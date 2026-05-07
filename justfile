@@ -47,6 +47,15 @@ kill:
 kill:
     -pkill -f kern
 
+docs:
+    mdbook build docs/book
+
+docs-serve:
+    mdbook serve docs/book
+
+docs-check:
+    mdbook test docs/book
+
 docker-build:
     {{compose}} build
 
