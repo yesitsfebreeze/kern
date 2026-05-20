@@ -211,10 +211,17 @@ fn do_cluster(
 	for rid in &question_jobs {
 		q.enqueue(task_extra(TaskKind::ResolveQuestion, kern_id, rid));
 	}
+	let did_structural_work = !spawned_children.is_empty()
+		|| evicted
+		|| !enrich_jobs.is_empty()
+		|| !question_jobs.is_empty();
 	if !spawned_children.is_empty() || evicted {
 		q.enqueue(task(TaskKind::Persist, kern_id));
 	}
-	q.enqueue(task(TaskKind::GnnPropagate, kern_id));
+	// Skip GNN propagation when the cluster pass produced no structural change — the previous gnn_vector state is still valid.
+	if did_structural_work {
+		q.enqueue(task(TaskKind::GnnPropagate, kern_id));
+	}
 }
 
 pub fn enqueue_all(q: &Queue, g: &Arc<RwLock<GraphGnn>>) {
