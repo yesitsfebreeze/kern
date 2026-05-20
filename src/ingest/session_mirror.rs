@@ -217,15 +217,23 @@ impl<S: MirrorSink> SessionMirror<S> {
 		}
 	}
 
-	/// Process one journal entry. Idempotent on `fork_id`.
-	pub fn process(&mut self, entry: &Entry) {
+	/// Process one journal entry. Idempotent on `fork_id`. Returns
+	/// `true` when the entry was dropped by the kern-self-feed filter
+	/// so the caller can aggregate a per-tick drop count for telemetry.
+	pub fn process(&mut self, entry: &Entry) -> bool {
 		if entry.ts_ms > self.last_ts_ms {
 			self.last_ts_ms = entry.ts_ms;
+		}
+		// kern self-feed loop: kern's own tracing must not be re-ingested as user/session data.
+		if let Some(src) = entry.payload.get("src").and_then(|v| v.as_str()) {
+			if src.starts_with("kern") {
+				return true;
+			}
 		}
 		match &entry.kind {
 			Kind::ForkOpen { fork_id, parent } => {
 				if self.seen.contains(fork_id) {
-					return;
+					return false;
 				}
 				let parent_label = parent.as_deref().unwrap_or("none");
 				let text = format!("Session {fork_id} (parent={parent_label})");
@@ -239,7 +247,7 @@ impl<S: MirrorSink> SessionMirror<S> {
 				// starts mid-life), treat resume like an open so the
 				// session still ends up mirrored.
 				if self.seen.contains(fork_id) {
-					return;
+					return false;
 				}
 				let text = format!("Session {fork_id} (parent=none)");
 				self.sink.ingest_session(fork_id, None, &text);
@@ -251,11 +259,22 @@ impl<S: MirrorSink> SessionMirror<S> {
 			}
 			_ => {}
 		}
+		false
 	}
 
 	pub fn process_all<'a, I: IntoIterator<Item = &'a Entry>>(&mut self, entries: I) {
+		let mut dropped = 0_usize;
 		for e in entries {
-			self.process(e);
+			if self.process(e) {
+				dropped += 1;
+			}
+		}
+		if dropped > 0 {
+			tracing::debug!(
+				target: "kern.session_mirror",
+				dropped,
+				"kern self-produced entries filtered"
+			);
 		}
 	}
 
