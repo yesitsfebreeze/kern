@@ -491,6 +491,46 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 		});
 	}
 
+	// Claude-Code memory: capture spool drain + recall digest writer.
+	// Both file-mediated; off unless `[capture] enabled = true` in
+	// `.relay/kern.toml`.
+	if cfg.capture.enabled {
+		let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+		// Capture drain: spool deltas -> distill -> enqueue -> archive.
+		if let Some(llm_fn) = llm_fn.clone() {
+			let spool = cwd.join(&cfg.capture.dir);
+			let worker_c = worker.clone();
+			let dedup = cfg.ingest.dedup_threshold;
+			let poll = std::time::Duration::from_secs(cfg.capture.poll_secs);
+			tokio::spawn(crate::ingest::capture_spool::run(
+				spool, worker_c, llm_fn, dedup, poll,
+			));
+		} else {
+			tracing::warn!(
+				target: "kern.capture",
+				"capture enabled but no reason LLM configured; distillation disabled"
+			);
+		}
+
+		// Digest writer: periodically snapshot purpose + hot thoughts.
+		{
+			let digest_path = cwd.join(&cfg.capture.digest_path);
+			let g_digest = g.clone();
+			let k = cfg.capture.digest_k;
+			let every = std::time::Duration::from_secs(cfg.capture.digest_secs);
+			tokio::spawn(async move {
+				loop {
+					{
+						let g = read_recovered(&g_digest);
+						crate::retrieval::digest::write_digest(&g, &digest_path, k);
+					}
+					tokio::time::sleep(every).await;
+				}
+			});
+		}
+	}
+
 	let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 	tokio::spawn(async move {
 		tokio::signal::ctrl_c().await.ok();
