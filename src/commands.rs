@@ -545,6 +545,62 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 		}
 	}
 
+	// Federation: start the gossip node so this kern can share/receive
+	// knowledge with peers. OFF by default (`[gossip] enabled`). When on, it
+	// binds a TCP listener, runs heartbeat, and (optionally) LAN multicast
+	// discovery to auto-peer with same-network nodes.
+	if cfg.gossip.enabled {
+		let network_id = {
+			let g = read_recovered(&g);
+			g.network_id.clone()
+		};
+		let node = crate::gossip::node::Node::new(&cfg.gossip.addr, &network_id, cfg.gossip.peers.clone());
+		let deps = Arc::new(crate::gossip::handler::Deps {
+			graph: g.clone(),
+			node: node.clone(),
+			queue: Some(q.clone()),
+		});
+		node.set_handler(crate::gossip::handler::new_handler(deps));
+		match node.listen().await {
+			Ok(addr) => {
+				tracing::info!(target: "kern.gossip", addr = %addr, network = %network_id, "gossip listening");
+				node.start_heartbeat();
+				if cfg.gossip.discovery {
+					crate::gossip::discovery::start_broadcast(&node, cfg.gossip.discovery_port);
+					crate::gossip::discovery::start_listen(&node, cfg.gossip.discovery_port);
+				}
+			}
+			Err(e) => {
+				tracing::warn!(target: "kern.gossip", error = %e, "gossip listen failed; federation disabled");
+			}
+		}
+	}
+
+	// Autonomous maintenance tick: drives self-compaction on a timer instead
+	// of only when something calls `pulse()`. Each tick pulses the root
+	// (heat decay + stigmergy GC of cold nodes) and re-enqueues clustering,
+	// so an idle daemon still decays, merges, and evicts. `interval_secs = 0`
+	// disables it.
+	if cfg.tick.interval_secs > 0 {
+		let g_tick = g.clone();
+		let q_tick = q.clone();
+		let every = std::time::Duration::from_secs(cfg.tick.interval_secs);
+		tokio::spawn(async move {
+			loop {
+				tokio::time::sleep(every).await;
+				let root_id = {
+					let g = read_recovered(&g_tick);
+					g.root.id.clone()
+				};
+				{
+					let mut g = crate::base::locks::write_recovered(&g_tick);
+					crate::tick::pulse::pulse(&q_tick, &mut g, &root_id, 1.0);
+				}
+				crate::tick::enqueue_all(&q_tick, &g_tick);
+			}
+		});
+	}
+
 	let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 	tokio::spawn(async move {
 		tokio::signal::ctrl_c().await.ok();

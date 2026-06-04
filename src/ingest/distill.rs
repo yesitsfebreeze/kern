@@ -30,9 +30,15 @@ user and an AI coding assistant. Output ONLY a JSON array. Each element must be 
 decision, project, fact, code-fact, reference>\"}}. Include only knowledge worth \
 remembering across future sessions: user preferences, decisions and their \
 rationale, ongoing project state, durable facts, structural code facts, and \
-external references. Skip greetings, acknowledgements, one-off task mechanics, \
-and anything ephemeral. If nothing is worth keeping, output []. Do not wrap the \
-array in markdown.\n\nCONVERSATION:\n{conversation}\n"
+external references. \
+Consolidate aggressively: emit ONE claim per distinct fact. Do NOT output \
+multiple claims that restate the same idea, and do NOT output sentence \
+fragments — each claim must be a complete, standalone statement that captures \
+the fact in full. Prefer the single most complete phrasing over several \
+partial ones. \
+Skip greetings, acknowledgements, one-off task mechanics, and anything \
+ephemeral. If nothing is worth keeping, output []. Do not wrap the array in \
+markdown.\n\nCONVERSATION:\n{conversation}\n"
 	);
 	parse_claims(&llm(&prompt))
 }
