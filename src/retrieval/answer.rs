@@ -171,7 +171,7 @@ pub fn refine_edges(g: &mut GraphGnn, chains: &[PathChain], llm: &LlmFunc) {
 				None => continue,
 			};
 			let tc = reason.traversal_count.value();
-			if tc > 0 && (tc as u32) % REFINE_INTERVAL == 0 {
+			if tc > 0 && (tc as u32).is_multiple_of(REFINE_INTERVAL) {
 				let from_text = find_entity(g, &reason.from)
 					.map(|(t, _)| t.text())
 					.unwrap_or_default();

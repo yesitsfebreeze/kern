@@ -23,7 +23,7 @@ pub fn build_digest(graph: &GraphGnn, k: usize) -> String {
 		.filter(|e| {
 			matches!(e.status, EntityStatus::Active)
 				&& !matches!(e.kind, EntityKind::Document | EntityKind::Question)
-				&& e.statements.first().map_or(false, |s| !s.trim().is_empty())
+				&& e.statements.first().is_some_and(|s| !s.trim().is_empty())
 		})
 		.collect();
 	ents.sort_by(|a, b| {

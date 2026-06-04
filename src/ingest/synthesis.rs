@@ -17,7 +17,7 @@ pub fn find_rephrase_candidates(graph: &GraphGnn, cfg: &Config) -> Vec<RephraseC
 				if h.id == t.id {
 					continue;
 				}
-				let sim = h.score as f64;
+				let sim = h.score;
 				if sim <= cfg.rephrase_lower || sim >= cfg.rephrase_upper {
 					continue;
 				}

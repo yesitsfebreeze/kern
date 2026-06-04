@@ -10,7 +10,7 @@ pub fn dedup_by_section(cfg: &RetrievalConfig, results: &mut Vec<ScoredEntity>) 
 	let mut best: HashMap<String, usize> = HashMap::new();
 	let mut keep: Vec<bool> = vec![true; results.len()];
 	for (i, r) in results.iter().enumerate() {
-		let section = section_key(&r.entity.source.section());
+		let section = section_key(r.entity.source.section());
 		if section.is_empty() {
 			continue;
 		}

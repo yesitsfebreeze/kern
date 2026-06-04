@@ -51,7 +51,7 @@ fn build_touch_entry(entity_id: &str, op: TouchOp) -> Entry {
 pub(crate) fn emit_agent_reads(ids: &[String], sink: &dyn Sink) {
     let mut seen: Vec<&str> = Vec::with_capacity(ids.len());
     for id in ids {
-        if id.is_empty() || seen.iter().any(|x| *x == id.as_str()) {
+        if id.is_empty() || seen.contains(&id.as_str()) {
             continue;
         }
         seen.push(id.as_str());

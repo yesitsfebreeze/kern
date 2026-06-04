@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct WatcherConfig {
 	/// Master switch. False keeps the watcher dormant even if `roots` set.
 	pub enabled: bool,
@@ -21,11 +22,3 @@ pub struct WatcherConfig {
 	pub roots: Vec<String>,
 }
 
-impl Default for WatcherConfig {
-	fn default() -> Self {
-		Self {
-			enabled: false,
-			roots: Vec::new(),
-		}
-	}
-}

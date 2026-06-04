@@ -105,7 +105,7 @@ pub fn apply_query_options(results: &mut Vec<ScoredEntity>, opts: &QueryOptions)
 		results.retain(|r| r.entity.created_at.is_none_or(|t| t <= before));
 	}
 	if let Some(valid_at) = opts.valid_at {
-		results.retain(|r| r.entity.valid_until.map_or(true, |exp| exp >= valid_at));
+		results.retain(|r| r.entity.valid_until.is_none_or(|exp| exp >= valid_at));
 	}
 
 	let asc = opts.ascending;

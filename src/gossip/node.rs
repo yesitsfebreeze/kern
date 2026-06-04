@@ -258,7 +258,7 @@ pub(super) async fn encode_msg(
 	msg: &GossipMessage,
 ) -> Result<(), std::io::Error> {
 	let bytes = bincode::serde::encode_to_vec(msg, bincode::config::standard())
-		.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+		.map_err(std::io::Error::other)?;
 	let len = (bytes.len() as u32).to_be_bytes();
 	stream.write_all(&len).await?;
 	stream.write_all(&bytes).await?;
