@@ -33,6 +33,55 @@ pub fn new_handler(d: Arc<Deps>) -> Handler {
 	})
 }
 
+/// Periodically broadcast this node's root-kern scope (purpose vector +
+/// radii) so peers become aware of the knowledge it holds and can route
+/// questions / fetch content to it. The outbound counterpart to
+/// `handle_sphere`: without it a node only ever receives. Runs until the
+/// node's stop signal fires.
+pub fn start_announce(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
+	let mut stop = node.stop_rx.clone();
+	tokio::spawn(async move {
+		let mut interval = tokio::time::interval(GOSSIP_HEARTBEAT_INTERVAL);
+		loop {
+			tokio::select! {
+				_ = interval.tick() => {
+					let payload = {
+						let g = graph.read().unwrap();
+						// Nothing worth announcing until the kern has a purpose.
+						if g.root.purpose_vec.is_empty() {
+							None
+						} else {
+							Some(SpherePayload {
+								network_id: g.network_id.clone(),
+								kern_id: g.root.id.clone(),
+								purpose_text: g.root.purpose_text.clone(),
+								purpose_vec: g.root.purpose_vec.clone(),
+								entity_id: String::new(),
+								inner_radius: g.root.inner_radius,
+								outer_radius: g.root.outer_radius,
+							})
+						}
+					};
+					if let Some(payload) = payload {
+						let stamp = std::time::SystemTime::now()
+							.duration_since(std::time::UNIX_EPOCH)
+							.map(|d| d.as_nanos())
+							.unwrap_or(0);
+						let msg = GossipMessage {
+							kind: GossipKind::Sphere,
+							id: format!("sphere-{}-{}", node.addr(), stamp),
+							origin: node.addr(),
+							payload: GossipPayload::Sphere(payload),
+						};
+						node.broadcast(msg);
+					}
+				}
+				_ = stop.changed() => break,
+			}
+		}
+	});
+}
+
 fn handle_sphere(d: &Deps, msg: GossipMessage) {
 	let sphere = match &msg.payload {
 		GossipPayload::Sphere(s) => s,
