@@ -5,3 +5,10 @@ Cargo.lock
 /.relay/kern
 /.relay/capture
 /.relay/journal
+/.relay/*.log
+
+# local tooling / vaults (not part of the product)
+/.claude
+/.obsidian
+/vicky
+NUL

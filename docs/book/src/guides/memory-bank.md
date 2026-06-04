@@ -91,19 +91,27 @@ descriptors (`preference`, `decision`, `project`, `fact`, `code-fact`,
 ## Status & known limits
 
 Self-learning and self-compaction run today. Self-distribution is wired and
-enableable, with two larger pieces still open:
+enableable. Recent work closed the two headline gaps:
 
-- **Graph CRDT (open).** Only scalar counters converge across nodes today;
-  remote knowledge arrives as read-only "phantom" kerns. Conflict-free merge
-  of entity/edge content (the OVERVIEW's "CRDT design pending") is the
-  remaining work for true write-convergence.
-- **Detached cold-storage tier (open).** Clustering reorganizes within the
-  in-memory graph; spilling cold clusters to detached on-disk sub-DBs with
-  lazy rehydrate is a future enhancement.
-- **Outbound broadcast (partial).** A node receives, answers questions, and
-  peers; active push of local knowledge on change is not yet triggered.
+- **Graph CRDT (implemented).** `base::merge` provides content-addressed,
+  conflict-free merge of entity/edge metadata — counters join, heat /
+  confidence take the max, status follows the `Active < Superseded` lattice,
+  timestamps min/max. Because ids are content hashes, existence is a set
+  union. Remaining: a transport that actively propagates entity bodies
+  between nodes so the merge runs cross-node (today federation shares scope +
+  answers + counter deltas; full entity flooding is the next wiring step).
+- **Detached cold-storage tier (implemented).** Stigmergy GC now spills cold,
+  abandoned, non-durable thoughts to an append-only cold store
+  (`<data_dir>/cold/cold.jsonl`) before dropping them from the hot graph, so
+  compaction never loses data. `kern get <id>` rehydrates from the cold store
+  on a hot-graph miss. Remaining: integrate cold rehydrate into vector
+  *query* (not just id lookup).
+- **Outbound broadcast (implemented).** `gossip::handler::start_announce`
+  periodically broadcasts the kern's scope; federation is now bidirectional.
 
-Near-duplicate handling currently relies on tighter distillation plus
-stigmergy GC; a non-destructive rephrase-linking pass
-(`ingest::synthesis::find_rephrase_candidates` + `ReasonKind::Rephrase`) is
-available as a future primitive.
+Two operational notes: the `kern_rpc` endpoint is per-user, so the federation
+deployment model is one kern per machine gossiping across machines (local
+single-host multi-node needs a per-cwd endpoint). Near-duplicate handling
+relies on tighter distillation plus stigmergy GC; a non-destructive
+rephrase-linking pass (`find_rephrase_candidates` + `ReasonKind::Rephrase`)
+remains a future primitive.
