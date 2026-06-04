@@ -107,16 +107,18 @@ enableable. Recent work closed the two headline gaps:
   GC sweep. Recall reaches it two ways: `kern get <id>` rehydrates by id, and
   the `query` tool fills remaining result slots from a cosine search over the
   cold store (marked `cold:true`) when the hot graph returns fewer than `k`.
-- **Federation (verified).** `start_announce` broadcasts the kern's scope;
-  peers inject it as a phantom kern and persist it. Verified end-to-end: two
-  daemons on one host bidirectionally propagate scope. The `kern_rpc`
-  endpoint is now **per-cwd** (was per-user), so each project gets its own
-  daemon — fixing cross-project memory contamination and letting multiple
-  nodes run per host.
+- **Federation (verified, content-level).** `start_announce` broadcasts the
+  kern's scope and `start_entity_sync` broadcasts the hottest local entity
+  *bodies*; peers merge both into a per-network phantom kern via the
+  content-addressed CRDT (`base::merge`) and persist them. Verified end-to-end
+  on one host: two daemons bidirectionally propagate scope **and** entity
+  bodies — a thought ingested on node A becomes vector-searchable on node B
+  with the same content-hash id. The `kern_rpc` endpoint is now **per-cwd**
+  (was per-user), so each project gets its own daemon — fixing cross-project
+  memory contamination and letting multiple nodes run per host.
 
-Remaining for full write-convergence federation: a transport that floods
-entity *bodies* between peers (today scope, answers, and counter-deltas
-propagate; `base::merge` is ready to converge the bodies when they arrive).
 Near-duplicate handling relies on tighter distillation plus stigmergy GC; a
 non-destructive rephrase-linking pass (`find_rephrase_candidates` +
-`ReasonKind::Rephrase`) remains a future primitive.
+`ReasonKind::Rephrase`) remains a future primitive. Federation tuning
+(entity-sync batch size, push vs. pull, anti-entropy) is open for scale, but
+the convergence path is proven.
