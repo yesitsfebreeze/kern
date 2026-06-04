@@ -37,17 +37,30 @@ array in markdown.\n\nCONVERSATION:\n{conversation}\n"
 	parse_claims(&llm(&prompt))
 }
 
-/// Pull the first top-level JSON array out of `raw` and parse claims from it.
-/// Tolerant of leading/trailing prose around the array.
+/// Parse claims from the first contiguous `[..]` span in `raw` (first `[`
+/// to last `]`), tolerant of surrounding prose. A lone nested array
+/// (`[[...]]`) is unwrapped. Malformed JSON or multiple sibling top-level
+/// arrays fail gracefully to an empty vec. The JSON field `kind` maps to
+/// `Claim::descriptor`, falling back to `"fact"` when missing or unknown.
 fn parse_claims(raw: &str) -> Vec<Claim> {
 	let (start, end) = match (raw.find('['), raw.rfind(']')) {
 		(Some(s), Some(e)) if e > s => (s, e),
 		_ => return Vec::new(),
 	};
-	let items: Vec<serde_json::Value> = match serde_json::from_str(&raw[start..=end]) {
+	let mut items: Vec<serde_json::Value> = match serde_json::from_str(&raw[start..=end]) {
 		Ok(v) => v,
-		Err(_) => return Vec::new(),
+		Err(e) => {
+			tracing::debug!(target: "kern.distill", error = %e, "claim JSON parse failed");
+			return Vec::new();
+		}
 	};
+	// LLMs sometimes wrap the array once more: `[[...]]`. Unwrap a lone
+	// nested array so its claims are not silently dropped.
+	if items.len() == 1 {
+		if let serde_json::Value::Array(inner) = &items[0] {
+			items = inner.clone();
+		}
+	}
 	let mut out = Vec::new();
 	for it in items {
 		let text = it
@@ -114,6 +127,30 @@ mod tests {
 	#[test]
 	fn tolerates_prose_around_json() {
 		let llm = stub("Here you go:\n[{\"text\":\"a\",\"kind\":\"fact\"}]\nHope that helps");
+		let claims = distill("c", &llm);
+		assert_eq!(claims.len(), 1);
+		assert_eq!(claims[0].text, "a");
+	}
+
+	#[test]
+	fn absent_kind_falls_back_to_fact() {
+		let llm = stub(r#"[{"text":"x"}]"#);
+		let claims = distill("c", &llm);
+		assert_eq!(claims.len(), 1);
+		assert_eq!(claims[0].descriptor, "fact");
+	}
+
+	#[test]
+	fn empty_or_missing_text_is_skipped() {
+		let llm = stub(r#"[{"text":"","kind":"fact"},{"kind":"fact"},{"text":"keep","kind":"fact"}]"#);
+		let claims = distill("c", &llm);
+		assert_eq!(claims.len(), 1);
+		assert_eq!(claims[0].text, "keep");
+	}
+
+	#[test]
+	fn single_nested_array_is_unwrapped() {
+		let llm = stub(r#"[[{"text":"a","kind":"fact"}]]"#);
 		let claims = distill("c", &llm);
 		assert_eq!(claims.len(), 1);
 		assert_eq!(claims[0].text, "a");
