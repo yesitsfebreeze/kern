@@ -42,6 +42,7 @@ pub fn new_handler(d: Arc<Deps>) -> Handler {
 		GossipKind::PeerExchange => handle_peer_exchange(&d, msg),
 		GossipKind::Fetch => {}
 		GossipKind::Delta => handle_crdt_delta(&d, msg),
+		GossipKind::EntitySync => handle_entity_sync(&d, msg),
 	})
 }
 
@@ -84,6 +85,60 @@ pub fn start_announce(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 							id: format!("sphere-{}-{}", node.addr(), stamp),
 							origin: node.addr(),
 							payload: GossipPayload::Sphere(payload),
+						};
+						node.broadcast(msg);
+					}
+				}
+				_ = stop.changed() => break,
+			}
+		}
+	});
+}
+
+/// Periodically broadcast this node's hottest LOCAL entities so peers can
+/// merge the actual thought content (not just scope) into a per-network
+/// phantom kern via `base::merge::merge_remote_entity`. The outbound
+/// counterpart to `handle_entity_sync`. Never re-broadcasts entities living
+/// in `remote-*` kerns (received data). Runs until the node's stop signal.
+pub fn start_entity_sync(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
+	let mut stop = node.stop_rx.clone();
+	tokio::spawn(async move {
+		let mut interval = tokio::time::interval(GOSSIP_HEARTBEAT_INTERVAL);
+		loop {
+			tokio::select! {
+				_ = interval.tick() => {
+					let payload = {
+						let g = graph.read().unwrap();
+						let mut entities: Vec<crate::base::types::Entity> = g
+							.kerns
+							.iter()
+							.filter(|(kid, _)| !kid.starts_with("remote-"))
+							.flat_map(|(_, k)| k.entities.values().cloned())
+							.collect();
+						if entities.is_empty() {
+							None
+						} else {
+							entities.sort_by(|a, b| {
+								b.heat.partial_cmp(&a.heat).unwrap_or(std::cmp::Ordering::Equal)
+							});
+							entities.truncate(32);
+							Some(EntitySyncPayload {
+								network_id: g.network_id.clone(),
+								kern_id: g.root.id.clone(),
+								entities,
+							})
+						}
+					};
+					if let Some(payload) = payload {
+						let stamp = std::time::SystemTime::now()
+							.duration_since(std::time::UNIX_EPOCH)
+							.map(|d| d.as_nanos())
+							.unwrap_or(0);
+						let msg = GossipMessage {
+							kind: GossipKind::EntitySync,
+							id: format!("esync-{}-{}", node.addr(), stamp),
+							origin: node.addr(),
+							payload: GossipPayload::EntitySync(payload),
 						};
 						node.broadcast(msg);
 					}
@@ -245,6 +300,38 @@ fn handle_crdt_delta(d: &Deps, msg: GossipMessage) {
 	}
 }
 
+/// Merge entity bodies a peer shared into a per-network phantom kern via the
+/// content-addressed CRDT join. Ignores our own data echoed back and empty
+/// network ids. Persists only when the merge actually changed the graph.
+fn handle_entity_sync(d: &Deps, msg: GossipMessage) {
+	let payload = match &msg.payload {
+		GossipPayload::EntitySync(p) => p,
+		_ => return,
+	};
+	if payload.network_id.is_empty() {
+		return;
+	}
+	let mut g = d.graph.write().unwrap();
+	// Ignore our own data echoed back.
+	if payload.network_id == g.network_id {
+		return;
+	}
+	let phantom = format!("remote-{}-{}", payload.network_id, payload.kern_id);
+	if !g.kerns.contains_key(&phantom) {
+		let mut k = Kern::new(phantom.as_str(), g.root.id.as_str());
+		k.root_id = g.root.root_id.clone();
+		g.register(k);
+	}
+	let mut changed = false;
+	for e in &payload.entities {
+		changed |= crate::base::merge::merge_remote_entity(&mut g, &phantom, e.clone());
+	}
+	drop(g);
+	if changed {
+		d.persist();
+	}
+}
+
 fn inject_remote_scope(g: &mut GraphGnn, sphere: &SpherePayload, _origin: &str) {
 	let phantom_id = format!("remote-{}-{}", sphere.network_id, sphere.kern_id);
 
@@ -295,5 +382,106 @@ fn resolve_question_from_peer(d: &Deps, reason_id: &str, sphere: &SpherePayload,
 
 	if let Some(q) = &d.queue {
 		q.enqueue(tick::queue::task(tick::queue::TaskKind::Persist, &kern_id));
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::base::types::{
+		Acl, ChunkPart, ChunkPartKind, Entity, EntityKind, EntityStatus, Source,
+	};
+	use crate::crdt::GCounter;
+
+	fn mk_entity(id: &str, text: &str, heat: f64) -> Entity {
+		let mut e = Entity {
+			id: id.to_string(),
+			root_id: String::new(),
+			external_id: String::new(),
+			superseded_by: String::new(),
+			kind: EntityKind::Fact,
+			status: EntityStatus::Active,
+			statements: vec![text.to_string()],
+			chunks: vec![ChunkPart {
+				kind: ChunkPartKind::StatementRef,
+				text: String::new(),
+				index: 0,
+			}],
+			vector: vec![0.0; 8],
+			gnn_vector: Vec::new(),
+			score: 0.0,
+			conf_alpha: 2.0,
+			conf_beta: 1.0,
+			source: Source::Inline {
+				hash: id.into(),
+				section: String::new(),
+			},
+			created_at: None,
+			acl: Acl::default(),
+			access_count: GCounter::new(),
+			accessed_at: None,
+			heat: heat as f32,
+			heat_updated_at: None,
+			updated_at: None,
+			valid_until: None,
+			producer_id: String::new(),
+			unlinked_count: 0,
+		};
+		e.refresh_score();
+		e
+	}
+
+	fn mk_deps(graph: Arc<RwLock<GraphGnn>>) -> Deps {
+		Deps {
+			graph,
+			node: Node::new("127.0.0.1:0", "testnet", vec![]),
+			queue: None,
+			save: None,
+		}
+	}
+
+	fn esync_msg(network_id: &str, kern_id: &str, entities: Vec<Entity>) -> GossipMessage {
+		GossipMessage {
+			kind: GossipKind::EntitySync,
+			id: "esync-test".to_string(),
+			origin: "127.0.0.1:1".to_string(),
+			payload: GossipPayload::EntitySync(EntitySyncPayload {
+				network_id: network_id.to_string(),
+				kern_id: kern_id.to_string(),
+				entities,
+			}),
+		}
+	}
+
+	#[test]
+	fn entity_sync_merges_remote_body_into_phantom() {
+		let g = Arc::new(RwLock::new(GraphGnn::new()));
+		let d = mk_deps(g.clone());
+
+		let msg = esync_msg("othernet", "rootK", vec![mk_entity("eR", "remote thought", 3.0)]);
+		handle_entity_sync(&d, msg);
+
+		let guard = g.read().unwrap();
+		let phantom = "remote-othernet-rootK";
+		let kern = guard.kerns.get(phantom).expect("phantom kern created");
+		assert!(kern.entities.contains_key("eR"), "remote entity merged into phantom");
+		assert_eq!(guard.kern_of_entity("eR"), Some(phantom));
+	}
+
+	#[test]
+	fn entity_sync_ignores_same_network() {
+		let g = Arc::new(RwLock::new(GraphGnn::new()));
+		let own_net = g.read().unwrap().network_id.clone();
+		let d = mk_deps(g.clone());
+
+		let msg = esync_msg(&own_net, "rootK", vec![mk_entity("eR", "echo", 3.0)]);
+		handle_entity_sync(&d, msg);
+
+		let guard = g.read().unwrap();
+		assert!(guard.kern_of_entity("eR").is_none(), "own-network echo ignored");
+		assert!(
+			!guard.kerns.keys().any(|k| k.starts_with("remote-")),
+			"no phantom kern created for own data"
+		);
 	}
 }

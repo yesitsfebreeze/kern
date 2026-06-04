@@ -567,6 +567,7 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 				tracing::info!(target: "kern.gossip", addr = %addr, network = %network_id, "gossip listening");
 				node.start_heartbeat();
 				crate::gossip::handler::start_announce(node.clone(), g.clone());
+				crate::gossip::handler::start_entity_sync(node.clone(), g.clone());
 				if cfg.gossip.discovery {
 					crate::gossip::discovery::start_broadcast(&node, cfg.gossip.discovery_port);
 					crate::gossip::discovery::start_listen(&node, cfg.gossip.discovery_port);

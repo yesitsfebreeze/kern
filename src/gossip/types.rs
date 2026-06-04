@@ -9,6 +9,7 @@ pub enum GossipKind {
 	PeerExchange = 3,
 	Fetch = 4,
 	Delta = 5,
+	EntitySync = 6,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +29,7 @@ pub enum GossipPayload {
 	FetchRequest(FetchPayload),
 	FetchResult(FetchResultPayload),
 	CrdtDelta(CrdtDeltaPayload),
+	EntitySync(EntitySyncPayload),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +79,13 @@ pub struct FetchResultPayload {
 pub enum CrdtTarget {
 	ThoughtAccessCount = 0,
 	ReasonTraversalCount = 1,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntitySyncPayload {
+	pub network_id: String,
+	pub kern_id: String,
+	pub entities: Vec<crate::base::types::Entity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
