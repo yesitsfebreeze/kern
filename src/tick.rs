@@ -253,7 +253,17 @@ pub fn tick_sync(
 	let mut rx = q.take_receiver().unwrap();
 	while let Ok(t) = rx.try_recv() {
 		q.dequeued(&t);
-		process_task(&q, &Arc::clone(g), &t, llm, embed, bq, &gnn_cfg, &tick_cfg, None);
+		process_task(
+			&q,
+			&Arc::clone(g),
+			&t,
+			llm,
+			embed,
+			bq,
+			&gnn_cfg,
+			&tick_cfg,
+			None, // cold_dir: None — sync drain is test-only; StigmergyGc spill is skipped here.
+		);
 		q.done();
 	}
 }

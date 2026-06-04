@@ -82,4 +82,11 @@ pub fn run_gc(
 		}
 		remove_entity(&mut g, kern_id, id);
 	}
+
+	// Bound cold-store growth: dedup to the latest entry per id once per sweep.
+	if let Some(dir) = cold_dir {
+		if !victims.is_empty() {
+			crate::base::cold::compact(dir);
+		}
+	}
 }

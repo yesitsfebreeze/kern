@@ -57,10 +57,7 @@ pub fn merge_entity(local: &mut Entity, remote: &Entity) -> bool {
 		local.conf_beta = remote.conf_beta;
 		changed = true;
 	}
-	if remote.unlinked_count > local.unlinked_count {
-		local.unlinked_count = remote.unlinked_count;
-		changed = true;
-	}
+	// unlinked_count is local ingest bookkeeping, not convergent — left as-is.
 	if remote.status == EntityStatus::Superseded && local.status != EntityStatus::Superseded {
 		local.status = EntityStatus::Superseded;
 		changed = true;
@@ -73,7 +70,7 @@ pub fn merge_entity(local: &mut Entity, remote: &Entity) -> bool {
 	changed |= join_max_time(&mut local.accessed_at, remote.accessed_at);
 	changed |= join_max_time(&mut local.updated_at, remote.updated_at);
 	changed |= join_max_time(&mut local.heat_updated_at, remote.heat_updated_at);
-	changed |= join_max_time(&mut local.valid_until, remote.valid_until);
+	changed |= join_min_time(&mut local.valid_until, remote.valid_until);
 	if changed {
 		local.refresh_score();
 	}
@@ -115,6 +112,7 @@ pub fn merge_remote_entity(g: &mut GraphGnn, fallback_kern_id: &str, remote: Ent
 			g.index_entity(&id, fallback_kern_id);
 			true
 		} else {
+			tracing::warn!(target: "kern.merge", kern = %fallback_kern_id, "merge_remote_entity: fallback kern missing; entity dropped");
 			false
 		}
 	}

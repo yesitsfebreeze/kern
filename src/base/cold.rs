@@ -23,12 +23,39 @@ pub fn spill(cold_dir: &Path, entity: &Entity) {
 		Err(_) => return,
 	};
 	use std::io::Write;
-	if let Ok(mut f) = std::fs::OpenOptions::new()
+	match std::fs::OpenOptions::new()
 		.create(true)
 		.append(true)
 		.open(store_path(cold_dir))
 	{
-		let _ = writeln!(f, "{line}");
+		Ok(mut f) => {
+			if writeln!(f, "{line}").is_err() {
+				tracing::warn!(target: "kern.cold", "spill failed; entity not persisted to cold store");
+			}
+		}
+		Err(_) => {
+			tracing::warn!(target: "kern.cold", "spill failed; entity not persisted to cold store");
+		}
+	}
+}
+
+/// Rewrite the cold store keeping only the latest entry per id, bounding
+/// file growth. Best-effort; a failure leaves the existing file intact.
+pub fn compact(cold_dir: &Path) {
+	let entities = load_all(cold_dir);
+	if entities.is_empty() {
+		return;
+	}
+	let tmp = cold_dir.join("cold.jsonl.tmp");
+	let mut buf = String::new();
+	for e in &entities {
+		if let Ok(line) = serde_json::to_string(e) {
+			buf.push_str(&line);
+			buf.push('\n');
+		}
+	}
+	if std::fs::write(&tmp, buf).is_ok() {
+		let _ = std::fs::rename(&tmp, store_path(cold_dir));
 	}
 }
 
@@ -126,5 +153,21 @@ mod tests {
 	fn get_absent_is_none() {
 		let dir = tempfile::tempdir().unwrap();
 		assert!(get(dir.path(), "missing").is_none());
+	}
+
+	#[test]
+	fn compact_dedups_to_latest() {
+		let dir = tempfile::tempdir().unwrap();
+		spill(dir.path(), &mk_entity("x", "v1", 1.0, EntityKind::Claim));
+		spill(dir.path(), &mk_entity("x", "v2", 3.0, EntityKind::Claim));
+		spill(dir.path(), &mk_entity("x", "v3", 5.0, EntityKind::Claim));
+		spill(dir.path(), &mk_entity("y", "y1", 1.0, EntityKind::Claim));
+
+		compact(dir.path());
+
+		let raw = std::fs::read_to_string(store_path(dir.path())).unwrap();
+		let lines = raw.lines().filter(|l| !l.trim().is_empty()).count();
+		assert_eq!(lines, 2);
+		assert_eq!(get(dir.path(), "x").unwrap().heat, 5.0);
 	}
 }
