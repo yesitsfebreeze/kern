@@ -148,8 +148,28 @@ impl Server {
 		};
 
 		let k = if p.k == 0 { rcfg.seed_k } else { p.k };
-		let entities: Vec<serde_json::Value> = result
-			.entities
+
+		// Cold-tier recall: when the hot graph yields fewer than k, fill the
+		// remaining slots from the cold store (read-only; demoted thoughts
+		// stay findable without rehydrating into the hot graph).
+		let mut scored: Vec<retrieval::expand::ScoredEntity> = result.entities.clone();
+		let mut cold_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+		if scored.len() < k {
+			let cold_dir = std::path::PathBuf::from(&self.cfg.data_dir).join("cold");
+			let have: std::collections::HashSet<String> =
+				scored.iter().map(|s| s.entity.id.clone()).collect();
+			for (entity, score) in crate::base::cold::search(&cold_dir, &vec, k) {
+				if scored.len() >= k {
+					break;
+				}
+				if !have.contains(&entity.id) {
+					cold_ids.insert(entity.id.clone());
+					scored.push(retrieval::expand::ScoredEntity { entity, score });
+				}
+			}
+		}
+
+		let entities: Vec<serde_json::Value> = scored
 			.iter()
 			.take(k)
 			.map(|st| {
@@ -173,6 +193,7 @@ impl Server {
 					"kind": st.entity.kind.as_str(),
 					"scheme": st.entity.source.scheme(),
 					"status": status_str,
+					"cold": cold_ids.contains(&st.entity.id),
 				})
 			})
 			.collect();

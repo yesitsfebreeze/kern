@@ -82,6 +82,26 @@ pub fn get(cold_dir: &Path, id: &str) -> Option<Entity> {
 	load_all(cold_dir).into_iter().find(|e| e.id == id)
 }
 
+/// Vector search over the cold store. Returns up to `k` entities with the
+/// highest cosine similarity to `query_vec` (descending), skipping entities
+/// whose stored vector is empty or a different dimension. Read-only.
+pub fn search(cold_dir: &Path, query_vec: &[f64], k: usize) -> Vec<(Entity, f64)> {
+	if query_vec.is_empty() || k == 0 {
+		return Vec::new();
+	}
+	let mut scored: Vec<(Entity, f64)> = load_all(cold_dir)
+		.into_iter()
+		.filter(|e| e.vector.len() == query_vec.len())
+		.map(|e| {
+			let s = crate::base::math::cosine(query_vec, &e.vector);
+			(e, s)
+		})
+		.collect();
+	scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+	scored.truncate(k);
+	scored
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -153,6 +173,28 @@ mod tests {
 	fn get_absent_is_none() {
 		let dir = tempfile::tempdir().unwrap();
 		assert!(get(dir.path(), "missing").is_none());
+	}
+
+	#[test]
+	fn search_ranks_by_cosine() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut ex = mk_entity("ex", "x axis", 0.0, EntityKind::Claim);
+		ex.vector = vec![1.0, 0.0];
+		let mut ey = mk_entity("ey", "y axis", 0.0, EntityKind::Claim);
+		ey.vector = vec![0.0, 1.0];
+		let mut enear = mk_entity("enear", "near x", 0.0, EntityKind::Claim);
+		enear.vector = vec![0.9, 0.1];
+		spill(dir.path(), &ex);
+		spill(dir.path(), &ey);
+		spill(dir.path(), &enear);
+
+		let hits = search(dir.path(), &[1.0, 0.0], 2);
+		assert_eq!(hits.len(), 2);
+		assert_eq!(hits[0].0.id, "ex");
+
+		// Dimension mismatch yields no results.
+		let none = search(dir.path(), &[1.0, 0.0, 0.0], 2);
+		assert!(none.is_empty());
 	}
 
 	#[test]
