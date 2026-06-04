@@ -8,6 +8,12 @@ use serde::{Deserialize, Serialize};
 /// [capture]
 /// enabled = true
 /// ```
+///
+/// `dir` and `digest_path` are intentionally **cwd-relative and independent
+/// of `data_dir`**: the Claude-Code hooks (`kern-capture.mjs`,
+/// `kern-recall.mjs`) resolve these paths from the session cwd and have no
+/// knowledge of kern's `data_dir`. Do not derive them from `data_dir` — that
+/// would break the hook contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CaptureConfig {
