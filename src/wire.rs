@@ -68,27 +68,6 @@ pub fn validate_fact_source(source: &str) -> Result<(), WireError> {
 	}
 }
 
-/// Validate an [`IngestRequest`] at the wire boundary.
-///
-/// Performs all three drift-prevention checks: conf range, kind allowlist,
-/// and fact-source pinning. The `pinned_source` argument is the trusted
-/// source the dispatch layer has bound the caller to (e.g. `AGENT_SOURCE`
-/// for MCP), independent of the descriptive `req.source` string.
-pub fn validate_ingest(req: &IngestRequest, pinned_source: &str) -> Result<(), WireError> {
-	validate_wire_conf(req.conf)?;
-	if let Some(k) = req.kind {
-		validate_wire_kind(k)?;
-		if k == EntityKind::Fact {
-			validate_fact_source(pinned_source)?;
-		}
-	}
-	// Conf at the fact boundary also requires a trusted pinned source.
-	if req.conf >= crate::base::constants::FACT_CONFIDENCE {
-		validate_fact_source(pinned_source)?;
-	}
-	Ok(())
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
 	pub version: String,
@@ -144,33 +123,6 @@ pub struct QueryResponse {
 	pub answer: String,
 	#[serde(default)]
 	pub chains: Vec<QueryChain>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct IngestRequest {
-	pub text: String,
-	#[serde(default)]
-	pub source: String,
-	#[serde(default)]
-	pub object_id: String,
-	#[serde(default)]
-	pub section: String,
-	#[serde(default, skip_serializing_if = "String::is_empty")]
-	pub author: String,
-	#[serde(default, skip_serializing_if = "String::is_empty")]
-	pub title: String,
-	#[serde(default, skip_serializing_if = "String::is_empty")]
-	pub url: String,
-	#[serde(default)]
-	pub conf: f64,
-	#[serde(default)]
-	pub descriptor: String,
-	#[serde(default)]
-	pub sync: bool,
-	/// Optional explicit thought kind. If present, only `Normal` and `Fact`
-	/// are accepted on the wire (see [`validate_wire_kind`]).
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub kind: Option<EntityKind>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -442,15 +394,6 @@ pub struct ListDescriptorsResponse {
 mod wire_validation_tests {
 	use super::*;
 
-	fn req_with(conf: f64, kind: Option<EntityKind>) -> IngestRequest {
-		IngestRequest {
-			text: "x".to_string(),
-			conf,
-			kind,
-			..Default::default()
-		}
-	}
-
 	#[test]
 	fn conf_out_of_range_rejected_high() {
 		assert!(matches!(
@@ -497,56 +440,17 @@ mod wire_validation_tests {
 	}
 
 	#[test]
-	fn fact_from_non_agent_source_rejected() {
-		let req = req_with(0.5, Some(EntityKind::Fact));
-		let err = validate_ingest(&req, "stranger").unwrap_err();
-		assert!(matches!(err, WireError::FactFromUntrustedSource(_)));
-	}
-
-	#[test]
-	fn fact_conf_from_non_agent_source_rejected() {
-		// Fact-tier conf without an explicit kind must also be gated.
-		let req = req_with(1.0, None);
-		let err = validate_ingest(&req, "stranger").unwrap_err();
-		assert!(matches!(err, WireError::FactFromUntrustedSource(_)));
-	}
-
-	#[test]
-	fn fact_from_agent_source_allowed() {
-		let req = req_with(1.0, Some(EntityKind::Fact));
-		assert!(validate_ingest(&req, AGENT_SOURCE).is_ok());
-	}
-
-	#[test]
-	fn normal_from_agent_source_allowed() {
-		let req = req_with(0.7, Some(EntityKind::Claim));
-		assert!(validate_ingest(&req, AGENT_SOURCE).is_ok());
-	}
-
-	#[test]
-	fn ingest_with_out_of_range_conf_rejected() {
-		let req = req_with(2.0, Some(EntityKind::Claim));
+	fn fact_source_rejects_untrusted() {
+		// The Fact-tier source gate (live backstop on the MCP ingest path).
 		assert!(matches!(
-			validate_ingest(&req, AGENT_SOURCE),
-			Err(WireError::ConfOutOfRange(_))
+			validate_fact_source("stranger"),
+			Err(WireError::FactFromUntrustedSource(_))
 		));
 	}
 
 	#[test]
-	fn ingest_with_document_kind_rejected() {
-		let req = req_with(0.5, Some(EntityKind::Document));
-		assert!(matches!(
-			validate_ingest(&req, AGENT_SOURCE),
-			Err(WireError::InternalKindOnWire(EntityKind::Document))
-		));
-	}
-
-	#[test]
-	fn ingest_with_conclusion_kind_rejected() {
-		let req = req_with(0.5, Some(EntityKind::Conclusion));
-		assert!(matches!(
-			validate_ingest(&req, AGENT_SOURCE),
-			Err(WireError::InternalKindOnWire(EntityKind::Conclusion))
-		));
+	fn fact_source_allows_trusted() {
+		assert!(validate_fact_source(AGENT_SOURCE).is_ok());
+		assert!(validate_fact_source(USER_SOURCE).is_ok());
 	}
 }
