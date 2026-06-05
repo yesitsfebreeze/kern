@@ -341,10 +341,17 @@ pub fn do_reembed(
 				_ => None,
 			};
 			if let Some(r) = k.reasons.get_mut(&rid) {
-				if let Some(v) = nv {
-					r.vector = v;
+				match nv {
+					// Recomputed the edge vector — correction recorded, clear dirty.
+					Some(v) => {
+						r.vector = v;
+						r.dirty = false;
+					}
+					// An endpoint isn't embedded yet (cold/unembedded). Leave the
+					// edge dirty so a later sweep retries once both endpoints have
+					// vectors — otherwise it would be stuck with a stale vector.
+					None => {}
 				}
-				r.dirty = false;
 			}
 		}
 		g.rebuild_index();
