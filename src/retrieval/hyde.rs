@@ -50,3 +50,65 @@ let norm: f64 = v.iter().map(|x| x * x).sum::<f64>().sqrt();
 		}
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::sync::Arc;
+
+	#[test]
+	fn disabled_returns_query_unchanged() {
+		let cfg = RetrievalConfig {
+			hyde_enabled: false,
+			..Default::default()
+		};
+		assert_eq!(expand_query(&cfg, None, None, &[1.0, 2.0], "cat"), vec![1.0, 2.0]);
+	}
+
+	#[test]
+	fn long_query_skips_expansion() {
+		let cfg = RetrievalConfig::default(); // hyde_min_query_tokens = 6
+		let llm: LlmFunc = Arc::new(|_: &str| "x".to_string());
+		let embed: EmbedFunc = Arc::new(|_: &str| Ok(vec![9.0, 9.0]));
+		let qv = vec![1.0, 0.0];
+		let out = expand_query(&cfg, Some(&llm), Some(&embed), &qv, "one two three four five six");
+		assert_eq!(out, qv, "queries at/over the token floor are not expanded");
+	}
+
+	#[test]
+	fn missing_llm_or_embed_returns_query() {
+		let cfg = RetrievalConfig::default();
+		assert_eq!(expand_query(&cfg, None, None, &[1.0, 0.0], "cat"), vec![1.0, 0.0]);
+	}
+
+	#[test]
+	fn short_query_fuses_and_normalizes() {
+		let cfg = RetrievalConfig::default();
+		let llm: LlmFunc = Arc::new(|_: &str| "a hypothetical answer".to_string());
+		let embed: EmbedFunc = Arc::new(|_: &str| Ok(vec![0.0, 1.0]));
+		let qv = vec![1.0, 0.0];
+		let out = expand_query(&cfg, Some(&llm), Some(&embed), &qv, "cat");
+		// fused (0.5,0.5) -> L2-normalized: equal components, unit norm.
+		assert!((out[0] - out[1]).abs() < 1e-9);
+		let norm: f64 = out.iter().map(|x| x * x).sum::<f64>().sqrt();
+		assert!((norm - 1.0).abs() < 1e-9, "fused vector is L2-normalized");
+	}
+
+	#[test]
+	fn empty_hypothesis_returns_query() {
+		let cfg = RetrievalConfig::default();
+		let llm: LlmFunc = Arc::new(|_: &str| "   ".to_string());
+		let embed: EmbedFunc = Arc::new(|_: &str| Ok(vec![0.0, 1.0]));
+		let qv = vec![1.0, 0.0];
+		assert_eq!(expand_query(&cfg, Some(&llm), Some(&embed), &qv, "cat"), qv);
+	}
+
+	#[test]
+	fn embed_length_mismatch_returns_query() {
+		let cfg = RetrievalConfig::default();
+		let llm: LlmFunc = Arc::new(|_: &str| "answer".to_string());
+		let embed: EmbedFunc = Arc::new(|_: &str| Ok(vec![1.0, 2.0, 3.0])); // len 3
+		let qv = vec![1.0, 0.0]; // len 2
+		assert_eq!(expand_query(&cfg, Some(&llm), Some(&embed), &qv, "cat"), qv);
+	}
+}
