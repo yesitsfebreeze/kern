@@ -33,8 +33,15 @@ use crate::base::graph::GraphGnn;
 use crate::base::locks::read_recovered;
 use crate::base::search::{find_entity, find_reason, search_all_unlocked, search_reasons_all_unlocked};
 use crate::base::util::truncate;
+use crate::config::RetrievalConfig;
 
 type Graph = Arc<RwLock<GraphGnn>>;
+
+#[derive(Clone)]
+struct LocalState {
+	graph: Graph,
+	retrieval: RetrievalConfig,
+}
 
 /// Heartbeat cadence and the staleness window for treating a registry entry as
 /// dead. A peer is live if its file was refreshed within `STALE` *and* its
@@ -63,14 +70,16 @@ fn registry_file() -> PathBuf {
 
 /// Run the viewer: start this daemon's local graph server, register it, and
 /// contend for the aggregator role. Never returns under normal operation.
-pub async fn run(graph: Graph, llm: crate::llm::Client, agg_addr: &str) -> std::io::Result<()> {
+pub async fn run(graph: Graph, llm: crate::llm::Client, retrieval: RetrievalConfig, agg_addr: &str) -> std::io::Result<()> {
 	// 1. Local graph server on an ephemeral loopback port (this daemon's own data).
 	let local = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
 	let local_addr = local.local_addr()?.to_string();
+	let local_state = LocalState { graph: graph.clone(), retrieval: retrieval.clone() };
 	let local_app = Router::new()
 		.route("/graph", get(graph_json))
 		.route("/search", post(peer_search))
-		.with_state(graph);
+		.route("/ask_retrieve", post(ask_retrieve))
+		.with_state(local_state);
 	tokio::spawn(async move {
 		if let Err(e) = axum::serve(local, local_app).await {
 			tracing::warn!(target: "kern.viewer", error = %e, "local graph server exited");
@@ -315,7 +324,8 @@ struct SearchBody {
 /// Peer endpoint: rank this daemon's graph against a *supplied* query vector.
 /// No embedding happens here — the hub already embedded once and passes the
 /// vector down, so N daemons cost one embed call total.
-async fn peer_search(State(g): State<Graph>, Json(body): Json<SearchBody>) -> Json<Value> {
+async fn peer_search(State(st): State<LocalState>, Json(body): Json<SearchBody>) -> Json<Value> {
+	let g = st.graph;
 	let g = read_recovered(&g);
 	let k = body.k.min(MAX_SEARCH_K);
 
@@ -350,6 +360,48 @@ async fn peer_search(State(g): State<Graph>, Json(body): Json<SearchBody>) -> Js
 	}
 
 	Json(json!({ "hits": hits, "reasons": reasons }))
+}
+
+#[derive(serde::Deserialize)]
+struct AskRetrieveBody {
+	vec: Vec<f64>,
+	question: String,
+	#[serde(default = "default_k")]
+	k: usize,
+}
+
+/// Peer endpoint for the oracle: retrieve (no generation) over THIS daemon's
+/// graph and return scored source thoughts + a pre-formatted provenance string.
+/// The hub merges these across daemons and does the single generation.
+async fn ask_retrieve(State(st): State<LocalState>, Json(body): Json<AskRetrieveBody>) -> Json<Value> {
+	use crate::retrieval::answer;
+	use crate::retrieval::seed::Mode;
+	let k = body.k.min(MAX_SEARCH_K);
+	let g = read_recovered(&st.graph);
+	let result = answer::query(
+		&g,
+		&st.retrieval,
+		&body.vec,
+		&body.question,
+		Mode::Hybrid,
+		None,
+		None,
+		None::<crate::retrieval::score::QueryOptions>,
+	);
+	let sources: Vec<Value> = result.entities.iter().take(k).map(|se| {
+		json!({
+			"id": se.entity.id,
+			"label": truncate(&se.entity.text(), 80),
+			"text": truncate(&se.entity.text(), 300),
+			"kind": format!("{:?}", se.entity.kind),
+			"kern": g.kern_of_entity(&se.entity.id).map(str::to_owned).unwrap_or_default(),
+			"heat": se.entity.heat,
+			"conf": se.entity.conf_mean(),
+			"score": se.score,
+		})
+	}).collect();
+	let chain_text = answer::format_chains(&g, &result.path_chains);
+	Json(json!({ "sources": sources, "chain_text": chain_text }))
 }
 
 #[cfg(test)]
@@ -419,7 +471,8 @@ mod tests {
 /// (id, truncated text, kind, kern, heat, confidence); links are reason edges.
 /// Edges whose endpoints are not both present (e.g. into an unloaded kern) are
 /// dropped so the client never sees a dangling link.
-async fn graph_json(State(g): State<Graph>) -> Json<serde_json::Value> {
+async fn graph_json(State(st): State<LocalState>) -> Json<serde_json::Value> {
+	let g = st.graph;
 	let g = read_recovered(&g);
 	let kerns = g.all();
 
