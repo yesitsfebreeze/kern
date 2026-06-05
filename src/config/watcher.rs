@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Slice O — file changes flow into kern as `Document` entities through
 /// `watcher::IngestSink`. The watcher is OFF by default; opt in via a
-/// `[watcher]` section in `.relay/kern.toml`:
+/// `[watcher]` section in `.kern/kern.toml`:
 ///
 /// ```toml
 /// [watcher]

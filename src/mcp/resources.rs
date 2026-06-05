@@ -9,25 +9,25 @@ use super::{err_resp, ok, Response, Server, ERR_INVALID_REQ, ERR_NOT_FOUND};
 pub fn resource_definitions() -> Vec<serde_json::Value> {
 	vec![
 		serde_json::json!({
-			"uri": "relay://local/health",
+			"uri": "kern://local/health",
 			"name": "Graph health",
 			"description": "Entity/edge counts, tick heat, unnamed count, purpose",
 			"mimeType": "application/json",
 		}),
 		serde_json::json!({
-			"uri": "relay://local/thoughts",
+			"uri": "kern://local/thoughts",
 			"name": "Top thoughts",
 			"description": "Top thoughts by global rank",
 			"mimeType": "application/json",
 		}),
 		serde_json::json!({
-			"uri": "relay://local/kerns",
+			"uri": "kern://local/kerns",
 			"name": "All Kerns",
 			"description": "All loaded Kerns with purpose and stats",
 			"mimeType": "application/json",
 		}),
 		serde_json::json!({
-			"uri": "relay://local/descriptors",
+			"uri": "kern://local/descriptors",
 			"name": "Descriptors",
 			"description": "All registered data-type descriptors",
 			"mimeType": "application/json",
@@ -55,13 +55,13 @@ pub(crate) fn handle_resource_read(
 	};
 
 	match params.uri.as_str() {
-		"relay://local/health" => ok(id, resource_content(&params.uri, &resource_health(server))),
-		"relay://local/thoughts" => ok(
+		"kern://local/health" => ok(id, resource_content(&params.uri, &resource_health(server))),
+		"kern://local/thoughts" => ok(
 			id,
 			resource_content(&params.uri, &resource_thoughts(server)),
 		),
-		"relay://local/kerns" => ok(id, resource_content(&params.uri, &resource_kerns(server))),
-		"relay://local/descriptors" => ok(
+		"kern://local/kerns" => ok(id, resource_content(&params.uri, &resource_kerns(server))),
+		"kern://local/descriptors" => ok(
 			id,
 			resource_content(&params.uri, &resource_descriptors(server)),
 		),

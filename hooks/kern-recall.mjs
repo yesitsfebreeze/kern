@@ -25,7 +25,7 @@ async function main() {
   let ev = {};
   try { ev = JSON.parse(input); } catch {}
   const cwd = ev.cwd || process.cwd();
-  const digestPath = path.join(cwd, '.relay', 'kern', 'digest.md');
+  const digestPath = path.join(cwd, '.kern', 'digest.md');
 
   let digest = '';
   try { digest = fs.readFileSync(digestPath, 'utf8'); } catch { return; }

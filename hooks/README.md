@@ -6,11 +6,11 @@ session proceeds untouched.
 
 | Hook | Event | What it does |
 |------|-------|--------------|
-| `kern-capture.mjs` | `Stop` | Extracts the new conversation delta from the transcript and writes it to `<cwd>/.relay/capture/`. The daemon drains and distills it. |
-| `kern-recall.mjs` | `SessionStart` | Reads `<cwd>/.relay/kern/digest.md` and injects it into the new session as context. |
+| `kern-capture.mjs` | `Stop` | Extracts the new conversation delta from the transcript and writes it to `<cwd>/.kern/capture/`. The daemon drains and distills it. |
+| `kern-recall.mjs` | `SessionStart` | Reads `<cwd>/.kern/digest.md` and injects it into the new session as context. |
 
 Both are **project-scoped by a guard**: `kern-capture` no-ops in any directory
-without a `.relay/` folder, so a single global registration is safe across every
+without a `.kern/` folder, so a single global registration is safe across every
 project — only directories where a kern is (or has been) active get captured.
 
 ## Install
@@ -59,6 +59,6 @@ After editing, confirm the JSON still parses:
 node -e "JSON.parse(require('fs').readFileSync(process.env.HOME + '/.claude/settings.json','utf8')); console.log('ok')"
 ```
 
-Then open a new Claude Code session in a project with a `.relay/` folder. After
+Then open a new Claude Code session in a project with a `.kern/` folder. After
 the daemon has written a digest, the recall hook injects it at the next
 `SessionStart`; the capture hook spools each session's delta on `Stop`.

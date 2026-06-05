@@ -1389,6 +1389,7 @@ dependencies = [
  "clap",
  "config-io",
  "criterion",
+ "dirs",
  "futures-core",
  "journal",
  "kern-test-utils",

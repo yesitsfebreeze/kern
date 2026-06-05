@@ -36,7 +36,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
 					"title":      {"type": "string", "description": "human-readable title"},
 					"url":        {"type": "string", "description": "URL reference"},
 					"conf":       {"type": "number", "description": "confidence weight 0.0-1.0 (default 0.5)"},
-					"descriptor": {"type": "string", "description": "Relay.Descriptors key for chunking context"},
+					"descriptor": {"type": "string", "description": "Descriptor key for chunking context"},
 					"sync":       {"type": "boolean", "description": "block until ingest completes (default false)"},
 				},
 			},

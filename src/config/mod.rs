@@ -1,6 +1,6 @@
 // Kern runtime config. One TOML file per scope:
-//   user:    <XDG_CONFIG>/relay/kern.toml
-//   project: <cwd>/.relay/kern.toml
+//   user:    <XDG_CONFIG>/kern/kern.toml
+//   project: <cwd>/.kern/kern.toml
 // Section-level merge: project sections replace user sections; missing
 // fields fall through to Default.
 
@@ -60,7 +60,7 @@ impl Default for Config {
 	fn default() -> Self {
 		let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 		Self {
-			data_dir: cwd.join(".relay").join("kern").to_string_lossy().into_owned(),
+			data_dir: cwd.join(".kern").to_string_lossy().into_owned(),
 			log_level: "info".into(),
 			embed: EmbedConfig::default(),
 			reason: ReasonConfig::default(),
@@ -81,8 +81,13 @@ impl Default for Config {
 
 impl Config {
 	pub fn load(cwd: &Path) -> Result<Self, config_io::Error> {
-		let user = config_io::user_dir()?.join("kern.toml");
-		let project = config_io::project_dir(cwd).join("kern.toml");
+		// kern owns its own paths. User scope: <XDG_CONFIG>/kern/kern.toml
+		// (absent is fine). Project scope: <cwd>/.kern/kern.toml.
+		let user = dirs::config_dir()
+			.unwrap_or_else(|| cwd.join(".kern"))
+			.join("kern")
+			.join("kern.toml");
+		let project = cwd.join(".kern").join("kern.toml");
 		config_io::load_layered(&user, &project)
 	}
 

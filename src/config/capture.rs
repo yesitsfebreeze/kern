@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// Configuration for Claude-Code memory capture + recall.
 ///
-/// OFF by default. Opt in via a `[capture]` section in `.relay/kern.toml`:
+/// OFF by default. Opt in via a `[capture]` section in `.kern/kern.toml`:
 ///
 /// ```toml
 /// [capture]
@@ -40,9 +40,9 @@ impl Default for CaptureConfig {
 	fn default() -> Self {
 		Self {
 			enabled: false,
-			dir: ".relay/capture".into(),
+			dir: ".kern/capture".into(),
 			poll_secs: 5,
-			digest_path: ".relay/kern/digest.md".into(),
+			digest_path: ".kern/digest.md".into(),
 			digest_secs: 30,
 			digest_k: 40,
 			done_retention_secs: 7 * 24 * 60 * 60,
@@ -58,9 +58,9 @@ mod tests {
 	fn defaults_are_off_with_sane_tunables() {
 		let c = CaptureConfig::default();
 		assert!(!c.enabled);
-		assert_eq!(c.dir, ".relay/capture");
+		assert_eq!(c.dir, ".kern/capture");
 		assert_eq!(c.poll_secs, 5);
-		assert_eq!(c.digest_path, ".relay/kern/digest.md");
+		assert_eq!(c.digest_path, ".kern/digest.md");
 		assert_eq!(c.digest_secs, 30);
 		assert_eq!(c.digest_k, 40);
 		assert_eq!(c.done_retention_secs, 7 * 24 * 60 * 60);

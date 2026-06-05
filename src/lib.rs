@@ -7,7 +7,7 @@
 //! * **retrieval** — vector + BM25 hybrid search over ingested content
 //! * **llm** — provider-agnostic LLM dispatch with quantisation support
 //! * **ingest** — file watcher pipeline that feeds the retrieval index
-//! * **rpc** — typed MCP service layer consumed by relay and agnt
+//! * **rpc** — typed MCP service layer consumed by external MCP clients
 
 /// Foundational types and daemon initialisation.
 pub mod base;
@@ -39,7 +39,7 @@ pub mod quant;
 pub mod repl;
 /// Hybrid vector + BM25 search over the ingested content index.
 pub mod retrieval;
-/// Typed RPC service layer consumed by relay and agnt.
+/// Typed RPC service layer consumed by external MCP clients.
 pub mod rpc;
 /// Per-data-dir store registry for multi-tenant kern instances.
 pub mod store;

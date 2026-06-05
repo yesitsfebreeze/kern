@@ -2,11 +2,9 @@
 # Cargo.lock IS tracked: kern ships a binary daemon, so the lockfile is
 # committed for reproducible builds across machines.
 
-# kern runtime state (keep kern.toml tracked)
-/.relay/kern
-/.relay/capture
-/.relay/journal
-/.relay/*.log
+# kern runtime state (keep .kern/kern.toml tracked)
+/.kern/*
+!/.kern/kern.toml
 
 # local tooling / vaults (not part of the product)
 /.claude

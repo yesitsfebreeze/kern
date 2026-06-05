@@ -3,9 +3,9 @@
 
 [reason]
 # Model for distillation + smart-split + edge proposal. Local Ollama.
-# gemma4 = fast; swap to qwen3.5:27b for higher-quality consolidation.
+# qwen2.5 = default; swap to a larger model for higher-quality consolidation.
 url = "http://localhost:11434"
-model = "gemma4:latest"
+model = "qwen2.5"
 
 [capture]
 # Self-learning: capture Claude Code sessions -> distill -> graph -> digest.

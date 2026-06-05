@@ -20,7 +20,7 @@ session text → spool file → distill (LLM) → claims → graph → digest �
 
 - A **Stop hook** (`kern-capture.mjs`) extracts the new conversation delta
   from the Claude Code transcript (user prompts + assistant text only) and
-  writes it to `<cwd>/.relay/capture/`.
+  writes it to `<cwd>/.kern/capture/`.
 - The daemon's **capture spool** (`ingest::capture_spool`) drains each delta,
   runs **distillation** (`ingest::distill`) — one LLM pass that extracts
   durable facts / decisions / preferences as typed claims — and ingests each
@@ -28,7 +28,7 @@ session text → spool file → distill (LLM) → claims → graph → digest �
   after every claim ingests; on LLM outage it stays for the next drain, so a
   transient failure never loses knowledge.
 - The daemon keeps a **recall digest** (`retrieval::digest`) fresh at
-  `<cwd>/.relay/kern/digest.md` — the root purpose plus the hottest distilled
+  `<cwd>/.kern/digest.md` — the root purpose plus the hottest distilled
   thoughts. A **SessionStart hook** (`kern-recall.mjs`) injects it into each
   new session. For mid-session deep recall, the model calls the `query` MCP
   tool directly.
@@ -57,7 +57,7 @@ same-network peers via UDP multicast. **Off by default.**
 
 ## Turning it on
 
-Everything is controlled from `<cwd>/.relay/kern.toml`:
+Everything is controlled from `<cwd>/.kern/kern.toml`:
 
 ```toml
 [reason]
@@ -81,7 +81,7 @@ peers = []
 
 The two Claude Code hooks are registered once in `~/.claude/settings.json`
 (`Stop` → capture, `SessionStart` → recall). They are project-scoped by a
-guard: they no-op in any directory without a `.relay/` folder, so a single
+guard: they no-op in any directory without a `.kern/` folder, so a single
 global registration is safe across all your projects.
 
 Seed the graph once via MCP: set the root `purpose` and add the typed

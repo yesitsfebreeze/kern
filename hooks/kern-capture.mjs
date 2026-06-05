@@ -63,12 +63,12 @@ async function main() {
   const { transcript_path, cwd, session_id } = ev;
   if (!transcript_path || !cwd || !session_id || !fs.existsSync(transcript_path)) return;
 
-  // Opt-in: only capture in projects that already have a `.relay` dir (a kern
+  // Opt-in: only capture in projects that already have a `.kern` dir (a kern
   // is or has been active here). Prevents this global hook from polluting
   // unrelated projects with empty spool dirs.
-  if (!fs.existsSync(path.join(cwd, '.relay'))) return;
+  if (!fs.existsSync(path.join(cwd, '.kern'))) return;
 
-  const spool = path.join(cwd, '.relay', 'capture');
+  const spool = path.join(cwd, '.kern', 'capture');
   fs.mkdirSync(spool, { recursive: true });
 
   const lines = readLines(fs.readFileSync(transcript_path, 'utf8'));

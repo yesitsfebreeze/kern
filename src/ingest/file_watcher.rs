@@ -102,7 +102,7 @@ impl IngestSink for KernFileWatcherSink {
 		let descriptor = language_hint.unwrap_or_default();
 
 		// Slice R: log an `FsWrite` touch into the shared journal so the
-		// relay-side `Recents` ring picks the file up via replay even
+		// a client-side `Recents` ring picks the file up via replay even
 		// though the file watcher runs in the kern process. Use the
 		// path as the entity_id — the actual kern entity_id is only
 		// known after `place_document` runs, but Recents matches by
