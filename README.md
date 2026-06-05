@@ -126,10 +126,12 @@ the current directory — so this one command is all you need to bring kern up
 claude mcp add kern -- kern mcp
 ```
 
-**3. Install the capture + recall hooks** once in `~/.claude/settings.json`.
-The scripts ship in [`hooks/`](hooks/) — see [`hooks/README.md`](hooks/README.md)
-for the exact settings block. They are guarded to no-op outside `.kern/`
-projects, so a single global registration is safe everywhere.
+**3. Install the capture + recall hooks.** The simplest path is the Claude
+plugin (`/plugin marketplace add yesitsfebreeze/relay-kern` then
+`/plugin install kern@kern`), which registers all three hooks plus the MCP
+server in one step. The scripts ship in [`hooks/`](hooks/); see the *Hooks*
+section below for the full table and behavior. They are guarded to no-op outside
+`.kern/` projects, so a single global registration is safe everywhere.
 
 **4. Enable capture.** Capture is **off by default**. In the project where you
 want memory, create `<cwd>/.kern/kern.toml` with at least:
@@ -187,13 +189,40 @@ peers = []
 
 ### Hooks
 
-The two Claude Code hooks live in [`hooks/`](hooks/): `kern-capture.mjs`
-(`Stop` → capture) and `kern-recall.mjs` (`SessionStart` → recall). Register
-them once in `~/.claude/settings.json` — full instructions and the exact JSON
-block are in [`hooks/README.md`](hooks/README.md). They are guarded: they no-op
-in any directory without a `.kern/` folder, so one global registration is safe
-across every project. Both fail open — if the daemon or its LLM is down, the
-session proceeds and capture simply queues.
+Three Claude Code hooks drive kern's automatic memory. They are plain Node ESM
+scripts in [`hooks/`](hooks/) with no dependencies, and all **fail open** — any
+error exits 0 and the session proceeds untouched.
+
+| Hook | Event | What it does |
+|------|-------|--------------|
+| `kern-capture.mjs` | `Stop` | Extracts the new conversation delta from the transcript and writes it to `<cwd>/.kern/capture/`. The daemon drains and distills it. |
+| `kern-recall.mjs` | `SessionStart` | Reads `<cwd>/.kern/digest.md` and injects it into the new session as context. |
+| `kern-recall-prompt.mjs` | `UserPromptSubmit` | Demand-driven semantic recall: runs `kern search <prompt>` against `<cwd>/.kern` and injects the top scored thoughts (score ≥ `MIN_SCORE`) as context for that prompt. Hard-bounded by `TIMEOUT_MS`. |
+
+All three are **project-scoped by a guard**: each no-ops in any directory
+without a `.kern/` folder, so a single global registration is safe across every
+project — only directories where a kern is (or has been) active get touched.
+`kern-recall-prompt` embeds the prompt every turn (Ollama), so it fails open on
+timeout and injects nothing rather than blocking the prompt.
+
+**Install as a plugin (recommended).** The repo is a self-contained Claude
+**plugin** and **marketplace** — install it straight from GitHub. From any
+Claude Code session:
+
+```
+/plugin marketplace add yesitsfebreeze/relay-kern
+/plugin install kern@kern
+```
+
+That registers all three hooks (via `${CLAUDE_PLUGIN_ROOT}` — no machine paths)
+and the kern MCP server. Restart Claude Code to load them.
+
+**Requirements:** the `kern` CLI on `PATH` (hooks and MCP server both shell out
+to it), a running embedding endpoint for `kern-recall-prompt` (Ollama by
+default), and `node` on `PATH` for hook execution.
+
+Prefer the plugin over hand-editing `~/.claude/settings.json`; enabling it wires
+all three hooks plus the MCP server in one step.
 
 ### Seed the graph
 
