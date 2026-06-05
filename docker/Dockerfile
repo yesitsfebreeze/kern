@@ -1,6 +1,6 @@
-# Relay dev container.
-# Full toolchain to build, run, profile, and operate every relay binary
-# (kern, agnt, repl) plus Claude Code CLI.
+# kern dev container.
+# Full toolchain to build, run, profile, and operate the kern daemon
+# plus the Claude Code CLI.
 
 FROM ubuntu:24.04
 

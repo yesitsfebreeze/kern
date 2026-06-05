@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Filesystem watcher (notify-rs) with debounce + ignore-rules + ingest pipeline. Slice E of relay-search-tui."
+description = "Filesystem watcher (notify-rs) with debounce + ignore-rules + ingest pipeline."
 
 [lints]
 workspace = true

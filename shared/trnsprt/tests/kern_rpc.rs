@@ -1,5 +1,4 @@
-//! Integration tests for `KernRpc` (slice J of the relay orchestrator
-//! TUI plan).
+//! Integration tests for `KernRpc`.
 //!
 //! Covers
 //! - end-to-end client/server roundtrip on `InprocAdapter` +

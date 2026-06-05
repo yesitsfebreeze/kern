@@ -25,7 +25,7 @@ services:
       - ${USERPROFILE}/.claude.json:/root/.claude.json
       - ${USERPROFILE}/.config/gh:/root/.config/gh
       - ${USERPROFILE}/.gitconfig:/root/.gitconfig:ro
-      - ${USERPROFILE}/.config/relay:/work/.relay
+      - ${USERPROFILE}/.config/kern:/work/.kern
     command: ["/bin/bash"]
 
 volumes:

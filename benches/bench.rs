@@ -151,7 +151,7 @@ fn bench_gnn_tensor_matmul(c: &mut Criterion) {
 }
 
 fn bench_persist_save_100(c: &mut Criterion) {
-	let dir = std::env::temp_dir().join("relay_bench_persist");
+	let dir = std::env::temp_dir().join("kern_bench_persist");
 	let _ = std::fs::remove_dir_all(&dir);
 	std::fs::create_dir_all(&dir).unwrap();
 

@@ -1,5 +1,4 @@
-//! Integration tests for `SearchSvc` (slice B of the relay search TUI
-//! plan).
+//! Integration tests for `SearchSvc`.
 //!
 //! Covers
 //! - end-to-end client/server roundtrip on `InprocAdapter` +

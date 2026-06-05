@@ -1,4 +1,4 @@
-// Relay docs — Ctrl+K / Cmd+K opens search. Adds a subtle hint badge.
+// kern docs — Ctrl+K / Cmd+K opens search. Adds a subtle hint badge.
 
 (function () {
   function isMac() {

@@ -5,7 +5,7 @@
 #   [[flow]]
 #   name      = "slug"                # file name (required)
 #   title     = "Display Title"       # chapter title in SUMMARY (required)
-#   seeds     = ["crate-a", "crate-b"] # seed crates or relay node IDs (required, non-empty)
+#   seeds     = ["crate-a", "crate-b"] # seed crates or kern node IDs (required, non-empty)
 #   question  = "What does X look like end-to-end?" # narrative prompt (required)
 
 flow = []
