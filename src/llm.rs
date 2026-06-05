@@ -52,6 +52,9 @@ struct Inner {
 	reason_url: String,
 	reason_model: String,
 	reason_headers: HeaderMap,
+	answer_url: String,
+	answer_model: String,
+	answer_headers: HeaderMap,
 	embed_url: String,
 	embed_model: String,
 	embed_headers: HeaderMap,
@@ -59,10 +62,14 @@ struct Inner {
 }
 
 impl Client {
+	#[allow(clippy::too_many_arguments)]
 	pub fn new(
 		reason_url: &str,
 		reason_model: &str,
 		reason_key: &str,
+		answer_url: &str,
+		answer_model: &str,
+		answer_key: &str,
 		embed_url: &str,
 		embed_model: &str,
 		embed_key: &str,
@@ -77,6 +84,24 @@ impl Client {
 		} else {
 			embed_key
 		};
+		// Answer endpoint falls back to reason when unset — the single-Ollama
+		// case where only the model differs. Empty model would 400 on /ask, so
+		// fall back there too rather than send a blank model name.
+		let answer_url = if answer_url.is_empty() {
+			reason_url
+		} else {
+			answer_url
+		};
+		let answer_key = if answer_key.is_empty() {
+			reason_key
+		} else {
+			answer_key
+		};
+		let answer_model = if answer_model.is_empty() {
+			reason_model
+		} else {
+			answer_model
+		};
 		let normalize = |u: &str| {
 			let u = u.trim_end_matches('/');
 			u.strip_suffix("/v1").unwrap_or(u).to_string()
@@ -90,6 +115,9 @@ impl Client {
 				reason_url: normalize(reason_url),
 				reason_model: reason_model.to_string(),
 				reason_headers: make_headers(reason_key),
+				answer_url: normalize(answer_url),
+				answer_model: answer_model.to_string(),
+				answer_headers: make_headers(answer_key),
 				embed_url: normalize(embed_url),
 				embed_model: embed_model.to_string(),
 				embed_headers: make_headers(embed_key),
@@ -99,7 +127,7 @@ impl Client {
 	}
 
 	pub fn new_embed_only(embed_url: &str, embed_model: &str) -> Self {
-		Self::new("", "", "", embed_url, embed_model, "")
+		Self::new("", "", "", "", "", "", embed_url, embed_model, "")
 	}
 
 	pub async fn embed(&self, text: &str) -> Result<Vec<f64>, LlmError> {
@@ -211,15 +239,21 @@ impl Client {
 	) -> impl futures_core::Stream<Item = Result<String, LlmError>> + Send {
 		let client = self.clone();
 		async_stream::stream! {
-			let url = format!("{}/v1/chat/completions", client.inner.reason_url);
+			let url = format!("{}/v1/chat/completions", client.inner.answer_url);
 			let msgs: Vec<serde_json::Value> = messages
 				.iter()
 				.map(|(r, c)| serde_json::json!({"role": r, "content": c}))
 				.collect();
+			// `reasoning_effort: none` disables the thinking phase. The answer model
+			// (qwen3.5) thinks by default, emitting hidden reasoning tokens before
+			// the first visible token — pure latency for a path that only glues
+			// already-retrieved graph nodes into prose. Ollama ignores unknown keys,
+			// so this is a no-op for non-reasoning models.
 			let body = serde_json::json!({
-				"model": client.inner.reason_model,
+				"model": client.inner.answer_model,
 				"messages": msgs,
 				"stream": true,
+				"reasoning_effort": "none",
 			});
 			// Override the client's 120s TOTAL timeout: a streamed generation can
 			// take far longer to finish than 120s (big RAG prompt + CPU inference),
@@ -227,7 +261,7 @@ impl Client {
 			// "error decoding response body". 600s is a generous ceiling for slow
 			// local models; tokens still stream as they arrive.
 			let resp = match client.inner.http.post(&url)
-				.headers(client.inner.reason_headers.clone())
+				.headers(client.inner.answer_headers.clone())
 				.timeout(Duration::from_secs(600))
 				.json(&body)
 				.send()

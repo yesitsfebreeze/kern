@@ -44,6 +44,9 @@ pub(super) async fn cmd_ingest(
 		reason_url,
 		reason_model,
 		reason_key,
+		"",
+		"",
+		"",
 	);
 	let llm_fn: Option<crate::ingest::LlmFunc> = if !no_llm && !reason_url.is_empty() {
 		Some(Arc::new(llm_client.complete_func()))

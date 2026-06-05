@@ -4,6 +4,7 @@
 // Section-level merge: project sections replace user sections; missing
 // fields fall through to Default.
 
+mod answer;
 mod capture;
 mod embed;
 mod gnn;
@@ -17,6 +18,7 @@ mod serve;
 mod tick;
 mod watcher;
 
+pub use answer::{AnswerConfig, DEFAULT_ANSWER_MODEL};
 pub use capture::CaptureConfig;
 pub use embed::{DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL, EmbedConfig};
 pub use gnn::GnnConfig;
@@ -43,6 +45,7 @@ pub struct Config {
 	pub log_level: String,
 	pub embed: EmbedConfig,
 	pub reason: ReasonConfig,
+	pub answer: AnswerConfig,
 	pub serve: ServeConfig,
 	pub retrieval: RetrievalConfig,
 	pub ingest: IngestConfig,
@@ -64,6 +67,7 @@ impl Default for Config {
 			log_level: "info".into(),
 			embed: EmbedConfig::default(),
 			reason: ReasonConfig::default(),
+			answer: AnswerConfig::default(),
 			serve: ServeConfig::default(),
 			retrieval: RetrievalConfig::default(),
 			ingest: IngestConfig::default(),
@@ -114,6 +118,24 @@ impl Config {
 			&self.embed.key
 		} else {
 			&self.reason.key
+		}
+	}
+
+	/// Answer endpoint, falling back to the reason endpoint when `[answer]` omits
+	/// a `url` — the common single-Ollama case where only the model differs.
+	pub fn answer_url(&self) -> &str {
+		if self.answer.url.is_empty() {
+			self.reason_url()
+		} else {
+			&self.answer.url
+		}
+	}
+
+	pub fn answer_key(&self) -> &str {
+		if self.answer.key.is_empty() {
+			self.reason_key()
+		} else {
+			&self.answer.key
 		}
 	}
 }

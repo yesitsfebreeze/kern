@@ -126,6 +126,9 @@ pub(super) async fn cmd_link(
 		reason_url,
 		reason_model,
 		cfg.reason_key(),
+		"",
+		"",
+		"",
 	);
 	let mut reason_text = reason.to_string();
 

@@ -77,7 +77,7 @@ pub(super) async fn cmd_purpose(
 	embed_url: &str,
 	embed_model: &str,
 ) {
-	let llm_client = build_llm(embed_url, embed_model, &cfg.embed.key, "", "", "");
+	let llm_client = build_llm(embed_url, embed_model, &cfg.embed.key, "", "", "", "", "", "");
 	let vec = match llm_client.embed(text).await {
 		Ok(v) => v,
 		Err(e) => {

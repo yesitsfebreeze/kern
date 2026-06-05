@@ -15,8 +15,8 @@ const BATCH: usize = 64;
 
 pub(super) async fn cmd_reembed(cfg: &crate::config::Config, embed_url: &str, embed_model: &str) {
 	let mut g = load_graph(cfg);
-	// Embed-only client (reason params unused here).
-	let client = build_llm(embed_url, embed_model, &cfg.embed.key, "", "", "");
+	// Embed-only client (reason/answer params unused here).
+	let client = build_llm(embed_url, embed_model, &cfg.embed.key, "", "", "", "", "", "");
 
 	// Collect every entity's text, graph-wide, in a stable order.
 	let mut ids: Vec<String> = Vec::new();

@@ -22,6 +22,9 @@ pub(super) async fn cmd_query(
 		reason_url,
 		reason_model,
 		cfg.reason_key(),
+		"",
+		"",
+		"",
 	);
 
 	let vec = match llm_client.embed(text).await {
@@ -85,7 +88,7 @@ pub(super) async fn cmd_search(
 	embed_model: &str,
 ) {
 	let g = load_graph(cfg);
-	let llm_client = build_llm(embed_url, embed_model, &cfg.embed.key, "", "", "");
+	let llm_client = build_llm(embed_url, embed_model, &cfg.embed.key, "", "", "", "", "", "");
 	let vec = match llm_client.embed(text).await {
 		Ok(v) => v,
 		Err(e) => {

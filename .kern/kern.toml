@@ -10,11 +10,18 @@ url = "http://localhost:11434"
 model = "qwen3-embedding:0.6b"
 
 [reason]
-# Model for distillation + smart-split + edge proposal. Local Ollama.
-# qwen2.5:7b — small, fast, and the most reliable small model for structured
-# extraction / formatted output, which is what distillation needs.
+# Model for distillation + smart-split + edge proposal (background capture).
+# Latency-insensitive, structured-output-sensitive → keep the bigger model.
+# qwen2.5:7b — most reliable small model for formatted extraction.
 url = "http://localhost:11434"
 model = "qwen2.5:7b"
+
+[answer]
+# Model for the user-facing /ask oracle (streamed answer in the viewer).
+# Latency-critical, only glues retrieved graph nodes into prose → smallest model
+# that clears the grounding floor. qwen3.5:4b: fits 8 GB VRAM beside the 0.6b
+# embedder, same family. url/key blank → fall back to [reason]'s endpoint.
+model = "qwen3.5:4b"
 
 [capture]
 # Self-learning: capture Claude Code sessions -> distill -> graph -> digest.
