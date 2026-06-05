@@ -1,231 +1,125 @@
 <script setup>
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import * as d3 from 'd3'
 
-const stats = ref('loading…')
+const raw = ref({ nodes: [], links: [], kerns: [] })
 const err = ref('')
-const crumbs = ref([])
-const detail = ref('')
-const svgEl = ref(null)
-
+const hovered = ref(null)
 let timer = null
-let raw = { nodes: [], links: [], kerns: [] }
-let kernsById = {}
-let entsByKern = new Map()
-let treeData = null
-let stack = []          // focus path (data nodes); last = current
-let lastTopo = ''
-let wheelLock = 0
 
-const KIND_COLOR = { Fact: '#e5c07b', Document: '#61afef', Question: '#c678dd', Claim: '#98c379' }
+const kernsById = computed(() => {
+  const m = {}; for (const k of raw.value.kerns) m[k.id] = k; return m
+})
+const entsByKern = computed(() => {
+  const m = new Map()
+  for (const e of raw.value.nodes) { if (!m.has(e.kern)) m.set(e.kern, []); m.get(e.kern).push(e) }
+  for (const arr of m.values()) arr.sort((a, b) => (b.heat || 0) - (a.heat || 0))
+  return m
+})
+const maxHeat = computed(() => Math.max(0.001, d3.max(raw.value.nodes, n => +n.heat || 0) || 1))
 
-function rootId() {
-  const r = raw.kerns.find(k => !k.parent) || raw.kerns[0]
-  return r ? r.id : null
-}
-
-// Nested data: kern → child kerns → … → thoughts (leaves, value 1).
-function buildTree() {
-  const make = (kid, seen) => {
-    const k = kernsById[kid]
-    if (!k || seen.has(kid)) return null
-    seen.add(kid)
-    const node = { id: kid, label: k.named ? k.label : '(unnamed)', type: 'kern', children: [] }
-    for (const c of k.children || []) { const cn = make(c, seen); if (cn) node.children.push(cn) }
-    for (const e of entsByKern.get(kid) || [])
-      node.children.push({ id: e.id, label: e.label, type: 'entity', kind: e.kind, heat: e.heat, conf: e.conf, value: 1 })
-    return node
+// DFS the sphere tree → ordered, indented groups; only kerns with thoughts show
+// a cell grid, but every named level keeps the hierarchy readable.
+const groups = computed(() => {
+  const out = []
+  const root = raw.value.kerns.find(k => !k.parent) || raw.value.kerns[0]
+  if (!root) return out
+  const walk = (id, depth, seen) => {
+    const k = kernsById.value[id]
+    if (!k || seen.has(id)) return
+    seen.add(id)
+    const ents = entsByKern.value.get(id) || []
+    out.push({ id, label: k.named ? k.label : '(unnamed)', named: k.named, depth, count: ents.length, total: k.count, ents })
+    for (const c of k.children || []) walk(c, depth + 1, seen)
   }
-  return make(rootId(), new Set()) || { id: 'root', label: 'root', type: 'kern', children: [] }
+  walk(root.id, 0, new Set())
+  return out
+})
+
+const total = computed(() => raw.value.nodes.length)
+const topColor = (depth) => d3.lab(70 - depth * 6, 6, 8).formatHex()
+function heatColor(h) {
+  // warm intensity ramp (like the references); low heat = dim ember, high = bright.
+  return d3.interpolateInferno(0.15 + 0.8 * Math.sqrt(Math.min(1, (h || 0) / maxHeat.value)))
 }
-
-function findById(node, id) {
-  if (node.id === id) return node
-  for (const c of node.children || []) { const r = findById(c, id); if (r) return r }
-  return null
-}
-
-const W = () => svgEl.value.clientWidth
-const H = () => svgEl.value.clientHeight
-
-let svg, g
-function layout() {
-  const cur = stack[stack.length - 1]
-  const r = d3.hierarchy(cur).sum(d => d.value || 0).sort((a, b) => (b.value || 0) - (a.value || 0))
-  d3.treemap().size([W(), H()]).paddingOuter(1).paddingTop(d => d.depth === 0 ? 0 : 13).paddingInner(1).round(true)(r)
-  return r
-}
-
-function render() {
-  crumbs.value = stack.map((n, i) => ({ id: n.id, label: i === 0 ? 'root' : n.label }))
-  const r = layout()
-  g.selectAll('*').remove()
-
-  const all = r.descendants().filter(d => d.depth > 0)
-  const wOf = d => Math.max(0, d.x1 - d.x0)
-  const hOf = d => Math.max(0, d.y1 - d.y0)
-
-  // every node — thoughts (leaf cells, by kind) AND every nested sub-topic block
-  // (bordered), all the way down, so the whole structure + all data is visible.
-  const node = g.selectAll('g.n').data(all).join('g').attr('class', 'n')
-    .attr('transform', d => `translate(${d.x0},${d.y0})`)
-
-  node.append('rect')
-    .attr('width', wOf).attr('height', hOf)
-    .attr('fill', d => d.data.type === 'entity'
-      ? (KIND_COLOR[d.data.kind] || '#98c379')
-      : d3.lab(58 - d.depth * 7, 0, -6).formatHex()) // nested kerns: darker by depth
-    // thought cells brighten with heat → intensity reads like a heatmap.
-    .attr('fill-opacity', d => d.data.type === 'entity' ? 0.3 + Math.min(1, (+d.data.heat || 0) / 2) * 0.65 : 1)
-    .attr('stroke', d => d.data.type === 'kern' ? '#7fd1ae' : '#06080b')
-    .attr('stroke-opacity', d => d.data.type === 'kern' ? 0.45 : 1)
-    .attr('stroke-width', d => d.data.type === 'kern' ? 1 : 0.4)
-    .style('cursor', d => d.data.type === 'kern' ? 'pointer' : 'default')
-    .on('click', (ev, d) => { if (d.data.type === 'kern') { ev.stopPropagation(); zoomIn(d.data) } })
-    .on('mousemove', (ev, d) => {
-      detail.value = d.data.type === 'entity'
-        ? `${d.data.kind} · heat ${(+d.data.heat).toFixed(2)} · conf ${(+d.data.conf).toFixed(2)} — ${d.data.label}`
-        : `${d.data.label} · ${d.value} thoughts`
-    })
-    .on('mouseleave', () => detail.value = '')
-  node.append('title').text(d => d.data.label)
-
-  // sub-topic header labels (words) where the block has room.
-  node.filter(d => d.data.type === 'kern' && wOf(d) > 34 && hOf(d) > 14)
-    .append('text').attr('x', 3).attr('y', 10)
-    .attr('fill', '#cfe9df').attr('font-size', '10px').attr('font-weight', 600)
-    .style('pointer-events', 'none')
-    .text(d => clip(d.data.label, wOf(d)))
-
-  // thought text on cells big enough to read — more info, not just color.
-  node.filter(d => d.data.type === 'entity' && wOf(d) > 46 && hOf(d) > 12)
-    .append('text').attr('x', 2).attr('y', 9)
-    .attr('fill', '#0b0d10').attr('font-size', '9px')
-    .style('pointer-events', 'none')
-    .text(d => clip(d.data.label, wOf(d)))
-
-  stats.value = `${raw.nodes.length} thoughts · ${raw.kerns.length} spheres · here: ${r.value} thoughts`
-}
-
-function clip(s, px) {
-  const n = Math.floor((px - 4) / 5.4)
-  return n >= s.length ? s : (n > 1 ? s.slice(0, n - 1) + '…' : '')
-}
-
-function findPath(node, id, acc = []) {
-  acc.push(node)
-  if (node.id === id) return acc.slice()
-  for (const c of node.children || []) { const r = findPath(c, id, acc); if (r) return r }
-  acc.pop()
-  return null
-}
-function zoomIn(dataNode) {
-  if (dataNode.type !== 'kern' || !(dataNode.children || []).length) return
-  if (dataNode.id === stack[stack.length - 1].id) return
-  const path = findPath(treeData, dataNode.id)
-  if (path) { stack = path; render() }
-}
-function zoomOut() { if (stack.length > 1) { stack.pop(); render() } }
-function goTo(id) {
-  const i = stack.findIndex(n => n.id === id)
-  if (i >= 0) { stack.length = i + 1; render() }
-}
-
-// Scroll = narrow into / back out of the tree.
-function onWheel(ev) {
-  ev.preventDefault()
-  const now = Date.now()
-  if (now - wheelLock < 350) return
-  wheelLock = now
-  if (ev.deltaY > 0) {
-    // into the deepest sub-topic block under the cursor
-    const r = layout()
-    const [mx, my] = d3.pointer(ev, svgEl.value)
-    const hits = r.descendants().filter(d => d.depth > 0 && d.data.type === 'kern'
-      && mx >= d.x0 && mx <= d.x1 && my >= d.y0 && my <= d.y1)
-    const hit = hits.sort((a, b) => b.depth - a.depth)[0]
-    if (hit) zoomIn(hit.data)
-  } else {
-    zoomOut()
-  }
-}
+const kindMark = { Fact: '◆', Document: '■', Question: '▲', Claim: '●' }
 
 async function load() {
-  try {
-    raw = await (await fetch('/graph')).json()
-    kernsById = {}; entsByKern = new Map()
-    for (const k of raw.kerns) kernsById[k.id] = k
-    for (const e of raw.nodes) { if (!entsByKern.has(e.kern)) entsByKern.set(e.kern, []); entsByKern.get(e.kern).push(e) }
-    const topo = raw.nodes.length + ':' + raw.kerns.length
-    if (topo !== lastTopo) {
-      lastTopo = topo
-      treeData = buildTree()
-      // rebuild the focus stack against the new tree (keep where you were)
-      const ids = stack.map(n => n.id)
-      stack = [treeData]
-      for (let i = 1; i < ids.length; i++) { const n = findById(treeData, ids[i]); if (n) stack.push(n); else break }
-      render()
-    }
-    err.value = ''
-  } catch (e) { err.value = String(e) }
+  try { raw.value = await (await fetch('/graph')).json(); err.value = '' }
+  catch (e) { err.value = String(e) }
 }
-
-onMounted(() => {
-  svg = d3.select(svgEl.value)
-  g = svg.append('g')
-  svgEl.value.addEventListener('wheel', onWheel, { passive: false })
-  load()
-  timer = setInterval(load, 5000)
-  window.addEventListener('resize', () => render())
-})
-onBeforeUnmount(() => { if (timer) clearInterval(timer); svgEl.value?.removeEventListener('wheel', onWheel) })
+onMounted(() => { load(); timer = setInterval(load, 5000) })
+onBeforeUnmount(() => { if (timer) clearInterval(timer) })
 </script>
 
 <template>
-  <div class="hud">
-    <b>kern</b>
-    <span class="crumbs">
-      <template v-for="(c, i) in crumbs" :key="c.id">
-        <a @click="goTo(c.id)" :class="{ here: i === crumbs.length - 1 }">{{ c.label }}</a>
-        <span v-if="i < crumbs.length - 1" class="sep"> › </span>
+  <div class="wrap">
+    <header>
+      <span class="brand">kern</span>
+      <span class="sub">{{ total }} thoughts · {{ raw.kerns.length }} spheres</span>
+      <span class="legend">heat&nbsp;<i class="ramp"></i>&nbsp;hot</span>
+      <span v-if="err" class="err">{{ err }}</span>
+    </header>
+
+    <main>
+      <section v-for="g in groups" :key="g.id" class="grp" :style="{ paddingLeft: 14 + g.depth * 18 + 'px' }">
+        <div class="hdr">
+          <i class="dot" :style="{ background: topColor(g.depth) }"></i>
+          <span class="name" :class="{ unnamed: !g.named }">{{ g.label }}</span>
+          <span class="cnt">{{ g.count }}<span v-if="g.total > g.count" class="sub2"> / {{ g.total }} below</span></span>
+        </div>
+        <div class="cells">
+          <span v-for="e in g.ents" :key="e.id" class="cell"
+            :style="{ background: heatColor(e.heat) }"
+            :title="`${e.kind} · heat ${(+e.heat).toFixed(2)} · conf ${(+e.conf).toFixed(2)}\n${e.label}`"
+            @mouseenter="hovered = e" />
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <template v-if="hovered">
+        <span class="mk">{{ kindMark[hovered.kind] || '·' }}</span>
+        <span class="hk">{{ hovered.kind }}</span>
+        <span class="ht">{{ hovered.label }}</span>
       </template>
-    </span>
-    <span class="stat">· {{ stats }}</span>
-    <span v-if="err" class="err"> — {{ err }}</span>
+      <span v-else class="dim">hover a cell · color = heat · sections = topic spheres</span>
+    </footer>
   </div>
-  <div class="legend">
-    <span style="color:#98c379">■ claim</span>
-    <span style="color:#e5c07b">■ fact</span>
-    <span style="color:#61afef">■ document</span>
-    <span style="color:#c678dd">■ question</span>
-    <span class="dim">· scroll ↓ into a topic · scroll ↑ out</span>
-  </div>
-  <div class="path">{{ detail }}</div>
-  <svg ref="svgEl" class="tm"></svg>
 </template>
 
 <style>
-html, body, #app { height: 100%; }
-.tm { position: fixed; inset: 0; width: 100vw; height: 100vh; background: #06080b; }
-.hud {
-  position: fixed; top: 10px; left: 12px; z-index: 10; background: #11151aee; color: #cdd3da;
-  padding: 8px 12px; border-radius: 8px; border: 1px solid #222a33;
-  font: 13px system-ui, sans-serif; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; max-width: 90vw;
-}
-.hud b { color: #7fd1ae; }
-.crumbs a { color: #8fb6d8; cursor: pointer; }
-.crumbs a.here { color: #e5c07b; font-weight: 600; }
-.crumbs .sep { color: #4a5563; }
-.stat { color: #9aa6b2; }
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; margin: 0; }
+.wrap { height: 100vh; display: flex; flex-direction: column; background: #0a0c10; color: #c8cfd8;
+  font: 13px/1.4 ui-sans-serif, system-ui, sans-serif; }
+
+header { display: flex; align-items: center; gap: 16px; padding: 12px 18px; border-bottom: 1px solid #1a2028; }
+.brand { color: #7fd1ae; font-weight: 700; letter-spacing: .5px; }
+.sub { color: #6b7682; }
+.legend { margin-left: auto; color: #6b7682; display: flex; align-items: center; }
+.ramp { display: inline-block; width: 90px; height: 9px; border-radius: 5px;
+  background: linear-gradient(90deg, #2a1a12, #d2602a, #f6d29a); }
 .err { color: #e06c75; }
-.legend {
-  position: fixed; top: 50px; left: 12px; z-index: 10; background: #11151acc; color: #9aa6b2;
-  padding: 4px 10px; border-radius: 6px; font: 12px system-ui, sans-serif; display: flex; gap: 12px;
-}
-.legend .dim { color: #5a6573; }
-.path {
-  position: fixed; bottom: 10px; left: 12px; right: 12px; z-index: 10; color: #cdd3da;
-  font: 13px system-ui, sans-serif; background: #11151acc; padding: 6px 12px; border-radius: 6px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 16px;
-}
+
+main { flex: 1; overflow-y: auto; padding: 14px 18px 40px; }
+.grp { margin-bottom: 16px; }
+.hdr { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; align-self: center; }
+.name { font-weight: 600; color: #dbe2ea; }
+.name.unnamed { color: #6b7682; font-weight: 400; font-style: italic; }
+.cnt { color: #5d6772; font-size: 12px; }
+.sub2 { color: #444d57; }
+
+.cells { display: flex; flex-wrap: wrap; gap: 3px; }
+.cell { width: 13px; height: 13px; border-radius: 2px; cursor: default;
+  transition: transform .08s; }
+.cell:hover { transform: scale(1.5); outline: 1px solid #cfe9df; }
+
+footer { padding: 8px 18px; border-top: 1px solid #1a2028; display: flex; gap: 10px; align-items: center;
+  white-space: nowrap; overflow: hidden; }
+.mk { color: #e5c07b; }
+.hk { color: #7fd1ae; font-weight: 600; }
+.ht { color: #aeb7c1; overflow: hidden; text-overflow: ellipsis; }
+.dim { color: #555f6a; }
 </style>
