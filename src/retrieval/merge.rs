@@ -4,6 +4,17 @@ use crate::base::search::EntityHit;
 use crate::retrieval::expand::{find_entity_in_graph, ScoredEntity};
 use std::collections::HashMap;
 
+/// Fuse the seed list and the expansion beam into one ranked result set.
+///
+/// Each entity's scores from both sources are pooled with log-sum-exp
+/// ([`OnlineSoftmax::finalize`]), so an entity surfaced via *both* paths earns a
+/// `+ln(count)` corroboration boost over an otherwise-equal entity seen once.
+/// This is intentional: multi-path agreement is positive evidence of relevance.
+/// A lone observation is unchanged (`x + ln(1) = x`). The merged value is a
+/// relevance magnitude (it may exceed 1.0) that `score::apply_boosts` then
+/// scales by confidence and adjusts with additive boosts — it is never treated
+/// as a probability. Switch `finalize()` to `running_max()` only if
+/// best-score-wins (no corroboration) is explicitly wanted.
 pub fn merge(g: &GraphGnn, seeds: &[EntityHit], beam: Vec<ScoredEntity>) -> Vec<ScoredEntity> {
 	let mut scores: HashMap<String, OnlineSoftmax> = HashMap::new();
 	let mut thoughts: HashMap<String, ScoredEntity> = HashMap::new();

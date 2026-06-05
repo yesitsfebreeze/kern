@@ -166,6 +166,17 @@ impl OnlineSoftmax {
 		self.m
 	}
 
+	/// Log-sum-exp of all observed scores: `m + ln(s)`.
+	///
+	/// This is deliberately a *pooling* operator, not a max. A single
+	/// observation is the identity (`x + ln(1) = x`), but an item observed `k`
+	/// times at the same score `x` finalizes to `x + ln(k)` — a corroboration
+	/// boost rewarding entities surfaced via multiple retrieval paths (e.g. both
+	/// the seed list and the beam in `retrieval::merge`). The result is a
+	/// relevance magnitude, not a probability, so values above 1.0 are expected
+	/// and fine; downstream only ranks by it and applies a multiplicative
+	/// confidence plus additive boosts. Use [`running_max`](Self::running_max)
+	/// instead when best-score-wins (no corroboration) is wanted.
 	pub fn finalize(&self) -> f64 {
 		if self.is_empty() {
 			return f64::NEG_INFINITY;
@@ -207,4 +218,44 @@ pub fn clamp_confidence(conf: f64, source: &str) -> (f64, EntityKind) {
 		EntityKind::Claim
 	};
 	(conf, kind)
+}
+
+#[cfg(test)]
+mod online_softmax_tests {
+	use super::OnlineSoftmax;
+
+	#[test]
+	fn empty_finalizes_to_neg_infinity() {
+		assert_eq!(OnlineSoftmax::new().finalize(), f64::NEG_INFINITY);
+	}
+
+	#[test]
+	fn single_observation_is_identity() {
+		let mut s = OnlineSoftmax::new();
+		s.update(0.7);
+		assert!((s.finalize() - 0.7).abs() < 1e-12);
+	}
+
+	#[test]
+	fn two_equal_observations_add_ln2() {
+		let mut s = OnlineSoftmax::new();
+		s.update(0.5);
+		s.update(0.5);
+		assert!((s.finalize() - (0.5 + 2.0_f64.ln())).abs() < 1e-12);
+	}
+
+	#[test]
+	fn corroborated_item_can_outrank_higher_single_observation() {
+		// Intentional pooling: an item seen twice at 0.8 (0.8 + ln2 ~= 1.49)
+		// outranks an item seen once at 0.9. Pins the design decision so a
+		// future switch to running_max is a deliberate, test-breaking change.
+		let mut corroborated = OnlineSoftmax::new();
+		corroborated.update(0.8);
+		corroborated.update(0.8);
+		let mut single = OnlineSoftmax::new();
+		single.update(0.9);
+		assert!(corroborated.finalize() > single.finalize());
+		// running_max would reverse this (0.8 < 0.9).
+		assert!(corroborated.running_max() < single.running_max());
+	}
 }
