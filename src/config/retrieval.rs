@@ -45,6 +45,12 @@ pub struct RetrievalConfig {
 	pub weights_reason: ModeWeights,
 	pub weights_hybrid: ModeWeights,
 	pub rrf_k: f64,
+	/// Weighted-RRF multiplier for the query-INDEPENDENT seed lists (global
+	/// importance + PageRank) relative to the query-relevant dense/lexical lists
+	/// (which stay 1.0). `< 1.0` down-weights global priors so a
+	/// popular-but-irrelevant entity can't match a query-relevant hit; `1.0`
+	/// recovers plain unweighted RRF.
+	pub rrf_global_weight: f64,
 	pub dedup_by_section: bool,
 	pub mmr_enabled: bool,
 	pub mmr_lambda: f64,
@@ -105,6 +111,7 @@ impl Default for RetrievalConfig {
 				lexical: 0.0,
 			},
 			rrf_k: 60.0,
+			rrf_global_weight: 0.5,
 			dedup_by_section: true,
 			mmr_enabled: true,
 			mmr_lambda: 0.45,

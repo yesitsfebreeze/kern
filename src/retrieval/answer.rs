@@ -55,12 +55,18 @@ pub fn query(
 			} else {
 				Vec::new()
 			};
+			// Weighted RRF: dense + lexical are query-relevant (weight 1.0);
+			// importance (and PageRank) are query-independent global priors, so
+			// they carry a smaller fusion weight to avoid diluting relevance.
+			let gw = cfg.rrf_global_weight;
 			let mut lists: Vec<&[crate::base::search::EntityHit]> =
 				vec![&dense_seeds, &lex_hits, &imp_hits];
+			let mut weights: Vec<f64> = vec![1.0, 1.0, gw];
 			if !pr_hits.is_empty() {
 				lists.push(&pr_hits);
+				weights.push(gw);
 			}
-			let fused = fuse::rrf(&lists, cfg.rrf_k, cfg.seed_k.max(1) * 2);
+			let fused = fuse::rrf(&lists, &weights, cfg.rrf_k, cfg.seed_k.max(1) * 2);
 			if fused.is_empty() {
 				dense_seeds
 			} else {
