@@ -323,6 +323,20 @@ fn handle_crdt_delta(d: &Deps, msg: GossipMessage) {
 /// Merge entity bodies a peer shared into a per-network phantom kern via the
 /// content-addressed CRDT join. Ignores our own data echoed back and empty
 /// network ids. Persists only when the merge actually changed the graph.
+///
+/// Threat model (see also `base::merge::merge_remote_entity`): a remote peer
+/// cannot hijack or alter a local-origin entity or another network's entity —
+/// the merge is scoped to this peer's own `remote-{net}-{kern}` phantom kern and
+/// rejects ids owned elsewhere — and cannot grow the graph without bound (the
+/// phantom kern is capped by `GOSSIP_REMOTE_KERN_ENTITY_CAP`). What is NOT yet
+/// verified is the *content↔id binding* of an accepted body: a peer may store an
+/// arbitrary body under any id within its own (network-isolated, capped) phantom
+/// kern. True content verification is impossible here without either the
+/// original creating text or a signature — the entity id is the sha256 of the
+/// original text, but `ingest::dedup` refines `statements` in place afterwards,
+/// so the id is not re-derivable from the transmitted body. The robust fix is
+/// signed gossip payloads (a federation-auth effort, tracked with the CRDT
+/// ownership-auth item); until then the cap + scope above are the accepted bound.
 fn handle_entity_sync(d: &Deps, msg: GossipMessage) {
 	let payload = match &msg.payload {
 		GossipPayload::EntitySync(p) => p,
