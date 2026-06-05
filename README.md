@@ -125,7 +125,10 @@ projects, so a single global registration is safe everywhere.
 **4. Seed the graph** (see *Seed the graph* below), then start a session. From
 then on, capture and recall are automatic.
 
-Verify the daemon is alive at any point with `kern health`.
+To verify it's working, call the `health` MCP tool from your session, or check
+that the daemon has written `<cwd>/.relay/kern/digest.md`. Prefer the MCP tools
+over the `kern <subcommand>` CLI for live state — the CLI reads the on-disk
+graph directly and can race the running daemon.
 
 ### Configure
 
