@@ -2,7 +2,21 @@ use crate::base::graph::GraphGnn;
 use crate::base::search::EntityHit;
 use std::collections::HashMap;
 
-pub fn pagerank(g: &GraphGnn, damping: f64, iters: usize, top_k: usize) -> Vec<EntityHit> {
+/// PageRank over the entity graph.
+///
+/// `seeds` is the personalization (teleport) distribution: when non-empty the
+/// teleport vector is built from the seed entities weighted by their scores,
+/// yielding query-Personalized PageRank (HippoRAG 2 — seed teleport at
+/// query-linked entities for multi-hop / associative recall). When `seeds` is
+/// empty (or none of the seeds exist in the graph) the teleport is uniform,
+/// recovering global query-independent PageRank.
+pub fn pagerank(
+	g: &GraphGnn,
+	seeds: &[EntityHit],
+	damping: f64,
+	iters: usize,
+	top_k: usize,
+) -> Vec<EntityHit> {
 	let mut id_to_idx: HashMap<String, usize> = HashMap::new();
 	let mut ids: Vec<String> = Vec::new();
 	for kern in g.map().values() {
@@ -32,9 +46,30 @@ pub fn pagerank(g: &GraphGnn, damping: f64, iters: usize, top_k: usize) -> Vec<E
 	}
 
 	let d = damping.clamp(0.0, 1.0);
-	let teleport = (1.0 - d) / (n as f64);
 
-	let mut rank = vec![1.0 / (n as f64); n];
+	// Personalization / teleport distribution.
+	let mut tele = vec![0.0f64; n];
+	let mut seed_sum = 0.0;
+	for s in seeds {
+		if let Some(&i) = id_to_idx.get(&s.entity_id) {
+			let w = s.score.max(0.0);
+			tele[i] += w;
+			seed_sum += w;
+		}
+	}
+	if seed_sum > 0.0 {
+		for t in tele.iter_mut() {
+			*t /= seed_sum;
+		}
+	} else {
+		// No usable seeds → uniform teleport = global PageRank.
+		let u = 1.0 / (n as f64);
+		for t in tele.iter_mut() {
+			*t = u;
+		}
+	}
+
+	let mut rank = tele.clone();
 	let mut next = vec![0.0f64; n];
 
 	for _ in 0..iters.max(1) {
@@ -44,10 +79,13 @@ pub fn pagerank(g: &GraphGnn, damping: f64, iters: usize, top_k: usize) -> Vec<E
 				dangling += rank[j];
 			}
 		}
-		let dangling_share = d * dangling / (n as f64);
+		// Dangling mass is redistributed along the teleport vector so the
+		// personalization bias is preserved (not leaked uniformly).
+		let dangling_mass = d * dangling;
+		let base = 1.0 - d + dangling_mass;
 
-		for slot in next.iter_mut() {
-			*slot = teleport + dangling_share;
+		for (i, slot) in next.iter_mut().enumerate() {
+			*slot = base * tele[i];
 		}
 		for (j, outs) in out.iter().enumerate() {
 			if outs.is_empty() {
@@ -100,9 +138,16 @@ mod tests {
 		}
 	}
 
+	fn hit(id: &str, score: f64) -> EntityHit {
+		EntityHit {
+			entity_id: id.into(),
+			score,
+		}
+	}
+
 	#[test]
 	fn empty_graph_is_empty() {
-		assert!(pagerank(&GraphGnn::new(), 0.85, 10, 5).is_empty());
+		assert!(pagerank(&GraphGnn::new(), &[], 0.85, 10, 5).is_empty());
 	}
 
 	#[test]
@@ -118,11 +163,40 @@ mod tests {
 		}
 		g.register(k);
 
-		let ranks = pagerank(&g, 0.85, 100, 3);
+		// Empty seeds → uniform teleport → global PageRank.
+		let ranks = pagerank(&g, &[], 0.85, 100, 3);
 		assert_eq!(ranks.len(), 3);
 		let score = |id: &str| ranks.iter().find(|h| h.entity_id == id).unwrap().score;
 		assert!(score("A") > score("B"), "hub A must outrank leaf B");
 		let sum: f64 = ranks.iter().map(|h| h.score).sum();
 		assert!((sum - 1.0).abs() < 1e-6, "ranks sum ~1, got {sum}");
+	}
+
+	#[test]
+	fn personalization_biases_toward_seed_and_conserves_mass() {
+		// Two disconnected components: A<-B and X<-Y. Without seeds the two
+		// hubs A and X are symmetric. Seeding Y must lift the X-component.
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("k", "");
+		for id in ["A", "B", "X", "Y"] {
+			k.entities.insert(id.into(), ent(id));
+		}
+		for e in [edge("B", "A"), edge("Y", "X")] {
+			k.reasons.insert(e.id.clone(), e);
+		}
+		g.register(k);
+
+		let global = pagerank(&g, &[], 0.85, 200, 4);
+		let gscore = |id: &str| global.iter().find(|h| h.entity_id == id).unwrap().score;
+		// Symmetric components: A and X tie globally.
+		assert!((gscore("A") - gscore("X")).abs() < 1e-6, "A,X symmetric");
+
+		let seeded = pagerank(&g, &[hit("Y", 1.0)], 0.85, 200, 4);
+		let sscore = |id: &str| seeded.iter().find(|h| h.entity_id == id).unwrap().score;
+		// Seeding Y pushes mass into the X-component (Y and its target X).
+		assert!(sscore("X") > gscore("X"), "seeded X must beat global X");
+		assert!(sscore("X") > sscore("A"), "seeded X-component outranks A");
+		let sum: f64 = seeded.iter().map(|h| h.score).sum();
+		assert!((sum - 1.0).abs() < 1e-6, "seeded ranks sum ~1, got {sum}");
 	}
 }

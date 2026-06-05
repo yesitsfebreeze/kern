@@ -40,8 +40,14 @@ pub fn query(
 			let lex_hits = seed::seed_lexical(lex, query_text, cfg.seed_k * 4);
 			let imp_hits = seed::seed_important(g, cfg, qvec);
 			let pr_hits = if cfg.pagerank_enabled {
+				// Personalize the teleport at the query's seed entities
+				// (dense + lexical hits) — query-independent importance is
+				// deliberately excluded so PageRank stays query-aware.
+				let ppr_seeds: Vec<crate::base::search::EntityHit> =
+					dense_seeds.iter().chain(lex_hits.iter()).cloned().collect();
 				pagerank::pagerank(
 					g,
+					&ppr_seeds,
 					cfg.pagerank_damping,
 					cfg.pagerank_iters,
 					cfg.pagerank_top_k,
