@@ -348,9 +348,28 @@ fn bench_hnsw_adaptive_vs_fixed(c: &mut Criterion) {
 	});
 }
 
+/// Cold-tier search baseline. Spills `n` entities to a temp cold store, then
+/// measures `cold::search` — the O(n) linear scan we are replacing with a
+/// disk-resident index (see docs/kern/diskann-disk-index.md). This is the
+/// latency baseline future index slices are measured against.
+fn bench_cold_search(c: &mut Criterion) {
+	let dir = tempfile::tempdir().expect("tempdir");
+	let n = 2_000;
+	for i in 0..n {
+		let mut e = make_entity(&format!("c{i}"), &format!("cold thought {i} topic {}", i % 10));
+		e.vector = stub_embed(&format!("cold thought {i} topic {}", i % 10));
+		kern::base::cold::spill(dir.path(), &e);
+	}
+	let query = stub_embed("cold thought 5 topic 5");
+	c.bench_function("cold_search_2000", |bench| {
+		bench.iter(|| kern::base::cold::search(black_box(dir.path()), black_box(&query), 5));
+	});
+}
+
 criterion_group!(
 	benches,
 	bench_cosine_768,
+	bench_cold_search,
 	bench_search_100,
 	bench_search_500,
 	bench_query_full_100,
