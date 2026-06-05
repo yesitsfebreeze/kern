@@ -15,6 +15,14 @@ pub const QBST_CAP: f64 = 0.1;
 
 pub const DEFAULT_DEDUP_THRESHOLD: f64 = 0.92;
 
+/// HNSW `ef` (search beam width) used by ingest dedup's nearest-neighbour
+/// probe. Dedup asks for the single closest entity (k=1); with `ef=1` the
+/// search is greedy single-path and routinely misses the true nearest
+/// neighbour, so genuine duplicates slip through and create divergent
+/// content-hash entities. A wider beam restores recall at negligible cost for
+/// a k=1 query.
+pub const DEDUP_EF: usize = 64;
+
 pub const KERN_INNER_RADIUS: f64 = 0.15;
 pub const KERN_OUTER_RADIUS: f64 = 0.35;
 pub const KERN_COHESION_THRESHOLD: f64 = 0.60;

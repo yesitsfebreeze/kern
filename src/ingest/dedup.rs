@@ -12,7 +12,7 @@ pub fn find_duplicate(
 	threshold: f64,
 ) -> Option<String> {
 	let g = graph.read().ok()?;
-	let hits = g.entity_idx.search(vec, 1, 1);
+	let hits = g.entity_idx.search(vec, 1, crate::base::constants::DEDUP_EF);
 	hits
 		.into_iter()
 		.find(|h| h.score >= threshold)
