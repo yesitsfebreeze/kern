@@ -461,6 +461,8 @@ async fn ask(State(st): State<HubState>, Json(body): Json<AskBody>) -> Sse<impl 
 			}
 		}
 		let mut merged = rank_peers(&tagged, k);
+		// `n` here (1-based) must match build_ask_prompt's enumerate() numbering so
+		// the model's inline [n] citations line up with the browser's source tiles.
 		for (n, s) in merged.iter_mut().enumerate() {
 			if let Some(o) = s.as_object_mut() { o.insert("n".into(), json!(n + 1)); }
 		}
@@ -468,7 +470,14 @@ async fn ask(State(st): State<HubState>, Json(body): Json<AskBody>) -> Sse<impl 
 		let prompt = build_ask_prompt(&merged, &chains, &q);
 		let mut messages: Vec<(String, String)> = body.history.iter()
 			.rev().take(6).rev()
-			.map(|t| (t.role.clone(), t.content.clone()))
+			.map(|t| {
+				// Chat API only accepts user/assistant/system; map anything else to user.
+				let role = match t.role.as_str() {
+					"assistant" | "system" => t.role.clone(),
+					_ => "user".to_string(),
+				};
+				(role, t.content.clone())
+			})
 			.collect();
 		messages.push(("user".to_string(), prompt));
 		let mut gen = Box::pin(st.llm.complete_stream(messages));
