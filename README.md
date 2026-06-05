@@ -98,7 +98,7 @@ beam search, gossip, and the MCP server are all written from scratch.
 [Ollama](https://ollama.com) with the default models pulled:
 
 ```bash
-ollama pull nomic-embed-text  # embeddings (default)
+ollama pull qwen3-embedding:0.6b  # embeddings (default)
 ollama pull qwen2.5:7b        # distillation / reasoning (default)
 ```
 
@@ -164,7 +164,7 @@ model = "qwen2.5:7b"        # default (small, fast, reliable)
 [embed]
 # Embedding model. Local Ollama.
 url = "http://localhost:11434"
-model = "nomic-embed-text"  # default (768-d); dimension locks the graph
+model = "qwen3-embedding:0.6b"  # default; dimension locks the graph (use `kern reembed` to switch)
 
 [capture]
 enabled = true          # self-learning (OFF by default — must opt in)

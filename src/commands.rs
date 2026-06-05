@@ -3,6 +3,7 @@ mod graph_ops;
 mod ingest_cmd;
 mod mcp_cmd;
 mod query;
+mod reembed;
 
 use std::sync::Arc;
 
@@ -88,6 +89,14 @@ pub enum Commands {
 		text: String,
 		#[arg(long, default_value = "5")]
 		k: usize,
+		#[arg(long)]
+		embed_url: Option<String>,
+		#[arg(long)]
+		embed_model: Option<String>,
+	},
+	/// Re-embed the whole graph with the configured embedding model (run after
+	/// changing `[embed] model`; stop the daemon first).
+	Reembed {
 		#[arg(long)]
 		embed_url: Option<String>,
 		#[arg(long)]
@@ -326,6 +335,18 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 				cfg,
 				&text,
 				k,
+				resolve(&embed_url, &cfg.embed.url),
+				resolve(&embed_model, &cfg.embed.model),
+			)
+			.await
+		}
+
+		Commands::Reembed {
+			embed_url,
+			embed_model,
+		} => {
+			reembed::cmd_reembed(
+				cfg,
 				resolve(&embed_url, &cfg.embed.url),
 				resolve(&embed_model, &cfg.embed.model),
 			)

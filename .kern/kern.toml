@@ -2,13 +2,12 @@
 # (Layered parsing now handles leading comments + [section] headers.)
 
 [embed]
-# MUST match the model the existing graph vectors were created with — this
-# graph was built with nomic-embed-text (768-d). Switching to a different-
-# dimension model (e.g. bge-m3, 1024-d) makes every cosine degenerate and the
-# router spawns an empty kern per ingest. Re-embed the whole graph before
-# changing this.
+# Embedding model. MUST match the dimension of the stored vectors — changing it
+# requires `kern reembed` (with the daemon stopped) to re-embed the whole graph,
+# else every cosine degenerates. This graph was migrated to qwen3-embedding via
+# `kern reembed`.
 url = "http://localhost:11434"
-model = "nomic-embed-text"
+model = "qwen3-embedding:0.6b"
 
 [reason]
 # Model for distillation + smart-split + edge proposal. Local Ollama.
