@@ -523,8 +523,9 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	if !cfg.serve.viewer.is_empty() {
 		let vg = g.clone();
 		let vaddr = cfg.serve.viewer.clone();
+		let viewer_llm = llm_client.clone();
 		tokio::spawn(async move {
-			if let Err(e) = crate::viewer::run(vg, &vaddr).await {
+			if let Err(e) = crate::viewer::run(vg, viewer_llm, &vaddr).await {
 				tracing::warn!(target: "kern.viewer", error = %e, "graph viewer failed to start");
 			}
 		});

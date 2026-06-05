@@ -22,7 +22,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::extract::State;
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
@@ -61,7 +63,7 @@ fn registry_file() -> PathBuf {
 
 /// Run the viewer: start this daemon's local graph server, register it, and
 /// contend for the aggregator role. Never returns under normal operation.
-pub async fn run(graph: Graph, agg_addr: &str) -> std::io::Result<()> {
+pub async fn run(graph: Graph, llm: crate::llm::Client, agg_addr: &str) -> std::io::Result<()> {
 	// 1. Local graph server on an ephemeral loopback port (this daemon's own data).
 	let local = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
 	let local_addr = local.local_addr()?.to_string();
@@ -89,10 +91,12 @@ pub async fn run(graph: Graph, agg_addr: &str) -> std::io::Result<()> {
 		match tokio::net::TcpListener::bind(&agg_addr).await {
 			Ok(listener) => {
 				tracing::info!(target: "kern.viewer", addr = %agg_addr, "aggregator hub listening");
+				let hub = HubState { client: client.clone(), llm: llm.clone() };
 				let app = Router::new()
 					.route("/", get(index))
 					.route("/graph", get(aggregate))
-					.with_state(client.clone());
+					.route("/search", get(hub_search))
+					.with_state(hub);
 				if let Err(e) = axum::serve(listener, app).await {
 					tracing::warn!(target: "kern.viewer", error = %e, "aggregator hub exited; will retry");
 				}
@@ -150,7 +154,8 @@ async fn index() -> &'static str {
 
 /// Hub endpoint: fan out to every live peer, namespace ids per peer to avoid
 /// cross-project collisions, and merge into one `{nodes,links,kerns}`.
-async fn aggregate(State(client): State<reqwest::Client>) -> Json<Value> {
+async fn aggregate(State(st): State<HubState>) -> Json<Value> {
+	let client = &st.client;
 	let peers = live_peers();
 	let mut nodes = Vec::new();
 	let mut links = Vec::new();
@@ -237,7 +242,6 @@ fn merge_search_hits(tag: &str, v: &Value, out: &mut Vec<Value>) {
 }
 
 /// Merge every peer's tagged payload, sort by `score` descending, truncate to k.
-#[cfg_attr(not(test), expect(dead_code))]
 fn rank_peers(peers: &[(String, Value)], k: usize) -> Vec<Value> {
 	let mut out = Vec::new();
 	for (tag, v) in peers {
@@ -253,6 +257,52 @@ fn rank_peers(peers: &[(String, Value)], k: usize) -> Vec<Value> {
 }
 
 fn default_k() -> usize { 10 }
+
+#[derive(Clone)]
+struct HubState {
+	client: reqwest::Client,
+	llm: crate::llm::Client,
+}
+
+#[derive(serde::Deserialize)]
+struct SearchQuery {
+	q: String,
+	#[serde(default = "default_k")]
+	k: usize,
+}
+
+/// Hub endpoint: embed the query ONCE, fan the vector out to every live peer's
+/// `POST /search`, namespace + merge + rank. Embed failure (e.g. ollama down)
+/// returns 503 so the browser can fall back to its in-page substring list.
+async fn hub_search(State(st): State<HubState>, Query(p): Query<SearchQuery>) -> Response {
+	let q = p.q.trim();
+	if q.is_empty() {
+		return Json(json!({ "results": [] })).into_response();
+	}
+	let vec = match st.llm.embed(q).await {
+		Ok(v) => v,
+		Err(e) => {
+			tracing::warn!(target: "kern.viewer", error = %e, "search embed failed");
+			return (StatusCode::SERVICE_UNAVAILABLE, "embed unavailable").into_response();
+		}
+	};
+
+	let peers = live_peers();
+	let body = json!({ "vec": vec, "k": p.k });
+	let mut tagged = Vec::new();
+	for addr in &peers {
+		let url = format!("http://{addr}/search");
+		let resp = match st.client.post(&url).json(&body).send().await {
+			Ok(r) => r,
+			Err(_) => continue, // unreachable peer (race with shutdown) — skip
+		};
+		if let Ok(v) = resp.json::<Value>().await {
+			tagged.push((format!("{addr}|"), v));
+		}
+	}
+
+	Json(json!({ "results": rank_peers(&tagged, p.k) })).into_response()
+}
 
 #[derive(serde::Deserialize)]
 struct SearchBody {
