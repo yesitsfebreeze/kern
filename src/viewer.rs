@@ -22,10 +22,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::extract::State;
 use axum::response::sse::{Event, Sse};
-use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::StreamExt as _;
@@ -34,7 +32,6 @@ use serde_json::{json, Value};
 
 use crate::base::graph::GraphGnn;
 use crate::base::locks::read_recovered;
-use crate::base::search::{find_entity, find_reason, search_all_unlocked, search_reasons_all_unlocked};
 use crate::base::util::truncate;
 use crate::config::RetrievalConfig;
 
@@ -80,7 +77,6 @@ pub async fn run(graph: Graph, llm: crate::llm::Client, retrieval: RetrievalConf
 	let local_state = LocalState { graph: graph.clone(), retrieval: retrieval.clone() };
 	let local_app = Router::new()
 		.route("/graph", get(graph_json))
-		.route("/search", post(peer_search))
 		.route("/ask_retrieve", post(ask_retrieve))
 		.with_state(local_state);
 	tokio::spawn(async move {
@@ -107,7 +103,6 @@ pub async fn run(graph: Graph, llm: crate::llm::Client, retrieval: RetrievalConf
 				let app = Router::new()
 					.route("/", get(index))
 					.route("/graph", get(aggregate))
-					.route("/search", get(hub_search))
 					.route("/ask", post(ask))
 					.with_state(hub);
 				if let Err(e) = axum::serve(listener, app).await {
@@ -277,94 +272,6 @@ struct HubState {
 	llm: crate::llm::Client,
 }
 
-#[derive(serde::Deserialize)]
-struct SearchQuery {
-	q: String,
-	#[serde(default = "default_k")]
-	k: usize,
-}
-
-/// Hub endpoint: embed the query ONCE, fan the vector out to every live peer's
-/// `POST /search`, namespace + merge + rank. Embed failure (e.g. ollama down)
-/// returns 503 so the browser can fall back to its in-page substring list.
-async fn hub_search(State(st): State<HubState>, Query(p): Query<SearchQuery>) -> Response {
-	let q = p.q.trim();
-	if q.is_empty() {
-		return Json(json!({ "results": [] })).into_response();
-	}
-	let k = p.k.min(MAX_SEARCH_K);
-	let vec = match st.llm.embed(q).await {
-		Ok(v) => v,
-		Err(e) => {
-			tracing::warn!(target: "kern.viewer", error = %e, "search embed failed");
-			return (StatusCode::SERVICE_UNAVAILABLE, "embed unavailable").into_response();
-		}
-	};
-
-	let peers = live_peers();
-	let body = json!({ "vec": vec, "k": k });
-	let mut tagged = Vec::new();
-	for addr in &peers {
-		let url = format!("http://{addr}/search");
-		let resp = match st.client.post(&url).json(&body).send().await {
-			Ok(r) => r,
-			Err(_) => continue, // unreachable peer (race with shutdown) — skip
-		};
-		if let Ok(v) = resp.json::<Value>().await {
-			tagged.push((format!("{addr}|"), v));
-		}
-	}
-
-	Json(json!({ "results": rank_peers(&tagged, k) })).into_response()
-}
-
-#[derive(serde::Deserialize)]
-struct SearchBody {
-	vec: Vec<f64>,
-	#[serde(default = "default_k")]
-	k: usize,
-}
-
-/// Peer endpoint: rank this daemon's graph against a *supplied* query vector.
-/// No embedding happens here — the hub already embedded once and passes the
-/// vector down, so N daemons cost one embed call total.
-async fn peer_search(State(st): State<LocalState>, Json(body): Json<SearchBody>) -> Json<Value> {
-	let g = st.graph;
-	let g = read_recovered(&g);
-	let k = body.k.min(MAX_SEARCH_K);
-
-	let mut hits = Vec::new();
-	for h in search_all_unlocked(&g, &body.vec, k) {
-		if let Some((e, kern)) = find_entity(&g, &h.entity_id) {
-			hits.push(json!({
-				"id": e.id,
-				"label": truncate(&e.text(), 60),
-				"kind": format!("{:?}", e.kind),
-				"kern": kern,
-				"heat": e.heat,
-				"conf": e.conf_mean(),
-				"score": h.score,
-			}));
-		}
-	}
-
-	let mut reasons = Vec::new();
-	for h in search_reasons_all_unlocked(&g, &body.vec, k) {
-		if let Some((r, kern)) = find_reason(&g, &h.reason_id) {
-			// id is the edge's target entity so a click anchors a real node,
-			// matching today's substring behavior (results used l.target).
-			reasons.push(json!({
-				"id": r.to,
-				"label": truncate(&r.text, 80),
-				"kind": format!("{:?}", r.kind),
-				"kern": kern,
-				"score": h.score,
-			}));
-		}
-	}
-
-	Json(json!({ "hits": hits, "reasons": reasons }))
-}
 
 #[derive(serde::Deserialize)]
 struct AskRetrieveBody {
