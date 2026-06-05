@@ -6,20 +6,23 @@ const crumbs = ref([])
 const stats = ref('loading…')
 const err = ref('')
 const detail = ref('')
-const svgEl = ref(null)
+const mode = ref('cube')      // 'cube' | 'list'
+const tiles = ref([])
+const listItems = ref([])
+const side = ref(480)
+const stageEl = ref(null)
 
 let timer = null
 let raw = { nodes: [], links: [], kerns: [] }
 let kernsById = {}, entsByKern = new Map(), meanHeat = {}
 let treeData = null
 let stack = []
-let layoutRoot = null
 let lastTopo = ''
-let hoverId = null
-let wheelLock = 0
+
+const KIND = { Fact: '#e5c07b', Document: '#61afef', Question: '#c678dd', Claim: '#98c379' }
+const MARK = { Fact: '◆', Document: '■', Question: '▲', Claim: '●' }
 
 function rootId() { const r = raw.kerns.find(k => !k.parent) || raw.kerns[0]; return r ? r.id : null }
-
 function buildTree() {
   const make = (kid, seen) => {
     const k = kernsById[kid]; if (!k || seen.has(kid)) return null
@@ -27,132 +30,52 @@ function buildTree() {
     const node = { id: kid, label: k.named ? k.label : '(unnamed)', type: 'kern', children: [] }
     for (const c of k.children || []) { const cn = make(c, seen); if (cn) node.children.push(cn) }
     for (const e of entsByKern.get(kid) || [])
-      node.children.push({ id: e.id, label: e.label, type: 'entity', kind: e.kind, heat: e.heat, conf: e.conf, value: 1 })
+      node.children.push({ id: e.id, label: e.label, type: 'entity', kind: e.kind, heat: e.heat, conf: e.conf })
     return node
   }
   return make(rootId(), new Set()) || { id: 'root', label: 'root', type: 'kern', children: [] }
 }
-function meanHeatOf(node) {
-  if (node.type === 'entity') return +node.heat || 0
-  let s = 0, n = 0
-  const walk = (x) => { if (x.type === 'entity') { s += +x.heat || 0; n++ } else for (const c of x.children || []) walk(c) }
-  walk(node)
-  return n ? s / n : 0
-}
-function findPath(node, id, acc = []) {
-  acc.push(node); if (node.id === id) return acc.slice()
-  for (const c of node.children || []) { const r = findPath(c, id, acc); if (r) return r }
-  acc.pop(); return null
-}
+function d3Count(d) { if (d.type === 'entity') return 1; let n = 0; const w = x => { if (x.type === 'entity') n++; else for (const c of x.children || []) w(c) }; w(d); return n || 1 }
+function subSpheres(d) { return (d.children || []).filter(c => c.type === 'kern').length }
+function meanHeatOf(node) { let s = 0, n = 0; const w = x => { if (x.type === 'entity') { s += +x.heat || 0; n++ } else for (const c of x.children || []) w(c) }; w(node); return n ? s / n : 0 }
+function findPath(node, id, acc = []) { acc.push(node); if (node.id === id) return acc.slice(); for (const c of node.children || []) { const r = findPath(c, id, acc); if (r) return r } acc.pop(); return null }
 function findById(n, id) { if (n.id === id) return n; for (const c of n.children || []) { const r = findById(c, id); if (r) return r } return null }
 
-// warm intensity ramp — the look from the references.
 const heatMax = () => Math.max(0.5, d3.max(raw.nodes, n => +n.heat || 0) || 1)
-function ramp(h) { return d3.interpolateInferno(0.2 + 0.72 * Math.sqrt(Math.min(1, (h || 0) / heatMax()))) }
+function ramp(h) { return d3.interpolateInferno(0.22 + 0.7 * Math.sqrt(Math.min(1, (h || 0) / heatMax()))) }
+function fill(ref) { return ramp(ref.type === 'entity' ? ref.heat : meanHeat[ref.id]) }
+function meta(ref) { return ref.type === 'kern' ? `${d3Count(ref)} thoughts${subSpheres(ref) ? ` · ${subSpheres(ref)} spheres` : ''}` : ref.kind }
+function info(ref) { return ref.type === 'entity' ? `${ref.kind} · heat ${(+ref.heat).toFixed(2)} · conf ${(+ref.conf).toFixed(2)} — ${ref.label}` : `${ref.label} · ${d3Count(ref)} thoughts — click to enter` }
 
-const sideOf = () => Math.max(140, Math.min(svgEl.value.clientWidth, svgEl.value.clientHeight) - 80)
-let ox = 0, oy = 0
-let svg, g
-
-// count of thoughts under a data node (for tile size)
-function d3Count(d) {
-  if (d.type === 'entity') return 1
-  let n = 0; const walk = x => { if (x.type === 'entity') n++; else for (const c of x.children || []) walk(c) }; walk(d); return n || 1
-}
-function layout() {
+function relayout() {
   const cur = stack[stack.length - 1]
-  const side = sideOf()
-  ox = (svgEl.value.clientWidth - side) / 2
-  oy = (svgEl.value.clientHeight - side) / 2
-  // ONE level only: the current node's DIRECT children, squarified, sized by
-  // how many thoughts each contains (biggest topic = most area).
-  const kids = (cur.children || []).map(c => ({ ref: c, value: d3Count(c) }))
-  const r = d3.hierarchy({ id: '_root', children: kids })
-    .sum(d => d.value || 0)
-    .sort((a, b) => (b.value || 0) - (a.value || 0))
-  d3.treemap().tile(d3.treemapSquarify.ratio(1)).size([side, side]).round(true).padding(7)(r)
-  return r
-}
-
-function render(dir) {
   crumbs.value = stack.map((n, i) => ({ id: n.id, label: i === 0 ? 'root' : n.label }))
-  layoutRoot = layout()
-  const tiles = layoutRoot.children || []
-  g.attr('transform', `translate(${ox},${oy})`)
-  const W = d => Math.max(0, d.x1 - d.x0), H = d => Math.max(0, d.y1 - d.y0)
-  const cx = sideOf() / 2
+  const kids = cur.children || []
+  const kernKids = kids.filter(c => c.type === 'kern')
 
-  const sel = g.selectAll('g.tile').data(tiles, d => d.data.ref.id)
-  sel.exit().remove()
-  const ent = sel.enter().append('g').attr('class', 'tile')
-  ent.append('rect').attr('rx', 7).attr('ry', 7)
-  ent.append('text').attr('class', 'lab')
-  ent.append('text').attr('class', 'cnt')
-  const all = ent.merge(sel)
-
-  all.style('cursor', d => d.data.ref.type === 'kern' ? 'pointer' : 'default')
-    .on('mouseenter', (ev, d) => setHover(d.data.ref.id))
-    .on('click', (ev, d) => { if (d.data.ref.type === 'kern') drill(d.data.ref) })
-
-  all.select('rect')
-    .attr('fill', d => ramp(d.data.ref.type === 'entity' ? d.data.ref.heat : meanHeat[d.data.ref.id]))
-    .attr('stroke', d => d.data.ref.id === hoverId ? '#fff' : 'rgba(255,255,255,0.08)')
-    .attr('stroke-width', d => d.data.ref.id === hoverId ? 2 : 1)
-
-  all.select('text.lab')
-    .attr('fill', d => '#f4ece2')
-    .attr('font-size', d => Math.min(15, 9 + W(d) / 40) + 'px')
-    .attr('font-weight', 600)
-    .attr('x', d => d.x0 + 8).attr('y', d => d.y0 + 18)
-    .style('pointer-events', 'none')
-    .style('paint-order', 'stroke').style('stroke', 'rgba(0,0,0,0.55)').style('stroke-width', '2.5px')
-    .text(d => W(d) > 40 && H(d) > 16 ? clip(d.data.ref.label, W(d) - 12) : '')
-
-  all.select('text.cnt')
-    .attr('fill', 'rgba(255,255,255,0.7)').attr('font-size', '11px')
-    .attr('x', d => d.x0 + 8).attr('y', d => d.y0 + 33)
-    .style('pointer-events', 'none')
-    .style('paint-order', 'stroke').style('stroke', 'rgba(0,0,0,0.45)').style('stroke-width', '2px')
-    .text(d => d.data.ref.type === 'kern' && W(d) > 50 && H(d) > 34 ? d.value + ' thoughts' : '')
-
-  // place + animate (scroll-in = grow from center; scroll-out = shrink in).
-  const place = (s) => s.attr('transform', 'translate(0,0) scale(1)')
-  all.select('rect').attr('x', d => d.x0).attr('y', d => d.y0).attr('width', W).attr('height', H)
-  if (dir) {
-    const k = dir === 'in' ? 0.7 : 1.25
-    all.attr('transform', d => `translate(${cx - (cx) * k},${cx - cx * k}) scale(${k})`).style('opacity', 0)
-      .transition().duration(360).ease(d3.easeCubicOut)
-      .attr('transform', 'translate(0,0) scale(1)').style('opacity', 1)
-  } else {
-    all.attr('transform', 'translate(0,0) scale(1)').style('opacity', 1)
+  // Last level (no sub-spheres) → a scrollable list of thoughts, not a blob.
+  if (kernKids.length === 0) {
+    mode.value = 'list'
+    listItems.value = kids.filter(c => c.type === 'entity').sort((a, b) => (b.heat || 0) - (a.heat || 0))
+    stats.value = `${raw.nodes.length} thoughts · ${raw.kerns.length} spheres · here: ${listItems.value.length}`
+    return
   }
 
-  stats.value = `${raw.nodes.length} thoughts · ${raw.kerns.length} spheres · here: ${layoutRoot.value}`
+  // Otherwise → squarified cube of sub-topics (+ any loose thoughts), centered.
+  mode.value = 'cube'
+  const s = Math.max(160, Math.min(stageEl.value.clientWidth, stageEl.value.clientHeight) - 24)
+  side.value = s
+  const data = kids.map(c => ({ ref: c, value: d3Count(c) }))
+  const r = d3.hierarchy({ children: data }).sum(d => d.value || 0).sort((a, b) => (b.value || 0) - (a.value || 0))
+  d3.treemap().tile(d3.treemapSquarify.ratio(1)).size([s, s]).round(true).paddingInner(6)(r)
+  tiles.value = (r.children || []).map(n => ({ ref: n.data.ref, x: n.x0, y: n.y0, w: n.x1 - n.x0, h: n.y1 - n.y0, n: n.value }))
+  stats.value = `${raw.nodes.length} thoughts · ${raw.kerns.length} spheres · here: ${r.value}`
 }
 
-function clip(s, px) { const n = Math.floor(px / 6.4); return n >= s.length ? s : (n > 1 ? s.slice(0, n - 1) + '…' : '') }
-
-function setHover(id) {
-  if (id === hoverId) return
-  hoverId = id
-  g.selectAll('g.tile rect').attr('stroke', d => d.data.ref.id === hoverId ? '#fff' : 'rgba(255,255,255,0.08)')
-    .attr('stroke-width', d => d.data.ref.id === hoverId ? 2 : 1)
-  const d = (layoutRoot.children || []).find(c => c.data.ref.id === id)?.data.ref
-  detail.value = d ? (d.type === 'entity'
-    ? `${d.kind} · heat ${(+d.heat).toFixed(2)} · conf ${(+d.conf).toFixed(2)} — ${d.label}`
-    : `${d.label} · ${d3Count(d)} thoughts — scroll to enter`) : ''
-}
-
-function drill(dataNode) {
-  if (dataNode.type !== 'kern' || !(dataNode.children || []).length) return
-  const p = findPath(treeData, dataNode.id); if (p) { stack = p; hoverId = null; render('in') }
-}
-function out() { if (stack.length > 1) { stack.pop(); hoverId = null; render('out') } }
-function goTo(id) { const i = stack.findIndex(n => n.id === id); if (i >= 0) { stack.length = i + 1; render('out') } }
-
-function onKey(ev) {
-  if (ev.key === 'Escape') { ev.preventDefault(); out() }
-}
+function enter(ref) { if (ref.type !== 'kern') return; const p = findPath(treeData, ref.id); if (p) { stack = p; relayout() } }
+function out() { if (stack.length > 1) { stack.pop(); relayout() } }
+function goTo(id) { const i = stack.findIndex(n => n.id === id); if (i >= 0) { stack.length = i + 1; relayout() } }
+function onKey(ev) { if (ev.key === 'Escape') { ev.preventDefault(); out() } }
 
 async function load() {
   try {
@@ -166,16 +89,15 @@ async function load() {
       meanHeat = {}; const reg = x => { if (x.type === 'kern') { meanHeat[x.id] = meanHeatOf(x); for (const c of x.children || []) reg(c) } }; reg(treeData)
       const ids = stack.map(n => n.id); stack = [treeData]
       for (let i = 1; i < ids.length; i++) { const n = findById(treeData, ids[i]); if (n) stack.push(n); else break }
-      render(null)
+      relayout()
     }
     err.value = ''
   } catch (e) { err.value = String(e) }
 }
 
 onMounted(() => {
-  svg = d3.select(svgEl.value); g = svg.append('g')
   window.addEventListener('keydown', onKey)
-  window.addEventListener('resize', () => render(null))
+  window.addEventListener('resize', () => relayout())
   load(); timer = setInterval(load, 5000)
 })
 onBeforeUnmount(() => { if (timer) clearInterval(timer); window.removeEventListener('keydown', onKey) })
@@ -193,13 +115,56 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); window.removeEventListe
     <span class="stat">· {{ stats }}</span>
     <span v-if="err" class="err"> — {{ err }}</span>
   </div>
+
+  <div ref="stageEl" class="stage">
+    <div v-if="mode === 'cube'" class="cube" :style="{ width: side + 'px', height: side + 'px' }">
+      <div v-for="t in tiles" :key="t.ref.id" class="tile" :class="t.ref.type"
+        :style="{ left: t.x + 'px', top: t.y + 'px', width: t.w + 'px', height: t.h + 'px', background: fill(t.ref) }"
+        @click="enter(t.ref)" @mouseenter="detail = info(t.ref)" @mouseleave="detail = ''">
+        <div class="tname">{{ t.ref.label }}</div>
+        <div class="tmeta">{{ meta(t.ref) }}</div>
+      </div>
+    </div>
+
+    <div v-else class="list">
+      <div class="lhead">{{ listItems.length }} thoughts in this sphere</div>
+      <div v-for="e in listItems" :key="e.id" class="row"
+        @mouseenter="detail = info(e)" @mouseleave="detail = ''">
+        <span class="rk" :style="{ color: KIND[e.kind] || '#98c379' }">{{ MARK[e.kind] || '·' }}</span>
+        <span class="rt">{{ e.label }}</span>
+        <span class="rbar"><i :style="{ width: Math.min(100, (e.heat / heatMax()) * 100) + '%', background: fill(e) }"></i></span>
+      </div>
+    </div>
+  </div>
+
   <div class="path">{{ detail || 'click a cube to enter · Esc to go back' }}</div>
-  <svg ref="svgEl" class="tm"></svg>
 </template>
 
 <style>
-html, body, #app { height: 100%; }
-.tm { position: fixed; inset: 0; width: 100vw; height: 100vh; background: #07090d; display: block; }
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; margin: 0; }
+.stage { position: fixed; inset: 0; background: #07090d; display: flex; align-items: center; justify-content: center; }
+
+.cube { position: relative; }
+.tile { position: absolute; border-radius: 8px; overflow: hidden; padding: 8px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
+  border: 1px solid rgba(255,255,255,0.08); cursor: pointer; transition: filter .1s, transform .1s; }
+.tile.kern:hover { filter: brightness(1.18); transform: scale(1.01); border-color: #fff; z-index: 2; }
+.tile.entity { cursor: default; }
+.tname { font: 600 13px/1.25 system-ui, sans-serif; color: #fff;
+  text-shadow: 0 1px 3px rgba(0,0,0,.8); display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.tmeta { margin-top: 5px; font: 11px system-ui, sans-serif; color: rgba(255,255,255,.8); text-shadow: 0 1px 2px rgba(0,0,0,.8); }
+
+.list { width: min(760px, 94vw); height: calc(100vh - 110px); overflow-y: auto; padding: 6px 4px 30px; }
+.lhead { color: #6b7682; font: 12px system-ui, sans-serif; padding: 4px 8px 10px; }
+.row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 7px;
+  border: 1px solid #161c24; margin-bottom: 6px; background: #0c1014; }
+.row:hover { background: #11161c; border-color: #243040; }
+.rk { font-size: 13px; flex: none; width: 14px; text-align: center; }
+.rt { flex: 1; color: #d6dde4; font: 13px/1.4 system-ui, sans-serif; }
+.rbar { flex: none; width: 70px; height: 6px; background: #161c24; border-radius: 3px; overflow: hidden; }
+.rbar i { display: block; height: 100%; border-radius: 3px; }
+
 .hud { position: fixed; top: 12px; left: 14px; z-index: 10; background: #11151ad9; color: #cdd3da;
   padding: 8px 13px; border-radius: 9px; border: 1px solid #1d2530; backdrop-filter: blur(6px);
   font: 13px system-ui, sans-serif; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; max-width: 92vw; }
