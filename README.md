@@ -122,7 +122,19 @@ The scripts ship in [`hooks/`](hooks/) — see [`hooks/README.md`](hooks/README.
 for the exact settings block. They are guarded to no-op outside `.relay/`
 projects, so a single global registration is safe everywhere.
 
-**4. Seed the graph** (see *Seed the graph* below), then start a session. From
+**4. Enable capture.** Capture is **off by default**. In the project where you
+want memory, create `<cwd>/.relay/kern.toml` with at least:
+
+```toml
+[capture]
+enabled = true
+```
+
+(See *Configure* below for the full set of options.) The `.relay/` directory is
+also what the hooks gate on — once it exists, capture and recall activate for
+that project.
+
+**5. Seed the graph** (see *Seed the graph* below), then start a session. From
 then on, capture and recall are automatic.
 
 To verify it's working, call the `health` MCP tool from your session, or check
@@ -146,7 +158,7 @@ url = "http://localhost:11434"
 model = "bge-m3"            # default; dimension inferred at runtime
 
 [capture]
-enabled = true          # self-learning
+enabled = true          # self-learning (OFF by default — must opt in)
 
 [tick]
 interval_secs = 60      # self-compaction cadence (0 = event-driven only)
@@ -176,8 +188,18 @@ session proceeds and capture simply queues.
 
 ### Seed the graph
 
-Once, via MCP: set the root `purpose` and add typed descriptors (`preference`,
-`decision`, `project`, `fact`, `code-fact`, `reference`).
+Once, via the MCP tools against the running daemon (not the CLI, which races the
+daemon). From a Claude Code session in the project:
+
+1. Set the root purpose — call `purpose` with a one-line description of what this
+   kern is for, e.g. *"Personal and project memory for <project>: durable facts,
+   decisions, preferences, and project state."*
+2. Add the typed descriptors you want to capture — call `descriptor` (action
+   `add`) once each for the kinds you use: `preference`, `decision`, `project`,
+   `fact`, `code-fact`, `reference`.
+
+After seeding, normal sessions populate the graph automatically through the
+capture hook.
 
 ### MCP tools
 
