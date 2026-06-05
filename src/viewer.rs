@@ -279,6 +279,7 @@ async fn hub_search(State(st): State<HubState>, Query(p): Query<SearchQuery>) ->
 	if q.is_empty() {
 		return Json(json!({ "results": [] })).into_response();
 	}
+	let k = p.k.min(MAX_SEARCH_K);
 	let vec = match st.llm.embed(q).await {
 		Ok(v) => v,
 		Err(e) => {
@@ -288,7 +289,7 @@ async fn hub_search(State(st): State<HubState>, Query(p): Query<SearchQuery>) ->
 	};
 
 	let peers = live_peers();
-	let body = json!({ "vec": vec, "k": p.k });
+	let body = json!({ "vec": vec, "k": k });
 	let mut tagged = Vec::new();
 	for addr in &peers {
 		let url = format!("http://{addr}/search");
@@ -301,7 +302,7 @@ async fn hub_search(State(st): State<HubState>, Query(p): Query<SearchQuery>) ->
 		}
 	}
 
-	Json(json!({ "results": rank_peers(&tagged, p.k) })).into_response()
+	Json(json!({ "results": rank_peers(&tagged, k) })).into_response()
 }
 
 #[derive(serde::Deserialize)]
