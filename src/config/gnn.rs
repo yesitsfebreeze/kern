@@ -13,16 +13,13 @@ pub struct GnnConfig {
 impl Default for GnnConfig {
 	fn default() -> Self {
 		Self {
-			self_weight: 0.6,
-			min_weight: 0.01,
-			// Skip GNN training below this many entities: a multi-layer GNN over
-			// a handful of nodes only overfits, and the resulting noisy
-			// gnn_vector pollutes ranking via gnn_entity_idx. Small graphs fall
-			// back to the vector+BM25+PageRank+reason-edge path. Keep in sync
-			// with gnn::propagate::GnnConfig::defaults().
-			min_thoughts: 128,
-			train_epochs: 24,
-			train_learning_rate: 0.01,
+			// Defaults live once in gnn::propagate (shared with the runtime
+			// GnnConfig) so the serde and runtime layers cannot drift.
+			self_weight: crate::gnn::propagate::DEFAULT_SELF_WEIGHT,
+			min_weight: crate::gnn::propagate::DEFAULT_MIN_WEIGHT,
+			min_thoughts: crate::gnn::propagate::DEFAULT_MIN_THOUGHTS,
+			train_epochs: crate::gnn::propagate::DEFAULT_TRAIN_EPOCHS,
+			train_learning_rate: crate::gnn::propagate::DEFAULT_TRAIN_LEARNING_RATE,
 		}
 	}
 }

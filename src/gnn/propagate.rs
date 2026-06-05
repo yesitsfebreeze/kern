@@ -13,6 +13,19 @@ use crate::gnn::persist::{marshal_weights, unmarshal_weights};
 use crate::gnn::tensor::Tensor;
 use crate::gnn::train::TrainConfig;
 
+/// Single source of truth for GnnConfig field defaults, shared by the runtime
+/// [`GnnConfig::defaults`] and the serde [`crate::config::gnn::GnnConfig`]
+/// default so the two layers cannot drift.
+pub const DEFAULT_SELF_WEIGHT: f64 = 0.6;
+pub const DEFAULT_MIN_WEIGHT: f64 = 0.01;
+/// Skip GNN training below this many entities: a multi-layer GNN over a
+/// handful of nodes only overfits, and the noisy gnn_vector then pollutes
+/// ranking via gnn_entity_idx. Small graphs fall back to the
+/// vector+BM25+PageRank+reason-edge path.
+pub const DEFAULT_MIN_THOUGHTS: usize = 128;
+pub const DEFAULT_TRAIN_EPOCHS: usize = 24;
+pub const DEFAULT_TRAIN_LEARNING_RATE: f64 = 0.01;
+
 #[derive(Debug, Clone, Copy)]
 pub struct GnnConfig {
 	pub self_weight: f64,
@@ -25,13 +38,11 @@ pub struct GnnConfig {
 impl GnnConfig {
 	pub fn defaults() -> Self {
 		Self {
-			self_weight: 0.6,
-			min_weight: 0.01,
-			// Skip GNN training below this many entities — see the rationale on
-			// config::gnn::GnnConfig (kept in sync with it).
-			min_thoughts: 128,
-			train_epochs: 24,
-			train_learning_rate: 0.01,
+			self_weight: DEFAULT_SELF_WEIGHT,
+			min_weight: DEFAULT_MIN_WEIGHT,
+			min_thoughts: DEFAULT_MIN_THOUGHTS,
+			train_epochs: DEFAULT_TRAIN_EPOCHS,
+			train_learning_rate: DEFAULT_TRAIN_LEARNING_RATE,
 		}
 	}
 }
