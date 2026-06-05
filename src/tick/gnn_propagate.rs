@@ -128,61 +128,6 @@ pub fn build_gnn_snapshot(kern: &Kern, cfg: &GnnConfig) -> Option<GnnSnapshot> {
 	})
 }
 
-#[cfg(test)]
-mod tests {
-	use super::*;
-	use crate::base::reason::add_reason;
-	use crate::base::types::{mk_entity, EntityKind, Reason};
-
-	/// `n` entities (each with a vector) chained by local reason edges, so a
-	/// snapshot has both nodes and positive edges once the floor is cleared.
-	fn kern_with_n(n: usize) -> Kern {
-		let mut k = Kern::new("k", "");
-		for i in 0..n {
-			let id = format!("e{i}");
-			k.entities
-				.insert(id.clone(), mk_entity(&id, &id, 0.0, EntityKind::Claim));
-		}
-		for i in 0..n.saturating_sub(1) {
-			let from = format!("e{i}");
-			let to = format!("e{}", i + 1);
-			add_reason(
-				&mut k,
-				Reason {
-					from: from.clone(),
-					to: to.clone(),
-					id: format!("{from}->{to}"),
-					..Default::default()
-				},
-			);
-		}
-		k
-	}
-
-	#[test]
-	fn gnn_skipped_below_min_thoughts_default() {
-		// Card #30: a tiny graph must NOT train a GNN under the default floor.
-		let k = kern_with_n(3);
-		let cfg = GnnConfig::defaults(); // min_thoughts = 128
-		assert!(
-			build_gnn_snapshot(&k, &cfg).is_none(),
-			"3-node graph skips GNN under the default min_thoughts floor"
-		);
-	}
-
-	#[test]
-	fn gnn_runs_when_floor_lowered() {
-		// Lowering the floor re-enables training, proving it's the floor gating.
-		let k = kern_with_n(3);
-		let mut cfg = GnnConfig::defaults();
-		cfg.min_thoughts = 2;
-		assert!(
-			build_gnn_snapshot(&k, &cfg).is_some(),
-			"with a low floor and local edges, a snapshot builds"
-		);
-	}
-}
-
 fn apply_gnn_updates(
 	q: &Queue,
 	g: &Arc<RwLock<GraphGnn>>,
@@ -243,4 +188,59 @@ fn cosine_align(a: &[f64], b: &[f64]) -> f64 {
 	}
 	let cos = dot / (na.sqrt() * nb.sqrt());
 	((cos + 1.0) * 0.5).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::base::reason::add_reason;
+	use crate::base::types::{mk_entity, EntityKind, Reason};
+
+	/// `n` entities (each with a vector) chained by local reason edges, so a
+	/// snapshot has both nodes and positive edges once the floor is cleared.
+	fn kern_with_n(n: usize) -> Kern {
+		let mut k = Kern::new("k", "");
+		for i in 0..n {
+			let id = format!("e{i}");
+			k.entities
+				.insert(id.clone(), mk_entity(&id, &id, 0.0, EntityKind::Claim));
+		}
+		for i in 0..n.saturating_sub(1) {
+			let from = format!("e{i}");
+			let to = format!("e{}", i + 1);
+			add_reason(
+				&mut k,
+				Reason {
+					from: from.clone(),
+					to: to.clone(),
+					id: format!("{from}->{to}"),
+					..Default::default()
+				},
+			);
+		}
+		k
+	}
+
+	#[test]
+	fn gnn_skipped_below_min_thoughts_default() {
+		// Card #30: a tiny graph must NOT train a GNN under the default floor.
+		let k = kern_with_n(3);
+		let cfg = GnnConfig::defaults(); // min_thoughts = 128
+		assert!(
+			build_gnn_snapshot(&k, &cfg).is_none(),
+			"3-node graph skips GNN under the default min_thoughts floor"
+		);
+	}
+
+	#[test]
+	fn gnn_runs_when_floor_lowered() {
+		// Lowering the floor re-enables training, proving it's the floor gating.
+		let k = kern_with_n(3);
+		let mut cfg = GnnConfig::defaults();
+		cfg.min_thoughts = 2;
+		assert!(
+			build_gnn_snapshot(&k, &cfg).is_some(),
+			"with a low floor and local edges, a snapshot builds"
+		);
+	}
 }
