@@ -94,7 +94,7 @@ beam search, gossip, and the MCP server are all written from scratch.
 
 ### Quickstart
 
-**Prerequisites:** a Rust toolchain, Node.js (for the hooks), and a local
+**Prerequisites:** Node.js (for the hooks) and a local
 [Ollama](https://ollama.com) with the default models pulled:
 
 ```bash
@@ -102,18 +102,28 @@ ollama pull bge-m3      # embeddings (default)
 ollama pull qwen2.5     # distillation / reasoning (default)
 ```
 
-**1. Build the binary.**
+**1. Install the binary.** A prebuilt binary for your platform (built by CI and
+published to GitHub Releases):
 
 ```bash
-cargo build --release   # produces target/release/kern
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/yesitsfebreeze/relay-kern/master/install.sh | sh
 ```
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/yesitsfebreeze/relay-kern/master/install.ps1 | iex
+```
+
+> Or build from source (needs a Rust toolchain): `cargo build --release` →
+> `target/release/kern`, or `cargo install --path .`.
 
 **2. Register the MCP server with Claude Code.** `kern mcp` attaches to a
 running daemon if one exists, and otherwise auto-spawns a detached daemon for
-the current directory — so this one command is all you need to bring kern up:
+the current directory — so this one command is all you need to bring kern up
+(the installer prints the exact path):
 
 ```bash
-claude mcp add kern -- /abs/path/to/kern/target/release/kern mcp
+claude mcp add kern -- kern mcp
 ```
 
 **3. Install the capture + recall hooks** once in `~/.claude/settings.json`.
