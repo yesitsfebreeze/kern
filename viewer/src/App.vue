@@ -49,48 +49,81 @@ const W = () => svgEl.value.clientWidth
 const H = () => svgEl.value.clientHeight
 
 let svg, g
-function render() {
+function layout() {
   const cur = stack[stack.length - 1]
-  crumbs.value = stack.map((n, i) => ({ id: n.id, label: i === 0 ? 'root' : n.label }))
-
   const r = d3.hierarchy(cur).sum(d => d.value || 0).sort((a, b) => (b.value || 0) - (a.value || 0))
-  d3.treemap().size([W(), H()]).paddingOuter(2).paddingTop(d => d.depth === 0 ? 0 : 18).paddingInner(1).round(true)(r)
+  d3.treemap().size([W(), H()]).paddingOuter(1).paddingTop(d => d.depth === 0 ? 0 : 13).paddingInner(1).round(true)(r)
+  return r
+}
 
+function render() {
+  crumbs.value = stack.map((n, i) => ({ id: n.id, label: i === 0 ? 'root' : n.label }))
+  const r = layout()
   g.selectAll('*').remove()
 
-  // leaf cells = thoughts, coloured by kind — "all the data" at once.
-  g.selectAll('rect.leaf').data(r.leaves()).join('rect').attr('class', 'leaf')
-    .attr('x', d => d.x0).attr('y', d => d.y0)
-    .attr('width', d => Math.max(0, d.x1 - d.x0)).attr('height', d => Math.max(0, d.y1 - d.y0))
-    .attr('fill', d => d.data.type === 'entity' ? (KIND_COLOR[d.data.kind] || '#98c379') : '#222a33')
-    .attr('fill-opacity', 0.85)
-    .on('mousemove', (ev, d) => { detail.value = `${d.data.kind || ''} ${d.data.label}` })
-    .on('mouseleave', () => detail.value = '')
-    .append('title').text(d => d.data.label)
+  const all = r.descendants().filter(d => d.depth > 0)
+  const wOf = d => Math.max(0, d.x1 - d.x0)
+  const hOf = d => Math.max(0, d.y1 - d.y0)
 
-  // depth-1 blocks = direct sub-topics; bordered + labeled = the "word matrix".
-  const blocks = (r.children || []).filter(d => d.data.type === 'kern')
-  const blk = g.selectAll('g.blk').data(blocks).join('g').attr('class', 'blk')
-  blk.append('rect')
-    .attr('x', d => d.x0).attr('y', d => d.y0)
-    .attr('width', d => Math.max(0, d.x1 - d.x0)).attr('height', d => Math.max(0, d.y1 - d.y0))
-    .attr('fill', 'none').attr('stroke', '#7fd1ae').attr('stroke-opacity', 0.5).attr('stroke-width', 1)
-    .style('cursor', 'pointer')
-    .on('click', (ev, d) => zoomIn(d.data))
-  blk.append('text')
-    .attr('x', d => d.x0 + 4).attr('y', d => d.y0 + 13)
-    .attr('fill', '#cfe9df').attr('font-size', '12px').attr('font-weight', 600)
+  // every node — thoughts (leaf cells, by kind) AND every nested sub-topic block
+  // (bordered), all the way down, so the whole structure + all data is visible.
+  const node = g.selectAll('g.n').data(all).join('g').attr('class', 'n')
+    .attr('transform', d => `translate(${d.x0},${d.y0})`)
+
+  node.append('rect')
+    .attr('width', wOf).attr('height', hOf)
+    .attr('fill', d => d.data.type === 'entity'
+      ? (KIND_COLOR[d.data.kind] || '#98c379')
+      : d3.lab(58 - d.depth * 7, 0, -6).formatHex()) // nested kerns: darker by depth
+    // thought cells brighten with heat → intensity reads like a heatmap.
+    .attr('fill-opacity', d => d.data.type === 'entity' ? 0.3 + Math.min(1, (+d.data.heat || 0) / 2) * 0.65 : 1)
+    .attr('stroke', d => d.data.type === 'kern' ? '#7fd1ae' : '#06080b')
+    .attr('stroke-opacity', d => d.data.type === 'kern' ? 0.45 : 1)
+    .attr('stroke-width', d => d.data.type === 'kern' ? 1 : 0.4)
+    .style('cursor', d => d.data.type === 'kern' ? 'pointer' : 'default')
+    .on('click', (ev, d) => { if (d.data.type === 'kern') { ev.stopPropagation(); zoomIn(d.data) } })
+    .on('mousemove', (ev, d) => {
+      detail.value = d.data.type === 'entity'
+        ? `${d.data.kind} · heat ${(+d.data.heat).toFixed(2)} · conf ${(+d.data.conf).toFixed(2)} — ${d.data.label}`
+        : `${d.data.label} · ${d.value} thoughts`
+    })
+    .on('mouseleave', () => detail.value = '')
+  node.append('title').text(d => d.data.label)
+
+  // sub-topic header labels (words) where the block has room.
+  node.filter(d => d.data.type === 'kern' && wOf(d) > 34 && hOf(d) > 14)
+    .append('text').attr('x', 3).attr('y', 10)
+    .attr('fill', '#cfe9df').attr('font-size', '10px').attr('font-weight', 600)
     .style('pointer-events', 'none')
-    .text(d => (d.x1 - d.x0) > 40 ? `${d.data.label}  (${d.value})` : '')
+    .text(d => clip(d.data.label, wOf(d)))
+
+  // thought text on cells big enough to read — more info, not just color.
+  node.filter(d => d.data.type === 'entity' && wOf(d) > 46 && hOf(d) > 12)
+    .append('text').attr('x', 2).attr('y', 9)
+    .attr('fill', '#0b0d10').attr('font-size', '9px')
+    .style('pointer-events', 'none')
+    .text(d => clip(d.data.label, wOf(d)))
 
   stats.value = `${raw.nodes.length} thoughts · ${raw.kerns.length} spheres · here: ${r.value} thoughts`
 }
 
+function clip(s, px) {
+  const n = Math.floor((px - 4) / 5.4)
+  return n >= s.length ? s : (n > 1 ? s.slice(0, n - 1) + '…' : '')
+}
+
+function findPath(node, id, acc = []) {
+  acc.push(node)
+  if (node.id === id) return acc.slice()
+  for (const c of node.children || []) { const r = findPath(c, id, acc); if (r) return r }
+  acc.pop()
+  return null
+}
 function zoomIn(dataNode) {
-  if (dataNode.type !== 'kern' || !(dataNode.children || []).some(c => c.type === 'kern' || c.type === 'entity')) return
+  if (dataNode.type !== 'kern' || !(dataNode.children || []).length) return
   if (dataNode.id === stack[stack.length - 1].id) return
-  stack.push(dataNode)
-  render()
+  const path = findPath(treeData, dataNode.id)
+  if (path) { stack = path; render() }
 }
 function zoomOut() { if (stack.length > 1) { stack.pop(); render() } }
 function goTo(id) {
@@ -105,12 +138,12 @@ function onWheel(ev) {
   if (now - wheelLock < 350) return
   wheelLock = now
   if (ev.deltaY > 0) {
-    // into the sub-topic under the cursor
-    const cur = stack[stack.length - 1]
-    const r = d3.hierarchy(cur).sum(d => d.value || 0).sort((a, b) => (b.value || 0) - (a.value || 0))
-    d3.treemap().size([W(), H()]).paddingOuter(2).paddingTop(d => d.depth === 0 ? 0 : 18).paddingInner(1).round(true)(r)
+    // into the deepest sub-topic block under the cursor
+    const r = layout()
     const [mx, my] = d3.pointer(ev, svgEl.value)
-    const hit = (r.children || []).find(d => d.data.type === 'kern' && mx >= d.x0 && mx <= d.x1 && my >= d.y0 && my <= d.y1)
+    const hits = r.descendants().filter(d => d.depth > 0 && d.data.type === 'kern'
+      && mx >= d.x0 && mx <= d.x1 && my >= d.y0 && my <= d.y1)
+    const hit = hits.sort((a, b) => b.depth - a.depth)[0]
     if (hit) zoomIn(hit.data)
   } else {
     zoomOut()
