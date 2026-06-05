@@ -20,30 +20,38 @@ pub struct Cli {
 	#[command(subcommand)]
 	pub command: Option<Commands>,
 
+	/// Run the long-lived daemon (tick worker + MCP + kern_rpc) for this cwd.
 	#[arg(short = 'd', long)]
 	pub daemon: bool,
 
+	/// Serve MCP over HTTP/SSE on this address instead of stdio (e.g. 127.0.0.1:7777).
 	#[arg(long, default_value = "")]
 	pub mcp_addr: String,
 
+	/// Serve MCP over stdio (for direct embedding in an MCP client).
 	#[arg(long)]
 	pub mcp_stdio: bool,
 
+	/// Embedding endpoint (Ollama-compatible). Overrides config.
 	#[arg(long, default_value = crate::config::DEFAULT_EMBED_URL)]
 	pub embed_url: String,
 
+	/// Embedding model name. Overrides config.
 	#[arg(long, default_value = crate::config::DEFAULT_EMBED_MODEL)]
 	pub embed_model: String,
 
+	/// Reasoning/distillation endpoint (Ollama-compatible). Overrides config.
 	#[arg(long, default_value = "")]
 	pub reason_url: String,
 
+	/// Reasoning/distillation model name. Overrides config.
 	#[arg(long, default_value = "")]
 	pub reason_model: String,
 }
 
 #[derive(Subcommand)]
 pub enum Commands {
+	/// Add text (or a --file) to the graph; distills into typed claims.
 	Ingest {
 		text: Vec<String>,
 		#[arg(long)]
@@ -59,6 +67,7 @@ pub enum Commands {
 		#[arg(long)]
 		reason_model: Option<String>,
 	},
+	/// Search the graph; prints scored thoughts (+ optional LLM --answer).
 	Query {
 		text: String,
 		#[arg(long, default_value = "hybrid")]
@@ -74,6 +83,7 @@ pub enum Commands {
 		#[arg(long)]
 		reason_model: Option<String>,
 	},
+	/// Raw vector + lexical search; print the top-k hits.
 	Search {
 		text: String,
 		#[arg(long, default_value = "5")]
@@ -83,13 +93,17 @@ pub enum Commands {
 		#[arg(long)]
 		embed_model: Option<String>,
 	},
+	/// Print a single thought by id (rehydrates from the cold store).
 	Get {
 		id: String,
 	},
+	/// List all thoughts in the graph.
 	List,
+	/// Remove a thought and cascade its edges (Facts are immune).
 	Forget {
 		id: String,
 	},
+	/// Create a reason edge between two thoughts (LLM writes the reason if blank).
 	Link {
 		from: String,
 		to: String,
@@ -104,7 +118,9 @@ pub enum Commands {
 		#[arg(long)]
 		reason_model: Option<String>,
 	},
+	/// Print graph stats: thought/edge counts, tick heat, purpose.
 	Health,
+	/// Set or read the root purpose.
 	Purpose {
 		text: String,
 		#[arg(long)]
@@ -112,22 +128,29 @@ pub enum Commands {
 		#[arg(long)]
 		embed_model: Option<String>,
 	},
+	/// Down-weight the edges along a bad retrieval path (learn from a miss).
 	Degrade {
 		id: String,
 	},
+	/// Add or remove data-type descriptors.
 	Descriptor {
 		#[command(subcommand)]
 		action: DescriptorAction,
 	},
+	/// List known gossip peers.
 	Peers,
+	/// Import a kern store from a directory into this graph.
 	Register {
 		path: String,
 	},
+	/// Inspect kerns that have no name yet.
 	Unnamed {
 		#[command(subcommand)]
 		action: UnnamedAction,
 	},
+	/// Run the MCP server over stdio (attaches to or spawns the daemon).
 	Mcp,
+	/// Quantize a kern store's vectors (none | int8) into a new directory.
 	Compress {
 		src: String,
 		#[arg(long, default_value = "int8")]
@@ -135,6 +158,7 @@ pub enum Commands {
 		#[arg(long)]
 		out: Option<String>,
 	},
+	/// Run a timed self-improvement hunt (feature-gated).
 	#[cfg(feature = "hunt")]
 	Hunt {
 		#[arg(long, default_value = "60")]
