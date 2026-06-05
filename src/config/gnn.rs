@@ -15,7 +15,12 @@ impl Default for GnnConfig {
 		Self {
 			self_weight: 0.6,
 			min_weight: 0.01,
-			min_thoughts: 2,
+			// Skip GNN training below this many entities: a multi-layer GNN over
+			// a handful of nodes only overfits, and the resulting noisy
+			// gnn_vector pollutes ranking via gnn_entity_idx. Small graphs fall
+			// back to the vector+BM25+PageRank+reason-edge path. Keep in sync
+			// with gnn::propagate::GnnConfig::defaults().
+			min_thoughts: 128,
 			train_epochs: 24,
 			train_learning_rate: 0.01,
 		}

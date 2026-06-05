@@ -27,7 +27,9 @@ impl GnnConfig {
 		Self {
 			self_weight: 0.6,
 			min_weight: 0.01,
-			min_thoughts: 2,
+			// Skip GNN training below this many entities — see the rationale on
+			// config::gnn::GnnConfig (kept in sync with it).
+			min_thoughts: 128,
 			train_epochs: 24,
 			train_learning_rate: 0.01,
 		}
