@@ -17,7 +17,9 @@ impl Default for ReasonConfig {
 	fn default() -> Self {
 		Self {
 			url: DEFAULT_REASON_URL.into(),
-			model: "qwen2.5".into(),
+			// qwen2.5:7b — small, fast, reliable structured-output model, which
+			// is what distillation/naming/edge-proposal need.
+			model: "qwen2.5:7b".into(),
 			key: String::new(),
 		}
 	}

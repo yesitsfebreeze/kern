@@ -12,8 +12,10 @@ model = "nomic-embed-text"
 
 [reason]
 # Model for distillation + smart-split + edge proposal. Local Ollama.
+# qwen2.5:7b — small, fast, and the most reliable small model for structured
+# extraction / formatted output, which is what distillation needs.
 url = "http://localhost:11434"
-model = "gemma4:latest"
+model = "qwen2.5:7b"
 
 [capture]
 # Self-learning: capture Claude Code sessions -> distill -> graph -> digest.

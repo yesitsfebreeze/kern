@@ -98,8 +98,8 @@ beam search, gossip, and the MCP server are all written from scratch.
 [Ollama](https://ollama.com) with the default models pulled:
 
 ```bash
-ollama pull bge-m3      # embeddings (default)
-ollama pull qwen2.5     # distillation / reasoning (default)
+ollama pull nomic-embed-text  # embeddings (default)
+ollama pull qwen2.5:7b        # distillation / reasoning (default)
 ```
 
 **1. Install the binary.** A prebuilt binary for your platform (built by CI and
@@ -159,12 +159,12 @@ Everything lives in `<cwd>/.kern/kern.toml`:
 [reason]
 # LLM for distillation. Local Ollama.
 url = "http://localhost:11434"
-model = "qwen2.5"           # default
+model = "qwen2.5:7b"        # default (small, fast, reliable)
 
 [embed]
 # Embedding model. Local Ollama.
 url = "http://localhost:11434"
-model = "bge-m3"            # default; dimension inferred at runtime
+model = "nomic-embed-text"  # default (768-d); dimension locks the graph
 
 [capture]
 enabled = true          # self-learning (OFF by default — must opt in)
