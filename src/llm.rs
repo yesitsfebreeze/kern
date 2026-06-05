@@ -31,6 +31,16 @@ pub fn is_transient(err: &LlmError) -> bool {
 	}
 }
 
+/// Whether a failed batch embed warrants a second attempt as a single embed.
+/// Only batch-specific failures qualify — transient network/5xx/429 errors, or
+/// an empty batch response. A permanent client error (e.g. 400 bad model, 401
+/// auth) fails identically as a single call, so it is propagated instead, which
+/// lets [`embed_with_retry`](crate::ingest) short-circuit rather than pay a
+/// second HTTP round-trip per chunk.
+fn should_retry_single(err: &LlmError) -> bool {
+	is_transient(err) || matches!(err, LlmError::EmptyEmbedding)
+}
+
 #[derive(Clone)]
 pub struct Client {
 	inner: Arc<Inner>,
@@ -98,7 +108,8 @@ impl Client {
 				}
 				Ok(vecs.swap_remove(0))
 			}
-			Err(_) => self.embed_single(text).await,
+			Err(e) if should_retry_single(&e) => self.embed_single(text).await,
+			Err(e) => Err(e),
 		}
 	}
 
@@ -264,4 +275,37 @@ struct ChatChoice {
 #[derive(Deserialize)]
 struct ChatChoiceMessage {
 	content: String,
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn permanent_client_errors_do_not_retry_single() {
+		// 400 bad model, 401 auth: a single embed fails identically, so the
+		// batch error must propagate (no wasted second round-trip).
+		assert!(!should_retry_single(&LlmError::Api {
+			status: 400,
+			body: String::new()
+		}));
+		assert!(!should_retry_single(&LlmError::Api {
+			status: 401,
+			body: String::new()
+		}));
+		assert!(!should_retry_single(&LlmError::EmptyCompletion));
+	}
+
+	#[test]
+	fn transient_and_empty_batch_retry_single() {
+		assert!(should_retry_single(&LlmError::Api {
+			status: 429,
+			body: String::new()
+		}));
+		assert!(should_retry_single(&LlmError::Api {
+			status: 503,
+			body: String::new()
+		}));
+		assert!(should_retry_single(&LlmError::EmptyEmbedding));
+	}
 }
