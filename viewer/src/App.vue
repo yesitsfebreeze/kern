@@ -9,11 +9,15 @@ const err = ref('')
 const turns = ref([])      // {role:'user'|'oracle', text, sources?, chains?}
 const sources = ref([])    // current answer's source tiles
 const chains = ref([])     // current answer's provenance strings
+const reasons = ref([])    // current answer's reason edges (structured)
 const input = ref('')
 const busy = ref(false)
 const hot = ref(null)      // hovered/active citation number
 const inputEl = ref(null)
 const scrollEl = ref(null)
+
+const editing = ref(null)  // {id, kind, text} of the item currently being edited
+const saved = ref(new Set()) // ids that were just corrected
 
 let history = []           // [{role, content}] sent to the server
 let ctrl = null            // AbortController for the in-flight stream
@@ -62,9 +66,10 @@ async function ask() {
   ctrl = new AbortController()
   input.value = ''
   busy.value = true
-  sources.value = []; chains.value = []; hot.value = null
+  sources.value = []; chains.value = []; reasons.value = []; hot.value = null
+  editing.value = null
   turns.value.push({ role: 'user', text: q })
-  turns.value.push({ role: 'oracle', text: '', sources: [], chains: [] })
+  turns.value.push({ role: 'oracle', text: '', sources: [], chains: [], reasons: [] })
   const oracle = turns.value[turns.value.length - 1]
   await scrollDown()
   try {
@@ -110,7 +115,8 @@ function handleFrame(frame, oracle) {
   if (ev === 'sources') {
     sources.value = d.entities || []
     chains.value = d.chains || []
-    oracle.sources = sources.value; oracle.chains = chains.value
+    reasons.value = d.reasons || []
+    oracle.sources = sources.value; oracle.chains = chains.value; oracle.reasons = reasons.value
     scrollDown()
   } else if (ev === 'token') {
     oracle.text += d.t || ''
@@ -128,6 +134,33 @@ async function scrollDown() {
 
 function onKey(ev) {
   if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); ask() }
+}
+
+function startEdit(item, kind) {
+  editing.value = { id: item.id, kind, text: item.text || item.label || '' }
+}
+
+function cancelEdit() {
+  editing.value = null
+}
+
+async function saveEdit(id, text, kind) {
+  editing.value = null
+  try {
+    const res = await fetch('/edit', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id, text, kind }),
+    })
+    const d = await res.json().catch(() => ({}))
+    if (d && d.ok) {
+      const newSaved = new Set(saved.value)
+      newSaved.add(id)
+      saved.value = newSaved
+      // reflect the correction locally so the user sees it immediately
+      const hit = [...sources.value, ...reasons.value].find(x => x.id === id)
+      if (hit) { hit.text = text; if ('label' in hit) hit.label = text.slice(0, 80) }
+    }
+  } catch (_) { /* keep UI as-is on failure */ }
 }
 
 onMounted(() => {
@@ -175,17 +208,48 @@ onBeforeUnmount(() => { if (pulse) clearInterval(pulse); if (ctrl) ctrl.abort() 
           <span class="count" v-if="sources.length">{{ sources.length }}</span></header>
         <div class="bwrap">
           <div class="bento">
-            <div v-for="s in sources" :key="s.id" class="tile" :class="{ on: hot === s.n }"
+            <div v-for="s in sources" :key="s.id" class="tile" :class="{ on: hot === s.n, corrected: saved.has(s.id) }"
               :style="{ background: ramp(s.heat), color: textColor(ramp(s.heat)) }"
               @mouseenter="hot = s.n" @mouseleave="hot = null">
               <span class="tn">{{ s.n }}</span>
               <span class="tmark">{{ MARK[s.kind] || '·' }}</span>
-              <div class="tname">{{ s.label }}</div>
-              <div class="tmeta">{{ s.kind }} · {{ (+s.score).toFixed(2) }}</div>
+              <template v-if="editing && editing.id === s.id">
+                <textarea class="edit-area" v-model="editing.text" @keydown.enter.ctrl="saveEdit(editing.id, editing.text, 'entity')" @keydown.esc="cancelEdit" rows="4" autofocus></textarea>
+                <div class="edit-actions">
+                  <button class="ebtn save" @click.stop="saveEdit(editing.id, editing.text, 'entity')">save</button>
+                  <button class="ebtn" @click.stop="cancelEdit">cancel</button>
+                </div>
+              </template>
+              <template v-else>
+                <div class="tname">{{ s.label }}</div>
+                <div class="tmeta">{{ s.kind }} · {{ (+s.score).toFixed(2) }}</div>
+                <button class="edit-btn" title="edit thought" @click.stop="startEdit(s, 'entity')">✎</button>
+                <span v-if="saved.has(s.id)" class="badge-ok">✓ corrected · reevaluating</span>
+              </template>
             </div>
             <div v-if="!sources.length" class="empty">sources appear here</div>
           </div>
-          <pre v-if="chains.length" class="trail">{{ chains.join('\n') }}</pre>
+
+          <div v-if="reasons.length" class="reasons-section">
+            <div class="reasons-head">reason edges</div>
+            <div v-for="r in reasons" :key="r.id" class="reason-row" :class="{ corrected: saved.has(r.id) }">
+              <template v-if="editing && editing.id === r.id">
+                <textarea class="edit-area reason-edit-area" v-model="editing.text" @keydown.enter.ctrl="saveEdit(editing.id, editing.text, 'reason')" @keydown.esc="cancelEdit" rows="3" autofocus></textarea>
+                <div class="edit-actions">
+                  <button class="ebtn save" @click.stop="saveEdit(editing.id, editing.text, 'reason')">save</button>
+                  <button class="ebtn" @click.stop="cancelEdit">cancel</button>
+                </div>
+              </template>
+              <template v-else>
+                <span class="reason-kind">{{ r.kind }}</span>
+                <span class="reason-text">{{ r.text }}</span>
+                <div class="reason-row-actions">
+                  <button class="edit-btn" title="edit reason" @click.stop="startEdit(r, 'reason')">✎</button>
+                  <span v-if="saved.has(r.id)" class="badge-ok">✓ corrected · reevaluating</span>
+                </div>
+              </template>
+            </div>
+          </div>
         </div>
       </section>
     </div>
@@ -223,10 +287,26 @@ onBeforeUnmount(() => { if (pulse) clearInterval(pulse); if (ctrl) ctrl.abort() 
 .bento { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
 .tile { position:relative; border-radius:13px; padding:12px; min-height:96px; display:flex; flex-direction:column; justify-content:flex-end; gap:5px; box-shadow:inset 0 0 0 1px rgba(255,255,255,0.08); transition:box-shadow .12s; }
 .tile.on { box-shadow:inset 0 0 0 2px #61afef, 0 0 0 2px rgba(97,175,239,0.4); }
+.tile.corrected { box-shadow:inset 0 0 0 1px rgba(152,195,121,0.45); }
 .tn { position:absolute; top:9px; left:11px; font-family:var(--mono); font-size:11px; opacity:.8; } .tmark { position:absolute; top:8px; right:11px; opacity:.8; }
 .tname { font-family:var(--display); font-weight:800; font-size:14px; line-height:1.12; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
 .tmeta { font-family:var(--mono); font-size:10px; opacity:.75; }
 .empty { grid-column:1/-1; color:var(--muted); text-align:center; padding:30px 0; font-size:13px; }
-.trail { margin-top:14px; padding:12px; border-radius:11px; background:#0d0c0b; box-shadow:inset 0 0 0 1px var(--line);
-  font-family:var(--mono); font-size:11px; line-height:1.5; color:var(--muted); white-space:pre-wrap; }
+/* edit affordances on tiles */
+.edit-btn { position:absolute; bottom:8px; right:9px; background:rgba(244,241,234,0.12); border:none; border-radius:5px; padding:2px 5px; font-size:12px; cursor:pointer; color:inherit; opacity:0; transition:opacity .12s; }
+.tile:hover .edit-btn, .reason-row:hover .edit-btn { opacity:1; }
+.edit-area { width:100%; background:rgba(0,0,0,0.3); border:1px solid rgba(244,241,234,0.2); border-radius:7px; color:var(--ink); font-family:var(--body); font-size:13px; padding:7px; resize:vertical; outline:none; }
+.edit-actions { display:flex; gap:6px; margin-top:4px; }
+.ebtn { background:rgba(244,241,234,0.10); border:1px solid rgba(244,241,234,0.15); border-radius:6px; color:var(--ink); font-size:11px; padding:3px 8px; cursor:pointer; }
+.ebtn.save { background:rgba(152,195,121,0.22); border-color:rgba(152,195,121,0.4); color:#c8efae; }
+.badge-ok { font-family:var(--mono); font-size:10px; color:#98c379; opacity:.8; margin-top:2px; display:block; }
+/* reason edges section */
+.reasons-section { margin-top:16px; }
+.reasons-head { font-family:var(--mono); font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:var(--muted); padding:6px 0 8px; border-top:1px solid var(--line); }
+.reason-row { position:relative; padding:8px 10px; border-radius:9px; background:rgba(244,241,234,0.03); box-shadow:inset 0 0 0 1px var(--line); margin-bottom:6px; display:flex; flex-direction:column; gap:3px; }
+.reason-row.corrected { box-shadow:inset 0 0 0 1px rgba(152,195,121,0.35); }
+.reason-kind { font-family:var(--mono); font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.1em; }
+.reason-text { font-size:13px; line-height:1.4; color:var(--ink); padding-right:26px; }
+.reason-row-actions { display:flex; align-items:center; gap:8px; margin-top:2px; }
+.reason-edit-area { margin-top:4px; }
 </style>

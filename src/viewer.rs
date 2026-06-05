@@ -316,7 +316,22 @@ async fn ask_retrieve(State(st): State<LocalState>, Json(body): Json<AskRetrieve
 		})
 	}).collect();
 	let chain_text = answer::format_chains(&g, &result.path_chains);
-	Json(json!({ "sources": sources, "chain_text": chain_text }))
+	let mut reasons: Vec<Value> = Vec::new();
+	let mut seen = std::collections::HashSet::new();
+	for chain in &result.path_chains {
+		for (j, node_id) in chain.nodes.iter().enumerate() {
+			if j % 2 == 0 { continue; } // even = entity, odd = reason
+			if !seen.insert(node_id.clone()) { continue; }
+			if let Some((r, _)) = crate::base::search::find_reason(&g, node_id) {
+				reasons.push(json!({
+					"id": r.id,
+					"text": if r.text.is_empty() { format!("{:?}", r.kind) } else { truncate(&r.text, 160) },
+					"kind": format!("{:?}", r.kind),
+				}));
+			}
+		}
+	}
+	Json(json!({ "sources": sources, "chain_text": chain_text, "reasons": reasons }))
 }
 
 #[derive(serde::Deserialize)]
@@ -358,6 +373,7 @@ async fn ask(State(st): State<HubState>, Json(body): Json<AskBody>) -> Sse<impl 
 		let reqbody = json!({ "vec": vec, "question": q, "k": k });
 		let mut tagged = Vec::new();
 		let mut chains: Vec<String> = Vec::new();
+		let mut reason_items: Vec<Value> = Vec::new();
 		for addr in &peers {
 			let url = format!("http://{addr}/ask_retrieve");
 			let resp = match st.client.post(&url).json(&reqbody).send().await {
@@ -368,6 +384,16 @@ async fn ask(State(st): State<HubState>, Json(body): Json<AskBody>) -> Sse<impl 
 				if let Some(ct) = v.get("chain_text").and_then(Value::as_str) {
 					if !ct.trim().is_empty() { chains.push(ct.to_string()); }
 				}
+				if let Some(rs) = v.get("reasons").and_then(Value::as_array) {
+					for r in rs {
+						let mut r = r.clone();
+						let rid = r.get("id").and_then(Value::as_str).map(|s| s.to_string());
+						if let (Some(o), Some(rid)) = (r.as_object_mut(), rid) {
+							o.insert("id".into(), json!(format!("{addr}|{rid}")));
+						}
+						reason_items.push(r);
+					}
+				}
 				tagged.push((format!("{addr}|"), json!({ "hits": v.get("sources").cloned().unwrap_or(json!([])) })));
 			}
 		}
@@ -377,7 +403,7 @@ async fn ask(State(st): State<HubState>, Json(body): Json<AskBody>) -> Sse<impl 
 		for (n, s) in merged.iter_mut().enumerate() {
 			if let Some(o) = s.as_object_mut() { o.insert("n".into(), json!(n + 1)); }
 		}
-		yield Ok(Event::default().event("sources").data(json!({ "entities": merged, "chains": chains }).to_string()));
+		yield Ok(Event::default().event("sources").data(json!({ "entities": merged, "chains": chains, "reasons": reason_items }).to_string()));
 		let prompt = build_ask_prompt(&merged, &chains, &q);
 		let mut messages: Vec<(String, String)> = body.history.iter()
 			.rev().take(6).rev()
