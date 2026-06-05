@@ -1,5 +1,6 @@
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -199,6 +200,62 @@ impl Client {
 			.ok_or(LlmError::EmptyCompletion)
 	}
 
+	/// Stream a chat completion as a sequence of content-delta strings.
+	/// `messages` is the full multi-turn context (role/content pairs). Yields each
+	/// non-empty token delta in order; ends when the server sends `[DONE]` or the
+	/// body closes. Errors (HTTP, network) surface as a single `Err` item.
+	pub fn complete_stream(
+		&self,
+		messages: Vec<(String, String)>,
+	) -> impl futures_core::Stream<Item = Result<String, LlmError>> + Send {
+		let client = self.clone();
+		async_stream::stream! {
+			let url = format!("{}/v1/chat/completions", client.inner.reason_url);
+			let msgs: Vec<serde_json::Value> = messages
+				.iter()
+				.map(|(r, c)| serde_json::json!({"role": r, "content": c}))
+				.collect();
+			let body = serde_json::json!({
+				"model": client.inner.reason_model,
+				"messages": msgs,
+				"stream": true,
+			});
+			let resp = match client.inner.http.post(&url)
+				.headers(client.inner.reason_headers.clone())
+				.json(&body)
+				.send()
+				.await
+			{
+				Ok(r) => r,
+				Err(e) => { yield Err(LlmError::from(e)); return; }
+			};
+			let status = resp.status().as_u16();
+			if status >= 400 {
+				let body = resp.text().await.unwrap_or_default();
+				yield Err(LlmError::Api { status, body });
+				return;
+			}
+			let mut stream = resp.bytes_stream();
+			let mut buf = String::new();
+			use futures_util::StreamExt as _;
+			while let Some(chunk) = stream.next().await {
+				let chunk = match chunk {
+					Ok(b) => b,
+					Err(e) => { yield Err(LlmError::from(e)); return; }
+				};
+				buf.push_str(&String::from_utf8_lossy(&chunk));
+				while let Some(nl) = buf.find('\n') {
+					let line: String = buf.drain(..=nl).collect();
+					match parse_sse_line(line.trim_end()) {
+						Some(SseDelta::Done) => return,
+						Some(SseDelta::Token(t)) if !t.is_empty() => yield Ok(t),
+						_ => {}
+					}
+				}
+			}
+		}
+	}
+
 	pub fn complete_func(&self) -> impl Fn(&str) -> String + Send + Sync + 'static {
 		let client = self.clone();
 		move |prompt: &str| {
@@ -277,9 +334,49 @@ struct ChatChoiceMessage {
 	content: String,
 }
 
+#[derive(Debug, PartialEq)]
+enum SseDelta {
+	Token(String),
+	Done,
+}
+
+/// Parse one SSE line from an OpenAI/ollama streaming chat response.
+/// `data: [DONE]` → `Done`; `data: {json}` → `Token(delta.content)`; anything
+/// else (blank lines, comments, non-`data:` fields) → `None`.
+fn parse_sse_line(line: &str) -> Option<SseDelta> {
+	let rest = line.strip_prefix("data:")?.trim();
+	if rest == "[DONE]" {
+		return Some(SseDelta::Done);
+	}
+	let v: Value = serde_json::from_str(rest).ok()?;
+	let content = v
+		.get("choices")
+		.and_then(|c| c.get(0))
+		.and_then(|c| c.get("delta"))
+		.and_then(|d| d.get("content"))
+		.and_then(Value::as_str)
+		.unwrap_or("");
+	Some(SseDelta::Token(content.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn sse_line_yields_token_then_done() {
+		assert_eq!(
+			parse_sse_line(r#"data: {"choices":[{"delta":{"content":"He"}}]}"#),
+			Some(SseDelta::Token("He".to_string()))
+		);
+		assert_eq!(parse_sse_line("data: [DONE]"), Some(SseDelta::Done));
+		assert_eq!(parse_sse_line(""), None);
+		assert_eq!(parse_sse_line(": keep-alive"), None);
+		assert_eq!(
+			parse_sse_line(r#"data: {"choices":[{"delta":{}}]}"#),
+			Some(SseDelta::Token(String::new()))
+		);
+	}
 
 	#[test]
 	fn permanent_client_errors_do_not_retry_single() {
