@@ -61,9 +61,9 @@ Everything is controlled from `<cwd>/.relay/kern.toml`:
 
 ```toml
 [reason]
-# LLM for distillation. Local Ollama; gemma4 is fast, qwen3.5:27b is sharper.
+# LLM for distillation. Local Ollama. Default qwen2.5; larger models are sharper.
 url = "http://localhost:11434"
-model = "gemma4:latest"
+model = "qwen2.5"
 
 [capture]
 enabled = true          # self-learning
