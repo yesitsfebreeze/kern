@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use crate::base::locks::lock_recovered;
+
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -65,13 +67,13 @@ impl Queue {
 	}
 
 	pub fn take_receiver(&self) -> Option<mpsc::Receiver<Task>> {
-		self.rx.lock().unwrap().take()
+		lock_recovered(&self.rx).take()
 	}
 
 	pub fn enqueue(&self, t: Task) -> bool {
 		let k = key_of(&t);
 		{
-			let mut pending = self.pending.lock().unwrap();
+			let mut pending = lock_recovered(&self.pending);
 			if *pending.get(&k).unwrap_or(&false) {
 				return false;
 			}
@@ -91,7 +93,7 @@ impl Queue {
 
 	pub fn dequeued(&self, t: &Task) {
 		let k = key_of(t);
-		self.pending.lock().unwrap().remove(&k);
+		lock_recovered(&self.pending).remove(&k);
 	}
 
 	pub fn done(&self) {
@@ -101,19 +103,19 @@ impl Queue {
 	}
 
 	pub fn pending_count(&self) -> usize {
-		self.pending.lock().unwrap().len()
+		lock_recovered(&self.pending).len()
 	}
 
 	pub fn record_task_latency(&self, d: Duration) {
-		let mut count = self.task_count.lock().unwrap();
-		let mut total = self.task_latency_total.lock().unwrap();
+		let mut count = lock_recovered(&self.task_count);
+		let mut total = lock_recovered(&self.task_latency_total);
 		*count += 1;
 		*total += d;
 	}
 
 	pub fn metrics(&self) -> (i64, i64) {
-		let count = *self.task_count.lock().unwrap();
-		let total = *self.task_latency_total.lock().unwrap();
+		let count = *lock_recovered(&self.task_count);
+		let total = *lock_recovered(&self.task_latency_total);
 		let avg = if count > 0 {
 			total.as_millis() as i64 / count
 		} else {

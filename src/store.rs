@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use crate::base::graph::GraphGnn;
-use crate::base::locks::read_recovered;
+use crate::base::locks::{read_recovered, write_recovered};
 use crate::config::Config;
 use crate::ingest::{LlmFunc as IngestLlmFunc, Worker};
 use crate::llm::Client as LlmClient;
@@ -40,12 +40,12 @@ impl Registry {
     }
 
     pub fn get(&self, data_dir: &Path) -> Option<Arc<StoreEntry>> {
-        self.stores.read().unwrap().get(&Self::canon(data_dir)).cloned()
+        read_recovered(&self.stores).get(&Self::canon(data_dir)).cloned()
     }
 
-    pub fn len(&self) -> usize { self.stores.read().unwrap().len() }
+    pub fn len(&self) -> usize { read_recovered(&self.stores).len() }
 
-    pub fn is_empty(&self) -> bool { self.stores.read().unwrap().is_empty() }
+    pub fn is_empty(&self) -> bool { read_recovered(&self.stores).is_empty() }
 
     #[allow(clippy::too_many_arguments)]
     pub fn open(
@@ -59,8 +59,8 @@ impl Registry {
         broadcast_q: Option<BroadcastQuestionFunc>,
     ) -> Arc<StoreEntry> {
         let key = Self::canon(data_dir);
-        if let Some(e) = self.stores.read().unwrap().get(&key) {
-            *e.last_touch.write().unwrap() = Instant::now();
+        if let Some(e) = read_recovered(&self.stores).get(&key) {
+            *write_recovered(&e.last_touch) = Instant::now();
             return e.clone();
         }
 
@@ -109,7 +109,7 @@ impl Registry {
             last_touch: RwLock::new(Instant::now()),
         });
 
-        self.stores.write().unwrap()
+        write_recovered(&self.stores)
             .entry(key)
             .or_insert_with(|| entry.clone())
             .clone()
