@@ -1,3 +1,4 @@
+use futures_util::StreamExt as _;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -236,16 +237,18 @@ impl Client {
 				return;
 			}
 			let mut stream = resp.bytes_stream();
-			let mut buf = String::new();
-			use futures_util::StreamExt as _;
+			let mut buf: Vec<u8> = Vec::new();
 			while let Some(chunk) = stream.next().await {
 				let chunk = match chunk {
 					Ok(b) => b,
 					Err(e) => { yield Err(LlmError::from(e)); return; }
 				};
-				buf.push_str(&String::from_utf8_lossy(&chunk));
-				while let Some(nl) = buf.find('\n') {
-					let line: String = buf.drain(..=nl).collect();
+				buf.extend_from_slice(&chunk);
+				// Decode only COMPLETE lines, so a multibyte char split across chunks
+				// is never lossily decoded mid-sequence. Each full SSE line is valid UTF-8.
+				while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+					let raw: Vec<u8> = buf.drain(..=pos).collect();
+					let line = String::from_utf8_lossy(&raw);
 					match parse_sse_line(line.trim_end()) {
 						Some(SseDelta::Done) => return,
 						Some(SseDelta::Token(t)) if !t.is_empty() => yield Ok(t),
@@ -351,11 +354,11 @@ fn parse_sse_line(line: &str) -> Option<SseDelta> {
 	let v: Value = serde_json::from_str(rest).ok()?;
 	let content = v
 		.get("choices")
-		.and_then(|c| c.get(0))
+		.and_then(|c| c.as_array())
+		.and_then(|a| a.first())
 		.and_then(|c| c.get("delta"))
 		.and_then(|d| d.get("content"))
-		.and_then(Value::as_str)
-		.unwrap_or("");
+		.and_then(Value::as_str)?;
 	Some(SseDelta::Token(content.to_string()))
 }
 
@@ -374,7 +377,7 @@ mod tests {
 		assert_eq!(parse_sse_line(": keep-alive"), None);
 		assert_eq!(
 			parse_sse_line(r#"data: {"choices":[{"delta":{}}]}"#),
-			Some(SseDelta::Token(String::new()))
+			None
 		);
 	}
 
