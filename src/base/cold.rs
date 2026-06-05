@@ -86,21 +86,59 @@ pub fn get(cold_dir: &Path, id: &str) -> Option<Entity> {
 /// Vector search over the cold store. Returns up to `k` entities with the
 /// highest cosine similarity to `query_vec` (descending), skipping entities
 /// whose stored vector is empty or a different dimension. Read-only.
+///
+/// Scores against a lightweight `{id, vector}` projection of each line (so the
+/// full `Entity` — text, metadata, gnn vector — is decoded only for the `k`
+/// survivors, not every row) and keeps latest-line-wins per id by storing a
+/// borrow into the file buffer rather than a materialized struct.
 pub fn search(cold_dir: &Path, query_vec: &[f64], k: usize) -> Vec<(Entity, f64)> {
 	if query_vec.is_empty() || k == 0 {
 		return Vec::new();
 	}
-	let mut scored: Vec<(Entity, f64)> = load_all(cold_dir)
-		.into_iter()
-		.filter(|e| e.vector.len() == query_vec.len())
-		.map(|e| {
-			let s = crate::base::math::cosine(query_vec, &e.vector);
-			(e, s)
-		})
+	let text = match std::fs::read_to_string(store_path(cold_dir)) {
+		Ok(t) => t,
+		Err(_) => return Vec::new(),
+	};
+
+	/// Minimal projection of a cold line: enough to score and to keep
+	/// latest-wins, without decoding the rest of the `Entity`.
+	#[derive(serde::Deserialize)]
+	struct ColdVec {
+		id: String,
+		#[serde(default)]
+		vector: Vec<f64>,
+	}
+
+	// Latest line per id wins. A wrong-dimension latest line still supersedes
+	// (matching `load_all` semantics) but scores `-inf` so it is excluded.
+	let mut latest: std::collections::HashMap<String, (f64, &str)> =
+		std::collections::HashMap::new();
+	for line in text.lines() {
+		if line.trim().is_empty() {
+			continue;
+		}
+		let Ok(cv) = serde_json::from_str::<ColdVec>(line) else {
+			continue;
+		};
+		let score = if cv.vector.len() == query_vec.len() {
+			crate::base::math::cosine(query_vec, &cv.vector)
+		} else {
+			f64::NEG_INFINITY
+		};
+		latest.insert(cv.id, (score, line));
+	}
+
+	let mut top: Vec<(f64, &str)> = latest
+		.into_values()
+		.filter(|(s, _)| s.is_finite())
 		.collect();
-	scored.sort_by(|a, b| cmp_partial(&b.1, &a.1));
-	scored.truncate(k);
-	scored
+	top.sort_by(|a, b| cmp_partial(&b.0, &a.0));
+	top.truncate(k);
+
+	// Decode the full Entity only for the survivors.
+	top.into_iter()
+		.filter_map(|(s, line)| serde_json::from_str::<Entity>(line).ok().map(|e| (e, s)))
+		.collect()
 }
 
 #[cfg(test)]
@@ -155,6 +193,36 @@ mod tests {
 		// Dimension mismatch yields no results.
 		let none = search(dir.path(), &[1.0, 0.0, 0.0], 2);
 		assert!(none.is_empty());
+	}
+
+	#[test]
+	fn search_uses_latest_spilled_vector() {
+		let dir = tempfile::tempdir().unwrap();
+		// First spill points away from the query...
+		let mut v1 = mk_entity("z", "v1", 0.0, EntityKind::Claim);
+		v1.vector = vec![0.0, 1.0];
+		spill(dir.path(), &v1);
+		// ...re-spill flips it to align with the query. Latest wins.
+		let mut v2 = mk_entity("z", "v2", 0.0, EntityKind::Claim);
+		v2.vector = vec![1.0, 0.0];
+		spill(dir.path(), &v2);
+
+		let hits = search(dir.path(), &[1.0, 0.0], 5);
+		assert_eq!(hits.len(), 1, "one id, latest-wins");
+		assert_eq!(hits[0].0.id, "z");
+		assert_eq!(hits[0].0.text(), "v2");
+		assert!(hits[0].1 > 0.99, "scored against the latest (aligned) vector");
+	}
+
+	#[test]
+	fn search_truncates_to_k() {
+		let dir = tempfile::tempdir().unwrap();
+		for i in 0..5 {
+			let mut e = mk_entity(&format!("e{i}"), "t", 0.0, EntityKind::Claim);
+			e.vector = vec![1.0, i as f64 / 10.0];
+			spill(dir.path(), &e);
+		}
+		assert_eq!(search(dir.path(), &[1.0, 0.0], 2).len(), 2);
 	}
 
 	#[test]
