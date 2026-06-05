@@ -1,5 +1,6 @@
 use serde_json::value::RawValue;
 
+use crate::base::locks::read_recovered;
 use crate::base::search::{find_reason, find_entity};
 use crate::base::util::truncate;
 
@@ -91,7 +92,7 @@ fn resource_health(server: &Server) -> String {
 }
 
 fn resource_thoughts(server: &Server) -> String {
-	let g = server.graph.read().unwrap();
+	let g = read_recovered(&server.graph);
 	let mut all = Vec::new();
 	for kern in g.all() {
 		for t in kern.entities.values() {
@@ -107,7 +108,7 @@ fn resource_thoughts(server: &Server) -> String {
 }
 
 fn resource_kerns(server: &Server) -> String {
-	let g = server.graph.read().unwrap();
+	let g = read_recovered(&server.graph);
 	let summaries: Vec<serde_json::Value> = g
 		.all()
 		.iter()
@@ -125,12 +126,12 @@ fn resource_kerns(server: &Server) -> String {
 }
 
 fn resource_descriptors(server: &Server) -> String {
-	let g = server.graph.read().unwrap();
+	let g = read_recovered(&server.graph);
 	serde_json::to_string(&g.root.descriptors).unwrap_or_default()
 }
 
 fn resource_thought(server: &Server, id: &str) -> String {
-	let g = server.graph.read().unwrap();
+	let g = read_recovered(&server.graph);
 	match find_entity(&g, id) {
 		Some((thought, kern_id)) => {
 			let mut edges = Vec::new();
@@ -171,7 +172,7 @@ fn resource_thought(server: &Server, id: &str) -> String {
 }
 
 fn resource_reason(server: &Server, id: &str) -> String {
-	let g = server.graph.read().unwrap();
+	let g = read_recovered(&server.graph);
 	match find_reason(&g, id) {
 		Some((reason, _)) => serde_json::to_string(&serde_json::json!({
 			"id": reason.id,
