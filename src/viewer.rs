@@ -24,9 +24,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
+use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures_util::StreamExt as _;
+use std::convert::Infallible;
 use serde_json::{json, Value};
 
 use crate::base::graph::GraphGnn;
@@ -105,6 +108,7 @@ pub async fn run(graph: Graph, llm: crate::llm::Client, retrieval: RetrievalConf
 					.route("/", get(index))
 					.route("/graph", get(aggregate))
 					.route("/search", get(hub_search))
+					.route("/ask", post(ask))
 					.with_state(hub);
 				if let Err(e) = axum::serve(listener, app).await {
 					tracing::warn!(target: "kern.viewer", error = %e, "aggregator hub exited; will retry");
@@ -404,6 +408,103 @@ async fn ask_retrieve(State(st): State<LocalState>, Json(body): Json<AskRetrieve
 	Json(json!({ "sources": sources, "chain_text": chain_text }))
 }
 
+#[derive(serde::Deserialize)]
+struct ChatTurn {
+	role: String,
+	content: String,
+}
+
+#[derive(serde::Deserialize)]
+struct AskBody {
+	question: String,
+	#[serde(default)]
+	history: Vec<ChatTurn>,
+	#[serde(default = "default_ask_k")]
+	k: usize,
+}
+
+fn default_ask_k() -> usize { 8 }
+
+/// Hub oracle endpoint: embed the question once, fan retrieval out to peers,
+/// merge sources by score, emit a `sources` SSE event, then stream the generated
+/// answer as `token` events, ending with `done`. Embed/LLM failure → `error`.
+async fn ask(State(st): State<HubState>, Json(body): Json<AskBody>) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
+	let stream = async_stream::stream! {
+		let q = body.question.trim().to_string();
+		if q.is_empty() {
+			yield Ok(Event::default().event("done").data("{}"));
+			return;
+		}
+		let k = body.k.min(MAX_SEARCH_K);
+		let vec = match st.llm.embed(&q).await {
+			Ok(v) => v,
+			Err(e) => {
+				yield Ok(Event::default().event("error").data(json!({ "message": e.to_string() }).to_string()));
+				return;
+			}
+		};
+		let peers = live_peers();
+		let reqbody = json!({ "vec": vec, "question": q, "k": k });
+		let mut tagged = Vec::new();
+		let mut chains: Vec<String> = Vec::new();
+		for addr in &peers {
+			let url = format!("http://{addr}/ask_retrieve");
+			let resp = match st.client.post(&url).json(&reqbody).send().await {
+				Ok(r) => r,
+				Err(_) => continue,
+			};
+			if let Ok(v) = resp.json::<Value>().await {
+				if let Some(ct) = v.get("chain_text").and_then(Value::as_str) {
+					if !ct.trim().is_empty() { chains.push(ct.to_string()); }
+				}
+				tagged.push((format!("{addr}|"), json!({ "hits": v.get("sources").cloned().unwrap_or(json!([])) })));
+			}
+		}
+		let mut merged = rank_peers(&tagged, k);
+		for (n, s) in merged.iter_mut().enumerate() {
+			if let Some(o) = s.as_object_mut() { o.insert("n".into(), json!(n + 1)); }
+		}
+		yield Ok(Event::default().event("sources").data(json!({ "entities": merged, "chains": chains }).to_string()));
+		let prompt = build_ask_prompt(&merged, &chains, &q);
+		let mut messages: Vec<(String, String)> = body.history.iter()
+			.rev().take(6).rev()
+			.map(|t| (t.role.clone(), t.content.clone()))
+			.collect();
+		messages.push(("user".to_string(), prompt));
+		let mut gen = Box::pin(st.llm.complete_stream(messages));
+		while let Some(item) = gen.next().await {
+			match item {
+				Ok(tok) => yield Ok(Event::default().event("token").data(json!({ "t": tok }).to_string())),
+				Err(e) => { yield Ok(Event::default().event("error").data(json!({ "message": e.to_string() }).to_string())); return; }
+			}
+		}
+		yield Ok(Event::default().event("done").data("{}"));
+	};
+	Sse::new(stream)
+}
+
+/// Build the generation prompt from merged source texts + per-daemon chain
+/// strings. Numbers each fact so the model can cite them as `[n]`, which the
+/// browser links back to the source tiles.
+fn build_ask_prompt(sources: &[Value], chains: &[String], question: &str) -> String {
+	let mut p = String::from("Context from knowledge graph:\n\n");
+	for c in chains.iter().filter(|c| !c.trim().is_empty()) {
+		p.push_str(c);
+		p.push('\n');
+	}
+	p.push_str("Relevant facts:\n");
+	for (i, s) in sources.iter().enumerate() {
+		let text = s.get("text").and_then(Value::as_str).unwrap_or("");
+		p.push_str(&format!("{}. {}\n", i + 1, text));
+	}
+	p.push_str(&format!(
+		"\nQuestion: {question}\n\
+		 Answer concisely using only the context above. Cite the facts you use \
+		 inline as [n] where n is the fact number. Do not restate the context. Be direct."
+	));
+	p
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -437,6 +538,21 @@ mod tests {
 		let (mut n, mut l, mut k) = (Vec::new(), Vec::new(), Vec::new());
 		merge_peer("t|", &json!({}), &mut n, &mut l, &mut k);
 		assert!(n.is_empty() && l.is_empty() && k.is_empty());
+	}
+
+	#[test]
+	fn ask_prompt_numbers_facts_and_requests_citations() {
+		let sources = vec![
+			json!({ "text": "confidence join uses max" }),
+			json!({ "text": "max is monotone" }),
+		];
+		let chains = vec!["Chain 1:\n  [Entity] conf\n".to_string()];
+		let p = build_ask_prompt(&sources, &chains, "how sure are we?");
+		assert!(p.contains("1. confidence join uses max"));
+		assert!(p.contains("2. max is monotone"));
+		assert!(p.contains("Chain 1:"));
+		assert!(p.contains("how sure are we?"));
+		assert!(p.contains("[n]"));
 	}
 
 	#[test]
