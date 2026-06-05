@@ -200,16 +200,17 @@ impl<S: MirrorSink> SessionMirror<S> {
 
 	pub fn set_max_seen(&mut self, cap: usize) {
 		self.max_seen = cap.max(1);
-		while self.seen_order.len() > self.max_seen {
-			if let Some(old) = self.seen_order.pop_front() {
-				self.seen.remove(&old);
-			}
-		}
+		self.evict_to_cap();
 	}
 
 	fn remember(&mut self, fork_id: String) {
 		self.seen.insert(fork_id.clone());
 		self.seen_order.push_back(fork_id);
+		self.evict_to_cap();
+	}
+
+	/// Drop oldest seen ids until the ring is within `max_seen`.
+	fn evict_to_cap(&mut self) {
 		while self.seen_order.len() > self.max_seen {
 			if let Some(old) = self.seen_order.pop_front() {
 				self.seen.remove(&old);

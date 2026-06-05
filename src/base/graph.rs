@@ -8,6 +8,41 @@ use super::types::Kern;
 use super::util;
 use crate::quant::QuantizationMode;
 
+/// Insert every entity/reason/source of `kern` into the cross-kern lookup
+/// maps and vector indices. Taken as disjoint `&mut` fields (not `&mut self`)
+/// so the caller can iterate `self.kerns` while filling the indices. Single
+/// source for the index-population loop shared by `rebuild_index` and the
+/// lazy-load path in `get`.
+#[allow(clippy::too_many_arguments)]
+fn index_kern_into(
+	kern: &Kern,
+	entity_kern: &mut HashMap<String, String>,
+	reason_kern: &mut HashMap<String, String>,
+	src_index: &mut HashMap<String, String>,
+	entity_idx: &mut HnswIndex,
+	gnn_entity_idx: &mut HnswIndex,
+	reason_idx: &mut HnswIndex,
+) {
+	for t in kern.entities.values() {
+		entity_kern.insert(t.id.clone(), kern.id.clone());
+		if t.has_vector() {
+			entity_idx.insert(t.id.clone(), t.vector.clone());
+		}
+		if t.has_gnn_vector() {
+			gnn_entity_idx.insert(t.id.clone(), t.gnn_vector.clone());
+		}
+	}
+	for r in kern.reasons.values() {
+		reason_kern.insert(r.id.clone(), kern.id.clone());
+		if r.has_vector() {
+			reason_idx.insert(r.id.clone(), r.vector.clone());
+		}
+	}
+	for ext_id in kern.source_index.keys() {
+		src_index.insert(ext_id.clone(), kern.id.clone());
+	}
+}
+
 pub struct GraphGnn {
 	pub root: Kern,
 	pub network_id: String,
@@ -105,26 +140,15 @@ impl GraphGnn {
 		self.entity_kern.clear();
 		self.reason_kern.clear();
 		for kern in self.kerns.values() {
-			for t in kern.entities.values() {
-				self.entity_kern.insert(t.id.clone(), kern.id.clone());
-				if t.has_vector() {
-					self.entity_idx.insert(t.id.clone(), t.vector.clone());
-				}
-				if t.has_gnn_vector() {
-					self
-						.gnn_entity_idx
-						.insert(t.id.clone(), t.gnn_vector.clone());
-				}
-			}
-			for r in kern.reasons.values() {
-				self.reason_kern.insert(r.id.clone(), kern.id.clone());
-				if r.has_vector() {
-					self.reason_idx.insert(r.id.clone(), r.vector.clone());
-				}
-			}
-			for ext_id in kern.source_index.keys() {
-				self.src_index.insert(ext_id.clone(), kern.id.clone());
-			}
+			index_kern_into(
+				kern,
+				&mut self.entity_kern,
+				&mut self.reason_kern,
+				&mut self.src_index,
+				&mut self.entity_idx,
+				&mut self.gnn_entity_idx,
+				&mut self.reason_idx,
+			);
 		}
 	}
 
@@ -139,26 +163,15 @@ impl GraphGnn {
 			if let Ok(mut k) = super::persist::load_kern(&self.data_dir, id) {
 				migrate_root_id(&mut k, &self.network_id);
 				k.last_access = Some(SystemTime::now());
-				for t in k.entities.values() {
-					self.entity_kern.insert(t.id.clone(), k.id.clone());
-					if t.has_vector() {
-						self.entity_idx.insert(t.id.clone(), t.vector.clone());
-					}
-					if t.has_gnn_vector() {
-						self
-							.gnn_entity_idx
-							.insert(t.id.clone(), t.gnn_vector.clone());
-					}
-				}
-				for r in k.reasons.values() {
-					self.reason_kern.insert(r.id.clone(), k.id.clone());
-					if r.has_vector() {
-						self.reason_idx.insert(r.id.clone(), r.vector.clone());
-					}
-				}
-				for ext_id in k.source_index.keys() {
-					self.src_index.insert(ext_id.clone(), k.id.clone());
-				}
+				index_kern_into(
+					&k,
+					&mut self.entity_kern,
+					&mut self.reason_kern,
+					&mut self.src_index,
+					&mut self.entity_idx,
+					&mut self.gnn_entity_idx,
+					&mut self.reason_idx,
+				);
 				self.unloaded.remove(id);
 				self.kerns.insert(id.to_string(), k);
 				return self.kerns.get(id);

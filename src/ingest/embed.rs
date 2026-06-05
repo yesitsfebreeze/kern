@@ -9,8 +9,7 @@ pub(crate) async fn embed_chunks(
 		return (Vec::new(), Vec::new());
 	}
 
-	let texts: Vec<String> = chunks.to_vec();
-	if let Ok(vecs) = embedder.embed_batch(&texts).await {
+	if let Ok(vecs) = embedder.embed_batch(chunks).await {
 		if vecs.len() == chunks.len() {
 			return (vecs, Vec::new());
 		}

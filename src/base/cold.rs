@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::base::types::Entity;
+use crate::base::util::cmp_partial;
 
 fn store_path(cold_dir: &Path) -> PathBuf {
 	cold_dir.join("cold.jsonl")
@@ -97,7 +98,7 @@ pub fn search(cold_dir: &Path, query_vec: &[f64], k: usize) -> Vec<(Entity, f64)
 			(e, s)
 		})
 		.collect();
-	scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+	scored.sort_by(|a, b| cmp_partial(&b.1, &a.1));
 	scored.truncate(k);
 	scored
 }
@@ -105,48 +106,7 @@ pub fn search(cold_dir: &Path, query_vec: &[f64], k: usize) -> Vec<(Entity, f64)
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::base::types::{
-		Acl, ChunkPart, ChunkPartKind, Entity, EntityKind, EntityStatus, Source,
-	};
-	use crate::crdt::GCounter;
-
-	fn mk_entity(id: &str, text: &str, heat: f64, kind: EntityKind) -> Entity {
-		let mut e = Entity {
-			id: id.to_string(),
-			root_id: String::new(),
-			external_id: String::new(),
-			superseded_by: String::new(),
-			kind,
-			status: EntityStatus::Active,
-			statements: vec![text.to_string()],
-			chunks: vec![ChunkPart {
-				kind: ChunkPartKind::StatementRef,
-				text: String::new(),
-				index: 0,
-			}],
-			vector: vec![0.0; 8],
-			gnn_vector: Vec::new(),
-			score: 0.0,
-			conf_alpha: 2.0,
-			conf_beta: 1.0,
-			source: Source::Inline {
-				hash: id.into(),
-				section: String::new(),
-			},
-			created_at: None,
-			acl: Acl::default(),
-			access_count: GCounter::new(),
-			accessed_at: None,
-			heat: heat as f32,
-			heat_updated_at: None,
-			updated_at: None,
-			valid_until: None,
-			producer_id: String::new(),
-			unlinked_count: 0,
-		};
-		e.refresh_score();
-		e
-	}
+	use crate::base::types::{mk_entity, EntityKind};
 
 	#[test]
 	fn spill_then_get_roundtrips() {

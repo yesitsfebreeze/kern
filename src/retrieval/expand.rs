@@ -1,5 +1,6 @@
 use crate::base::graph::GraphGnn;
 use crate::base::math::cosine;
+use crate::base::reason::collect_reason_ids;
 use crate::base::search::EntityHit;
 use crate::base::types::*;
 use crate::config::RetrievalConfig;
@@ -167,16 +168,6 @@ pub fn score_neighbor(
 	w.content * content_score + w.reason * reason_score + w.edge * edge_score
 }
 
-fn collect_reason_ids(kern: &Kern, entity_id: &str) -> Vec<String> {
-	let mut ids = Vec::new();
-	if let Some(from_ids) = kern.by_from.get(entity_id) {
-		ids.extend(from_ids.iter().cloned());
-	}
-	if let Some(to_ids) = kern.by_to.get(entity_id) {
-		ids.extend(to_ids.iter().cloned());
-	}
-	ids
-}
 
 fn find_entity_and_kern<'a>(g: &'a GraphGnn, id: &str) -> Option<(&'a Entity, &'a Kern)> {
 	if let Some(kid) = g.kern_of_entity(id) {
@@ -195,18 +186,6 @@ fn find_entity_and_kern<'a>(g: &'a GraphGnn, id: &str) -> Option<(&'a Entity, &'
 }
 
 pub fn find_entity_in_graph(g: &GraphGnn, id: &str) -> Option<Entity> {
-	if let Some(kid) = g.kern_of_entity(id) {
-		if let Some(kern) = g.loaded(kid) {
-			if let Some(t) = kern.entities.get(id) {
-				return Some(t.clone());
-			}
-		}
-	}
-	for kern in g.all() {
-		if let Some(t) = kern.entities.get(id) {
-			return Some(t.clone());
-		}
-	}
-	None
+	find_entity_and_kern(g, id).map(|(t, _)| t.clone())
 }
 

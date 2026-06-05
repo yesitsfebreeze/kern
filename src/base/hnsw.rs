@@ -1,4 +1,5 @@
 use super::math::cosine_distance;
+use super::util::cmp_partial;
 use crate::quant::{quantized_cosine_distance, QuantizationMode, QuantizedVec};
 use rand::RngExt;
 use rayon::prelude::*;
@@ -375,7 +376,7 @@ impl HnswIndex {
 				}
 			})
 			.collect();
-		pairs.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+		pairs.sort_by(|a, b| cmp_partial(&a.1, &b.1));
 		pairs.truncate(m);
 		pairs.into_iter().map(|(id, _)| id).collect()
 	}

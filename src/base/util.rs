@@ -33,6 +33,34 @@ pub fn truncate(s: &str, max: usize) -> String {
 	}
 }
 
+/// Total order over `PartialOrd` values, treating incomparable pairs (NaN)
+/// as `Equal`. Replaces the `a.partial_cmp(&b).unwrap_or(Ordering::Equal)`
+/// idiom scattered across the sort/rank paths.
+pub fn cmp_partial<T: PartialOrd>(a: &T, b: &T) -> std::cmp::Ordering {
+	a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+}
+
+/// Wall-clock nanoseconds since the Unix epoch. Single source for the
+/// `SystemTime::now().duration_since(UNIX_EPOCH)` stamp used to mint
+/// gossip message ids.
+pub fn now_nanos() -> u128 {
+	std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
+		.unwrap_or_default()
+		.as_nanos()
+}
+
+/// Build the LLM prompt asking why two entities are related. Single source
+/// for the prompt text and the 500-char truncation budget, shared by the
+/// link/enrich paths in commands, mcp, and tick.
+pub fn explain_relationship_prompt(a: &str, b: &str) -> String {
+	format!(
+		"Explain in one sentence why these two pieces of knowledge are related:\n\nA: {}\n\nB: {}\n\nRelationship:",
+		truncate(a, 500),
+		truncate(b, 500),
+	)
+}
+
 pub fn uuid_v4() -> String {
 	use rand::RngExt;
 	let mut rng = rand::rng();

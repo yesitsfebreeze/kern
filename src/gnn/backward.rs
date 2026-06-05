@@ -15,14 +15,21 @@ pub fn act_deriv_mul(act: Activation, d_out: &Tensor, pre_act: &Tensor) -> Tenso
 	out
 }
 
+/// Sum of squares of a single tensor row. Shared by the L2-norm forward and
+/// backward passes so the per-row reduction lives in one place.
+fn row_sum_sq(t: &Tensor, row: usize) -> f64 {
+	let mut sum_sq = 0.0;
+	for j in 0..t.cols {
+		let v = t.at(row, j);
+		sum_sq += v * v;
+	}
+	sum_sq
+}
+
 pub fn l2_normalize_rows(t: &Tensor) -> Tensor {
 	let mut out = t.clone();
 	for i in 0..t.rows {
-		let mut sum_sq = 0.0;
-		for j in 0..t.cols {
-			let v = t.at(i, j);
-			sum_sq += v * v;
-		}
+		let sum_sq = row_sum_sq(t, i);
 		if sum_sq == 0.0 {
 			continue;
 		}
@@ -37,11 +44,7 @@ pub fn l2_normalize_rows(t: &Tensor) -> Tensor {
 pub fn l2_norm_backward(pre_norm: &Tensor, d_out: &Tensor) -> Tensor {
 	let mut out = Tensor::zeros(pre_norm.rows, pre_norm.cols);
 	for i in 0..pre_norm.rows {
-		let mut sum_sq = 0.0;
-		for j in 0..pre_norm.cols {
-			let v = pre_norm.at(i, j);
-			sum_sq += v * v;
-		}
+		let sum_sq = row_sum_sq(pre_norm, i);
 		if sum_sq == 0.0 {
 			continue;
 		}

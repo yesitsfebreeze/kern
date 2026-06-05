@@ -3,6 +3,7 @@ use crate::base::constants::{
 	KERN_NAMING_MIN_CLUSTER_SIZE,
 };
 use crate::base::math::cosine;
+use crate::base::util::cmp_partial;
 use crate::base::types::Entity;
 use rayon::prelude::*;
 
@@ -144,7 +145,7 @@ pub fn purpose_prompt(c: &Cluster) -> String {
 			.enumerate()
 			.map(|(i, t)| (i, cosine(&centroid, &t.vector)))
 			.collect();
-		ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+		ranked.sort_by(|a, b| cmp_partial(&b.1, &a.1));
 		ranked
 			.iter()
 			.take(MAX_SAMPLES)

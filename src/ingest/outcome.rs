@@ -35,3 +35,21 @@ pub struct Outcome {
 	pub failures: Vec<FailureReport>,
 	pub message: String,
 }
+
+impl Outcome {
+	/// A wholly-failed outcome: no document committed, all chunk counters
+	/// zero. Used for enqueue/dispatch failures where nothing was processed.
+	pub fn failed(message: impl Into<String>, failures: Vec<FailureReport>) -> Self {
+		Self {
+			status: OutcomeStatus::Failed,
+			doc_id: String::new(),
+			total_chunks: 0,
+			embedded_chunks: 0,
+			failed_chunks: 0,
+			transient_failures: 0,
+			permanent_failures: 0,
+			failures,
+			message: message.into(),
+		}
+	}
+}

@@ -154,12 +154,7 @@ let (llm, embed) = match (llm, embed) {
 			Some(t) => t,
 			None => return,
 		};
-		format!(
-			"Explain in one sentence why these two pieces of knowledge are related:\n\n\
-			 A: {}\n\nB: {}\n\nRelationship:",
-			util::truncate(&from.text(), 500),
-			util::truncate(&to.text(), 500)
-		)
+		util::explain_relationship_prompt(&from.text(), &to.text())
 	};
 
 	let text = llm(&prompt);

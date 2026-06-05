@@ -156,49 +156,8 @@ pub fn merge_remote_entity(g: &mut GraphGnn, target_kern_id: &str, remote: Entit
 mod tests {
 	use super::*;
 	use crate::base::graph::GraphGnn;
-	use crate::base::types::{
-		Acl, ChunkPart, ChunkPartKind, Entity, EntityKind, EntityStatus, Kern, Source,
-	};
-	use crate::crdt::GCounter;
+	use crate::base::types::{mk_entity, EntityKind, Kern};
 	use std::time::{Duration, UNIX_EPOCH};
-
-	fn mk_entity(id: &str, text: &str, heat: f64, kind: EntityKind) -> Entity {
-		let mut e = Entity {
-			id: id.to_string(),
-			root_id: String::new(),
-			external_id: String::new(),
-			superseded_by: String::new(),
-			kind,
-			status: EntityStatus::Active,
-			statements: vec![text.to_string()],
-			chunks: vec![ChunkPart {
-				kind: ChunkPartKind::StatementRef,
-				text: String::new(),
-				index: 0,
-			}],
-			vector: vec![0.0; 8],
-			gnn_vector: Vec::new(),
-			score: 0.0,
-			conf_alpha: 2.0,
-			conf_beta: 1.0,
-			source: Source::Inline {
-				hash: id.into(),
-				section: String::new(),
-			},
-			created_at: None,
-			acl: Acl::default(),
-			access_count: GCounter::new(),
-			accessed_at: None,
-			heat: heat as f32,
-			heat_updated_at: None,
-			updated_at: None,
-			valid_until: None,
-			producer_id: String::new(),
-			unlinked_count: 0,
-		};
-		e.refresh_score();
-		e
-	}
 
 	fn t(secs: u64) -> Option<SystemTime> {
 		Some(UNIX_EPOCH + Duration::from_secs(secs))

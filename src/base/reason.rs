@@ -1,6 +1,20 @@
 use super::graph::GraphGnn;
 use super::types::{Kern, Reason};
 
+/// All reason (edge) ids incident to `entity_id` in this kern — outgoing
+/// (`by_from`) followed by incoming (`by_to`). Single source for the
+/// edge-collection step shared by retrieval, the MCP tools, and the CLI.
+pub(crate) fn collect_reason_ids(kern: &Kern, entity_id: &str) -> Vec<String> {
+	let mut ids = Vec::new();
+	if let Some(from_ids) = kern.by_from.get(entity_id) {
+		ids.extend(from_ids.iter().cloned());
+	}
+	if let Some(to_ids) = kern.by_to.get(entity_id) {
+		ids.extend(to_ids.iter().cloned());
+	}
+	ids
+}
+
 pub fn add_reason(kern: &mut Kern, reason: Reason) {
 	let id = reason.id.clone();
 	let from = reason.from.clone();

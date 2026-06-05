@@ -91,16 +91,23 @@ impl Activation {
 	}
 }
 
+/// Maximum value in a tensor row — the numerically-stable shift subtracted
+/// before exponentiating in `softmax` / `log_softmax`.
+fn row_max(t: &Tensor, row: usize) -> f64 {
+	let mut max_val = f64::NEG_INFINITY;
+	for j in 0..t.cols {
+		let v = t.at(row, j);
+		if v > max_val {
+			max_val = v;
+		}
+	}
+	max_val
+}
+
 pub fn softmax(t: &Tensor) -> Tensor {
 	let mut out = Tensor::zeros(t.rows, t.cols);
 	for i in 0..t.rows {
-		let mut max_val = f64::NEG_INFINITY;
-		for j in 0..t.cols {
-			let v = t.at(i, j);
-			if v > max_val {
-				max_val = v;
-			}
-		}
+		let max_val = row_max(t, i);
 		let mut sum = 0.0;
 		for j in 0..t.cols {
 			let e = (t.at(i, j) - max_val).exp();
@@ -117,13 +124,7 @@ pub fn softmax(t: &Tensor) -> Tensor {
 pub fn log_softmax(t: &Tensor) -> Tensor {
 	let mut out = Tensor::zeros(t.rows, t.cols);
 	for i in 0..t.rows {
-		let mut max_val = f64::NEG_INFINITY;
-		for j in 0..t.cols {
-			let v = t.at(i, j);
-			if v > max_val {
-				max_val = v;
-			}
-		}
+		let max_val = row_max(t, i);
 		let mut log_sum = 0.0;
 		for j in 0..t.cols {
 			log_sum += (t.at(i, j) - max_val).exp();

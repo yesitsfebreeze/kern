@@ -84,34 +84,19 @@ let (result_tx, result_rx) = oneshot::channel();
 			result_tx: Some(result_tx),
 		};
 		if let Err(e) = self.tx.send(job).await {
-			return Outcome {
-				status: OutcomeStatus::Failed,
-				doc_id: String::new(),
-				total_chunks: 0,
-				embedded_chunks: 0,
-				failed_chunks: 0,
-				transient_failures: 0,
-				permanent_failures: 0,
-				failures: vec![FailureReport {
+			return Outcome::failed(
+				"failed to enqueue",
+				vec![FailureReport {
 					scope: "document".into(),
 					chunk_index: 0,
 					class: "permanent".into(),
 					error: format!("send failed: {e}"),
 				}],
-				message: "failed to enqueue".into(),
-			};
+			);
 		}
-		result_rx.await.unwrap_or(Outcome {
-			status: OutcomeStatus::Failed,
-			doc_id: String::new(),
-			total_chunks: 0,
-			embedded_chunks: 0,
-			failed_chunks: 0,
-			transient_failures: 0,
-			permanent_failures: 0,
-			failures: Vec::new(),
-			message: "worker dropped".into(),
-		})
+		result_rx
+			.await
+			.unwrap_or_else(|_| Outcome::failed("worker dropped", Vec::new()))
 }
 }
 

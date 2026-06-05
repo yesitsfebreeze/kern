@@ -1,4 +1,5 @@
 use crate::base::heat::{self, HeatConfig};
+use crate::base::util::cmp_partial;
 use crate::base::types::{EntityKind, EntityStatus};
 use crate::config::RetrievalConfig;
 use crate::retrieval::expand::ScoredEntity;
@@ -117,53 +118,24 @@ pub fn apply_query_options(results: &mut Vec<ScoredEntity>, opts: &QueryOptions)
 		results.retain(|r| r.entity.valid_until.is_none_or(|exp| exp >= valid_at));
 	}
 
+	// Sort each field ascending, then flip for descending. `dir` keeps the
+	// asc/desc branch in one place instead of per-field if/else.
 	let asc = opts.ascending;
+	let dir = |ord: std::cmp::Ordering| if asc { ord } else { ord.reverse() };
 	match opts.sort {
 		SortField::Score => {
-			results.sort_by(|a, b| {
-				if asc {
-					a.score.partial_cmp(&b.score)
-				} else {
-					b.score.partial_cmp(&a.score)
-				}
-				.unwrap_or(std::cmp::Ordering::Equal)
-			});
+			results.sort_by(|a, b| dir(cmp_partial(&a.score, &b.score)));
 		}
 		SortField::Date => {
-			results.sort_by(|a, b| {
-				let ta = a.entity.created_at;
-				let tb = b.entity.created_at;
-				if asc {
-					ta.cmp(&tb)
-				} else {
-					tb.cmp(&ta)
-				}
-			});
+			results.sort_by(|a, b| dir(a.entity.created_at.cmp(&b.entity.created_at)));
 		}
 		SortField::Access => {
 			results.sort_by(|a, b| {
-				let (av, bv) = (
-					a.entity.access_count.value(),
-					b.entity.access_count.value(),
-				);
-				if asc {
-					av.cmp(&bv)
-				} else {
-					bv.cmp(&av)
-				}
+				dir(a.entity.access_count.value().cmp(&b.entity.access_count.value()))
 			});
 		}
 		SortField::Confidence => {
-			results.sort_by(|a, b| {
-				let ca = a.entity.score;
-				let cb = b.entity.score;
-				if asc {
-					ca.partial_cmp(&cb)
-				} else {
-					cb.partial_cmp(&ca)
-				}
-				.unwrap_or(std::cmp::Ordering::Equal)
-			});
+			results.sort_by(|a, b| dir(cmp_partial(&a.entity.score, &b.entity.score)));
 		}
 	}
 }

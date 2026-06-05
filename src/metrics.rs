@@ -6,6 +6,7 @@
 //! concentrated, self-organising regime.
 
 use crate::base::types::Entity;
+use crate::base::util::cmp_partial;
 
 /// Snapshot of stigmergy state at a single observation point.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -40,7 +41,7 @@ pub fn gini_from_iter<I: IntoIterator<Item = f64>>(values: I) -> f64 {
 		return 0.0;
 	}
 
-	v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+	v.sort_by(|a, b| cmp_partial(a, b));
 
 	let sum: f64 = v.iter().sum();
 	if sum <= 0.0 {

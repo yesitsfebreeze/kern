@@ -12,7 +12,7 @@ impl Default for ReasonConfig {
 	fn default() -> Self {
 		Self {
 			url: String::new(),
-			model: "llama3".into(),
+			model: "qwen2.5".into(),
 			key: String::new(),
 		}
 	}

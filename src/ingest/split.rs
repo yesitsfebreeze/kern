@@ -22,22 +22,23 @@ pub(crate) fn llm_split(text: &str, descriptor: &str, llm: &dyn Fn(&str) -> Stri
 	if response.is_empty() {
 		return Vec::new();
 	}
-	response
-		.lines()
-		.map(|l| l.trim().to_string())
-		.filter(|l| !l.is_empty())
-		.collect()
+	trim_nonempty(response.lines())
 }
 
 pub(crate) fn paragraph_split(text: &str) -> Vec<String> {
-	let chunks: Vec<String> = text
-		.split("\n\n")
-		.map(|p| p.trim().to_string())
-		.filter(|p| !p.is_empty())
-		.collect();
+	let chunks = trim_nonempty(text.split("\n\n"));
 	if chunks.is_empty() {
 		vec![text.to_string()]
 	} else {
 		chunks
 	}
+}
+
+/// Trim each part and drop the empties. Shared by the line-based and
+/// paragraph-based splitters.
+fn trim_nonempty<'a>(parts: impl Iterator<Item = &'a str>) -> Vec<String> {
+	parts
+		.map(|p| p.trim().to_string())
+		.filter(|p| !p.is_empty())
+		.collect()
 }

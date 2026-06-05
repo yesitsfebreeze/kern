@@ -256,13 +256,7 @@ fn entity_detail(
 ) -> serde_json::Value {
 	let mut edges = Vec::new();
 	if let Some(kern) = g.kerns.get(kern_id) {
-		let mut rids = Vec::new();
-		if let Some(from_list) = kern.by_from.get(&thought.id) {
-			rids.extend(from_list.iter().cloned());
-		}
-		if let Some(to_list) = kern.by_to.get(&thought.id) {
-			rids.extend(to_list.iter().cloned());
-		}
+		let rids = crate::base::reason::collect_reason_ids(kern, &thought.id);
 		for rid in &rids {
 			if let Some(re) = kern.reasons.get(rid) {
 				edges.push(serde_json::json!({

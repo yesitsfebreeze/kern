@@ -1,10 +1,17 @@
 use super::graph::GraphGnn;
 use super::types::{Reason, Entity};
+use super::util::cmp_partial;
 
 #[derive(Debug, Clone)]
 pub struct EntityHit {
 	pub entity_id: String,
 	pub score: f64,
+}
+
+impl From<(String, f64)> for EntityHit {
+	fn from((entity_id, score): (String, f64)) -> Self {
+		Self { entity_id, score }
+	}
 }
 
 #[derive(Debug, Clone)]
@@ -42,16 +49,10 @@ pub fn search_all_unlocked(g: &GraphGnn, vec: &[f64], k: usize) -> Vec<EntityHit
 	}
 
 	let mut ranked: Vec<_> = scores.into_iter().collect();
-	ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+	ranked.sort_by(|a, b| cmp_partial(&b.1, &a.1));
 	ranked.truncate(k);
 
-	ranked
-		.into_iter()
-		.map(|(id, score)| EntityHit {
-			entity_id: id,
-			score,
-		})
-		.collect()
+	ranked.into_iter().map(EntityHit::from).collect()
 }
 
 pub fn search_reasons_all_unlocked(g: &GraphGnn, vec: &[f64], k: usize) -> Vec<ReasonHit> {

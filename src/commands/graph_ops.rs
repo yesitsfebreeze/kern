@@ -4,7 +4,7 @@ use crate::base::math::{average_vec, cosine, reason_id};
 use crate::base::reason::{add_reason, remove_reason, remove_entity};
 use crate::base::search::find_entity;
 use crate::base::types::{Reason, ReasonKind};
-use crate::base::util::{short_id, truncate};
+use crate::base::util::{explain_relationship_prompt, short_id, truncate};
 
 use super::{build_llm, find_entity_by_prefix, load_graph, print_kern, save_graph, with_graph};
 
@@ -38,13 +38,7 @@ pub(super) fn cmd_get(cfg: &crate::config::Config, id: &str) {
 	println!("Text:   {}", thought.text());
 
 	if let Some(kern) = g.kerns.get(&kern_id) {
-		let mut rids = Vec::new();
-		if let Some(from_list) = kern.by_from.get(&thought.id) {
-			rids.extend(from_list.iter().cloned());
-		}
-		if let Some(to_list) = kern.by_to.get(&thought.id) {
-			rids.extend(to_list.iter().cloned());
-		}
+		let rids = crate::base::reason::collect_reason_ids(kern, &thought.id);
 		if !rids.is_empty() {
 			println!("Edges:");
 			for rid in &rids {
@@ -136,11 +130,7 @@ pub(super) async fn cmd_link(
 	let mut reason_text = reason.to_string();
 
 	if reason_text.is_empty() && !reason_url.is_empty() {
-		let prompt = format!(
-			"Explain in one sentence why these two pieces of knowledge are related:\n\nA: {}\n\nB: {}\n\nRelationship:",
-			truncate(&from_t.text(), 500),
-			truncate(&to_t.text(), 500),
-		);
+		let prompt = explain_relationship_prompt(&from_t.text(), &to_t.text());
 		reason_text = llm_client
 			.complete(&prompt)
 			.await
@@ -196,14 +186,7 @@ pub(super) fn cmd_degrade(cfg: &crate::config::Config, id: &str) {
 		};
 
 		let rids: Vec<String> = if let Some(kern) = g.kerns.get(&kern_id) {
-			let mut ids = Vec::new();
-			if let Some(from_list) = kern.by_from.get(id) {
-				ids.extend(from_list.iter().cloned());
-			}
-			if let Some(to_list) = kern.by_to.get(id) {
-				ids.extend(to_list.iter().cloned());
-			}
-			ids
+			crate::base::reason::collect_reason_ids(kern, id)
 		} else {
 			Vec::new()
 		};

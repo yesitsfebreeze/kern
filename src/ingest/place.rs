@@ -12,6 +12,13 @@ use crate::llm::Client as LlmClient;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
+/// Beta-Bernoulli prior params from a clamped `[0,1]` confidence:
+/// `Beta(1 + conf, 1 + (1 - conf))`. Single source for the parameterization
+/// shared by document- and chunk-entity construction.
+fn beta_params_from_confidence(conf: f32) -> (f32, f32) {
+	(1.0 + conf, 1.0 + (1.0 - conf))
+}
+
 pub(crate) async fn place_document(
 	graph: &Arc<RwLock<GraphGnn>>,
 	embedder: &LlmClient,
@@ -38,6 +45,7 @@ let vec = match embed_with_retry(embedder, &job.text, "document", 0).await {
 		.map(|s| SystemTime::now() + Duration::from_secs(s));
 
 	let conf = job.confidence.clamp(0.0, 1.0) as f32;
+	let (conf_alpha, conf_beta) = beta_params_from_confidence(conf);
 	let mut thought = Entity {
 		id: doc_id.to_string(),
 		root_id: String::new(),
@@ -54,8 +62,8 @@ let vec = match embed_with_retry(embedder, &job.text, "document", 0).await {
 		vector: vec,
 		gnn_vector: Vec::new(),
 		score: 0.0,
-		conf_alpha: 1.0 + conf,
-		conf_beta: 1.0 + (1.0 - conf),
+		conf_alpha,
+		conf_beta,
 		source: job.source.clone(),
 		created_at: Some(SystemTime::now()),
 		acl: Acl::default(),
@@ -192,8 +200,7 @@ pub fn build_chunk_entity(
 	valid_until: Option<SystemTime>,
 ) -> Entity {
 let conf = confidence.clamp(0.0, 1.0) as f32;
-	let alpha = 1.0 + conf;
-	let beta = 1.0 + (1.0 - conf);
+	let (alpha, beta) = beta_params_from_confidence(conf);
 	let mut t = Entity {
 		id: util::content_hash(text),
 		root_id: String::new(),

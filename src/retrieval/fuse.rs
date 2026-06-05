@@ -10,13 +10,7 @@ pub fn rrf(lists: &[&[EntityHit]], k_rrf: f64, top_k: usize) -> Vec<EntityHit> {
 			*agg.entry(hit.entity_id.clone()).or_insert(0.0) += contrib;
 		}
 	}
-	let mut out: Vec<EntityHit> = agg
-		.into_iter()
-		.map(|(id, score)| EntityHit {
-			entity_id: id,
-			score,
-		})
-		.collect();
+	let mut out: Vec<EntityHit> = agg.into_iter().map(EntityHit::from).collect();
 	out.sort_by(|a, b| {
 		b.score
 			.partial_cmp(&a.score)

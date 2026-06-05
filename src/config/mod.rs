@@ -18,7 +18,7 @@ mod tick;
 mod watcher;
 
 pub use capture::CaptureConfig;
-pub use embed::EmbedConfig;
+pub use embed::{DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL, EmbedConfig};
 pub use gnn::GnnConfig;
 pub use gossip::GossipConfig;
 pub use graph::GraphConfig;

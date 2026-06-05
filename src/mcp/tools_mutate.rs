@@ -6,7 +6,7 @@ use crate::base::math::{average_vec, clamp_confidence, cosine, reason_id};
 use crate::base::reason::{add_reason, remove_reason, remove_entity};
 use crate::base::search::find_entity;
 use crate::base::types::{Reason, ReasonKind, Source, EntityKind};
-use crate::base::util::truncate;
+use crate::base::util::explain_relationship_prompt;
 use crate::ingest;
 use crate::wire::{validate_fact_source, validate_wire_conf, validate_wire_kind};
 
@@ -189,11 +189,7 @@ impl Server {
 		let mut reason_text = p.reason;
 		if reason_text.is_empty() {
 			if let Some(llm) = &self.llm {
-				let prompt = format!(
-					"Explain in one sentence why these two pieces of knowledge are related:\n\nA: {}\n\nB: {}\n\nRelationship:",
-					truncate(&from_t.text(), 500),
-					truncate(&to_t.text(), 500),
-				);
+				let prompt = explain_relationship_prompt(&from_t.text(), &to_t.text());
 				if let Ok(handle) = tokio::runtime::Handle::try_current() {
 					reason_text = tokio::task::block_in_place(|| handle.block_on(llm.complete(&prompt)))
 						.unwrap_or_default()
@@ -288,18 +284,11 @@ impl Server {
 			None => return tool_error(&format!("thought not found: {}", p.query_id)),
 		};
 
-		let rids: Vec<String> = if let Some(kern) = g.kerns.get(&kern_id) {
-			let mut ids = Vec::new();
-			if let Some(from_list) = kern.by_from.get(&p.query_id) {
-				ids.extend(from_list.iter().cloned());
-			}
-			if let Some(to_list) = kern.by_to.get(&p.query_id) {
-				ids.extend(to_list.iter().cloned());
-			}
-			ids
-		} else {
-			Vec::new()
-		};
+		let rids: Vec<String> = g
+			.kerns
+			.get(&kern_id)
+			.map(|kern| crate::base::reason::collect_reason_ids(kern, &p.query_id))
+			.unwrap_or_default();
 
 		let mut decayed = 0usize;
 		for (i, rid) in rids.iter().enumerate() {

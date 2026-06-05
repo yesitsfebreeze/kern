@@ -106,6 +106,25 @@ fn unwrap_tool_json(envelope: &Value) -> Result<Value, String> {
     serde_json::from_str(text).map_err(|e| format!("decode tool result: {e}"))
 }
 
+/// Read `v[key]` as an owned string, falling back to `default` when the
+/// field is missing or not a string. Collapses the
+/// `.get().and_then(as_str).unwrap_or().to_string()` chain repeated
+/// across the envelope-parsing paths below.
+fn str_field(v: &Value, key: &str, default: &str) -> String {
+    v.get(key).and_then(|x| x.as_str()).unwrap_or(default).to_string()
+}
+
+/// Read `v[key]` as an `f32` score, defaulting to `0.0`.
+fn f32_field(v: &Value, key: &str) -> f32 {
+    v.get(key).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32
+}
+
+/// Best-effort entity label: the first 80 chars of the snippet (hard cut,
+/// no ellipsis — distinct from `base::util::truncate`).
+fn label_from_snippet(snippet: &str) -> String {
+    snippet.chars().take(80).collect()
+}
+
 fn entity_kind_from_lite(k: EntityKindLite) -> EntityKind {
     match k {
         EntityKindLite::Fact => EntityKind::Fact,
@@ -196,26 +215,17 @@ impl KernRpc for KernRpcHandler {
                 Ok(v) => v,
                 Err(_) => return QueryRes::default(),
             };
-            let answer = payload
-                .get("answer")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let answer = str_field(&payload, "answer", "");
             let mut hits: Vec<EntityRef> = Vec::new();
             if let Some(arr) = payload.get("entities").and_then(|v| v.as_array()) {
                 for e in arr {
-                    let id = e.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let id = str_field(e, "id", "");
                     if id.is_empty() {
                         continue;
                     }
-                    let score = e.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                    let snippet = e
-                        .get("text")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    // Best-effort label = first 80 chars of snippet.
-                    let label: String = snippet.chars().take(80).collect();
+                    let score = f32_field(e, "score");
+                    let snippet = str_field(e, "text", "");
+                    let label = label_from_snippet(&snippet);
                     // Slice Z: tool_query envelope echoes kind / scheme
                     // / status directly off the matched Entity, so no
                     // second graph read is needed per hit. Defaults
@@ -226,11 +236,7 @@ impl KernRpc for KernRpcHandler {
                         .and_then(|v| v.as_str())
                         .and_then(parse_kind_label)
                         .unwrap_or(EntityKindLite::Claim);
-                    let scheme = e
-                        .get("scheme")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("inline")
-                        .to_string();
+                    let scheme = str_field(e, "scheme", "inline");
                     let status = e
                         .get("status")
                         .and_then(|v| v.as_str())
@@ -339,21 +345,9 @@ impl KernRpc for KernRpcHandler {
                     };
                 }
             };
-            let entity_id = payload
-                .get("doc_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let status = payload
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("queued")
-                .to_string();
-            let message = payload
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let entity_id = str_field(&payload, "doc_id", "");
+            let status = str_field(&payload, "status", "queued");
+            let message = str_field(&payload, "message", "");
             // Slice R: one `AgentWrite` touch per successful ingest.
             // `emit_agent_write` no-ops when the id is empty (rejected).
             emit_agent_write(&entity_id, &journal::GlobalSink);
@@ -444,12 +438,8 @@ impl KernRpc for KernRpcHandler {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-                let snippet = detail
-                    .get("text")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let score = detail.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                let snippet = str_field(&detail, "text", "");
+                let score = f32_field(&detail, "score");
                 let kind_u8 = detail.get("kind").and_then(|v| v.as_u64()).unwrap_or(1) as u8;
                 let kind_internal = match kind_u8 {
                     0 => EntityKind::Fact,
@@ -460,7 +450,7 @@ impl KernRpc for KernRpcHandler {
                     _ => EntityKind::Claim,
                 };
                 let (_, scheme, status) = lookup_kind_scheme_status(&kern, &id);
-                let label: String = snippet.chars().take(80).collect();
+                let label = label_from_snippet(&snippet);
                 neighbors.push(EntityRef {
                     id,
                     kind: entity_kind_to_lite(kind_internal),
