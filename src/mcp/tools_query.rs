@@ -10,6 +10,19 @@ use crate::types::{EmbedFunc, LlmFunc};
 
 use super::{tool_error, tool_result_json, Server};
 
+/// Parse an optional RFC3339 time filter from a query arg. An empty string
+/// means "no filter"; a non-empty but unparseable value is a hard error, so a
+/// typo'd time-bounded query fails loudly instead of silently returning the
+/// full unfiltered result set.
+fn parse_time_filter(field: &str, value: &str) -> Result<Option<std::time::SystemTime>, String> {
+	if value.is_empty() {
+		return Ok(None);
+	}
+	super::parse_rfc3339(value)
+		.map(Some)
+		.map_err(|()| format!("invalid `{field}` timestamp: {value}"))
+}
+
 #[derive(Deserialize, Default)]
 struct QueryArgs {
 	#[serde(default)]
@@ -113,14 +126,17 @@ impl Server {
 			}
 		}
 		opts.min_conf = p.min_conf;
-		if let Ok(t) = super::parse_rfc3339(&p.since) {
-			opts.since = Some(t);
+		match parse_time_filter("since", &p.since) {
+			Ok(v) => opts.since = v,
+			Err(e) => return tool_error(&e),
 		}
-		if let Ok(t) = super::parse_rfc3339(&p.before) {
-			opts.before = Some(t);
+		match parse_time_filter("before", &p.before) {
+			Ok(v) => opts.before = v,
+			Err(e) => return tool_error(&e),
 		}
-		if let Ok(t) = super::parse_rfc3339(&p.valid_at) {
-			opts.valid_at = Some(t);
+		match parse_time_filter("valid_at", &p.valid_at) {
+			Ok(v) => opts.valid_at = v,
+			Err(e) => return tool_error(&e),
 		}
 
 		let rcfg = &self.cfg.retrieval;
@@ -396,5 +412,30 @@ mod envelope_shape_tests {
 			let v = build_entity_json(&ent, 0.0);
 			assert_eq!(v.get("kind").and_then(|x| x.as_str()), Some(k.as_str()));
 		}
+	}
+}
+
+#[cfg(test)]
+mod time_filter_tests {
+	use super::parse_time_filter;
+
+	#[test]
+	fn empty_is_no_filter() {
+		assert_eq!(parse_time_filter("since", "").unwrap(), None);
+	}
+
+	#[test]
+	fn valid_parses_to_some() {
+		assert!(parse_time_filter("before", "2026-06-05T09:00:00Z")
+			.unwrap()
+			.is_some());
+	}
+
+	#[test]
+	fn nonempty_malformed_is_hard_error() {
+		// Full-length but non-numeric year -> hard error naming the field, not a
+		// silent unfiltered query.
+		let e = parse_time_filter("valid_at", "20XX-06-05T09:00:00Z").unwrap_err();
+		assert!(e.contains("valid_at"), "error names the field: {e}");
 	}
 }
