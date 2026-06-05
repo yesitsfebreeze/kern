@@ -12,6 +12,9 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/graph': { target: KERN, changeOrigin: true },
+      // POST + SSE stream for the oracle. http-proxy streams chunked responses
+      // through unbuffered, so token events arrive live.
+      '/ask': { target: KERN, changeOrigin: true },
     },
   },
 })
