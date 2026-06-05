@@ -210,6 +210,41 @@ fn merge_peer(tag: &str, v: &Value, nodes: &mut Vec<Value>, links: &mut Vec<Valu
 	}
 }
 
+/// Tag one peer's search payload (`{hits, reasons}`) and append every hit to
+/// `out`, prefixing `id`/`kern` so they match the namespaced ids `/graph`
+/// already shipped to the browser. Both arrays are pooled into one list.
+fn merge_search_hits(tag: &str, v: &Value, out: &mut Vec<Value>) {
+	let pre = |id: &Value| -> Value {
+		id.as_str().map(|s| Value::String(format!("{tag}{s}"))).unwrap_or(Value::Null)
+	};
+	for arr in ["hits", "reasons"] {
+		for h in v.get(arr).and_then(Value::as_array).into_iter().flatten() {
+			let mut h = h.clone();
+			if let Some(o) = h.as_object_mut() {
+				if let Some(id) = o.get("id") { let p = pre(id); o.insert("id".into(), p); }
+				if let Some(k) = o.get("kern") { let p = pre(k); o.insert("kern".into(), p); }
+			}
+			out.push(h);
+		}
+	}
+}
+
+/// Merge every peer's tagged payload, sort by `score` descending, truncate to k.
+#[cfg_attr(not(test), expect(dead_code))]
+fn rank_peers(peers: &[(String, Value)], k: usize) -> Vec<Value> {
+	let mut out = Vec::new();
+	for (tag, v) in peers {
+		merge_search_hits(tag, v, &mut out);
+	}
+	out.sort_by(|a, b| {
+		let sa = a.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+		let sb = b.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+		sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+	});
+	out.truncate(k);
+	out
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -243,6 +278,33 @@ mod tests {
 		let (mut n, mut l, mut k) = (Vec::new(), Vec::new(), Vec::new());
 		merge_peer("t|", &json!({}), &mut n, &mut l, &mut k);
 		assert!(n.is_empty() && l.is_empty() && k.is_empty());
+	}
+
+	#[test]
+	fn rank_peers_namespaces_pools_sorts_and_truncates() {
+		// Two peers. Each returns entity hits + reason hits with scores.
+		let peer_a = json!({
+			"hits":    [{ "id": "e1", "kern": "k1", "label": "a", "score": 0.40 }],
+			"reasons": [{ "id": "e9", "kern": "k1", "label": "ra", "score": 0.95 }],
+		});
+		let peer_b = json!({
+			"hits":    [{ "id": "e2", "kern": "k2", "label": "b", "score": 0.70 }],
+			"reasons": [],
+		});
+		let tagged = vec![
+			("A|".to_string(), peer_a),
+			("B|".to_string(), peer_b),
+		];
+		let out = rank_peers(&tagged, 2);
+
+		// Truncated to k=2, sorted by score desc across BOTH peers and BOTH arrays.
+		assert_eq!(out.len(), 2);
+		assert_eq!(out[0]["score"], 0.95);
+		assert_eq!(out[1]["score"], 0.70);
+		// ids + kern are namespaced by peer tag so they match what /graph shipped.
+		assert_eq!(out[0]["id"], "A|e9");
+		assert_eq!(out[0]["kern"], "A|k1");
+		assert_eq!(out[1]["id"], "B|e2");
 	}
 }
 
