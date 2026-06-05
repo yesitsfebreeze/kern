@@ -88,6 +88,13 @@ pub struct EntitySyncPayload {
 	pub entities: Vec<crate::base::types::Entity>,
 }
 
+/// A CRDT counter update shared over gossip.
+///
+/// `value` is the sender's **absolute total** for its `replica` slot, not an
+/// increment-since-last. The receiver max-merges it into the local GCounter, so
+/// delivery in any order and with duplicates converges to the same state
+/// (commutative + idempotent). Senders must therefore transmit the full slot
+/// value; an increment-based value would be lost under the max-merge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrdtDeltaPayload {
 	pub kern_id: String,

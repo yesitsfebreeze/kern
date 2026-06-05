@@ -264,16 +264,36 @@ fn handle_peer_exchange(d: &Deps, msg: GossipMessage) {
 	}
 }
 
+/// Validate an inbound CRDT delta, returning the slot value to merge or `None`
+/// to drop it.
+///
+/// `value` is the sender's ABSOLUTE total for its `replica` slot (not an
+/// increment): merging it via the GCounter per-slot `max` is therefore
+/// commutative, idempotent and convergent regardless of delivery order or
+/// duplication. Empty ids and zero are dropped (no-ops), and values above
+/// [`GOSSIP_CRDT_DELTA_MAX`] are rejected to bound a peer pinning a slot.
+fn validated_delta_value(replica: &str, object_id: &str, value: u64) -> Option<u64> {
+	if replica.is_empty() || object_id.is_empty() {
+		return None;
+	}
+	if value == 0 || value > GOSSIP_CRDT_DELTA_MAX {
+		return None;
+	}
+	Some(value)
+}
+
 fn handle_crdt_delta(d: &Deps, msg: GossipMessage) {
 	let delta = match &msg.payload {
 		GossipPayload::CrdtDelta(c) => c.clone(),
 		_ => return,
 	};
 
+	let value = match validated_delta_value(&delta.replica, &delta.object_id, delta.value) {
+		Some(v) => v,
+		None => return,
+	};
 	let mut incoming = GCounter::new();
-	if delta.value > 0 {
-		incoming.increment(&delta.replica, delta.value);
-	}
+	incoming.increment(&delta.replica, value);
 
 	let mut g = d.graph.write().unwrap();
 	match delta.target {
@@ -483,5 +503,31 @@ mod tests {
 			!guard.kerns.keys().any(|k| k.starts_with("remote-")),
 			"no phantom kern created for own data"
 		);
+	}
+
+	#[test]
+	fn delta_validation_accepts_sane_value() {
+		assert_eq!(validated_delta_value("r1", "obj", 5), Some(5));
+		assert_eq!(
+			validated_delta_value("r1", "obj", GOSSIP_CRDT_DELTA_MAX),
+			Some(GOSSIP_CRDT_DELTA_MAX)
+		);
+	}
+
+	#[test]
+	fn delta_validation_drops_empty_ids_and_zero() {
+		assert_eq!(validated_delta_value("", "obj", 5), None);
+		assert_eq!(validated_delta_value("r1", "", 5), None);
+		assert_eq!(validated_delta_value("r1", "obj", 0), None);
+	}
+
+	#[test]
+	fn delta_validation_rejects_oversized_value() {
+		// A peer trying to pin a slot toward u64::MAX is dropped.
+		assert_eq!(
+			validated_delta_value("r1", "obj", GOSSIP_CRDT_DELTA_MAX + 1),
+			None
+		);
+		assert_eq!(validated_delta_value("r1", "obj", u64::MAX), None);
 	}
 }

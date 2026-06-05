@@ -68,6 +68,13 @@ pub const GOSSIP_SEED_ADDR: &str = "seed.kern.dev:7946";
 /// is reached, brand-new remote ids are dropped while existing ids still
 /// CRDT-merge (so legitimate updates to known entities are never lost).
 pub const GOSSIP_REMOTE_KERN_ENTITY_CAP: usize = 50_000;
+/// Upper bound on an inbound CRDT delta's per-replica value. The value is the
+/// sender's absolute slot total, max-merged into the local GCounter; rejecting
+/// values above this coarsely bounds a peer pinning a slot toward `u64::MAX`.
+/// Realistic access/traversal tallies are far below this. (Full per-replica
+/// ownership authentication is tracked separately.)
+pub const GOSSIP_CRDT_DELTA_MAX: u64 = 1_000_000;
+
 pub const LEDGER_THOUGHT_TTL: Duration = Duration::from_secs(72 * 60 * 60);
 pub const LEDGER_ROUTING_TTL: Duration = Duration::from_secs(5 * 60);
 

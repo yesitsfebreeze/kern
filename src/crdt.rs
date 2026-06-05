@@ -78,3 +78,53 @@ impl PnCounter {
 		a || b
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Build a GCounter with a single replica slot set to an absolute value —
+	/// the shape an inbound CRDT delta is merged as.
+	fn slot(replica: &str, value: u64) -> GCounter {
+		let mut g = GCounter::new();
+		g.increment(replica, value);
+		g
+	}
+
+	#[test]
+	fn merge_is_per_slot_max() {
+		let mut a = slot("r1", 5);
+		a.merge(&slot("r1", 3)); // smaller -> no change
+		assert_eq!(a.value(), 5);
+		a.merge(&slot("r1", 9)); // larger -> wins
+		assert_eq!(a.value(), 9);
+	}
+
+	#[test]
+	fn merge_is_commutative_and_order_independent() {
+		// Three absolute-total deltas across two replicas, applied in two
+		// different orders (with a duplicate), must converge to the same state.
+		let deltas = [slot("r1", 4), slot("r2", 7), slot("r1", 6)];
+
+		let mut a = GCounter::new();
+		for d in [&deltas[0], &deltas[1], &deltas[2], &deltas[1]] {
+			a.merge(d); // includes a duplicate of r2=7
+		}
+
+		let mut b = GCounter::new();
+		for d in [&deltas[2], &deltas[1], &deltas[0]] {
+			b.merge(d); // reverse order
+		}
+
+		assert_eq!(a, b, "merge must be order- and duplicate-independent");
+		assert_eq!(a.value(), 6 + 7); // max(r1)=6, r2=7
+	}
+
+	#[test]
+	fn merge_is_idempotent() {
+		let mut a = slot("r1", 5);
+		let snapshot = a.clone();
+		assert!(!a.merge(&slot("r1", 5)), "re-merging same value is a no-op");
+		assert_eq!(a, snapshot);
+	}
+}
