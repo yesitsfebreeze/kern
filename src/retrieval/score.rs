@@ -82,7 +82,16 @@ pub fn filter_delivery(cfg: &RetrievalConfig, results: &mut Vec<ScoredEntity>) {
 	if results.iter().any(|r| r.score >= floor) {
 		results.retain(|r| r.score >= floor);
 	}
-	results.truncate(cfg.max_deliver_results);
+	// When MMR is enabled it diversifies this pool and performs the final cut
+	// to `max_deliver_results` itself, so keep a larger candidate pool here —
+	// otherwise we would truncate to the delivery cap first and MMR's
+	// `len() <= max_deliver_results` guard would make it a no-op (dead code).
+	let cap = if cfg.mmr_enabled {
+		cfg.mmr_pool_size.max(cfg.max_deliver_results)
+	} else {
+		cfg.max_deliver_results
+	};
+	results.truncate(cap);
 }
 
 pub fn apply_query_options(results: &mut Vec<ScoredEntity>, opts: &QueryOptions) {
@@ -279,6 +288,32 @@ mod query_filter_tests {
 		apply_query_options(&mut results, &opts);
 		assert_eq!(results.len(), 2);
 		assert!(results.iter().all(|r| r.entity.source.scheme() == "file"));
+	}
+
+	#[test]
+	fn filter_delivery_keeps_mmr_pool_when_mmr_enabled() {
+		// Regression: previously truncated straight to max_deliver_results,
+		// which made MMR's len-guard a no-op. With MMR on, keep the pool so
+		// MMR has candidates to diversify and does the final cut itself.
+		let cfg = RetrievalConfig::default(); // mmr on, pool 50, cap 25
+		let mut results: Vec<ScoredEntity> = (0..60)
+			.map(|i| ent(&format!("e{i}"), EntityKind::Fact, file_src("/x")))
+			.collect();
+		filter_delivery(&cfg, &mut results);
+		assert_eq!(results.len(), cfg.mmr_pool_size);
+	}
+
+	#[test]
+	fn filter_delivery_cuts_to_cap_when_mmr_disabled() {
+		let cfg = RetrievalConfig {
+			mmr_enabled: false,
+			..Default::default()
+		};
+		let mut results: Vec<ScoredEntity> = (0..60)
+			.map(|i| ent(&format!("e{i}"), EntityKind::Fact, file_src("/x")))
+			.collect();
+		filter_delivery(&cfg, &mut results);
+		assert_eq!(results.len(), cfg.max_deliver_results);
 	}
 }
 
