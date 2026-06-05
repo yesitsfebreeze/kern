@@ -64,8 +64,8 @@ async function ask() {
   busy.value = true
   sources.value = []; chains.value = []; hot.value = null
   turns.value.push({ role: 'user', text: q })
-  const oracle = { role: 'oracle', text: '', sources: [], chains: [] }
-  turns.value.push(oracle)
+  turns.value.push({ role: 'oracle', text: '', sources: [], chains: [] })
+  const oracle = turns.value[turns.value.length - 1]
   await scrollDown()
   try {
     const res = await fetch('/ask', {
@@ -103,7 +103,7 @@ function handleFrame(frame, oracle) {
   let ev = 'message', data = ''
   for (const line of frame.split('\n')) {
     if (line.startsWith('event:')) ev = line.slice(6).trim()
-    else if (line.startsWith('data:')) data += line.slice(5).trim()
+    else if (line.startsWith('data:')) data += (data ? '\n' : '') + line.slice(5).trim()
   }
   let d = {}
   try { d = data ? JSON.parse(data) : {} } catch (_) { return }
