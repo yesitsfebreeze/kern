@@ -261,7 +261,7 @@ function onKey(ev) {
 }
 
 onMounted(() => { window.addEventListener('keydown', onKey); load(); timer = setInterval(load, 5000) })
-onBeforeUnmount(() => { if (timer) clearInterval(timer); if (freshT) clearTimeout(freshT); window.removeEventListener('keydown', onKey) })
+onBeforeUnmount(() => { if (timer) clearInterval(timer); if (freshT) clearTimeout(freshT); if (searchTimer) clearTimeout(searchTimer); window.removeEventListener('keydown', onKey) })
 </script>
 
 <template>
