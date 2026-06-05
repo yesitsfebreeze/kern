@@ -50,14 +50,14 @@ pub fn merge_entity(local: &mut Entity, remote: &Entity) -> bool {
 		local.heat = remote.heat;
 		changed = true;
 	}
-	if remote.conf_alpha > local.conf_alpha {
-		local.conf_alpha = remote.conf_alpha;
-		changed = true;
-	}
-	if remote.conf_beta > local.conf_beta {
-		local.conf_beta = remote.conf_beta;
-		changed = true;
-	}
+	// SECURITY: confidence (conf_alpha/conf_beta) is NOT imported from remote.
+	// A max-join is monotone-up and irreversible, so a compromised peer could
+	// pin a poisoned claim's confidence arbitrarily high federation-wide with
+	// no honest replica able to lower it (the confidence-by-max poisoning pin).
+	// Until inbound federation entities are trust/provenance-gated, confidence
+	// stays replica-local — derived only from this replica's own Bayesian
+	// observations (observe_support / observe_contradict). Replica-local values
+	// converge trivially (never shared), so CRDT properties are preserved.
 	// unlinked_count is local ingest bookkeeping, not convergent — left as-is.
 	if remote.status == EntityStatus::Superseded && local.status != EntityStatus::Superseded {
 		local.status = EntityStatus::Superseded;
@@ -185,7 +185,6 @@ mod tests {
 		let mut local = mk_entity("e1", "x", 1.0, EntityKind::Fact);
 		let mut remote = mk_entity("e1", "x", 5.0, EntityKind::Fact);
 		remote.access_count.increment("b", 2);
-		remote.conf_alpha = 9.0;
 		remote.accessed_at = t(100);
 		remote.created_at = t(10);
 
@@ -207,6 +206,27 @@ mod tests {
 		assert_eq!(local.accessed_at, snap_acc);
 		assert_eq!(local.created_at, snap_created);
 		assert_eq!(local.score, snap_score);
+	}
+
+	#[test]
+	fn merge_does_not_import_remote_confidence() {
+		// SECURITY regression guard: the confidence-by-max poisoning pin.
+		// A peer inflating conf_alpha/conf_beta must NOT raise local confidence
+		// — confidence is replica-local until inbound entities are trust-gated.
+		let mut local = mk_entity("e1", "x", 1.0, EntityKind::Fact);
+		let local_alpha = local.conf_alpha;
+		let local_beta = local.conf_beta;
+		let local_mean = local.conf_mean();
+
+		let mut poisoned = mk_entity("e1", "x", 1.0, EntityKind::Fact);
+		poisoned.conf_alpha = 1.0e9; // attacker pins confidence sky-high
+		poisoned.conf_beta = 0.0;
+
+		merge_entity(&mut local, &poisoned);
+
+		assert_eq!(local.conf_alpha, local_alpha, "remote alpha must not be imported");
+		assert_eq!(local.conf_beta, local_beta, "remote beta must not be imported");
+		assert_eq!(local.conf_mean(), local_mean, "confidence stays replica-local");
 	}
 
 	#[test]
