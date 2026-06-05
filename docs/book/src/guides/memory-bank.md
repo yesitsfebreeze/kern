@@ -86,7 +86,7 @@ global registration is safe across all your projects.
 
 Seed the graph once via MCP: set the root `purpose` and add the typed
 descriptors (`preference`, `decision`, `project`, `fact`, `code-fact`,
-`reference`).
+`reference`, `procedural`).
 
 ## Status & known limits
 

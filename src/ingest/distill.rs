@@ -13,8 +13,11 @@ pub struct Claim {
 }
 
 /// The typed-memory taxonomy. Mirrors the descriptors seeded into the kern.
-pub const DESCRIPTORS: [&str; 6] = [
-	"preference", "decision", "project", "fact", "code-fact", "reference",
+///
+/// Covers semantic + episodic knowledge plus `procedural` (Letta/MemGPT-style
+/// "how we do X" — learned workflows, rules, and conventions, not just facts).
+pub const DESCRIPTORS: [&str; 7] = [
+	"preference", "decision", "project", "fact", "code-fact", "reference", "procedural",
 ];
 
 /// Extract durable claims from `conversation`.
@@ -34,10 +37,11 @@ pub fn distill(conversation: &str, llm: &dyn Fn(&str) -> String) -> Option<Vec<C
 		"Extract durable, reusable knowledge from this conversation between a \
 user and an AI coding assistant. Output ONLY a JSON array. Each element must be \
 {{\"text\": \"<one self-contained statement>\", \"kind\": \"<one of: preference, \
-decision, project, fact, code-fact, reference>\"}}. Include only knowledge worth \
+decision, project, fact, code-fact, reference, procedural>\"}}. Include only knowledge worth \
 remembering across future sessions: user preferences, decisions and their \
-rationale, ongoing project state, durable facts, structural code facts, and \
-external references. \
+rationale, ongoing project state, durable facts, structural code facts, \
+external references, and procedural knowledge (learned workflows, rules, and \
+conventions — how we do X, not just what is true). \
 Consolidate aggressively: emit ONE claim per distinct fact. Do NOT output \
 multiple claims that restate the same idea, and do NOT output sentence \
 fragments — each claim must be a complete, standalone statement that captures \
@@ -121,6 +125,17 @@ mod tests {
 		assert_eq!(claims[0].text, "User prefers tabs");
 		assert_eq!(claims[0].descriptor, "preference");
 		assert_eq!(claims[1].descriptor, "code-fact");
+	}
+
+	#[test]
+	fn procedural_kind_maps_through() {
+		// The Letta-style procedural scope must survive parsing, not fall back
+		// to "fact".
+		let llm = stub(r#"[{"text":"Always run cargo test before committing","kind":"procedural"}]"#);
+		let claims = distill("c", &llm).expect("some");
+		assert_eq!(claims.len(), 1);
+		assert_eq!(claims[0].descriptor, "procedural");
+		assert!(DESCRIPTORS.contains(&"procedural"));
 	}
 
 	#[test]

@@ -195,7 +195,7 @@ daemon). From a Claude Code session in the project:
    decisions, preferences, and project state."*
 2. Add the typed descriptors you want to capture — call `descriptor` (action
    `add`) once each for the kinds you use: `preference`, `decision`, `project`,
-   `fact`, `code-fact`, `reference`.
+   `fact`, `code-fact`, `reference`, `procedural`.
 
 After seeding, normal sessions populate the graph automatically through the
 capture hook.
