@@ -6,10 +6,8 @@ members = [
     "shared/journal",
     "shared/log",
     "shared/protocol",
-    "shared/search",
     "shared/trnsprt",
     "shared/trnsprt/macros",
-    "shared/tui",
     "shared/watcher",
     "shared/test-utils",
 ]
