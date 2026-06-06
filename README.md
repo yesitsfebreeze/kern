@@ -100,6 +100,7 @@ beam search, gossip, and the MCP server are all written from scratch.
 ```bash
 ollama pull qwen3-embedding:0.6b  # embeddings (default)
 ollama pull qwen2.5:7b        # distillation / reasoning (default)
+ollama pull qwen3.5:4b        # /ask oracle answer model (default)
 ```
 
 **1. Install the binary.** A prebuilt binary for your platform (built by CI and
@@ -167,6 +168,13 @@ model = "qwen2.5:7b"        # default (small, fast, reliable)
 # Embedding model. Local Ollama.
 url = "http://localhost:11434"
 model = "qwen3-embedding:0.6b"  # default; dimension locks the graph (use `kern reembed` to switch)
+
+[answer]
+# User-facing /ask oracle (streamed answer in the viewer). Latency-critical, only
+# glues retrieved nodes into prose → smallest model that grounds. Uses Ollama's
+# native /api/chat (capped context, kept GPU-resident). url/key blank → fall back
+# to [reason]'s endpoint, so a single local Ollama needs no extra wiring.
+model = "qwen3.5:4b"        # default; must be an Ollama model
 
 [capture]
 enabled = true          # self-learning (OFF by default — must opt in)
