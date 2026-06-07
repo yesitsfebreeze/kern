@@ -425,9 +425,9 @@ pub(crate) fn add_anchor(g: &mut GraphGnn, name: &str, vec: Vec<f64>) {
 	}
 }
 
-/// The root's named children — its anchors — read from the authoritative kern
-/// map (runtime mutations land there, not on the `g.root` snapshot field).
-/// Includes the `generic` catch-all.
+/// The root's user-facing anchors — its named children excluding the `generic`
+/// catch-all — read from the authoritative kern map (runtime mutations land
+/// there, not on the `g.root` snapshot field).
 pub(crate) fn root_anchor_ids(g: &GraphGnn) -> Vec<String> {
 	let root = g.root.id.clone();
 	let children = g
@@ -438,7 +438,7 @@ pub(crate) fn root_anchor_ids(g: &GraphGnn) -> Vec<String> {
 		.into_iter()
 		.filter(|cid| {
 			g.loaded(cid)
-				.map(|c| !c.anchor_text.is_empty())
+				.map(|c| !c.anchor_text.is_empty() && c.anchor_text != GENERIC_ANCHOR)
 				.unwrap_or(false)
 		})
 		.collect()

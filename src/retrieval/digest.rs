@@ -38,10 +38,14 @@ fn dedup_key(s: &str) -> String {
 ///   restatements don't waste the budget.
 pub fn build_digest(graph: &GraphGnn, k: usize, min_trust: f64, token_budget: usize) -> String {
 	let mut out = String::from("# kern memory\n\n");
-	let purpose = graph.root.anchor_text.trim();
-	if !purpose.is_empty() {
-		out.push_str("Purpose: ");
-		out.push_str(purpose);
+	let anchors: Vec<String> = crate::base::accept::root_anchor_ids(graph)
+		.iter()
+		.filter_map(|cid| graph.loaded(cid))
+		.map(|c| c.anchor_text.clone())
+		.collect();
+	if !anchors.is_empty() {
+		out.push_str("Anchors: ");
+		out.push_str(&anchors.join(", "));
 		out.push_str("\n\n");
 	}
 
@@ -120,14 +124,15 @@ mod tests {
 	#[test]
 	fn digest_has_anchor_and_hottest_first_capped() {
 		let mut g = GraphGnn::default();
-		g.root.anchor_text = "remember durable facts".to_string();
+		// A named anchor (root child) should surface in the digest header.
+		crate::base::accept::add_anchor(&mut g, "durable facts", vec![1.0, 0.0, 0.0]);
 		let root_id = g.root.id.clone();
 		let kern = g.kerns.get_mut(&root_id).expect("root kern");
 		kern.entities.insert("a".into(), mk_entity("a", "cold fact", 0.1, EntityKind::Claim));
 		kern.entities.insert("b".into(), mk_entity("b", "hot fact", 9.0, EntityKind::Claim));
 
 		let md = build_digest(&g, 1, 0.0, 0);
-		assert!(md.contains("remember durable facts"), "purpose present");
+		assert!(md.contains("Anchors: durable facts"), "anchor present in header");
 		assert!(md.contains("hot fact"), "hottest included");
 		assert!(!md.contains("cold fact"), "capped at k=1");
 	}

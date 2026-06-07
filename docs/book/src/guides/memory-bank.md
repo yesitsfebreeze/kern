@@ -28,7 +28,7 @@ session text → spool file → distill (LLM) → claims → graph → digest �
   after every claim ingests; on LLM outage it stays for the next drain, so a
   transient failure never loses knowledge.
 - The daemon keeps a **recall digest** (`retrieval::digest`) fresh at
-  `<cwd>/.kern/digest.md` — the root purpose plus the hottest distilled
+  `<cwd>/.kern/digest.md` — the root's anchors plus the hottest distilled
   thoughts. A **SessionStart hook** (`kern-recall.mjs`) injects it into each
   new session. For mid-session deep recall, the model calls the `query` MCP
   tool directly.
@@ -84,8 +84,9 @@ The two Claude Code hooks are registered once in `~/.claude/settings.json`
 guard: they no-op in any directory without a `.kern/` folder, so a single
 global registration is safe across all your projects.
 
-Seed the graph once via MCP: set the root `purpose` and add the typed
-descriptors (`preference`, `decision`, `project`, `fact`, `code-fact`,
+Seed the graph once via MCP: add a few `anchor`s — named top-level buckets the
+root routes matching memories into (anything unmatched lands in `generic`) — and
+the typed descriptors (`preference`, `decision`, `project`, `fact`, `code-fact`,
 `reference`, `procedural`).
 
 ## Status & known limits

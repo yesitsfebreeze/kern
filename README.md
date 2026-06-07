@@ -24,7 +24,7 @@ session text → spool → distill (LLM) → typed claims → graph → digest �
   graph. Nothing is lost on an LLM outage — the delta stays queued until it
   succeeds.
 
-- **Recalls into context.** The daemon keeps a fresh **digest** (root purpose +
+- **Recalls into context.** The daemon keeps a fresh **digest** (root anchors +
   hottest thoughts) at `<cwd>/.kern/digest.md`. A `SessionStart` hook
   injects it into every new session. For deeper mid-session lookups the agent
   calls the `query` MCP tool directly.
@@ -237,9 +237,11 @@ all three hooks plus the MCP server in one step.
 Once, via the MCP tools against the running daemon (not the CLI, which races the
 daemon). From a Claude Code session in the project:
 
-1. Set the root purpose — call `purpose` with a one-line description of what this
-   kern is for, e.g. *"Personal and project memory for <project>: durable facts,
-   decisions, preferences, and project state."*
+1. Add a few anchors — call `anchor` (action `add`) with a `name` and a one-line
+   `text` description for each top-level bucket the root should route memories
+   into, e.g. *"decisions"*, *"project state"*, *"preferences"*. Memories that
+   match no anchor land in `generic`; dense `generic` clusters auto-promote to
+   new anchors over time.
 2. Add the typed descriptors you want to capture — call `descriptor` (action
    `add`) once each for the kinds you use: `preference`, `decision`, `project`,
    `fact`, `code-fact`, `reference`, `procedural`.
@@ -256,7 +258,7 @@ capture hook.
 | `link` | Create a reason edge between two thoughts (LLM writes the reason if blank). |
 | `forget` | Remove a thought and cascade its edges. Facts are immune. |
 | `degrade` | Down-weight the edges along a bad retrieval path — teaches the graph from miss feedback. |
-| `purpose` | Set or read the root purpose. |
+| `anchor` | Manage anchors (named top-level buckets): `list` (default), `add` (name+text), `remove` (name). |
 | `descriptor` | Add/remove a data-type descriptor. |
 | `health` | Graph stats: thought/edge counts, tick heat. |
 | `pulse` | Trigger a clustering pass across the kern tree. |

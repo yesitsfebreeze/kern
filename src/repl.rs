@@ -148,14 +148,18 @@ let g = read_recovered(graph);
 			unnamed += 1;
 		}
 	}
-	let purpose = if g.root.anchor_text.is_empty() {
-		"(unset)"
-	} else {
-		&g.root.anchor_text
-	};
+	let anchors: Vec<String> = crate::base::accept::root_anchor_ids(&g)
+		.iter()
+		.filter_map(|cid| g.loaded(cid))
+		.map(|c| c.anchor_text.clone())
+		.collect();
 	let queue_depth = task_q.as_ref().map(|q| q.pending_count()).unwrap_or(0);
 
-	println!("purpose:     {purpose}");
+	if anchors.is_empty() {
+		println!("anchors:     (none)");
+	} else {
+		println!("anchors:     {}", anchors.join(", "));
+	}
 	println!("kerns:       {}", kerns.len());
 	println!("thoughts:    {} (unnamed: {})", total_entities, unnamed);
 	println!("reasons:     {}", total_reasons);
