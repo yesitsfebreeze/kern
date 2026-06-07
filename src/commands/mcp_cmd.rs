@@ -219,15 +219,9 @@ impl McpServer for ProxyServer {
 async fn run_standalone(cfg: &crate::config::Config) {
 	let g = Arc::new(StdRwLock::new(load_graph(cfg)));
 	let llm_client = crate::llm::Client::new(
-		cfg.reason_url(),
-		&cfg.reason.model,
-		cfg.reason_key(),
-		cfg.answer_url(),
-		&cfg.answer.model,
-		cfg.answer_key(),
-		&cfg.embed.url,
-		&cfg.embed.model,
-		&cfg.embed.key,
+		crate::llm::Endpoint::new(cfg.reason_url(), &cfg.reason.model, cfg.reason_key()),
+		crate::llm::Endpoint::new(cfg.answer_url(), &cfg.answer.model, cfg.answer_key()),
+		crate::llm::Endpoint::new(&cfg.embed.url, &cfg.embed.model, &cfg.embed.key),
 	);
 	let save_g = g.clone();
 	let save_fn: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {

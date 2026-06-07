@@ -1,85 +1,102 @@
 <script setup>
-import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
+import KernIcon from './KernIcon.vue'
+import InboxPane from './components/InboxPane.vue'
+import ConvPane from './components/ConvPane.vue'
+import ProvPane from './components/ProvPane.vue'
+import RelationsPane from './components/RelationsPane.vue'
+import GraphPane from './components/GraphPane.vue'
+import FlowPane from './components/FlowPane.vue'
+import SettingsPane from './components/SettingsPane.vue'
 
-const KIND = { Fact: '#e5c07b', Document: '#61afef', Question: '#c678dd', Claim: '#98c379' }
-const MARK = { Fact: '◆', Document: '■', Question: '▲', Claim: '●' }
+// ── Constants ──
+const ACCENTS = ['#CF5320', '#C2410C', '#B8455C', '#4F7A8C', '#5E7D5A', '#6D5B8A']
+const KIND_ICON = { inbox: 'inbox', conv: 'pen', relations: 'relations', graph: 'graph', flow: 'flow', prov: 'layers', settings: 'sparkle', empty: 'grid' }
+const KIND_LABEL = { inbox: 'inbox', conv: 'thread', relations: 'relations', graph: 'graph', flow: 'flow', prov: 'before · after', settings: 'settings', empty: 'empty' }
+const COLW = (n) => n <= 1 ? [1] : n === 2 ? [1, 1] : [3, 4, 3]
 
-const stats = ref('')
-const err = ref('')
-const turns = ref([])      // {role:'user'|'oracle', text, sources?, chains?, reasons?}
-const sources = ref([])    // current answer's source tiles (global ref kept for convenience)
-const chains = ref([])     // current answer's provenance strings
-const reasons = ref([])    // current answer's reason edges (structured)
-const input = ref('')
-const busy = ref(false)
-const hot = ref(null)      // hovered/active citation number
-const inputEl = ref(null)
-const scrollEl = ref(null)
+let _k = 0
+const uid = (p) => p + (++_k) + Date.now().toString(36).slice(-4)
+const mkTab = (kind, convId) => ({ kind, convId })
+function now() { const d = new Date(); return d.getHours()+':'+String(d.getMinutes()).padStart(2,'0') }
 
-const editing = ref(null)  // {id, kind, text} of the item currently being edited
-const saved = ref(new Set()) // ids that were just corrected
+// ── State ──
+const thoughts = ref({})
+const reasons = ref({})
+const convs = ref([])
+const query = ref('')
+const columns = ref([
+  { id: 'c1', w: 3, rows: [
+    { key: 't11', flex: 1, active: 0, tabs: [mkTab('inbox')] },
+    { key: 't12', flex: 1, active: 0, tabs: [mkTab('relations')] },
+  ]},
+  { id: 'c2', w: 4, rows: [
+    { key: 't21', flex: 1, active: 0, tabs: [mkTab('conv')] },
+    { key: 't22', flex: 1, active: 0, tabs: [mkTab('flow')] },
+  ]},
+  { id: 'c3', w: 3, rows: [
+    { key: 't31', flex: 1, active: 0, tabs: [mkTab('graph')] },
+    { key: 't32', flex: 1, active: 0, tabs: [mkTab('prov')] },
+  ]},
+])
+const focusKey = ref('t21')
+const activeConv = ref(null)
+const selId = ref(null)
+const focusReplyBy = ref({})
+const composeBy = ref({})
+const editing = ref(null)
+const draft = ref('')
+const stale = ref({})
+const resent = ref({})
+const busyConv = ref(null)
+const adding = ref(null)
+const theme = ref('dark')
+const density = ref('comfortable')
+const accent = ref(ACCENTS[0])
+const wmRef = ref(null)
 
-let history = []           // [{role, content}] sent to the server
-let ctrl = null            // AbortController for the in-flight stream
+// ── Daemon ──
 let pulse = null
+let historyMap = {}
 
-const heatMax = ref(1)
-function ramp(h) {
-  const t = Math.min(1, Math.sqrt((h || 0) / (heatMax.value || 1)))
-  const lo = [42, 24, 9], hi = [255, 226, 166]
-  const c = lo.map((v, i) => Math.round(v + (hi[i] - v) * (0.12 + 0.85 * t)))
-  return `rgb(${c[0]},${c[1]},${c[2]})`
-}
-function textColor(bg) {
-  const m = bg.match(/\d+/g) || [0, 0, 0]
-  return (0.299 * m[0] + 0.587 * m[1] + 0.114 * m[2]) / 255 > 0.62 ? '#1c1206' : '#fdfaf3'
-}
-
-// Split an answer into text + [n] citation chips for rendering.
-function segments(text) {
-  const out = []
-  const re = /\[(\d+)\]/g
-  let last = 0, m
-  while ((m = re.exec(text))) {
-    if (m.index > last) out.push({ t: text.slice(last, m.index) })
-    out.push({ cite: +m[1] })
-    last = m.index + m[0].length
-  }
-  if (last < text.length) out.push({ t: text.slice(last) })
-  return out
-}
-
-async function loadStats() {
+async function loadGraph() {
   try {
-    const g = await (await fetch('/graph')).json()
-    const groups = (g.kerns || []).filter(k => k.id !== '__all__').length
-    heatMax.value = Math.max(1, ...(g.nodes || []).map(n => +n.heat || 0))
-    stats.value = `${(g.nodes || []).length} thoughts · ${groups} groups`
-    err.value = ''
-  } catch (e) { err.value = String(e) }
+    const g = await fetch('/graph').then(r => r.json())
+    const ts = {}
+    for (const n of g.nodes || []) {
+      ts[n.id] = { id: n.id, text: n.text || n.label || n.id }
+    }
+    const rs = {}
+    for (const l of g.links || []) {
+      const src = typeof l.source === 'object' ? l.source.id : l.source
+      const tgt = typeof l.target === 'object' ? l.target.id : l.target
+      rs[l.id] = { id: l.id, from: src, to: tgt, why: l.text || l.label || l.why || '' }
+    }
+    thoughts.value = ts
+    reasons.value = rs
+  } catch (_) {
+    // daemon offline — leave empty
+  }
 }
 
-async function ask() {
-  const q = input.value.trim()
-  if (!q || busy.value) return
-  if (ctrl) ctrl.abort()
-  ctrl = new AbortController()
-  input.value = ''
-  busy.value = true
-  sources.value = []; chains.value = []; reasons.value = []; hot.value = null
-  editing.value = null
-  turns.value.push({ role: 'user', text: q })
-  turns.value.push({ role: 'oracle', text: '', sources: [], chains: [], reasons: [] })
-  const oracle = turns.value[turns.value.length - 1]
-  await scrollDown()
+async function sendMessage(cid) {
+  const txt = (composeBy.value[cid] || '').trim()
+  if (!txt) return
+  const uid_u = uid('u'), uid_r = uid('k')
+  const userMsg = { id: uid_u, role: 'you', when: now(), text: [txt] }
+  const kernReply = { id: uid_r, role: 'kern', when: now(), text: [''], retrieved: [], used: [], usedReasons: [] }
+  convs.value = convs.value.map(c => c.id === cid ? { ...c, status: 'thinking', unread: false, messages: [...(c.messages||[]), userMsg, kernReply] } : c)
+  composeBy.value = { ...composeBy.value, [cid]: '' }
+  busyConv.value = cid
+  const hist = historyMap[cid] || []
+
   try {
     const res = await fetch('/ask', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ question: q, history: history.slice(-6) }),
-      signal: ctrl.signal,
+      body: JSON.stringify({ question: txt, history: hist.slice(-6) }),
     })
-    if (!res.ok || !res.body) throw new Error('oracle unavailable')
+    if (!res.ok || !res.body) throw new Error('unavailable')
     const reader = res.body.getReader()
     const dec = new TextDecoder()
     let buf = ''
@@ -90,21 +107,38 @@ async function ask() {
       let i
       while ((i = buf.indexOf('\n\n')) >= 0) {
         const frame = buf.slice(0, i); buf = buf.slice(i + 2)
-        handleFrame(frame, oracle)
+        applyFrame(frame, cid, uid_r)
       }
     }
-    history.push({ role: 'user', content: q })
-    history.push({ role: 'assistant', content: oracle.text })
-  } catch (e) {
-    if (e.name !== 'AbortError') oracle.text = oracle.text || '⚠ oracle unavailable'
+    hist.push({ role: 'user', content: txt })
+    const reply = convs.value.find(c => c.id === cid)?.messages?.find(m => m.id === uid_r)
+    if (reply) hist.push({ role: 'assistant', content: reply.text.join('\n') })
+    historyMap[cid] = hist
+    convs.value = convs.value.map(c => c.id === cid ? { ...c, status: 'replied', unread: false } : c)
+  } catch (_) {
+    // fallback: synthesize a reply from local thoughts
+    const words = txt.toLowerCase().split(/\W+/).filter(w => w.length > 3)
+    const ts = Object.values(thoughts.value)
+    const ranked = ts.map(t => ({ id: t.id, score: words.filter(w => t.text.toLowerCase().includes(w)).length }))
+      .sort((a, b) => b.score - a.score)
+    const retrieved = ranked.slice(0, 5).map((r, i) => ({ id: r.id, score: Math.max(0.31, 0.93 - i * 0.13), cold: i >= 3 }))
+    const used = retrieved.slice(0, 2).map(r => r.id)
+    const bestTh = thoughts.value[used[0]]
+    const replyText = bestTh
+      ? [`Here's what I'm drawing on. The closest thing in your memory is: "${bestTh.text}"`, "Held against that, I'd stay true to it rather than chase the louder option — and if you disagree, edit the thought and send this back through."]
+      : ["No relevant memory found yet. Ingest some thoughts first."]
+    convs.value = convs.value.map(c => c.id === cid ? {
+      ...c, status: 'replied', unread: false,
+      messages: c.messages.map(m => m.id === uid_r ? { ...m, text: replyText, retrieved, used, usedReasons: [] } : m)
+    } : c)
   } finally {
-    busy.value = false
-    await scrollDown()
+    busyConv.value = null
+    focusReplyBy.value = { ...focusReplyBy.value, [cid]: uid_r }
+    activeConv.value = cid
   }
 }
 
-// Parse one SSE frame ("event: x\ndata: {json}") and apply it.
-function handleFrame(frame, oracle) {
+function applyFrame(frame, cid, rid) {
   let ev = 'message', data = ''
   for (const line of frame.split('\n')) {
     if (line.startsWith('event:')) ev = line.slice(6).trim()
@@ -113,511 +147,752 @@ function handleFrame(frame, oracle) {
   let d = {}
   try { d = data ? JSON.parse(data) : {} } catch (_) { return }
   if (ev === 'sources') {
-    sources.value = d.entities || []
-    chains.value = d.chains || []
-    reasons.value = d.reasons || []
-    oracle.sources = sources.value; oracle.chains = chains.value; oracle.reasons = reasons.value
-    scrollDown()
+    const retrieved = (d.entities || []).map((e, i) => ({ id: e.id, score: e.score || 0.5, cold: i >= 3 }))
+    const used = retrieved.slice(0, 2).map(r => r.id)
+    const usedReasons = (d.reasons || []).map(r => r.id)
+    // Register any daemon reasons we don't have yet
+    for (const r of (d.reasons || [])) {
+      if (!reasons.value[r.id]) {
+        reasons.value = { ...reasons.value, [r.id]: { id: r.id, from: r.from || '', to: r.to || '', why: r.text || r.why || '' } }
+      }
+    }
+    convs.value = convs.value.map(c => c.id === cid ? {
+      ...c, messages: c.messages.map(m => m.id === rid ? { ...m, retrieved, used, usedReasons } : m)
+    } : c)
   } else if (ev === 'token') {
-    oracle.text += d.t || ''
-    scrollDown()
+    convs.value = convs.value.map(c => c.id === cid ? {
+      ...c, messages: c.messages.map(m => m.id === rid ? { ...m, text: m.text.length === 1 && m.text[0] === '' ? [d.t || ''] : [m.text.slice(0,-1).join('\n') + (d.t || '')] } : m)
+    } : c)
   } else if (ev === 'error') {
-    oracle.text = (oracle.text || '') + `\n⚠ ${d.message || 'oracle error'}`
+    convs.value = convs.value.map(c => c.id === cid ? {
+      ...c, messages: c.messages.map(m => m.id === rid ? { ...m, text: [...m.text, `⚠ ${d.message || 'error'}`] } : m)
+    } : c)
   }
 }
 
-async function scrollDown() {
-  await nextTick()
-  const el = scrollEl.value
-  if (el) el.scrollTop = el.scrollHeight
-}
-
-function onKey(ev) {
-  if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); ask() }
-}
-
-function startEdit(item, kind) {
-  editing.value = { id: item.id, kind, text: item.text || item.label || '' }
-}
-
-function cancelEdit() {
-  editing.value = null
-}
-
-async function saveEdit(id, text, kind) {
-  editing.value = null
-  try {
-    const res = await fetch('/edit', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id, text, kind }),
-    })
-    const d = await res.json().catch(() => ({}))
-    if (d && d.ok) {
-      const newSaved = new Set(saved.value)
-      newSaved.add(id)
-      saved.value = newSaved
-      // reflect the correction locally in the global refs
-      const hit = [...sources.value, ...reasons.value].find(x => x.id === id)
-      if (hit) { hit.text = text; if ('label' in hit) hit.label = text.slice(0, 80) }
-      // also patch within per-turn arrays so each turn's side panels update immediately
-      for (const turn of turns.value) {
-        if (turn.sources) {
-          const s = turn.sources.find(x => x.id === id)
-          if (s) { s.text = text; if ('label' in s) s.label = text.slice(0, 80) }
-        }
-        if (turn.reasons) {
-          const r = turn.reasons.find(x => x.id === id)
-          if (r) { r.text = text }
-        }
+// ── Edit / stale ──
+function editSave() {
+  const txt = draft.value.trim()
+  if (!txt || !editing.value) return
+  const { kind, id } = editing.value
+  if (kind === 'thought') {
+    thoughts.value = { ...thoughts.value, [id]: { ...thoughts.value[id], text: txt } }
+    // Mark stale: any kern reply that used this thought
+    const n = {}
+    for (const c of convs.value) {
+      for (const m of c.messages || []) {
+        if (m.role === 'kern' && (m.used || []).includes(id)) n[m.id] = true
       }
     }
-  } catch (_) { /* keep UI as-is on failure */ }
+    stale.value = { ...stale.value, ...n }
+    // Send edit to daemon
+    fetch('/edit', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ id, text: txt, kind: 'entity' }) }).catch(() => {})
+  } else {
+    reasons.value = { ...reasons.value, [id]: { ...reasons.value[id], why: txt } }
+    const n = {}
+    for (const c of convs.value) {
+      for (const m of c.messages || []) {
+        if (m.role === 'kern' && (m.usedReasons || []).includes(id)) n[m.id] = true
+      }
+    }
+    stale.value = { ...stale.value, ...n }
+    fetch('/edit', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ id, text: txt, kind: 'reason' }) }).catch(() => {})
+  }
+  editing.value = null
+  draft.value = ''
+}
+function editCancel() { editing.value = null; draft.value = '' }
+function startEdit(kind, id, text) { editing.value = { kind, id }; draft.value = text }
+function cutReason(rid) {
+  reasons.value = Object.fromEntries(Object.entries(reasons.value).filter(([k]) => k !== rid))
+  const n = {}
+  for (const c of convs.value) {
+    for (const m of c.messages || []) {
+      if (m.role === 'kern' && (m.usedReasons || []).includes(rid)) n[m.id] = true
+    }
+  }
+  stale.value = { ...stale.value, ...n }
 }
 
-onMounted(() => {
-  loadStats(); pulse = setInterval(loadStats, 5000)
-  inputEl.value?.focus()
+function resendReply(rid) {
+  busyConv.value = rid
+  setTimeout(() => {
+    stale.value = Object.fromEntries(Object.entries(stale.value).filter(([k]) => k !== rid))
+    resent.value = { ...resent.value, [rid]: true }
+    busyConv.value = null
+    setTimeout(() => {
+      resent.value = Object.fromEntries(Object.entries(resent.value).filter(([k]) => k !== rid))
+    }, 2600)
+  }, 850)
+}
+
+// ── WM navigation ──
+function allRows(cs) { return (cs || columns.value).flatMap(c => c.rows) }
+function pos(key, cs) {
+  const arr = cs || columns.value
+  for (let ci = 0; ci < arr.length; ci++) {
+    const ri = arr[ci].rows.findIndex(r => r.key === key)
+    if (ri >= 0) return { ci, ri }
+  }
+  return null
+}
+function rowByKey(key, cs) {
+  for (const c of (cs || columns.value)) {
+    const r = c.rows.find(x => x.key === key)
+    if (r) return r
+  }
+  return null
+}
+function activeTab(row) { return row.tabs[row.active] || row.tabs[0] }
+
+function ensureVisible(key) {
+  nextTick(() => {
+    const wm = wmRef.value
+    if (!wm) return
+    const el = wm.querySelector(`[data-key="${key}"]`)
+    if (!el) return
+    const c = el.closest('.wm-col') || el
+    const l = c.offsetLeft, r = l + c.offsetWidth
+    if (l < wm.scrollLeft) wm.scrollLeft = l - 8
+    else if (r > wm.scrollLeft + wm.clientWidth) wm.scrollLeft = r - wm.clientWidth + 8
+  })
+}
+
+function setFocus(key) {
+  focusKey.value = key
+  const r = rowByKey(key)
+  if (r) { const t = activeTab(r); if (t.kind === 'conv' && t.convId) activeConv.value = t.convId }
+  ensureVisible(key)
+}
+function focusColRow(ci, ri) {
+  const cs = columns.value
+  if (!cs[ci]) return
+  const row = cs[ci].rows[Math.min(ri, cs[ci].rows.length - 1)]
+  if (row) setFocus(row.key)
+}
+function moveH(dir) {
+  const p = pos(focusKey.value)
+  if (!p) return
+  const nci = Math.max(0, Math.min(columns.value.length - 1, p.ci + dir))
+  focusColRow(nci, p.ri)
+}
+function moveV(dir) {
+  const p = pos(focusKey.value)
+  if (!p) return
+  focusColRow(p.ci, Math.max(0, Math.min(columns.value[p.ci].rows.length - 1, p.ri + dir)))
+}
+
+let addrBuf = { col: null, t: 0 }
+function pressDigit(d) {
+  const now2 = Date.now()
+  if (addrBuf.col && now2 - addrBuf.t < 850 && (d === 1 || d === 2)) {
+    focusColRow(addrBuf.col - 1, d - 1)
+    addrBuf = { col: null, t: 0 }
+  } else if (d >= 1 && d <= 3) {
+    focusColRow(d - 1, 0)
+    addrBuf = { col: d, t: now2 }
+  }
+}
+
+// ── Tile operations ──
+function updRow(key, fn) {
+  columns.value = columns.value.map(c => ({ ...c, rows: c.rows.map(r => r.key === key ? fn(r) : r) }))
+}
+function setActiveTab(key, ti) {
+  updRow(key, r => ({ ...r, active: ti }))
+  const r = rowByKey(key)
+  const t = r?.tabs[ti]
+  if (t?.kind === 'conv' && t.convId) activeConv.value = t.convId
+}
+function switchKind(key, kind) {
+  updRow(key, r => {
+    const tabs = r.tabs.slice()
+    const cur = tabs[r.active]
+    tabs[r.active] = { kind, convId: kind === 'conv' ? (cur.convId || activeConv.value || null) : undefined }
+    return { ...r, tabs }
+  })
+  if (kind === 'conv') {
+    const r = rowByKey(key)
+    const cv = r?.tabs[r.active]?.convId
+    if (cv) ensureFocusReply(cv)
+  }
+}
+function addTab(key, kind) {
+  updRow(key, r => ({ ...r, tabs: [...r.tabs, { kind, convId: kind === 'conv' ? (activeConv.value || null) : undefined }], active: r.tabs.length }))
+  setFocus(key)
+}
+function closeTab(key, ti) {
+  const r = rowByKey(key)
+  if (!r) return
+  if (r.tabs.length <= 1) { closePane(key); return }
+  updRow(key, rr => {
+    const tabs = rr.tabs.filter((_, i) => i !== ti)
+    return { ...rr, tabs, active: Math.max(0, Math.min(rr.active - (ti <= rr.active ? 1 : 0), tabs.length - 1)) }
+  })
+}
+function updActiveConv(key, cid) {
+  updRow(key, r => { const tabs = r.tabs.slice(); tabs[r.active] = { ...tabs[r.active], convId: cid }; return { ...r, tabs } })
+}
+
+function emptyRowKey() {
+  const e = allRows().find(r => activeTab(r).kind === 'empty')
+  return e ? e.key : null
+}
+function focusedColIdx() { const p = pos(focusKey.value); return p ? p.ci : 1 }
+
+function placePane(kind, convId) {
+  const cs = columns.value
+  if (kind !== 'conv') {
+    const ex = allRows(cs).find(r => activeTab(r).kind === kind)
+    if (ex) { setFocus(ex.key); return }
+  }
+  const ek = emptyRowKey()
+  if (ek) { switchKind(ek, kind); if (convId) updActiveConv(ek, convId); setFocus(ek); return }
+  const ci = focusedColIdx()
+  if (cs[ci].rows.length < 2) {
+    const key = uid('k')
+    addRowTile(ci, kind, convId, key)
+    nextTick(() => setFocus(key))
+    return
+  }
+  addTab(focusKey.value, kind)
+  if (convId) updActiveConv(focusKey.value, convId)
+}
+function addRowTile(ci, kind, convId, key) {
+  columns.value = columns.value.map((c, i) => i === ci ? {
+    ...c, rows: c.rows.length >= 2 ? c.rows : [
+      ...c.rows.map(r => ({ ...r, flex: 1 })),
+      { key: key || uid('k'), flex: 1, active: 0, tabs: [mkTab(kind, convId)] }
+    ]
+  } : c)
+}
+
+function ensureFocusReply(cid) {
+  if (!focusReplyBy.value[cid]) {
+    const c = convs.value.find(x => x.id === cid)
+    const lk = c && [...(c.messages||[])].reverse().find(x => x.role === 'kern')
+    if (lk) focusReplyBy.value = { ...focusReplyBy.value, [cid]: lk.id }
+  }
+}
+
+function openThread(cid) {
+  selId.value = cid
+  activeConv.value = cid
+  editing.value = null
+  ensureFocusReply(cid)
+  const fr = rowByKey(focusKey.value)
+  if (fr && activeTab(fr).kind === 'conv') { updActiveConv(fr.key, cid); return }
+  const firstConv = allRows().find(r => activeTab(r).kind === 'conv')
+  if (firstConv) { updActiveConv(firstConv.key, cid); setFocus(firstConv.key); return }
+  placePane('conv', cid)
+}
+
+function spawnConv() {
+  const id = uid('th')
+  convs.value = [{ id, subject: 'New conversation', status: 'draft', time: now(), unread: false, parties: 'you ⇄ kern', parentId: null, messages: [] }, ...convs.value]
+  selId.value = id
+  placePane('conv', id)
+}
+
+function branchConv() {
+  const cur = convs.value.find(c => c.id === activeConv.value)
+  if (!cur) return
+  const id = uid('br')
+  const parent = cur.parentId || cur.id
+  convs.value = convs.value.reduce((acc, c) => {
+    acc.push(c)
+    if (c.id === cur.id) acc.push({ id, subject: cur.subject + ' — branch', status: 'draft', time: now(), unread: false, parties: cur.parties, parentId: parent, messages: [] })
+    return acc
+  }, [])
+  selId.value = id
+  placePane('conv', id)
+}
+
+function splitCol(ci) {
+  if (columns.value[ci].rows.length >= 2) return
+  const key = uid('k')
+  addRowTile(ci, 'empty', undefined, key)
+  nextTick(() => setFocus(key))
+}
+
+function closePane(key) {
+  const p = pos(key)
+  if (!p) return
+  const cs = columns.value
+  const col = cs[p.ci]
+  if (col.rows.length > 1) {
+    const sib = col.rows[p.ri === 0 ? 1 : 0].key
+    columns.value = cs.map((c, i) => i === p.ci ? { ...c, rows: c.rows.filter(r => r.key !== key).map(r => ({ ...r, flex: 1 })) } : c)
+    if (key === focusKey.value) nextTick(() => setFocus(sib))
+  } else if (cs.length > 1) {
+    const nci = p.ci > 0 ? p.ci - 1 : 1
+    const sib = cs[nci].rows[0].key
+    const next = cs.filter((_, i) => i !== p.ci)
+    const w = COLW(next.length)
+    columns.value = next.map((c, i) => ({ ...c, w: w[i] }))
+    if (key === focusKey.value) nextTick(() => setFocus(sib))
+  } else {
+    updRow(key, r => ({ ...r, tabs: [mkTab('empty')], active: 0 }))
+  }
+}
+
+function toggleKind(kind) {
+  const ex = allRows().find(r => activeTab(r).kind === kind)
+  if (ex) setFocus(ex.key); else placePane(kind)
+}
+
+function addAt(dir, key, kind) {
+  const p = pos(key)
+  if (!p) { adding.value = null; return }
+  if (dir === 'tab') { addTab(key, kind); adding.value = null; return }
+  const convId = kind === 'conv' ? (activeConv.value || null) : undefined
+  const nk = uid('k')
+  if (dir === 'left' || dir === 'right') {
+    if (columns.value.length >= 3) { adding.value = null; return }
+    const ncol = { id: uid('col'), w: 1, rows: [{ key: nk, flex: 1, active: 0, tabs: [mkTab(kind, convId)] }] }
+    const out = columns.value.slice()
+    out.splice(dir === 'left' ? p.ci : p.ci + 1, 0, ncol)
+    const w = COLW(out.length)
+    columns.value = out.map((c, i) => ({ ...c, w: w[i] }))
+  } else {
+    if (columns.value[p.ci].rows.length >= 2) { adding.value = null; return }
+    columns.value = columns.value.map((c, i) => {
+      if (i !== p.ci) return c
+      const rows = c.rows.map(r => ({ ...r, flex: 1 }))
+      rows.splice(dir === 'top' ? p.ri : p.ri + 1, 0, { key: nk, flex: 1, active: 0, tabs: [mkTab(kind, convId)] })
+      return { ...c, rows }
+    })
+  }
+  if (convId) { activeConv.value = convId; ensureFocusReply(convId) }
+  adding.value = null
+  nextTick(() => setFocus(nk))
+}
+
+// ── Resize ──
+function startColResize(e, ci) {
+  e.preventDefault(); e.stopPropagation()
+  const wm = wmRef.value
+  const els = wm.querySelectorAll('.wm-col')
+  const aEl = els[ci], bEl = els[ci + 1]
+  if (!bEl) return
+  const a0 = aEl.getBoundingClientRect().width, b0 = bEl.getBoundingClientRect().width
+  const sumW = (columns.value[ci].w || 1) + (columns.value[ci + 1].w || 1)
+  const totalPx = a0 + b0
+  const startX = e.clientX
+  const g = e.currentTarget
+  g.classList.add('drag')
+  function move(ev) {
+    const na = Math.max(60, Math.min(totalPx - 60, a0 + (ev.clientX - startX)))
+    const lw = sumW * na / totalPx, rw = sumW - lw
+    columns.value = columns.value.map((c, i) => i === ci ? { ...c, w: lw } : i === ci + 1 ? { ...c, w: rw } : c)
+  }
+  function up() {
+    window.removeEventListener('pointermove', move)
+    window.removeEventListener('pointerup', up)
+    document.body.style.cursor = ''
+    g.classList.remove('drag')
+  }
+  window.addEventListener('pointermove', move)
+  window.addEventListener('pointerup', up)
+  document.body.style.cursor = 'col-resize'
+}
+
+function startRowResize(e, ci, ri) {
+  e.preventDefault(); e.stopPropagation()
+  const wm = wmRef.value
+  const colEl = wm.querySelectorAll('.wm-col')[ci]
+  const tiles = colEl.querySelectorAll(':scope > .tile')
+  const top = tiles[ri], bot = tiles[ri + 1]
+  const startTop = top.getBoundingClientRect().height
+  const avail = startTop + bot.getBoundingClientRect().height
+  const startY = e.clientY
+  const g = e.currentTarget
+  g.classList.add('drag')
+  function move(ev) {
+    let nt = Math.max(110, Math.min(avail - 110, startTop + (ev.clientY - startY)))
+    columns.value = columns.value.map((c, i) => {
+      if (i !== ci) return c
+      const rows = c.rows.slice()
+      rows[ri] = { ...rows[ri], flex: nt }
+      rows[ri + 1] = { ...rows[ri + 1], flex: avail - nt }
+      return { ...c, rows }
+    })
+  }
+  function up() {
+    window.removeEventListener('pointermove', move)
+    window.removeEventListener('pointerup', up)
+    document.body.style.cursor = ''
+    g.classList.remove('drag')
+  }
+  window.addEventListener('pointermove', move)
+  window.addEventListener('pointerup', up)
+  document.body.style.cursor = 'row-resize'
+}
+
+function resetCols() {
+  const w = COLW(columns.value.length)
+  columns.value = columns.value.map((c, i) => ({ ...c, w: w[i] }))
+}
+
+// ── Computed inbox lists ──
+const topLevel = computed(() => convs.value.filter(c => c.parentId == null))
+const branchesOf = (id) => convs.value.filter(c => c.parentId === id)
+const unsettled = (x) => x.status !== 'replied' || x.unread
+const isActive = (c) => unsettled(c) || branchesOf(c.id).some(unsettled)
+const qq = computed(() => query.value.trim().toLowerCase())
+const matchesC = (c) => !qq.value || (c.subject + ' ' + (c.messages||[]).map(m => (Array.isArray(m.text)?m.text:m.text?[m.text]:[]).join(' ')).join(' ')).toLowerCase().includes(qq.value)
+const activeThreads = computed(() => topLevel.value.filter(c => isActive(c) && (matchesC(c) || branchesOf(c.id).some(matchesC))))
+const resolvedThreads = computed(() => topLevel.value.filter(c => !isActive(c) && (matchesC(c) || branchesOf(c.id).some(matchesC))))
+
+// ── Active reply provenance ──
+const activeReply = computed(() => {
+  const c = convs.value.find(x => x.id === activeConv.value)
+  const rid = c && focusReplyBy.value[c.id]
+  if (!rid) return null
+  for (const conv of convs.value) {
+    const m = conv.messages?.find(x => x.id === rid)
+    if (m) return m
+  }
+  return null
 })
-onBeforeUnmount(() => { if (pulse) clearInterval(pulse); if (ctrl) ctrl.abort() })
+const activeUsed = computed(() => new Set(activeReply.value?.used || []))
+
+// ── Keyboard ──
+function onKey(e) {
+  const tag = (document.activeElement?.tagName) || ''
+  const inField = tag === 'INPUT' || tag === 'TEXTAREA'
+  if (e.altKey) {
+    const k = e.key.toLowerCase()
+    const map = {
+      arrowleft: () => moveH(-1), h: () => moveH(-1),
+      arrowright: () => moveH(1), l: () => moveH(1),
+      arrowup: () => moveV(-1), k: () => moveV(-1),
+      arrowdown: () => moveV(1), j: () => moveV(1),
+      n: spawnConv,
+      b: branchConv,
+      p: () => toggleKind('prov'),
+      s: () => splitCol(focusedColIdx()),
+      t: () => { adding.value = { key: focusKey.value, dir: 'tab' } },
+      ',': () => toggleKind('settings'),
+      w: () => closePane(focusKey.value),
+    }
+    if (map[k]) { e.preventDefault(); map[k]() }
+    return
+  }
+  if (e.key === 'Escape' && inField) { document.activeElement.blur(); return }
+  if (!inField) {
+    if (/^[1-3]$/.test(e.key)) { e.preventDefault(); pressDigit(+e.key); return }
+  }
+}
+
+// ── Accent watcher ──
+watch(accent, (v) => { document.documentElement.style.setProperty('--ember', v) }, { immediate: true })
+
+// ── Lifecycle ──
+onMounted(() => {
+  loadGraph()
+  pulse = setInterval(loadGraph, 5000)
+  window.addEventListener('keydown', onKey)
+})
+onBeforeUnmount(() => {
+  if (pulse) clearInterval(pulse)
+  window.removeEventListener('keydown', onKey)
+})
+
+// ── Tab label helpers ──
+function tabLabel(t) {
+  if (t.kind === 'conv') {
+    const c = convs.value.find(x => x.id === t.convId)
+    return c?.subject || 'thread'
+  }
+  return KIND_LABEL[t.kind] || t.kind
+}
+
+// ── Body renderer per tile ──
+function tileKind(row) { return (row.tabs[row.active] || row.tabs[0]).kind }
+
+const PLUGIN_OPTS = [
+  ['inbox', 'inbox'], ['conv', 'thread'], ['relations', 'relations'],
+  ['graph', 'graph'], ['flow', 'flow'], ['prov', 'before · after'],
+]
+
+const flatTiles = computed(() =>
+  columns.value.flatMap((col, ci) => col.rows.map((row, ri) => ({ ci, ri, row })))
+)
 </script>
 
 <template>
-  <div class="app">
-    <header class="rail">
-      <div class="brand"><b>kern</b><span class="sub">oracle</span></div>
-      <div class="rstats"><span class="dot"></span>{{ stats }}<span v-if="err" class="err"> — {{ err }}</span></div>
+  <div class="app" :data-theme="theme" :data-density="density">
+    <!-- Topbar -->
+    <header class="topbar">
+      <div class="brand">
+        <span class="mk"><KernIcon n="layers" :size="15" /></span>
+        <span class="nm">kern</span>
+        <span class="tag">workspace</span>
+      </div>
+      <div class="grow"></div>
+      <label class="topsearch">
+        <KernIcon n="search" :size="15" />
+        <input v-model="query" placeholder="search threads + memory" />
+      </label>
+      <div class="grow"></div>
+      <button class="icon-btn" title="Add window (alt+t)" @click="adding = { key: focusKey, dir: 'tab' }">
+        <KernIcon n="plus" :size="18" />
+      </button>
+      <button class="icon-btn" title="Settings (alt+,)" @click="toggleKind('settings')">
+        <KernIcon n="sparkle" :size="17" />
+      </button>
+      <button class="btn primary" @click="spawnConv">
+        <KernIcon n="pen" :size="15" /> Compose
+      </button>
     </header>
 
-    <div class="miller-scroll" ref="scrollEl">
-      <div v-if="!turns.length" class="hint-wrap">
-        <div class="hint">Ask the oracle anything about your memory.</div>
-      </div>
-
-      <!-- 3-column grid; each oracle turn emits 3 sibling cells via display:contents wrapper -->
-      <div class="miller-grid">
-        <template v-for="(t, i) in turns" :key="i">
-          <!-- USER TURN: left empty · center bubble · right empty -->
-          <template v-if="t.role === 'user'">
-            <div class="mc-left mc-user-empty"></div>
-            <div class="mc-center">
-              <div class="turn user">
-                <div class="ubody">{{ t.text }}</div>
-              </div>
-            </div>
-            <div class="mc-right mc-user-empty"></div>
-          </template>
-
-          <!-- ORACLE TURN: left=sources · center=answer · right=reasons -->
-          <template v-else>
-            <!-- LEFT: incoming memories (sources) -->
-            <div class="mc-left mc-sticky">
-              <div v-if="t.sources && t.sources.length" class="side-panel incoming">
-                <div class="side-head">
-                  <span class="side-label">incoming</span>
-                  <span class="side-count">{{ t.sources.length }}</span>
-                </div>
-                <div class="src-list">
-                  <div
-                    v-for="s in t.sources"
-                    :key="s.id"
-                    class="tile"
-                    :class="{ on: hot === s.n, corrected: saved.has(s.id) }"
-                    :style="{ background: ramp(s.heat), color: textColor(ramp(s.heat)) }"
-                    @mouseenter="hot = s.n"
-                    @mouseleave="hot = null"
+    <!-- Workspace -->
+    <div class="wm" ref="wmRef">
+      <template v-for="(col, ci) in columns" :key="col.id">
+        <div class="wm-col" :style="{ flex: (col.w||1) + ' 1 0' }">
+          <template v-for="(row, ri) in col.rows" :key="row.key">
+            <section
+              :data-key="row.key"
+              :class="['tile', 'kind-'+tileKind(row), row.key===focusKey ? 'focused' : '']"
+              :style="{ flex: (row.flex||1) + ' 1 0', minHeight: 0 }"
+              @mousedown="setFocus(row.key)"
+            >
+              <!-- Tile header -->
+              <header class="tile-bar">
+                <span class="tile-addr">
+                  {{ (ci+1)+'.'+( ri+1) }}
+                </span>
+                <div class="tile-tabs">
+                  <button
+                    v-for="(t, ti) in row.tabs" :key="ti"
+                    :class="['ttab', ti===row.active ? 'on' : '']"
+                    @mousedown.stop
+                    @click.stop="setActiveTab(row.key, ti)"
                   >
-                    <span class="tn">{{ s.n }}</span>
-                    <span class="tmark">{{ MARK[s.kind] || '·' }}</span>
-                    <template v-if="editing && editing.id === s.id">
-                      <textarea
-                        class="edit-area"
-                        v-model="editing.text"
-                        @keydown.enter.ctrl="saveEdit(editing.id, editing.text, 'entity')"
-                        @keydown.esc="cancelEdit"
-                        rows="4"
-                        autofocus
-                      ></textarea>
-                      <div class="edit-actions">
-                        <button class="ebtn save" @click.stop="saveEdit(editing.id, editing.text, 'entity')">save</button>
-                        <button class="ebtn" @click.stop="cancelEdit">cancel</button>
-                      </div>
-                    </template>
-                    <template v-else>
-                      <div class="tname">{{ s.label }}</div>
-                      <div class="tmeta">{{ s.kind }} · {{ (+s.score).toFixed(2) }}</div>
-                      <button class="edit-btn" title="edit thought" @click.stop="startEdit(s, 'entity')">✎</button>
-                      <span v-if="saved.has(s.id)" class="badge-ok">✓ corrected · reevaluating</span>
-                    </template>
+                    <span class="tmic"><KernIcon :n="KIND_ICON[t.kind]||'grid'" :size="13" /></span>
+                    <span class="tlab">{{ tabLabel(t) }}</span>
+                    <span v-if="row.tabs.length>1" class="tx" @click.stop="closeTab(row.key, ti)">
+                      <KernIcon n="x" :size="11" />
+                    </span>
+                  </button>
+                  <button class="tadd" title="Add tab (alt+t)" @mousedown.stop @click.stop="adding = {key: row.key, dir: 'tab'}">
+                    <KernIcon n="plus" :size="13" />
+                  </button>
+                </div>
+                <span class="tb-actions">
+                  <!-- branch button if conv -->
+                  <template v-if="tileKind(row)==='conv' && row.tabs[row.active]?.convId">
+                    <span class="tb-status">
+                      <span :class="['status', convs.find(c=>c.id===row.tabs[row.active].convId)?.status||'draft']">
+                        <span class="dot"></span>{{ convs.find(c=>c.id===row.tabs[row.active].convId)?.status||'draft' }}
+                      </span>
+                    </span>
+                    <button class="tb-btn" @mousedown.stop @click.stop="activeConv=row.tabs[row.active].convId; branchConv()" title="Branch (alt+b)">
+                      <KernIcon n="branch" :size="14" />
+                    </button>
+                  </template>
+                  <button v-if="col.rows.length<2" class="tile-x" title="Split (alt+s)" @mousedown.stop @click.stop="splitCol(ci)">
+                    <KernIcon n="panelR" :size="15" />
+                  </button>
+                  <button class="tile-x" title="Close (alt+w)" @mousedown.stop @click.stop="closePane(row.key)">
+                    <KernIcon n="x" :size="14" />
+                  </button>
+                </span>
+              </header>
+
+              <!-- Tile body -->
+              <div class="tile-body">
+                <!-- inbox -->
+                <InboxPane
+                  v-if="tileKind(row)==='inbox'"
+                  :activeThreads="activeThreads"
+                  :resolvedThreads="resolvedThreads"
+                  :branchesOf="branchesOf"
+                  :selId="selId"
+                  :count="activeThreads.length"
+                  @openThread="openThread"
+                  @spawnConv="spawnConv"
+                />
+
+                <!-- conversation -->
+                <template v-else-if="tileKind(row)==='conv'">
+                  <ConvPane
+                    v-if="convs.find(c=>c.id===row.tabs[row.active]?.convId)"
+                    :conv="convs.find(c=>c.id===row.tabs[row.active].convId)"
+                    :focusReply="focusReplyBy[row.tabs[row.active].convId]"
+                    :stale="stale"
+                    :resent="resent"
+                    :busy="busyConv"
+                    :compose="composeBy[row.tabs[row.active].convId] || ''"
+                    @setFocusReply="rid => { focusReplyBy = {...focusReplyBy, [row.tabs[row.active].convId]: rid}; activeConv = row.tabs[row.active].convId }"
+                    @setCompose="v => composeBy = {...composeBy, [row.tabs[row.active].convId]: v}"
+                    @send="sendMessage(row.tabs[row.active].convId)"
+                    @resend="resendReply"
+                  />
+                  <!-- launcher if no conv selected -->
+                  <div v-else class="launcher">
+                    <div class="lc-t">No conversation selected</div>
+                    <div class="lc-s">pick one from the inbox or compose a new one</div>
+                    <div class="lc-grid">
+                      <button v-for="[k,l] in PLUGIN_OPTS" :key="k" class="lc-btn" @click="switchKind(row.key, k)">
+                        <span class="ic"><KernIcon :n="KIND_ICON[k]" :size="14" /></span>{{ l }}
+                      </button>
+                    </div>
+                  </div>
+                </template>
+
+                <!-- prov / before-after -->
+                <template v-else-if="tileKind(row)==='prov'">
+                  <ProvPane
+                    v-if="activeReply"
+                    :entry="{ msg: activeReply }"
+                    :thoughts="thoughts"
+                    :reasons="reasons"
+                    :editing="editing"
+                    :draft="draft"
+                    :stale="!!stale[activeReply.id]"
+                    :busy="busyConv === activeReply.id"
+                    @startEdit="startEdit"
+                    @save="editSave"
+                    @cancel="editCancel"
+                    @setDraft="v => draft = v"
+                    @cut="cutReason"
+                    @resend="() => resendReply(activeReply.id)"
+                  />
+                  <div v-else class="thread-empty" style="padding:26px">
+                    <span class="te-mk"><KernIcon n="layers" :size="24" /></span>
+                    <div class="te-t" style="font-size:16px">Before &amp; after</div>
+                    <div class="te-s">Open a reply to see what kern pulled and leaned on.</div>
+                  </div>
+                </template>
+
+                <!-- relations -->
+                <RelationsPane
+                  v-else-if="tileKind(row)==='relations'"
+                  :thoughts="thoughts"
+                  :reasons="reasons"
+                  :editing="editing"
+                  :draft="draft"
+                  :activeUsed="activeUsed"
+                  @startEdit="startEdit"
+                  @save="editSave"
+                  @cancel="editCancel"
+                  @setDraft="v => draft = v"
+                  @cut="cutReason"
+                />
+
+                <!-- graph -->
+                <GraphPane
+                  v-else-if="tileKind(row)==='graph'"
+                  :thoughts="thoughts"
+                  :reasons="reasons"
+                  :activeUsed="activeUsed"
+                />
+
+                <!-- flow -->
+                <FlowPane
+                  v-else-if="tileKind(row)==='flow'"
+                  :thoughts="thoughts"
+                  :reasons="reasons"
+                  :editing="editing"
+                  :draft="draft"
+                  @startEdit="startEdit"
+                  @save="editSave"
+                  @cancel="editCancel"
+                  @setDraft="v => draft = v"
+                />
+
+                <!-- settings -->
+                <SettingsPane
+                  v-else-if="tileKind(row)==='settings'"
+                  :theme="theme"
+                  :density="density"
+                  :accent="accent"
+                  @setTheme="v => theme = v"
+                  @setDensity="v => density = v"
+                  @setAccent="v => accent = v"
+                />
+
+                <!-- empty / launcher -->
+                <div v-else class="launcher">
+                  <div class="lc-t">Empty tile</div>
+                  <div class="lc-s">display any window here</div>
+                  <div class="lc-grid">
+                    <button v-for="[k,l] in PLUGIN_OPTS" :key="k" class="lc-btn" @click="switchKind(row.key, k)">
+                      <span class="ic"><KernIcon :n="KIND_ICON[k]" :size="14" /></span>{{ l }}
+                    </button>
                   </div>
                 </div>
               </div>
-              <div v-else class="mc-empty-side"></div>
-            </div>
 
-            <!-- CENTER: oracle answer bubble -->
-            <div class="mc-center">
-              <div class="turn oracle">
-                <span class="oglyph">◈</span>
-                <div class="obody">
-                  <span v-for="(s, j) in segments(t.text)" :key="j">
-                    <span
-                      v-if="s.cite"
-                      class="cite"
-                      :class="{ on: hot === s.cite }"
-                      @mouseenter="hot = s.cite"
-                      @mouseleave="hot = null"
-                    >{{ s.cite }}</span>
-                    <span v-else>{{ s.t }}</span>
-                  </span>
-                  <span v-if="busy && i === turns.length - 1" class="caret">▍</span>
+              <!-- Edge add buttons -->
+              <div class="tile-edges">
+                <div v-if="col.rows.length<2" class="edge-zone ez-top">
+                  <button class="edge-plus" title="Add above" @mousedown.stop @click.stop="adding={key:row.key,dir:'top'}">
+                    <KernIcon n="plus" :size="15" />
+                  </button>
+                </div>
+                <div v-if="col.rows.length<2" class="edge-zone ez-bottom">
+                  <button class="edge-plus" title="Add below" @mousedown.stop @click.stop="adding={key:row.key,dir:'bottom'}">
+                    <KernIcon n="plus" :size="15" />
+                  </button>
+                </div>
+                <div v-if="columns.length<3" class="edge-zone ez-left">
+                  <button class="edge-plus" title="Add column left" @mousedown.stop @click.stop="adding={key:row.key,dir:'left'}">
+                    <KernIcon n="plus" :size="15" />
+                  </button>
+                </div>
+                <div v-if="columns.length<3" class="edge-zone ez-right">
+                  <button class="edge-plus" title="Add column right" @mousedown.stop @click.stop="adding={key:row.key,dir:'right'}">
+                    <KernIcon n="plus" :size="15" />
+                  </button>
                 </div>
               </div>
-            </div>
 
-            <!-- RIGHT: outgoing reasoning (reason edges) -->
-            <div class="mc-right mc-sticky">
-              <div v-if="t.reasons && t.reasons.length" class="side-panel outgoing">
-                <div class="side-head">
-                  <span class="side-label">reasoning</span>
-                  <span class="side-count">{{ t.reasons.length }}</span>
-                </div>
-                <div
-                  v-for="r in t.reasons"
-                  :key="r.id"
-                  class="reason-row"
-                  :class="{ corrected: saved.has(r.id) }"
-                >
-                  <template v-if="editing && editing.id === r.id">
-                    <textarea
-                      class="edit-area reason-edit-area"
-                      v-model="editing.text"
-                      @keydown.enter.ctrl="saveEdit(editing.id, editing.text, 'reason')"
-                      @keydown.esc="cancelEdit"
-                      rows="3"
-                      autofocus
-                    ></textarea>
-                    <div class="edit-actions">
-                      <button class="ebtn save" @click.stop="saveEdit(editing.id, editing.text, 'reason')">save</button>
-                      <button class="ebtn" @click.stop="cancelEdit">cancel</button>
-                    </div>
-                  </template>
-                  <template v-else>
-                    <span class="reason-kind">{{ r.kind }}</span>
-                    <span class="reason-text">{{ r.text }}</span>
-                    <div class="reason-row-actions">
-                      <button class="edit-btn" title="edit reason" @click.stop="startEdit(r, 'reason')">✎</button>
-                      <span v-if="saved.has(r.id)" class="badge-ok">✓ corrected · reevaluating</span>
-                    </div>
-                  </template>
+              <!-- Add chooser overlay -->
+              <div v-if="adding && adding.key===row.key" class="add-cover" @mousedown.stop="adding=null">
+                <div class="add-chooser" @mousedown.stop>
+                  <span class="ey ac-lab">add window {{ {tab:'as a tab here',top:'above',bottom:'below',left:'to the left',right:'to the right'}[adding.dir] }} · pick a plugin</span>
+                  <div class="lc-grid">
+                    <button v-for="[k,l] in PLUGIN_OPTS" :key="k" class="lc-btn" @click="addAt(adding.dir, row.key, k)">
+                      <span class="ic"><KernIcon :n="KIND_ICON[k]" :size="14" /></span>{{ l }}
+                    </button>
+                  </div>
+                  <span class="ac-hint">more plugins soon</span>
                 </div>
               </div>
-              <div v-else class="mc-empty-side"></div>
-            </div>
+            </section>
+
+            <!-- Row gutter -->
+            <div v-if="ri < col.rows.length-1" class="row-gutter" title="Drag to resize"
+              @pointerdown="startRowResize($event, ci, ri)"><span class="g"></span></div>
           </template>
-        </template>
-      </div>
-
-      <!-- Input bar pinned to bottom of center column via a full-width footer row -->
-      <div class="ask-footer">
-        <div class="ask-footer-inner">
-          <input
-            ref="inputEl"
-            v-model="input"
-            @keydown="onKey"
-            :disabled="busy"
-            placeholder="ask the oracle…"
-          />
-          <button @click="ask" :disabled="busy || !input.trim()">↵</button>
         </div>
-      </div>
+
+        <!-- Column gutter -->
+        <div v-if="ci < columns.length-1" class="col-gutter" title="Drag to resize · double-click to reset"
+          @pointerdown="startColResize($event, ci)"
+          @dblclick="resetCols"><span class="g"></span></div>
+      </template>
     </div>
+
+    <!-- Statusbar -->
+    <footer class="statusbar">
+      <span class="sb-ws"><span class="d"></span>kern</span>
+      <div class="sb-tiles">
+        <button
+          v-for="{ ci, ri, row } in flatTiles"
+          :key="row.key"
+          :class="['sb-chip', row.key===focusKey ? 'on' : '']"
+          @click="setFocus(row.key)"
+        >
+          <span class="n">{{ (ci+1)+'.'+(ri+1) }}</span>
+          <span class="lbl">{{ tabLabel(activeTab(row)) }}</span>
+        </button>
+      </div>
+      <span class="grow"></span>
+      <span class="sb-hint"><b>1–3</b> then <b>1/2</b> address · <b>alt+←↑↓→</b> move · <b>alt+t</b> tab · <b>alt+s</b> split · <b>alt+n</b> new · <b>alt+w</b> close</span>
+    </footer>
   </div>
 </template>
-
-<style>
-:root {
-  --ink: #f4f1ea;
-  --muted: #8b8678;
-  --line: rgba(244,241,234,0.10);
-  --panel: rgba(244,241,234,0.018);
-  --rail-h: 52px;
-  --display: 'Bricolage Grotesque', system-ui, sans-serif;
-  --body: 'Hanken Grotesk', system-ui, sans-serif;
-  --mono: 'IBM Plex Mono', ui-monospace, monospace;
-}
-* { box-sizing: border-box; }
-html, body, #app { height: 100%; margin: 0; }
-
-.app {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  background: radial-gradient(120% 90% at 50% -10%, #16130f 0%, #0a0a0c 55%, #08080a 100%);
-  color: var(--ink);
-  font-family: var(--body);
-}
-
-/* ── rail ── */
-.rail {
-  height: var(--rail-h);
-  display: flex;
-  align-items: baseline;
-  gap: 14px;
-  padding: 14px 22px;
-  border-bottom: 1px solid var(--line);
-  flex-shrink: 0;
-}
-.brand b { font-family: var(--display); font-weight: 800; font-size: 17px; }
-.brand .sub { color: var(--muted); font-family: var(--mono); font-size: 11px; letter-spacing: .16em; text-transform: uppercase; margin-left: 6px; }
-.rstats { color: var(--muted); font-family: var(--mono); font-size: 11px; display: flex; align-items: center; gap: 8px; }
-.dot { width: 7px; height: 7px; border-radius: 50%; background: #98c379; box-shadow: 0 0 8px #98c379; }
-.err { color: #e8705e; }
-
-/* ── outer scroll container ── */
-.miller-scroll {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-}
-
-/* ── hint (empty state) ── */
-.hint-wrap {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.hint { color: var(--muted); font-size: 14px; }
-
-/* ── miller 3-column grid ── */
-.miller-grid {
-  flex: 1;
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(380px, 1.5fr) minmax(240px, 1fr);
-  column-gap: 0;
-  row-gap: 0;
-  align-items: start;
-  padding: 18px 0 0;
-}
-
-/* column dividers */
-.miller-grid::before,
-.miller-grid::after {
-  display: none; /* handled via cell borders */
-}
-
-/* ── grid cells ── */
-.mc-left,
-.mc-center,
-.mc-right {
-  padding: 0 16px 24px;
-}
-.mc-left {
-  border-right: 1px solid var(--line);
-}
-.mc-right {
-  border-left: 1px solid var(--line);
-}
-
-/* sticky side panels pin to top of viewport below the rail */
-.mc-sticky {
-  position: sticky;
-  top: var(--rail-h);
-  align-self: start;
-}
-
-.mc-user-empty,
-.mc-empty-side {
-  /* intentionally blank */
-}
-
-/* ── center column turns ── */
-.turn.user {
-  display: flex;
-  justify-content: flex-end;
-  margin-bottom: 4px;
-}
-.ubody {
-  background: rgba(242,169,62,0.14);
-  color: var(--ink);
-  padding: 9px 13px;
-  border-radius: 13px 13px 3px 13px;
-  font-size: 14px;
-  max-width: 88%;
-}
-.turn.oracle {
-  display: flex;
-  gap: 10px;
-}
-.oglyph { color: #98c379; flex-shrink: 0; padding-top: 2px; }
-.obody { font-size: 15px; line-height: 1.5; }
-.cite {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 17px;
-  height: 17px;
-  padding: 0 4px;
-  margin: 0 1px;
-  border-radius: 5px;
-  background: rgba(97,175,239,0.18);
-  color: #9cd0ff;
-  font-family: var(--mono);
-  font-size: 11px;
-  cursor: pointer;
-  vertical-align: 1px;
-}
-.cite.on { background: #61afef; color: #08080a; }
-.caret { color: #f2a93e; animation: blink 1s steps(2) infinite; }
-@keyframes blink { 50% { opacity: 0; } }
-
-/* ── side panels (incoming / outgoing) ── */
-.side-panel {
-  border-radius: 14px;
-  background: var(--panel);
-  box-shadow: inset 0 0 0 1px rgba(244,241,234,0.06);
-  overflow: hidden;
-}
-.side-head {
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: .16em;
-  text-transform: uppercase;
-  padding: 10px 13px;
-  border-bottom: 1px solid var(--line);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--muted);
-}
-.side-label { color: var(--ink); opacity: .7; }
-.side-count { margin-left: auto; }
-
-/* ── source tiles (left column) ── */
-.src-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px;
-}
-.tile {
-  position: relative;
-  border-radius: 11px;
-  padding: 10px 10px 10px 10px;
-  min-height: 80px;
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  gap: 4px;
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08);
-  transition: box-shadow .12s;
-}
-.tile.on { box-shadow: inset 0 0 0 2px #61afef, 0 0 0 2px rgba(97,175,239,0.4); }
-.tile.corrected { box-shadow: inset 0 0 0 1px rgba(152,195,121,0.45); }
-.tn { position: absolute; top: 8px; left: 10px; font-family: var(--mono); font-size: 10px; opacity: .8; }
-.tmark { position: absolute; top: 7px; right: 10px; opacity: .8; }
-.tname { font-family: var(--display); font-weight: 800; font-size: 13px; line-height: 1.15; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-.tmeta { font-family: var(--mono); font-size: 10px; opacity: .75; }
-
-/* ── reason rows (right column) ── */
-.reason-row {
-  position: relative;
-  padding: 8px 10px;
-  border-radius: 9px;
-  background: rgba(244,241,234,0.03);
-  box-shadow: inset 0 0 0 1px var(--line);
-  margin: 8px 10px 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-.reason-row:last-child { margin-bottom: 10px; }
-.reason-row.corrected { box-shadow: inset 0 0 0 1px rgba(152,195,121,0.35); }
-.reason-kind { font-family: var(--mono); font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .1em; }
-.reason-text { font-size: 13px; line-height: 1.4; color: var(--ink); padding-right: 26px; }
-.reason-row-actions { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
-.reason-edit-area { margin-top: 4px; }
-
-/* ── edit affordances ── */
-.edit-btn {
-  position: absolute;
-  bottom: 7px;
-  right: 8px;
-  background: rgba(244,241,234,0.12);
-  border: none;
-  border-radius: 5px;
-  padding: 2px 5px;
-  font-size: 12px;
-  cursor: pointer;
-  color: inherit;
-  opacity: 0;
-  transition: opacity .12s;
-}
-.tile:hover .edit-btn, .reason-row:hover .edit-btn { opacity: 1; }
-.edit-area {
-  width: 100%;
-  background: rgba(0,0,0,0.3);
-  border: 1px solid rgba(244,241,234,0.2);
-  border-radius: 7px;
-  color: var(--ink);
-  font-family: var(--body);
-  font-size: 13px;
-  padding: 7px;
-  resize: vertical;
-  outline: none;
-}
-.edit-actions { display: flex; gap: 6px; margin-top: 4px; }
-.ebtn {
-  background: rgba(244,241,234,0.10);
-  border: 1px solid rgba(244,241,234,0.15);
-  border-radius: 6px;
-  color: var(--ink);
-  font-size: 11px;
-  padding: 3px 8px;
-  cursor: pointer;
-}
-.ebtn.save { background: rgba(152,195,121,0.22); border-color: rgba(152,195,121,0.4); color: #c8efae; }
-.badge-ok { font-family: var(--mono); font-size: 10px; color: #98c379; opacity: .8; margin-top: 2px; display: block; }
-
-/* ── ask footer ── */
-.ask-footer {
-  position: sticky;
-  bottom: 0;
-  background: linear-gradient(to top, #0a0a0c 70%, transparent);
-  padding: 10px 0 16px;
-  /* align the input to the center column */
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(380px, 1.5fr) minmax(240px, 1fr);
-}
-.ask-footer-inner {
-  grid-column: 2;
-  display: flex;
-  gap: 10px;
-  padding: 0 16px;
-}
-.ask-footer-inner input {
-  flex: 1;
-  background: #131210;
-  border: 0;
-  outline: none;
-  color: var(--ink);
-  font-family: var(--body);
-  font-size: 14px;
-  padding: 13px 15px;
-  border-radius: 11px;
-  box-shadow: inset 0 0 0 1px var(--line);
-}
-.ask-footer-inner input::placeholder { color: #4f4b43; }
-.ask-footer-inner button {
-  background: #f2a93e;
-  color: #1c1206;
-  border: 0;
-  border-radius: 11px;
-  width: 46px;
-  font-size: 16px;
-  cursor: pointer;
-}
-.ask-footer-inner button:disabled { opacity: .4; cursor: default; }
-</style>

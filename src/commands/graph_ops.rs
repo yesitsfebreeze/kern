@@ -6,7 +6,7 @@ use crate::base::search::find_entity;
 use crate::base::types::{Reason, ReasonKind};
 use crate::base::util::{explain_relationship_prompt, short_id, truncate};
 
-use super::{build_llm, find_entity_by_prefix, load_graph, print_kern, save_graph, with_graph};
+use super::{Client, Endpoint, find_entity_by_prefix, load_graph, print_kern, save_graph, with_graph};
 
 pub(super) fn cmd_get(cfg: &crate::config::Config, id: &str) {
 	let g = load_graph(cfg);
@@ -119,16 +119,10 @@ pub(super) async fn cmd_link(
 		}
 	};
 
-	let llm_client = build_llm(
-		embed_url,
-		embed_model,
-		&cfg.embed.key,
-		reason_url,
-		reason_model,
-		cfg.reason_key(),
-		"",
-		"",
-		"",
+	let llm_client = Client::new(
+		Endpoint::new(reason_url, reason_model, cfg.reason_key()),
+		Endpoint::default(),
+		Endpoint::new(embed_url, embed_model, &cfg.embed.key),
 	);
 	let mut reason_text = reason.to_string();
 

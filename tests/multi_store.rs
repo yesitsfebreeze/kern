@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use kern::config::Config;
-use kern::llm::Client;
+use kern::llm::{Client, Endpoint};
 use kern::store::Registry;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10,7 +10,7 @@ async fn registry_idempotent_and_isolated() {
     let dir_b = tempfile::tempdir().unwrap();
 
     let cfg = Config::default();
-    let llm = Client::new("", "", "", "", "", "", "", "", "");
+    let llm = Client::new(Endpoint::default(), Endpoint::default(), Endpoint::default());
 
     let reg = Registry::new();
 

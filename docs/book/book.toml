@@ -10,7 +10,7 @@ preferred-dark-theme = "ayu"
 git-repository-url = "https://github.com/yesitsfebreeze/relay-kern"
 edit-url-template = "https://github.com/yesitsfebreeze/relay-kern/edit/master/docs/book/{path}"
 additional-css = ["theme/custom.css"]
-additional-js = ["theme/custom.js"]
+additional-js = ["theme/custom.js", "mermaid.min.js", "mermaid-init.js"]
 no-section-label = false
 
 [output.html.search]
@@ -26,3 +26,8 @@ heading-split-level = 3
 [output.html.fold]
 enable = true
 level = 1
+
+[preprocessor]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"

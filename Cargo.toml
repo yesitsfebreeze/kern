@@ -64,6 +64,10 @@ path = "src/main.rs"
 name = "retrieval_bench"
 path = "src/bin/retrieval_bench.rs"
 
+[[bin]]
+name = "locomo_eval"
+path = "src/bin/locomo_eval.rs"
+
 [[bench]]
 name = "bench"
 path = "benches/bench.rs"

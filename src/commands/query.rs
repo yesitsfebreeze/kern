@@ -1,7 +1,7 @@
 use crate::base::search::{find_entity, search_all_unlocked};
 use crate::base::util::{short_id, truncate};
 
-use super::{build_llm, load_graph, save_graph};
+use super::{Client, Endpoint, load_graph, save_graph};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn cmd_query(
@@ -15,16 +15,10 @@ pub(super) async fn cmd_query(
 	reason_model: &str,
 ) {
 	let g = load_graph(cfg);
-	let llm_client = build_llm(
-		embed_url,
-		embed_model,
-		&cfg.embed.key,
-		reason_url,
-		reason_model,
-		cfg.reason_key(),
-		"",
-		"",
-		"",
+	let llm_client = Client::new(
+		Endpoint::new(reason_url, reason_model, cfg.reason_key()),
+		Endpoint::new(cfg.answer_url(), &cfg.answer.model, cfg.answer_key()),
+		Endpoint::new(embed_url, embed_model, &cfg.embed.key),
 	);
 
 	let vec = match llm_client.embed(text).await {
@@ -64,19 +58,32 @@ pub(super) async fn cmd_query(
 	}
 
 	if answer {
+		use futures_util::StreamExt as _;
 		let prompt = crate::retrieval::answer::build_answer_prompt(
 			&g,
 			&result.path_chains,
 			&result.entities,
 			text,
 		);
-		match llm_client.complete(&prompt).await {
-			Ok(ans) => {
-				println!("--- Answer ---");
-				println!("{ans}");
+		// Single-shot (stream:false): one round-trip, collected into the printed
+		// answer. The streamed tokens arrive through the same interface the `/ask`
+		// UI consumes incrementally — see `Client::answer`.
+		let mut gen = std::pin::pin!(llm_client.answer(crate::llm::AnswerParams {
+			messages: vec![("user".to_string(), prompt)],
+			stream: false,
+			num_predict: None,
+		}));
+		println!("--- Answer ---");
+		while let Some(item) = gen.next().await {
+			match item {
+				Ok(tok) => print!("{tok}"),
+				Err(e) => {
+					eprintln!("answer: {e}");
+					return;
+				}
 			}
-			Err(e) => eprintln!("answer: {e}"),
 		}
+		println!();
 	}
 }
 
@@ -88,7 +95,11 @@ pub(super) async fn cmd_search(
 	embed_model: &str,
 ) {
 	let g = load_graph(cfg);
-	let llm_client = build_llm(embed_url, embed_model, &cfg.embed.key, "", "", "", "", "", "");
+	let llm_client = Client::new(
+		Endpoint::default(),
+		Endpoint::default(),
+		Endpoint::new(embed_url, embed_model, &cfg.embed.key),
+	);
 	let vec = match llm_client.embed(text).await {
 		Ok(v) => v,
 		Err(e) => {

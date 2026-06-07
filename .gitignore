@@ -14,3 +14,6 @@
 /.obsidian
 /vicky
 NUL
+
+# LoCoMo eval corpus — CC BY-NC 4.0, user-supplied, never redistributed in-repo (#36)
+/eval/

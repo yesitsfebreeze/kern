@@ -2,6 +2,7 @@
 //! mode's `truncate_after` flow. Intentionally a HashMap shim — the
 //! truncate-by-timestamp semantics don't need the full graph.
 
+use crate::base::locks::lock_recovered;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -23,21 +24,21 @@ impl MemoryService {
 	}
 
 	pub fn insert(&self, e: MemoryEntry) {
-		let mut g = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+		let mut g = lock_recovered(&self.entries);
 		g.insert(e.key.clone(), e);
 	}
 
 	/// Drop entries with `ts_ms > input`. Returns the number removed so
 	/// callers can surface a trace line for visibility.
 	pub fn truncate_after(&self, ts_ms: u64) -> usize {
-		let mut g = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+		let mut g = lock_recovered(&self.entries);
 		let before = g.len();
 		g.retain(|_, e| e.ts_ms <= ts_ms);
 		before - g.len()
 	}
 
 	pub fn len(&self) -> usize {
-		self.entries.lock().unwrap_or_else(|p| p.into_inner()).len()
+		lock_recovered(&self.entries).len()
 	}
 
 	pub fn is_empty(&self) -> bool {

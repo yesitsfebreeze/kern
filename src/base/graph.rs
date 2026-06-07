@@ -264,6 +264,12 @@ impl GraphGnn {
 		}
 		self.kerns.remove(id);
 		self.unloaded.remove(id);
+		// Delete the on-disk file too. `load_dir` reads every `*.kern` as a live
+		// kern, so a deregistered kern whose file lingers resurrects on the next
+		// start — the leak that let reaped empty kerns persist by the thousand.
+		if !self.data_dir.is_empty() {
+			super::persist::delete_kern(&self.data_dir, id);
+		}
 	}
 
 	pub fn unload(&mut self, id: &str) -> Result<(), super::persist::PersistError> {
@@ -278,6 +284,71 @@ impl GraphGnn {
 		self.kerns.remove(id);
 		self.unloaded.insert(id.to_string());
 		Ok(())
+	}
+
+	/// Reap unnamed kerns that hold no entities and no surviving children — the
+	/// residue of the historical unnamed-child spawn runaway (see
+	/// [`crate::base::accept::get_or_spawn_unnamed_child`]) which fragments the
+	/// graph to `max_kerns` near-empty kerns. Every retrieval seed, tick
+	/// `enqueue_all`, and `/graph` render is O(loaded kerns), so this bloat is a
+	/// flat tax on latency. Iterates leaf-first until stable, so an empty parent
+	/// of (now-removed) empty children is reaped in a later pass. Detaches each
+	/// victim from its parent's `children` first, leaving no dangling ref. The
+	/// root, named kerns, and any kern with entities or a non-empty descendant are
+	/// never touched. Returns the number removed.
+	pub fn gc_empty_kerns(&mut self) -> usize {
+		let root_id = self.root.id.clone();
+		let mut removed = 0usize;
+		loop {
+			let victims: std::collections::HashSet<String> = self
+				.kerns
+				.values()
+				.filter(|k| {
+					k.id != root_id
+						&& k.is_unnamed()
+						&& k.entities.is_empty()
+						&& k.children.is_empty()
+				})
+				.map(|k| k.id.clone())
+				.collect();
+			if victims.is_empty() {
+				break;
+			}
+			// Detach victims from EVERY parent's children in one linear pass over
+			// the surviving kerns — not per-victim, which is O(victims × children)
+			// and explodes when the root holds hundreds of thousands of dead child
+			// refs (the exact bloat this reaps). HashSet membership keeps it O(total
+			// children) per round.
+			for k in self.kerns.values_mut() {
+				if !k.children.is_empty() {
+					k.children.retain(|c| !victims.contains(c));
+				}
+			}
+			for id in &victims {
+				self.deregister(id);
+				removed += 1;
+			}
+		}
+		// Final hygiene: drop any child ref pointing at a kern that no longer
+		// exists in the graph. Covers victims removed above AND files deleted
+		// out-of-band (e.g. a bulk sweep of empty-kern files), which otherwise
+		// leaves the root carrying a vast list of dead child ids.
+		let existing: std::collections::HashSet<String> = self.kerns.keys().cloned().collect();
+		for k in self.kerns.values_mut() {
+			if !k.children.is_empty() {
+				k.children.retain(|c| existing.contains(c));
+			}
+		}
+		removed
+	}
+
+	/// [`gc_empty_kerns`](Self::gc_empty_kerns) wrapped with the loaded-kern counts
+	/// either side, as `(before, reaped, after)` — the shape both the startup reap
+	/// and the offline `gc` command log.
+	pub fn gc_empty_kerns_counted(&mut self) -> (usize, usize, usize) {
+		let before = self.kerns.len();
+		let reaped = self.gc_empty_kerns();
+		(before, reaped, self.kerns.len())
 	}
 
 	pub fn all(&self) -> Vec<&Kern> {

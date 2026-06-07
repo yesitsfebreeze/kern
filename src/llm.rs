@@ -43,6 +43,32 @@ fn should_retry_single(err: &LlmError) -> bool {
 	is_transient(err) || matches!(err, LlmError::EmptyEmbedding)
 }
 
+/// Parameters for [`Client::answer`]. `messages` is the full role/content turn
+/// list (the `/ask` UI passes multi-turn context; single-shot callers pass one
+/// `("user", prompt)` pair). `stream` toggles Ollama wire streaming. `num_predict`
+/// caps generated tokens — `None` for a real answer, `Some(1)` for the warm ping.
+pub struct AnswerParams {
+	pub messages: Vec<(String, String)>,
+	pub stream: bool,
+	pub num_predict: Option<u64>,
+}
+
+/// One LLM endpoint: base URL, model tag, optional bearer key. Empty fields fall
+/// back per [`Client::new`] (answer/embed → reason), so `Endpoint::default()`
+/// means "reuse the reason endpoint".
+#[derive(Default, Clone)]
+pub struct Endpoint {
+	pub url: String,
+	pub model: String,
+	pub key: String,
+}
+
+impl Endpoint {
+	pub fn new(url: &str, model: &str, key: &str) -> Self {
+		Self { url: url.to_string(), model: model.to_string(), key: key.to_string() }
+	}
+}
+
 #[derive(Clone)]
 pub struct Client {
 	inner: Arc<Inner>,
@@ -62,46 +88,19 @@ struct Inner {
 }
 
 impl Client {
-	#[allow(clippy::too_many_arguments)]
-	pub fn new(
-		reason_url: &str,
-		reason_model: &str,
-		reason_key: &str,
-		answer_url: &str,
-		answer_model: &str,
-		answer_key: &str,
-		embed_url: &str,
-		embed_model: &str,
-		embed_key: &str,
-	) -> Self {
-		let embed_url = if embed_url.is_empty() {
-			reason_url
-		} else {
-			embed_url
-		};
-		let embed_key = if embed_key.is_empty() {
-			reason_key
-		} else {
-			embed_key
-		};
-		// Answer endpoint falls back to reason when unset — the single-Ollama
-		// case where only the model differs. Empty model would 400 on /ask, so
-		// fall back there too rather than send a blank model name.
-		let answer_url = if answer_url.is_empty() {
-			reason_url
-		} else {
-			answer_url
-		};
-		let answer_key = if answer_key.is_empty() {
-			reason_key
-		} else {
-			answer_key
-		};
-		let answer_model = if answer_model.is_empty() {
-			reason_model
-		} else {
-			answer_model
-		};
+	/// Build a client from three endpoints. Empty `answer`/`embed` fields fall back
+	/// to `reason`: embed reuses reason's url+key (single-Ollama host), and answer
+	/// reuses reason's url+key+model — the common case where only the answer model
+	/// differs. An empty answer model would 400 on `/ask`, so it falls back too.
+	pub fn new(reason: Endpoint, answer: Endpoint, embed: Endpoint) -> Self {
+		fn or<'a>(v: &'a str, fallback: &'a str) -> &'a str {
+			if v.is_empty() { fallback } else { v }
+		}
+		let embed_url = or(&embed.url, &reason.url);
+		let embed_key = or(&embed.key, &reason.key);
+		let answer_url = or(&answer.url, &reason.url);
+		let answer_key = or(&answer.key, &reason.key);
+		let answer_model = or(&answer.model, &reason.model);
 		let normalize = |u: &str| {
 			let u = u.trim_end_matches('/');
 			u.strip_suffix("/v1").unwrap_or(u).to_string()
@@ -112,14 +111,14 @@ impl Client {
 			.expect("failed to build HTTP client");
 		Self {
 			inner: Arc::new(Inner {
-				reason_url: normalize(reason_url),
-				reason_model: reason_model.to_string(),
-				reason_headers: make_headers(reason_key),
+				reason_url: normalize(&reason.url),
+				reason_model: reason.model.clone(),
+				reason_headers: make_headers(&reason.key),
 				answer_url: normalize(answer_url),
 				answer_model: answer_model.to_string(),
 				answer_headers: make_headers(answer_key),
 				embed_url: normalize(embed_url),
-				embed_model: embed_model.to_string(),
+				embed_model: embed.model.clone(),
 				embed_headers: make_headers(embed_key),
 				http,
 			}),
@@ -127,7 +126,7 @@ impl Client {
 	}
 
 	pub fn new_embed_only(embed_url: &str, embed_model: &str) -> Self {
-		Self::new("", "", "", "", "", "", embed_url, embed_model, "")
+		Self::new(Endpoint::default(), Endpoint::default(), Endpoint::new(embed_url, embed_model, ""))
 	}
 
 	pub async fn embed(&self, text: &str) -> Result<Vec<f64>, LlmError> {
@@ -143,12 +142,32 @@ impl Client {
 		}
 	}
 
+	/// The shared `/api/embed` request body. `input` is either one string or an
+	/// array of strings — both native-endpoint shapes.
+	///
+	/// Ollama's NATIVE /api/embed, not the OpenAI-compat /v1/embeddings: only the
+	/// native endpoint honors `options.num_ctx` and `keep_alive`. Without a num_ctx
+	/// cap Ollama allocates a KV cache for the model's DEFAULT context (32k for
+	/// qwen3-embedding) — that balloons a 0.6b embedder to ~5.8 GB of VRAM, which on
+	/// an 8 GB GPU cannot coexist with the answer model, so every `/ask` (embed →
+	/// answer) thrashes Ollama swapping the two and, under the multi-daemon forest's
+	/// concurrent load, wedges it outright. Capping to EMBED_NUM_CTX holds the
+	/// embedder at ~1.5 GB so it stays resident beside the answer model. `truncate`
+	/// lets an over-long input clip instead of erroring. See [`Client::answer`] for
+	/// the mirror of this on the answer path.
+	fn embed_body(&self, input: Value) -> Value {
+		serde_json::json!({
+			"model": self.inner.embed_model,
+			"input": input,
+			"truncate": true,
+			"keep_alive": EMBED_KEEP_ALIVE,
+			"options": { "num_ctx": EMBED_NUM_CTX },
+		})
+	}
+
 	pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f64>>, LlmError> {
-		let url = format!("{}/v1/embeddings", self.inner.embed_url);
-		let body = EmbedBatchRequest {
-			model: &self.inner.embed_model,
-			input: texts,
-		};
+		let url = format!("{}/api/embed", self.inner.embed_url);
+		let body = self.embed_body(serde_json::json!(texts));
 		let resp = self
 			.inner
 			.http
@@ -157,25 +176,18 @@ impl Client {
 			.json(&body)
 			.send()
 			.await?;
-		let status = resp.status().as_u16();
-		if status >= 400 {
-			let body = resp.text().await.unwrap_or_default();
-			return Err(LlmError::Api { status, body });
-		}
-		let mut parsed: EmbedResponse = resp.json().await?;
-		if parsed.data.is_empty() {
+		let resp = check_status(resp).await?;
+		// /api/embed preserves input order in `embeddings`, so no index sort needed.
+		let parsed: NativeEmbedResponse = resp.json().await?;
+		if parsed.embeddings.is_empty() {
 			return Err(LlmError::EmptyEmbedding);
 		}
-		parsed.data.sort_by_key(|d| d.index);
-		Ok(parsed.data.into_iter().map(|d| d.embedding).collect())
+		Ok(parsed.embeddings)
 	}
 
 	async fn embed_single(&self, text: &str) -> Result<Vec<f64>, LlmError> {
-		let url = format!("{}/v1/embeddings", self.inner.embed_url);
-		let body = EmbedSingleRequest {
-			model: &self.inner.embed_model,
-			input: text,
-		};
+		let url = format!("{}/api/embed", self.inner.embed_url);
+		let body = self.embed_body(serde_json::json!(text));
 		let resp = self
 			.inner
 			.http
@@ -184,21 +196,50 @@ impl Client {
 			.json(&body)
 			.send()
 			.await?;
-		let status = resp.status().as_u16();
-		if status >= 400 {
-			let body = resp.text().await.unwrap_or_default();
-			return Err(LlmError::Api { status, body });
-		}
-		let parsed: EmbedResponse = resp.json().await?;
+		let resp = check_status(resp).await?;
+		let parsed: NativeEmbedResponse = resp.json().await?;
 		parsed
-			.data
+			.embeddings
 			.into_iter()
 			.next()
-			.map(|d| d.embedding)
 			.ok_or(LlmError::EmptyEmbedding)
 	}
 
 	pub async fn complete(&self, prompt: &str) -> Result<String, LlmError> {
+		// Local Ollama reason: run distillation/edge-proposal on CPU (num_gpu:0)
+		// via the native endpoint. Reason is latency-insensitive background work,
+		// but the reason model (e.g. qwen2.5:7b, 4.7 GB) cannot share an 8 GB GPU
+		// with the embedder + answer model — loading it for a distillation burst
+		// evicts both and thrashes the user-facing `/ask`. Forcing it to CPU keeps
+		// the GPU entirely for embed+answer so `/ask` stays fast, at the cost of
+		// slower (but invisible) distillation. Cloud reason endpoints don't support
+		// `num_gpu`, so they keep the OpenAI-compat `/v1` path below.
+		if is_local_ollama(&self.inner.reason_url) {
+			let url = format!("{}/api/chat", self.inner.reason_url);
+			let body = serde_json::json!({
+				"model": self.inner.reason_model,
+				"messages": [{"role": "user", "content": prompt}],
+				"stream": false,
+				"think": false,
+				"keep_alive": REASON_KEEP_ALIVE,
+				"options": { "num_ctx": REASON_NUM_CTX, "num_gpu": 0 },
+			});
+			let resp = self
+				.inner
+				.http
+				.post(&url)
+				.headers(self.inner.reason_headers.clone())
+				.timeout(Duration::from_secs(600))
+				.json(&body)
+				.send()
+				.await?;
+			let text = check_status(resp).await?.text().await?;
+			// One `stream:false` object; `parse_chat_line` already knows this shape.
+			return parse_chat_line(text.trim_end())
+				.and_then(|cl| cl.content)
+				.ok_or(LlmError::EmptyCompletion);
+		}
+
 		let url = format!("{}/v1/chat/completions", self.inner.reason_url);
 		let body = ChatRequest {
 			model: &self.inner.reason_model,
@@ -215,11 +256,7 @@ impl Client {
 			.json(&body)
 			.send()
 			.await?;
-		let status = resp.status().as_u16();
-		if status >= 400 {
-			let body = resp.text().await.unwrap_or_default();
-			return Err(LlmError::Api { status, body });
-		}
+		let resp = check_status(resp).await?;
 		let parsed: ChatResponse = resp.json().await?;
 		parsed
 			.choices
@@ -229,43 +266,53 @@ impl Client {
 			.ok_or(LlmError::EmptyCompletion)
 	}
 
-	/// Stream a chat completion as a sequence of content-delta strings.
-	/// `messages` is the full multi-turn context (role/content pairs). Yields each
-	/// non-empty token delta in order; ends when the server sends `[DONE]` or the
-	/// body closes. Errors (HTTP, network) surface as a single `Err` item.
-	pub fn complete_stream(
+	/// The single answer-model entry point. Streams a completion over Ollama's
+	/// NATIVE `/api/chat` — used by the `/ask` UI (consumed incrementally), the CLI
+	/// `query --answer` (collected into a string), and the keep-alive warm ping
+	/// (drained, `num_predict: 1`). All three share one request shape and one
+	/// response parser; there is no second answer path.
+	///
+	/// `/api/chat` (not the OpenAI-compat `/v1`) is the only endpoint that honors
+	/// `options.num_ctx` and `keep_alive`, both of which the answer path needs to
+	/// stay GPU-resident: `/v1` would cold-load every call and let Ollama's default
+	/// 32k KV cache spill a 4b model onto CPU (~2x slower, and it evicts the
+	/// embedder). `think:false` skips qwen3.5's hidden reasoning phase — pure
+	/// latency for a path that only glues retrieved nodes into prose (ignored by
+	/// non-reasoning models).
+	///
+	/// Yields each non-empty content delta in order; ends when the server reports
+	/// `done`. Errors (HTTP, network, 4xx/5xx) surface as a single `Err` item.
+	/// `params.stream` toggles wire streaming — `true` delivers tokens as they
+	/// arrive, `false` returns one object — but either way the content is yielded
+	/// through this same stream, so callers handle both identically.
+	pub fn answer(
 		&self,
-		messages: Vec<(String, String)>,
+		params: AnswerParams,
 	) -> impl futures_core::Stream<Item = Result<String, LlmError>> + Send {
 		let client = self.clone();
 		async_stream::stream! {
-			// Ollama's NATIVE /api/chat, not the OpenAI-compat /v1: it is the only
-			// endpoint that honors `options.num_ctx` and `keep_alive`, both of which
-			// the answer path needs to stay GPU-resident (see ANSWER_NUM_CTX). The
-			// trade is that the answer endpoint must be Ollama — by design: [answer]
-			// is the local small-model glue path. Reason/embed stay on /v1.
 			let url = format!("{}/api/chat", client.inner.answer_url);
-			let msgs: Vec<serde_json::Value> = messages
+			let msgs: Vec<Value> = params
+				.messages
 				.iter()
 				.map(|(r, c)| serde_json::json!({"role": r, "content": c}))
 				.collect();
-			// `think: false` disables the thinking phase. The answer model (qwen3.5)
-			// thinks by default, emitting hidden reasoning tokens before the first
-			// visible one — pure latency for a path that only glues already-retrieved
-			// graph nodes into prose. Ignored by non-reasoning models.
+			let mut options = serde_json::json!({ "num_ctx": ANSWER_NUM_CTX });
+			if let Some(n) = params.num_predict {
+				options["num_predict"] = n.into();
+			}
 			let body = serde_json::json!({
 				"model": client.inner.answer_model,
 				"messages": msgs,
-				"stream": true,
+				"stream": params.stream,
 				"think": false,
 				"keep_alive": ANSWER_KEEP_ALIVE,
-				"options": { "num_ctx": ANSWER_NUM_CTX },
+				"options": options,
 			});
-			// Override the client's 120s TOTAL timeout: a streamed generation can
-			// take far longer to finish than 120s (big RAG prompt + CPU inference),
-			// and a total-response timeout would abort it mid-stream and surface as
-			// "error decoding response body". 600s is a generous ceiling for slow
-			// local models; tokens still stream as they arrive.
+			// Override the client's 120s TOTAL timeout: a generation can take far
+			// longer than 120s (big RAG prompt + CPU inference), and a total-response
+			// timeout would abort it mid-stream as "error decoding response body".
+			// 600s is a generous ceiling; tokens still stream as they arrive.
 			let resp = match client.inner.http.post(&url)
 				.headers(client.inner.answer_headers.clone())
 				.timeout(Duration::from_secs(600))
@@ -276,12 +323,10 @@ impl Client {
 				Ok(r) => r,
 				Err(e) => { yield Err(LlmError::from(e)); return; }
 			};
-			let status = resp.status().as_u16();
-			if status >= 400 {
-				let body = resp.text().await.unwrap_or_default();
-				yield Err(LlmError::Api { status, body });
-				return;
-			}
+			let resp = match check_status(resp).await {
+				Ok(r) => r,
+				Err(e) => { yield Err(e); return; }
+			};
 			let mut stream = resp.bytes_stream();
 			let mut buf: Vec<u8> = Vec::new();
 			while let Some(chunk) = stream.next().await {
@@ -291,50 +336,30 @@ impl Client {
 				};
 				buf.extend_from_slice(&chunk);
 				// Decode only COMPLETE lines, so a multibyte char split across chunks
-				// is never lossily decoded mid-sequence. Each full SSE line is valid UTF-8.
+				// is never lossily decoded mid-sequence. Each full line is valid UTF-8.
 				while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
 					let raw: Vec<u8> = buf.drain(..=pos).collect();
 					let line = String::from_utf8_lossy(&raw);
-					match parse_chat_line(line.trim_end()) {
-						Some(ChatDelta::Done) => return,
-						Some(ChatDelta::Token(t)) if !t.is_empty() => yield Ok(t),
-						_ => {}
+					if let Some(cl) = parse_chat_line(line.trim_end()) {
+						if let Some(t) = cl.content {
+							if !t.is_empty() { yield Ok(t); }
+						}
+						if cl.done { return; }
+					}
+				}
+			}
+			// A `stream:false` response is one JSON object with no trailing newline,
+			// so the line-split loop never fires — flush the buffered remainder. It
+			// carries both the full content and `done:true`; emit content first.
+			if !buf.is_empty() {
+				let line = String::from_utf8_lossy(&buf);
+				if let Some(cl) = parse_chat_line(line.trim_end()) {
+					if let Some(t) = cl.content {
+						if !t.is_empty() { yield Ok(t); }
 					}
 				}
 			}
 		}
-	}
-
-	/// Touch the answer model so Ollama keeps it GPU-resident. Mirrors the embed
-	/// keep-alive: `/ask` is user-facing and a cold reload of qwen3.5:4b costs
-	/// multiple seconds before the first token. A 1-token `/api/chat` with the
-	/// same `num_ctx` and `keep_alive` as the real stream holds the exact runner
-	/// instance, so the next `/ask` reuses it instead of reloading. Errors are
-	/// the caller's to ignore — a missed warm just means one slow request.
-	pub async fn warm_answer(&self) -> Result<(), LlmError> {
-		let url = format!("{}/api/chat", self.inner.answer_url);
-		let body = serde_json::json!({
-			"model": self.inner.answer_model,
-			"messages": [{"role": "user", "content": "warm"}],
-			"stream": false,
-			"think": false,
-			"keep_alive": ANSWER_KEEP_ALIVE,
-			"options": { "num_ctx": ANSWER_NUM_CTX, "num_predict": 1 },
-		});
-		let resp = self
-			.inner
-			.http
-			.post(&url)
-			.headers(self.inner.answer_headers.clone())
-			.json(&body)
-			.send()
-			.await?;
-		let status = resp.status().as_u16();
-		if status >= 400 {
-			let body = resp.text().await.unwrap_or_default();
-			return Err(LlmError::Api { status, body });
-		}
-		Ok(())
 	}
 
 	pub fn complete_func(&self) -> impl Fn(&str) -> String + Send + Sync + 'static {
@@ -342,15 +367,34 @@ impl Client {
 		move |prompt: &str| {
 			let client = client.clone();
 			let prompt = prompt.to_string();
-			match tokio::runtime::Handle::try_current() {
-				Ok(handle) => {
-					let result = tokio::task::block_in_place(|| handle.block_on(client.complete(&prompt)));
-					result.unwrap_or_default()
-				}
-				Err(_) => String::new(),
-			}
+			// No runtime or a completion error both collapse to "" — the distill /
+			// edge-label callers treat that as "no output".
+			block_on_in_place(client.complete(&prompt)).and_then(Result::ok).unwrap_or_default()
 		}
 	}
+}
+
+/// Drive an async `Client` call to completion from a synchronous context that is
+/// itself inside the multi-thread runtime. `block_in_place` hands this worker
+/// thread back to the scheduler while we block, so `block_on` is legal here —
+/// plain `block_on` on a runtime worker panics ("Cannot start a runtime from
+/// within a runtime"). `None` when called outside any runtime; the caller maps
+/// that to its own empty/error result.
+pub(crate) fn block_on_in_place<F: std::future::Future>(fut: F) -> Option<F::Output> {
+	let handle = tokio::runtime::Handle::try_current().ok()?;
+	Some(tokio::task::block_in_place(|| handle.block_on(fut)))
+}
+
+/// Map a non-2xx response to `LlmError::Api` (reading the error body for the
+/// message), passing a successful response through unchanged so the caller can
+/// `.await?` then parse it. Shared by every embed/reason request path.
+async fn check_status(resp: reqwest::Response) -> Result<reqwest::Response, LlmError> {
+	let status = resp.status().as_u16();
+	if status >= 400 {
+		let body = resp.text().await.unwrap_or_default();
+		return Err(LlmError::Api { status, body });
+	}
+	Ok(resp)
 }
 
 fn make_headers(key: &str) -> HeaderMap {
@@ -364,28 +408,11 @@ fn make_headers(key: &str) -> HeaderMap {
 	h
 }
 
-#[derive(Serialize)]
-struct EmbedBatchRequest<'a> {
-	model: &'a str,
-	input: &'a [String],
-}
-
-#[derive(Serialize)]
-struct EmbedSingleRequest<'a> {
-	model: &'a str,
-	input: &'a str,
-}
-
+/// Response from Ollama's native `/api/embed`. `embeddings` preserves the order
+/// of the request `input` (one row per input string).
 #[derive(Deserialize)]
-struct EmbedResponse {
-	data: Vec<EmbedDatum>,
-}
-
-#[derive(Deserialize)]
-struct EmbedDatum {
-	embedding: Vec<f64>,
-	#[serde(default)]
-	index: usize,
+struct NativeEmbedResponse {
+	embeddings: Vec<Vec<f64>>,
 }
 
 #[derive(Serialize)]
@@ -427,29 +454,62 @@ const ANSWER_NUM_CTX: u64 = 8192;
 /// so a user `/ask` never pays a cold reload.
 const ANSWER_KEEP_ALIVE: &str = "10m";
 
-#[derive(Debug, PartialEq)]
-enum ChatDelta {
-	Token(String),
-	Done,
+/// Context window for the embedder's `/api/embed` load. Retrieval embeddings are
+/// short (paragraph chunks, query strings), but Ollama otherwise allocates the
+/// model's DEFAULT context — 32k for qwen3-embedding — whose KV cache balloons a
+/// 0.6b model to ~5.8 GB of VRAM. That cannot share an 8 GB GPU with the answer
+/// model, so the two thrash on every `/ask` and wedge under concurrent load.
+/// 2048 holds the embedder at ~1.5 GB, leaving the answer model resident too.
+const EMBED_NUM_CTX: u64 = 2048;
+
+/// Keep the embedder resident between requests, same rationale as the answer
+/// model: `/api/embed` honors `keep_alive`, the ~4-min warm ping re-touches it,
+/// and retrieval never pays a cold embedder reload.
+const EMBED_KEEP_ALIVE: &str = "10m";
+
+/// Context window for the CPU-bound reason model. Distillation/edge-proposal
+/// prompts are bounded (chunks, capture deltas), and a larger window only slows
+/// CPU prefill, so cap it modestly.
+const REASON_NUM_CTX: u64 = 8192;
+
+/// The reason model runs on CPU and is used in bursts; a short keep-alive frees
+/// the (large) CPU model's RAM between distillation runs rather than pinning it.
+const REASON_KEEP_ALIVE: &str = "2m";
+
+/// Heuristic: is this endpoint a local Ollama server? Only Ollama honors the
+/// native `options.num_gpu`/`num_ctx`; cloud endpoints (OpenAI-compat) must stay
+/// on the `/v1` path. URLs are already normalized (trailing `/` and `/v1`
+/// stripped) before storage, so match on the loopback host / default port.
+fn is_local_ollama(url: &str) -> bool {
+	url.contains("localhost") || url.contains("127.0.0.1") || url.contains(":11434")
 }
 
-/// Parse one line of an Ollama `/api/chat` streaming response (NDJSON). Each line
-/// is a JSON object `{"message":{"content":"…"},"done":bool}`. `done:true` →
-/// `Done`; otherwise the message content → `Token`. Blank lines / parse failures
-/// → `None`.
-fn parse_chat_line(line: &str) -> Option<ChatDelta> {
+/// One parsed line of an Ollama `/api/chat` response. `content` is the message
+/// delta — present on token chunks, typically empty on the terminal chunk.
+/// `done` marks the final object. A `stream:false` response is a SINGLE object
+/// carrying both the full content AND `done:true`, so a consumer must emit
+/// `content` before acting on `done`, or the whole answer is lost.
+#[derive(Debug, PartialEq)]
+struct ChatLine {
+	content: Option<String>,
+	done: bool,
+}
+
+/// Parse one line of an Ollama `/api/chat` response — NDJSON when streaming, a
+/// single object when not (`{"message":{"content":"…"},"done":bool}`). Blank
+/// lines / parse failures → `None`.
+fn parse_chat_line(line: &str) -> Option<ChatLine> {
 	if line.is_empty() {
 		return None;
 	}
 	let v: Value = serde_json::from_str(line).ok()?;
-	if v.get("done").and_then(Value::as_bool).unwrap_or(false) {
-		return Some(ChatDelta::Done);
-	}
 	let content = v
 		.get("message")
 		.and_then(|m| m.get("content"))
-		.and_then(Value::as_str)?;
-	Some(ChatDelta::Token(content.to_string()))
+		.and_then(Value::as_str)
+		.map(str::to_string);
+	let done = v.get("done").and_then(Value::as_bool).unwrap_or(false);
+	Some(ChatLine { content, done })
 }
 
 #[cfg(test)]
@@ -458,17 +518,28 @@ mod tests {
 
 	#[test]
 	fn chat_line_yields_token_then_done() {
+		// Streaming token chunk: content present, not done.
 		assert_eq!(
 			parse_chat_line(r#"{"message":{"role":"assistant","content":"He"},"done":false}"#),
-			Some(ChatDelta::Token("He".to_string()))
+			Some(ChatLine { content: Some("He".to_string()), done: false })
 		);
+		// Streaming terminal chunk: empty content, done.
 		assert_eq!(
 			parse_chat_line(r#"{"message":{"content":""},"done":true,"done_reason":"stop"}"#),
-			Some(ChatDelta::Done)
+			Some(ChatLine { content: Some(String::new()), done: true })
+		);
+		// `stream:false` single object: full content AND done in one line — both
+		// must survive so the caller emits the answer before stopping.
+		assert_eq!(
+			parse_chat_line(r#"{"message":{"content":"Full answer."},"done":true}"#),
+			Some(ChatLine { content: Some("Full answer.".to_string()), done: true })
 		);
 		assert_eq!(parse_chat_line(""), None);
 		assert_eq!(parse_chat_line("not json"), None);
-		assert_eq!(parse_chat_line(r#"{"message":{},"done":false}"#), None);
+		assert_eq!(
+			parse_chat_line(r#"{"message":{},"done":false}"#),
+			Some(ChatLine { content: None, done: false })
+		);
 	}
 
 	#[test]

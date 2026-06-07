@@ -1,3 +1,5 @@
+import './kern.css'
+import './wm.css'
 import { createApp } from 'vue'
 import App from './App.vue'
 

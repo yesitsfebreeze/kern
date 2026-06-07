@@ -111,22 +111,20 @@ impl Server {
 		};
 
 		if p.sync {
-			let Some(handle) = tokio::runtime::Handle::try_current().ok() else {
+			let fut = self.worker.run(
+				p.text,
+				src,
+				kind,
+				p.descriptor,
+				conf,
+				ingest::Config {
+					dedup_threshold: self.cfg.ingest.dedup_threshold,
+					..Default::default()
+				},
+			);
+			let Some(outcome) = crate::llm::block_on_in_place(fut) else {
 				return tool_error("no tokio runtime");
 			};
-			let outcome = tokio::task::block_in_place(|| {
-				handle.block_on(self.worker.run(
-					p.text,
-					src,
-					kind,
-					p.descriptor,
-					conf,
-					ingest::Config {
-						dedup_threshold: self.cfg.ingest.dedup_threshold,
-						..Default::default()
-					},
-				))
-			});
 			(self.save_fn)();
 			return tool_result_json(&serde_json::json!({
 				"status": outcome.status.as_str(),
@@ -190,20 +188,16 @@ impl Server {
 		if reason_text.is_empty() {
 			if let Some(llm) = &self.llm {
 				let prompt = explain_relationship_prompt(&from_t.text(), &to_t.text());
-				if let Ok(handle) = tokio::runtime::Handle::try_current() {
-					reason_text = tokio::task::block_in_place(|| handle.block_on(llm.complete(&prompt)))
-						.unwrap_or_default()
-						.trim()
-						.to_string();
+				if let Some(reply) = crate::llm::block_on_in_place(llm.complete(&prompt)) {
+					reason_text = reply.unwrap_or_default().trim().to_string();
 				}
 			}
 		}
 
 		let vec = if !reason_text.is_empty() {
 			if let Some(llm) = &self.llm {
-				tokio::runtime::Handle::try_current()
-					.ok()
-					.and_then(|h| tokio::task::block_in_place(|| h.block_on(llm.embed(&reason_text))).ok())
+				crate::llm::block_on_in_place(llm.embed(&reason_text))
+					.and_then(Result::ok)
 					.unwrap_or_else(|| average_vec(&from_t.vector, &to_t.vector))
 			} else {
 				average_vec(&from_t.vector, &to_t.vector)

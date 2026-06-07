@@ -5,7 +5,7 @@ use crate::base::math::clamp_confidence;
 use crate::base::types::Source;
 use crate::base::util::truncate;
 
-use super::{build_llm, load_graph, save_graph};
+use super::{Client, Endpoint, load_graph, save_graph};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn cmd_ingest(
@@ -37,16 +37,10 @@ pub(super) async fn cmd_ingest(
 	}
 
 	let g = Arc::new(RwLock::new(load_graph(cfg)));
-	let llm_client = build_llm(
-		embed_url,
-		embed_model,
-		embed_key,
-		reason_url,
-		reason_model,
-		reason_key,
-		"",
-		"",
-		"",
+	let llm_client = Client::new(
+		Endpoint::new(reason_url, reason_model, reason_key),
+		Endpoint::default(),
+		Endpoint::new(embed_url, embed_model, embed_key),
 	);
 	let llm_fn: Option<crate::ingest::LlmFunc> = if !no_llm && !reason_url.is_empty() {
 		Some(Arc::new(llm_client.complete_func()))

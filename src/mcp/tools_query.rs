@@ -93,12 +93,10 @@ impl Server {
 			None => return tool_error("no embed client configured"),
 		};
 
-		let Some(handle) = tokio::runtime::Handle::try_current().ok() else {
-			return tool_error("no tokio runtime");
-		};
-		let vec = match tokio::task::block_in_place(|| handle.block_on(llm.embed(&p.text))) {
-			Ok(v) => v,
-			Err(e) => return tool_error(&format!("embed failed: {e}")),
+		let vec = match crate::llm::block_on_in_place(llm.embed(&p.text)) {
+			Some(Ok(v)) => v,
+			Some(Err(e)) => return tool_error(&format!("embed failed: {e}")),
+			None => return tool_error("no tokio runtime"),
 		};
 
 		let mode = retrieval::seed::Mode::parse(&p.mode);
@@ -108,10 +106,11 @@ impl Server {
 		let llm_fn: LlmFunc = Arc::new(complete);
 
 		let llm_embed = llm.clone();
-		let embed_handle = handle.clone();
 		let embed_fn: EmbedFunc = Arc::new(move |s: &str| {
-			tokio::task::block_in_place(|| embed_handle.block_on(llm_embed.embed(s)))
-				.map_err(|e| e.to_string())
+			match crate::llm::block_on_in_place(llm_embed.embed(s)) {
+				Some(r) => r.map_err(|e| e.to_string()),
+				None => Err("no tokio runtime".to_string()),
+			}
 		});
 
 		let mut opts = retrieval::score::QueryOptions::default();
