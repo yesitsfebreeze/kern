@@ -59,7 +59,7 @@ fn route_entity(g: &mut GraphGnn, kern_id: &str, thought: &Entity, is_dup: bool)
 			if kern.has_anchor() {
 				let dist = cosine_distance(&thought.vector, &kern.anchor_vec);
 				let p = acceptance_probability(dist, kern.inner_radius, kern.outer_radius);
-				p < 0.5
+				p < ACCEPT_FLOOR
 			} else {
 				false
 			}
@@ -69,6 +69,17 @@ fn route_entity(g: &mut GraphGnn, kern_id: &str, thought: &Entity, is_dup: bool)
 			let child_id = get_or_spawn_unnamed_child(g, &current_id);
 			current_id = child_id;
 			continue;
+		}
+
+		// No named anchor cleared the floor and the node did not reject. At the
+		// root dispatcher (which holds no anchor of its own), the entity belongs
+		// in the `generic` catch-all rather than being committed onto the root.
+		if current_id == g.root.id {
+			let generic_id = get_or_spawn_generic_child(g, &current_id);
+			if generic_id != current_id {
+				current_id = generic_id;
+				continue;
+			}
 		}
 
 		break;
@@ -369,6 +380,34 @@ pub fn get_or_spawn_unnamed_child(g: &mut GraphGnn, kern_id: &str) -> String {
 	child_id
 }
 
+/// Find the parent's permanent `generic` catch-all child, creating it if
+/// absent. Generic carries an empty `anchor_vec` so similarity routing never
+/// matches it; it is named, hence immortal (never GC'd).
+pub(crate) fn get_or_spawn_generic_child(g: &mut GraphGnn, parent_id: &str) -> String {
+	let children = g
+		.loaded(parent_id)
+		.map(|k| k.children.clone())
+		.unwrap_or_default();
+	for child_id in &children {
+		if let Some(c) = g.loaded(child_id) {
+			if c.anchor_text == GENERIC_ANCHOR {
+				return child_id.clone();
+			}
+		}
+	}
+	let root_id = g
+		.loaded(parent_id)
+		.map(|k| k.root_id.clone())
+		.unwrap_or_default();
+	let child = Kern::new_named_child(parent_id, &root_id, GENERIC_ANCHOR, Vec::new());
+	let child_id = child.id.clone();
+	g.register(child);
+	if let Some(kern) = g.get_mut(parent_id) {
+		kern.children.push(child_id.clone());
+	}
+	child_id
+}
+
 fn route_to_child_id(children: &[String], g: &GraphGnn, vec: &[f64]) -> Option<String> {
 	let mut best_id = None;
 	let mut best_p = 0.0;
@@ -383,6 +422,11 @@ fn route_to_child_id(children: &[String], g: &GraphGnn, vec: &[f64]) -> Option<S
 			best_p = p;
 			best_id = Some(id.clone());
 		}
+	}
+	// Floor: an entity only enters a named anchor if it clears ACCEPT_FLOOR.
+	// Otherwise the caller routes it to the generic catch-all.
+	if best_p < ACCEPT_FLOOR {
+		return None;
 	}
 	best_id
 }
@@ -451,5 +495,36 @@ mod tests {
 		// Orthogonal vector -> cosine 0.0 < threshold -> placed, not deduped.
 		let r = accept(&mut g, &root, ent("c", vec![0.0, 1.0, 0.0]), "");
 		assert!(!r.deduped, "orthogonal vector must not dedup");
+	}
+
+	/// Build a root with one named anchor pointing at +x.
+	fn graph_with_anchor() -> (GraphGnn, String, String) {
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		let root_net = g.root.root_id.clone();
+		let anchor = Kern::new_named_child(&root, &root_net, "work", vec![1.0, 0.0, 0.0]);
+		let anchor_id = anchor.id.clone();
+		g.register(anchor);
+		g.get_mut(&root).unwrap().children.push(anchor_id.clone());
+		(g, root, anchor_id)
+	}
+
+	#[test]
+	fn routes_nonmatch_to_generic() {
+		let (mut g, root, anchor_id) = graph_with_anchor();
+		// Orthogonal to the anchor -> p = 0 < ACCEPT_FLOOR -> falls through.
+		let r = accept(&mut g, &root, ent("e", vec![0.0, 1.0, 0.0]), "");
+		assert_ne!(r.placed_in, root, "must not commit onto the root dispatcher");
+		assert_ne!(r.placed_in, anchor_id, "non-matching entity must not enter the anchor");
+		let placed = g.loaded(&r.placed_in).expect("placed kern is loaded");
+		assert_eq!(placed.anchor_text, GENERIC_ANCHOR, "fell through to generic");
+	}
+
+	#[test]
+	fn routes_match_to_anchor() {
+		let (mut g, root, anchor_id) = graph_with_anchor();
+		// Aligned with the anchor -> dist 0 -> p = 1 >= ACCEPT_FLOOR.
+		let r = accept(&mut g, &root, ent("e", vec![1.0, 0.0, 0.0]), "");
+		assert_eq!(r.placed_in, anchor_id, "matching entity enters its anchor");
 	}
 }

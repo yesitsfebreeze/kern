@@ -475,6 +475,34 @@ impl Kern {
 		k
 	}
 
+	/// A named child of `parent_id` carrying an anchor vector. An **anchor** is
+	/// exactly this: a named kern directly under the root. `vec` may be empty
+	/// (the `generic` catch-all), in which case similarity routing never matches
+	/// it. Default radii come from the kern routing constants.
+	pub fn new_named_child(
+		parent_id: &str,
+		root_id: &str,
+		name: &str,
+		vec: Vec<f64>,
+	) -> Self {
+		let id = util::content_hash(&format!(
+			"{}{}{}",
+			parent_id,
+			name,
+			SystemTime::now()
+				.duration_since(SystemTime::UNIX_EPOCH)
+				.unwrap_or_default()
+				.as_nanos()
+		));
+		let mut k = Self::new(id, parent_id);
+		k.root_id = root_id.to_string();
+		k.anchor_text = name.to_string();
+		k.anchor_vec = vec;
+		k.inner_radius = crate::base::constants::KERN_INNER_RADIUS;
+		k.outer_radius = crate::base::constants::KERN_OUTER_RADIUS;
+		k
+	}
+
 	pub fn is_unnamed(&self) -> bool {
 		self.anchor_text.is_empty()
 	}

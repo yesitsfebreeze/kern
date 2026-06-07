@@ -38,6 +38,17 @@ pub const DEDUP_EF: usize = 64;
 
 pub const KERN_INNER_RADIUS: f64 = 0.15;
 pub const KERN_OUTER_RADIUS: f64 = 0.35;
+
+/// Minimum acceptance probability an entity must reach against a named anchor
+/// (a named child of the dispatcher) to be routed into it. Below this, the
+/// entity falls through to the `generic` catch-all anchor. Matches the
+/// long-standing rejection cutoff used by the per-node acceptance gate.
+pub const ACCEPT_FLOOR: f64 = 0.5;
+
+/// Reserved anchor name for the root's permanent catch-all child. It carries an
+/// empty `anchor_vec`, so similarity routing never matches it — it is reachable
+/// only as the fallback when no named anchor clears `ACCEPT_FLOOR`.
+pub const GENERIC_ANCHOR: &str = "generic";
 pub const KERN_COHESION_THRESHOLD: f64 = 0.60;
 pub const KERN_MIN_CLUSTER_SIZE: usize = 10;
 pub const KERN_NAMING_COHESION_THRESHOLD: f64 = 0.50;
