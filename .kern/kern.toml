@@ -1,6 +1,10 @@
 # Project-scope kern config. Merges over the user-scope kern.toml.
 # (Layered parsing now handles leading comments + [section] headers.)
 
+# Graph shards live under .kern/data/ (data separated from config). Relative to
+# the daemon cwd; portable, so it stays safe to commit.
+data_dir = ".kern/data"
+
 [embed]
 # Embedding model. MUST match the dimension of the stored vectors — changing it
 # requires `kern reembed` (with the daemon stopped) to re-embed the whole graph,
@@ -9,19 +13,11 @@
 url = "http://localhost:11434"
 model = "qwen3-embedding:0.6b"
 
-[reason]
-# Model for distillation + smart-split + edge proposal (background capture).
-# Latency-insensitive, structured-output-sensitive → keep the bigger model.
-# qwen2.5:7b — most reliable small model for formatted extraction.
-url = "http://localhost:11434"
-model = "qwen2.5:7b"
-
-[answer]
-# Model for the user-facing /ask oracle (streamed answer in the viewer).
-# Latency-critical, only glues retrieved graph nodes into prose → smallest model
-# that clears the grounding floor. qwen3.5:4b: fits 8 GB VRAM beside the 0.6b
-# embedder, same family. url/key blank → fall back to [reason]'s endpoint.
-model = "qwen3.5:4b"
+# [reason] and [answer] live in the USER-scope config (%APPDATA%\kern\kern.toml)
+# so the Ollama-cloud API key is not committed to git. Both point at
+# deepseek-v3.1:671b-cloud; embeddings (above) stay LOCAL. Section merge is
+# whole-section replace — do NOT add [reason]/[answer] here or they will clobber
+# the user-scope cloud blocks (and re-introduce the secret-in-git problem).
 
 [capture]
 # Self-learning: capture Claude Code sessions -> distill -> graph -> digest.
