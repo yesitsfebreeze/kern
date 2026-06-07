@@ -82,12 +82,14 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
 			"inputSchema": {"type": "object", "properties": {}},
 		}),
 		serde_json::json!({
-			"name": "purpose",
-			"description": "Set or get the root Kern purpose.",
+			"name": "anchor",
+			"description": "Manage anchors: named top-level buckets the root routes matching memories into; non-matches fall through to `generic`. action=list (default) returns anchors; action=add needs name+text (text is embedded into the routing vector); action=remove needs name.",
 			"inputSchema": {
 				"type": "object",
 				"properties": {
-					"text": {"type": "string", "description": "new purpose text (omit to read current)"},
+					"action": {"type": "string", "enum": ["list", "add", "remove"], "description": "list (default) | add | remove"},
+					"name": {"type": "string", "description": "anchor name (required for add/remove)"},
+					"text": {"type": "string", "description": "description embedded into the anchor's routing vector (required for add)"},
 				},
 			},
 		}),

@@ -22,8 +22,8 @@ use serde_json::Value;
 use trnsprt::kern_rpc::{
     CallToolReq, CallToolRes, DegradeReq, DegradeRes, DescriptorReq, DescriptorRes, EdgeKind,
     EntityKindLite, EntityRef, EntityStatusLite, ForgetReq, ForgetRes, HealthRes, IngestReq,
-    IngestRes, KernRpc, LinkReq, LinkRes, NeighborsReq, NeighborsRes, PulseReq, PulseRes,
-    PurposeReq, PurposeRes, QueryReq, QueryRes, SourceLite, TruncateAfterReq, TruncateAfterRes,
+    AnchorReq, AnchorRes, IngestRes, KernRpc, LinkReq, LinkRes, NeighborsReq, NeighborsRes,
+    PulseReq, PulseRes, QueryReq, QueryRes, SourceLite, TruncateAfterReq, TruncateAfterRes,
 };
 use trnsprt::typed::{Channel, JsonEnvelopeCodec, LocalListener};
 use trnsprt::McpServer;
@@ -458,7 +458,7 @@ impl KernRpc for KernRpcHandler {
     ) -> impl ::core::future::Future<Output = TruncateAfterRes> + Send {
         let memory = self.memory.clone();
         async move {
-            let svc = memory.lock().unwrap_or_else(|p| p.into_inner());
+            let svc = crate::base::locks::lock_recovered(&memory);
             let dropped = svc.truncate_after(req.ts_ms);
             tracing::debug!(target: "kern.kern_rpc", dropped, ts_ms = req.ts_ms, "truncate_after");
             TruncateAfterRes {}
@@ -513,12 +513,18 @@ impl KernRpc for KernRpcHandler {
         }
     }
 
-    fn purpose(&self, req: PurposeReq) -> impl ::core::future::Future<Output = PurposeRes> + Send {
+    fn anchor(&self, req: AnchorReq) -> impl ::core::future::Future<Output = AnchorRes> + Send {
         let kern = self.kern.clone();
         async move {
-            let args = serde_json::json!({ "text": req.text });
-            let _ = kern.tool_purpose(&args);
-            PurposeRes::default()
+            let args = serde_json::json!({
+                "action": req.action,
+                "name": req.name,
+                "text": req.text,
+            });
+            let result = kern.tool_anchor(&args);
+            AnchorRes {
+                result: result.to_string(),
+            }
         }
     }
 

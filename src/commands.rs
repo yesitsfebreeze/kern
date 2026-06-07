@@ -131,13 +131,11 @@ pub enum Commands {
 	Health,
 	/// Reap empty unnamed kerns and persist (run with the daemon stopped).
 	Gc,
-	/// Set or read the root purpose.
-	Purpose {
-		text: String,
-		#[arg(long)]
-		embed_url: Option<String>,
-		#[arg(long)]
-		embed_model: Option<String>,
+	/// Manage anchors: named top-level buckets the root routes memories into.
+	/// Memories that match no anchor fall through to `generic`.
+	Anchor {
+		#[command(subcommand)]
+		action: AnchorAction,
 	},
 	/// Down-weight the edges along a bad retrieval path (learn from a miss).
 	Degrade {
@@ -178,6 +176,23 @@ pub enum Commands {
 }
 
 #[derive(Subcommand)]
+pub enum AnchorAction {
+	/// Add a named anchor; `text` is embedded into its routing vector.
+	Add {
+		name: String,
+		text: String,
+		#[arg(long)]
+		embed_url: Option<String>,
+		#[arg(long)]
+		embed_model: Option<String>,
+	},
+	/// List the root's anchors.
+	List,
+	/// Remove a named anchor; its memories fall back to generic.
+	Remove { name: String },
+}
+
+#[derive(Subcommand)]
 pub enum DescriptorAction {
 	Add { name: String, description: String },
 	Rm { name: String },
@@ -207,10 +222,11 @@ pub(crate) fn save_graph(g: &GraphGnn) {
 	}
 }
 
-pub(crate) fn with_graph(cfg: &crate::config::Config, f: impl FnOnce(&mut GraphGnn)) {
+pub(crate) fn with_graph<R>(cfg: &crate::config::Config, f: impl FnOnce(&mut GraphGnn) -> R) -> R {
 	let mut g = load_graph(cfg);
-	f(&mut g);
+	let out = f(&mut g);
 	save_graph(&g);
+	out
 }
 
 pub(crate) fn resolve<'a>(arg: &'a Option<String>, fallback: &'a str) -> &'a str {
@@ -368,19 +384,7 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 		Commands::Health => admin::cmd_health(cfg),
 		Commands::Gc => admin::cmd_gc(cfg),
 
-		Commands::Purpose {
-			text,
-			embed_url,
-			embed_model,
-		} => {
-			admin::cmd_purpose(
-				cfg,
-				&text,
-				resolve(&embed_url, &cfg.embed.url),
-				resolve(&embed_model, &cfg.embed.model),
-			)
-			.await
-		}
+		Commands::Anchor { action } => admin::cmd_anchor(cfg, action).await,
 
 		Commands::Degrade { id } => graph_ops::cmd_degrade(cfg, &id),
 		Commands::Descriptor { action } => admin::cmd_descriptor(cfg, action),

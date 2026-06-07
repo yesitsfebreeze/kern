@@ -1,7 +1,9 @@
-use crate::base::constants::{KERN_INNER_RADIUS, KERN_OUTER_RADIUS};
 use crate::base::util::short_id;
 
-use super::{Client, DescriptorAction, Endpoint, UnnamedAction, load_graph, save_graph, with_graph};
+use super::{
+	AnchorAction, Client, DescriptorAction, Endpoint, UnnamedAction, load_graph, save_graph,
+	with_graph,
+};
 
 pub(super) fn cmd_compress(src: &str, mode_str: &str, out: Option<&str>) {
 	let Some(mode) = crate::quant::QuantizationMode::parse(mode_str) else {
@@ -31,14 +33,18 @@ pub(super) fn cmd_compress(src: &str, mode_str: &str, out: Option<&str>) {
 
 pub(super) fn cmd_health(cfg: &crate::config::Config) {
 	let g = load_graph(cfg);
-	let purpose = if g.root.anchor_text.is_empty() {
-		"(unset)".to_string()
-	} else {
-		g.root.anchor_text.clone()
-	};
 
 	println!("data_dir:    {}", g.data_dir);
-	println!("purpose:     {purpose}");
+	let anchors: Vec<String> = crate::base::accept::root_anchor_ids(&g)
+		.iter()
+		.filter_map(|cid| g.loaded(cid))
+		.map(|c| c.anchor_text.clone())
+		.collect();
+	if anchors.is_empty() {
+		println!("anchors:     (none)");
+	} else {
+		println!("anchors:     {}", anchors.join(", "));
+	}
 
 	let kerns = g.all();
 	let mut total_entities = 0usize;
@@ -83,31 +89,54 @@ pub(super) fn cmd_gc(cfg: &crate::config::Config) {
 	println!("gc: reaped {reaped} empty kerns ({before} -> {after})");
 }
 
-pub(super) async fn cmd_purpose(
-	cfg: &crate::config::Config,
-	text: &str,
-	embed_url: &str,
-	embed_model: &str,
-) {
-	let llm_client = Client::new(
-		Endpoint::default(),
-		Endpoint::default(),
-		Endpoint::new(embed_url, embed_model, &cfg.embed.key),
-	);
-	let vec = match llm_client.embed(text).await {
-		Ok(v) => v,
-		Err(e) => {
-			eprintln!("embed: {e}");
-			return;
+pub(super) async fn cmd_anchor(cfg: &crate::config::Config, action: AnchorAction) {
+	match action {
+		AnchorAction::Add {
+			name,
+			text,
+			embed_url,
+			embed_model,
+		} => {
+			let url = embed_url.as_deref().unwrap_or(&cfg.embed.url);
+			let model = embed_model.as_deref().unwrap_or(&cfg.embed.model);
+			let llm_client = Client::new(
+				Endpoint::default(),
+				Endpoint::default(),
+				Endpoint::new(url, model, &cfg.embed.key),
+			);
+			let vec = match llm_client.embed(&text).await {
+				Ok(v) => v,
+				Err(e) => {
+					eprintln!("embed: {e}");
+					return;
+				}
+			};
+			with_graph(cfg, |g| crate::base::accept::add_anchor(g, &name, vec));
+			println!("anchor added: {name}");
 		}
-	};
-	with_graph(cfg, |g| {
-		g.root.anchor_text = text.to_string();
-		g.root.anchor_vec = vec;
-		g.root.inner_radius = KERN_INNER_RADIUS;
-		g.root.outer_radius = KERN_OUTER_RADIUS;
-	});
-	println!("purpose set: {text}");
+		AnchorAction::List => {
+			let g = load_graph(cfg);
+			println!("anchors:");
+			for cid in crate::base::accept::root_anchor_ids(&g) {
+				if let Some(c) = g.loaded(&cid) {
+					println!(
+						"  {}  thoughts:{}  reasons:{}",
+						c.anchor_text,
+						c.entities.len(),
+						c.reasons.len(),
+					);
+				}
+			}
+		}
+		AnchorAction::Remove { name } => {
+			let removed = with_graph(cfg, |g| crate::base::accept::remove_anchor(g, &name));
+			if removed {
+				println!("anchor removed: {name}");
+			} else {
+				eprintln!("anchor not found: {name}");
+			}
+		}
+	}
 }
 
 pub(super) fn cmd_descriptor(cfg: &crate::config::Config, action: DescriptorAction) {

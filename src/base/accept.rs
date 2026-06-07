@@ -51,6 +51,19 @@ fn route_entity(g: &mut GraphGnn, kern_id: &str, thought: &Entity, is_dup: bool)
 			continue;
 		}
 
+		// The root is a pure dispatcher: it never gates on its own (possibly
+		// stale) anchor. An entity that matched no named anchor at the root
+		// falls through to the `generic` catch-all rather than committing onto
+		// the root itself.
+		if current_id == g.root.id {
+			let generic_id = get_or_spawn_generic_child(g, &current_id);
+			if generic_id != current_id {
+				current_id = generic_id;
+				continue;
+			}
+			break;
+		}
+
 		let reject = {
 			let kern = match g.loaded(&current_id) {
 				Some(k) => k,
@@ -69,17 +82,6 @@ fn route_entity(g: &mut GraphGnn, kern_id: &str, thought: &Entity, is_dup: bool)
 			let child_id = get_or_spawn_unnamed_child(g, &current_id);
 			current_id = child_id;
 			continue;
-		}
-
-		// No named anchor cleared the floor and the node did not reject. At the
-		// root dispatcher (which holds no anchor of its own), the entity belongs
-		// in the `generic` catch-all rather than being committed onto the root.
-		if current_id == g.root.id {
-			let generic_id = get_or_spawn_generic_child(g, &current_id);
-			if generic_id != current_id {
-				current_id = generic_id;
-				continue;
-			}
 		}
 
 		break;
@@ -408,6 +410,68 @@ pub(crate) fn get_or_spawn_generic_child(g: &mut GraphGnn, parent_id: &str) -> S
 	child_id
 }
 
+/// Create a named child of the root carrying `vec` as its routing vector — i.e.
+/// a new anchor. Shared by the CLI `anchor add` and the MCP `anchor` tool.
+pub(crate) fn add_anchor(g: &mut GraphGnn, name: &str, vec: Vec<f64>) {
+	let root = g.root.id.clone();
+	let root_net = g.root.root_id.clone();
+	let child = Kern::new_named_child(&root, &root_net, name, vec);
+	let cid = child.id.clone();
+	g.register(child);
+	if let Some(r) = g.get_mut(&root) {
+		if !r.children.contains(&cid) {
+			r.children.push(cid);
+		}
+	}
+}
+
+/// The root's named children — its anchors — read from the authoritative kern
+/// map (runtime mutations land there, not on the `g.root` snapshot field).
+/// Includes the `generic` catch-all.
+pub(crate) fn root_anchor_ids(g: &GraphGnn) -> Vec<String> {
+	let root = g.root.id.clone();
+	let children = g
+		.loaded(&root)
+		.map(|r| r.children.clone())
+		.unwrap_or_default();
+	children
+		.into_iter()
+		.filter(|cid| {
+			g.loaded(cid)
+				.map(|c| !c.anchor_text.is_empty())
+				.unwrap_or(false)
+		})
+		.collect()
+}
+
+/// Demote a named root anchor and reparent its kern under `generic`, so its
+/// existing memories fall back to the catch-all. Returns whether an anchor of
+/// that name was found and removed.
+pub(crate) fn remove_anchor(g: &mut GraphGnn, name: &str) -> bool {
+	let root = g.root.id.clone();
+	let generic = get_or_spawn_generic_child(g, &root);
+	let target = root_anchor_ids(g)
+		.into_iter()
+		.find(|cid| {
+			*cid != generic && g.loaded(cid).map(|c| c.anchor_text == name).unwrap_or(false)
+		});
+	let Some(tid) = target else {
+		return false;
+	};
+	if let Some(t) = g.get_mut(&tid) {
+		t.anchor_text.clear();
+		t.anchor_vec.clear();
+		t.parent = generic.clone();
+	}
+	if let Some(r) = g.get_mut(&root) {
+		r.children.retain(|c| c != &tid);
+	}
+	if let Some(gk) = g.get_mut(&generic) {
+		gk.children.push(tid);
+	}
+	true
+}
+
 fn route_to_child_id(children: &[String], g: &GraphGnn, vec: &[f64]) -> Option<String> {
 	let mut best_id = None;
 	let mut best_p = 0.0;
@@ -526,5 +590,41 @@ mod tests {
 		// Aligned with the anchor -> dist 0 -> p = 1 >= ACCEPT_FLOOR.
 		let r = accept(&mut g, &root, ent("e", vec![1.0, 0.0, 0.0]), "");
 		assert_eq!(r.placed_in, anchor_id, "matching entity enters its anchor");
+	}
+
+	fn anchor_names(g: &GraphGnn) -> Vec<String> {
+		root_anchor_ids(g)
+			.iter()
+			.filter_map(|c| g.loaded(c))
+			.map(|k| k.anchor_text.clone())
+			.collect()
+	}
+
+	#[test]
+	fn add_anchor_creates_named_root_child() {
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		add_anchor(&mut g, "work", vec![1.0, 0.0, 0.0]);
+		assert!(anchor_names(&g).contains(&"work".to_string()));
+		// A matching entity routes into the new anchor.
+		let r = accept(&mut g, &root, ent("e", vec![1.0, 0.0, 0.0]), "");
+		assert!(
+			g.loaded(&r.placed_in)
+				.map(|k| k.anchor_text == "work")
+				.unwrap_or(false),
+			"matching entity enters the added anchor"
+		);
+	}
+
+	#[test]
+	fn remove_anchor_demotes_and_reports() {
+		let mut g = GraphGnn::new();
+		add_anchor(&mut g, "work", vec![1.0, 0.0, 0.0]);
+		assert!(remove_anchor(&mut g, "work"), "existing anchor removed");
+		assert!(
+			!anchor_names(&g).contains(&"work".to_string()),
+			"anchor no longer a named root child"
+		);
+		assert!(!remove_anchor(&mut g, "missing"), "missing anchor -> false");
 	}
 }

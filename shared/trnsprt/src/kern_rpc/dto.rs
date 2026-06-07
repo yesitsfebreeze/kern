@@ -298,16 +298,23 @@ pub struct HealthRes {
     pub entities: u64,
 }
 
-// ---- purpose -------------------------------------------------------------
+// ---- anchor --------------------------------------------------------------
 
-/// Set the root kern's purpose text. Empty text is a no-op.
+/// Manage anchors (named top-level buckets the root routes into).
+/// `action` is "list" (default), "add", or "remove". `add` needs name+text;
+/// `remove` needs name.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct PurposeReq {
+pub struct AnchorReq {
+    pub action: String,
+    pub name: String,
     pub text: String,
 }
 
+/// The anchor tool's JSON result, serialized as a string for transport.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct PurposeRes {}
+pub struct AnchorRes {
+    pub result: String,
+}
 
 // ---- descriptor ----------------------------------------------------------
 

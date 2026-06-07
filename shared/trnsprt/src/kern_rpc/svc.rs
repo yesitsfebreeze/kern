@@ -17,7 +17,7 @@
 use super::dto::{
     CallToolReq, CallToolRes, DegradeReq, DegradeRes, DescriptorReq, DescriptorRes, ForgetReq,
     ForgetRes, HealthRes, IngestReq, IngestRes, LinkReq, LinkRes, NeighborsReq, NeighborsRes,
-    PulseReq, PulseRes, PurposeReq, PurposeRes, QueryReq, QueryRes, TruncateAfterReq,
+    AnchorReq, AnchorRes, PulseReq, PulseRes, QueryReq, QueryRes, TruncateAfterReq,
     TruncateAfterRes,
 };
 
@@ -46,8 +46,8 @@ crate::service! {
         async fn degrade(req: DegradeReq) -> DegradeRes;
         /// Daemon liveness + summary counters.
         async fn health() -> HealthRes;
-        /// Set the root kern's purpose text.
-        async fn purpose(req: PurposeReq) -> PurposeRes;
+        /// Manage anchors (named top-level buckets): list, add, or remove.
+        async fn anchor(req: AnchorReq) -> AnchorRes;
         /// Add or remove a descriptor classifier.
         async fn descriptor(req: DescriptorReq) -> DescriptorRes;
         /// Fire a stigmergic pulse through the root kern.

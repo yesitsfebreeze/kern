@@ -115,7 +115,7 @@ fn resource_kerns(server: &Server) -> String {
 		.map(|k| {
 			serde_json::json!({
 				"id": k.id,
-				"purpose": k.anchor_text,
+				"anchor": k.anchor_text,
 				"entities": k.entities.len(),
 				"reasons": k.reasons.len(),
 				"children": k.children.len(),

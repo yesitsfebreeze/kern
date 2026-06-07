@@ -71,14 +71,14 @@ impl Server {
 				unnamed += 1;
 			}
 		}
-		let purpose = if g.root.anchor_text.is_empty() {
-			"(unset)".to_string()
-		} else {
-			g.root.anchor_text.clone()
-		};
+		let anchors: Vec<String> = crate::base::accept::root_anchor_ids(&g)
+			.iter()
+			.filter_map(|cid| g.loaded(cid))
+			.map(|c| c.anchor_text.clone())
+			.collect();
 		let descriptors = g.root.descriptors.len();
 		serde_json::json!({
-			"purpose": purpose,
+			"anchors": anchors,
 			"kerns": kerns.len(),
 			"entities": total_entities,
 			"reasons": total_reasons,
@@ -111,7 +111,7 @@ impl trnsprt::McpServer for Server {
 			"forget"     => self.tool_forget(args),
 			"degrade"    => self.tool_degrade(args),
 			"health"     => self.tool_health(),
-			"purpose"    => self.tool_purpose(args),
+			"anchor"     => self.tool_anchor(args),
 			"descriptor" => self.tool_descriptor(args),
 			"pulse"      => self.tool_pulse(args),
 			_ => return Ok(trnsprt::ToolResult {

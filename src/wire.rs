@@ -289,12 +289,14 @@ pub struct DescriptorResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PurposeRequest {
+pub struct AnchorRequest {
+	pub action: String,
+	pub name: String,
 	pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PurposeResponse {
+pub struct AnchorResponse {
 	pub ok: bool,
 }
 

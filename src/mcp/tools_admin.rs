@@ -9,43 +9,74 @@ impl Server {
 		tool_result_json(&self.health_stats())
 	}
 
-	pub(crate) fn tool_purpose(&self, args: &serde_json::Value) -> serde_json::Value {
+	pub(crate) fn tool_anchor(&self, args: &serde_json::Value) -> serde_json::Value {
 		#[derive(Deserialize, Default)]
-		struct PurposeArgs {
+		struct AnchorArgs {
+			#[serde(default)]
+			action: String,
+			#[serde(default)]
+			name: String,
 			#[serde(default)]
 			text: String,
 		}
 
-		let p: PurposeArgs = serde_json::from_value(args.clone()).unwrap_or_default();
-
-		if p.text.is_empty() {
-			let g = read_recovered(&self.graph);
-			let purpose = if g.root.anchor_text.is_empty() {
-				"(unset)".to_string()
-			} else {
-				g.root.anchor_text.clone()
-			};
-			return tool_result_json(&serde_json::json!({"purpose": purpose}));
-		}
-
-		let vec = match &self.llm {
-			Some(llm) => match crate::llm::block_on_in_place(llm.embed(&p.text)) {
-				Some(Ok(v)) => v,
-				Some(Err(e)) => return tool_error(&format!("embed failed: {e}")),
-				None => return tool_error("no tokio runtime"),
-			},
-			None => return tool_error("no embed client configured"),
+		let p: AnchorArgs = serde_json::from_value(args.clone()).unwrap_or_default();
+		let action = if p.action.is_empty() {
+			"list"
+		} else {
+			p.action.as_str()
 		};
 
-		let mut g = write_recovered(&self.graph);
-		g.root.anchor_text = p.text.clone();
-		g.root.anchor_vec = vec;
-		g.root.inner_radius = crate::base::constants::KERN_INNER_RADIUS;
-		g.root.outer_radius = crate::base::constants::KERN_OUTER_RADIUS;
-		drop(g);
-		(self.save_fn)();
-
-		tool_result_json(&serde_json::json!({"purpose": p.text}))
+		match action {
+			"list" => {
+				let g = read_recovered(&self.graph);
+				let anchors: Vec<serde_json::Value> = crate::base::accept::root_anchor_ids(&g)
+					.iter()
+					.filter_map(|cid| g.loaded(cid))
+					.map(|c| {
+						serde_json::json!({
+							"name": c.anchor_text,
+							"thoughts": c.entities.len(),
+							"reasons": c.reasons.len(),
+						})
+					})
+					.collect();
+				tool_result_json(&serde_json::json!({ "anchors": anchors }))
+			}
+			"add" => {
+				if p.name.is_empty() || p.text.is_empty() {
+					return tool_error("add requires name and text");
+				}
+				let vec = match &self.llm {
+					Some(llm) => match crate::llm::block_on_in_place(llm.embed(&p.text)) {
+						Some(Ok(v)) => v,
+						Some(Err(e)) => return tool_error(&format!("embed failed: {e}")),
+						None => return tool_error("no tokio runtime"),
+					},
+					None => return tool_error("no embed client configured"),
+				};
+				let mut g = write_recovered(&self.graph);
+				crate::base::accept::add_anchor(&mut g, &p.name, vec);
+				drop(g);
+				(self.save_fn)();
+				tool_result_json(&serde_json::json!({ "added": p.name }))
+			}
+			"remove" | "rm" => {
+				if p.name.is_empty() {
+					return tool_error("remove requires name");
+				}
+				let mut g = write_recovered(&self.graph);
+				let removed = crate::base::accept::remove_anchor(&mut g, &p.name);
+				drop(g);
+				if removed {
+					(self.save_fn)();
+					tool_result_json(&serde_json::json!({ "removed": p.name }))
+				} else {
+					tool_error(&format!("anchor not found: {}", p.name))
+				}
+			}
+			_ => tool_error("action must be add, list, or remove"),
+		}
 	}
 
 	pub(crate) fn tool_descriptor(&self, args: &serde_json::Value) -> serde_json::Value {
