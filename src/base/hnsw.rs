@@ -503,3 +503,114 @@ impl MaxHeap {
 		Some(top)
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::base::math::cosine_distance as bf_cosine;
+	use crate::base::util::cmp_partial as bf_cmp;
+	use rand::{RngExt, SeedableRng};
+	use std::collections::HashSet;
+
+	fn rand_vec(rng: &mut rand::rngs::StdRng, dim: usize) -> Vec<f64> {
+		(0..dim).map(|_| rng.random::<f64>() * 2.0 - 1.0).collect()
+	}
+
+	/// Exact nearest-by-cosine ground truth for the recall assertions.
+	fn brute_force_topk(vecs: &[(String, Vec<f64>)], q: &[f64], k: usize) -> HashSet<String> {
+		let mut scored: Vec<(String, f64)> = vecs
+			.iter()
+			.map(|(id, v)| (id.clone(), bf_cosine(v, q)))
+			.collect();
+		scored.sort_by(|a, b| bf_cmp(&a.1, &b.1));
+		scored.into_iter().take(k).map(|(id, _)| id).collect()
+	}
+
+	fn random_corpus(seed: u64, n: usize, dim: usize) -> Vec<(String, Vec<f64>)> {
+		let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+		(0..n).map(|i| (format!("v{i}"), rand_vec(&mut rng, dim))).collect()
+	}
+
+	#[test]
+	fn empty_index_returns_nothing() {
+		let idx = HnswIndex::new(8, 64);
+		assert!(idx.is_empty());
+		assert!(idx.search(&[1.0, 0.0], 5, 16).is_empty());
+	}
+
+	#[test]
+	fn inserts_and_finds_exact_nearest() {
+		let mut idx = HnswIndex::new(8, 64);
+		idx.insert("x".into(), vec![1.0, 0.0, 0.0]);
+		idx.insert("y".into(), vec![0.0, 1.0, 0.0]);
+		idx.insert("z".into(), vec![0.0, 0.0, 1.0]);
+		let hits = idx.search(&[0.9, 0.1, 0.0], 1, 16);
+		assert_eq!(hits[0].id, "x", "nearest by cosine is x");
+	}
+
+	#[test]
+	fn delete_removes_node_from_results() {
+		let mut idx = HnswIndex::new(8, 64);
+		idx.insert("x".into(), vec![1.0, 0.0]);
+		idx.insert("y".into(), vec![0.0, 1.0]);
+		idx.delete("x");
+		assert!(idx.search(&[1.0, 0.0], 5, 16).iter().all(|h| h.id != "x"));
+	}
+
+	#[test]
+	fn recall_matches_brute_force() {
+		// The whole point of an ANN index is that its top-k closely tracks the
+		// exact top-k. Build a corpus, query it, and require high overlap with the
+		// brute-force ground truth. This is the recall number we must beat Qdrant
+		// on — without it, the index is unmeasured.
+		let dim = 32;
+		let corpus = random_corpus(7, 300, dim);
+		let mut idx = HnswIndex::new(16, 128);
+		for (id, v) in &corpus {
+			idx.insert(id.clone(), v.clone());
+		}
+		let k = 10;
+		let queries = 25;
+		let mut qrng = rand::rngs::StdRng::seed_from_u64(99);
+		let mut total = 0.0;
+		for _ in 0..queries {
+			let q = rand_vec(&mut qrng, dim);
+			let truth = brute_force_topk(&corpus, &q, k);
+			let got: HashSet<String> =
+				idx.search(&q, k, 128).into_iter().map(|h| h.id).collect();
+			total += truth.intersection(&got).count() as f64 / k as f64;
+		}
+		let recall = total / queries as f64;
+		assert!(recall >= 0.85, "HNSW recall@{k} too low: {recall:.3}");
+	}
+
+	#[test]
+	fn int8_recall_tracks_f64() {
+		// int8 quantization cuts vector memory 8x (the Qdrant-parity move). It must
+		// not wreck retrieval: an int8 index's top-k must closely match the f64
+		// index's top-k on the same corpus. Proves the quantized path is usable,
+		// not just present.
+		let dim = 32;
+		let corpus = random_corpus(13, 300, dim);
+		let mut f64_idx = HnswIndex::new(16, 128);
+		let mut i8_idx = HnswIndex::with_mode(16, 128, QuantizationMode::Int8);
+		for (id, v) in &corpus {
+			f64_idx.insert(id.clone(), v.clone());
+			i8_idx.insert(id.clone(), v.clone());
+		}
+		let k = 10;
+		let queries = 25;
+		let mut qrng = rand::rngs::StdRng::seed_from_u64(123);
+		let mut total = 0.0;
+		for _ in 0..queries {
+			let q = rand_vec(&mut qrng, dim);
+			let f: HashSet<String> =
+				f64_idx.search(&q, k, 128).into_iter().map(|h| h.id).collect();
+			let i: HashSet<String> =
+				i8_idx.search(&q, k, 128).into_iter().map(|h| h.id).collect();
+			total += f.intersection(&i).count() as f64 / k as f64;
+		}
+		let agreement = total / queries as f64;
+		assert!(agreement >= 0.75, "int8 vs f64 top-{k} agreement too low: {agreement:.3}");
+	}
+}
