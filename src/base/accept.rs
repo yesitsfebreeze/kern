@@ -571,6 +571,38 @@ mod tests {
 		assert_eq!(g.count(), 2, "no runaway kern creation under the cap");
 	}
 
+	/// The orphan-shard leak that grew the data dir to 347k files was empty,
+	/// unnamed kerns left behind by routing. The accept path must NEVER leave
+	/// one: a duplicate must short-circuit before any spawn, and a spawned
+	/// unnamed child must always receive the committed entity. Exercise dup,
+	/// anchor-match, generic-fallthrough, and near-anchor reject in one batch and
+	/// assert zero empty unnamed kerns survive.
+	#[test]
+	fn accept_never_leaves_empty_unnamed_kern() {
+		let (mut g, root, _anchor) = graph_with_anchor();
+		let vectors = [
+			vec![1.0, 0.0, 0.0], // matches the anchor
+			vec![1.0, 0.0, 0.0], // duplicate -> deduped, must NOT spawn
+			vec![0.0, 1.0, 0.0], // non-match -> generic
+			vec![0.0, 1.0, 0.0], // duplicate of the generic one
+			vec![0.0, 0.0, 1.0], // another non-match
+			vec![0.9, 0.1, 0.0], // near the anchor
+		];
+		for (i, v) in vectors.iter().enumerate() {
+			accept(&mut g, &root, ent(&format!("e{i}"), v.clone()), "");
+		}
+		let empties: Vec<String> = g
+			.all()
+			.iter()
+			.filter(|k| k.id != root && k.is_unnamed() && k.entities.is_empty())
+			.map(|k| k.id.clone())
+			.collect();
+		assert!(
+			empties.is_empty(),
+			"accept left empty unnamed kern(s) behind: {empties:?}"
+		);
+	}
+
 	#[test]
 	fn duplicate_vector_is_deduped() {
 		let mut g = GraphGnn::new();
