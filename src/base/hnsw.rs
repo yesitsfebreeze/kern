@@ -249,6 +249,127 @@ impl HnswIndex {
 			.collect()
 	}
 
+	/// Filtered nearest-neighbour search: return up to `k` hits whose id passes
+	/// `keep`, ranked by distance. Unlike post-filtering (search k, then drop the
+	/// non-matches — which yields *fewer* than k whenever matches are sparse in
+	/// the top-k), this filters DURING traversal: non-matching nodes are still
+	/// walked for navigation so matches hidden behind them are reachable, but only
+	/// matching nodes enter the result set. This is the filtered-vector-search
+	/// guarantee a dedicated vector DB provides.
+	///
+	/// Cost note: when matches are sparse the frontier stays open longer (the
+	/// result set never fills to `ef`), so the worst case approaches a full graph
+	/// walk. The `visited` set bounds it to O(nodes).
+	pub fn search_filtered(
+		&self,
+		vec: &[f64],
+		k: usize,
+		ef: usize,
+		keep: &dyn Fn(&str) -> bool,
+	) -> Vec<HnswHit> {
+		if self.ep.is_empty() || vec.is_empty() || k == 0 {
+			return Vec::new();
+		}
+		let query = Query::new(vec, self.quant_mode);
+		let ef = ef.max(k);
+		let mut ep = self.ep.clone();
+		// Upper layers are pure navigation — no filter, just descend to a good
+		// entry point for the filtered beam at layer 0.
+		for l in (1..=self.max_layer).rev() {
+			ep = self.greedy_nearest(&ep, &query, l);
+		}
+		let candidates = self.beam_search_filtered(&ep, &query, 0, ef, keep);
+		let k = k.min(candidates.len());
+		candidates[..k]
+			.iter()
+			.map(|c| HnswHit {
+				id: c.id.clone(),
+				score: 1.0 - c.dist,
+			})
+			.collect()
+	}
+
+	/// Beam search whose navigation frontier (`candidates`) includes every visited
+	/// node, but whose result set (`results`) admits only nodes passing `keep`.
+	/// The frontier keeps expanding while the result set is under `ef` OR a
+	/// neighbour is closer than the current worst match, so matches behind walls
+	/// of non-matching nodes are still found.
+	fn beam_search_filtered(
+		&self,
+		ep: &str,
+		query: &Query<'_>,
+		layer: usize,
+		ef: usize,
+		keep: &dyn Fn(&str) -> bool,
+	) -> Vec<Candidate> {
+		let ep_dist = self.distance_to_query(ep, query);
+		let mut candidates = MinHeap::new();
+		let mut results = MaxHeap::new();
+		let mut visited = HashSet::new();
+
+		let seed = Candidate {
+			id: ep.to_string(),
+			dist: ep_dist,
+		};
+		candidates.push(seed.clone());
+		visited.insert(ep.to_string());
+		if keep(ep) {
+			results.push(seed);
+		}
+
+		while let Some(c) = candidates.pop() {
+			// If the matching set is full and the nearest frontier node is farther
+			// than the worst match, no closer match can exist — stop.
+			if results.len() >= ef {
+				if let Some(worst) = results.peek() {
+					if c.dist > worst.dist {
+						break;
+					}
+				}
+			}
+			let node = &self.nodes[&c.id];
+			if layer >= node.layers.len() {
+				continue;
+			}
+			for nb_id in &node.layers[layer] {
+				if !visited.insert(nb_id.clone()) {
+					continue;
+				}
+				if !self.nodes.contains_key(nb_id) {
+					continue;
+				}
+				let d = self.distance_to_query(nb_id, query);
+				// Explore (navigate through) this node if the result set isn't full
+				// yet, or it could beat the worst match. Non-matching nodes are still
+				// pushed to the frontier — that is how we reach matches behind them.
+				let worst = results.peek().map(|w| w.dist);
+				let explore = results.len() < ef || worst.map_or(true, |w| d < w);
+				if explore {
+					candidates.push(Candidate {
+						id: nb_id.clone(),
+						dist: d,
+					});
+					if keep(nb_id) {
+						results.push(Candidate {
+							id: nb_id.clone(),
+							dist: d,
+						});
+						if results.len() > ef {
+							results.pop();
+						}
+					}
+				}
+			}
+		}
+
+		let mut out = Vec::with_capacity(results.len());
+		while let Some(c) = results.pop() {
+			out.push(c);
+		}
+		out.reverse();
+		out
+	}
+
 	fn random_level(&mut self) -> usize {
 		let r: f64 = self.rng.random::<f64>().max(1e-18);
 		let level = (-r.ln() * self.ml).floor() as usize;
@@ -582,6 +703,72 @@ mod tests {
 		}
 		let recall = total / queries as f64;
 		assert!(recall >= 0.85, "HNSW recall@{k} too low: {recall:.3}");
+	}
+
+	#[test]
+	fn search_filtered_matches_brute_force_over_subset() {
+		// Filtered search must equal brute-force ranking restricted to the matching
+		// subset — proving it filters DURING traversal (k matches returned), not
+		// after (which would drop below k whenever matches are sparse in the raw
+		// top-k). Keep is "even-indexed vector id".
+		let dim = 16;
+		let corpus = random_corpus(21, 240, dim);
+		let mut idx = HnswIndex::new(16, 128);
+		for (id, v) in &corpus {
+			idx.insert(id.clone(), v.clone());
+		}
+		let keep = |id: &str| {
+			id.trim_start_matches('v')
+				.parse::<usize>()
+				.map(|n| n % 2 == 0)
+				.unwrap_or(false)
+		};
+		let subset: Vec<(String, Vec<f64>)> =
+			corpus.iter().filter(|(id, _)| keep(id)).cloned().collect();
+
+		let k = 8;
+		let queries = 25;
+		let mut qrng = rand::rngs::StdRng::seed_from_u64(55);
+		let mut total = 0.0;
+		for _ in 0..queries {
+			let q = rand_vec(&mut qrng, dim);
+			let truth = brute_force_topk(&subset, &q, k);
+			let hits = idx.search_filtered(&q, k, 128, &keep);
+			assert_eq!(hits.len(), k, "filtered search returned fewer than k matches");
+			let got: HashSet<String> = hits.into_iter().map(|h| h.id).collect();
+			assert!(
+				got.iter().all(|id| keep(id)),
+				"filtered search returned a non-matching id"
+			);
+			total += truth.intersection(&got).count() as f64 / k as f64;
+		}
+		let recall = total / queries as f64;
+		assert!(recall >= 0.85, "filtered recall@{k} too low: {recall:.3}");
+	}
+
+	#[test]
+	fn search_filtered_reject_all_is_empty() {
+		let mut idx = HnswIndex::new(8, 64);
+		idx.insert("a".into(), vec![1.0, 0.0]);
+		idx.insert("b".into(), vec![0.0, 1.0]);
+		assert!(idx.search_filtered(&[1.0, 0.0], 5, 32, &|_| false).is_empty());
+	}
+
+	#[test]
+	fn search_filtered_finds_single_rare_match() {
+		// One matching node among many non-matching ones must still be found —
+		// the navigation walks through the non-matches to reach it.
+		let dim = 16;
+		let corpus = random_corpus(8, 200, dim);
+		let mut idx = HnswIndex::new(16, 128);
+		for (id, v) in &corpus {
+			idx.insert(id.clone(), v.clone());
+		}
+		let target = "v137";
+		let qv = corpus.iter().find(|(id, _)| id == target).map(|(_, v)| v.clone()).unwrap();
+		let hits = idx.search_filtered(&qv, 5, 128, &|id| id == target);
+		assert_eq!(hits.len(), 1, "the one matching node is found");
+		assert_eq!(hits[0].id, target);
 	}
 
 	#[test]
