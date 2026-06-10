@@ -1,6 +1,6 @@
 use crate::base::heat::{self, HeatConfig};
 use crate::base::util::cmp_partial;
-use crate::base::types::{EntityKind, EntityStatus};
+use crate::base::types::{Entity, EntityKind, EntityStatus};
 use crate::config::RetrievalConfig;
 use crate::retrieval::expand::ScoredEntity;
 use std::time::{Duration, SystemTime};
@@ -95,28 +95,53 @@ pub fn filter_delivery(cfg: &RetrievalConfig, results: &mut Vec<ScoredEntity>) {
 	results.truncate(cap);
 }
 
-pub fn apply_query_options(results: &mut Vec<ScoredEntity>, opts: &QueryOptions) {
-	if !opts.source.is_empty() {
-		results.retain(|r| r.entity.source.system() == opts.source);
+/// Whether `entity` passes the metadata filters in `opts` (source/kind/scheme/
+/// confidence/time validity). Sort and `ascending` are presentation, not
+/// filters, so they are not considered here. Single source of truth shared by
+/// post-filtering ([`apply_query_options`], which trims an already-retrieved
+/// result set) and pre-filtered ANN search (a `keep` predicate handed to
+/// `search_all_filtered`, which filters during the index traversal).
+pub fn matches_filter(entity: &Entity, opts: &QueryOptions) -> bool {
+	if !opts.source.is_empty() && entity.source.system() != opts.source {
+		return false;
 	}
 	if let Some(want) = opts.kind {
-		results.retain(|r| r.entity.kind == want);
+		if entity.kind != want {
+			return false;
+		}
 	}
 	if let Some(ref want) = opts.scheme {
-		results.retain(|r| r.entity.source.scheme() == want.as_str());
+		if entity.source.scheme() != want.as_str() {
+			return false;
+		}
 	}
-	if opts.min_conf > 0.0 {
-		results.retain(|r| r.entity.score >= opts.min_conf);
+	if opts.min_conf > 0.0 && entity.score < opts.min_conf {
+		return false;
 	}
+	// `since`/`before` gate on `created_at`; an entity with no timestamp is not
+	// excluded by either bound (matches the previous `is_none_or` semantics).
 	if let Some(since) = opts.since {
-		results.retain(|r| r.entity.created_at.is_none_or(|t| t >= since));
+		if entity.created_at.is_some_and(|t| t < since) {
+			return false;
+		}
 	}
 	if let Some(before) = opts.before {
-		results.retain(|r| r.entity.created_at.is_none_or(|t| t <= before));
+		if entity.created_at.is_some_and(|t| t > before) {
+			return false;
+		}
 	}
+	// `valid_at`: an entity whose validity has expired before the query instant
+	// is filtered out; no expiry means always valid.
 	if let Some(valid_at) = opts.valid_at {
-		results.retain(|r| r.entity.valid_until.is_none_or(|exp| exp >= valid_at));
+		if entity.valid_until.is_some_and(|exp| exp < valid_at) {
+			return false;
+		}
 	}
+	true
+}
+
+pub fn apply_query_options(results: &mut Vec<ScoredEntity>, opts: &QueryOptions) {
+	results.retain(|r| matches_filter(&r.entity, opts));
 
 	// Sort each field ascending, then flip for descending. `dir` keeps the
 	// asc/desc branch in one place instead of per-field if/else.
@@ -260,6 +285,29 @@ mod query_filter_tests {
 		apply_query_options(&mut results, &opts);
 		assert_eq!(results.len(), 2);
 		assert!(results.iter().all(|r| r.entity.source.scheme() == "file"));
+	}
+
+	#[test]
+	fn matches_filter_is_the_per_entity_predicate() {
+		let fact_file = ent("a", EntityKind::Fact, file_src("/a")).entity;
+		// Default (no filter) matches anything.
+		assert!(matches_filter(&fact_file, &QueryOptions::default()));
+		// Kind filter.
+		assert!(matches_filter(&fact_file, &QueryOptions { kind: Some(EntityKind::Fact), ..Default::default() }));
+		assert!(!matches_filter(&fact_file, &QueryOptions { kind: Some(EntityKind::Claim), ..Default::default() }));
+		// Scheme filter.
+		assert!(matches_filter(&fact_file, &QueryOptions { scheme: Some("file".into()), ..Default::default() }));
+		assert!(!matches_filter(&fact_file, &QueryOptions { scheme: Some("ticket".into()), ..Default::default() }));
+		// Confidence floor (entity.score is 0.5 from the `ent` helper).
+		assert!(matches_filter(&fact_file, &QueryOptions { min_conf: 0.4, ..Default::default() }));
+		assert!(!matches_filter(&fact_file, &QueryOptions { min_conf: 0.6, ..Default::default() }));
+		// Combined filters must all pass.
+		assert!(matches_filter(&fact_file, &QueryOptions {
+			kind: Some(EntityKind::Fact),
+			scheme: Some("file".into()),
+			min_conf: 0.5,
+			..Default::default()
+		}));
 	}
 
 	#[test]
