@@ -20,6 +20,8 @@ pub struct MuxConfig {
     pub key_cycle: String,
     /// Key binding to quit mux (kills all panes). Default `ctrl+q`.
     pub key_quit: String,
+    /// Key binding to toggle the kern research panel. Default `ctrl+l`.
+    pub key_research: String,
     /// TCP address the mux MCP server listens on. Default `127.0.0.1:7779`.
     pub mcp_addr: String,
     /// TCP address of the running kern daemon MCP server.
@@ -37,6 +39,7 @@ impl Default for MuxConfig {
             key_close_pane: "ctrl+w".into(),
             key_cycle:      "tab".into(),
             key_quit:       "ctrl+q".into(),
+            key_research:   "ctrl+l".into(),
             mcp_addr:       "127.0.0.1:7779".into(),
             kern_mcp_addr:  "127.0.0.1:7778".into(),
         }
@@ -49,6 +52,7 @@ pub struct KeyMap {
     pub close_pane: KeyEvent,
     pub cycle:      KeyEvent,
     pub quit:       KeyEvent,
+    pub research:   KeyEvent,
 }
 
 impl KeyMap {
@@ -62,6 +66,8 @@ impl KeyMap {
                 .unwrap_or_else(|| KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             quit:       parse_key_event(&cfg.key_quit)
                 .unwrap_or_else(|| KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+            research:   parse_key_event(&cfg.key_research)
+                .unwrap_or_else(|| KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)),
         }
     }
 
@@ -69,6 +75,7 @@ impl KeyMap {
     pub fn matches_close_pane(&self, ev: &KeyEvent) -> bool { self.close_pane == *ev }
     pub fn matches_cycle(&self, ev: &KeyEvent) -> bool      { self.cycle == *ev }
     pub fn matches_quit(&self, ev: &KeyEvent) -> bool       { self.quit == *ev }
+    pub fn matches_research(&self, ev: &KeyEvent) -> bool   { self.research == *ev }
 }
 
 /// Parse a key-binding string like `"alt+n"`, `"ctrl+w"`, or `"tab"` into a
@@ -154,6 +161,24 @@ mod tests {
         let c = MuxConfig::default();
         // kern daemon MCP default is 7778; mux's own MCP is 7779.
         assert_eq!(c.kern_mcp_addr, "127.0.0.1:7778");
+    }
+
+    #[test]
+    fn mux_config_key_research_default() {
+        let c = MuxConfig::default();
+        assert_eq!(c.key_research, "ctrl+l");
+    }
+
+    #[test]
+    fn keymap_matches_research_ctrl_l() {
+        let km = KeyMap::from_config(&MuxConfig::default());
+        assert!(km.matches_research(&KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn keymap_matches_research_false_for_other_key() {
+        let km = KeyMap::from_config(&MuxConfig::default());
+        assert!(!km.matches_research(&KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)));
     }
 
     #[test]
