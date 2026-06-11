@@ -793,7 +793,7 @@ fn spawn_file_watcher(cfg: &crate::config::Config, worker: &Arc<crate::ingest::W
 }
 
 /// Claude-Code memory: capture spool drain + recall digest writer. Both
-/// file-mediated; off unless `[capture] enabled = true`.
+/// file-mediated; on by default, disable via `[capture] enabled = false`.
 fn spawn_capture(
 	cfg: &crate::config::Config,
 	worker: &Arc<crate::ingest::Worker>,
@@ -818,7 +818,7 @@ fn spawn_capture(
 	} else {
 		tracing::warn!(
 			target: "kern.capture",
-			"capture enabled but no reason LLM configured; distillation disabled"
+			"capture: spool drain inactive — add a [reason] section to kern.toml to enable distillation; deltas will accumulate in .kern/capture/ and will be processed once the daemon restarts with a reason LLM configured"
 		);
 	}
 
