@@ -23,7 +23,15 @@ impl PaneRegistry {
     /// Create a new registry and immediately spawn the main pane.
     pub fn new(main_cmd: String, cols: u16, rows: u16) -> anyhow::Result<Self> {
         let id   = new_session_id();
-        let pane = PtySession::spawn(id, "main".to_string(), main_cmd, cols, rows)?;
+        let pane = PtySession::spawn(id.clone(), "main".to_string(), main_cmd, cols, rows)?;
+        // Emit ForkOpen so SessionMirror can index this pane when a kern daemon is running.
+        // Payload carries fork_id redundantly because history.db's kind_from_tag reads from
+        // the payload column; the inline enum field alone is lost after JSONL→SQLite rollover.
+        journal::emit(journal::Entry::new(
+            journal::Kind::ForkOpen { fork_id: id.clone(), parent: None },
+            "mux",
+            serde_json::json!({ "fork_id": id }),
+        ));
         Ok(Self { panes: vec![pane], focus: 0, cols, rows })
     }
 
@@ -35,7 +43,7 @@ impl PaneRegistry {
         journal::emit(journal::Entry::new(
             journal::Kind::ForkOpen { fork_id: id.clone(), parent: None },
             "mux",
-            serde_json::Value::Null,
+            serde_json::json!({ "fork_id": &id }),
         ));
         Ok(id)
     }
@@ -81,10 +89,11 @@ impl PaneRegistry {
         while i < self.panes.len() {
             if self.panes[i].poll_exited() {
                 let id = self.panes[i].id.clone();
+                let close_payload = serde_json::json!({ "fork_id": &id });
                 journal::emit(journal::Entry::new(
                     journal::Kind::ForkClose { fork_id: id },
                     "mux",
-                    serde_json::Value::Null,
+                    close_payload,
                 ));
                 self.panes.remove(i);
                 // If a pane below the focus was removed, shift focus down to keep pointing at the same pane.

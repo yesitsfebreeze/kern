@@ -85,7 +85,7 @@ pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap) -> io::Result<()> {
     loop {
         // Drain + reap: brief lock acquisition.
         {
-            let mut reg = registry.lock().expect("registry lock");
+            let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
             reg.drain_all();
             reg.reap_exited();
             if reg.panes.is_empty() {
@@ -95,7 +95,7 @@ pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap) -> io::Result<()> {
 
         // Draw: read-lock for frame rendering.
         {
-            let reg = registry.lock().expect("registry lock");
+            let reg = registry.lock().unwrap_or_else(|p| p.into_inner());
             draw_frame(&reg, &mut stdout, cols, rows)?;
         }
         stdout.flush()?;
@@ -106,12 +106,12 @@ pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap) -> io::Result<()> {
                 Event::Resize(w, h) => {
                     cols = w;
                     rows = h;
-                    let mut reg = registry.lock().expect("registry lock");
+                    let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
                     reg.resize_all(cols, rows.saturating_sub(1));
                     queue!(stdout, Clear(ClearType::All))?;
                 }
                 Event::Key(kev) if kev.kind == KeyEventKind::Press => {
-                    let mut reg = registry.lock().expect("registry lock");
+                    let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
                     if keymap.matches_quit(&kev) {
                         break;
                     } else if keymap.matches_cycle(&kev) {

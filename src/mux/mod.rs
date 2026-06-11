@@ -88,12 +88,16 @@ pub async fn run_mux(cfg: &Config) {
     });
 
     // ── TUI loop (blocking) ───────────────────────────────────────────────
-    // The registry is passed as Arc<Mutex<>> so the TUI acquires the lock
-    // only for brief drain/draw/key operations, releasing it between frames
-    // to allow MCP worker threads to call mux_* tools concurrently.
-    let keymap = KeyMap::from_config(&cfg.mux);
-    if let Err(e) = run_tui(&registry, &keymap) {
-        eprintln!("kern mux: TUI error: {e}");
+    // `run_tui` calls `event::poll`/`event::read` in a hot loop — blocking
+    // syscalls that must not occupy a tokio async-worker thread. We hand off
+    // to `spawn_blocking` so the tokio runtime remains responsive for the
+    // MCP server tasks.
+    let keymap  = KeyMap::from_config(&cfg.mux);
+    let reg_tui = registry.clone();
+    match tokio::task::spawn_blocking(move || run_tui(&reg_tui, &keymap)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => eprintln!("kern mux: TUI error: {e}"),
+        Err(e)     => eprintln!("kern mux: TUI panicked: {e}"),
     }
 
     // Signal the MCP task to stop.

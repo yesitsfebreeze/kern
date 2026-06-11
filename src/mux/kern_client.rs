@@ -30,8 +30,10 @@ impl TcpTransport {
     fn connect(addr: &str) -> anyhow::Result<Self> {
         let stream = TcpStream::connect(addr)
             .with_context(|| format!("kern MCP TCP connect to {addr}"))?;
-        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        // kern's LLM answer/distill paths run 12–21 s; 60 s read timeout gives
+        // enough headroom without hanging indefinitely on a dead daemon.
+        stream.set_read_timeout(Some(Duration::from_secs(60)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(10)))?;
         let writer = stream
             .try_clone()
             .context("kern MCP TCP clone for writer")?;
