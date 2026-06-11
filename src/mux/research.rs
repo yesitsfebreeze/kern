@@ -252,18 +252,16 @@ impl ChatSession {
 // ── ResearchPanel ─────────────────────────────────────────────────────────────
 
 pub struct ResearchPanel {
-    pub journal:      JournalTailer,
-    pub session:      ChatSession,
-    kern_mcp_addr:    String,
+    pub journal: JournalTailer,
+    pub session: ChatSession,
 }
 
 impl ResearchPanel {
     /// Construct a new panel. Spawns the journal tailer thread immediately.
-    pub fn new(kern_mcp_addr: String) -> Self {
+    pub fn new() -> Self {
         Self {
-            journal:      JournalTailer::new(),
-            session:      ChatSession::new(),
-            kern_mcp_addr,
+            journal: JournalTailer::new(),
+            session: ChatSession::new(),
         }
     }
 
@@ -482,15 +480,23 @@ impl ResearchPanel {
                             text: query.clone(),
                         });
                         let (tx, rx) = mpsc::sync_channel(1);
-                        let addr = self.kern_mcp_addr.clone();
-                        std::thread::Builder::new()
-                            .name("kern-research-answer".into())
-                            .spawn(move || {
-                                let _ = tx.send(
-                                    crate::mux::KernClient::new(addr).answer(&query)
-                                );
-                            })
-                            .expect("spawn kern-research-answer");
+                        // Capture the runtime handle from the spawn_blocking context
+                        // so the answer thread (a plain OS thread with no async context)
+                        // can block on the async kern RPC call.
+                        match tokio::runtime::Handle::try_current() {
+                            Ok(handle) => {
+                                std::thread::Builder::new()
+                                    .name("kern-research-answer".into())
+                                    .spawn(move || {
+                                        let _ = tx.send(handle.block_on(kern_answer(query)));
+                                    })
+                                    .expect("spawn kern-research-answer");
+                            }
+                            Err(e) => {
+                                // No runtime available (e.g. unit test context).
+                                let _ = tx.send(Err(anyhow::anyhow!("no tokio runtime: {e}")));
+                            }
+                        }
                         self.session.pending = Some(rx);
                         self.session.state   = SessionState::Thinking;
                     }
@@ -508,6 +514,52 @@ impl ResearchPanel {
 
         false // panel stays open
     }
+}
+
+// ── Kern answer (internal RPC) ────────────────────────────────────────────────
+
+/// Call the kern daemon's `query` tool (with `answer: true`) via the internal
+/// typed RPC channel, bypassing the MCP JSON-over-TCP layer entirely.
+async fn kern_answer(query: String) -> anyhow::Result<String> {
+    use trnsprt::kern_rpc::{CallToolReq, KernRpcClient};
+    use trnsprt::typed::JsonEnvelopeCodec;
+
+    let client = KernRpcClient::<JsonEnvelopeCodec>::connect_local()
+        .await
+        .map_err(|e| anyhow::anyhow!("kern connect: {e}"))?;
+    let res = client
+        .call_tool(CallToolReq {
+            name: "query".into(),
+            args: serde_json::json!({"text": query, "k": 5, "answer": true}),
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("kern query: {e}"))?;
+
+    let env = &res.envelope;
+    if env.get("isError").and_then(|v| v.as_bool()).unwrap_or(false) {
+        anyhow::bail!("kern: {}", extract_rpc_text(env));
+    }
+    Ok(extract_rpc_text(env))
+}
+
+/// Concatenate all `type: text` items from an MCP content envelope.
+fn extract_rpc_text(envelope: &serde_json::Value) -> String {
+    envelope
+        .get("content")
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    if item.get("type")?.as_str()? == "text" {
+                        item.get("text")?.as_str()
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
 }
 
 /// Wrap `text` into lines of at most `width` chars (naive word-wrap).
@@ -648,13 +700,13 @@ mod tests {
 
     #[test]
     fn research_panel_new_constructs() {
-        let panel = ResearchPanel::new("127.0.0.1:7778".to_string());
+        let panel = ResearchPanel::new();
         assert!(matches!(panel.session.state, SessionState::Fresh));
     }
 
     #[test]
     fn research_panel_typing_on_printable_key() {
-        let mut panel = ResearchPanel::new("127.0.0.1:7778".to_string());
+        let mut panel = ResearchPanel::new();
         panel.session.push_char('a');
         assert_eq!(panel.session.input, "a");
         assert!(matches!(panel.session.state, SessionState::Typing));
@@ -662,7 +714,7 @@ mod tests {
 
     #[test]
     fn research_panel_welcome_back_reset() {
-        let mut panel = ResearchPanel::new("127.0.0.1:7778".to_string());
+        let mut panel = ResearchPanel::new();
         panel.session.history.push(ChatEntry { role: ChatRole::User, text: "old".to_string() });
         panel.session.state = SessionState::WelcomeBack;
         panel.session.handle_reset();

@@ -165,7 +165,7 @@ impl ScreenSnapshot {
 ///
 /// Acquires `registry` only for brief drain/draw/key operations, releasing it
 /// between frames so MCP worker threads can call `mux_*` tools concurrently.
-pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap, kern_mcp_addr: String) -> io::Result<()> {
+pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap) -> io::Result<()> {
     install_panic_hook();
     let _guard = Guard::enter()?;
     // Full absolute path — the status bar front-truncates it to fit, so longer
@@ -231,7 +231,7 @@ pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap, kern_mcp_addr: String
                         match research.take() {
                             Some(_) => {}
                             None => {
-                                let mut panel = crate::mux::ResearchPanel::new(kern_mcp_addr.clone());
+                                let mut panel = crate::mux::ResearchPanel::new();
                                 panel.session.on_panel_open();
                                 research = Some(panel);
                             }

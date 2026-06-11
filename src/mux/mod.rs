@@ -109,10 +109,9 @@ pub async fn run_mux(cfg: &Config) {
     // syscalls that must not occupy a tokio async-worker thread. We hand off
     // to `spawn_blocking` so the tokio runtime remains responsive for the
     // MCP server tasks.
-    let keymap        = KeyMap::from_config(&cfg.mux);
-    let kern_mcp_addr = cfg.mux.kern_mcp_addr.clone();
-    let reg_tui       = registry.clone();
-    match tokio::task::spawn_blocking(move || run_tui(&reg_tui, &keymap, kern_mcp_addr)).await {
+    let keymap  = KeyMap::from_config(&cfg.mux);
+    let reg_tui = registry.clone();
+    match tokio::task::spawn_blocking(move || run_tui(&reg_tui, &keymap)).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => eprintln!("kern mux: TUI error: {e}"),
         Err(e)     => eprintln!("kern mux: TUI panicked: {e}"),
