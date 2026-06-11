@@ -2,6 +2,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
 
 /// Configuration for `kern mux` — the default PTY-multiplexer TUI mode.
+///
+/// # Serialization note
+/// `MuxConfig` is TOML-only (loaded via `config_io::load_layered`).
+/// **Never** add `#[derive(bincode::Encode, bincode::Decode)]` here — doing so
+/// and serializing `Config` would corrupt every shard written by the old layout.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MuxConfig {

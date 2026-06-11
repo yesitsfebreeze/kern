@@ -74,9 +74,12 @@ impl KernClient {
 
     /// Ingest `text` into kern under `key`.
     ///
-    /// Prepends `[KEY={key}]` so the document is reliably retrievable via
-    /// `query(text=key)` through kern's lexical index. Uses `sync=true` so
-    /// the document is indexed and searchable before this call returns.
+    /// Prepends `[KEY={key}]` so the document is retrievable via `query(text=key)`.
+    /// Uses `sync=true` so the document is indexed before this call returns.
+    ///
+    /// # Important
+    /// Pass **raw** task text here — not the output of [`crate::mux::delegate::kern_ingest_text`],
+    /// which already prepends `[KEY=…]`. Passing pre-formatted text would double the prefix.
     pub fn ingest(&self, key: &str, text: &str) -> anyhow::Result<()> {
         let full_text = format!("[KEY={key}]\n{text}");
         let mut client = self.open()?;
