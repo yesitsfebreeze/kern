@@ -28,7 +28,7 @@ interrogate, and communicate with sibling panes programmatically.
 `Cli` gains a `daemon` subcommand (alias for `--daemon`). Both routes call `run_server()`.
 
 ```
-kern              →  run_replicator()   (new default — mux TUI)
+kern              →  run_mux()   (new default — mux TUI)
 kern --daemon     →  run_server()       (existing daemon path)
 kern daemon       →  run_server()       (new subcommand alias)
 kern query ...    →  dispatch()         (existing, unchanged)
@@ -41,7 +41,7 @@ match cli.command {
     Some(Commands::Daemon) => run_server(&cli, &cfg).await,
     Some(cmd)              => dispatch(cmd, &cfg).await,
     None if cli.daemon     => run_server(&cli, &cfg).await,
-    None                   => kern::mux::run_replicator(&cfg).await,
+    None                   => kern::mux::run_mux(&cfg).await,
 }
 ```
 
@@ -55,11 +55,11 @@ Add `pub mod mux;`
 
 ```
 src/mux/
-  mod.rs      — pub async fn run_replicator(cfg); wires pty + registry + tui + mcp
+  mod.rs      — pub async fn run_mux(cfg); wires pty + registry + tui + mcp
   pty.rs      — PtySession: portable-pty + vt100, spawn/drain/write/resize
   registry.rs — PaneRegistry: Vec<PtySession>, focus index, Arc<Mutex<>>
   tui.rs      — crossterm render loop, event pump, draw_frame()
-  mcp.rs      — ReplicatorMcpServer: four relay tools
+  mcp.rs      — MuxMcpServer: four mux tools
 ```
 
 ---
