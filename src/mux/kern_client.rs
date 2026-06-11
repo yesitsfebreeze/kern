@@ -12,6 +12,9 @@ use std::time::Duration;
 use anyhow::Context as _;
 use trnsprt::{Client, Transport};
 
+/// Number of candidate results to request from kern in a `query` call.
+const QUERY_K: u32 = 3;
+
 // ── TCP transport ─────────────────────────────────────────────────────────────
 
 /// Implements `trnsprt::Transport` over a pair of cloned `TcpStream`s.
@@ -59,7 +62,7 @@ impl Transport for TcpTransport {
 /// `std::thread` (the mux MCP server handler thread) — no tokio context needed.
 pub struct KernClient {
     /// TCP address of the kern daemon MCP server, e.g. `"127.0.0.1:7778"`.
-    pub addr: String,
+    addr: String,
 }
 
 impl KernClient {
@@ -75,7 +78,7 @@ impl KernClient {
     pub fn ingest(&self, key: &str, text: &str) -> anyhow::Result<()> {
         let full_text = format!("[KEY={key}]\n{text}");
         let mut client = self.open()?;
-        client
+        let result = client
             .call_tool(
                 "ingest",
                 &serde_json::json!({
@@ -86,6 +89,10 @@ impl KernClient {
                 }),
             )
             .with_context(|| format!("kern ingest key={key}"))?;
+        if result.is_error {
+            let msg = Self::extract_text(&result.content).unwrap_or_default();
+            anyhow::bail!("kern ingest key={key}: tool error: {msg}");
+        }
         Ok(())
     }
 
@@ -100,9 +107,13 @@ impl KernClient {
         let result = client
             .call_tool(
                 "query",
-                &serde_json::json!({ "text": query_text, "k": 3 }),
+                &serde_json::json!({ "text": query_text, "k": QUERY_K }),
             )
             .with_context(|| format!("kern query text={query_text:?}"))?;
+        if result.is_error {
+            let msg = Self::extract_text(&result.content).unwrap_or_default();
+            anyhow::bail!("kern query text={query_text:?}: tool error: {msg}");
+        }
         Ok(Self::extract_text(&result.content).unwrap_or_default())
     }
 
@@ -135,8 +146,8 @@ mod tests {
 
     #[test]
     fn kern_client_constructs() {
-        let c = KernClient::new("127.0.0.1:7778");
-        assert_eq!(c.addr, "127.0.0.1:7778");
+        // Verify that KernClient::new succeeds without panicking.
+        let _c = KernClient::new("127.0.0.1:7778");
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! the four `mux_*` tools on a TCP loopback socket.
 
 pub mod delegate;
-pub mod kern_client;
+mod kern_client;
 pub mod mcp;
 pub mod pty;
 pub mod registry;
