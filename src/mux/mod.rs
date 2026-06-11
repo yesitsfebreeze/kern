@@ -25,10 +25,25 @@ use crate::config::{Config, KeyMap};
 
 /// Launch the mux TUI.
 ///
-/// 1. Starts the MCP server on `cfg.mux.mcp_addr` in a background task.
-/// 2. Runs the TUI render loop (blocks until quit).
-/// 3. Cancels the MCP task on return.
+/// 1. Ensures the per-cwd kern daemon is running (spawns a detached one if not)
+///    so every pane shares one warm daemon.
+/// 2. Starts the MCP server on `cfg.mux.mcp_addr` in a background task.
+/// 3. Runs the TUI render loop (blocks until quit).
+/// 4. Cancels the MCP task on return.
 pub async fn run_mux(cfg: &Config) {
+    // Bring up the per-cwd kern daemon BEFORE spawning any pane, so each pane's
+    // `kern mcp` bridge attaches to one warm shared daemon (proxy mode) instead
+    // of cold-spawning its own and timing out. Detached + null stdio, so it
+    // never touches the TUI. No-op (instant) when a daemon is already running.
+    crate::commands::ensure_daemon().await;
+
+    // Register kern MCP in this project's .claude/settings.json so
+    // `mcp__kern__*` tools appear in Claude Code automatically.
+    {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        crate::commands::ensure_mcp_registered(&cwd);
+    }
+
     // Determine terminal size (fall back to 80×24 if detection fails).
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let pane_rows    = rows.saturating_sub(1);

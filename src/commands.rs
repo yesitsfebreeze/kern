@@ -6,6 +6,14 @@ mod profile_cmd;
 mod query;
 mod reembed;
 
+/// Ensure the per-cwd kern daemon is running (spawning a detached one if not).
+/// Consumed by the mux at launch so spawned panes share one warm daemon.
+pub(crate) use mcp_cmd::ensure_daemon;
+
+/// Register the kern MCP server in the project's `.claude/settings.json`.
+/// Called at mux and daemon startup — idempotent, safe to call every boot.
+pub(crate) use mcp_cmd::ensure_mcp_registered;
+
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
@@ -462,6 +470,12 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	if let Some(j) = journal::global() {
 		j.set_max_bytes(cfg.journal.max_today_bytes);
+	}
+
+	// Register kern in .claude/settings.json so Claude Code picks it up.
+	{
+		let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+		ensure_mcp_registered(&cwd);
 	}
 
 	// Runtime watchdog. A wedged daemon — deadlock on the graph lock, a panic

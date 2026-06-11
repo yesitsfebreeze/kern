@@ -69,6 +69,42 @@ pub(super) async fn cmd_mcp(cfg: &crate::config::Config) {
 	}
 }
 
+/// Ensure a kern daemon is running for this cwd, spawning a detached one if not.
+///
+/// Probes `kern.sock`: if a daemon already answers, returns at once. Otherwise
+/// spawns a detached `kern --daemon` (null stdio, outlives us — same mechanism
+/// `kern mcp` uses) and waits a short, bounded window for its socket to come up.
+///
+/// Called by the mux at launch so every spawned pane's `kern mcp` bridge
+/// attaches to one warm shared daemon (proxy mode) instead of each cold-spawning
+/// its own and timing out — the "failed to reconnect" symptom.
+///
+/// Returns `true` if a daemon was already running, `false` if one was spawned
+/// (or the spawn failed — see logs).
+pub(crate) async fn ensure_daemon() -> bool {
+	// Fast path: a daemon already serving kern.sock needs nothing more.
+	if attach_with_retry(1, 0).await.is_ok() {
+		return true;
+	}
+	// None reachable — spawn a detached daemon and give its socket a brief
+	// head start so the first pane attaches in proxy mode rather than racing to
+	// cold-spawn a second daemon. ~2s budget; if it's not up by then we proceed
+	// anyway and the pane's own attach-retry covers the remainder.
+	if let Err(e) = spawn_daemon() {
+		tracing::warn!(target: "kern.mcp", error = %e, "ensure_daemon: spawn failed");
+		return false;
+	}
+	match attach_with_retry(8, 250).await {
+		Ok(_) => tracing::info!(target: "kern.mcp", "ensure_daemon: daemon up"),
+		Err(e) => tracing::warn!(
+			target: "kern.mcp",
+			error = %e,
+			"ensure_daemon: daemon not ready in budget; panes will retry"
+		),
+	}
+	false
+}
+
 async fn run_proxy(client: KernRpcClient<JsonEnvelopeCodec>) {
 	tracing::info!(
 		target: "kern.mcp_proxy",
@@ -312,4 +348,136 @@ async fn run_standalone(cfg: &crate::config::Config) {
 		),
 	};
 	server.run_stdio();
+}
+
+// ── Claude Code MCP auto-registration ────────────────────────────────────────
+
+/// Ensure the kern MCP server is registered in the project's `.claude/settings.json`.
+///
+/// Called at daemon/mux startup so any project directory that runs kern
+/// automatically gains `mcp__kern__*` tools in the Claude Code session without
+/// manual plugin or settings setup. Idempotent — exits immediately if the
+/// `mcpServers.kern` entry is already present. Does not touch any other key.
+pub(crate) fn ensure_mcp_registered(cwd: &std::path::Path) {
+    let settings_path = cwd.join(".claude").join("settings.json");
+
+    // Read existing JSON or start from an empty object.
+    let raw = std::fs::read_to_string(&settings_path).unwrap_or_else(|_| "{}".to_string());
+    let mut root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
+
+    // If kern is already registered, nothing to do.
+    if root
+        .get("mcpServers")
+        .and_then(|s| s.get("kern"))
+        .is_some()
+    {
+        return;
+    }
+
+    // Upsert the mcpServers.kern entry.
+    root.as_object_mut()
+        .map(|obj| {
+            obj.entry("mcpServers")
+                .or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+                .map(|servers| {
+                    servers.insert(
+                        "kern".to_string(),
+                        serde_json::json!({
+                            "command": "kern",
+                            "args":    ["mcp"],
+                            "description": "kern knowledge-graph MCP tools \
+                                (query, ingest, forget, anchor, link, degrade, \
+                                descriptor, health, pulse)"
+                        }),
+                    )
+                })
+        });
+
+    // Ensure .claude/ exists and write back.
+    let dir = settings_path.parent().expect("settings_path has parent");
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        tracing::warn!(target: "kern.mcp", error = %e, "ensure_mcp_registered: create_dir_all failed");
+        return;
+    }
+    match serde_json::to_string_pretty(&root) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&settings_path, json) {
+                tracing::warn!(target: "kern.mcp", error = %e, "ensure_mcp_registered: write failed");
+            } else {
+                tracing::info!(
+                    target: "kern.mcp",
+                    path = %settings_path.display(),
+                    "registered kern MCP server in Claude Code project settings"
+                );
+            }
+        }
+        Err(e) => tracing::warn!(target: "kern.mcp", error = %e, "ensure_mcp_registered: serialize failed"),
+    }
+}
+
+#[cfg(test)]
+mod ensure_mcp_tests {
+    use super::*;
+
+    #[test]
+    fn writes_kern_entry_when_settings_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_mcp_registered(dir.path());
+        let raw = std::fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["mcpServers"]["kern"]["command"], "kern");
+        assert_eq!(v["mcpServers"]["kern"]["args"][0], "mcp");
+    }
+
+    #[test]
+    fn preserves_existing_keys_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        let settings = claude.join("settings.json");
+        // Seed with pre-existing hooks key and an unrelated mcpServer.
+        std::fs::write(
+            &settings,
+            r#"{"hooks":{"Stop":[]},"mcpServers":{"other":{"command":"other"}}}"#,
+        )
+        .unwrap();
+
+        ensure_mcp_registered(dir.path());
+
+        let raw = std::fs::read_to_string(&settings).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        // Original keys preserved.
+        assert!(v["hooks"]["Stop"].is_array());
+        assert_eq!(v["mcpServers"]["other"]["command"], "other");
+        // New kern entry added.
+        assert_eq!(v["mcpServers"]["kern"]["command"], "kern");
+
+        // Second call is idempotent — does not alter the file.
+        let before = std::fs::read_to_string(&settings).unwrap();
+        ensure_mcp_registered(dir.path());
+        let after = std::fs::read_to_string(&settings).unwrap();
+        assert_eq!(before, after, "idempotent: file unchanged on second call");
+    }
+
+    #[test]
+    fn does_not_overwrite_existing_kern_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        let settings = claude.join("settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"mcpServers":{"kern":{"command":"custom-kern","args":["custom"]}}}"#,
+        )
+        .unwrap();
+
+        ensure_mcp_registered(dir.path());
+
+        let raw = std::fs::read_to_string(&settings).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        // Custom entry must not be overwritten.
+        assert_eq!(v["mcpServers"]["kern"]["command"], "custom-kern");
+        assert_eq!(v["mcpServers"]["kern"]["args"][0], "custom");
+    }
 }
