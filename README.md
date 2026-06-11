@@ -85,7 +85,11 @@ returns fewer than `k`.
 - **tarpc `KernRpc`** over a per-cwd socket for other local clients.
 
 A background **tick** (default 60s) drives decay, eviction, and clustering — an
-idle daemon still maintains itself. Persistence is `bincode`. HNSW, the GNN,
+idle daemon still maintains itself. Persistence is **LMDB** (via
+[heed](https://github.com/meilisearch/heed)) — an ACID, multi-process embedded
+KV. Hot graph and cold tier live together in one `kern.mdb` file per data dir;
+vectors are stored int8, values are `zstd(bincode)`. The daemon, CLI, and recall
+hook all open the same data dir concurrently without contention. HNSW, the GNN,
 beam search, gossip, and the MCP server are all written from scratch.
 
 ---
@@ -153,6 +157,18 @@ To verify it's working, call the `health` MCP tool from your session, or check
 that the daemon has written `<cwd>/.kern/digest.md`. Prefer the MCP tools
 over the `kern <subcommand>` CLI for live state — the CLI reads the on-disk
 graph directly and can race the running daemon.
+
+**Upgrading from the legacy file-shard store?** Earlier builds persisted each
+kern as a separate bincode shard in `.kern/data/`. Run `kern migrate` (with the
+daemon stopped) once per data directory to import them into the new LMDB store:
+
+```bash
+kern migrate              # migrates <cwd>/.kern/data/ in-place
+kern migrate --path /dir  # or target a specific data directory
+```
+
+The old shard files are left in place; remove them once you've verified recall is
+working. New projects need no migration — the LMDB store is created automatically.
 
 ### Configure
 
