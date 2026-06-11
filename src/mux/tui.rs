@@ -272,6 +272,17 @@ pub fn draw_frame(
         )?;
     }
 
+    // ── Cursor: position at focused pane's vt100 cursor, then show ───────────
+    let (focused_screen, pane_col_offset) = if registry.focus > 0 {
+        (registry.focused().map(|p| p.parser.screen()), left_cols + 1)
+    } else {
+        (registry.panes.get(0).map(|p| p.parser.screen()), 0u16)
+    };
+    if let Some(screen) = focused_screen {
+        let (crow, ccol) = screen.cursor_position();
+        queue!(stdout, MoveTo(pane_col_offset + ccol, crow + 1), Show)?;
+    }
+
     Ok(())
 }
 
