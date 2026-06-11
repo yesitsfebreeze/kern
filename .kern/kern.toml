@@ -21,7 +21,6 @@ model = "qwen3-embedding:0.6b"
 
 [capture]
 # Self-learning: capture Claude Code sessions -> distill -> graph -> digest.
-enabled = true
 
 [tick]
 # Self-compaction cadence (heat decay + stigmergy GC + clustering).
