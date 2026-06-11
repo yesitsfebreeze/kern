@@ -134,12 +134,20 @@ pub fn key_event_to_bytes(ev: &KeyEvent) -> Option<Vec<u8>> {
     let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
     match ev.code {
         KeyCode::Char(c) => {
+            let alt = ev.modifiers.contains(KeyModifiers::ALT);
             if ctrl {
                 let lower = c.to_ascii_lowercase();
                 if lower.is_ascii_alphabetic() {
                     return Some(vec![lower as u8 - b'a' + 1]);
                 }
                 None
+            } else if alt {
+                // Terminal convention: Alt+char = ESC prefix + char bytes.
+                let mut buf = [0u8; 4];
+                let s = c.encode_utf8(&mut buf);
+                let mut out = vec![0x1b];
+                out.extend_from_slice(s.as_bytes());
+                Some(out)
             } else {
                 let mut buf = [0u8; 4];
                 Some(c.encode_utf8(&mut buf).as_bytes().to_vec())
@@ -215,5 +223,11 @@ mod tests {
         let id = new_session_id();
         assert_eq!(id.len(), 8);
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "not hex: {id}");
+    }
+
+    #[test]
+    fn key_event_to_bytes_alt_b() {
+        let ev = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT);
+        assert_eq!(key_event_to_bytes(&ev), Some(vec![0x1b, b'b']));
     }
 }

@@ -17,7 +17,7 @@ use crossterm::{
 
 use crate::config::KeyMap;
 use crate::mux::pty::key_event_to_bytes;
-use crate::mux::registry::PaneRegistry;
+use crate::mux::registry::{PaneRegistry, SharedRegistry};
 
 // ── Terminal guard ────────────────────────────────────────────────────────────
 
@@ -70,7 +70,10 @@ fn enable_vt_windows() -> io::Result<()> {
 // ── Main TUI loop ─────────────────────────────────────────────────────────────
 
 /// Run the mux TUI until the user quits or all panes exit.
-pub fn run_tui(registry: &mut PaneRegistry, keymap: &KeyMap) -> io::Result<()> {
+///
+/// Acquires `registry` only for brief drain/draw/key operations, releasing it
+/// between frames so MCP worker threads can call `mux_*` tools concurrently.
+pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap) -> io::Result<()> {
     install_panic_hook();
     let _guard = Guard::enter()?;
     let (mut cols, mut rows) = terminal::size()?;
@@ -80,48 +83,54 @@ pub fn run_tui(registry: &mut PaneRegistry, keymap: &KeyMap) -> io::Result<()> {
     stdout.flush()?;
 
     loop {
-        registry.drain_all();
-        registry.reap_exited();
-
-        if registry.panes.is_empty() {
-            break;
+        // Drain + reap: brief lock acquisition.
+        {
+            let mut reg = registry.lock().expect("registry lock");
+            reg.drain_all();
+            reg.reap_exited();
+            if reg.panes.is_empty() {
+                break;
+            }
         }
 
-        draw_frame(registry, &mut stdout, cols, rows)?;
+        // Draw: read-lock for frame rendering.
+        {
+            let reg = registry.lock().expect("registry lock");
+            draw_frame(&reg, &mut stdout, cols, rows)?;
+        }
         stdout.flush()?;
 
+        // Poll for input — lock is NOT held here, giving MCP threads ~16ms per frame.
         if event::poll(Duration::from_millis(16))? {
             match event::read()? {
                 Event::Resize(w, h) => {
                     cols = w;
                     rows = h;
-                    registry.resize_all(cols, rows.saturating_sub(1));
+                    let mut reg = registry.lock().expect("registry lock");
+                    reg.resize_all(cols, rows.saturating_sub(1));
                     queue!(stdout, Clear(ClearType::All))?;
                 }
                 Event::Key(kev) if kev.kind == KeyEventKind::Press => {
+                    let mut reg = registry.lock().expect("registry lock");
                     if keymap.matches_quit(&kev) {
                         break;
                     } else if keymap.matches_cycle(&kev) {
-                        registry.cycle_focus();
+                        reg.cycle_focus();
                     } else if keymap.matches_new_pane(&kev) {
-                        let n = registry.panes.len();
-                        let cmd = registry.panes[0].cmd.clone();
-                        let _ = registry.spawn_pane(
+                        let n   = reg.panes.len();
+                        let cmd = reg.panes[0].cmd.clone();
+                        let _ = reg.spawn_pane(
                             format!("sub-{n}"),
                             cmd,
                             cols / 2,
                             rows.saturating_sub(1),
                         );
                     } else if keymap.matches_close_pane(&kev) {
-                        if registry.focus > 0 {
-                            if let Some(p) = registry.focused_mut() {
-                                p.kill();
-                            }
+                        if reg.focus > 0 {
+                            if let Some(p) = reg.focused_mut() { p.kill(); }
                         }
                     } else if let Some(bytes) = key_event_to_bytes(&kev) {
-                        if let Some(p) = registry.focused_mut() {
-                            p.write_input(&bytes);
-                        }
+                        if let Some(p) = reg.focused_mut() { p.write_input(&bytes); }
                     }
                 }
                 _ => {}
