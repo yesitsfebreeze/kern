@@ -62,6 +62,11 @@ pub fn update_existing_entity(
 		let reason = Reason {
 			id: rid,
 			from: entity_id.to_string(),
+			// A Rephrase is a LOCAL annotation on `from` itself — the alternate
+			// phrasing attaches to this one entity, there is no second endpoint to
+			// point at. So the cross-kern target fields are intentionally blank:
+			// `to` (no target entity), `to_kern_id`/`to_net_id` (no remote kern or
+			// federated network to resolve). A normal typed edge fills all three.
 			to: String::new(),
 			to_kern_id: String::new(),
 			to_net_id: String::new(),
@@ -95,6 +100,38 @@ mod tests {
 		let g = graph.read().unwrap();
 		let kid = g.kern_of_entity(id).unwrap().to_string();
 		g.kerns.get(&kid).unwrap().entities.get(id).unwrap().clone()
+	}
+
+	/// Graph holding one entity with an explicit vector, indexed into the ANN
+	/// index so `find_duplicate`'s `entity_idx.search` can return it.
+	fn graph_with_vec_entity(id: &str, vec: Vec<f64>) -> Arc<RwLock<GraphGnn>> {
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		let mut e = mk_entity(id, "text", 1.0, EntityKind::Claim);
+		e.vector = vec;
+		g.get_mut(&root).unwrap().entities.insert(id.to_string(), e);
+		g.rebuild_index();
+		Arc::new(RwLock::new(g))
+	}
+
+	#[test]
+	fn find_duplicate_matches_above_threshold_and_skips_below() {
+		let graph = graph_with_vec_entity("e1", vec![1.0, 0.0, 0.0]);
+		// Identical vector -> cosine 1.0 >= threshold -> the existing id.
+		assert_eq!(find_duplicate(&graph, &[1.0, 0.0, 0.0], 0.9).as_deref(), Some("e1"));
+		// Orthogonal vector -> cosine 0 < threshold -> not a duplicate.
+		assert_eq!(find_duplicate(&graph, &[0.0, 1.0, 0.0], 0.9), None);
+		// Near but below the bar: cos([0.9,0.1,0],[1,0,0]) ~= 0.994 — a 0.999
+		// threshold rejects it, guarding the `score >= threshold` ordering.
+		assert_eq!(find_duplicate(&graph, &[0.9, 0.1, 0.0], 0.999), None);
+		// ...and the same near vector clears a 0.9 threshold.
+		assert_eq!(find_duplicate(&graph, &[0.9, 0.1, 0.0], 0.9).as_deref(), Some("e1"));
+	}
+
+	#[test]
+	fn find_duplicate_on_empty_graph_is_none() {
+		let graph = Arc::new(RwLock::new(GraphGnn::new()));
+		assert_eq!(find_duplicate(&graph, &[1.0, 0.0], 0.5), None);
 	}
 
 	#[test]

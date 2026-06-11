@@ -4,8 +4,6 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::base::locks::lock_recovered;
-use crate::base::search::EntityHit;
-use crate::base::util::cmp_partial;
 
 pub struct RateClipper {
 	state: Mutex<HashMap<String, PeerBucket>>,
@@ -60,70 +58,46 @@ impl RateClipper {
 	}
 }
 
-pub fn trimmed_mean(values: &[f64], trim_pct: f64) -> Option<f64> {
-	if values.is_empty() {
-		return None;
-	}
-	let pct = trim_pct.clamp(0.0, 0.4999);
-	let n = values.len();
-	let k = ((n as f64) * pct).floor() as usize;
-	if 2 * k >= n {
-		return None;
-	}
-	let mut sorted: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
-	if sorted.is_empty() {
-		return None;
-	}
-	sorted.sort_by(cmp_partial);
-	let m = sorted.len();
-	let k = ((m as f64) * pct).floor() as usize;
-	if 2 * k >= m {
-		return None;
-	}
-	let slice = &sorted[k..m - k];
-	let sum: f64 = slice.iter().sum();
-	Some(sum / slice.len() as f64)
-}
+#[cfg(test)]
+mod tests {
+	use super::*;
 
-pub fn trimmed_mean_merge_hits(
-	per_peer: &[&[EntityHit]],
-	trim_pct: f64,
-	top_k: usize,
-) -> Vec<EntityHit> {
-	let mut acc: HashMap<String, Vec<f64>> = HashMap::new();
-	for list in per_peer {
-		for hit in list.iter() {
-			acc
-				.entry(hit.entity_id.clone())
-				.or_default()
-				.push(hit.score);
+	#[test]
+	fn max_per_window_zero_admits_everything() {
+		let rc = RateClipper::new(0, Duration::from_secs(1));
+		for _ in 0..100 {
+			assert!(rc.admit("p"));
 		}
+		assert_eq!(rc.dropped_count(), 0, "the zero-cap fast path never drops");
 	}
-	let mut out: Vec<EntityHit> = acc
-		.into_iter()
-		.filter_map(|(id, scores)| {
-			let merged = trimmed_mean(&scores, trim_pct).or_else(|| {
-				let finite: Vec<f64> = scores.iter().copied().filter(|v| v.is_finite()).collect();
-				if finite.is_empty() {
-					None
-				} else {
-					Some(finite.iter().sum::<f64>() / finite.len() as f64)
-				}
-			})?;
-			Some(EntityHit {
-				entity_id: id,
-				score: merged,
-			})
-		})
-		.collect();
-	out.sort_by(|a, b| {
-		b.score
-			.partial_cmp(&a.score)
-			.unwrap_or(std::cmp::Ordering::Equal)
-			.then_with(|| a.entity_id.cmp(&b.entity_id))
-	});
-	if top_k < out.len() {
-		out.truncate(top_k);
+
+	#[test]
+	fn admits_up_to_cap_then_drops_within_window() {
+		let rc = RateClipper::new(2, Duration::from_secs(10));
+		let t0 = Instant::now();
+		assert!(rc.admit_at("p", t0));
+		assert!(rc.admit_at("p", t0));
+		assert!(!rc.admit_at("p", t0), "third call within the window is dropped");
+		assert_eq!(rc.dropped_count(), 1);
 	}
-	out
+
+	#[test]
+	fn capacity_is_restored_after_the_window_elapses() {
+		let rc = RateClipper::new(1, Duration::from_secs(5));
+		let t0 = Instant::now();
+		assert!(rc.admit_at("p", t0));
+		assert!(!rc.admit_at("p", t0), "over cap in the same window");
+		// Advance past the window: the bucket resets.
+		let t1 = t0 + Duration::from_secs(6);
+		assert!(rc.admit_at("p", t1), "capacity restored after the window elapses");
+	}
+
+	#[test]
+	fn buckets_are_independent_per_peer() {
+		let rc = RateClipper::new(1, Duration::from_secs(10));
+		let t0 = Instant::now();
+		assert!(rc.admit_at("a", t0));
+		assert!(rc.admit_at("b", t0), "a different peer has its own bucket");
+		assert!(!rc.admit_at("a", t0), "peer a is now over its cap");
+	}
 }

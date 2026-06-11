@@ -36,6 +36,18 @@ impl TcpAdapter {
         let stream = TcpStream::connect(addr).await?;
         Ok(Self { stream })
     }
+
+    /// Bind a listener for server-side use — the counterpart to [`connect`].
+    /// Pair with [`accept`] so callers don't hand-roll a `TcpListener` + wrap.
+    pub async fn bind(addr: &str) -> Result<tokio::net::TcpListener, AdapterError> {
+        Ok(tokio::net::TcpListener::bind(addr).await?)
+    }
+
+    /// Accept one connection from a bound listener and wrap it as an adapter.
+    pub async fn accept(listener: &tokio::net::TcpListener) -> Result<Self, AdapterError> {
+        let (stream, _) = listener.accept().await?;
+        Ok(Self { stream })
+    }
 }
 
 impl Adapter for TcpAdapter {
@@ -48,16 +60,16 @@ impl Adapter for TcpAdapter {
 // ---------------------------------------------------------- AsyncStdioAdapter
 
 /// Adapter that wraps a `tokio::process::Child`'s stdin/stdout. NEW —
-/// distinct from the legacy synchronous `ChildStdio`. The child is killed
-/// when this adapter is dropped (after `split`, the `Child` handle moves
-/// into a guard returned alongside, but we accept that the writer half
-/// owning the child via a wrapper would be more involved; for Phase 1 we
-/// simply spawn the child without a guard and rely on the child exiting
-/// when its stdin is closed).
+/// distinct from the legacy synchronous `ChildStdio`. On `split` the `Child`
+/// moves into the writer half (`WriterWithChild`), whose `Drop` calls
+/// `start_kill` — a `tokio::process::Child` does NOT kill on drop by default (it
+/// detaches), so without that the dropped writer would orphan the subprocess.
+/// (No `Drop` on the adapter itself: `split` moves its fields out, which a `Drop`
+/// type forbids; the adapter is always split immediately in practice.)
 pub struct AsyncStdioAdapter {
     stdin: ChildStdin,
     stdout: ChildStdout,
-    _child: Child,
+    child: Child,
 }
 
 impl AsyncStdioAdapter {
@@ -68,7 +80,7 @@ impl AsyncStdioAdapter {
         let stdout = child.stdout.take().ok_or_else(|| {
             AdapterError::Other("child stdout missing".into())
         })?;
-        Ok(Self { stdin, stdout, _child: child })
+        Ok(Self { stdin, stdout, child })
     }
 }
 
@@ -79,7 +91,14 @@ impl Adapter for AsyncStdioAdapter {
         // writer is dropped, so is the child, killing any orphan.
         struct WriterWithChild {
             inner: ChildStdin,
-            _child: Child,
+            child: Child,
+        }
+        impl Drop for WriterWithChild {
+            fn drop(&mut self) {
+                // tokio Child detaches on drop; kill it so closing the writer can't
+                // leave an orphaned MCP subprocess behind.
+                let _ = self.child.start_kill();
+            }
         }
         impl AsyncWrite for WriterWithChild {
             fn poll_write(
@@ -102,7 +121,7 @@ impl Adapter for AsyncStdioAdapter {
                 Pin::new(&mut self.inner).poll_shutdown(cx)
             }
         }
-        let writer = WriterWithChild { inner: self.stdin, _child: self._child };
+        let writer = WriterWithChild { inner: self.stdin, child: self.child };
         (Box::new(self.stdout), Box::new(writer))
     }
 }
@@ -210,5 +229,51 @@ impl AsyncWrite for InprocWriter {
         _cx: &mut TaskContext<'_>,
     ) -> Poll<std::io::Result<()>> {
         Poll::Ready(Ok(()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn inproc_reader_drains_leftover_across_small_reads() {
+        // One 5-byte write, then read it back two bytes at a time so the reader's
+        // `leftover` buffer is exercised (a chunk larger than the read buffer).
+        let (a, b) = InprocAdapter::pair();
+        let (_ar, mut aw) = Box::new(a).split();
+        let (mut br, _bw) = Box::new(b).split();
+
+        aw.write_all(b"hello").await.unwrap();
+
+        let mut got = Vec::new();
+        let mut chunk = [0u8; 2];
+        while got.len() < 5 {
+            let n = br.read(&mut chunk).await.unwrap();
+            assert!(n > 0, "reader makes progress");
+            got.extend_from_slice(&chunk[..n]);
+        }
+        assert_eq!(&got, b"hello", "leftover bytes are drained across reads");
+    }
+
+    #[tokio::test]
+    async fn tcp_bind_accept_connect_round_trips() {
+        let listener = TcpAdapter::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let server = tokio::spawn(async move {
+            let a = TcpAdapter::accept(&listener).await.unwrap();
+            let (mut r, _w) = Box::new(a).split();
+            let mut buf = [0u8; 5];
+            r.read_exact(&mut buf).await.unwrap();
+            buf
+        });
+
+        let client = TcpAdapter::connect(&addr).await.unwrap();
+        let (_r, mut w) = Box::new(client).split();
+        w.write_all(b"hello").await.unwrap();
+
+        assert_eq!(&server.await.unwrap(), b"hello", "bind/accept pairs with connect");
     }
 }

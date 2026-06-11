@@ -139,6 +139,10 @@ pub struct QueryRes {
     pub fresh: bool,
 }
 
+/// `fresh` defaults to `true` (a missing field on the wire means "not stale").
+/// This needs a named fn because `#[serde(default = "...")]` takes a function
+/// *path*, not a literal — there is no `#[serde(default = true)]` form, and the
+/// derived `Default` for `bool` is `false`, which would be the wrong default here.
 fn default_true() -> bool {
     true
 }
@@ -246,6 +250,10 @@ pub struct TruncateAfterReq {
     pub ts_ms: u64,
 }
 
+/// Ack-only response: `truncate_after` returns no data, so this is intentionally
+/// an empty struct — receiving it IS the acknowledgement that the truncation ran.
+/// Kept as a named type (rather than `()`) so the typed-RPC return shape stays
+/// uniform and the method can grow fields later without a wire break.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TruncateAfterRes {}
 
@@ -486,5 +494,40 @@ mod dto_serde_tests {
         let s = "{\"hits\":[],\"answer\":\"\"}";
         let back: QueryRes = serde_json::from_str(s).unwrap();
         assert!(back.fresh, "missing `fresh` should default to true");
+    }
+
+    #[test]
+    fn query_req_roundtrips_through_json_and_bincode_with_cancel_token() {
+        let original = QueryReq {
+            text: "borrow checker".into(),
+            k: 7,
+            mode: "hybrid".into(),
+            answer: true,
+            kind: "fact".into(),
+            source: "file".into(),
+            cancel_token: Some(99),
+        };
+
+        // JSON: the Some(n) cancel_token survives, as do the scalar fields.
+        let s = serde_json::to_string(&original).unwrap();
+        let back: QueryReq = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.cancel_token, Some(99));
+        assert_eq!(back.k, 7);
+        assert!(back.answer);
+        assert_eq!(back.kind, "fact");
+
+        // bincode: same payload over the length-delimited codec.
+        let cfg = bincode::config::standard();
+        let bytes = bincode::serde::encode_to_vec(&original, cfg).unwrap();
+        let (back2, _): (QueryReq, _) = bincode::serde::decode_from_slice(&bytes, cfg).unwrap();
+        assert_eq!(back2.cancel_token, Some(99));
+        assert_eq!(back2.mode, "hybrid");
+        assert_eq!(back2.source, "file");
+
+        // None path: the absent-token case round-trips as None, not Some(0).
+        let none_req = QueryReq { cancel_token: None, ..Default::default() };
+        let s = serde_json::to_string(&none_req).unwrap();
+        let back3: QueryReq = serde_json::from_str(&s).unwrap();
+        assert_eq!(back3.cancel_token, None);
     }
 }

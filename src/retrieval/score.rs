@@ -166,7 +166,7 @@ pub fn apply_query_options(results: &mut Vec<ScoredEntity>, opts: &QueryOptions)
 }
 
 pub fn commit_access(results: &mut [ScoredEntity]) {
-	commit_access_with_half_life(results, HeatConfig::defaults().half_life_secs);
+	commit_access_with_half_life(results, HeatConfig::default().half_life_secs);
 }
 
 pub fn commit_access_with_half_life(results: &mut [ScoredEntity], half_life_secs: u64) {
@@ -184,7 +184,7 @@ pub fn commit_access_with_half_life(results: &mut [ScoredEntity], half_life_secs
 			r.entity.heat_updated_at,
 			now,
 			half_life_secs,
-			HeatConfig::defaults().deposit_access,
+			HeatConfig::default().deposit_access,
 		);
 		r.entity.heat_updated_at = Some(now);
 	}
@@ -334,6 +334,105 @@ mod query_filter_tests {
 			.collect();
 		filter_delivery(&cfg, &mut results);
 		assert_eq!(results.len(), cfg.max_deliver_results);
+	}
+
+	// ---- qbst / apply_boosts -----------------------------------------------
+
+	#[test]
+	fn qbst_zero_access_and_no_recency_is_zero() {
+		let cfg = RetrievalConfig::default();
+		// ln(0+1)=0 access component; accessed_at None -> 0 recency.
+		assert_eq!(qbst(&cfg, 0, None), 0.0);
+	}
+
+	#[test]
+	fn qbst_access_component_follows_log_count_times_weight() {
+		let cfg = RetrievalConfig {
+			qbst_access_weight: 1.5,
+			qbst_recency_weight: 0.0, // isolate the access term
+			qbst_cap: 1e9,            // don't clamp
+			..Default::default()
+		};
+		let got = qbst(&cfg, 9, None);
+		let expected = (9.0_f64 + 1.0).ln() * 1.5;
+		assert!((got - expected).abs() < 1e-9, "got {got}, want {expected}");
+	}
+
+	#[test]
+	fn qbst_recency_is_near_full_weight_at_zero_age() {
+		let cfg = RetrievalConfig {
+			qbst_access_weight: 0.0, // isolate the recency term
+			qbst_recency_weight: 3.0,
+			qbst_cap: 1e9,
+			..Default::default()
+		};
+		// age ~0 -> exp(0) ~ 1 -> ~ full recency weight.
+		let got = qbst(&cfg, 0, Some(SystemTime::now()));
+		assert!((got - 3.0).abs() < 0.05, "near-zero age -> ~full weight, got {got}");
+	}
+
+	#[test]
+	fn qbst_clamps_to_cap() {
+		let cfg = RetrievalConfig {
+			qbst_access_weight: 100.0,
+			qbst_recency_weight: 100.0,
+			qbst_cap: 2.0,
+			..Default::default()
+		};
+		assert_eq!(qbst(&cfg, 1000, Some(SystemTime::now())), 2.0, "clamped to qbst_cap");
+	}
+
+	#[test]
+	fn apply_boosts_scales_by_confidence_and_adds_fact_bonus_only_for_facts() {
+		let cfg = RetrievalConfig {
+			qbst_access_weight: 0.0, // boost = 0 so the arithmetic is exact
+			qbst_recency_weight: 0.0,
+			fact_score_boost: 0.5,
+			..Default::default()
+		};
+		let mut fact = ent("f", EntityKind::Fact, file_src("/f"));
+		fact.score = 2.0; // raw retrieval score
+		fact.entity.score = 0.5; // confidence
+		let mut claim = ent("c", EntityKind::Claim, file_src("/c"));
+		claim.score = 2.0;
+		claim.entity.score = 0.5;
+		let mut results = vec![fact, claim];
+		apply_boosts(&cfg, &mut results);
+		// fact: 2.0*0.5 + 0(boost) + 0.5(fact bonus) = 1.5
+		assert!((results[0].score - 1.5).abs() < 1e-9, "fact got {}", results[0].score);
+		// claim: 2.0*0.5 + 0 + 0 = 1.0 (no fact bonus)
+		assert!((results[1].score - 1.0).abs() < 1e-9, "claim got {}", results[1].score);
+	}
+
+	// ---- softmax edge cases ------------------------------------------------
+
+	#[test]
+	fn softmax_zero_or_invalid_temperature_is_uniform() {
+		assert_eq!(softmax(&[1.0, 2.0, 3.0], 0.0), vec![1.0 / 3.0; 3]);
+		assert_eq!(softmax(&[1.0, 2.0], -1.0), vec![0.5, 0.5]);
+		assert_eq!(softmax(&[1.0, 2.0], f64::NAN), vec![0.5, 0.5]);
+	}
+
+	#[test]
+	fn softmax_non_finite_values_fall_back_to_uniform() {
+		// +inf makes `max` non-finite -> uniform.
+		assert_eq!(softmax(&[1.0, f64::INFINITY, 2.0], 1.0), vec![1.0 / 3.0; 3]);
+		// A NaN value leaves max finite (f64::max skips NaN) but the exp/sum goes
+		// NaN -> non-finite sum -> uniform.
+		assert_eq!(softmax(&[1.0, f64::NAN, 2.0], 1.0), vec![1.0 / 3.0; 3]);
+	}
+
+	#[test]
+	fn softmax_empty_input_is_empty() {
+		assert!(softmax(&[], 1.0).is_empty());
+	}
+
+	#[test]
+	fn softmax_normal_case_sums_to_one_and_is_monotonic() {
+		let out = softmax(&[1.0, 2.0, 3.0], 1.0);
+		let sum: f64 = out.iter().sum();
+		assert!((sum - 1.0).abs() < 1e-9, "probabilities sum to 1");
+		assert!(out[2] > out[1] && out[1] > out[0], "higher logit -> higher prob");
 	}
 }
 

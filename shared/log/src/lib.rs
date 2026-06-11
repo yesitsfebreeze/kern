@@ -83,14 +83,16 @@ pub fn sink() -> Option<&'static Sink> {
 
 pub fn log(level: Level, source: &str, message: impl Into<String>) {
 	let message = message.into();
-	let entry = Entry {
-		level,
-		source: source.to_string(),
-		message: message.clone(),
-		when_ms: now_ms(),
-	};
 	if let Some(s) = SINK.get() {
-		s.push(entry);
+		// Sink path: move `message` straight into the Entry — no clone. The
+		// previous unconditional `message.clone()` only existed to keep a copy
+		// for the eprintln fallback, which the else branch borrows instead.
+		s.push(Entry {
+			level,
+			source: source.to_string(),
+			message,
+			when_ms: now_ms(),
+		});
 	} else {
 		eprintln!("[{}][{}] {}", level.tag(), source, message);
 	}
@@ -103,8 +105,12 @@ fn now_ms() -> u64 {
 		.unwrap_or(0)
 }
 
+/// Log at an explicit [`Level`]. Named `klog!` (not `log!`) so it never shadows
+/// the ubiquitous `log::log!` macro from the `log` crate in downstream code that
+/// imports both. The level-specific [`info!`] / [`warn!`] / [`error!`] macros
+/// are the usual entry points; reach for `klog!` only when the level is dynamic.
 #[macro_export]
-macro_rules! log {
+macro_rules! klog {
 	($level:expr, $source:expr, $($arg:tt)+) => {{
 		$crate::log($level, $source, format!($($arg)+));
 	}};

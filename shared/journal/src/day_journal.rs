@@ -117,24 +117,7 @@ impl DayJournal {
 }
 
 	pub fn scan<F: FnMut(&Entry)>(&self, mut f: F) -> io::Result<()> {
-		let file = File::open(&self.path)?;
-		let reader = BufReader::new(file);
-		for (i, line) in reader.lines().enumerate() {
-			let line = line?;
-			if i == 0 {
-				continue;
-			}
-			if line.trim().is_empty() {
-				continue;
-			}
-			match serde_json::from_str::<Entry>(&line) {
-				Ok(entry) => f(&entry),
-				Err(e) => {
-					eprintln!("day_journal: skipping unparsable line {}: {e}", i + 1);
-				}
-			}
-		}
-		Ok(())
+		for_each_entry(&self.path, |e| f(&e))
 }
 
 	fn rollover_locked(&self, inner: &mut Inner, today: &str) -> io::Result<()> {
@@ -215,28 +198,142 @@ fn read_header_day(path: &Path) -> io::Result<Option<String>> {
 }
 
 fn read_entries(path: &Path) -> io::Result<Vec<Entry>> {
+	let mut out = Vec::new();
+	for_each_entry(path, |e| out.push(e))?;
+	Ok(out)
+}
+
+/// Iterate the parsed entries of a journal file: skip the header (line 0) and
+/// blank lines, parse each remaining line as an [`Entry`], and call `f` for each.
+/// An unparsable line is logged and skipped so one bad line can't abort the whole
+/// read. Shared by `scan` (borrows each entry) and `read_entries` (collects them).
+fn for_each_entry(path: &Path, mut f: impl FnMut(Entry)) -> io::Result<()> {
 	let file = File::open(path)?;
 	let reader = BufReader::new(file);
-	let mut out = Vec::new();
 	for (i, line) in reader.lines().enumerate() {
 		let line = line?;
-		if i == 0 {
-			continue;
-		}
-		if line.trim().is_empty() {
+		if i == 0 || line.trim().is_empty() {
 			continue;
 		}
 		match serde_json::from_str::<Entry>(&line) {
-			Ok(e) => out.push(e),
-			Err(e) => {
-				eprintln!(
-					"day_journal: skipping unparsable entry on rollover (line {}): {e}",
-					i + 1
-				);
-			}
+			Ok(entry) => f(entry),
+			Err(e) => eprintln!("day_journal: skipping unparsable line {}: {e}", i + 1),
 		}
 	}
-	Ok(out)
+	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::entry::{Kind, SCHEMA_VERSION};
+	use std::sync::Mutex as StdMutex;
+
+	#[derive(Default)]
+	struct CapturingHistory {
+		rolled: StdMutex<Vec<Entry>>,
+	}
+	impl HistorySink for CapturingHistory {
+		fn bulk_insert(&self, entries: &[Entry]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+			self.rolled.lock().unwrap().extend_from_slice(entries);
+			Ok(())
+		}
+	}
+
+	fn entry(key: &str) -> Entry {
+		Entry {
+			v: SCHEMA_VERSION,
+			ts_ms: now_ms(),
+			kind: Kind::Log,
+			key: key.into(),
+			payload: serde_json::json!({}),
+		}
+	}
+
+	#[test]
+	fn open_rolls_a_stale_day_into_history_and_rewrites_the_header() {
+		let dir = tempfile::tempdir().unwrap();
+		let jdir = dir.path().join(".kern").join("journal");
+		std::fs::create_dir_all(&jdir).unwrap();
+		let today_path = jdir.join("today.jsonl");
+
+		// Seed a file dated in the past + two entries under that stale header.
+		write_fresh(&today_path, "proj", "2000-01-01").unwrap();
+		{
+			let mut f = OpenOptions::new().append(true).open(&today_path).unwrap();
+			for k in ["a", "b"] {
+				let mut s = serde_json::to_string(&entry(k)).unwrap();
+				s.push('\n');
+				f.write_all(s.as_bytes()).unwrap();
+			}
+		}
+
+		let hist = Arc::new(CapturingHistory::default());
+		let _dj = DayJournal::open(dir.path(), hist.clone()).unwrap();
+
+		let rolled = hist.rolled.lock().unwrap();
+		assert_eq!(rolled.len(), 2, "the stale day's entries are flushed to history on open");
+		assert_eq!(rolled[0].key, "a");
+		drop(rolled);
+		assert_ne!(
+			read_header_day(&today_path).unwrap().as_deref(),
+			Some("2000-01-01"),
+			"today.jsonl is rewritten with a fresh header",
+		);
+	}
+
+	#[test]
+	fn emit_rolls_over_when_the_byte_cap_is_exceeded() {
+		let dir = tempfile::tempdir().unwrap();
+		let hist = Arc::new(CapturingHistory::default());
+		let dj = DayJournal::open(dir.path(), hist.clone()).unwrap();
+		dj.set_max_bytes(1); // tiny cap: each emit rolls over the prior content.
+
+		dj.emit(entry("first"));
+		dj.emit(entry("second"));
+
+		// 'first' was flushed to history by the rollover that ran before 'second'.
+		assert!(
+			hist.rolled.lock().unwrap().iter().any(|e| e.key == "first"),
+			"a cap-triggered rollover flushes earlier entries to history",
+		);
+	}
+
+	#[test]
+	fn cap_of_zero_disables_size_rollover() {
+		// max_today_bytes == 0 means "no size cap" — emits accumulate in today.jsonl
+		// and never trigger a mid-day rollover (the `cap > 0 &&` guard in emit makes
+		// 0 a no-op; only a day change would roll over).
+		let dir = tempfile::tempdir().unwrap();
+		let hist = Arc::new(CapturingHistory::default());
+		let dj = DayJournal::open(dir.path(), hist.clone()).unwrap();
+		dj.set_max_bytes(0); // disabled
+
+		for k in ["a", "b", "c", "d"] {
+			dj.emit(entry(k));
+		}
+
+		assert!(
+			hist.rolled.lock().unwrap().is_empty(),
+			"cap=0 disables size rollover -> nothing flushed to history mid-day",
+		);
+		// All four entries remain in the single today.jsonl (header skipped by scan).
+		let mut keys = Vec::new();
+		dj.scan(|e| keys.push(e.key.clone())).unwrap();
+		assert_eq!(keys, vec!["a", "b", "c", "d"].into_iter().map(String::from).collect::<Vec<_>>());
+	}
+
+	#[test]
+	fn scan_visits_entries_in_order_and_skips_the_header() {
+		let dir = tempfile::tempdir().unwrap();
+		let dj = DayJournal::open(dir.path(), Arc::new(NullHistorySink)).unwrap();
+		dj.emit(entry("x"));
+		dj.emit(entry("y"));
+
+		let mut keys = Vec::new();
+		dj.scan(|e| keys.push(e.key.clone())).unwrap();
+		assert_eq!(keys, vec!["x".to_string(), "y".to_string()], "header skipped, order preserved");
+	}
 }
 
 fn write_fresh(path: &Path, project_abs: &str, day: &str) -> io::Result<()> {

@@ -134,8 +134,11 @@ pub struct IngestFailure {
 	pub error: String,
 }
 
-fn is_zero(v: &i32) -> bool {
-	*v == 0
+/// serde `skip_serializing_if` predicate: true when `v` equals its type's
+/// default (0 for integers). Generic so one helper serves every numeric wire
+/// field — replaces the former per-type `is_zero` / `is_zero_i64` pair.
+fn is_zero<T: Default + PartialEq>(v: &T) -> bool {
+	*v == T::default()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -173,30 +176,26 @@ pub struct HealthResponse {
 	pub data_dir: String,
 	#[serde(default, skip_serializing_if = "String::is_empty")]
 	pub core_addr: String,
-	#[serde(default, skip_serializing_if = "is_zero_i64")]
+	#[serde(default, skip_serializing_if = "is_zero")]
 	pub query_count: i64,
-	#[serde(default, skip_serializing_if = "is_zero_i64")]
+	#[serde(default, skip_serializing_if = "is_zero")]
 	pub query_latency_ms_avg: i64,
-	#[serde(default, skip_serializing_if = "is_zero_i64")]
+	#[serde(default, skip_serializing_if = "is_zero")]
 	pub query_path_depth_avg: i64,
-	#[serde(default, skip_serializing_if = "is_zero_i64")]
+	#[serde(default, skip_serializing_if = "is_zero")]
 	pub query_path_depth_max: i64,
-	#[serde(default, skip_serializing_if = "is_zero_i64")]
+	#[serde(default, skip_serializing_if = "is_zero")]
 	pub ingest_committed: i64,
-	#[serde(default, skip_serializing_if = "is_zero_i64")]
+	#[serde(default, skip_serializing_if = "is_zero")]
 	pub ingest_partial: i64,
-	#[serde(default, skip_serializing_if = "is_zero_i64")]
+	#[serde(default, skip_serializing_if = "is_zero")]
 	pub ingest_failed: i64,
-	#[serde(default, skip_serializing_if = "is_zero_i64")]
+	#[serde(default, skip_serializing_if = "is_zero")]
 	pub ingest_chunk_failures: i64,
-	#[serde(default, skip_serializing_if = "is_zero_i64")]
+	#[serde(default, skip_serializing_if = "is_zero")]
 	pub task_count: i64,
-	#[serde(default, skip_serializing_if = "is_zero_i64")]
+	#[serde(default, skip_serializing_if = "is_zero")]
 	pub task_latency_ms_avg: i64,
-}
-
-fn is_zero_i64(v: &i64) -> bool {
-	*v == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -437,8 +436,41 @@ mod wire_validation_tests {
 	}
 
 	#[test]
+	fn conf_inclusive_bounds_accepted() {
+		// The range is documented as inclusive [0.0, 1.0]; pin both endpoints so a
+		// future `<`/`>` typo can't silently reject a valid boundary value.
+		assert_eq!(validate_wire_conf(0.0), Ok(0.0));
+		assert_eq!(validate_wire_conf(1.0), Ok(1.0));
+		assert_eq!(validate_wire_conf(0.5), Ok(0.5));
+	}
+
+	#[test]
 	fn normal_on_wire_allowed() {
 		assert_eq!(validate_wire_kind(EntityKind::Claim), Ok(EntityKind::Claim));
+		// Fact is the other wire-acceptable kind.
+		assert_eq!(validate_wire_kind(EntityKind::Fact), Ok(EntityKind::Fact));
+	}
+
+	#[test]
+	fn answer_and_conclusion_on_wire_rejected() {
+		// The remaining internal-only kinds (beyond Document/Question already
+		// covered) must also be refused at the trust boundary.
+		assert_eq!(
+			validate_wire_kind(EntityKind::Answer),
+			Err(WireError::InternalKindOnWire(EntityKind::Answer))
+		);
+		assert_eq!(
+			validate_wire_kind(EntityKind::Conclusion),
+			Err(WireError::InternalKindOnWire(EntityKind::Conclusion))
+		);
+	}
+
+	#[test]
+	fn is_zero_generic_matches_defaults_for_both_int_widths() {
+		assert!(is_zero(&0_i32));
+		assert!(is_zero(&0_i64));
+		assert!(!is_zero(&1_i32));
+		assert!(!is_zero(&-1_i64));
 	}
 
 	#[test]

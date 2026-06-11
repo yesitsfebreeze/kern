@@ -221,26 +221,11 @@ pub enum BindOutcome {
     AlreadyRunning,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum BindError {
-    Io(std::io::Error),
+    #[error("bind: {0}")]
+    Io(#[from] std::io::Error),
 }
-
-impl From<std::io::Error> for BindError {
-    fn from(e: std::io::Error) -> Self {
-        BindError::Io(e)
-    }
-}
-
-impl std::fmt::Display for BindError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BindError::Io(e) => write!(f, "bind: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for BindError {}
 
 /// Singleton-aware bind. On Unix probes for a live owner before removing
 /// a stale socket file; on Windows uses `first_pipe_instance(true)` so
@@ -339,5 +324,52 @@ impl Drop for LocalListener {
     fn drop(&mut self) {
         // Best-effort cleanup so the next daemon doesn't trip the stale-sock probe.
         let _ = std::fs::remove_file(&self.socket_path);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod bind_tests_windows {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_second_bind_of_the_same_pipe_reports_already_running() {
+        // first_pipe_instance(true) makes the OS reject a second owner of the same
+        // pipe name while the first instance is alive -> AlreadyRunning.
+        let ep = Endpoint::NamedPipe(format!(r"\\.\pipe\kern-bindtest-{}", std::process::id()));
+        let first = bind_kern_listener(&ep).await.unwrap();
+        assert!(matches!(first, BindOutcome::Bound(_)), "first bind owns the pipe");
+        let second = bind_kern_listener(&ep).await.unwrap();
+        assert!(matches!(second, BindOutcome::AlreadyRunning), "second bind sees AlreadyRunning");
+        drop(first); // keep the first instance alive until the assertion above
+    }
+}
+
+#[cfg(all(test, unix))]
+mod bind_tests_unix {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_live_owner_reports_already_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let ep = Endpoint::Unix(dir.path().join("kern.sock"));
+        let first = bind_kern_listener(&ep).await.unwrap();
+        let BindOutcome::Bound(_listener) = first else { panic!("first bind should own the socket") };
+        let second = bind_kern_listener(&ep).await.unwrap();
+        assert!(matches!(second, BindOutcome::AlreadyRunning), "a live owner -> AlreadyRunning");
+    }
+
+    #[tokio::test]
+    async fn a_stale_socket_file_is_removed_and_rebound() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kern.sock");
+        // Bind then drop a listener WITHOUT going through LocalListener's Drop, so the
+        // socket file is left on disk with nothing listening (a stale endpoint).
+        {
+            let _l = tokio::net::UnixListener::bind(&path).unwrap();
+        }
+        assert!(path.exists(), "stale socket file remains after the listener drops");
+        let ep = Endpoint::Unix(path);
+        let outcome = bind_kern_listener(&ep).await.unwrap();
+        assert!(matches!(outcome, BindOutcome::Bound(_)), "stale file removed, endpoint rebound");
     }
 }

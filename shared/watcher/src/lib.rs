@@ -23,6 +23,31 @@
 //!   applied for symmetry.
 //! * **Linux** inotify fires one event per syscall; debounce mostly drops
 //!   editor-induced bursts (write + chmod + close-write).
+//!
+//! ## Usage
+//!
+//! Implement an [`IngestSink`], then pump a [`FileWatcher`]'s coalesced events
+//! through an [`IngestPipeline`] into it (this is exactly how kern wires it):
+//!
+//! ```ignore
+//! use watcher::{FileWatcher, IgnoreRules, IngestPipeline, IngestRecord, IngestSink};
+//!
+//! struct MySink;
+//! impl IngestSink for MySink {
+//!     async fn ingest(&self, record: IngestRecord) {
+//!         // record.source_uri + record.content -> your ingest path
+//!         let _ = (record.source_uri, record.content);
+//!     }
+//! }
+//!
+//! // ...in an async context:
+//! let mut watcher = FileWatcher::new(vec!["./src".into()], IgnoreRules::empty())?;
+//! let pipeline = IngestPipeline::new(MySink);
+//! while let Some(ev) = watcher.next_event().await {
+//!     pipeline.handle(ev).await; // reads file (<= MAX_INGEST_BYTES) -> sink.ingest
+//! }
+//! # Ok::<(), watcher::WatcherError>(())
+//! ```
 
 mod event;
 mod ignore_rules;

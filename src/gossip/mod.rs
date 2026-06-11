@@ -5,4 +5,5 @@ pub mod merge;
 pub mod node;
 pub mod seen;
 pub mod sybil;
+pub mod transport;
 pub mod types;

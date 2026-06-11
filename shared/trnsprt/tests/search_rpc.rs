@@ -14,16 +14,16 @@ use trnsprt::search::{
     EdgeKind, EntityKindLite, Facet, MockSearchServer, NeighborsReq, PreviewReq, PreviewRes,
     SearchReq, SearchSvcClient,
 };
-use trnsprt::typed::{Channel, InprocAdapter, JsonEnvelopeCodec};
+use trnsprt::typed::JsonEnvelopeCodec;
+
+mod common;
 
 fn spawn_mock_server() -> (
     SearchSvcClient<JsonEnvelopeCodec>,
     tokio::task::JoinHandle<()>,
     Arc<MockSearchServer>,
 ) {
-    let (client_side, server_side) = InprocAdapter::pair();
-    let server_chan = Channel::new(server_side, JsonEnvelopeCodec::new());
-    let client_chan = Channel::new(client_side, JsonEnvelopeCodec::new());
+    let (client_chan, server_chan) = common::channel_pair();
     let client = SearchSvcClient::new(client_chan);
     let mock = Arc::new(MockSearchServer::new());
     let mock_for_server = (*mock).clone();
@@ -98,6 +98,46 @@ async fn preview_returns_file_variant_for_document() {
         }
         other => panic!("expected File variant, got {other:?}"),
     }
+
+    handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preview_returns_non_file_variants_for_non_document_entities() {
+    let (client, handle, _mock) = spawn_mock_server();
+
+    // An edge entity -> Edge variant (not File).
+    match client.preview(PreviewReq { entity_id: "e:edge:1".into() }).await.expect("preview rpc") {
+        PreviewRes::Edge { .. } => {}
+        other => panic!("expected Edge variant, got {other:?}"),
+    }
+    // Any other non-document entity -> generic Text body.
+    match client.preview(PreviewReq { entity_id: "e:claim:1".into() }).await.expect("preview rpc") {
+        PreviewRes::Text { content } => assert!(!content.is_empty(), "Text body present"),
+        other => panic!("expected Text variant, got {other:?}"),
+    }
+
+    handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn search_with_unmatched_scheme_returns_no_hits_not_an_error() {
+    let (client, handle, _mock) = spawn_mock_server();
+
+    // The scheme axis is an exact-match filter, so a scheme that no corpus
+    // entity carries yields an empty result set — but the RPC must still
+    // SUCCEED (graceful, fresh), not surface an error or panic.
+    let res = client
+        .search(SearchReq {
+            query: String::new(),
+            facets: vec![Facet { scheme: Some("bogus".into()), kind: None }],
+            k: 10,
+            cancel_token: None,
+        })
+        .await
+        .expect("search must succeed on an unknown scheme");
+    assert!(res.hits.is_empty(), "unmatched scheme -> no hits");
+    assert!(res.fresh, "still a fresh response");
 
     handle.abort();
 }

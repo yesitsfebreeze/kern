@@ -68,9 +68,13 @@ fn forward_child_stderr<R: std::io::Read>(stderr: R, source: &str) {
 }
 
 fn classify_child_log_level(line: &str) -> logsink::Level {
-	if line.contains("ERROR") || line.contains("error:") {
+	// Case-insensitive so a child logging "error", "Error" or "ERROR" all map to
+	// Error (previously only upper-case "ERROR" / lower-case "error:" matched, so
+	// "Error: boom" slipped through as Info).
+	let upper = line.to_ascii_uppercase();
+	if upper.contains("ERROR") {
 		logsink::Level::Error
-	} else if line.contains("WARN") || line.contains("warning:") {
+	} else if upper.contains("WARN") {
 		logsink::Level::Warn
 	} else {
 		logsink::Level::Info
@@ -93,5 +97,54 @@ impl Transport for ChildStdio {
 				Ok(())
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use logsink::Level;
+
+	#[test]
+	fn classify_child_log_level_is_case_insensitive_with_error_priority() {
+		assert!(matches!(classify_child_log_level("ERROR: boom"), Level::Error));
+		assert!(matches!(classify_child_log_level("Error happened"), Level::Error));
+		assert!(matches!(classify_child_log_level("an error: detail"), Level::Error));
+		assert!(matches!(classify_child_log_level("WARN: heads up"), Level::Warn));
+		assert!(matches!(classify_child_log_level("a Warning: x"), Level::Warn));
+		assert!(matches!(classify_child_log_level("just some info"), Level::Info));
+		// Error wins over warn when both appear.
+		assert!(matches!(classify_child_log_level("WARN then ERROR"), Level::Error));
+	}
+
+	#[test]
+	fn child_log_source_is_the_file_stem() {
+		assert_eq!(child_log_source("/usr/bin/foo-server"), "foo-server");
+		assert_eq!(child_log_source("bar.exe"), "bar");
+		assert_eq!(child_log_source("plain"), "plain");
+	}
+
+	#[test]
+	fn child_stdio_round_trips_a_line_through_an_echo_child() {
+		// A trivial echo child: read one line from stdin, write it to stdout, exit.
+		// `cat` on unix; a one-line PowerShell readline on windows — both portable
+		// enough to verify the spawn -> write -> read -> kill cycle.
+		#[cfg(unix)]
+		let mut t = ChildStdio::spawn("cat", &[]).expect("spawn cat");
+		#[cfg(windows)]
+		let mut t = ChildStdio::spawn(
+			"powershell",
+			&["-NoProfile", "-Command", "$l = [Console]::In.ReadLine(); [Console]::Out.WriteLine($l)"],
+		)
+		.expect("spawn powershell echo");
+
+		t.writer().write_all(b"hello world\n").unwrap();
+		t.writer().flush().unwrap();
+
+		let mut line = String::new();
+		BufRead::read_line(&mut BufReader::new(t.reader()), &mut line).unwrap();
+		assert_eq!(line.trim_end(), "hello world", "stdin line echoed back on stdout");
+
+		t.kill().unwrap();
 	}
 }

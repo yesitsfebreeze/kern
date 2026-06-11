@@ -39,11 +39,9 @@ use crate::base::accept;
 #[cfg(test)]
 use crate::base::graph::GraphGnn;
 #[cfg(test)]
-use crate::base::types::{Acl, ChunkPart, ChunkPartKind, Entity, EntityStatus};
+use crate::base::types::{ChunkPart, ChunkPartKind, Entity, EntityStatus};
 #[cfg(test)]
 use crate::base::util;
-#[cfg(test)]
-use crate::crdt::GCounter;
 
 /// Pluggable target for mirrored sessions. Implementations must be
 /// idempotent on `fork_id` (the mirror itself dedupes via its `seen`
@@ -133,11 +131,13 @@ impl MirrorSink for DirectSink {
 		};
 		let vec = Self::stub_vector(fork_id);
 		let id = util::content_hash(text);
+		// Only the fields that differ from `Entity::default()` are spelled out;
+		// the ~14 zero/empty/None fields the old literal listed by hand are the
+		// derived defaults. Keeps this test fixture from drifting when `Entity`
+		// gains a field (the canonical production shape lives in place.rs).
 		let mut t = Entity {
 			id,
-			root_id: String::new(),
 			external_id: source.object_id().to_string(),
-			superseded_by: String::new(),
 			kind: EntityKind::Document,
 			status: EntityStatus::Active,
 			statements: vec![text.to_string()],
@@ -147,22 +147,11 @@ impl MirrorSink for DirectSink {
 				index: 0,
 			}],
 			vector: vec,
-			gnn_vector: Vec::new(),
-			score: 0.0,
 			conf_alpha: 2.0,
 			conf_beta: 1.0,
 			source,
 			created_at: Some(SystemTime::now()),
-			acl: Acl::default(),
-			access_count: GCounter::new(),
-			accessed_at: None,
-			heat: 0.0,
-			heat_updated_at: None,
-			updated_at: None,
-			valid_until: None,
-			producer_id: String::new(),
-			unlinked_count: 0,
-			dirty: false,
+			..Default::default()
 		};
 		t.refresh_score();
 		let _ = parent; // recorded in descriptor by WorkerSink path; unused here
@@ -444,6 +433,54 @@ mod tests {
 		assert_eq!(matching.len(), 1);
 		assert_eq!(matching[0].source.object_id(), "only-fork");
 		assert!(matching[0].statements[0].contains("only-fork"));
+	}
+
+	/// Counts ingest calls per fork_id without touching a graph — lets the
+	/// eviction test observe re-mirroring directly.
+	#[derive(Default)]
+	struct CountingSink {
+		calls: std::sync::Mutex<Vec<String>>,
+	}
+	impl MirrorSink for CountingSink {
+		fn ingest_session(&self, fork_id: &str, _parent: Option<&str>, _text: &str) {
+			self.calls.lock().unwrap().push(fork_id.to_string());
+		}
+	}
+
+	/// When more than `max_seen` forks are processed, the oldest fork_id is
+	/// evicted from the dedup ring — re-processing it then mirrors it again,
+	/// while a still-remembered fork is still skipped.
+	#[test]
+	fn seen_ring_evicts_oldest_beyond_cap() {
+		let mut mirror = SessionMirror::new(CountingSink::default());
+		mirror.set_max_seen(2);
+
+		mirror.process(&fork_open(1, "a", None));
+		mirror.process(&fork_open(2, "b", None));
+		mirror.process(&fork_open(3, "c", None)); // pushes ring over cap -> evicts "a"
+		assert_eq!(mirror.seen_count(), 2, "ring capped at max_seen");
+
+		// "c" is the newest still-remembered fork -> re-processing is skipped.
+		mirror.process(&fork_open(4, "c", None));
+		// "a" was evicted -> re-processing re-mirrors it.
+		mirror.process(&fork_open(5, "a", None));
+
+		let calls = mirror.sink.calls.lock().unwrap();
+		assert_eq!(calls.iter().filter(|x| *x == "c").count(), 1, "still-seen c skipped on replay");
+		assert_eq!(calls.iter().filter(|x| *x == "a").count(), 2, "evicted a re-mirrors");
+		assert_eq!(calls.len(), 4, "a,b,c then a again — c not repeated");
+	}
+
+	/// Shrinking `max_seen` below the current ring size evicts immediately.
+	#[test]
+	fn set_max_seen_shrinks_ring_in_place() {
+		let mut mirror = SessionMirror::new(CountingSink::default());
+		mirror.process(&fork_open(1, "a", None));
+		mirror.process(&fork_open(2, "b", None));
+		mirror.process(&fork_open(3, "c", None));
+		assert_eq!(mirror.seen_count(), 3);
+		mirror.set_max_seen(1); // evict down to the newest
+		assert_eq!(mirror.seen_count(), 1, "shrunk to cap immediately");
 	}
 
 	/// `ForkResume` for a never-seen fork still mirrors it (mid-life

@@ -5,6 +5,21 @@ use crate::gnn::graph::Graph;
 use crate::gnn::layer::{Backward, Layer, LinearLayer};
 use crate::gnn::tensor::Tensor;
 
+/// A stack of graph layers plus an optional final linear projection, with an
+/// optional residual (skip) connection.
+///
+/// Contract:
+/// - [`forward`](Model::forward) runs each layer in order; when `residual` is set
+///   and a layer preserves its input shape, the input is added back to the output
+///   (the dims are checked before the add, so it never fails). `out_layer` is
+///   applied last if present. Each layer caches state for its backward pass, so a
+///   `forward` must precede the matching `backward`.
+/// - [`backward`](Model::backward) walks the layers in reverse, mirroring the
+///   residual add on the incoming gradient. Call [`zero_grads`](Model::zero_grads)
+///   before each backward to reset gradient accumulators.
+/// - [`parameters`](Model::parameters) / [`param_grads`](Model::param_grads) (and
+///   their `_mut` forms) expose the trainable tensors and their gradients in
+///   matching order for an optimizer to step.
 pub struct Model {
 	pub layers: Vec<Box<dyn BackwardGraphLayer>>,
 	pub out_layer: Option<LinearLayer>,
@@ -36,7 +51,8 @@ impl Model {
 		for layer in &mut self.layers {
 			let mut out = layer.forward_graph(g, &h);
 			if self.residual && h.rows == out.rows && h.cols == out.cols {
-				out = out.add(&h).expect("residual add");
+				// Shapes were just checked equal, so `add` is infallible here.
+				out = out.add(&h).expect("residual add (dims pre-checked)");
 			}
 			h = out;
 		}
@@ -54,9 +70,10 @@ impl Model {
 		for layer in self.layers.iter_mut().rev() {
 			let mut input_grad = layer.backward_graph(g, &grad);
 			if self.residual && input_grad.rows == grad.rows && input_grad.cols == grad.cols {
+				// Shapes were just checked equal, so `add_inplace` is infallible here.
 				input_grad
 					.add_inplace(&grad)
-					.expect("residual backward add");
+					.expect("residual backward add (dims pre-checked)");
 			}
 			grad = input_grad;
 		}
@@ -118,6 +135,71 @@ impl Model {
 	pub fn set_training(&mut self, training: bool) {
 		for layer in &mut self.layers {
 			layer.set_training(training);
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::gnn::gcn::GCNLayer;
+	use rand::rngs::StdRng;
+	use rand::SeedableRng;
+
+	fn tiny_graph() -> (Graph, Tensor) {
+		let mut g = Graph::new();
+		let feats = [[0.5, -0.2, 0.1, 0.3], [-0.4, 0.6, 0.2, -0.1], [0.2, 0.1, -0.5, 0.4]];
+		for (i, f) in feats.iter().enumerate() {
+			g.add_node(&format!("n{i}"), f.to_vec()).unwrap();
+		}
+		g.add_edge("n0", "n1", vec![]).unwrap();
+		g.add_edge("n1", "n2", vec![]).unwrap();
+		g.add_edge("n2", "n0", vec![]).unwrap();
+		g.add_self_loops();
+		let x = g.feature_matrix();
+		(g, x)
+	}
+
+	#[test]
+	fn forward_projects_to_out_layer_width_and_is_finite() {
+		let (g, x) = tiny_graph();
+		let mut rng = StdRng::seed_from_u64(3);
+		let mut model = Model::new(
+			vec![Box::new(GCNLayer::with_rng(4, 3, None, false, 0.0, &mut rng))],
+			None,
+		);
+		let out = model.forward(&g, &x);
+		assert_eq!(out.rows, g.num_nodes(), "one row per node");
+		assert_eq!(out.cols, 3, "width equals the layer's out_features");
+		assert!(out.data.iter().all(|v| v.is_finite()), "no NaN/inf");
+	}
+
+	#[test]
+	fn residual_model_adds_the_input_back() {
+		let (g, x) = tiny_graph();
+
+		// Residual model: a shape-preserving 4->4 layer, so the skip add fires.
+		let mut rng = StdRng::seed_from_u64(7);
+		let mut model = Model::new_residual(
+			vec![Box::new(GCNLayer::with_rng(4, 4, None, false, 0.0, &mut rng))],
+			None,
+		);
+		let out = model.forward(&g, &x);
+		assert_eq!(out.shape(), x.shape(), "residual preserves the feature shape");
+
+		// Recompute the bare layer output with the same seed; residual output must
+		// equal layer_out + input element-wise.
+		let mut rng2 = StdRng::seed_from_u64(7);
+		let mut bare = GCNLayer::with_rng(4, 4, None, false, 0.0, &mut rng2);
+		let layer_out = bare.forward_graph(&g, &x);
+		for i in 0..out.data.len() {
+			let expected = layer_out.data[i] + x.data[i];
+			assert!(
+				(out.data[i] - expected).abs() < 1e-9,
+				"residual[{i}]: got {}, want {}",
+				out.data[i],
+				expected
+			);
 		}
 	}
 }

@@ -33,3 +33,18 @@ impl Default for AnswerConfig {
 		}
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn default_leaves_endpoint_empty_and_uses_the_answer_model() {
+		// Empty url/key on purpose: the Config::answer_url/answer_key accessors then
+		// fall back to [reason] (-> [embed]), so a single local Ollama needs no wiring.
+		let c = AnswerConfig::default();
+		assert!(c.url.is_empty(), "url empty -> falls back to reason/embed");
+		assert!(c.key.is_empty(), "key empty -> inherits reason/embed key");
+		assert_eq!(c.model, DEFAULT_ANSWER_MODEL, "model is the shared default const");
+	}
+}

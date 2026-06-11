@@ -47,14 +47,21 @@ impl Weights {
 	}
 }
 
+/// Build the dense seed set for retrieval: vector ANN over the query (or
+/// reason-vector ANN in [`Mode::Reason`]) merged with query-independent
+/// "important" entities (high cosine to the query AND either a Fact or
+/// frequently-accessed), then truncated to `max(k, cfg.seed_k)`.
+///
+/// This is the dense + importance core only. The lexical seed layer
+/// ([`seed_lexical`]) and PageRank are blended on top by the caller
+/// (`answer::retrieve`) for Hybrid mode, so they are intentionally not threaded
+/// through here.
 pub fn seed(
 	g: &GraphGnn,
 	cfg: &RetrievalConfig,
 	query_vec: &[f64],
-	_query_text: &str,
 	k: usize,
 	mode: Mode,
-	_lexical: Option<&LexicalIndex>,
 ) -> Vec<EntityHit> {
 	let mut hits = match mode {
 		Mode::Reason => seed_by_reason(g, query_vec, k),
@@ -146,4 +153,66 @@ pub fn merge_seeds(a: Vec<EntityHit>, b: Vec<EntityHit>) -> Vec<EntityHit> {
 			.unwrap_or(std::cmp::Ordering::Equal)
 	});
 	out
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::base::types::{Entity, EntityKind, Kern};
+
+	fn ent(id: &str, vector: Vec<f64>, access: u64, fact: bool) -> Entity {
+		let mut e = Entity {
+			id: id.into(),
+			vector,
+			kind: if fact { EntityKind::Fact } else { EntityKind::Claim },
+			..Default::default()
+		};
+		if access > 0 {
+			e.access_count.increment("t", access);
+		}
+		e
+	}
+
+	fn graph_with(entities: Vec<Entity>) -> GraphGnn {
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("kx", "");
+		for e in entities {
+			k.entities.insert(e.id.clone(), e);
+		}
+		g.kerns.insert("kx".into(), k);
+		g
+	}
+
+	fn cfg() -> RetrievalConfig {
+		RetrievalConfig { important_min_cosine: 0.5, important_access_threshold: 5, ..Default::default() }
+	}
+
+	#[test]
+	fn seed_important_applies_cosine_and_access_gates() {
+		let g = graph_with(vec![
+			ent("hot", vec![1.0, 0.0], 10, false), // accessed + aligned -> in
+			ent("cold", vec![1.0, 0.0], 0, false), // aligned but not accessed/fact -> out
+			ent("fact", vec![1.0, 0.0], 0, true),  // a Fact bypasses the access gate -> in
+			ent("off", vec![0.0, 1.0], 10, false), // accessed but cosine 0 < 0.5 -> out
+		]);
+		let hits = seed_important(&g, &cfg(), &[1.0, 0.0]);
+		let ids: std::collections::HashSet<&str> = hits.iter().map(|h| h.entity_id.as_str()).collect();
+		assert!(ids.contains("hot"), "accessed + aligned is important");
+		assert!(ids.contains("fact"), "a Fact is important regardless of access count");
+		assert!(!ids.contains("cold"), "low-access non-fact is dominated");
+		assert!(!ids.contains("off"), "below the cosine threshold is excluded");
+	}
+
+	#[test]
+	fn merge_seeds_pools_by_entity_and_sorts_descending() {
+		let a = vec![EntityHit { entity_id: "x".into(), score: 0.6 }];
+		let b = vec![
+			EntityHit { entity_id: "x".into(), score: 0.8 }, // same id -> pooled into one
+			EntityHit { entity_id: "y".into(), score: 0.3 },
+		];
+		let out = merge_seeds(a, b);
+		assert_eq!(out.len(), 2, "duplicate id x collapses to a single hit");
+		assert_eq!(out[0].entity_id, "x", "the higher-scoring entity sorts first");
+		assert!(out[0].score >= out[1].score, "descending by score");
+	}
 }

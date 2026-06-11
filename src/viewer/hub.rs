@@ -1,176 +1,31 @@
-//! Live graph data API + zero-config local aggregator.
-//!
-//! Each kern daemon is per-cwd. To let one Vite app show *every* running kern
-//! on the machine with no configuration, the viewer has two layers:
-//!
-//! 1. **Local server** — every daemon binds an ephemeral loopback port and
-//!    serves its own graph at `GET /graph`. It writes that address into a
-//!    shared registry directory (`<temp>/kern-viewers/<pid>.json`) and
-//!    heartbeats it. A browser can't read UDP broadcasts, so the registry is a
-//!    file the aggregator (a process, not the browser) reads.
-//! 2. **Aggregator** — every daemon races to bind the well-known address
-//!    `cfg.serve.viewer` (default 127.0.0.1:7700). Exactly one wins and becomes
-//!    the hub; the rest retry periodically so the hub fails over if it dies.
-//!    The hub serves `GET /graph` by fanning out to every live peer in the
-//!    registry, namespacing their ids, and merging into one `{nodes,links,kerns}`.
-//!
-//! The browser always fetches `127.0.0.1:7700/graph` and gets the union — zero
-//! config whether one daemon runs or ten.
+//! The aggregator hub: fans `/graph` and the oracle out to every live peer,
+//! namespaces their ids to avoid cross-project collisions, merges the results,
+//! and runs the single agentic generation pass over the merged context.
 
-use std::collections::HashSet;
-use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::convert::Infallible;
 
 use axum::extract::State;
 use axum::response::sse::{Event, Sse};
-use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Json;
 use futures_util::StreamExt as _;
-use std::convert::Infallible;
 use serde_json::{json, Value};
 
-use crate::base::graph::GraphGnn;
-use trnsprt::McpServer as _;
-use crate::base::locks::{read_recovered, write_recovered};
-use crate::base::util::truncate;
-use crate::config::RetrievalConfig;
-use crate::tick::queue::{task, TaskKind};
-
-type Graph = Arc<RwLock<GraphGnn>>;
+use super::registry::live_peers;
+use super::{FANOUT_TIMEOUT, MAX_SEARCH_K};
 
 #[derive(Clone)]
-struct LocalState {
-	graph: Graph,
-	retrieval: RetrievalConfig,
-	queue: std::sync::Arc<crate::tick::queue::Queue>,
-	mcp: Arc<crate::mcp::Server>,
+pub(super) struct HubState {
+	pub(super) client: reqwest::Client,
+	pub(super) llm: crate::llm::Client,
 }
 
-/// Heartbeat cadence and the staleness window for treating a registry entry as
-/// dead. A peer is live if its file was refreshed within `STALE` *and* its
-/// `/graph` answers; otherwise the aggregator skips it.
-const HEARTBEAT: Duration = Duration::from_secs(5);
-const STALE: Duration = Duration::from_secs(20);
-/// Per-peer fan-out timeout: a wedged daemon must not stall the whole view.
-const FANOUT_TIMEOUT: Duration = Duration::from_secs(3);
-/// How often a non-hub daemon retries binding the aggregator address.
-const FAILOVER_RETRY: Duration = Duration::from_secs(4);
-/// Upper bound on a single search request's `k`, so an over-large request can't
-/// drive the HNSW `ef` budget into a multi-second scan while holding the read lock.
-const MAX_SEARCH_K: usize = 200;
-
-fn now_secs() -> u64 {
-	SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
-
-fn registry_dir() -> PathBuf {
-	std::env::temp_dir().join("kern-viewers")
-}
-
-fn registry_file() -> PathBuf {
-	registry_dir().join(format!("{}.json", std::process::id()))
-}
-
-/// Run the viewer: start this daemon's local graph server, register it, and
-/// contend for the aggregator role. Never returns under normal operation.
-pub async fn run(graph: Graph, llm: crate::llm::Client, retrieval: RetrievalConfig, queue: std::sync::Arc<crate::tick::queue::Queue>, mcp: Arc<crate::mcp::Server>, agg_addr: &str) -> std::io::Result<()> {
-	// 1. Local graph server on an ephemeral loopback port (this daemon's own data).
-	let local = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-	let local_addr = local.local_addr()?.to_string();
-	let local_state = LocalState { graph: graph.clone(), retrieval: retrieval.clone(), queue: queue.clone(), mcp };
-	let local_app = Router::new()
-		.route("/graph", get(graph_json))
-		.route("/ask_retrieve", post(ask_retrieve))
-		.route("/edit", post(edit))
-		.route("/tool", post(local_tool))
-		.with_state(local_state);
-	tokio::spawn(async move {
-		if let Err(e) = axum::serve(local, local_app).await {
-			tracing::warn!(target: "kern.viewer", error = %e, "local graph server exited");
-		}
-	});
-	tracing::info!(target: "kern.viewer", addr = %local_addr, "local graph server listening");
-
-	// 2. Register self + heartbeat so the hub can discover this daemon.
-	spawn_registry(local_addr.clone());
-
-	// 3. Contend for the aggregator address; retry so the hub can fail over.
-	let client = reqwest::Client::builder()
-		.timeout(FANOUT_TIMEOUT)
-		.build()
-		.unwrap_or_default();
-	let agg_addr = agg_addr.to_string();
-	loop {
-		match tokio::net::TcpListener::bind(&agg_addr).await {
-			Ok(listener) => {
-				tracing::info!(target: "kern.viewer", addr = %agg_addr, "aggregator hub listening");
-				let hub = HubState { client: client.clone(), llm: llm.clone() };
-				let app = Router::new()
-					.route("/", get(index))
-					.route("/graph", get(aggregate))
-					.route("/ask", post(ask))
-					.route("/edit", post(hub_edit))
-					.route("/tool", post(hub_tool))
-					.with_state(hub);
-				if let Err(e) = axum::serve(listener, app).await {
-					tracing::warn!(target: "kern.viewer", error = %e, "aggregator hub exited; will retry");
-				}
-			}
-			// Another daemon holds the hub. Wait, then retry to take over if it dies.
-			Err(_) => tokio::time::sleep(FAILOVER_RETRY).await,
-		}
-	}
-}
-
-/// Write `<temp>/kern-viewers/<pid>.json` once, then refresh its timestamp on a
-/// timer. Best-effort: registry failures degrade to "this daemon is invisible
-/// to the hub", never crash the daemon.
-fn spawn_registry(local_addr: String) {
-	tokio::spawn(async move {
-		let _ = std::fs::create_dir_all(registry_dir());
-		let file = registry_file();
-		loop {
-			let body = json!({ "graph": local_addr, "ts": now_secs() }).to_string();
-			let _ = std::fs::write(&file, &body);
-			tokio::time::sleep(HEARTBEAT).await;
-		}
-	});
-}
-
-/// Read the registry directory and return the loopback `/graph` addresses of
-/// every peer heartbeated within `STALE`. Stale files are swept.
-fn live_peers() -> Vec<String> {
-	let dir = registry_dir();
-	let entries = match std::fs::read_dir(&dir) {
-		Ok(e) => e,
-		Err(_) => return Vec::new(),
-	};
-	let now = now_secs();
-	let mut peers = Vec::new();
-	for entry in entries.flatten() {
-		let path = entry.path();
-		let Ok(text) = std::fs::read_to_string(&path) else { continue };
-		let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
-		let ts = v.get("ts").and_then(Value::as_u64).unwrap_or(0);
-		if now.saturating_sub(ts) > STALE.as_secs() {
-			let _ = std::fs::remove_file(&path); // sweep dead daemons
-			continue;
-		}
-		if let Some(addr) = v.get("graph").and_then(Value::as_str) {
-			peers.push(addr.to_string());
-		}
-	}
-	peers
-}
-
-async fn index() -> &'static str {
+pub(super) async fn index() -> &'static str {
 	"kern viewer aggregator. GET /graph for the merged graph across all running daemons."
 }
 
 /// Hub endpoint: fan out to every live peer, namespace ids per peer to avoid
 /// cross-project collisions, and merge into one `{nodes,links,kerns}`.
-async fn aggregate(State(st): State<HubState>) -> Json<Value> {
+pub(super) async fn aggregate(State(st): State<HubState>) -> Json<Value> {
 	let client = &st.client;
 	let peers = live_peers();
 	let mut nodes = Vec::new();
@@ -273,78 +128,6 @@ fn rank_peers(peers: &[(String, Value)], k: usize) -> Vec<Value> {
 	out
 }
 
-fn default_k() -> usize { 10 }
-
-#[derive(Clone)]
-struct HubState {
-	client: reqwest::Client,
-	llm: crate::llm::Client,
-}
-
-
-#[derive(serde::Deserialize)]
-struct AskRetrieveBody {
-	vec: Vec<f64>,
-	question: String,
-	#[serde(default = "default_k")]
-	k: usize,
-}
-
-/// Peer endpoint for the oracle: retrieve (no generation) over THIS daemon's
-/// graph and return scored source thoughts + a pre-formatted provenance string.
-/// The hub merges these across daemons and does the single generation.
-async fn ask_retrieve(State(st): State<LocalState>, Json(body): Json<AskRetrieveBody>) -> Json<Value> {
-	use crate::retrieval::answer;
-	use crate::retrieval::seed::Mode;
-	let k = body.k.min(MAX_SEARCH_K);
-	let g = read_recovered(&st.graph);
-	let result = answer::query(
-		&g,
-		&st.retrieval,
-		&body.vec,
-		&body.question,
-		Mode::Hybrid,
-		None,
-		None,
-		None::<crate::retrieval::score::QueryOptions>,
-	);
-	let sources: Vec<Value> = result.entities.iter().take(k).map(|se| {
-		json!({
-			"id": se.entity.id,
-			"label": truncate(&se.entity.text(), 80),
-			"text": truncate(&se.entity.text(), 300),
-			"kind": format!("{:?}", se.entity.kind),
-			"kern": g.kern_of_entity(&se.entity.id).map(str::to_owned).unwrap_or_default(),
-			"heat": se.entity.heat,
-			"conf": se.entity.conf_mean(),
-			"score": se.score,
-		})
-	}).collect();
-	let chain_text = answer::format_chains(&g, &result.path_chains);
-	let mut reasons: Vec<Value> = Vec::new();
-	let mut seen = std::collections::HashSet::new();
-	for chain in &result.path_chains {
-		for (j, node_id) in chain.nodes.iter().enumerate() {
-			if j % 2 == 0 { continue; } // even = entity, odd = reason
-			if !seen.insert(node_id.clone()) { continue; }
-			if let Some((r, _)) = crate::base::search::find_reason(&g, node_id) {
-				reasons.push(json!({
-					"id": r.id,
-					"from": r.from,
-					"to": r.to,
-					"text": if !r.text.is_empty() {
-						truncate(&r.text, 160).to_string()
-					} else {
-						r.kind.fallback_label().unwrap_or("").to_string()
-					},
-					"kind": format!("{:?}", r.kind),
-				}));
-			}
-		}
-	}
-	Json(json!({ "sources": sources, "chain_text": chain_text, "reasons": reasons }))
-}
-
 #[derive(serde::Deserialize)]
 struct ChatTurn {
 	role: String,
@@ -352,7 +135,7 @@ struct ChatTurn {
 }
 
 #[derive(serde::Deserialize)]
-struct AskBody {
+pub(super) struct AskBody {
 	question: String,
 	#[serde(default)]
 	history: Vec<ChatTurn>,
@@ -433,7 +216,7 @@ async fn exec_tool(client: &reqwest::Client, peers: &[String], name: &str, args:
 /// tool loop. The LLM can call kern tools (ingest, anchor, forget, etc.) by
 /// emitting <tool_call>…</tool_call> blocks; each is executed and the result
 /// fed back before the final answer is streamed as `token` events.
-async fn ask(State(st): State<HubState>, Json(body): Json<AskBody>) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
+pub(super) async fn ask(State(st): State<HubState>, Json(body): Json<AskBody>) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
 	let stream = async_stream::stream! {
 		let q = body.question.trim().to_string();
 		if q.is_empty() {
@@ -500,13 +283,36 @@ async fn ask(State(st): State<HubState>, Json(body): Json<AskBody>) -> Sse<impl 
 		}
 		messages.push(("user".to_string(), user_prompt));
 
+		// Hand off to the agentic tool loop. It is a standalone stream (no axum
+		// State / HTTP dependency) so the iterate→detect-tool→exec→feed-back
+		// cycle can be driven directly in tests with a stub LLM + peer set.
+		for await ev in run_agent_loop(st.llm.clone(), st.client.clone(), peers, messages) {
+			yield ev;
+		}
+	};
+	Sse::new(stream)
+}
+
+/// The agentic generation loop, factored out of [`ask`] so it carries no axum
+/// `State`/HTTP coupling. Given the assembled `messages`, it repeatedly asks the
+/// LLM, parses any `<tool_call>` blocks, executes them against `peers`, and
+/// feeds the results back — up to `MAX_ITERS` rounds — emitting `token`,
+/// `tool_call`, `tool_result`, `error`, and a terminal `done` SSE event. Returns
+/// a stream so the caller just forwards events; testable without binding a port.
+fn run_agent_loop(
+	llm: crate::llm::Client,
+	client: reqwest::Client,
+	peers: Vec<String>,
+	mut messages: Vec<(String, String)>,
+) -> impl futures_core::Stream<Item = Result<Event, Infallible>> {
+	async_stream::stream! {
 		const MAX_ITERS: usize = 8;
 		let mut tool_idx = 0usize;
 
 		for _iter in 0..MAX_ITERS {
 			// Collect full response so we can detect tool calls before emitting anything.
 			let mut response = String::new();
-			let mut gen = Box::pin(st.llm.answer(crate::llm::AnswerParams {
+			let mut gen = Box::pin(llm.answer(crate::llm::AnswerParams {
 				messages: messages.clone(),
 				stream: false,
 				num_predict: None,
@@ -543,7 +349,7 @@ async fn ask(State(st): State<HubState>, Json(body): Json<AskBody>) -> Sse<impl 
 				yield Ok(Event::default().event("tool_call").data(
 					json!({ "name": tc.name, "args": tc.args, "idx": idx }).to_string()
 				));
-				let (ok, result_text) = exec_tool(&st.client, &peers, &tc.name, &tc.args).await;
+				let (ok, result_text) = exec_tool(&client, &peers, &tc.name, &tc.args).await;
 				yield Ok(Event::default().event("tool_result").data(
 					json!({ "name": tc.name, "result": result_text, "ok": ok, "idx": idx }).to_string()
 				));
@@ -556,12 +362,11 @@ async fn ask(State(st): State<HubState>, Json(body): Json<AskBody>) -> Sse<impl 
 		}
 
 		yield Ok(Event::default().event("done").data("{}"));
-	};
-	Sse::new(stream)
+	}
 }
 
 /// Hub endpoint: broadcast a tool call to all live peers, return first success.
-async fn hub_tool(State(st): State<HubState>, Json(body): Json<Value>) -> Json<Value> {
+pub(super) async fn hub_tool(State(st): State<HubState>, Json(body): Json<Value>) -> Json<Value> {
 	let peers = live_peers();
 	if peers.is_empty() {
 		return Json(json!({ "ok": false, "error": "no daemons available" }));
@@ -585,6 +390,25 @@ async fn hub_tool(State(st): State<HubState>, Json(body): Json<Value>) -> Json<V
 		}
 	}
 	last_ok.map(Json).unwrap_or_else(|| Json(json!({ "ok": false, "error": errors.join("; ") })))
+}
+
+/// Hub endpoint: forward an edit to the peer that owns the namespaced id.
+pub(super) async fn hub_edit(State(st): State<HubState>, Json(mut body): Json<Value>) -> Json<Value> {
+	let id = body.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+	let Some((addr, real)) = id.split_once('|') else {
+		return Json(json!({ "ok": false, "error": "bad id" }));
+	};
+	if let Some(o) = body.as_object_mut() {
+		o.insert("id".into(), json!(real));
+	}
+	let url = format!("http://{addr}/edit");
+	match st.client.post(&url).json(&body).send().await {
+		Ok(r) => match r.json::<Value>().await {
+			Ok(v) => Json(v),
+			Err(_) => Json(json!({ "ok": false, "error": "peer decode" })),
+		},
+		Err(_) => Json(json!({ "ok": false, "error": "peer unreachable" })),
+	}
 }
 
 /// Build the generation prompt from merged source texts + per-daemon chain
@@ -696,150 +520,54 @@ mod tests {
 		assert_eq!(out[0]["kern"], "A|k1");
 		assert_eq!(out[1]["id"], "B|e2");
 	}
-}
 
-#[derive(serde::Deserialize)]
-struct EditBody {
-	id: String,
-	text: String,
-	#[serde(default)]
-	kind: String,
-}
+	// --- extract_tool_calls: the fragile <tool_call> string-scan parser. ---
 
-/// Peer endpoint: execute a kern MCP tool locally and return the result.
-async fn local_tool(State(st): State<LocalState>, Json(body): Json<ToolBody>) -> Json<Value> {
-	match st.mcp.call_tool(&body.name, &body.args) {
-		Ok(r) => {
-			let text = r.content.iter()
-				.filter_map(|c: &Value| c.get("text").and_then(Value::as_str))
-				.collect::<Vec<_>>()
-				.join("\n");
-			Json(json!({ "ok": !r.is_error, "result": text }))
-		}
-		Err(e) => Json(json!({ "ok": false, "error": format!("{e:?}") })),
-	}
-}
-
-#[derive(serde::Deserialize)]
-struct ToolBody {
-	name: String,
-	#[serde(default)]
-	args: Value,
-}
-
-/// Peer endpoint: edit an entity or reason by id, mark dirty, enqueue reembed + persist.
-async fn edit(State(st): State<LocalState>, Json(body): Json<EditBody>) -> Json<Value> {
-	let is_reason = body.kind == "reason";
-	let kern_id = {
-		let g = read_recovered(&st.graph);
-		if is_reason {
-			g.kern_of_reason(&body.id).map(|s| s.to_string())
-		} else {
-			g.kern_of_entity(&body.id).map(|s| s.to_string())
-		}
-	};
-	let Some(kern_id) = kern_id else {
-		return Json(json!({ "ok": false, "error": "not found" }));
-	};
-	{
-		let mut g = write_recovered(&st.graph);
-		if let Some(k) = g.get_mut(&kern_id) {
-			if is_reason {
-				if let Some(r) = k.reasons.get_mut(&body.id) {
-					r.set_text(body.text.clone());
-				}
-			} else if let Some(e) = k.entities.get_mut(&body.id) {
-				e.set_text(body.text.clone());
-			}
-		}
-	}
-	st.queue.enqueue(task(TaskKind::Reembed, &kern_id));
-	st.queue.enqueue(task(TaskKind::Persist, &kern_id));
-	Json(json!({ "ok": true }))
-}
-
-/// Hub endpoint: forward an edit to the peer that owns the namespaced id.
-async fn hub_edit(State(st): State<HubState>, Json(mut body): Json<Value>) -> Json<Value> {
-	let id = body.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-	let Some((addr, real)) = id.split_once('|') else {
-		return Json(json!({ "ok": false, "error": "bad id" }));
-	};
-	if let Some(o) = body.as_object_mut() {
-		o.insert("id".into(), json!(real));
-	}
-	let url = format!("http://{addr}/edit");
-	match st.client.post(&url).json(&body).send().await {
-		Ok(r) => match r.json::<Value>().await {
-			Ok(v) => Json(v),
-			Err(_) => Json(json!({ "ok": false, "error": "peer decode" })),
-		},
-		Err(_) => Json(json!({ "ok": false, "error": "peer unreachable" })),
-	}
-}
-
-/// Snapshot the live graph as `{nodes, links, kerns}`. Nodes are entities
-/// (id, truncated text, kind, kern, heat, confidence); links are reason edges.
-/// Edges whose endpoints are not both present (e.g. into an unloaded kern) are
-/// dropped so the client never sees a dangling link.
-async fn graph_json(State(st): State<LocalState>) -> Json<serde_json::Value> {
-	let g = st.graph;
-	let g = read_recovered(&g);
-	let kerns = g.all();
-
-	let mut node_ids: HashSet<String> = HashSet::new();
-	let mut nodes = Vec::new();
-	for kern in &kerns {
-		for e in kern.entities.values() {
-			node_ids.insert(e.id.clone());
-			nodes.push(json!({
-				"id": e.id,
-				"label": truncate(&e.text(), 60),
-				"kind": format!("{:?}", e.kind),
-				"kern": kern.id,
-				"heat": e.heat,
-				"conf": e.conf_mean(),
-			}));
-		}
+	#[test]
+	fn extract_tool_calls_pulls_call_and_strips_from_visible() {
+		let raw = "Adding that now. <tool_call>{\"name\":\"ingest\",\"args\":{\"text\":\"hi\"}}</tool_call> Done.";
+		let (visible, calls) = extract_tool_calls(raw);
+		assert_eq!(calls.len(), 1);
+		assert_eq!(calls[0].name, "ingest");
+		assert_eq!(calls[0].args["text"], "hi");
+		// The block is removed from the user-visible text; surrounding prose stays.
+		assert!(!visible.contains("tool_call"));
+		assert!(visible.contains("Adding that now."));
+		assert!(visible.contains("Done."));
 	}
 
-	let mut links = Vec::new();
-	for kern in &kerns {
-		for r in kern.reasons.values() {
-			if node_ids.contains(&r.from) && node_ids.contains(&r.to) {
-				links.push(json!({
-					"id": r.id,
-					"source": r.from,
-					"target": r.to,
-					"kind": format!("{:?}", r.kind),
-					"text": truncate(&r.text, 80),
-					"score": r.score,
-				}));
-			}
-		}
+	#[test]
+	fn extract_tool_calls_handles_missing_args_and_multiple_blocks() {
+		let raw = "<tool_call>{\"name\":\"pulse\"}</tool_call><tool_call>{\"name\":\"anchor\",\"args\":{\"id\":\"x\"}}</tool_call>";
+		let (visible, calls) = extract_tool_calls(raw);
+		assert_eq!(calls.len(), 2);
+		assert_eq!(calls[0].name, "pulse");
+		// Missing args defaults to an empty object, not a panic.
+		assert_eq!(calls[0].args, json!({}));
+		assert_eq!(calls[1].name, "anchor");
+		assert_eq!(calls[1].args["id"], "x");
+		assert!(visible.is_empty());
 	}
 
-	// Sphere structure: the recursive kern tree (purpose, radii, parent/children,
-	// member count). The viewer renders each kern as a sphere you can step into.
-	let kern_meta: Vec<_> = kerns
-		.iter()
-		.map(|k| {
-			json!({
-				"id": k.id,
-				"label": if k.anchor_text.trim().is_empty() { "(unnamed)".to_string() } else { truncate(&k.anchor_text, 60) },
-				"named": !k.anchor_text.trim().is_empty(),
-				"parent": k.parent,
-				"children": k.children,
-				"inner_radius": k.inner_radius,
-				"outer_radius": k.outer_radius,
-				"count": k.entities.len(),
-			})
-		})
-		.collect();
+	#[test]
+	fn extract_tool_calls_ignores_malformed_json_and_unclosed_blocks() {
+		// Invalid JSON inside the block yields no call; an unclosed block ends the scan.
+		let bad = "<tool_call>not json</tool_call>plain";
+		let (visible, calls) = extract_tool_calls(bad);
+		assert!(calls.is_empty());
+		assert_eq!(visible, "plain");
 
-	Json(json!({
-		"nodes": nodes,
-		"links": links,
-		"kerns": kern_meta,
-		"kern_count": kerns.len(),
-	}))
+		let unclosed = "before <tool_call>{\"name\":\"x\"} and no close";
+		let (visible2, calls2) = extract_tool_calls(unclosed);
+		assert!(calls2.is_empty());
+		// Everything before the unterminated marker survives as visible text.
+		assert!(visible2.contains("before"));
+	}
+
+	#[test]
+	fn extract_tool_calls_plain_text_is_unchanged() {
+		let (visible, calls) = extract_tool_calls("just a normal answer with no tools");
+		assert!(calls.is_empty());
+		assert_eq!(visible, "just a normal answer with no tools");
+	}
 }

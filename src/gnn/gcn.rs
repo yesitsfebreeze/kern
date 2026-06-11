@@ -7,6 +7,7 @@ use crate::gnn::graph::Graph;
 use crate::gnn::layer::{Backward, Layer, LinearLayer};
 use crate::gnn::norm::LayerNorm;
 use crate::gnn::tensor::Tensor;
+use crate::gnn::GnnError;
 
 pub struct GCNLayer {
 	pub linear: LinearLayer,
@@ -57,6 +58,34 @@ impl GCNLayer {
 			last_pre_act: None,
 		}
 	}
+
+	/// Fallible backward pass. Mirrors [`GATLayer::try_backward_graph`](crate::gnn::gat::GATLayer):
+	/// returns [`GnnError::MissingForwardState`] when invoked before a successful
+	/// `forward_graph` (instead of panicking) and bubbles tensor shape errors as
+	/// [`GnnError::Tensor`]. The infallible [`BackwardGraphLayer::backward_graph`]
+	/// delegates here.
+	pub fn try_backward_graph(&mut self, _g: &Graph, d_out: &Tensor) -> Result<Tensor, GnnError> {
+		let mut grad = d_out.clone();
+		if let Some(ref d) = self.drop {
+			grad = d.backward(&grad);
+		}
+		if let Some(a) = self.act {
+			let pre_act = self
+				.last_pre_act
+				.as_ref()
+				.ok_or(GnnError::MissingForwardState("gcn::last_pre_act"))?;
+			grad = act_deriv_mul(a, &grad, pre_act);
+		}
+		if let Some(ref mut n) = self.norm {
+			grad = n.backward(&grad);
+		}
+		let d_agg = self.linear.backward(&grad);
+		let norm_adj = self
+			.last_norm_adj
+			.as_ref()
+			.ok_or(GnnError::MissingForwardState("gcn::last_norm_adj"))?;
+		Ok(norm_adj.transpose().matmul(&d_agg)?)
+	}
 }
 
 impl GraphLayer for GCNLayer {
@@ -103,27 +132,15 @@ impl GraphLayer for GCNLayer {
 }
 
 impl BackwardGraphLayer for GCNLayer {
-	fn backward_graph(&mut self, _g: &Graph, d_out: &Tensor) -> Tensor {
-		let mut grad = d_out.clone();
-		if let Some(ref d) = self.drop {
-			grad = d.backward(&grad);
+	fn backward_graph(&mut self, g: &Graph, d_out: &Tensor) -> Tensor {
+		match self.try_backward_graph(g, d_out) {
+			Ok(t) => t,
+			Err(e) => {
+				tracing::error!(error = %e, "GCNLayer backward_graph failed; returning zero gradient");
+				// dInput is (num_nodes, in_features); in_features == linear.weight.rows.
+				Tensor::zeros(g.num_nodes(), self.linear.weight.rows)
+			}
 		}
-		if let Some(a) = self.act {
-			let pre_act = self.last_pre_act.as_ref().expect("backward before forward");
-			grad = act_deriv_mul(a, &grad, pre_act);
-		}
-		if let Some(ref mut n) = self.norm {
-			grad = n.backward(&grad);
-		}
-		let d_agg = self.linear.backward(&grad);
-		let norm_adj = self
-			.last_norm_adj
-			.as_ref()
-			.expect("backward before forward");
-		norm_adj
-			.transpose()
-			.matmul(&d_agg)
-			.expect("GCN backward adj.T*dAgg")
 	}
 
 	fn param_grads(&self) -> Vec<&Tensor> {
@@ -147,5 +164,55 @@ impl BackwardGraphLayer for GCNLayer {
 		if let Some(ref mut n) = self.norm {
 			Backward::zero_grads(n);
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use rand::rngs::StdRng;
+	use rand::SeedableRng;
+
+	fn two_node_graph() -> Graph {
+		let mut g = Graph::new();
+		g.add_node("a", vec![1.0, 0.0]).unwrap();
+		g.add_node("b", vec![0.0, 1.0]).unwrap();
+		g.add_edge("a", "b", vec![]).unwrap();
+		g
+	}
+
+	#[test]
+	fn forward_graph_aggregates_then_projects_to_out_features() {
+		// No norm/dropout/activation -> output is a pure linear projection of the
+		// normalized-adjacency-aggregated features; assert shape + that the state
+		// backward needs is cached (independent of running backward).
+		let g = two_node_graph();
+		let feats = Tensor::new(2, 2, vec![1.0, 0.0, 0.0, 1.0]).unwrap();
+		let mut rng = StdRng::seed_from_u64(1);
+		let mut layer = GCNLayer::with_rng(2, 3, None, false, 0.0, &mut rng);
+
+		let out = layer.forward_graph(&g, &feats);
+		assert_eq!((out.rows, out.cols), (2, 3), "num_nodes x out_features");
+		let adj = layer.last_norm_adj.as_ref().expect("normalized adjacency cached");
+		assert_eq!((adj.rows, adj.cols), (2, 2), "adjacency is num_nodes x num_nodes");
+		assert!(layer.last_pre_act.is_some(), "pre-activation cached for backward");
+	}
+
+	#[test]
+	fn try_backward_before_forward_is_missing_state_and_infallible_path_zeroes() {
+		let g = two_node_graph();
+		let mut rng = StdRng::seed_from_u64(2);
+		// With an activation, the act path's last_pre_act guard trips first.
+		let mut layer = GCNLayer::with_rng(2, 3, Some(Activation::Relu), false, 0.0, &mut rng);
+		let d_out = Tensor::ones(2, 3);
+
+		assert!(matches!(
+			layer.try_backward_graph(&g, &d_out).unwrap_err(),
+			GnnError::MissingForwardState(_)
+		));
+		// Infallible delegate degrades to a zero gradient of input shape (n x in).
+		let z = layer.backward_graph(&g, &d_out);
+		assert_eq!((z.rows, z.cols), (2, 2), "fallback dInput is num_nodes x in_features");
+		assert!(z.data.iter().all(|&v| v == 0.0));
 	}
 }

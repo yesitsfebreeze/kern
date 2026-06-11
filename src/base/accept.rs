@@ -299,10 +299,14 @@ fn supersede(
 			}
 		}
 		if found.is_none() {
-			for kern in g.all() {
-				if let Some(t) = kern.entities.get(&old_id) {
-					found = Some((t.vector.clone(), kern.id.clone()));
-					break;
+			// Resolve the owning kern through the entity index (O(1)) instead of an
+			// O(kerns × entities) scan over g.all(); `get` auto-loads it if the kern
+			// was evicted, so this also finds entities the all() scan would miss.
+			if let Some(kid) = g.kern_of_entity(&old_id).map(|s| s.to_string()) {
+				if let Some(kern) = g.get(&kid) {
+					if let Some(t) = kern.entities.get(&old_id) {
+						found = Some((t.vector.clone(), kid));
+					}
 				}
 			}
 		}
@@ -386,19 +390,24 @@ pub fn get_or_spawn_unnamed_child(g: &mut GraphGnn, kern_id: &str) -> String {
 /// absent. Generic carries an empty `anchor_vec` so similarity routing never
 /// matches it; it is named, hence immortal (never GC'd).
 pub(crate) fn get_or_spawn_generic_child(g: &mut GraphGnn, parent_id: &str) -> String {
+	// Use `get` (auto-loads from disk), NOT `loaded` (in-memory only): the generic
+	// child is named/immortal but can still be SPILLED to disk under the kern-load
+	// cap. Checking only loaded kerns would then spawn a duplicate `generic` every
+	// call once eviction kicks in — the same runaway `get_or_spawn_unnamed_child`
+	// already guards against. Auto-loading finds and reuses the existing one.
 	let children = g
-		.loaded(parent_id)
+		.get(parent_id)
 		.map(|k| k.children.clone())
 		.unwrap_or_default();
 	for child_id in &children {
-		if let Some(c) = g.loaded(child_id) {
+		if let Some(c) = g.get(child_id) {
 			if c.anchor_text == GENERIC_ANCHOR {
 				return child_id.clone();
 			}
 		}
 	}
 	let root_id = g
-		.loaded(parent_id)
+		.get(parent_id)
 		.map(|k| k.root_id.clone())
 		.unwrap_or_default();
 	let child = Kern::new_named_child(parent_id, &root_id, GENERIC_ANCHOR, Vec::new());
@@ -559,6 +568,9 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let mut g = GraphGnn::new();
 		g.data_dir = dir.path().to_string_lossy().into_owned();
+		g.set_store(std::sync::Arc::new(
+			crate::base::store::Store::open(&g.data_dir).unwrap(),
+		));
 		g.set_max_loaded_kerns(1); // only the root stays resident → child evicts
 		let root = g.root.id.clone();
 
@@ -569,6 +581,28 @@ mod tests {
 		}
 		// Exactly one unnamed child ever created (root + 1), no runaway.
 		assert_eq!(g.count(), 2, "no runaway kern creation under the cap");
+	}
+
+	#[test]
+	fn generic_child_reused_when_evicted_by_load_cap() {
+		// Same eviction regression for the named `generic` catch-all: get_or_spawn
+		// must reload + REUSE it (via get(), not loaded()), not duplicate it once the
+		// cap spills it to disk.
+		let dir = tempfile::tempdir().unwrap();
+		let mut g = GraphGnn::new();
+		g.data_dir = dir.path().to_string_lossy().into_owned();
+		g.set_store(std::sync::Arc::new(
+			crate::base::store::Store::open(&g.data_dir).unwrap(),
+		));
+		g.set_max_loaded_kerns(1); // only the root stays resident → generic evicts
+		let root = g.root.id.clone();
+
+		let first = get_or_spawn_generic_child(&mut g, &root);
+		for _ in 0..20 {
+			let id = get_or_spawn_generic_child(&mut g, &root);
+			assert_eq!(id, first, "must reuse the evicted generic child");
+		}
+		assert_eq!(g.count(), 2, "exactly one generic child created, no runaway");
 	}
 
 	/// The orphan-shard leak that grew the data dir to 347k files was empty,

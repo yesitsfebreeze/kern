@@ -2,6 +2,7 @@
 
 use crate::gnn::layer::{Backward, Layer};
 use crate::gnn::tensor::Tensor;
+use crate::gnn::GnnError;
 
 pub struct LayerNorm {
 	pub gamma: Tensor, // 1×D
@@ -26,6 +27,47 @@ impl LayerNorm {
 			d_gamma: Tensor::zeros(1, dim),
 			d_beta: Tensor::zeros(1, dim),
 		}
+	}
+
+	/// Fallible backward pass. Returns [`GnnError::MissingForwardState`] when
+	/// invoked before a successful `forward` (or after a reset) instead of
+	/// panicking. Mirrors [`LinearLayer::try_backward`](crate::gnn::layer::LinearLayer);
+	/// the infallible [`Backward::backward`] delegates here. `last_x_hat` stays an
+	/// `Option` to match the forward-state caching convention used by every other
+	/// gnn layer (linear/sage/gcn/gat/dropout).
+	pub fn try_backward(&mut self, d_out: &Tensor) -> Result<Tensor, GnnError> {
+		let x_hat = self
+			.last_x_hat
+			.as_ref()
+			.ok_or(GnnError::MissingForwardState("layernorm::last_x_hat"))?;
+		let (n, d) = (d_out.rows, d_out.cols);
+		let mut d_input = Tensor::zeros(n, d);
+
+		for i in 0..n {
+			let mut d_x_hat = vec![0.0; d];
+			for (j, slot) in d_x_hat.iter_mut().enumerate().take(d) {
+				*slot = d_out.at(i, j) * self.gamma.at(0, j);
+				self.d_gamma.data[j] += d_out.at(i, j) * x_hat.at(i, j);
+				self.d_beta.data[j] += d_out.at(i, j);
+			}
+
+			let mut sum_dx = 0.0;
+			let mut sum_dx_xh = 0.0;
+			for (j, &dxh) in d_x_hat.iter().enumerate().take(d) {
+				sum_dx += dxh;
+				sum_dx_xh += dxh * x_hat.at(i, j);
+			}
+
+			let scale = self.last_inv_std[i] / d as f64;
+			for (j, &dxh) in d_x_hat.iter().enumerate().take(d) {
+				d_input.set(
+					i,
+					j,
+					scale * (d as f64 * dxh - sum_dx - x_hat.at(i, j) * sum_dx_xh),
+				);
+			}
+		}
+		Ok(d_input)
 	}
 }
 
@@ -75,35 +117,14 @@ impl Layer for LayerNorm {
 
 impl Backward for LayerNorm {
 	fn backward(&mut self, d_out: &Tensor) -> Tensor {
-		let x_hat = self.last_x_hat.as_ref().expect("backward before forward");
-		let (n, d) = (d_out.rows, d_out.cols);
-		let mut d_input = Tensor::zeros(n, d);
-
-		for i in 0..n {
-			let mut d_x_hat = vec![0.0; d];
-			for (j, slot) in d_x_hat.iter_mut().enumerate().take(d) {
-				*slot = d_out.at(i, j) * self.gamma.at(0, j);
-				self.d_gamma.data[j] += d_out.at(i, j) * x_hat.at(i, j);
-				self.d_beta.data[j] += d_out.at(i, j);
-			}
-
-			let mut sum_dx = 0.0;
-			let mut sum_dx_xh = 0.0;
-			for (j, &dxh) in d_x_hat.iter().enumerate().take(d) {
-				sum_dx += dxh;
-				sum_dx_xh += dxh * x_hat.at(i, j);
-			}
-
-			let scale = self.last_inv_std[i] / d as f64;
-			for (j, &dxh) in d_x_hat.iter().enumerate().take(d) {
-				d_input.set(
-					i,
-					j,
-					scale * (d as f64 * dxh - sum_dx - x_hat.at(i, j) * sum_dx_xh),
-				);
+		match self.try_backward(d_out) {
+			Ok(t) => t,
+			Err(e) => {
+				tracing::error!(error = %e, "LayerNorm backward failed; returning zero gradient");
+				// dInput has the same shape as d_out (n_samples × dim).
+				Tensor::zeros(d_out.rows, d_out.cols)
 			}
 		}
-		d_input
 	}
 
 	fn param_grads(&self) -> Vec<&Tensor> {
@@ -133,6 +154,91 @@ mod tests {
 		assert!(mean.abs() < 1e-9, "row mean ~0, got {mean}");
 		let var: f64 = out.data.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / 3.0;
 		assert!((var - 1.0).abs() < 1e-3, "row var ~1 (minus epsilon), got {var}");
+	}
+
+	#[test]
+	fn parameters_returns_gamma_then_beta_in_order() {
+		let ln = LayerNorm::new(3);
+		let params = ln.parameters();
+		assert_eq!(params.len(), 2);
+		// gamma is ones, beta is zeros at init — confirms order + identity.
+		assert!(params[0].data.iter().all(|&v| v == 1.0), "param[0] is gamma (ones)");
+		assert!(params[1].data.iter().all(|&v| v == 0.0), "param[1] is beta (zeros)");
+		assert_eq!((params[0].rows, params[0].cols), (1, 3));
+		assert_eq!((params[1].rows, params[1].cols), (1, 3));
+		// param_grads mirrors the same (gamma, beta) order and starts zeroed.
+		let grads = ln.param_grads();
+		assert_eq!(grads.len(), 2);
+		assert!(grads.iter().all(|g| g.data.iter().all(|&v| v == 0.0)), "fresh grads are zero");
+	}
+
+	#[test]
+	fn zero_grads_resets_accumulation_between_backward_passes() {
+		let x = Tensor::new(1, 3, vec![1.0, 2.0, 3.0]).unwrap();
+		let mut ln = LayerNorm::new(3);
+		ln.forward(&x);
+		let d_out = Tensor::ones(1, 3);
+
+		ln.backward(&d_out);
+		let after_one: Vec<f64> = ln.d_beta.data.clone();
+		// d_beta[j] += d_out (=1) each pass, so a single row of ones gives [1;3].
+		assert!(after_one.iter().all(|&v| (v - 1.0).abs() < 1e-12));
+
+		ln.backward(&d_out); // second pass accumulates onto the first
+		assert!(
+			ln.d_beta.data.iter().all(|&v| (v - 2.0).abs() < 1e-12),
+			"grads bleed across passes without a reset"
+		);
+
+		ln.zero_grads();
+		assert!(ln.d_gamma.data.iter().all(|&v| v == 0.0), "zero_grads clears d_gamma");
+		assert!(ln.d_beta.data.iter().all(|&v| v == 0.0), "zero_grads clears d_beta");
+
+		// After reset, a single backward equals exactly one pass — no residue.
+		ln.backward(&d_out);
+		assert!(
+			ln.d_beta.data.iter().zip(&after_one).all(|(now, one)| (now - one).abs() < 1e-12),
+			"accumulation restarts from zero after zero_grads"
+		);
+	}
+
+	#[test]
+	fn try_backward_before_forward_is_a_missing_state_error() {
+		let mut ln = LayerNorm::new(3);
+		let d_out = Tensor::ones(1, 3);
+		assert!(matches!(
+			ln.try_backward(&d_out).unwrap_err(),
+			GnnError::MissingForwardState(_)
+		));
+	}
+
+	#[test]
+	fn backward_before_forward_returns_zero_gradient_not_panic() {
+		// The infallible Backward::backward used to `expect` (panic) when called
+		// before forward; it now delegates to try_backward and returns a correctly
+		// shaped zero gradient instead.
+		let mut ln = LayerNorm::new(3);
+		let d_out = Tensor::ones(2, 3);
+		let d_in = ln.backward(&d_out);
+		assert_eq!((d_in.rows, d_in.cols), (2, 3), "zero gradient matches d_out shape");
+		assert!(d_in.data.iter().all(|&v| v == 0.0), "missing forward state -> all-zero gradient");
+	}
+
+	#[test]
+	fn try_backward_equals_the_infallible_backward_after_forward() {
+		// On the happy path the two entry points produce identical gradients.
+		let x = Tensor::new(2, 4, vec![0.5, -0.2, 0.1, 0.3, -0.4, 0.6, 0.2, -0.1]).unwrap();
+		let d_out = Tensor::ones(2, 4);
+
+		let mut a = LayerNorm::new(4);
+		a.forward(&x);
+		let via_try = a.try_backward(&d_out).expect("forward ran");
+
+		let mut b = LayerNorm::new(4);
+		b.forward(&x);
+		let via_infallible = b.backward(&d_out);
+
+		assert_eq!(via_try.data, via_infallible.data, "delegation preserves the gradient");
 	}
 
 	#[test]

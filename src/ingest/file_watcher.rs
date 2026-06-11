@@ -49,13 +49,18 @@ pub(crate) fn emit_fs_write_touch(entity_id: &str, sink: &dyn Sink) {
 /// prefix is present (defensive — kern still accepts plain paths).
 fn strip_file_uri(uri: &str) -> String {
 	if let Some(rest) = uri.strip_prefix("file:///") {
-		// Windows: `file:///C:/foo` → `C:/foo`
+		// Empty authority. Windows `file:///C:/foo` → `C:/foo`; POSIX `file:///abs`
+		// → `abs` (path minus the empty authority's leading slash).
 		return rest.to_string();
 	}
 	if let Some(rest) = uri.strip_prefix("file://") {
-		// POSIX: `file:///abs` already handled above; this branch covers
-		// `file://host/path` and the no-host shorthand `file:///` was caught.
-		return rest.to_string();
+		// Non-empty authority: `file://host/path`. Per RFC 8089 the local path is
+		// everything from the first '/', so DROP the host (`file://host/p` -> `/p`)
+		// instead of the old behaviour that smuggled `host` into the path.
+		return match rest.find('/') {
+			Some(i) => rest[i..].to_string(),
+			None => String::new(), // bare `file://host` with no path
+		};
 	}
 	uri.to_string()
 }
@@ -270,7 +275,9 @@ mod tests {
 	fn strip_file_uri_handles_windows_and_posix() {
 		assert_eq!(strip_file_uri("file:///C:/foo/bar.rs"), "C:/foo/bar.rs");
 		assert_eq!(strip_file_uri("file:///abs/posix.rs"), "abs/posix.rs");
-		assert_eq!(strip_file_uri("file://host/p.rs"), "host/p.rs");
+		// Non-empty authority: the host is dropped, the path keeps its leading slash.
+		assert_eq!(strip_file_uri("file://host/p.rs"), "/p.rs");
+		assert_eq!(strip_file_uri("file://host"), "", "bare authority with no path");
 		assert_eq!(strip_file_uri("plain/path.rs"), "plain/path.rs");
 	}
 

@@ -35,6 +35,37 @@ async fn collect_events(w: &mut FileWatcher, budget: Duration) -> Vec<WatchEvent
 	out
 }
 
+/// Poll for events until `done(&events)` holds or `budget` expires, returning
+/// everything collected so far. Unlike [`collect_events`] (which always drains
+/// the full budget — required for *negative* assertions), this early-exits the
+/// instant the predicate is satisfied, so fast machines don't pay a fixed
+/// worst-case sleep while slow CI still gets the whole budget. Use it for
+/// *presence* assertions to replace the `sleep(fixed); collect_events(budget)`
+/// pattern.
+async fn collect_until(
+	w: &mut FileWatcher,
+	budget: Duration,
+	done: impl Fn(&[WatchEvent]) -> bool,
+) -> Vec<WatchEvent> {
+	let mut out = Vec::new();
+	let deadline = tokio::time::Instant::now() + budget;
+	loop {
+		if done(&out) {
+			break;
+		}
+		let now = tokio::time::Instant::now();
+		if now >= deadline {
+			break;
+		}
+		match tokio::time::timeout(deadline - now, w.next_event()).await {
+			Ok(Some(ev)) => out.push(ev),
+			Ok(None) => break,
+			Err(_) => break,
+		}
+	}
+	out
+}
+
 fn has_kind(events: &[WatchEvent], path: &PathBuf, want: fn(&WatchKind) -> bool) -> bool {
 	events.iter().any(|e| &e.path == path && want(&e.kind))
 }
@@ -55,12 +86,16 @@ async fn create_modify_delete_cycle_emits_expected_events() {
 	tokio::time::sleep(Duration::from_millis(150)).await;
 	tokio::fs::remove_file(&file).await.unwrap();
 
-	let events = collect_events(&mut w, POLL_BUDGET).await;
-
 	// We require *at least* a Created (or Modified — Windows often collapses
 	// the initial write into Modified) and a Deleted. The platform decides
 	// whether the second write becomes a separate Modified or is folded
-	// into the first event by debouncing.
+	// into the first event by debouncing. Early-exit once both are seen.
+	let want = |evs: &[WatchEvent]| {
+		has_kind(evs, &file, |k| matches!(k, WatchKind::Created | WatchKind::Modified))
+			&& has_kind(evs, &file, |k| matches!(k, WatchKind::Deleted))
+	};
+	let events = collect_until(&mut w, POLL_BUDGET, want).await;
+
 	let created_or_modified = has_kind(&events, &file, |k| {
 		matches!(k, WatchKind::Created | WatchKind::Modified)
 	});
@@ -132,6 +167,67 @@ async fn gitignore_is_respected() {
 	assert!(
 		!events.iter().any(|e| e.path == ignored),
 		"did not expect event for ignored.txt, got {events:?}"
+	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rename_within_root_emits_renamed_or_delete_create_pair() {
+	let tmp = TempDir::new().unwrap();
+	let root = tmp.path().to_path_buf();
+	let src = root.join("old.txt");
+	tokio::fs::write(&src, b"content").await.unwrap();
+
+	// Watch after the seed write so its Created doesn't muddy the rename window.
+	let mut w = FileWatcher::new(vec![root.clone()], IgnoreRules::empty()).unwrap();
+	tokio::time::sleep(Duration::from_millis(100)).await;
+
+	let dst = root.join("new.txt");
+	tokio::fs::rename(&src, &dst).await.unwrap();
+
+	// Two valid shapes per `translate`: a single `Renamed { from, to }` when the
+	// platform reports `Modify(Name(Both))`, or a `Deleted(src)` + `Created(dst)`
+	// pair when it splits the rename into From/To halves. Accept either.
+	let saw_rename = |evs: &[WatchEvent]| {
+		let renamed = evs.iter().any(|e| {
+			matches!(&e.kind, WatchKind::Renamed { from, to } if from == &src && to == &dst)
+		});
+		let deleted_old = has_kind(evs, &src, |k| matches!(k, WatchKind::Deleted));
+		let created_new = has_kind(evs, &dst, |k| matches!(k, WatchKind::Created));
+		renamed || (deleted_old && created_new)
+	};
+	let events = collect_until(&mut w, POLL_BUDGET, saw_rename).await;
+	assert!(
+		saw_rename(&events),
+		"expected Renamed or Deleted+Created for {src:?} -> {dst:?}, saw {events:?}"
+	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watches_multiple_roots_simultaneously() {
+	// One FileWatcher rooted at two independent trees must surface events from
+	// both, not just the first registered root.
+	let tmp_a = TempDir::new().unwrap();
+	let tmp_b = TempDir::new().unwrap();
+	let root_a = tmp_a.path().to_path_buf();
+	let root_b = tmp_b.path().to_path_buf();
+	let mut w =
+		FileWatcher::new(vec![root_a.clone(), root_b.clone()], IgnoreRules::empty()).unwrap();
+	tokio::time::sleep(Duration::from_millis(100)).await;
+
+	let file_a = root_a.join("a.txt");
+	let file_b = root_b.join("b.txt");
+	tokio::fs::write(&file_a, b"a").await.unwrap();
+	tokio::fs::write(&file_b, b"b").await.unwrap();
+
+	let both = |evs: &[WatchEvent]| {
+		let a = has_kind(evs, &file_a, |k| matches!(k, WatchKind::Created | WatchKind::Modified));
+		let b = has_kind(evs, &file_b, |k| matches!(k, WatchKind::Created | WatchKind::Modified));
+		a && b
+	};
+	let events = collect_until(&mut w, POLL_BUDGET, both).await;
+	assert!(
+		both(&events),
+		"expected a create/modify event under each root, saw {events:?}"
 	);
 }
 

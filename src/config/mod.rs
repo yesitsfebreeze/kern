@@ -25,8 +25,8 @@ pub use gnn::GnnConfig;
 pub use gossip::GossipConfig;
 pub use graph::GraphConfig;
 pub use ingest::IngestConfig;
-pub use journal::JournalConfig;
-pub use reason::ReasonConfig;
+pub use journal::{DEFAULT_MAX_TODAY_BYTES, DEFAULT_RETAIN_DAYS, JournalConfig};
+pub use reason::{DEFAULT_REASON_MODEL, ReasonConfig};
 pub use retrieval::{ModeWeights, RetrievalConfig};
 pub use serve::ServeConfig;
 pub use tick::TickConfig;
@@ -61,25 +61,8 @@ pub struct Config {
 
 impl Default for Config {
 	fn default() -> Self {
-		let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-		Self {
-			data_dir: cwd.join(".kern").to_string_lossy().into_owned(),
-			log_level: "info".into(),
-			embed: EmbedConfig::default(),
-			reason: ReasonConfig::default(),
-			answer: AnswerConfig::default(),
-			serve: ServeConfig::default(),
-			retrieval: RetrievalConfig::default(),
-			ingest: IngestConfig::default(),
-			gossip: GossipConfig::default(),
-			tick: TickConfig::default(),
-			heat: HeatConfig::defaults(),
-			gnn: GnnConfig::default(),
-			watcher: WatcherConfig::default(),
-			capture: CaptureConfig::default(),
-			graph: GraphConfig::default(),
-			journal: JournalConfig::default(),
-		}
+		let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+		Self::default_in(&cwd)
 	}
 }
 
@@ -99,6 +82,31 @@ fn anchor_data_dir(data_dir: &str, cwd: &Path) -> String {
 }
 
 impl Config {
+	/// [`Default`], but with an explicit working directory instead of reading the
+	/// process-wide `current_dir()`. Deterministic for tests and for callers that
+	/// already know their root; `Config::default()` delegates here with the live
+	/// cwd. Only `data_dir` depends on `cwd`; every other field is a fixed baseline.
+	pub fn default_in(cwd: &Path) -> Self {
+		Self {
+			data_dir: cwd.join(".kern").to_string_lossy().into_owned(),
+			log_level: "info".into(),
+			embed: EmbedConfig::default(),
+			reason: ReasonConfig::default(),
+			answer: AnswerConfig::default(),
+			serve: ServeConfig::default(),
+			retrieval: RetrievalConfig::default(),
+			ingest: IngestConfig::default(),
+			gossip: GossipConfig::default(),
+			tick: TickConfig::default(),
+			heat: HeatConfig::default(),
+			gnn: GnnConfig::default(),
+			watcher: WatcherConfig::default(),
+			capture: CaptureConfig::default(),
+			graph: GraphConfig::default(),
+			journal: JournalConfig::default(),
+		}
+	}
+
 	pub fn load(cwd: &Path) -> Result<Self, config_io::Error> {
 		// kern owns its own paths. User scope: <XDG_CONFIG>/kern/kern.toml
 		// (absent is fine). Project scope: <cwd>/.kern/kern.toml.
@@ -133,9 +141,19 @@ impl Config {
 		if self.embed.model.is_empty() {
 			return Err("embed.model is required".into());
 		}
+		// Section invariants: each sub-config validates its own ranges. Prefix the
+		// section name so a bad value reports where it lives.
+		self.ingest.validate().map_err(|e| format!("ingest: {e}"))?;
+		self.capture.validate().map_err(|e| format!("capture: {e}"))?;
 		Ok(())
 	}
 
+	/// Endpoint resolution precedence (applies to both URL and key):
+	/// `reason_*` uses `[reason]` when set, else falls back to `[embed]`; `answer_*`
+	/// uses `[answer]` when set, else falls back to the resolved `reason_*` (which in
+	/// turn falls back to embed). So a single-Ollama deployment can fill in only
+	/// `[embed]` and leave the reason/answer URLs empty — they all resolve to the
+	/// embed endpoint, with each section still free to override just the model.
 	pub fn reason_url(&self) -> &str {
 		if self.reason.url.is_empty() {
 			&self.embed.url
@@ -207,5 +225,33 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let start = dir.path().canonicalize().unwrap();
 		assert_eq!(Config::resolve_root(&start), start);
+	}
+
+	#[test]
+	fn default_in_pins_data_dir_to_the_given_cwd_deterministically() {
+		let cwd = Path::new("some_project_root");
+		let cfg = Config::default_in(cwd);
+		assert_eq!(cfg.data_dir, cwd.join(".kern").to_string_lossy());
+		assert_eq!(cfg.log_level, "info", "baseline fields are independent of cwd");
+		// No process state read → two calls with the same cwd are identical.
+		assert_eq!(Config::default_in(cwd).data_dir, cfg.data_dir);
+	}
+
+	#[test]
+	fn validate_requires_embed_and_surfaces_sub_config_invariants() {
+		let cfg = Config::default_in(Path::new("x"));
+		assert!(cfg.validate().is_ok(), "shipped defaults validate");
+
+		let mut no_embed = Config::default_in(Path::new("x"));
+		no_embed.embed.url = String::new();
+		assert!(no_embed.validate().unwrap_err().contains("embed.url"));
+
+		// A bad ingest knob now propagates through the top-level validate, tagged
+		// with its section.
+		let mut bad_ingest = Config::default_in(Path::new("x"));
+		bad_ingest.ingest.rephrase_lower = 0.9;
+		bad_ingest.ingest.rephrase_upper = 0.8;
+		let err = bad_ingest.validate().unwrap_err();
+		assert!(err.contains("ingest"), "sub-config error is surfaced + tagged: {err}");
 	}
 }

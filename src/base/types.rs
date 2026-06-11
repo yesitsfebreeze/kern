@@ -461,6 +461,31 @@ pub struct Kern {
 	pub last_access: Option<SystemTime>,
 }
 
+/// Wall-clock nonce (nanoseconds since the epoch) that keeps generated kern ids
+/// unique across rapid successive creations. Isolated here so the only
+/// non-deterministic input to id derivation is a single, named call.
+fn now_nanos() -> u128 {
+	SystemTime::now()
+		.duration_since(SystemTime::UNIX_EPOCH)
+		.unwrap_or_default()
+		.as_nanos()
+}
+
+/// Derive an unnamed kern's id from its parent and a uniqueness nonce. Pure —
+/// split out of `new_unnamed` so the id scheme is deterministic for a fixed
+/// `(parent_id, nonce)` and can be unit-tested without mocking the clock (the
+/// public ctor supplies `now_nanos()`).
+fn unnamed_kern_id(parent_id: &str, nonce_nanos: u128) -> String {
+	util::content_hash(&format!("{parent_id}{nonce_nanos}"))
+}
+
+/// Derive a named child's id from parent, anchor name, and nonce. Pure (see
+/// `unnamed_kern_id`); the name is folded into the hash so two anchors with
+/// different names under the same parent never collide.
+fn named_child_kern_id(parent_id: &str, name: &str, nonce_nanos: u128) -> String {
+	util::content_hash(&format!("{parent_id}{name}{nonce_nanos}"))
+}
+
 impl Kern {
 	pub fn new(id: impl Into<String>, parent_id: impl Into<String>) -> Self {
 		Self {
@@ -478,15 +503,7 @@ impl Kern {
 	}
 
 	pub fn new_unnamed(parent_id: &str, root_id: &str) -> Self {
-		let id = util::content_hash(&format!(
-			"{}{}",
-			parent_id,
-			SystemTime::now()
-				.duration_since(SystemTime::UNIX_EPOCH)
-				.unwrap_or_default()
-				.as_nanos()
-		));
-		let mut k = Self::new(id, parent_id);
+		let mut k = Self::new(unnamed_kern_id(parent_id, now_nanos()), parent_id);
 		k.root_id = root_id.to_string();
 		k
 	}
@@ -501,16 +518,7 @@ impl Kern {
 		name: &str,
 		vec: Vec<f64>,
 	) -> Self {
-		let id = util::content_hash(&format!(
-			"{}{}{}",
-			parent_id,
-			name,
-			SystemTime::now()
-				.duration_since(SystemTime::UNIX_EPOCH)
-				.unwrap_or_default()
-				.as_nanos()
-		));
-		let mut k = Self::new(id, parent_id);
+		let mut k = Self::new(named_child_kern_id(parent_id, name, now_nanos()), parent_id);
 		k.root_id = root_id.to_string();
 		k.anchor_text = name.to_string();
 		k.anchor_vec = vec;
@@ -639,6 +647,73 @@ mod tests {
 		r.set_text("new edge".into());
 		assert_eq!(r.text, "new edge");
 		assert!(r.dirty);
+	}
+
+	#[test]
+	fn conf_mean_and_variance_handle_a_zero_total_prior() {
+		// alpha = beta = 0 is a degenerate prior: mean falls back to 0.5, var to 0.
+		let e = Entity { conf_alpha: 0.0, conf_beta: 0.0, ..Default::default() };
+		assert_eq!(e.conf_mean(), 0.5);
+		assert_eq!(e.conf_variance(), 0.0);
+	}
+
+	#[test]
+	fn conf_mean_and_variance_for_a_beta_prior() {
+		// Beta(2,1): mean = a/(a+b) = 2/3; var = ab / ((a+b)^2 (a+b+1)) = 2/36.
+		let e = Entity { conf_alpha: 2.0, conf_beta: 1.0, ..Default::default() };
+		assert!((e.conf_mean() - 2.0 / 3.0).abs() < 1e-12);
+		assert!((e.conf_variance() - 2.0 / 36.0).abs() < 1e-12);
+	}
+
+	#[test]
+	fn kern_is_dead_only_when_unnamed_and_empty() {
+		let empty_unnamed = Kern::new("k", "");
+		assert!(empty_unnamed.is_dead(), "unnamed + no entities -> dead");
+
+		let mut named = Kern::new("k2", "");
+		named.anchor_text = "topic".into();
+		assert!(!named.is_dead(), "a name keeps an empty kern alive");
+
+		let mut with_thought = Kern::new("k3", "");
+		with_thought.entities.insert("e".into(), Entity { id: "e".into(), ..Default::default() });
+		assert!(!with_thought.is_dead(), "an entity keeps an unnamed kern alive");
+	}
+
+	#[test]
+	fn kern_has_anchor_requires_both_text_and_vector() {
+		let mut k = Kern::new("k", "");
+		assert!(!k.has_anchor(), "fresh kern has no anchor");
+		k.anchor_text = "topic".into();
+		assert!(!k.has_anchor(), "text without a vector is not a full anchor");
+		k.anchor_vec = vec![0.1, 0.2];
+		assert!(k.has_anchor(), "text + vector -> anchored");
+	}
+
+	#[test]
+	fn new_named_child_sets_anchor_parent_and_root() {
+		let k = Kern::new_named_child("parent", "rootid", "generic", vec![0.5, 0.5]);
+		assert_eq!(k.parent, "parent");
+		assert_eq!(k.root_id, "rootid");
+		assert_eq!(k.anchor_text, "generic");
+		assert_eq!(k.anchor_vec, vec![0.5, 0.5]);
+		assert!(k.is_named() && k.has_anchor() && !k.is_dead());
+		assert!(!k.id.is_empty(), "id is the content hash, never empty");
+	}
+
+	#[test]
+	fn kern_id_derivation_is_deterministic_and_input_sensitive() {
+		// Deterministic for a fixed (parent, nonce) — the property that the bare
+		// SystemTime::now() call previously made un-testable.
+		assert_eq!(unnamed_kern_id("p", 42), unnamed_kern_id("p", 42));
+		assert_eq!(named_child_kern_id("p", "code", 9), named_child_kern_id("p", "code", 9));
+		// The nonce disambiguates rapid successive creations under one parent.
+		assert_ne!(unnamed_kern_id("p", 1), unnamed_kern_id("p", 2));
+		// Parent and anchor name both feed the hash.
+		assert_ne!(unnamed_kern_id("a", 7), unnamed_kern_id("b", 7));
+		assert_ne!(named_child_kern_id("p", "code", 9), named_child_kern_id("p", "docs", 9));
+		// Ids are non-empty content hashes.
+		assert!(!unnamed_kern_id("p", 0).is_empty());
+		assert!(!named_child_kern_id("p", "x", 0).is_empty());
 	}
 
 	#[test]

@@ -21,11 +21,18 @@ pub struct ReasonHit {
 	pub score: f64,
 }
 
+/// Weight on the raw content-index score when a node is found in BOTH indices.
+const CONTENT_BLEND: f64 = 0.4;
+/// Weight on the GNN re-embedding score in the same case. Larger than
+/// [`CONTENT_BLEND`] because the learned re-embedding is trusted more; the two
+/// sum to 1.0.
+const GNN_BLEND: f64 = 0.6;
+
 /// Merge content-index (`primary`) and GNN-index (`gnn`) hits into a single
-/// ranked entity list. A node present in both blends `0.4*content + 0.6*gnn`
-/// (the learned re-embedding is trusted more); a node in only one keeps that
-/// score. Shared by [`search_all_unlocked`] and [`search_all_filtered`] so the
-/// fusion + ranking lives in exactly one place.
+/// ranked entity list. A node present in both blends
+/// `CONTENT_BLEND*content + GNN_BLEND*gnn`; a node in only one keeps that score.
+/// Shared by [`search_all_unlocked`] and [`search_all_filtered`] so the fusion +
+/// ranking lives in exactly one place.
 fn merge_hits(primary: Vec<HnswHit>, gnn: Vec<HnswHit>, k: usize) -> Vec<EntityHit> {
 	let mut scores = std::collections::HashMap::new();
 	for h in primary {
@@ -34,7 +41,7 @@ fn merge_hits(primary: Vec<HnswHit>, gnn: Vec<HnswHit>, k: usize) -> Vec<EntityH
 	for h in gnn {
 		let entry = scores.entry(h.id).or_insert(0.0);
 		if *entry > 0.0 {
-			*entry = 0.4 * *entry + 0.6 * h.score;
+			*entry = CONTENT_BLEND * *entry + GNN_BLEND * h.score;
 		} else {
 			*entry = h.score;
 		}
@@ -189,6 +196,41 @@ mod tests {
 	fn search_all_filtered_reject_all_is_empty() {
 		let g = populated();
 		assert!(search_all_filtered(&g, &[1.0, 0.0, 0.0], 5, &|_| false).is_empty());
+	}
+
+	#[test]
+	fn search_reasons_ranks_by_proximity_and_guards_empty() {
+		let mut g = GraphGnn::new();
+		g.reason_idx.insert("r_x".into(), vec![1.0, 0.0]);
+		g.reason_idx.insert("r_y".into(), vec![0.0, 1.0]);
+
+		let hits = search_reasons_all_unlocked(&g, &[1.0, 0.0], 5);
+		assert!(!hits.is_empty(), "reason search returns hits");
+		assert_eq!(hits[0].reason_id, "r_x", "closest reason ranks first");
+		// Empty index OR empty query -> empty, no panic.
+		assert!(search_reasons_all_unlocked(&GraphGnn::new(), &[1.0, 0.0], 5).is_empty());
+		assert!(search_reasons_all_unlocked(&g, &[], 5).is_empty());
+	}
+
+	#[test]
+	fn find_entity_resolves_through_the_ref_indirection_path() {
+		use crate::base::types::{Entity, EntityRef, Kern};
+		// Entity "real" lives in kern "kb". Kern "ka" only holds a *ref* under a
+		// different key ("alias") pointing at it. Looking up "alias" must miss the
+		// direct-entity paths and resolve via kern.refs -> ref_kern.entities.
+		let mut g = GraphGnn::new();
+		let mut kb = Kern::new("kb", "");
+		kb.entities.insert("real".into(), Entity { id: "real".into(), ..Default::default() });
+		let mut ka = Kern::new("ka", "");
+		ka.refs.insert("alias".into(), EntityRef { kern_id: "kb".into(), entity_id: "real".into() });
+		g.kerns.insert("kb".into(), kb);
+		g.kerns.insert("ka".into(), ka);
+
+		let (ent, kern_id) = find_entity(&g, "alias").expect("resolved via ref path");
+		assert_eq!(ent.id, "real", "ref resolves to the target entity");
+		assert_eq!(kern_id, "kb", "returns the entity's home kern, not the ref's");
+		// A bogus id hits none of the three paths -> None.
+		assert!(find_entity(&g, "nope").is_none());
 	}
 
 	#[test]

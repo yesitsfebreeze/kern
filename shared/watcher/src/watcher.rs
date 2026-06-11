@@ -4,7 +4,7 @@ use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
 use notify::event::{CreateKind, ModifyKind, RemoveKind, RenameMode};
-use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -48,7 +48,6 @@ impl FileWatcher {
 				// Best-effort: if the receiver is gone we're shutting down.
 				let _ = raw_tx.send(res);
 			})?;
-		notify_watcher = configure(notify_watcher);
 
 		for root in &roots {
 			notify_watcher.watch(root, RecursiveMode::Recursive)?;
@@ -71,13 +70,6 @@ impl FileWatcher {
 	pub fn receiver(&mut self) -> &mut mpsc::UnboundedReceiver<WatchEvent> {
 		&mut self.rx
 	}
-}
-
-fn configure(w: RecommendedWatcher) -> RecommendedWatcher {
-	// Keep default config — `Config::default()` is what `recommended_watcher`
-	// already installs. Function exists as a hook for future tuning.
-	let _ = Config::default();
-	w
 }
 
 fn spawn_coalescer(
@@ -153,9 +145,13 @@ fn flush_due(
 	out_tx: &mpsc::UnboundedSender<WatchEvent>,
 ) {
 	let now = Instant::now();
+	// Collect only the due keys (the borrow checker forbids removing from
+	// `pending` while iterating it). Just the `PathBuf` keys are cloned — never
+	// the `Pending` values — so this stays cheap on a large pending set.
 	let due: Vec<PathBuf> = pending
 		.iter()
-		.filter_map(|(k, v)| if v.deadline <= now { Some(k.clone()) } else { None })
+		.filter(|(_, v)| v.deadline <= now)
+		.map(|(k, _)| k.clone())
 		.collect();
 	for key in due {
 		if let Some(p) = pending.remove(&key) {
@@ -187,7 +183,7 @@ fn translate(ev: Event, ignore: &IgnoreRules) -> Vec<WatchEvent> {
 		if ignore.is_ignored(&path) {
 			return None;
 		}
-		Some(WatchEvent { path, kind, ts })
+		Some(WatchEvent::new(path, kind, ts))
 	};
 
 	match ev.kind {
@@ -201,11 +197,8 @@ fn translate(ev: Event, ignore: &IgnoreRules) -> Vec<WatchEvent> {
 			if ignore.is_ignored(&to) && ignore.is_ignored(&from) {
 				return Vec::new();
 			}
-			vec![WatchEvent {
-				path: to.clone(),
-				kind: WatchKind::Renamed { from, to },
-				ts,
-			}]
+			// `new` pins path == to for Renamed (the path arg is overridden).
+			vec![WatchEvent::new(to.clone(), WatchKind::Renamed { from, to }, ts)]
 		}
 		EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
 			paths.into_iter().filter_map(|p| mk(p, WatchKind::Deleted)).collect()
@@ -221,5 +214,92 @@ fn translate(ev: Event, ignore: &IgnoreRules) -> Vec<WatchEvent> {
 		}
 		// Access / Any / Other: not actionable for ingest.
 		_ => Vec::new(),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn ev(kind: EventKind, paths: &[&str]) -> Event {
+		let mut e = Event::new(kind);
+		for p in paths {
+			e = e.add_path(PathBuf::from(p));
+		}
+		e
+	}
+
+	#[test]
+	fn translate_create_file_to_created() {
+		let out = translate(
+			ev(EventKind::Create(CreateKind::File), &["/a.txt"]),
+			&IgnoreRules::empty(),
+		);
+		assert_eq!(out.len(), 1);
+		assert_eq!(out[0].kind, WatchKind::Created);
+		assert_eq!(out[0].path, PathBuf::from("/a.txt"));
+	}
+
+	#[test]
+	fn translate_rename_both_collapses_to_single_renamed() {
+		let kind = EventKind::Modify(ModifyKind::Name(RenameMode::Both));
+		let out = translate(ev(kind, &["/old.txt", "/new.txt"]), &IgnoreRules::empty());
+		assert_eq!(out.len(), 1, "Both -> exactly one Renamed");
+		match &out[0].kind {
+			WatchKind::Renamed { from, to } => {
+				assert_eq!(from, &PathBuf::from("/old.txt"));
+				assert_eq!(to, &PathBuf::from("/new.txt"));
+			}
+			other => panic!("expected Renamed, got {other:?}"),
+		}
+		// `path` is the new location (what downstream ingest reads).
+		assert_eq!(out[0].path, PathBuf::from("/new.txt"));
+	}
+
+	#[test]
+	fn translate_rename_both_with_wrong_arity_is_not_a_rename() {
+		// The `paths.len() == 2` guard: a Both event with a single path falls
+		// through to the generic Modify arm (Modified), never a Renamed.
+		let kind = EventKind::Modify(ModifyKind::Name(RenameMode::Both));
+		let out = translate(ev(kind, &["/only.txt"]), &IgnoreRules::empty());
+		assert_eq!(out.len(), 1);
+		assert_eq!(out[0].kind, WatchKind::Modified);
+	}
+
+	#[test]
+	fn translate_rename_half_events_split_to_delete_and_create() {
+		let from = translate(
+			ev(EventKind::Modify(ModifyKind::Name(RenameMode::From)), &["/g.txt"]),
+			&IgnoreRules::empty(),
+		);
+		assert_eq!(from[0].kind, WatchKind::Deleted, "From half -> Deleted");
+		let to = translate(
+			ev(EventKind::Modify(ModifyKind::Name(RenameMode::To)), &["/h.txt"]),
+			&IgnoreRules::empty(),
+		);
+		assert_eq!(to[0].kind, WatchKind::Created, "To half -> Created");
+	}
+
+	#[test]
+	fn translate_generic_modify_and_remove_map_to_expected_kinds() {
+		let m = translate(
+			ev(EventKind::Modify(ModifyKind::Any), &["/m.txt"]),
+			&IgnoreRules::empty(),
+		);
+		assert_eq!(m[0].kind, WatchKind::Modified);
+		let r = translate(
+			ev(EventKind::Remove(RemoveKind::File), &["/r.txt"]),
+			&IgnoreRules::empty(),
+		);
+		assert_eq!(r[0].kind, WatchKind::Deleted);
+	}
+
+	#[test]
+	fn translate_non_actionable_access_events_are_dropped() {
+		let out = translate(
+			ev(EventKind::Access(notify::event::AccessKind::Any), &["/a.txt"]),
+			&IgnoreRules::empty(),
+		);
+		assert!(out.is_empty(), "Access events produce no WatchEvent");
 	}
 }

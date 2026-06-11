@@ -39,7 +39,7 @@ pub struct EvalConfig {
 }
 
 /// Running totals for one LoCoMo category.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, serde::Serialize)]
 pub struct CatAgg {
 	pub n: usize,
 	/// Sum of token-F1 over answerable questions in this category.
@@ -53,6 +53,7 @@ pub struct CatAgg {
 }
 
 /// Aggregated result of a run.
+#[derive(serde::Serialize)]
 pub struct EvalReport {
 	pub per_category: BTreeMap<u8, CatAgg>,
 	pub latencies_ms: Vec<u128>,
@@ -169,6 +170,14 @@ pub async fn run_eval(cfg: &EvalConfig) -> Result<EvalReport, String> {
 	let rcfg = RetrievalConfig::default();
 	let icfg = Config { dedup_threshold: cfg.dedup_threshold, ..Default::default() };
 
+	let eval_ctx = EvalContext {
+		client: &client,
+		judge: &judge,
+		llm: &llm,
+		embed_fn: &embed_fn,
+		rcfg: &rcfg,
+	};
+
 	let mut report = EvalReport::new();
 
 	for (i, sample) in samples.iter().take(take).enumerate() {
@@ -182,8 +191,7 @@ pub async fn run_eval(cfg: &EvalConfig) -> Result<EvalReport, String> {
 		report.total_claims += claims;
 		report.n_samples += 1;
 
-		eval_sample(&graph, &client, &judge, &llm, &embed_fn, &rcfg, sample, cfg.max_qa_per_sample, &mut report)
-			.await;
+		eval_sample(&eval_ctx, &graph, sample, cfg.max_qa_per_sample, &mut report).await;
 		eprintln!("[{}/{}] done (total queries so far: {})", i + 1, take, report.n_queries);
 	}
 
@@ -252,22 +260,30 @@ async fn ingest_sample(worker: &Worker, llm: &LlmFunc, sample: &Sample, icfg: &C
 	total
 }
 
+/// Read-only shared dependencies for the eval loop: the answerer+embedder client,
+/// the judge client, the distill/answer LLM closure, the sync embed closure, and
+/// retrieval config. Built once in [`run_eval`] and borrowed by [`eval_sample`]
+/// so it takes a context plus the per-sample inputs instead of nine positional
+/// args (and drops its `too_many_arguments` allow).
+struct EvalContext<'a> {
+	client: &'a LlmClient,
+	judge: &'a LlmClient,
+	llm: &'a LlmFunc,
+	embed_fn: &'a EmbedFunc,
+	rcfg: &'a RetrievalConfig,
+}
+
 /// Answer + score every QA probe for one sample.
-#[allow(clippy::too_many_arguments)]
 async fn eval_sample(
+	ctx: &EvalContext<'_>,
 	graph: &Arc<RwLock<GraphGnn>>,
-	client: &LlmClient,
-	judge: &LlmClient,
-	llm: &LlmFunc,
-	embed_fn: &EmbedFunc,
-	rcfg: &RetrievalConfig,
 	sample: &Sample,
 	max_qa: Option<usize>,
 	report: &mut EvalReport,
 ) {
 	let limit = max_qa.unwrap_or(sample.qa.len());
 	for q in sample.qa.iter().take(limit) {
-		let qvec = match client.embed(&q.question).await {
+		let qvec = match ctx.client.embed(&q.question).await {
 			Ok(v) => v,
 			Err(_) => continue, // embed outage; skip this probe
 		};
@@ -275,7 +291,7 @@ async fn eval_sample(
 		let t0 = Instant::now();
 		let res = {
 			let g = crate::base::locks::read_recovered(graph);
-			answer::query(&g, rcfg, &qvec, &q.question, Mode::Hybrid, Some(llm), Some(embed_fn), None)
+			answer::query(&g, ctx.rcfg, &qvec, &q.question, Mode::Hybrid, Some(ctx.llm), Some(ctx.embed_fn), None)
 		};
 		report.latencies_ms.push(t0.elapsed().as_millis());
 
@@ -294,7 +310,8 @@ async fn eval_sample(
 		} else if let Some(gold) = q.answer.as_deref() {
 			agg.f1 += locomo::token_f1(pred, gold);
 			agg.rouge += locomo::rouge_l(pred, gold);
-			let verdict = judge
+			let verdict = ctx
+				.judge
 				.complete(&locomo::judge_prompt(&q.question, gold, pred))
 				.await
 				.map(|r| locomo::parse_judge_verdict(&r))
@@ -397,5 +414,68 @@ mod tests {
 			"[]".to_string()
 		};
 		distill_locomo("Bob: I love Rust.", &llm);
+	}
+
+	use super::locomo::{Session, Turn};
+
+	/// Throwaway Ollama-native /api/embed stub: any input -> a fixed 3-dim vector.
+	async fn serve_embed() -> String {
+		let app = axum::Router::new().route(
+			"/api/embed",
+			axum::routing::post(|_b: axum::Json<serde_json::Value>| async move {
+				axum::Json(serde_json::json!({ "embeddings": [[0.1, 0.2, 0.3]] }))
+			}),
+		);
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let addr = listener.local_addr().unwrap();
+		tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+		format!("http://{addr}")
+	}
+
+	/// Live-path coverage for ingest_sample: a real Worker (its own async pipeline)
+	/// ingests every distilled claim. The mock LLM is role-aware — distill prompts
+	/// carry the "DIALOGUE:" marker and receive a claims JSON array, while the chunk
+	/// splitter's prompts get an empty string and fall back to heuristic splitting —
+	/// and embeddings come from a local /api/embed stub, so no network/ollama is
+	/// touched. Asserts the claim is both counted and flows through the Worker into
+	/// the shared graph.
+	#[tokio::test]
+	async fn ingest_sample_distills_and_flows_claims_through_the_worker() {
+		let embed_url = serve_embed().await;
+		let embedder = LlmClient::new_embed_only(&embed_url, "embed-model");
+
+		let llm: LlmFunc = Arc::new(|p: &str| {
+			if p.contains("DIALOGUE:") {
+				r#"[{"text":"Alice prefers tea over coffee","kind":"preference"}]"#.to_string()
+			} else {
+				String::new()
+			}
+		});
+
+		let graph: Arc<RwLock<GraphGnn>> = Arc::new(RwLock::new(GraphGnn::new()));
+		let worker = Worker::new(graph.clone(), embedder, Some(llm.clone()), None);
+
+		let sample = Sample {
+			sample_id: "t1".into(),
+			sessions: vec![Session {
+				index: 1,
+				date_time: "1 Jan 2024".into(),
+				turns: vec![Turn {
+					speaker: "Alice".into(),
+					dia_id: "d1".into(),
+					text: "I prefer tea.".into(),
+				}],
+			}],
+			qa: Vec::new(),
+		};
+		let icfg = Config { dedup_threshold: 0.95, ..Default::default() };
+
+		let claims = ingest_sample(&worker, &llm, &sample, &icfg).await;
+		assert_eq!(claims, 1, "the single distilled claim is counted");
+
+		// The claim flowed through the canonical Worker into the shared graph.
+		let g = crate::base::locks::read_recovered(&graph);
+		let entities: usize = g.all().iter().map(|k| k.entities.len()).sum();
+		assert!(entities > 0, "worker placed at least the claim document into the graph");
 	}
 }

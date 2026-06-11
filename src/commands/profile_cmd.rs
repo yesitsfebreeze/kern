@@ -95,19 +95,10 @@ pub(super) async fn cmd_profile(cfg: &crate::config::Config, text: &str, no_llm:
 			eprintln!("no reason endpoint configured; skipping llm stages");
 		}
 	} else {
-		let complete = llm_client.complete_func();
+		// One complete-closure shared by the profiled query and distill (was two
+		// complete_func() calls). The embed closure comes from the shared factory.
 		let llm_fn: crate::retrieval::LlmFunc = Arc::new(llm_client.complete_func());
-		let embed_fn: crate::retrieval::EmbedFunc = {
-			let c = llm_client.clone();
-			Arc::new(move |t: &str| {
-				let c = c.clone();
-				let t = t.to_string();
-				match crate::llm::block_on_in_place(c.embed(&t)) {
-					Some(r) => r.map_err(|e| e.to_string()),
-					None => Err("no runtime".to_string()),
-				}
-			})
-		};
+		let embed_fn: crate::retrieval::EmbedFunc = super::embed_fn(&llm_client);
 
 		let (_, p) = crate::retrieval::answer::query_profiled(
 			&g,
@@ -122,7 +113,7 @@ pub(super) async fn cmd_profile(cfg: &crate::config::Config, text: &str, no_llm:
 		profiles.push(renamed(p, "query hybrid (llm)"));
 
 		let t = Instant::now();
-		let claims = crate::ingest::distill::distill(DISTILL_SAMPLE, &complete);
+		let claims = crate::ingest::distill::distill(DISTILL_SAMPLE, &*llm_fn);
 		let n = claims.map(|c| c.len()).unwrap_or(0);
 		profiles.push(flat(&format!("distill ({n} claims)"), ms(t)));
 	}
@@ -131,7 +122,7 @@ pub(super) async fn cmd_profile(cfg: &crate::config::Config, text: &str, no_llm:
 	let digest = crate::retrieval::digest::build_digest(
 		&g,
 		cfg.capture.digest_k,
-		cfg.capture.digest_min_trust as f64,
+		cfg.capture.digest_min_trust,
 		cfg.capture.digest_token_budget,
 	);
 	profiles.push(flat(&format!("digest build ({} bytes)", digest.len()), ms(t)));
@@ -139,4 +130,49 @@ pub(super) async fn cmd_profile(cfg: &crate::config::Config, text: &str, no_llm:
 	println!("kern profile — {kerns} kerns, {entities} entities, query: {text:?}");
 	println!();
 	print!("{}", render_timeline(&profiles, TIMELINE_WIDTH));
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use serde_json::{json, Value};
+
+	/// Spawn a throwaway HTTP server on an ephemeral port; returns its base URL.
+	async fn serve(app: axum::Router) -> String {
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let addr = listener.local_addr().unwrap();
+		tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+		format!("http://{addr}")
+	}
+
+	/// The no-LLM path must run end-to-end without panicking on an empty graph:
+	/// load → cold/warm embed → vector search → the three no-LLM query modes →
+	/// digest build. The reason/answer endpoints are never touched (no_llm=true),
+	/// so only `/api/embed` is stubbed; everything downstream runs on a fresh,
+	/// empty graph backed by a temp data dir.
+	#[tokio::test]
+	async fn cmd_profile_no_llm_path_does_not_panic() {
+		// Stub Ollama-native /api/embed: any input -> a fixed 3-dim embedding.
+		let app = axum::Router::new().route(
+			"/api/embed",
+			axum::routing::post(|_body: axum::Json<Value>| async move {
+				axum::Json(json!({ "embeddings": [[0.1, 0.2, 0.3]] }))
+			}),
+		);
+		let embed_url = serve(app).await;
+
+		// Isolated empty data dir so load_graph yields a fresh graph (and Store::open
+		// has a real directory to bind).
+		let dir = std::env::temp_dir().join(format!("kern_profile_smoke_{}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+
+		let mut cfg = crate::config::Config::default();
+		cfg.data_dir = dir.to_string_lossy().into_owned();
+		cfg.embed.url = embed_url;
+
+		// no_llm=true → the reason/answer stages are skipped entirely.
+		cmd_profile(&cfg, "smoke test query", true).await;
+
+		let _ = std::fs::remove_dir_all(&dir);
+	}
 }

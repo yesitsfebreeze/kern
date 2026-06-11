@@ -1,3 +1,19 @@
+//! Journal entry and its event-kind taxonomy.
+//!
+//! [`Kind`] tags every [`Entry`]. Most variants are unit-like — their detail
+//! lives in `Entry.payload` as JSON — but five carry their data INLINE in the
+//! variant itself: `Edit { target_ts_ms, new_text }`, `Fork { from_ts_ms,
+//! new_fork_id }`, and the fork-lifecycle trio `ForkOpen { fork_id, parent }` /
+//! `ForkResume { fork_id }` / `ForkClose { fork_id }`. Inline data lets a
+//! consumer replay a journal slice without a second lookup into `payload`.
+//!
+//! That inline data has a maintenance consequence: the SQLite history stores
+//! `kind` as a short text tag, not the full serde enum, so `history.rs`'s
+//! `kind_tag` / `kind_from_tag` round-trip those inline fields by hand. Any
+//! change to an inline-data variant's shape must be mirrored there. The serde
+//! round-trip is covered by the tests in this file; the tag round-trip lives in
+//! `history.rs`.
+
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -76,7 +92,7 @@ impl Entry {
 			key: key.into(),
 			payload,
 		}
-}
+	}
 }
 
 pub trait Sink: Send + Sync {
@@ -86,9 +102,7 @@ pub trait Sink: Send + Sync {
 pub struct NullSink;
 
 impl Sink for NullSink {
-	fn emit(&self, _entry: Entry) {
-
-}
+	fn emit(&self, _entry: Entry) {}
 }
 
 pub fn now_ms() -> u64 {
@@ -96,4 +110,49 @@ pub fn now_ms() -> u64 {
 		.duration_since(UNIX_EPOCH)
 		.map(|d| d.as_millis() as u64)
 		.unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Serialize an `Entry` carrying `kind`, deserialize it back, and return the
+	/// recovered kind after asserting the envelope fields survived intact.
+	fn roundtrip_kind(kind: Kind) -> Kind {
+		let entry = Entry::new(kind, "k", serde_json::json!({ "x": 1 }));
+		let bytes = serde_json::to_vec(&entry).expect("serialize");
+		let back: Entry = serde_json::from_slice(&bytes).expect("deserialize");
+		assert_eq!(back.v, SCHEMA_VERSION);
+		assert_eq!(back.key, "k");
+		assert_eq!(back.payload, serde_json::json!({ "x": 1 }));
+		back.kind
+	}
+
+	#[test]
+	fn entry_round_trips_inline_data_variants() {
+		// The inline-data variants carry their fields in the enum, so a serde
+		// regression (e.g. a renamed field) would silently corrupt replay.
+		assert_eq!(
+			roundtrip_kind(Kind::Edit { target_ts_ms: 42, new_text: "fixed".into() }),
+			Kind::Edit { target_ts_ms: 42, new_text: "fixed".into() }
+		);
+		assert_eq!(
+			roundtrip_kind(Kind::Fork { from_ts_ms: 7, new_fork_id: "nf".into() }),
+			Kind::Fork { from_ts_ms: 7, new_fork_id: "nf".into() }
+		);
+		assert_eq!(
+			roundtrip_kind(Kind::ForkOpen { fork_id: "f1".into(), parent: Some("p".into()) }),
+			Kind::ForkOpen { fork_id: "f1".into(), parent: Some("p".into()) }
+		);
+		// `parent: None` is a distinct serde shape worth covering too.
+		assert_eq!(
+			roundtrip_kind(Kind::ForkOpen { fork_id: "f2".into(), parent: None }),
+			Kind::ForkOpen { fork_id: "f2".into(), parent: None }
+		);
+	}
+
+	#[test]
+	fn entry_round_trips_a_unit_variant() {
+		assert_eq!(roundtrip_kind(Kind::TurnStart), Kind::TurnStart);
+	}
 }

@@ -1,8 +1,6 @@
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
 use rand::seq::SliceRandom;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
@@ -12,6 +10,7 @@ use crate::base::locks::{read_recovered, write_recovered};
 use super::ledger::Ledger;
 use super::seen::SeenSet;
 use super::sybil::RateClipper;
+use super::transport::{decode_msg, encode_msg, send_and_receive, send_msg};
 use super::types::*;
 
 pub type Handler = Arc<dyn Fn(GossipMessage) + Send + Sync>;
@@ -252,49 +251,6 @@ impl Node {
 			});
 		}
 	}
-}
-
-pub(super) async fn encode_msg(
-	stream: &mut TcpStream,
-	msg: &GossipMessage,
-) -> Result<(), std::io::Error> {
-	let bytes = bincode::serde::encode_to_vec(msg, bincode::config::standard())
-		.map_err(std::io::Error::other)?;
-	let len = (bytes.len() as u32).to_be_bytes();
-	stream.write_all(&len).await?;
-	stream.write_all(&bytes).await?;
-	stream.flush().await?;
-	Ok(())
-}
-
-pub(super) async fn decode_msg(stream: &mut TcpStream) -> Option<GossipMessage> {
-	let mut len_buf = [0u8; 4];
-	stream.read_exact(&mut len_buf).await.ok()?;
-	let len = u32::from_be_bytes(len_buf) as usize;
-	if len > 4 * 1024 * 1024 {
-		return None;
-	}
-	let mut buf = vec![0u8; len];
-	stream.read_exact(&mut buf).await.ok()?;
-	bincode::serde::decode_from_slice(&buf, bincode::config::standard()).ok().map(|(v, _)| v)
-}
-
-pub(super) async fn send_msg(addr: &str, msg: &GossipMessage) -> Result<(), std::io::Error> {
-	let mut stream = tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr))
-		.await
-		.map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "dial timeout"))??;
-	encode_msg(&mut stream, msg).await
-}
-
-async fn send_and_receive(addr: &str, msg: &GossipMessage) -> Option<GossipMessage> {
-	let mut stream = tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr))
-		.await
-		.ok()?
-		.ok()?;
-	encode_msg(&mut stream, msg).await.ok()?;
-	tokio::time::timeout(Duration::from_secs(5), decode_msg(&mut stream))
-		.await
-		.ok()?
 }
 
 fn now_nanos() -> u64 {

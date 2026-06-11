@@ -11,6 +11,16 @@ pub struct Cluster {
 	pub members: Vec<Entity>,
 }
 
+/// Greedy single-pass clustering: walk the thoughts in order, and for each
+/// not-yet-assigned thought start a new cluster seeded by it, pulling in every
+/// remaining thought whose cosine to the **seed** clears `KERN_COHESION_THRESHOLD`.
+///
+/// Note the centroid is fixed at the seed vector and does NOT evolve as members
+/// join — so clusters are biased toward the seed's direction rather than the
+/// emergent group mean, and membership depends on iteration order. This is a
+/// deliberate speed/simplicity trade for the tick path; a k-means-style evolving
+/// centroid would be more balanced but multi-pass. `max_sample` caps the working
+/// set so a huge kern can't make this O(n^2) blow up.
 pub fn vector_cluster(thoughts: &[&Entity], max_sample: usize) -> Vec<Cluster> {
 	let mut all: Vec<&Entity> = thoughts
 		.iter()
@@ -135,6 +145,13 @@ pub fn compute_centroid(members: &[Entity]) -> Vec<f64> {
 	centroid
 }
 
+/// Build the LLM prompt that asks for a one-phrase anchor label for a cluster.
+///
+/// For clusters larger than `MAX_SAMPLES`, only the thoughts nearest the
+/// centroid are included — the most representative members, which also bounds
+/// prompt-eval cost. The instruction demands the model reply with ONLY the
+/// phrase (no prefix, no trailing punctuation) so the response can be used
+/// verbatim as the anchor text; the sampled thoughts follow as a `- ` list.
 pub fn anchor_prompt(c: &Cluster) -> String {
 	const MAX_SAMPLES: usize = 10;
 	let members = if c.members.len() > MAX_SAMPLES {
@@ -155,11 +172,131 @@ pub fn anchor_prompt(c: &Cluster) -> String {
 		c.members.iter().collect()
 	};
 
+	use std::fmt::Write as _;
 	let mut sb = String::from("Summarize the core theme of these related thoughts in one concise phrase. Reply with ONLY the phrase, no prefix, no punctuation at the end:\n\n");
 	for t in members {
-		sb.push_str("- ");
-		sb.push_str(&t.text());
-		sb.push('\n');
+		// writeln! into a String is infallible; the Result is discarded.
+		let _ = writeln!(sb, "- {}", t.text());
 	}
 	sb
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn ent(id: &str, vector: Vec<f64>) -> Entity {
+		Entity { id: id.into(), vector, ..Default::default() }
+	}
+
+	#[test]
+	fn anchor_prompt_keeps_header_then_one_bullet_per_member() {
+		let c = Cluster {
+			members: vec![ent("a", vec![1.0]), ent("b", vec![1.0]), ent("c", vec![1.0])],
+		};
+		let p = anchor_prompt(&c);
+		assert!(
+			p.starts_with("Summarize the core theme of these related thoughts"),
+			"instruction header is preserved verbatim",
+		);
+		assert!(p.contains(":\n\n"), "blank line separates the header from the list");
+		assert_eq!(p.matches("\n- ").count(), 3, "exactly one `- ` bullet per member");
+		assert!(p.ends_with('\n'), "each bullet line is newline-terminated");
+	}
+
+	#[test]
+	fn compute_centroid_is_componentwise_mean() {
+		let m = vec![ent("a", vec![1.0, 0.0]), ent("b", vec![3.0, 2.0])];
+		assert_eq!(compute_centroid(&m), vec![2.0, 1.0]);
+	}
+
+	#[test]
+	fn compute_centroid_empty_is_empty() {
+		assert!(compute_centroid(&[]).is_empty());
+	}
+
+	#[test]
+	fn cohesion_of_identical_vectors_is_one() {
+		let m = vec![ent("a", vec![1.0, 0.0]), ent("b", vec![1.0, 0.0])];
+		assert!((cohesion(&m) - 1.0).abs() < 1e-9);
+	}
+
+	#[test]
+	fn cohesion_empty_is_zero() {
+		assert_eq!(cohesion(&[]), 0.0);
+	}
+
+	#[test]
+	fn vector_cluster_empty_input_yields_no_clusters() {
+		assert!(vector_cluster(&[], 100).is_empty());
+	}
+
+	#[test]
+	fn vector_cluster_identical_vectors_collapse_to_one() {
+		let m = vec![
+			ent("a", vec![1.0, 0.0]),
+			ent("b", vec![1.0, 0.0]),
+			ent("c", vec![1.0, 0.0]),
+		];
+		let refs: Vec<&Entity> = m.iter().collect();
+		let clusters = vector_cluster(&refs, 100);
+		assert_eq!(clusters.len(), 1, "identical vectors form a single cluster");
+		assert_eq!(clusters[0].members.len(), 3);
+	}
+
+	#[test]
+	fn vector_cluster_respects_max_sample() {
+		let m: Vec<Entity> = (0..5).map(|i| ent(&format!("e{i}"), vec![1.0, 0.0])).collect();
+		let refs: Vec<&Entity> = m.iter().collect();
+		let clusters = vector_cluster(&refs, 2);
+		let total: usize = clusters.iter().map(|c| c.members.len()).sum();
+		assert_eq!(total, 2, "only max_sample entities are considered");
+	}
+
+	#[test]
+	fn centroid_thought_picks_member_in_dominant_direction() {
+		// Two vectors point at [1,0], one at [0,1]; centroid leans toward [1,0].
+		let c = Cluster {
+			members: vec![
+				ent("a", vec![1.0, 0.0]),
+				ent("b", vec![1.0, 0.0]),
+				ent("c", vec![0.0, 1.0]),
+			],
+		};
+		let rep = centroid_thought(&c).expect("non-empty cluster has a representative");
+		assert!(rep.vector[0] > rep.vector[1], "representative aligns with the dominant direction");
+	}
+
+	#[test]
+	fn centroid_thought_empty_is_none() {
+		assert!(centroid_thought(&Cluster { members: vec![] }).is_none());
+	}
+
+	#[test]
+	fn is_core_cluster_false_when_anchor_empty() {
+		let c = Cluster { members: vec![ent("a", vec![1.0, 0.0])] };
+		assert!(!is_core_cluster(&c, &[]));
+	}
+
+	#[test]
+	fn best_cluster_prefers_larger_cohesive_cluster() {
+		// Both clusters are internally cohesive (identical members); the larger wins.
+		let small = Cluster { members: vec![ent("a", vec![1.0, 0.0]), ent("b", vec![1.0, 0.0])] };
+		let large = Cluster {
+			members: vec![
+				ent("c", vec![0.0, 1.0]),
+				ent("d", vec![0.0, 1.0]),
+				ent("e", vec![0.0, 1.0]),
+			],
+		};
+		let clusters = vec![small, large];
+		// Use explicit small thresholds (the public wrappers require >=10 members).
+		assert_eq!(best_cluster(&clusters, 2, 0.5), Some(1));
+	}
+
+	#[test]
+	fn best_cluster_none_below_min_size() {
+		let clusters = vec![Cluster { members: vec![ent("a", vec![1.0, 0.0])] }];
+		assert_eq!(best_cluster(&clusters, 2, 0.5), None);
+	}
 }

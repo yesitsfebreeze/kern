@@ -165,18 +165,31 @@ impl Client {
 		})
 	}
 
+	/// Shared request dispatch: POST `body` as JSON to `url` with `headers`,
+	/// applying an optional per-request timeout override, and map any non-2xx to
+	/// [`LlmError::Api`]. The single point every embed/reason request flows
+	/// through — the four call sites (`embed_batch`, `embed_single`, and both
+	/// branches of `complete`) previously inlined this identical block. Decoding
+	/// the success body stays with the caller because the paths parse different
+	/// shapes (`NativeEmbedResponse`, raw text, `ChatResponse`).
+	async fn post_checked<T: Serialize + ?Sized>(
+		&self,
+		url: &str,
+		headers: &HeaderMap,
+		body: &T,
+		timeout: Option<Duration>,
+	) -> Result<reqwest::Response, LlmError> {
+		let mut req = self.inner.http.post(url).headers(headers.clone()).json(body);
+		if let Some(t) = timeout {
+			req = req.timeout(t);
+		}
+		check_status(req.send().await?).await
+	}
+
 	pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f64>>, LlmError> {
 		let url = format!("{}/api/embed", self.inner.embed_url);
 		let body = self.embed_body(serde_json::json!(texts));
-		let resp = self
-			.inner
-			.http
-			.post(&url)
-			.headers(self.inner.embed_headers.clone())
-			.json(&body)
-			.send()
-			.await?;
-		let resp = check_status(resp).await?;
+		let resp = self.post_checked(&url, &self.inner.embed_headers, &body, None).await?;
 		// /api/embed preserves input order in `embeddings`, so no index sort needed.
 		let parsed: NativeEmbedResponse = resp.json().await?;
 		if parsed.embeddings.is_empty() {
@@ -188,15 +201,7 @@ impl Client {
 	async fn embed_single(&self, text: &str) -> Result<Vec<f64>, LlmError> {
 		let url = format!("{}/api/embed", self.inner.embed_url);
 		let body = self.embed_body(serde_json::json!(text));
-		let resp = self
-			.inner
-			.http
-			.post(&url)
-			.headers(self.inner.embed_headers.clone())
-			.json(&body)
-			.send()
-			.await?;
-		let resp = check_status(resp).await?;
+		let resp = self.post_checked(&url, &self.inner.embed_headers, &body, None).await?;
 		let parsed: NativeEmbedResponse = resp.json().await?;
 		parsed
 			.embeddings
@@ -225,15 +230,14 @@ impl Client {
 				"options": { "num_ctx": REASON_NUM_CTX, "num_gpu": 0 },
 			});
 			let resp = self
-				.inner
-				.http
-				.post(&url)
-				.headers(self.inner.reason_headers.clone())
-				.timeout(Duration::from_secs(600))
-				.json(&body)
-				.send()
+				.post_checked(
+					&url,
+					&self.inner.reason_headers,
+					&body,
+					Some(Duration::from_secs(600)),
+				)
 				.await?;
-			let text = check_status(resp).await?.text().await?;
+			let text = resp.text().await?;
 			// One `stream:false` object; `parse_chat_line` already knows this shape.
 			return parse_chat_line(text.trim_end())
 				.and_then(|cl| cl.content)
@@ -248,15 +252,7 @@ impl Client {
 				content: prompt,
 			}],
 		};
-		let resp = self
-			.inner
-			.http
-			.post(&url)
-			.headers(self.inner.reason_headers.clone())
-			.json(&body)
-			.send()
-			.await?;
-		let resp = check_status(resp).await?;
+		let resp = self.post_checked(&url, &self.inner.reason_headers, &body, None).await?;
 		let parsed: ChatResponse = resp.json().await?;
 		parsed
 			.choices
@@ -476,12 +472,20 @@ const REASON_NUM_CTX: u64 = 8192;
 /// the (large) CPU model's RAM between distillation runs rather than pinning it.
 const REASON_KEEP_ALIVE: &str = "2m";
 
+/// Host / port substrings that mark an endpoint as a local Ollama server. The
+/// loopback names plus Ollama's default port. NOTE: a Docker-bridged or
+/// non-standard-port Ollama (e.g. `http://ollama:11434` resolves the port, but a
+/// remapped `:8080` would not) is still classed as cloud and routed to `/v1`.
+/// Making this configurable per-endpoint is deferred — it needs a flag on
+/// [`Endpoint`] threaded from config, not just a constant.
+const OLLAMA_LOCAL_MARKERS: [&str; 3] = ["localhost", "127.0.0.1", ":11434"];
+
 /// Heuristic: is this endpoint a local Ollama server? Only Ollama honors the
 /// native `options.num_gpu`/`num_ctx`; cloud endpoints (OpenAI-compat) must stay
 /// on the `/v1` path. URLs are already normalized (trailing `/` and `/v1`
 /// stripped) before storage, so match on the loopback host / default port.
 fn is_local_ollama(url: &str) -> bool {
-	url.contains("localhost") || url.contains("127.0.0.1") || url.contains(":11434")
+	OLLAMA_LOCAL_MARKERS.iter().any(|m| url.contains(m))
 }
 
 /// One parsed line of an Ollama `/api/chat` response. `content` is the message
@@ -568,5 +572,91 @@ mod tests {
 			body: String::new()
 		}));
 		assert!(should_retry_single(&LlmError::EmptyEmbedding));
+	}
+
+	#[test]
+	fn local_ollama_markers_match_loopback_and_default_port() {
+		assert!(is_local_ollama("http://localhost"));
+		assert!(is_local_ollama("http://127.0.0.1:9999"));
+		assert!(is_local_ollama("http://ollama:11434"));
+		// A remote OpenAI-compat host is NOT local — must stay on /v1.
+		assert!(!is_local_ollama("https://api.openai.com"));
+	}
+
+	// -- embed batch-then-single fallback (stub server) --------------------
+
+	async fn serve(app: axum::Router) -> String {
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let addr = listener.local_addr().unwrap();
+		tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+		format!("http://{addr}")
+	}
+
+	/// `/api/embed` distinguishes a batch attempt (array `input`) from the single
+	/// retry (string `input`): the embed() fallback fires `embed_single` only
+	/// after a retry-worthy batch failure.
+	#[tokio::test]
+	async fn embed_falls_back_to_single_on_transient_batch_error() {
+		use axum::http::StatusCode;
+		let app = axum::Router::new().route(
+			"/api/embed",
+			axum::routing::post(|body: axum::Json<Value>| async move {
+				if body.0["input"].is_array() {
+					(StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({ "error": "busy" })))
+				} else {
+					(StatusCode::OK, axum::Json(serde_json::json!({ "embeddings": [[1.0, 2.0, 3.0]] })))
+				}
+			}),
+		);
+		let url = serve(app).await;
+		let client = Client::new_embed_only(&url, "m");
+		let v = client.embed("hello").await.expect("transient batch -> single retry succeeds");
+		assert_eq!(v, vec![1.0, 2.0, 3.0]);
+	}
+
+	/// An empty batch response is retry-worthy too (`should_retry_single` matches
+	/// `EmptyEmbedding`), so the single retry still runs and recovers.
+	#[tokio::test]
+	async fn embed_falls_back_to_single_on_empty_batch_response() {
+		let app = axum::Router::new().route(
+			"/api/embed",
+			axum::routing::post(|body: axum::Json<Value>| async move {
+				if body.0["input"].is_array() {
+					axum::Json(serde_json::json!({ "embeddings": [] }))
+				} else {
+					axum::Json(serde_json::json!({ "embeddings": [[9.0]] }))
+				}
+			}),
+		);
+		let url = serve(app).await;
+		let client = Client::new_embed_only(&url, "m");
+		let v = client.embed("x").await.expect("empty batch -> single retry succeeds");
+		assert_eq!(v, vec![9.0]);
+	}
+
+	/// A permanent client error (400) fails identically as a single call, so
+	/// embed() must propagate it WITHOUT a wasted second round-trip. The hit
+	/// counter proves exactly one request was made.
+	#[tokio::test]
+	async fn embed_propagates_permanent_batch_error_without_retry() {
+		use axum::http::StatusCode;
+		use std::sync::atomic::{AtomicUsize, Ordering};
+		let hits = Arc::new(AtomicUsize::new(0));
+		let h = hits.clone();
+		let app = axum::Router::new().route(
+			"/api/embed",
+			axum::routing::post(move |_body: axum::Json<Value>| {
+				let h = h.clone();
+				async move {
+					h.fetch_add(1, Ordering::SeqCst);
+					(StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": "bad model" })))
+				}
+			}),
+		);
+		let url = serve(app).await;
+		let client = Client::new_embed_only(&url, "m");
+		let err = client.embed("hello").await.unwrap_err();
+		assert!(matches!(err, LlmError::Api { status: 400, .. }), "permanent error propagates, got {err:?}");
+		assert_eq!(hits.load(Ordering::SeqCst), 1, "no wasted single retry on a permanent error");
 	}
 }

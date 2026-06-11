@@ -36,8 +36,10 @@ pub struct CaptureConfig {
 	/// replayed into every future session. Gating it here quarantines
 	/// low-trust and repeatedly-contradicted claims (whose `conf_beta` has
 	/// grown, dragging the mean down) out of that surface. Set to `0.0` to
-	/// disable the gate. Default `0.35`.
-	pub digest_min_trust: f32,
+	/// disable the gate. Default `0.35`. `f64` to match `build_digest`'s threshold
+	/// and the `conf_mean` it is compared against — no cast (and no silent f32→f64
+	/// rounding) at the call sites.
+	pub digest_min_trust: f64,
 	/// Approximate token budget for the digest body. Claims are added best-first
 	/// (heat × confidence) until this many tokens are used, trimmed greedily —
 	/// context rot means attention degrades with length, so a tight budget beats
@@ -67,6 +69,24 @@ impl Default for CaptureConfig {
 	}
 }
 
+impl CaptureConfig {
+	/// Reject knobs that would busy-loop the capture tasks. A zero poll/digest
+	/// interval makes the spool-drain / digest-rebuild loop spin with no delay.
+	/// Only enforced when `enabled` — a dormant capture with zero intervals is
+	/// harmless because the tasks never run.
+	pub fn validate(&self) -> Result<(), String> {
+		if self.enabled {
+			if self.poll_secs == 0 {
+				return Err("poll_secs must be > 0 (0 busy-loops the spool drain)".into());
+			}
+			if self.digest_secs == 0 {
+				return Err("digest_secs must be > 0 (0 busy-loops the digest rebuild)".into());
+			}
+		}
+		Ok(())
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -82,6 +102,26 @@ mod tests {
 		assert_eq!(c.digest_k, 40);
 		assert_eq!(c.digest_min_trust, 0.35);
 		assert_eq!(c.digest_token_budget, 1500);
-		assert_eq!(c.done_retention_secs, 7 * 24 * 60 * 60);
+		// Assert the concrete VALUE (not the same 7*24*60*60 expression as the
+		// default), so a silent change to the computed literal is caught.
+		assert_eq!(c.done_retention_secs, 604_800, "7 days in seconds");
+	}
+
+	#[test]
+	fn validate_rejects_zero_intervals_only_when_enabled() {
+		assert!(CaptureConfig::default().validate().is_ok(), "disabled default is fine");
+
+		let enabled = CaptureConfig { enabled: true, ..Default::default() };
+		assert!(enabled.validate().is_ok(), "enabled default intervals are non-zero");
+
+		let zero_poll = CaptureConfig { enabled: true, poll_secs: 0, ..Default::default() };
+		assert!(zero_poll.validate().unwrap_err().contains("poll_secs"));
+
+		let zero_digest = CaptureConfig { enabled: true, digest_secs: 0, ..Default::default() };
+		assert!(zero_digest.validate().unwrap_err().contains("digest_secs"));
+
+		// Disabled with zero intervals is accepted — the loops never start.
+		let disabled_zero = CaptureConfig { enabled: false, poll_secs: 0, digest_secs: 0, ..Default::default() };
+		assert!(disabled_zero.validate().is_ok(), "disabled capture ignores its intervals");
 	}
 }

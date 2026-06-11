@@ -4,6 +4,10 @@ use crate::gnn::tensor::Tensor;
 
 pub trait Optimizer {
 	fn step(&mut self, params: &mut [&mut Tensor], grads: &[&Tensor]);
+	/// Zero the gradient tensors PASSED IN — this clears the caller's `grads`
+	/// slice, NOT any gradient state owned by a model or by the optimizer. The
+	/// training loop hands the model's grad tensors here between steps; calling it
+	/// on unrelated tensors has no effect on the optimizer's momentum/Adam state.
 	fn zero_grad(&self, grads: &mut [Tensor]) {
 		for g in grads.iter_mut() {
 			for v in &mut g.data {
@@ -48,12 +52,13 @@ impl Optimizer for SGD {
 
 		for (i, (param, grad)) in params.iter_mut().zip(grads.iter()).enumerate() {
 			if self.momentum > 0.0 {
+				// Single pass: update velocity[j] then immediately apply it, instead
+				// of a second loop that re-indexed self.velocity[i] every element.
+				let (momentum, lr) = (self.momentum, self.lr);
 				let v = &mut self.velocity[i];
-				for (j, vj) in v.data.iter_mut().enumerate() {
-					*vj = self.momentum * *vj + grad.data[j];
-				}
 				for (j, pj) in param.data.iter_mut().enumerate() {
-					*pj -= self.lr * self.velocity[i].data[j];
+					v.data[j] = momentum * v.data[j] + grad.data[j];
+					*pj -= lr * v.data[j];
 				}
 			} else {
 				for (pj, gj) in param.data.iter_mut().zip(&grad.data) {
@@ -157,5 +162,34 @@ mod tests {
 		let mut opt = Adam::new(0.1);
 		opt.step(&mut [&mut p], &[&g]);
 		assert!((p.data[0] - (-0.1)).abs() < 1e-6, "got {}", p.data[0]);
+	}
+
+	#[test]
+	fn adam_keeps_independent_moment_state_per_parameter() {
+		// Two params with OPPOSITE gradients in one step: each must move opposite
+		// (~ -lr*sign(g)) with no cross-contamination of m/v between the slots.
+		let mut p0 = scalar(0.0);
+		let mut p1 = scalar(0.0);
+		let g0 = scalar(2.0);
+		let g1 = scalar(-2.0);
+		let mut opt = Adam::new(0.1);
+		opt.step(&mut [&mut p0, &mut p1], &[&g0, &g1]);
+		assert!((p0.data[0] - (-0.1)).abs() < 1e-6, "p0 {}", p0.data[0]);
+		assert!((p1.data[0] - 0.1).abs() < 1e-6, "p1 {}", p1.data[0]);
+	}
+
+	#[test]
+	fn sgd_momentum_velocity_is_independent_per_parameter() {
+		// Guards the single-pass momentum update: each param accumulates its own
+		// velocity, so opposite grads give opposite (and equal-magnitude) moves.
+		let mut p0 = scalar(0.0);
+		let mut p1 = scalar(0.0);
+		let g0 = scalar(1.0);
+		let g1 = scalar(-1.0);
+		let mut opt = SGD::with_momentum(0.1, 0.9);
+		opt.step(&mut [&mut p0, &mut p1], &[&g0, &g1]); // v0=1, v1=-1
+		opt.step(&mut [&mut p0, &mut p1], &[&g0, &g1]); // v0=1.9, v1=-1.9
+		assert!((p0.data[0] - (-0.29)).abs() < 1e-12, "p0 {}", p0.data[0]);
+		assert!((p1.data[0] - 0.29).abs() < 1e-12, "p1 {}", p1.data[0]);
 	}
 }

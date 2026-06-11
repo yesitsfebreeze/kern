@@ -51,8 +51,9 @@ pub struct Queue {
 	pending: Mutex<HashMap<TaskKey, bool>>,
 	inflight: std::sync::atomic::AtomicUsize,
 
-	task_count: Mutex<i64>,
-	task_latency_total: Mutex<Duration>,
+	/// Cumulative `(completed task count, total latency)` behind a single lock, so
+	/// the hot `record_task_latency` path takes one mutex instead of two.
+	stats: Mutex<(i64, Duration)>,
 }
 
 impl Queue {
@@ -63,8 +64,7 @@ impl Queue {
 			rx: Mutex::new(Some(rx)),
 			pending: Mutex::new(HashMap::new()),
 			inflight: std::sync::atomic::AtomicUsize::new(0),
-			task_count: Mutex::new(0),
-			task_latency_total: Mutex::new(Duration::ZERO),
+			stats: Mutex::new((0, Duration::ZERO)),
 		}
 	}
 
@@ -79,7 +79,7 @@ impl Queue {
 			if *pending.get(&k).unwrap_or(&false) {
 				return false;
 			}
-			pending.insert(k, true);
+			pending.insert(k.clone(), true);
 		}
 		self
 			.inflight
@@ -88,6 +88,10 @@ impl Queue {
 			self
 				.inflight
 				.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+			// Roll back the pending marker too: otherwise a send failure (full
+			// channel) would leave this key flagged forever and dedup would block
+			// every future re-enqueue of the same task.
+			lock_recovered(&self.pending).remove(&k);
 			return false;
 		}
 		true
@@ -109,15 +113,13 @@ impl Queue {
 	}
 
 	pub fn record_task_latency(&self, d: Duration) {
-		let mut count = lock_recovered(&self.task_count);
-		let mut total = lock_recovered(&self.task_latency_total);
-		*count += 1;
-		*total += d;
+		let mut s = lock_recovered(&self.stats);
+		s.0 += 1;
+		s.1 += d;
 	}
 
 	pub fn metrics(&self) -> (i64, i64) {
-		let count = *lock_recovered(&self.task_count);
-		let total = *lock_recovered(&self.task_latency_total);
+		let (count, total) = *lock_recovered(&self.stats);
 		let avg = if count > 0 {
 			total.as_millis() as i64 / count
 		} else {
@@ -140,5 +142,54 @@ pub fn task_extra(kind: TaskKind, kern_id: &str, extra: &str) -> Task {
 		kind,
 		kern_id: kern_id.to_string(),
 		extra: extra.to_string(),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn enqueue_dedups_an_already_pending_key() {
+		let q = Queue::new(8);
+		assert!(q.enqueue(task(TaskKind::Cluster, "k")));
+		assert!(!q.enqueue(task(TaskKind::Cluster, "k")), "same key is deduped");
+		assert_eq!(q.pending_count(), 1);
+	}
+
+	#[test]
+	fn dequeued_clears_pending_so_the_key_can_re_enqueue() {
+		let q = Queue::new(8);
+		let t = task(TaskKind::Persist, "k");
+		assert!(q.enqueue(t.clone()));
+		assert!(!q.enqueue(t.clone()), "still pending -> deduped");
+		q.dequeued(&t);
+		assert_eq!(q.pending_count(), 0);
+		assert!(q.enqueue(t), "re-enqueue succeeds after dequeue");
+	}
+
+	#[test]
+	fn full_channel_send_failure_rolls_back_pending() {
+		// Capacity 1: 'a' fills the channel; 'b' fails on try_send and must NOT be
+		// left stuck in pending (the regression this guards).
+		let q = Queue::new(1);
+		assert!(q.enqueue(task(TaskKind::Cluster, "a")));
+		let b = task(TaskKind::Cluster, "b");
+		assert!(!q.enqueue(b.clone()), "full channel -> enqueue fails");
+		assert_eq!(q.pending_count(), 1, "only 'a' remains pending; 'b' was rolled back");
+		// Free a slot, then 'b' can enqueue (its key was not blocked).
+		let mut rx = q.take_receiver().unwrap();
+		let _ = rx.try_recv();
+		assert!(q.enqueue(b), "b re-enqueues once a slot frees");
+	}
+
+	#[test]
+	fn record_task_latency_accumulates_count_and_average() {
+		let q = Queue::new(8);
+		q.record_task_latency(Duration::from_millis(10));
+		q.record_task_latency(Duration::from_millis(30));
+		let (count, avg_ms) = q.metrics();
+		assert_eq!(count, 2);
+		assert_eq!(avg_ms, 20, "average latency = (10 + 30) / 2 ms");
 	}
 }

@@ -23,6 +23,10 @@ pub fn rrf(
 		}
 	}
 	let mut out: Vec<EntityHit> = agg.into_iter().map(EntityHit::from).collect();
+	// Primary key: fused score, descending. Secondary key: entity_id, ascending —
+	// a deliberate STABLE, deterministic tiebreak (HashMap iteration order is not),
+	// so equal-score entities always sort the same way across runs. This keeps
+	// recall reproducible and tests deterministic.
 	out.sort_by(|a, b| {
 		b.score
 			.partial_cmp(&a.score)
@@ -86,5 +90,18 @@ mod tests {
 		let out = rrf(&lists, &[1.0], 60.0, 10); // second list defaults to 1.0
 		let both = rrf(&lists, &[1.0, 1.0], 60.0, 10);
 		assert_eq!(out[0].score, both[0].score, "missing weight == 1.0");
+	}
+
+	#[test]
+	fn top_k_truncates_and_zero_is_empty_without_panicking() {
+		let a = [hit("x"), hit("y"), hit("z")];
+		let lists: Vec<&[EntityHit]> = vec![&a];
+
+		// top_k = 0 -> empty vec, no panic (truncate(0)).
+		assert!(rrf(&lists, &[], 60.0, 0).is_empty(), "top_k=0 yields an empty result");
+		// top_k below the result count truncates to the top entries.
+		assert_eq!(rrf(&lists, &[], 60.0, 2).len(), 2);
+		// top_k above the result count returns all, no padding/panic.
+		assert_eq!(rrf(&lists, &[], 60.0, 99).len(), 3);
 	}
 }

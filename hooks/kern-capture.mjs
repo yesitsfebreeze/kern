@@ -49,7 +49,31 @@ function readOffsets(spool) {
 }
 
 function writeOffsets(spool, offsets) {
-  try { fs.writeFileSync(offsetsFile(spool), JSON.stringify(offsets)); } catch {}
+  // Atomic write: a tmp file (pid-tagged so two rapidly-firing Stop hooks don't
+  // clobber each other's temp) then a rename, so a concurrent reader never sees
+  // a half-written `.offsets.json`.
+  const dst = offsetsFile(spool);
+  const tmp = `${dst}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(offsets));
+    fs.renameSync(tmp, dst);
+  } catch {
+    try { fs.unlinkSync(tmp); } catch {}
+  }
+}
+
+/** Cap on capture files kept in the spool. */
+export const MAX_SPOOL_FILES = 500;
+
+/** Return the capture file names to delete so at most `maxFiles` remain,
+ *  dropping the OLDEST (lowest `mtimeMs`) first. `entries` is `[{name,mtimeMs}]`.
+ *  Pure, so the eviction policy is unit-testable without touching the fs. */
+export function spoolEvictions(entries, maxFiles) {
+  if (entries.length <= maxFiles) return [];
+  return [...entries]
+    .sort((a, b) => a.mtimeMs - b.mtimeMs)
+    .slice(0, entries.length - maxFiles)
+    .map((e) => e.name);
 }
 
 async function main() {
@@ -83,6 +107,18 @@ async function main() {
   }
   offsets[session_id] = consumed;
   writeOffsets(spool, offsets);
+
+  // Cap the spool so an un-drained capture dir can't grow without bound across
+  // many sessions; evict the oldest beyond MAX_SPOOL_FILES.
+  try {
+    const entries = fs
+      .readdirSync(spool)
+      .filter((n) => n.endsWith('.txt'))
+      .map((n) => ({ name: n, mtimeMs: fs.statSync(path.join(spool, n)).mtimeMs }));
+    for (const name of spoolEvictions(entries, MAX_SPOOL_FILES)) {
+      try { fs.unlinkSync(path.join(spool, name)); } catch {}
+    }
+  } catch {}
 }
 
 // Only run main when invoked directly (not when imported by tests).

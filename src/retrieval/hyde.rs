@@ -8,7 +8,7 @@ pub fn expand_query(
 	query_vec: &[f64],
 	query_text: &str,
 ) -> Vec<f64> {
-if !cfg.hyde_enabled {
+	if !cfg.hyde_enabled {
 		return query_vec.to_vec();
 	}
 	let tokens = query_text.split_whitespace().count();
@@ -39,17 +39,8 @@ if !cfg.hyde_enabled {
 		.zip(hypo_vec.iter())
 		.map(|(q, h)| q * (1.0 - w) + h * w)
 		.collect();
-	l2_normalize(&mut fused);
+	crate::base::math::l2_normalize(&mut fused);
 	fused
-}
-
-fn l2_normalize(v: &mut [f64]) {
-let norm: f64 = v.iter().map(|x| x * x).sum::<f64>().sqrt();
-	if norm > 0.0 {
-		for x in v.iter_mut() {
-			*x /= norm;
-		}
-	}
 }
 
 #[cfg(test)]
@@ -125,6 +116,18 @@ mod tests {
 		let llm: LlmFunc = Arc::new(|_: &str| "answer".to_string());
 		let embed: EmbedFunc = Arc::new(|_: &str| Ok(vec![1.0, 2.0, 3.0])); // len 3
 		let qv = vec![1.0, 0.0]; // len 2
+		assert_eq!(expand_query(&cfg, Some(&llm), Some(&embed), &qv, "cat"), qv);
+	}
+
+	#[test]
+	fn empty_hypo_vec_returns_query_without_fusing() {
+		// Dimension-0 edge: embed returns Ok(vec![]). The len/empty guard must
+		// short-circuit to the original query rather than fuse against a 0-d
+		// vector (which would zip to nothing and yield an empty result).
+		let cfg = RetrievalConfig::default();
+		let llm: LlmFunc = Arc::new(|_: &str| "answer".to_string());
+		let embed: EmbedFunc = Arc::new(|_: &str| Ok(vec![])); // 0-dim
+		let qv = vec![1.0, 0.0];
 		assert_eq!(expand_query(&cfg, Some(&llm), Some(&embed), &qv, "cat"), qv);
 	}
 }

@@ -11,10 +11,25 @@ import { fileURLToPath } from 'node:url';
 // ── tunables ──────────────────────────────────────────────────────────────
 export const TOP_K          = 6;     // hits to ask kern for
 export const MAX_INJECT     = 5;     // hits to actually inject
-export const MIN_SCORE      = 0.85;  // drop weaker hits (kern scores ~0.0–1.0)
 export const MIN_PROMPT     = 4;     // skip trivially short prompts
 export const TIMEOUT_MS     = 2500;  // hard bound; slow kern = inject nothing
 export const MIN_OVERLAP    = 2;     // word overlap with digest required to spawn kern
+
+/**
+ * Resolve the score floor for injected hits. `0.85` is deliberately aggressive
+ * — it favours precision (only inject obviously-relevant recall) over recall,
+ * and silently drops borderline hits when embeddings are slightly off. Override
+ * per-project/per-user with the `KERN_RECALL_MIN_SCORE` env var (a float in
+ * `[0,1]`); anything missing, non-numeric, or out of range falls back to the
+ * default. Pure + exported so the precedence is unit-testable.
+ */
+export function resolveMinScore(raw, fallback = 0.85) {
+  const n = raw != null ? Number.parseFloat(raw) : Number.NaN;
+  return Number.isFinite(n) && n >= 0 && n <= 1 ? n : fallback;
+}
+
+// drop weaker hits (kern scores ~0.0–1.0); env-overridable, see resolveMinScore.
+export const MIN_SCORE = resolveMinScore(process.env.KERN_RECALL_MIN_SCORE);
 
 // ── digest pre-check (pure, testable) ────────────────────────────────────
 
@@ -114,10 +129,13 @@ export function buildOutput(context) {
 // ── kern invocation ───────────────────────────────────────────────────────
 
 /** Run `kern search <prompt> --k K` in `cwd`, resolving to stdout text.
- *  Rejects/never throws past the caller — bounded by TIMEOUT_MS. */
-function kernSearch(prompt, cwd) {
+ *  Fail-open: never throws past the caller, resolves '' on any error (missing
+ *  binary, non-zero exit, TIMEOUT_MS). `exec` is injectable so the dispatch
+ *  path can be smoke-tested without a real `kern` on PATH (defaults to
+ *  `child_process.execFile`). */
+export function kernSearch(prompt, cwd, exec = execFile) {
   return new Promise((resolve) => {
-    execFile(
+    exec(
       'kern',
       ['search', prompt, '--k', String(TOP_K)],
       { cwd, timeout: TIMEOUT_MS, windowsHide: true, maxBuffer: 1 << 20 },

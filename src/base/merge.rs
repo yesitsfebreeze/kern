@@ -42,6 +42,23 @@ fn join_min_time(local: &mut Option<SystemTime>, remote: Option<SystemTime>) -> 
 	}
 }
 
+/// CRDT join for the `superseded_by` pointer: a non-empty remote id that sorts
+/// lexicographically HIGHER wins; an empty remote never clears a local pointer.
+///
+/// Lexicographic order is deliberate. When two replicas each independently record
+/// a *different* superseding id (a genuine concurrent supersession), the join must
+/// pick the same winner on every replica or the graph diverges. String `>` is an
+/// arbitrary but TOTAL and replica-independent order, so it is a valid CRDT
+/// tiebreak — the choice of winner carries no semantics, only determinism.
+fn join_superseded_by(local: &mut String, remote: &str) -> bool {
+	if !remote.is_empty() && remote > local.as_str() {
+		*local = remote.to_string();
+		true
+	} else {
+		false
+	}
+}
+
 /// CRDT join of `remote` into `local` (same content id assumed). Returns
 /// whether `local` changed. Commutative, associative, idempotent, monotone.
 pub fn merge_entity(local: &mut Entity, remote: &Entity) -> bool {
@@ -63,10 +80,7 @@ pub fn merge_entity(local: &mut Entity, remote: &Entity) -> bool {
 		local.status = EntityStatus::Superseded;
 		changed = true;
 	}
-	if !remote.superseded_by.is_empty() && remote.superseded_by > local.superseded_by {
-		local.superseded_by = remote.superseded_by.clone();
-		changed = true;
-	}
+	changed |= join_superseded_by(&mut local.superseded_by, &remote.superseded_by);
 	changed |= join_min_time(&mut local.created_at, remote.created_at);
 	changed |= join_max_time(&mut local.accessed_at, remote.accessed_at);
 	changed |= join_max_time(&mut local.updated_at, remote.updated_at);
@@ -361,5 +375,64 @@ mod tests {
 			merge_remote_entity(&mut g, phantom, mk_entity("f0", "x", 7.0, EntityKind::Fact));
 		assert!(changed, "known id must still merge at cap");
 		assert_eq!(g.kerns.get(phantom).unwrap().entities.get("f0").unwrap().heat, 7.0);
+	}
+
+	#[test]
+	fn merge_reason_maxes_score_and_joins_traversal_idempotently() {
+		let mut local = Reason { score: 0.3, ..Default::default() };
+		local.traversal_count.increment("a", 1);
+		let mut remote = Reason { score: 0.7, ..Default::default() };
+		remote.traversal_count.increment("b", 2);
+
+		assert!(merge_reason(&mut local, &remote));
+		assert_eq!(local.score, 0.7, "score is a monotone max-join");
+		assert_eq!(local.traversal_count.value(), 3, "traversal GCounters join");
+
+		// Idempotent: re-merging the same remote changes nothing.
+		assert!(!merge_reason(&mut local, &remote));
+		assert_eq!(local.score, 0.7);
+		assert_eq!(local.traversal_count.value(), 3);
+
+		// Monotone: a lower-score remote never lowers the score.
+		let lower = Reason { score: 0.1, ..Default::default() };
+		assert!(!merge_reason(&mut local, &lower));
+		assert_eq!(local.score, 0.7);
+	}
+
+	#[test]
+	fn superseded_by_join_picks_the_lexicographically_higher_id() {
+		let mut a = String::from("idA");
+		// A higher-sorting non-empty remote wins...
+		assert!(join_superseded_by(&mut a, "idZ"));
+		assert_eq!(a, "idZ");
+		// ...a lower-sorting one does not...
+		assert!(!join_superseded_by(&mut a, "idB"));
+		assert_eq!(a, "idZ");
+		// ...and an empty remote never clears a local pointer.
+		assert!(!join_superseded_by(&mut a, ""));
+		assert_eq!(a, "idZ");
+	}
+
+	#[test]
+	fn merge_entity_never_imports_replica_local_mutable_state() {
+		// Field-addition guard (a targeted stand-in for a full fuzz harness): poison
+		// EVERY replica-local field on the remote and assert none leak through the
+		// CRDT join. A future field accidentally wired into merge_entity would trip
+		// this — keep it in sync when adding mutable Entity fields.
+		let mut local = mk_entity("e1", "x", 1.0, EntityKind::Fact);
+		let snap_alpha = local.conf_alpha;
+		let snap_beta = local.conf_beta;
+		let snap_unlinked = local.unlinked_count;
+
+		let mut remote = mk_entity("e1", "x", 1.0, EntityKind::Fact);
+		remote.conf_alpha = 1.0e9;
+		remote.conf_beta = 1.0e9;
+		remote.unlinked_count = 9_999;
+
+		merge_entity(&mut local, &remote);
+
+		assert_eq!(local.conf_alpha, snap_alpha, "conf_alpha stays replica-local");
+		assert_eq!(local.conf_beta, snap_beta, "conf_beta stays replica-local");
+		assert_eq!(local.unlinked_count, snap_unlinked, "unlinked_count is local bookkeeping");
 	}
 }

@@ -25,11 +25,6 @@ pub trait IngestSink: Send + Sync + 'static {
 	async fn ingest(&self, record: IngestRecord);
 }
 
-// We avoid pulling in `async-trait` as a workspace dep just for one trait —
-// fall back to a hand-rolled boxed-future trait if the dep is unwelcome.
-// (Pre-emptive note: if reviewers object to `async-trait`, swap to a
-// `Pin<Box<dyn Future>>` returning method.)
-
 /// Drives a stream of [`WatchEvent`]s into an [`IngestSink`].
 ///
 /// * `Created` / `Modified` → read file (≤ [`MAX_INGEST_BYTES`]) → ingest.
@@ -125,4 +120,77 @@ fn language_hint(path: &Path) -> Option<String> {
 		_ => return Some(ext),
 	};
 	Some(hint.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::path::PathBuf;
+	use std::time::SystemTime;
+
+	// All file_uri cases below use paths that don't exist on disk, so
+	// `canonicalize` fails and the deterministic string-normalisation fallback
+	// runs — making the expected output stable across machines.
+
+	#[test]
+	fn file_uri_unix_absolute_path_gets_three_slashes() {
+		assert_eq!(
+			file_uri(Path::new("/nonexistent_kern_test/dir/file.rs")),
+			"file:///nonexistent_kern_test/dir/file.rs"
+		);
+	}
+
+	#[test]
+	fn file_uri_strips_windows_unc_prefix() {
+		// `\\?\C:\..` is what Windows canonicalize returns; the `//?/` prefix is
+		// stripped and the drive path becomes `file:///C:/..`. (Backslashes are
+		// literal chars on Unix, so the string ops are identical cross-platform.)
+		assert_eq!(
+			file_uri(Path::new(r"\\?\C:\foo\bar.rs")),
+			"file:///C:/foo/bar.rs"
+		);
+	}
+
+	#[cfg(unix)]
+	fn non_utf8_path() -> PathBuf {
+		use std::os::unix::ffi::OsStrExt;
+		// 0x80 is an invalid UTF-8 lead byte.
+		std::ffi::OsStr::from_bytes(&[0x66, 0x80, 0x66]).into()
+	}
+
+	#[cfg(windows)]
+	fn non_utf8_path() -> PathBuf {
+		use std::os::windows::ffi::OsStringExt;
+		// 0xD800 is an unpaired surrogate -> not valid UTF-16/UTF-8.
+		std::ffi::OsString::from_wide(&[0x66, 0xD800, 0x66]).into()
+	}
+
+	#[tokio::test]
+	async fn renamed_with_non_utf8_from_reads_the_to_path() {
+		// build_record uses the `to` endpoint of a rename; a non-UTF-8 `from`
+		// path must not affect it (the from is never read or stringified).
+		let dir = tempfile::tempdir().unwrap();
+		let to = dir.path().join("renamed.rs");
+		tokio::fs::write(&to, "fn main() {}").await.unwrap();
+
+		let ev = WatchEvent {
+			path: to.clone(),
+			kind: WatchKind::Renamed { from: non_utf8_path(), to: to.clone() },
+			ts: SystemTime::now(),
+		};
+		let rec = build_record(&ev).await.expect("record built from the `to` path");
+		assert_eq!(rec.content, "fn main() {}");
+		assert_eq!(rec.language_hint.as_deref(), Some("rust"));
+		assert!(rec.source_uri.starts_with("file://"));
+	}
+
+	#[tokio::test]
+	async fn deleted_events_build_no_record() {
+		let ev = WatchEvent {
+			path: PathBuf::from("/whatever.rs"),
+			kind: WatchKind::Deleted,
+			ts: SystemTime::now(),
+		};
+		assert!(build_record(&ev).await.is_none());
+	}
 }

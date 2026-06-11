@@ -347,8 +347,7 @@ fn handle_entity_sync(d: &Deps, msg: GossipMessage) {
 	}
 	let phantom = format!("remote-{}-{}", payload.network_id, payload.kern_id);
 	if !g.kerns.contains_key(&phantom) {
-		let mut k = Kern::new(phantom.as_str(), g.root.id.as_str());
-		k.root_id = g.root.root_id.clone();
+		let k = new_phantom_kern(&g, &phantom);
 		g.register(k);
 	}
 	let mut changed = false;
@@ -370,8 +369,7 @@ fn inject_remote_scope(g: &mut GraphGnn, sphere: &SpherePayload, _origin: &str) 
 		kern.inner_radius = sphere.inner_radius;
 		kern.outer_radius = sphere.outer_radius;
 	} else {
-		let mut k = Kern::new(&phantom_id, &g.root.id);
-		k.root_id = g.root.root_id.clone();
+		let mut k = new_phantom_kern(g, &phantom_id);
 		k.anchor_text = sphere.anchor_text.clone();
 		k.anchor_vec = sphere.anchor_vec.clone();
 		k.inner_radius = sphere.inner_radius;
@@ -380,20 +378,34 @@ fn inject_remote_scope(g: &mut GraphGnn, sphere: &SpherePayload, _origin: &str) 
 	}
 }
 
+/// Create (unregistered) a per-network phantom kern parented under the local
+/// root, with the federation `root_id` stamped. Callers fill in scope/content and
+/// then `register` it. Shared by `inject_remote_scope` and `handle_entity_sync`.
+fn new_phantom_kern(g: &GraphGnn, phantom_id: &str) -> Kern {
+	let mut k = Kern::new(phantom_id, &g.root.id);
+	k.root_id = g.root.root_id.clone();
+	k
+}
+
 fn resolve_question_from_peer(d: &Deps, reason_id: &str, sphere: &SpherePayload, origin: &str) {
 	if sphere.entity_id.is_empty() || sphere.network_id.is_empty() {
 		return;
 	}
 
-	let (reason, kern_id) = match crate::base::search::find_reason(&read_recovered(&d.graph), reason_id) {
-		Some(pair) => pair,
-		None => return,
+	// One read acquisition: pull the reason, its owning kern, and our network id
+	// together instead of locking for find_reason and again for network_id.
+	let (reason, kern_id, local_net) = {
+		let g = read_recovered(&d.graph);
+		match crate::base::search::find_reason(&g, reason_id) {
+			Some((reason, kern_id)) => (reason, kern_id, g.network_id.clone()),
+			None => return,
+		}
 	};
 	if reason.kind != ReasonKind::Question || !reason.to.is_empty() {
 		return;
 	}
 
-	let is_local = sphere.network_id == read_recovered(&d.graph).network_id;
+	let is_local = sphere.network_id == local_net;
 
 	let mut g = write_recovered(&d.graph);
 	if let Some(kern) = g.kerns.get_mut(&kern_id) {
@@ -417,7 +429,8 @@ fn resolve_question_from_peer(d: &Deps, reason_id: &str, sphere: &SpherePayload,
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::base::types::{mk_entity as mk_entity_kind, Entity, EntityKind};
+	use crate::base::reason::add_reason;
+	use crate::base::types::{mk_entity as mk_entity_kind, Entity, EntityKind, Reason};
 
 	/// Local convenience: these gossip tests only ever need `Fact` entities.
 	fn mk_entity(id: &str, text: &str, heat: f64) -> Entity {
@@ -502,5 +515,101 @@ mod tests {
 			None
 		);
 		assert_eq!(validated_delta_value("r1", "obj", u64::MAX), None);
+	}
+
+	/// A graph holding one OPEN question reason ("r1", to empty) in kern "kq".
+	/// Returns the graph and the local network id.
+	fn graph_with_open_question() -> (Arc<RwLock<GraphGnn>>, String) {
+		let mut g = GraphGnn::new();
+		let net = g.network_id.clone();
+		let mut k = Kern::new("kq", "");
+		add_reason(
+			&mut k,
+			Reason {
+				from: "a".into(),
+				to: String::new(),
+				id: "r1".into(),
+				kind: ReasonKind::Question,
+				..Default::default()
+			},
+		);
+		g.kerns.insert("kq".into(), k);
+		(Arc::new(RwLock::new(g)), net)
+	}
+
+	fn answer_sphere(net: &str, entity_id: &str) -> SpherePayload {
+		SpherePayload {
+			network_id: net.to_string(),
+			kern_id: "rk".into(),
+			anchor_vec: vec![],
+			anchor_text: String::new(),
+			entity_id: entity_id.to_string(),
+			inner_radius: 0.0,
+			outer_radius: 0.0,
+		}
+	}
+
+	#[test]
+	fn resolve_question_from_peer_fills_answer_and_promotes_to_similarity() {
+		let (g, net) = graph_with_open_question();
+		let d = mk_deps(g.clone());
+		resolve_question_from_peer(&d, "r1", &answer_sphere(&net, "ans"), "127.0.0.1:9");
+		let guard = g.read().unwrap();
+		let r = guard.kerns["kq"].reasons.get("r1").expect("reason present");
+		assert_eq!(r.to, "ans", "answer endpoint filled in");
+		assert!(matches!(r.kind, ReasonKind::Similarity), "open question promoted to similarity");
+	}
+
+	#[test]
+	fn resolve_question_from_peer_ignores_an_empty_answer() {
+		let (g, net) = graph_with_open_question();
+		let d = mk_deps(g.clone());
+		resolve_question_from_peer(&d, "r1", &answer_sphere(&net, ""), "o");
+		let guard = g.read().unwrap();
+		let r = guard.kerns["kq"].reasons.get("r1").unwrap();
+		assert!(
+			r.to.is_empty() && matches!(r.kind, ReasonKind::Question),
+			"an empty answer leaves the question untouched",
+		);
+	}
+
+	#[test]
+	fn handle_question_with_empty_reason_vec_is_a_noop() {
+		let g = Arc::new(RwLock::new(GraphGnn::new()));
+		let d = mk_deps(g.clone());
+		let msg = GossipMessage {
+			kind: GossipKind::Question,
+			id: "q".into(),
+			origin: "o".into(),
+			payload: GossipPayload::Question(QuestionPayload {
+				reason_id: "r".into(),
+				from_id: "a".into(),
+				reason_vec: vec![],
+				question_text: String::new(),
+			}),
+		};
+		handle_question(&d, msg); // empty reason_vec -> early return, must not panic
+	}
+
+	#[test]
+	fn handle_pulse_falls_back_to_root_for_an_unknown_kern() {
+		let g = Arc::new(RwLock::new(GraphGnn::new()));
+		let q = Arc::new(tick::queue::Queue::new(64));
+		let d = Deps {
+			graph: g.clone(),
+			node: Node::new("127.0.0.1:0", "testnet", vec![]),
+			queue: Some(q),
+			save: None,
+		};
+		let msg = GossipMessage {
+			kind: GossipKind::Pulse,
+			id: "p".into(),
+			origin: "o".into(),
+			payload: GossipPayload::Pulse(PulsePayload {
+				kern_id: "does-not-exist".into(),
+				strength: 1.0,
+			}),
+		};
+		handle_pulse(&d, msg); // unknown kern -> root fallback; must not panic
 	}
 }

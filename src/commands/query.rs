@@ -3,17 +3,22 @@ use crate::base::util::{short_id, truncate};
 
 use super::{Client, Endpoint, load_graph};
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn cmd_query(
-	cfg: &crate::config::Config,
-	text: &str,
-	mode: &str,
-	answer: bool,
-	embed_url: &str,
-	embed_model: &str,
-	reason_url: &str,
-	reason_model: &str,
-) {
+/// Borrowed arguments for [`cmd_query`]. Groups the query text, retrieval mode,
+/// answer flag, and the four embed/reason endpoint overrides so the entry point
+/// takes one struct instead of an eight-positional signature (named `QueryParams`
+/// to avoid colliding with the deserialize-side `QueryArgs` in `mcp/tools_query`).
+pub(super) struct QueryParams<'a> {
+	pub(super) text: &'a str,
+	pub(super) mode: &'a str,
+	pub(super) answer: bool,
+	pub(super) embed_url: &'a str,
+	pub(super) embed_model: &'a str,
+	pub(super) reason_url: &'a str,
+	pub(super) reason_model: &'a str,
+}
+
+pub(super) async fn cmd_query(cfg: &crate::config::Config, params: QueryParams<'_>) {
+	let QueryParams { text, mode, answer, embed_url, embed_model, reason_url, reason_model } = params;
 	let g = load_graph(cfg);
 	let llm_client = Client::new(
 		Endpoint::new(reason_url, reason_model, cfg.reason_key()),
@@ -105,6 +110,11 @@ pub(super) async fn cmd_search(
 	embed_model: &str,
 ) {
 	let g = load_graph(cfg);
+	// `search` is pure vector retrieval — it never calls the reason or answer
+	// models — so those two endpoints are deliberately left as `Endpoint::default()`
+	// (unconfigured). Only the embedder is wired. Do not "fix" these to real
+	// endpoints: nothing here would use them, and constructing live clients would
+	// pull in credentials the search path has no business touching.
 	let llm_client = Client::new(
 		Endpoint::default(),
 		Endpoint::default(),

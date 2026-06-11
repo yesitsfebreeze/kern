@@ -21,11 +21,30 @@ pub enum TensorError {
 	},
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Tensor {
 	pub data: Vec<f64>,
 	pub rows: usize,
 	pub cols: usize,
+}
+
+/// Manual `Debug` (not derived): print the shape and only a short data preview
+/// so logging a large weight tensor doesn't dump thousands of floats.
+impl std::fmt::Debug for Tensor {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		const PREVIEW: usize = 8;
+		write!(f, "Tensor {{ {}x{}, data: [", self.rows, self.cols)?;
+		for (i, v) in self.data.iter().take(PREVIEW).enumerate() {
+			if i > 0 {
+				write!(f, ", ")?;
+			}
+			write!(f, "{v}")?;
+		}
+		if self.data.len() > PREVIEW {
+			write!(f, ", … ({} total)", self.data.len())?;
+		}
+		write!(f, "] }}")
+	}
 }
 
 impl Tensor {
@@ -46,6 +65,12 @@ impl Tensor {
 			rows,
 			cols,
 		}
+	}
+
+	/// Set every element to `v` in place — keeps the existing allocation/shape,
+	/// unlike re-assigning a fresh `Tensor::zeros`.
+	pub fn fill(&mut self, v: f64) {
+		self.data.iter_mut().for_each(|x| *x = v);
 	}
 
 	pub fn ones(rows: usize, cols: usize) -> Self {
@@ -147,6 +172,11 @@ impl Tensor {
 		}
 	}
 
+	/// Row count at or above which `matmul` parallelizes across rows with rayon.
+	/// Below this, the per-task scheduling overhead outweighs the gain on the
+	/// small matrices kern multiplies (per-kern GNN layers are tens of rows), so
+	/// the serial triple-loop wins. An empirical breakpoint, not a hard limit;
+	/// retune if layer widths grow substantially.
 	const MATMUL_PAR_THRESHOLD: usize = 64;
 
 	pub fn matmul(&self, other: &Tensor) -> Result<Tensor, TensorError> {
@@ -276,5 +306,76 @@ impl Tensor {
 			});
 		}
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn matmul_small_path_is_correct() {
+		// [[1,2,3],[4,5,6]] (2x3) · [[7,8],[9,10],[11,12]] (3x2) = [[58,64],[139,154]].
+		let a = Tensor::new(2, 3, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+		let b = Tensor::new(3, 2, vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]).unwrap();
+		let c = a.matmul(&b).unwrap();
+		assert_eq!(c.shape(), (2, 2));
+		assert_eq!(c.data, vec![58.0, 64.0, 139.0, 154.0]);
+	}
+
+	#[test]
+	fn matmul_parallel_and_serial_paths_agree_at_the_threshold() {
+		// m == THRESHOLD takes the rayon path; m == THRESHOLD-1 takes the serial
+		// path. ones(m,2) · ones(2,2) = a matrix of 2.0; both paths must match.
+		let t = Tensor::MATMUL_PAR_THRESHOLD;
+		for &m in &[t - 1, t] {
+			let out = Tensor::ones(m, 2).matmul(&Tensor::ones(2, 2)).unwrap();
+			assert_eq!(out.shape(), (m, 2));
+			assert!(out.data.iter().all(|v| (*v - 2.0).abs() < 1e-12), "m={m} entries all 2.0");
+		}
+	}
+
+	#[test]
+	fn matmul_inner_dimension_mismatch_errors() {
+		let a = Tensor::zeros(2, 3);
+		let b = Tensor::zeros(2, 2); // inner 3 vs 2
+		assert!(matches!(a.matmul(&b), Err(TensorError::InnerMismatch { lhs: 3, rhs: 2 })));
+	}
+
+	#[test]
+	fn transpose_swaps_axes_and_elements() {
+		let a = Tensor::new(2, 3, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+		let t = a.transpose();
+		assert_eq!(t.shape(), (3, 2));
+		assert_eq!(t.at(0, 1), 4.0); // was at(1,0)
+		assert_eq!(t.at(2, 0), 3.0); // was at(0,2)
+		assert_eq!(t.data, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+	}
+
+	#[test]
+	fn add_row_vec_broadcasts_and_validates_width() {
+		let m = Tensor::new(2, 2, vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+		let r = Tensor::new(1, 2, vec![10.0, 20.0]).unwrap();
+		let out = m.add_row_vec(&r).unwrap();
+		assert_eq!(out.data, vec![11.0, 22.0, 13.0, 24.0]);
+		// Wrong-width row is rejected.
+		let bad = Tensor::new(1, 3, vec![0.0, 0.0, 0.0]).unwrap();
+		assert!(matches!(m.add_row_vec(&bad), Err(TensorError::ShapeMismatch { .. })));
+	}
+
+	#[test]
+	fn row_extracts_a_1xn_slice() {
+		let a = Tensor::new(2, 3, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+		let r = a.row(1);
+		assert_eq!(r.shape(), (1, 3));
+		assert_eq!(r.data, vec![4.0, 5.0, 6.0]);
+	}
+
+	#[test]
+	fn debug_truncates_large_data() {
+		let big = Tensor::zeros(10, 10); // 100 elements
+		let s = format!("{big:?}");
+		assert!(s.contains("10x10"));
+		assert!(s.contains("(100 total)"), "preview is truncated: {s}");
 	}
 }

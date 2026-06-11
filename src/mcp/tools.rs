@@ -1,122 +1,13 @@
+/// The full MCP tool catalogue, assembled from each handler module so a tool's
+/// schema lives next to the `tool_*` impl that serves it — schema and handler
+/// can no longer silently drift across files. Order is intentional (asserted in
+/// `definitions_are_well_formed_and_complete`): query, then the mutators, then
+/// the admin tools.
 pub fn tool_definitions() -> Vec<serde_json::Value> {
-	vec![
-		serde_json::json!({
-			"name": "query",
-			"description": "Search the knowledge graph. Returns scored thoughts and optionally an LLM answer.",
-			"inputSchema": {
-				"type": "object",
-				"properties": {
-					"text":      {"type": "string", "description": "search query text"},
-					"id":        {"type": "string", "description": "thought ID for direct lookup"},
-					"k":         {"type": "integer", "description": "number of results (default 5)"},
-					"mode":      {"type": "string", "enum": ["content", "reason", "hybrid"], "description": "retrieval mode (default hybrid)"},
-					"answer":    {"type": "boolean", "description": "synthesize an LLM answer"},
-					"sort":      {"type": "string", "enum": ["", "date", "access", "confidence"], "description": "sort key"},
-					"ascending": {"type": "boolean", "description": "sort ascending (default false)"},
-					"source":    {"type": "string", "description": "filter by source system"},
-					"kind":      {"type": "string", "enum": ["", "normal", "fact", "document"], "description": "filter by thought kind"},
-					"since":     {"type": "string", "description": "ISO8601 timestamp; only include thoughts at or after this time"},
-					"before":    {"type": "string", "description": "ISO8601 timestamp; only include thoughts before this time"},
-					"min_conf":  {"type": "number", "description": "minimum confidence 0.0-1.0"},
-				},
-			},
-		}),
-		serde_json::json!({
-			"name": "ingest",
-			"description": "Add text to the knowledge graph.",
-			"inputSchema": {
-				"type": "object",
-				"required": ["text"],
-				"properties": {
-					"text":       {"type": "string", "description": "text to ingest"},
-					"source":     {"type": "string", "description": "source system identifier"},
-					"object_id":  {"type": "string", "description": "stable object identifier for update semantics"},
-					"section":    {"type": "string", "description": "section within the object"},
-					"author":     {"type": "string", "description": "author or origin of the content"},
-					"title":      {"type": "string", "description": "human-readable title"},
-					"url":        {"type": "string", "description": "URL reference"},
-					"conf":       {"type": "number", "description": "confidence weight 0.0-1.0 (default 0.5)"},
-					"descriptor": {"type": "string", "description": "Descriptor key for chunking context"},
-					"sync":       {"type": "boolean", "description": "block until ingest completes (default false)"},
-				},
-			},
-		}),
-		serde_json::json!({
-			"name": "link",
-			"description": "Create a reason edge between two thoughts.",
-			"inputSchema": {
-				"type": "object",
-				"required": ["from", "to"],
-				"properties": {
-					"from":   {"type": "string", "description": "source thought ID"},
-					"to":     {"type": "string", "description": "target thought ID"},
-					"reason": {"type": "string", "description": "reason text (LLM generates if empty)"},
-				},
-			},
-		}),
-		serde_json::json!({
-			"name": "forget",
-			"description": "Remove a thought and cascade-delete its edges. Facts are immune.",
-			"inputSchema": {
-				"type": "object",
-				"required": ["id"],
-				"properties": {
-					"id": {"type": "string", "description": "thought ID to remove"},
-				},
-			},
-		}),
-		serde_json::json!({
-			"name": "degrade",
-			"description": "Decrease edge scores along the retrieval path for a query.",
-			"inputSchema": {
-				"type": "object",
-				"required": ["query_id"],
-				"properties": {
-					"query_id": {"type": "string", "description": "thought ID at the end of a bad retrieval path"},
-				},
-			},
-		}),
-		serde_json::json!({
-			"name": "health",
-			"description": "Graph statistics: thought/edge counts, tick heat, unnamed count.",
-			"inputSchema": {"type": "object", "properties": {}},
-		}),
-		serde_json::json!({
-			"name": "anchor",
-			"description": "Manage anchors: named top-level buckets the root routes matching memories into; non-matches fall through to `generic`. action=list (default) returns anchors; action=add needs name+text (text is embedded into the routing vector); action=remove needs name.",
-			"inputSchema": {
-				"type": "object",
-				"properties": {
-					"action": {"type": "string", "enum": ["list", "add", "remove"], "description": "list (default) | add | remove"},
-					"name": {"type": "string", "description": "anchor name (required for add/remove)"},
-					"text": {"type": "string", "description": "description embedded into the anchor's routing vector (required for add)"},
-				},
-			},
-		}),
-		serde_json::json!({
-			"name": "descriptor",
-			"description": "Add or remove a data-type descriptor.",
-			"inputSchema": {
-				"type": "object",
-				"required": ["action", "name"],
-				"properties": {
-					"action":      {"type": "string", "enum": ["add", "rm"], "description": "add or remove"},
-					"name":        {"type": "string", "description": "descriptor name"},
-					"description": {"type": "string", "description": "markdown description (required for add)"},
-				},
-			},
-		}),
-		serde_json::json!({
-			"name": "pulse",
-			"description": "Trigger a pulse through the Kern tree, enqueuing cluster tasks for all kerns with thoughts.",
-			"inputSchema": {
-				"type": "object",
-				"properties": {
-					"strength": {"type": "number", "description": "pulse strength (default 1.0)"},
-				},
-			},
-		}),
-	]
+	let mut defs = super::tools_query::tool_schemas();
+	defs.extend(super::tools_mutate::tool_schemas());
+	defs.extend(super::tools_admin::tool_schemas());
+	defs
 }
 
 #[cfg(test)]
@@ -152,6 +43,47 @@ mod tests {
 				schema["type"], "object",
 				"{name}: inputSchema.type must be 'object'"
 			);
+		}
+	}
+
+	#[test]
+	fn query_schema_requires_text_or_id() {
+		let defs = tool_definitions();
+		let query = defs.iter().find(|d| d["name"] == "query").expect("query tool present");
+		let any_of = query["inputSchema"]["anyOf"]
+			.as_array()
+			.expect("query schema declares an anyOf branch");
+		// The schema must offer exactly the text-or-id alternatives that
+		// tool_query enforces at runtime ("either text or id is required").
+		let required: Vec<&str> = any_of
+			.iter()
+			.filter_map(|b| b["required"][0].as_str())
+			.collect();
+		assert!(required.contains(&"text"), "anyOf must allow `text`, got {required:?}");
+		assert!(required.contains(&"id"), "anyOf must allow `id`, got {required:?}");
+	}
+
+	#[test]
+	fn mutation_tools_declare_their_required_fields() {
+		let defs = tool_definitions();
+		// Each mutating tool's runtime handler rejects missing core args; the
+		// schema's `required` must list them so clients fail fast instead.
+		let want: &[(&str, &[&str])] = &[
+			("ingest", &["text"]),
+			("link", &["from", "to"]),
+			("forget", &["id"]),
+			("degrade", &["query_id"]),
+			("descriptor", &["action", "name"]),
+		];
+		for (name, fields) in want {
+			let tool = defs.iter().find(|d| d["name"] == *name).expect("tool present");
+			let required: Vec<&str> = tool["inputSchema"]["required"]
+				.as_array()
+				.map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+				.unwrap_or_default();
+			for f in *fields {
+				assert!(required.contains(f), "{name} schema must require `{f}`, got {required:?}");
+			}
 		}
 	}
 }

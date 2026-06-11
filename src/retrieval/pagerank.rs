@@ -72,6 +72,11 @@ pub fn pagerank(
 	let mut rank = tele.clone();
 	let mut next = vec![0.0f64; n];
 
+	// Stop early once the rank vector stops moving — `iters` is just an upper
+	// bound. Power iteration on a stochastic matrix converges geometrically, so a
+	// well-connected graph typically settles in far fewer than the cap.
+	const CONVERGENCE_EPS: f64 = 1e-9;
+
 	for _ in 0..iters.max(1) {
 		let mut dangling = 0.0;
 		for (j, outs) in out.iter().enumerate() {
@@ -96,7 +101,13 @@ pub fn pagerank(
 				next[ti] += share;
 			}
 		}
+		// L1 movement this step; once below epsilon the ranks have converged and
+		// further iterations only re-derive the same fixed point.
+		let delta: f64 = next.iter().zip(rank.iter()).map(|(a, b)| (a - b).abs()).sum();
 		std::mem::swap(&mut rank, &mut next);
+		if delta < CONVERGENCE_EPS {
+			break;
+		}
 	}
 
 	let mut scored: Vec<(usize, f64)> = rank.iter().copied().enumerate().collect();
@@ -170,6 +181,55 @@ mod tests {
 		assert!(score("A") > score("B"), "hub A must outrank leaf B");
 		let sum: f64 = ranks.iter().map(|h| h.score).sum();
 		assert!((sum - 1.0).abs() < 1e-6, "ranks sum ~1, got {sum}");
+	}
+
+	#[test]
+	fn self_loops_do_not_inflate_score() {
+		// A self-loop `A -> A` is dropped during adjacency build (from == to), so
+		// A's rank is identical whether or not the loop is present.
+		let make = |with_loop: bool| {
+			let mut g = GraphGnn::new();
+			let mut k = Kern::new("k", "");
+			for id in ["A", "B"] {
+				k.entities.insert(id.into(), ent(id));
+			}
+			k.reasons.insert("B->A".into(), edge("B", "A"));
+			if with_loop {
+				k.reasons.insert("A->A".into(), edge("A", "A"));
+			}
+			g.register(k);
+			pagerank(&g, &[], 0.85, 100, 2)
+		};
+		let s = |v: &[EntityHit], id: &str| v.iter().find(|h| h.entity_id == id).unwrap().score;
+		let base = make(false);
+		let looped = make(true);
+		assert!(
+			(s(&base, "A") - s(&looped, "A")).abs() < 1e-9,
+			"self-loop must not change A's rank ({} vs {})",
+			s(&base, "A"),
+			s(&looped, "A")
+		);
+	}
+
+	#[test]
+	fn convergence_early_exit_matches_full_iteration() {
+		// With the L1 early-exit, a tiny well-connected graph converges in far
+		// fewer than the cap; a 5-iter run must equal a 1000-iter run.
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("k", "");
+		for id in ["A", "B", "C"] {
+			k.entities.insert(id.into(), ent(id));
+		}
+		for e in [edge("A", "B"), edge("B", "C"), edge("C", "A")] {
+			k.reasons.insert(e.id.clone(), e);
+		}
+		g.register(k);
+		let few = pagerank(&g, &[], 0.85, 5, 3);
+		let many = pagerank(&g, &[], 0.85, 1000, 3);
+		for (a, b) in few.iter().zip(many.iter()) {
+			assert_eq!(a.entity_id, b.entity_id);
+			assert!((a.score - b.score).abs() < 1e-6, "converged result is iteration-count-independent");
+		}
 	}
 
 	#[test]

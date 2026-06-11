@@ -96,7 +96,7 @@ impl KernRpc for MockKernServer {
             // enum so we can compare on equal terms with `EntityRef.kind`.
             // An unrecognised string disables the kind filter rather than
             // silently dropping every hit.
-            let kind_filter = parse_kind(&req.kind);
+            let kind_filter = EntityKindLite::from_label(&req.kind);
             let scheme_filter = if req.source.is_empty() {
                 None
             } else {
@@ -183,9 +183,19 @@ impl KernRpc for MockKernServer {
     ) -> impl ::core::future::Future<Output = NeighborsRes> + Send {
         let state = self.inner.clone();
         async move {
+            // `depth` is clamped but NOT traversed: the mock only ever returns
+            // direct (depth-1) neighbours regardless of the requested depth. The
+            // clamp documents the server's intended ceiling; multi-hop expansion
+            // is intentionally out of scope for the test double (see the
+            // `neighbors_returns_only_direct_edges_regardless_of_depth` test).
             let _depth = req.depth.min(3);
             let entities = state.entities.lock().unwrap();
             let edges = state.edges.lock().unwrap();
+            // Index entities by id once so the per-edge endpoint lookup is O(1)
+            // instead of an O(n) linear scan — keeps `neighbors` near-linear in
+            // edge count even on a large seeded corpus.
+            let by_id: std::collections::HashMap<&str, &EntityRef> =
+                entities.iter().map(|e| (e.r#ref.id.as_str(), &e.r#ref)).collect();
             let allowed = |k: EdgeKind| {
                 req.edge_kinds.is_empty() || req.edge_kinds.contains(&k)
             };
@@ -201,8 +211,8 @@ impl KernRpc for MockKernServer {
                 } else {
                     continue;
                 };
-                if let Some(e) = entities.iter().find(|e| e.r#ref.id == other) {
-                    out.push(e.r#ref.clone());
+                if let Some(r) = by_id.get(other) {
+                    out.push((*r).clone());
                 }
             }
             NeighborsRes { neighbors: out }
@@ -256,22 +266,6 @@ impl KernRpc for MockKernServer {
         _req: CallToolReq,
     ) -> impl ::core::future::Future<Output = CallToolRes> + Send {
         async move { CallToolRes::default() }
-    }
-}
-
-/// Parse the wire-side lower-case kind label (e.g. `"fact"`) into the
-/// lite enum. Returns `None` for empty or unrecognised input — callers
-/// treat that as "no kind filter" rather than "filter everything out".
-fn parse_kind(s: &str) -> Option<EntityKindLite> {
-    match s {
-        "fact" => Some(EntityKindLite::Fact),
-        "claim" => Some(EntityKindLite::Claim),
-        "document" => Some(EntityKindLite::Document),
-        "question" => Some(EntityKindLite::Question),
-        "answer" => Some(EntityKindLite::Answer),
-        "conclusion" => Some(EntityKindLite::Conclusion),
-        "superseded" => Some(EntityKindLite::Superseded),
-        _ => None,
     }
 }
 
@@ -396,5 +390,41 @@ mod facet_filter_tests {
         let res = mock.query(q).await;
         assert_eq!(res.hits.len(), 1);
         assert!(res.hits[0].label.contains("alpha"));
+    }
+
+    #[tokio::test]
+    async fn neighbors_returns_only_direct_edges_regardless_of_depth() {
+        // Documents the mock's depth behaviour: `depth` is clamped to 3 but never
+        // traversed — only direct (depth-1) neighbours come back. A deeper
+        // request does NOT pull transitive nodes.
+        use crate::kern_rpc::{EdgeKind, LinkReq, NeighborsReq};
+        let mock = MockKernServer::new();
+        let a = mock.seed("a", EntityKindLite::Claim);
+        let b = mock.seed("b", EntityKindLite::Claim);
+        let c = mock.seed("c", EntityKindLite::Claim);
+        // a -> b -> c chain.
+        let _ = mock
+            .link(LinkReq { from_id: a.clone(), to_id: b.clone(), reason_kind: EdgeKind::Supports, text: String::new() })
+            .await;
+        let _ = mock
+            .link(LinkReq { from_id: b.clone(), to_id: c.clone(), reason_kind: EdgeKind::Supports, text: String::new() })
+            .await;
+
+        let res = mock
+            .neighbors(NeighborsReq { entity_id: a.clone(), edge_kinds: vec![], depth: 3 })
+            .await;
+        let ids: Vec<&str> = res.neighbors.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec![b.as_str()], "depth-1 only: direct neighbour b");
+        assert!(!ids.contains(&c.as_str()), "transitive c must NOT be reached");
+    }
+
+    #[test]
+    fn from_label_maps_content_kinds_and_rejects_superseded() {
+        assert_eq!(EntityKindLite::from_label("fact"), Some(EntityKindLite::Fact));
+        assert_eq!(EntityKindLite::from_label("conclusion"), Some(EntityKindLite::Conclusion));
+        // Superseded is a status, not a kind -> None (degrades to "no filter").
+        assert_eq!(EntityKindLite::from_label("superseded"), None);
+        assert_eq!(EntityKindLite::from_label("bogus"), None);
+        assert_eq!(EntityKindLite::from_label(""), None);
     }
 }

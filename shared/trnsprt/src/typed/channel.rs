@@ -44,9 +44,9 @@ where
     }
 
     pub async fn send(&mut self, frame: <C as Codec>::Frame) -> Result<(), AdapterError> {
-        <FramedWrite<DynWrite, C> as SinkExt<<C as Codec>::Frame>>::send(&mut self.writer, frame)
-            .await
-            .map_err(adapter_err_from_codec)?;
+        // `SinkExt` is in scope, so the method form resolves without the verbose
+        // fully-qualified `<FramedWrite<..> as SinkExt<..>>::send` spelling.
+        self.writer.send(frame).await.map_err(adapter_err_from_codec)?;
         Ok(())
     }
 
@@ -69,7 +69,7 @@ fn adapter_err_from_codec(e: CodecError) -> AdapterError {
 #[cfg(test)]
 mod tests {
     use super::super::adapter::InprocAdapter;
-    use super::super::codec::JsonEnvelopeCodec;
+    use super::super::codec::{BincodeCodec, JsonEnvelopeCodec};
     use super::Channel;
     use serde_json::json;
 
@@ -81,5 +81,27 @@ mod tests {
         ca.send(json!({"hello": "world"})).await.unwrap();
         let got = cb.recv().await.unwrap().unwrap();
         assert_eq!(got["hello"], "world");
+    }
+
+    #[tokio::test]
+    async fn channel_roundtrip_bincode() {
+        // Mirror the JSON roundtrip for the length-delimited bincode codec
+        // (frames are raw `Vec<u8>` payloads).
+        let (a, b) = InprocAdapter::pair();
+        let mut ca = Channel::new(a, BincodeCodec::new());
+        let mut cb = Channel::new(b, BincodeCodec::new());
+        ca.send(vec![1u8, 2, 3, 255]).await.unwrap();
+        assert_eq!(cb.recv().await.unwrap().unwrap(), vec![1u8, 2, 3, 255]);
+    }
+
+    #[tokio::test]
+    async fn recv_returns_none_on_closed_adapter() {
+        // Dropping one side closes its write half; the peer's reader hits EOF
+        // and `recv` must surface a clean `Ok(None)`, not an error.
+        let (a, b) = InprocAdapter::pair();
+        let ca = Channel::new(a, JsonEnvelopeCodec::new());
+        let mut cb = Channel::new(b, JsonEnvelopeCodec::new());
+        drop(ca);
+        assert!(cb.recv().await.unwrap().is_none(), "EOF -> Ok(None)");
     }
 }

@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+/// Coarse wire/routing category for a [`GossipMessage`] — a lightweight tag used
+/// for dispatch and metrics. The AUTHORITATIVE message shape is the
+/// [`GossipPayload`] variant; `GossipKind` is intentionally coarser and is NOT
+/// 1:1 with it: `Fetch` covers BOTH the request (`GossipPayload::FetchRequest`)
+/// and the response (`GossipPayload::FetchResult`), because a fetch is a single
+/// logical request/response exchange. When you need the exact shape, match on the
+/// payload, not the kind. The `repr(u8)` discriminants are the on-wire values and
+/// must stay stable (append new variants at the end; never renumber).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum GossipKind {
@@ -7,6 +15,7 @@ pub enum GossipKind {
 	Question = 1,
 	Pulse = 2,
 	PeerExchange = 3,
+	/// Both directions of a fetch — `FetchRequest` and `FetchResult` payloads.
 	Fetch = 4,
 	Delta = 5,
 	EntitySync = 6,
@@ -32,14 +41,28 @@ pub enum GossipPayload {
 	EntitySync(EntitySyncPayload),
 }
 
+/// Advertises a kern ("sphere") to peers so they can route thoughts toward it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpherePayload {
+	/// Federation network this sphere belongs to (gossip is scoped per network).
 	pub network_id: String,
+	/// Id of the kern being advertised.
 	pub kern_id: String,
+	/// The kern's anchor embedding — the centroid incoming thoughts are routed
+	/// against. Same dimensionality as entity vectors; empty for an un-centred
+	/// (unnamed) kern, which then matches nothing by similarity.
 	pub anchor_vec: Vec<f64>,
+	/// Human-readable anchor label (the kern's name).
 	pub anchor_text: String,
+	/// A representative entity id for the sphere (provenance / dedup handle).
 	pub entity_id: String,
+	/// Inner routing radius as a COSINE DISTANCE (`1 - cosine_similarity`, so
+	/// smaller = closer). A thought within `inner_radius` of `anchor_vec` is firmly
+	/// inside this kern.
 	pub inner_radius: f64,
+	/// Outer routing radius (cosine distance). A thought beyond `outer_radius` is
+	/// firmly outside; the band `inner_radius..outer_radius` is the fuzzy
+	/// "consider" zone. Invariant: `inner_radius <= outer_radius`.
 	pub outer_radius: f64,
 }
 

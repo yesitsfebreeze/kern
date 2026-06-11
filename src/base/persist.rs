@@ -3,6 +3,13 @@
 // `SourceRef` -> typed `Source` enum, `Kern.thoughts` -> `Kern.entities`,
 // `created_at` moved off `Source` onto `Entity`). Old saved DBs are NOT
 // migrated — they must be regenerated. CLAUDE.md mandates "no compat".
+//
+// ENCRYPTION-AT-REST POSTURE: snapshots are written as PLAINTEXT bincode
+// (`atomic_write` below does a tmp-write + fsync + atomic rename — durability,
+// not confidentiality). This layer intentionally does no encryption. Protecting
+// the `.kern` data dir is a DEPLOYMENT-layer concern (full-disk / volume
+// encryption, filesystem ACLs); do not store secrets in kern expecting the file
+// layer to guard them.
 use super::graph::{migrate_root_id, GraphGnn};
 use super::types::Kern;
 use super::util;
@@ -100,20 +107,8 @@ fn sweep_stale_tmp(dir: &Path) {
 }
 
 #[derive(Serialize, Deserialize)]
-struct SavedState {
-	root: Kern,
-	network_id: String,
-	kerns: HashMap<String, Kern>,
-	unloaded: Vec<String>,
-}
-
-#[derive(Serialize, Deserialize)]
 struct QuantMeta {
 	mode: QuantizationMode,
-}
-
-fn quant_sidecar_path(path: &Path) -> PathBuf {
-	append_suffix(path, ".quant")
 }
 
 fn quant_dir_sidecar(dir: &str) -> PathBuf {
@@ -128,64 +123,6 @@ fn read_quant_mode(sidecar: &Path) -> QuantizationMode {
 	bincode::serde::decode_from_slice::<QuantMeta, _>(&data, bincode_cfg())
 		.map(|(m, _)| m.mode)
 		.unwrap_or(QuantizationMode::None)
-}
-
-fn write_quant_mode(sidecar: &Path, mode: QuantizationMode) {
-	let meta = QuantMeta { mode };
-	if let Ok(data) = bincode::serde::encode_to_vec(&meta, bincode_cfg()) {
-		let _ = atomic_write(sidecar, &data);
-	}
-}
-
-pub fn save(g: &GraphGnn, path: &Path) -> Result<(), PersistError> {
-	let state = SavedState {
-		root: g.root.clone(),
-		network_id: g.network_id.clone(),
-		kerns: g.map().clone(),
-		unloaded: g.unloaded_ids(),
-	};
-	let data = bincode::serde::encode_to_vec(&state, bincode_cfg())?;
-	atomic_write(path, &data)?;
-	write_quant_mode(&quant_sidecar_path(path), g.quant_mode);
-	Ok(())
-}
-
-pub fn load(path: &Path) -> Result<GraphGnn, PersistError> {
-	if let Some(parent) = path.parent() {
-		if !parent.as_os_str().is_empty() {
-			sweep_stale_tmp(parent);
-		}
-	}
-	let data = fs::read(path)?;
-	let (mut state, _): (SavedState, _) = bincode::serde::decode_from_slice(&data, bincode_cfg())?;
-
-	let unloaded: std::collections::HashSet<String> = state.unloaded.into_iter().collect();
-
-	let root = state
-		.kerns
-		.get(&state.root.id)
-		.cloned()
-		.unwrap_or(state.root);
-	let mut network_id = state.network_id;
-	if network_id.is_empty() {
-		network_id = util::uuid_v4();
-	}
-
-	for k in state.kerns.values_mut() {
-		migrate_root_id(k, &network_id);
-		backfill_created_at(k);
-	}
-
-	let quant_mode = read_quant_mode(&quant_sidecar_path(path));
-	let g = GraphGnn::from_saved_with_mode(
-		root,
-		network_id,
-		String::new(),
-		state.kerns,
-		unloaded,
-		quant_mode,
-	);
-	Ok(g)
 }
 
 pub fn save_kern(dir: &str, kern: &Kern) -> Result<(), PersistError> {
@@ -203,23 +140,15 @@ pub fn load_kern(dir: &str, id: &str) -> Result<Kern, PersistError> {
 	Ok(kern)
 }
 
-/// Delete a kern's on-disk file. Called when a kern is permanently removed
-/// (`GraphGnn::deregister`) so a reaped kern does not resurrect on the next
-/// `load_dir` — `load_dir` reads every `*.kern` in the directory, so a leftover
-/// file IS a live kern as far as the next start is concerned. A missing file is
-/// success (idempotent). Never touches the root or `_meta`.
-pub fn delete_kern(dir: &str, id: &str) {
-	if dir.is_empty() || id == "_meta" {
-		return;
-	}
-	let path = Path::new(dir).join(format!("{id}.kern"));
-	match fs::remove_file(&path) {
-		Ok(()) => {}
-		Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-		Err(e) => tracing::warn!(target: "kern.persist", kern = %id, error = %e, "failed to delete kern file"),
-	}
-}
-
+/// DEPRECATION HORIZON: this is legacy-read scaffolding, not a permanent
+/// migration. It backfills `created_at` for entities decoded from old file
+/// shards that predate the field. It silently mutates loaded data on every
+/// restart, which is acceptable ONLY because it is part of the file-shard
+/// *reader* that the redb-`Store` migration is retiring: per
+/// `docs/superpowers/plans/2026-06-10-redb-store.md` (Step 1), `load_kern` /
+/// `load_dir` / `backfill_created_at` move into `migrate.rs::read_legacy_dir`
+/// and this whole path is deleted once stores are the only on-disk format.
+/// Do NOT extend it — new fields use serde `#[serde(default)]`, not a backfill.
 fn backfill_created_at(kern: &mut Kern) {
 	let now = std::time::SystemTime::now();
 	for t in kern.entities.values_mut() {
@@ -229,7 +158,52 @@ fn backfill_created_at(kern: &mut Kern) {
 	}
 }
 
-pub fn load_dir(dir: &str) -> Result<GraphGnn, PersistError> {
+/// Load the graph from the embedded LMDB store under `dir`. Opens the store once
+/// and binds it to the returned graph for the lazy-load / persist paths. An empty
+/// or root-less store yields a fresh graph bound to the (now-open) store, so the
+/// very first run on a new project persists correctly.
+pub fn load_dir(dir: &str) -> Result<GraphGnn, crate::base::store::StoreError> {
+	use crate::base::store::Store;
+	use std::sync::Arc;
+
+	let store = Store::open(dir)?;
+	let (mut kerns, mut network_id, quant_mode) = store.load_all_kerns()?;
+	if network_id.is_empty() {
+		network_id = util::uuid_v4();
+	}
+	let store = Arc::new(store);
+
+	if !kerns.contains_key("root") {
+		let mut g = GraphGnn::new();
+		g.data_dir = dir.to_string();
+		g.set_store(store);
+		return Ok(g);
+	}
+
+	for k in kerns.values_mut() {
+		migrate_root_id(k, &network_id);
+		backfill_created_at(k);
+	}
+	let root = kerns
+		.get("root")
+		.cloned()
+		.expect("root presence checked above");
+	let mut g = GraphGnn::from_saved_with_mode(
+		root,
+		network_id,
+		dir.to_string(),
+		kerns,
+		std::collections::HashSet::new(),
+		quant_mode,
+	);
+	g.set_store(store);
+	Ok(g)
+}
+
+/// Legacy file-per-shard reader, retained solely for the one-shot `kern migrate`
+/// path (see `crate::base::migrate`). New loads go through the store-backed
+/// [`load_dir`]. Reads every `<id>.kern` bincode shard under `dir`.
+pub fn load_legacy_dir(dir: &str) -> Result<GraphGnn, PersistError> {
 	sweep_stale_tmp(Path::new(dir));
 	let mut root = load_kern(dir, "root")?;
 	let mut network_id = load_network_id(dir);
@@ -326,78 +300,57 @@ pub fn merged_root(g: &GraphGnn) -> Kern {
 	merged.anchor_vec = g.root.anchor_vec.clone();
 	merged.inner_radius = g.root.inner_radius;
 	merged.outer_radius = g.root.outer_radius;
-	for (k, v) in &g.root.descriptors {
-		merged.descriptors.insert(k.clone(), v.clone());
-	}
+	// g.root is authoritative for descriptors — REPLACE, don't union. A union (the
+	// old `insert` loop) re-added any descriptor still present on the stale map-root
+	// base, so a removal on g.root (e.g. `descriptor rm`) never persisted.
+	merged.descriptors = g.root.descriptors.clone();
 	merged
 }
 
-pub fn save_all(g: &GraphGnn) -> Result<(), PersistError> {
-	if g.data_dir.is_empty() {
-		return Ok(());
-	}
-	fs::create_dir_all(&g.data_dir)?;
-	let root_id = g.root.id.clone();
-	for (id, kern) in g.map().iter() {
-		if id == &root_id {
-			continue;
-		}
-		save_kern(&g.data_dir, kern)?;
-	}
-
-	save_kern(&g.data_dir, &merged_root(g))?;
-	save_network_id(&g.data_dir, &g.network_id);
-	write_quant_mode(&quant_dir_sidecar(&g.data_dir), g.quant_mode);
-
-	// Prune orphaned kern files: any `<id>.kern` on disk that the live graph no
-	// longer knows (neither loaded nor in the unloaded tier) is a stale remnant
-	// of a deregistered kern. `load_dir` treats every file as a live kern, so
-	// without this a reaped kern resurrects on restart — the mechanism that let
-	// the unnamed-child runaway persist tens of thousands of empty kerns. The
-	// `delete_kern` in `deregister` handles the common path; this reconciles disk
-	// to memory on every full save as a backstop.
-	let keep: std::collections::HashSet<String> = g.all_ids().into_iter().collect();
-	let root_id = g.root.id.clone();
-	if let Ok(entries) = fs::read_dir(&g.data_dir) {
-		for entry in entries.flatten() {
-			let name = entry.file_name().to_string_lossy().to_string();
-			let Some(id) = name.strip_suffix(".kern") else { continue };
-			if id == "_meta" || id == root_id || keep.contains(id) {
-				continue;
-			}
-			delete_kern(&g.data_dir, id);
-		}
-	}
-	Ok(())
+/// Persist a graph's kerns (with the authoritative root overlay) into an explicit
+/// store. Shared by [`save_all`] (the graph's own store) and the copy commands
+/// (`compress` / `register`) that write into a *different* destination store.
+/// Clones the kern map once to apply the `merged_root` overlay; this is the
+/// full-persist path (shutdown / explicit save / copy), not the hot per-kern
+/// `do_persist`, so the transient clone is fine.
+pub fn save_graph_into(
+	store: &crate::base::store::Store,
+	g: &GraphGnn,
+) -> Result<(), crate::base::store::StoreError> {
+	let mut kerns = g.map().clone();
+	kerns.insert(g.root.id.clone(), merged_root(g));
+	store.save_all_kerns(&kerns, &g.network_id, g.quant_mode)
 }
 
+/// Persist the whole graph to its own store in one atomic transaction. No-op for
+/// an in-memory graph (no store bound). The store's `save_all_kerns` prunes any
+/// kern row not in the live set, so a deregistered kern can't resurrect —
+/// replacing the old on-disk orphan-file reconcile.
+pub fn save_all(g: &GraphGnn) -> Result<(), crate::base::store::StoreError> {
+	match g.store() {
+		Some(store) => save_graph_into(&store, g),
+		None => Ok(()),
+	}
+}
+
+/// Copy the graph at `src` into a fresh store at `out_dir`, recording
+/// `target_mode` as the in-memory index quantization. On-disk vectors are always
+/// int8 now (the store's size win), so `target_mode` controls only the HNSW index
+/// mode the next load rebuilds with, not the durable vector form.
 pub fn compress_dir(
 	src: &str,
 	out_dir: &str,
 	target_mode: QuantizationMode,
-) -> Result<(), PersistError> {
+) -> Result<(), crate::base::store::StoreError> {
 	let mut g = load_dir(src)?;
 	g.quant_mode = target_mode;
-	g.data_dir = out_dir.to_string();
-	fs::create_dir_all(out_dir)?;
-	g.rebuild_index();
-	save_all(&g)?;
-	Ok(())
+	let dest = crate::base::store::Store::open(out_dir)?;
+	save_graph_into(&dest, &g)
 }
 
 #[derive(Serialize, Deserialize)]
 struct GraphMeta {
 	network_id: String,
-}
-
-fn save_network_id(dir: &str, network_id: &str) {
-	let path = Path::new(dir).join("_meta.kern");
-	let meta = GraphMeta {
-		network_id: network_id.to_string(),
-	};
-	if let Ok(data) = bincode::serde::encode_to_vec(&meta, bincode_cfg()) {
-		let _ = atomic_write(&path, &data);
-	}
 }
 
 fn load_network_id(dir: &str) -> String {
@@ -417,6 +370,29 @@ mod tests {
 	use super::*;
 	use crate::base::graph::GraphGnn;
 	use tempfile::tempdir;
+
+	#[test]
+	fn atomic_write_cleans_tmp_and_errors_when_rename_fails() {
+		// Force the rename half to fail by making the destination an existing
+		// DIRECTORY (renaming a file onto a dir errors on every platform). The
+		// tmp file must be cleaned up and the original rename error surfaced.
+		let dir = tempdir().unwrap();
+		let dst = dir.path().join("target");
+		fs::create_dir(&dst).unwrap(); // dst is a directory, not a file
+
+		let err = atomic_write(&dst, b"payload").unwrap_err();
+		assert!(matches!(err, PersistError::TmpRename { .. }), "got {err:?}");
+		assert!(!tmp_path(&dst).exists(), "the .tmp file must be cleaned up on rename failure");
+	}
+
+	#[test]
+	fn atomic_write_then_read_round_trips_on_the_happy_path() {
+		let dir = tempdir().unwrap();
+		let path = dir.path().join("ok.bin");
+		atomic_write(&path, b"hello").expect("write succeeds");
+		assert_eq!(fs::read(&path).unwrap(), b"hello");
+		assert!(!tmp_path(&path).exists(), "no .tmp left behind on success");
+	}
 
 	#[test]
 	fn merged_root_overlays_authoritative_fields_over_stale_map_entry() {
@@ -487,7 +463,7 @@ mod tests {
 		// A corrupt sibling that fails to decode.
 		fs::write(format!("{d}/bad.kern"), b"not a valid bincode kern").unwrap();
 
-		let g = load_dir(&d).expect("load_dir tolerates a corrupt sibling");
+		let g = load_legacy_dir(&d).expect("load_legacy_dir tolerates a corrupt sibling");
 		assert!(g.loaded("child1").is_some(), "valid sibling still loads");
 		assert!(
 			g.map().keys().all(|k| k != "bad"),
@@ -508,7 +484,7 @@ mod tests {
 		}
 		fs::write(format!("{d}/bad.kern"), b"not a valid bincode kern").unwrap();
 
-		let g = load_dir(&d).expect("load_dir loads a large sibling set");
+		let g = load_legacy_dir(&d).expect("load_legacy_dir loads a large sibling set");
 		// root + 64 children, corrupt one skipped.
 		assert_eq!(g.map().len(), 65, "root + 64 children all present");
 		for i in 0..64 {

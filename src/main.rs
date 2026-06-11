@@ -3,6 +3,14 @@ use clap::Parser;
 use kern::commands::{Cli, dispatch, run_server};
 use kern::config::Config;
 
+/// Worker-thread count for the tokio runtime: the detected core count, but never
+/// below the hard floor of 4 (and 4 when detection fails). The floor keeps the
+/// async UI/RPC/timer paths from being starved by the blocking tick/ingest/
+/// keepalive bridges on a low-core box. Pure so the floor logic is unit-tested.
+fn worker_thread_count(available: Option<usize>) -> usize {
+	available.unwrap_or(4).max(4)
+}
+
 fn main() {
 	use tracing_subscriber::prelude::*;
 	let _ = tracing_subscriber::registry()
@@ -17,10 +25,7 @@ fn main() {
 	// exact total stall that wedges the hub. The tick/ingest consumers are serial
 	// (≤1 in-flight blocking LLM call each), so ≥4 workers guarantees the async
 	// UI/RPC paths and timers always have a thread to run on.
-	let workers = std::thread::available_parallelism()
-		.map(|n| n.get())
-		.unwrap_or(4)
-		.max(4);
+	let workers = worker_thread_count(std::thread::available_parallelism().map(|n| n.get()).ok());
 	let rt = tokio::runtime::Builder::new_multi_thread()
 		.worker_threads(workers)
 		.enable_all()
@@ -36,6 +41,14 @@ fn main() {
 		let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 		let root = Config::resolve_root(&cwd);
 		if root != cwd {
+			// Operators inspecting where the daemon anchored its data_dir / spool
+			// need to see this re-pin; a silent cwd change is hard to diagnose.
+			tracing::info!(
+				target: "kern",
+				from = %cwd.display(),
+				to = %root.display(),
+				"re-pinned cwd to project root (nearest ancestor with .kern)"
+			);
 			let _ = std::env::set_current_dir(&root);
 		}
 		let cfg = Config::load(&root).unwrap_or_default();
@@ -46,4 +59,21 @@ fn main() {
 			None => run_server(&cli, &cfg).await,
 		}
 	});
+}
+
+#[cfg(test)]
+mod tests {
+	use super::worker_thread_count;
+
+	#[test]
+	fn worker_count_honors_the_floor_of_four() {
+		// Below the floor (incl. detection failure -> None) clamps up to 4.
+		assert_eq!(worker_thread_count(None), 4, "detection failure -> floor");
+		assert_eq!(worker_thread_count(Some(1)), 4, "1 core -> floor");
+		assert_eq!(worker_thread_count(Some(2)), 4);
+		assert_eq!(worker_thread_count(Some(4)), 4, "at the floor");
+		// Above the floor passes through.
+		assert_eq!(worker_thread_count(Some(8)), 8);
+		assert_eq!(worker_thread_count(Some(64)), 64);
+	}
 }

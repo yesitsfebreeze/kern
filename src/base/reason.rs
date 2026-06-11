@@ -227,6 +227,16 @@ pub fn remove_entity(g: &mut GraphGnn, kern_id: &str, id: &str) {
 	}
 }
 
+/// Remove the first occurrence of `s` from `vec` (if present).
+///
+/// The linear scan is intentional, not a missed optimization. `by_from`/`by_to`
+/// values are an entity's adjacency list — its edge degree — which the daemon
+/// keeps small: clustering caps a kern at a bounded entity count and edges are
+/// pruned by decay/gc, so a list is tens of ids, not thousands. At that size a
+/// `Vec` scan beats a `HashSet` on cache locality and avoids per-edge hashing.
+/// `by_from`/`by_to` are also `Kern` fields serialized (serde) into the bincode
+/// shards, so swapping `Vec<String>` for `HashSet<String>` is a persisted-format
+/// change to weigh against the (nonexistent) hot-path win — not worth it.
 fn remove_string_from_vec(vec: Option<&mut Vec<String>>, s: &str) {
 	if let Some(v) = vec {
 		if let Some(pos) = v.iter().position(|x| x == s) {
@@ -238,7 +248,7 @@ fn remove_string_from_vec(vec: Option<&mut Vec<String>>, s: &str) {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::base::types::{Kern, Reason};
+	use crate::base::types::{Entity, EntityKind, Kern, Reason};
 
 	fn edge(from: &str, to: &str) -> Reason {
 		Reason {
@@ -247,6 +257,10 @@ mod tests {
 			id: format!("{from}->{to}"),
 			..Default::default()
 		}
+	}
+
+	fn ent(id: &str, vector: Vec<f64>) -> Entity {
+		Entity { id: id.into(), vector, ..Default::default() }
 	}
 
 	#[test]
@@ -279,5 +293,95 @@ mod tests {
 			"no stale id left in by_from"
 		);
 		assert!(collect_reason_ids(&k, "a").is_empty(), "no dangling edge id");
+	}
+
+	// ---- move_entity --------------------------------------------------------
+
+	#[test]
+	fn move_entity_relocates_outgoing_and_stamps_cross_kern_targets() {
+		let mut g = GraphGnn::new();
+		let mut src = Kern::new("src", "");
+		src.entities.insert("E".into(), ent("E", vec![]));
+		src.entities.insert("X".into(), ent("X", vec![])); // third entity stays behind
+		add_reason(&mut src, edge("E", "X")); // outgoing -> moves, stamp to_kern_id=src
+		add_reason(&mut src, edge("E", "E")); // self-loop -> moves, no stamp
+		add_reason(&mut src, edge("Y", "E")); // incoming -> stays in src, stamp to_kern_id=dst
+		g.kerns.insert("src".into(), src);
+		g.kerns.insert("dst".into(), Kern::new("dst", ""));
+
+		move_entity(&mut g, "src", "dst", "E");
+
+		let dst = g.kerns.get("dst").unwrap();
+		let src = g.kerns.get("src").unwrap();
+		assert!(dst.entities.contains_key("E"), "entity moved to dst");
+		assert!(!src.entities.contains_key("E"), "entity gone from src");
+
+		// Outgoing E->X moved and stamped with the SOURCE kern (X left behind there).
+		assert_eq!(dst.reasons.get("E->X").map(|r| r.to_kern_id.as_str()), Some("src"));
+		assert!(!src.reasons.contains_key("E->X"), "outgoing detached from src maps");
+		assert!(src.by_from.get("E").map(|v| v.is_empty()).unwrap_or(true), "src by_from[E] cleared");
+		// Self-loop E->E moved with both endpoints -> no cross-kern stamp.
+		assert_eq!(dst.reasons.get("E->E").map(|r| r.to_kern_id.as_str()), Some(""));
+
+		// Incoming Y->E stays in src (its `from` didn't move) but is stamped to dst.
+		assert_eq!(src.reasons.get("Y->E").map(|r| r.to_kern_id.as_str()), Some("dst"));
+		assert!(!dst.reasons.contains_key("Y->E"), "incoming reason not moved");
+	}
+
+	#[test]
+	fn move_entity_same_kern_or_missing_entity_is_noop() {
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("k", "");
+		k.entities.insert("E".into(), ent("E", vec![]));
+		g.kerns.insert("k".into(), k);
+
+		move_entity(&mut g, "k", "k", "E"); // same kern -> silent no-op
+		assert!(g.kerns.get("k").unwrap().entities.contains_key("E"));
+		move_entity(&mut g, "k", "dst", "ghost"); // missing entity -> silent no-op
+		assert!(g.kerns.get("k").unwrap().entities.contains_key("E"));
+	}
+
+	// ---- remove_entity ------------------------------------------------------
+
+	#[test]
+	fn remove_entity_cascades_through_reasons_and_hnsw_indices() {
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("k", "");
+		k.entities.insert("a".into(), ent("a", vec![1.0, 0.0]));
+		k.entities.insert("b".into(), ent("b", vec![0.0, 1.0]));
+		let mut e1 = edge("a", "b");
+		e1.vector = vec![0.5, 0.5];
+		let mut e2 = edge("b", "a");
+		e2.vector = vec![0.4, 0.6];
+		add_reason(&mut k, e1);
+		add_reason(&mut k, e2);
+		g.kerns.insert("k".into(), k);
+		g.rebuild_index();
+		assert_eq!(g.entity_idx.len(), 2, "two entities indexed");
+		assert_eq!(g.reason_idx.len(), 2, "two reasons indexed");
+
+		remove_entity(&mut g, "k", "a");
+
+		let k = g.kerns.get("k").unwrap();
+		assert!(!k.entities.contains_key("a"), "entity removed from map");
+		assert!(k.by_from.get("a").is_none(), "by_from[a] purged");
+		assert!(k.by_to.get("a").is_none(), "by_to[a] purged");
+		assert!(k.reasons.is_empty(), "both incident reasons removed (a->b and b->a)");
+		assert!(collect_reason_ids(k, "b").is_empty(), "b left with no dangling edges");
+		// HNSW purge: a gone (b stays); both reasons gone.
+		assert_eq!(g.entity_idx.len(), 1, "entity a purged from entity_idx, b remains");
+		assert_eq!(g.reason_idx.len(), 0, "both reasons purged from reason_idx");
+	}
+
+	#[test]
+	fn remove_entity_fact_is_immune() {
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("k", "");
+		let fact = Entity { id: "f".into(), kind: EntityKind::Fact, ..Default::default() };
+		k.entities.insert("f".into(), fact);
+		g.kerns.insert("k".into(), k);
+
+		remove_entity(&mut g, "k", "f");
+		assert!(g.kerns.get("k").unwrap().entities.contains_key("f"), "facts are immune to removal");
 	}
 }

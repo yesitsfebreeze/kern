@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readLines, extractDelta } from '../kern-capture.mjs';
+import { readLines, extractDelta, spoolEvictions, MAX_SPOOL_FILES } from '../kern-capture.mjs';
 
 // ── readLines ─────────────────────────────────────────────────────────────
 
@@ -114,6 +114,34 @@ test('offset skips earlier lines', () => {
 test('offset at lines.length yields empty text', () => {
   const lines = [makeUser('hi')];
   assert.equal(extractDelta(lines, lines.length).text, '');
+});
+
+test('offset PAST lines.length is a clean no-op (chaining guard)', () => {
+  // start > lines.length can happen if the transcript was truncated/rewound
+  // between Stop hooks; the loop must simply not run, not throw.
+  const lines = [makeUser('hi')];
+  const r = extractDelta(lines, 5);
+  assert.equal(r.text, '');
+  assert.equal(r.consumed, lines.length, 'consumed still pins to lines.length');
+});
+
+// ── spoolEvictions ────────────────────────────────────────────────────────
+
+test('spoolEvictions keeps everything at or under the cap', () => {
+  const entries = [{ name: 'a', mtimeMs: 1 }, { name: 'b', mtimeMs: 2 }];
+  assert.deepEqual(spoolEvictions(entries, 5), []);
+  assert.deepEqual(spoolEvictions(entries, 2), [], 'exactly at cap -> nothing evicted');
+  assert.deepEqual(spoolEvictions([], MAX_SPOOL_FILES), [], 'empty spool -> nothing');
+});
+
+test('spoolEvictions drops the oldest (lowest mtime) beyond the cap', () => {
+  const entries = [
+    { name: 'new', mtimeMs: 300 },
+    { name: 'old', mtimeMs: 100 },
+    { name: 'mid', mtimeMs: 200 },
+  ];
+  // cap 1 -> keep newest (300); evict old(100) then mid(200), oldest-first.
+  assert.deepEqual(spoolEvictions(entries, 1), ['old', 'mid']);
 });
 
 // ── extractDelta: resilience ──────────────────────────────────────────────

@@ -1,3 +1,12 @@
+//! Deterministic hash-based embedding STUB — benchmarks only.
+//!
+//! Maps text to a fixed-[`DIM`] vector by feature-hashing each token into signed
+//! slots, then L2-normalizing. It is NOT a semantic embedder: there is no
+//! learned model, so cosine similarity reflects token *overlap*, not meaning.
+//! The bench harness (`build.rs`, `replay.rs`) uses it to exercise the
+//! retrieval/index path at scale without a live Ollama embedder. Never wire this
+//! into production retrieval.
+
 use crate::base::util::content_hash;
 
 pub const DIM: usize = 64;
@@ -14,7 +23,9 @@ pub fn embed(text: &str) -> Vec<f64> {
 			v[slot] += sign;
 		}
 	}
-	normalize(&mut v);
+	// Shared primitive — same L2 normalization the retrieval path uses; no local
+	// re-implementation (was a duplicate of base::math::l2_normalize).
+	crate::base::math::l2_normalize(&mut v);
 	v
 }
 
@@ -39,11 +50,39 @@ fn hex_u32(bytes: &[u8]) -> u32 {
 	n
 }
 
-fn normalize(v: &mut [f64]) {
-	let norm: f64 = v.iter().map(|x| x * x).sum::<f64>().sqrt();
-	if norm > 0.0 {
-		for x in v.iter_mut() {
-			*x /= norm;
-		}
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::base::math::cosine;
+
+	#[test]
+	fn output_is_unit_length() {
+		let v = embed("the quick brown fox");
+		assert_eq!(v.len(), DIM);
+		let norm: f64 = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+		assert!((norm - 1.0).abs() < 1e-9, "L2 norm ~1, got {norm}");
+	}
+
+	#[test]
+	fn deterministic_and_tokenization_is_case_punct_insensitive() {
+		assert_eq!(embed("hello world"), embed("hello world"), "deterministic");
+		assert_eq!(embed("Hello, World!"), embed("hello world"), "case/punct folded");
+	}
+
+	#[test]
+	fn empty_or_tokenless_input_is_a_zero_vector() {
+		// No tokens deposited -> norm 0 -> l2_normalize leaves zeros (no NaN).
+		assert_eq!(embed(""), vec![0.0; DIM]);
+		assert_eq!(embed("   !!! "), vec![0.0; DIM]);
+	}
+
+	#[test]
+	fn identical_token_sets_match_and_disjoint_sets_diverge() {
+		let base = embed("alpha beta gamma");
+		// Same tokens, different order -> identical vector (sum is order-free).
+		let same = embed("gamma alpha beta");
+		let diff = embed("delta epsilon zeta");
+		assert!((cosine(&base, &same) - 1.0).abs() < 1e-9, "same token set -> cosine 1.0");
+		assert!(cosine(&base, &diff) < cosine(&base, &same), "disjoint tokens less similar");
 	}
 }

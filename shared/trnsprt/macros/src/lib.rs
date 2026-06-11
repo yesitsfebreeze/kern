@@ -23,7 +23,7 @@
 //!   requests, dispatches to the handler, sends replies.
 
 use proc_macro::TokenStream;
-use proc_macro2::{Span, TokenStream as TokenStream2};
+use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{parse_macro_input, FnArg, ItemTrait, Pat, PatType, ReturnType, TraitItem, Type};
 
@@ -114,21 +114,26 @@ fn expand(input: ItemTrait) -> syn::Result<TokenStream> {
     let client_methods = methods.iter().map(client_method);
     let server_arms = methods.iter().map(|m| server_arm(&trait_name, m));
 
-    let method_names: Vec<String> = methods.iter().map(|m| m.name.to_string()).collect();
+    // The Codec trait bound is identical on the client struct, its impl block, and
+    // the serve fn. Build it once and interpolate, so the five-trait clause is not
+    // copy-pasted three times (and stays in sync if it ever changes).
+    let codec_bound = quote! {
+        ::trnsprt::typed::Codec<Frame = ::trnsprt::__private::serde_json::Value>
+            + ::core::default::Default
+            + ::trnsprt::__private::tokio_util::codec::Encoder<
+                ::trnsprt::__private::serde_json::Value,
+                Error = ::trnsprt::typed::CodecError,
+            >
+            + ::trnsprt::__private::tokio_util::codec::Decoder<
+                Item = ::trnsprt::__private::serde_json::Value,
+                Error = ::trnsprt::typed::CodecError,
+            >
+    };
 
     let client_decl = quote! {
         #trait_vis struct #client_ident<C>
         where
-            C: ::trnsprt::typed::Codec<Frame = ::trnsprt::__private::serde_json::Value>
-                + ::core::default::Default
-                + ::trnsprt::__private::tokio_util::codec::Encoder<
-                    ::trnsprt::__private::serde_json::Value,
-                    Error = ::trnsprt::typed::CodecError,
-                >
-                + ::trnsprt::__private::tokio_util::codec::Decoder<
-                    Item = ::trnsprt::__private::serde_json::Value,
-                    Error = ::trnsprt::typed::CodecError,
-                >,
+            C: #codec_bound,
         {
             channel: ::trnsprt::__private::tokio::sync::Mutex<::trnsprt::typed::Channel<C>>,
             next_id: ::core::sync::atomic::AtomicU64,
@@ -139,16 +144,7 @@ fn expand(input: ItemTrait) -> syn::Result<TokenStream> {
 
         impl<C> #client_ident<C>
         where
-            C: ::trnsprt::typed::Codec<Frame = ::trnsprt::__private::serde_json::Value>
-                + ::core::default::Default
-                + ::trnsprt::__private::tokio_util::codec::Encoder<
-                    ::trnsprt::__private::serde_json::Value,
-                    Error = ::trnsprt::typed::CodecError,
-                >
-                + ::trnsprt::__private::tokio_util::codec::Decoder<
-                    Item = ::trnsprt::__private::serde_json::Value,
-                    Error = ::trnsprt::typed::CodecError,
-                >,
+            C: #codec_bound,
         {
             pub fn new(channel: ::trnsprt::typed::Channel<C>) -> Self {
                 Self {
@@ -231,19 +227,9 @@ fn expand(input: ItemTrait) -> syn::Result<TokenStream> {
             handler: H,
         ) -> ::core::result::Result<(), ::trnsprt::typed::AdapterError>
         where
-            C: ::trnsprt::typed::Codec<Frame = ::trnsprt::__private::serde_json::Value>
-                + ::core::default::Default
-                + ::trnsprt::__private::tokio_util::codec::Encoder<
-                    ::trnsprt::__private::serde_json::Value,
-                    Error = ::trnsprt::typed::CodecError,
-                >
-                + ::trnsprt::__private::tokio_util::codec::Decoder<
-                    Item = ::trnsprt::__private::serde_json::Value,
-                    Error = ::trnsprt::typed::CodecError,
-                >,
+            C: #codec_bound,
             H: #trait_name,
         {
-            let known_methods: &[&str] = &[ #( #method_names ),* ];
             loop {
                 let frame = match channel.recv().await? {
                     Some(f) => f,
@@ -259,7 +245,6 @@ fn expand(input: ItemTrait) -> syn::Result<TokenStream> {
                 let params = frame.get("params").cloned().unwrap_or(
                     ::trnsprt::__private::serde_json::Value::Null,
                 );
-                let _ = known_methods;
                 let reply = match method.as_str() {
                     #( #server_arms )*
                     other => ::trnsprt::__private::serde_json::json!({
@@ -370,7 +355,31 @@ fn to_snake(s: &str) -> String {
     out
 }
 
-#[allow(dead_code)]
-fn _span() -> Span {
-    Span::call_site()
+#[cfg(test)]
+mod tests {
+    use super::to_snake;
+
+    // `to_snake` derives the `serve_<snake>` fn name from the trait ident, so its
+    // output is part of the macro's public surface (a regression would rename the
+    // generated server fn and break every call site). `expand()` itself can't be
+    // unit-tested here — it returns a `proc_macro::TokenStream`, which only exists
+    // inside the compiler — so the generated client/server is proven to compile and
+    // round-trip by the consumer-crate integration tests (tests/search_rpc.rs and
+    // tests/kern_rpc.rs drive SearchSvcClient/serve_search_svc and KernRpcClient/
+    // serve_kern_rpc over real Channel pairs).
+    #[test]
+    fn to_snake_lowercases_and_word_splits_on_interior_capitals() {
+        // The real trait idents this macro is used on.
+        assert_eq!(to_snake("MemoryRpc"), "memory_rpc");
+        assert_eq!(to_snake("KernRpc"), "kern_rpc");
+        assert_eq!(to_snake("SearchSvc"), "search_svc");
+        // A leading capital never produces a leading underscore (i == 0 guard).
+        assert_eq!(to_snake("Memory"), "memory");
+        assert_eq!(to_snake("X"), "x");
+        // Each interior capital starts a new word — consecutive caps each split.
+        assert_eq!(to_snake("ABC"), "a_b_c");
+        // Already-snake / lowercase input passes through untouched.
+        assert_eq!(to_snake("already_snake"), "already_snake");
+        assert_eq!(to_snake(""), "");
+    }
 }

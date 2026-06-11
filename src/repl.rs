@@ -127,52 +127,48 @@ async fn do_ingest(
 }
 
 fn do_health(graph: &Arc<RwLock<GraphGnn>>, task_q: &Option<Arc<crate::tick::queue::Queue>>) {
-	let g = read_recovered(graph);
-	let kerns = g.all();
-	let mut total_entities = 0usize;
-	let mut total_reasons = 0usize;
-	let mut unnamed = 0usize;
-	for k in &kerns {
-		total_entities += k.entities.len();
-		total_reasons += k.reasons.len();
-		if k.is_unnamed() {
-			unnamed += 1;
-		}
-	}
-	let anchors: Vec<String> = crate::base::accept::root_anchor_ids(&g)
-		.iter()
-		.filter_map(|cid| g.loaded(cid))
-		.map(|c| c.anchor_text.clone())
-		.collect();
+	let h = {
+		let g = read_recovered(graph);
+		crate::base::health::graph_health_stats(&g)
+	};
 	let queue_depth = task_q.as_ref().map(|q| q.pending_count()).unwrap_or(0);
 
-	if anchors.is_empty() {
+	if h.anchors.is_empty() {
 		println!("anchors:     (none)");
 	} else {
-		println!("anchors:     {}", anchors.join(", "));
+		println!("anchors:     {}", h.anchors.join(", "));
 	}
-	println!("kerns:       {}", kerns.len());
-	println!("thoughts:    {} (unnamed: {})", total_entities, unnamed);
-	println!("reasons:     {}", total_reasons);
+	println!("kerns:       {}", h.kerns);
+	println!("thoughts:    {} (unnamed: {})", h.entities, h.unnamed);
+	println!("reasons:     {}", h.reasons);
 	println!("queue_depth: {queue_depth}");
 }
 
 fn do_list(graph: &Arc<RwLock<GraphGnn>>) {
 	let g = read_recovered(graph);
-	let mut count = 0usize;
+	for line in list_lines(&g) {
+		println!("{line}");
+	}
+}
+
+/// Build the `list` command output: one `[id] text` line per entity, truncated
+/// to the first 50 with a sentinel line, or a single "no entities" line on an
+/// empty graph. Pure (no IO) so the cap and line format are unit-testable.
+fn list_lines(g: &GraphGnn) -> Vec<String> {
+	let mut lines = Vec::new();
 	for k in g.all() {
 		for t in k.entities.values() {
-			println!("[{}] {}", short_id(&t.id), truncate(&t.text(), 120),);
-			count += 1;
-			if count >= 50 {
-				println!("... (showing first 50)");
-				return;
+			lines.push(format!("[{}] {}", short_id(&t.id), truncate(&t.text(), 120)));
+			if lines.len() >= 50 {
+				lines.push("... (showing first 50)".to_string());
+				return lines;
 			}
 		}
 	}
-	if count == 0 {
-		println!("no entities");
+	if lines.is_empty() {
+		lines.push("no entities".to_string());
 	}
+	lines
 }
 
 fn do_pulse(graph: &Arc<RwLock<GraphGnn>>, task_q: &Option<Arc<crate::tick::queue::Queue>>) {
@@ -190,13 +186,52 @@ fn do_pulse(graph: &Arc<RwLock<GraphGnn>>, task_q: &Option<Arc<crate::tick::queu
 }
 
 fn print_help() {
-	println!("Commands:");
-	println!("  query <text>   Search and get LLM answer");
-	println!("  q <text>       Alias for query");
-	println!("  ingest <text>  Add text to the graph");
-	println!("  health         Show graph statistics");
-	println!("  list           Show first 50 entities");
-	println!("  pulse          Trigger tick pulse");
-	println!("  quit / exit    Exit REPL");
-	println!("  ? / help       Show this help");
+	println!("{}", help_text());
+}
+
+/// The `help`/`?` command text. Pure so the command listing stays unit-testable.
+fn help_text() -> &'static str {
+	"Commands:\n\
+	\x20 query <text>   Search and get LLM answer\n\
+	\x20 q <text>       Alias for query\n\
+	\x20 ingest <text>  Add text to the graph\n\
+	\x20 health         Show graph statistics\n\
+	\x20 list           Show first 50 entities\n\
+	\x20 pulse          Trigger tick pulse\n\
+	\x20 quit / exit    Exit REPL\n\
+	\x20 ? / help       Show this help"
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::base::types::{Entity, Kern};
+
+	#[test]
+	fn help_text_lists_every_command() {
+		let h = help_text();
+		for cmd in ["query", "ingest", "health", "list", "pulse", "quit", "help"] {
+			assert!(h.contains(cmd), "help text missing `{cmd}`");
+		}
+	}
+
+	#[test]
+	fn list_lines_caps_at_50_with_sentinel() {
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("kx", "");
+		for i in 0..60 {
+			let id = format!("e{i:04}");
+			k.entities.insert(id.clone(), Entity { id, ..Default::default() });
+		}
+		g.kerns.insert("kx".into(), k);
+		let lines = list_lines(&g);
+		assert_eq!(lines.len(), 51, "50 entity lines + 1 truncation sentinel");
+		assert_eq!(lines.last().unwrap(), "... (showing first 50)");
+	}
+
+	#[test]
+	fn list_lines_empty_graph_says_no_entities() {
+		let g = GraphGnn::new();
+		assert_eq!(list_lines(&g), vec!["no entities".to_string()]);
+	}
 }

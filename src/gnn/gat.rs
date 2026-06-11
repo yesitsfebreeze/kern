@@ -22,7 +22,9 @@ pub struct GATLayer {
 	last_features: Option<Tensor>,
 	last_wh: Vec<Tensor>,
 	last_alpha: Vec<Vec<Vec<f64>>>, // [K][N][|nbrs|]
-	pub last_pre_leaky_pos: Vec<Vec<Vec<bool>>>,
+	// Per-head leaky-relu sign cache for the backward pass. Private: external
+	// mutation would silently corrupt gradient computation in try_backward_graph.
+	last_pre_leaky_pos: Vec<Vec<Vec<bool>>>,
 	last_nbr_idxs: Vec<Vec<usize>>,
 	last_pre_act: Option<Tensor>,
 	d_a: Vec<Tensor>,
@@ -38,12 +40,30 @@ impl GATLayer {
 		norm: bool,
 		drop_rate: f64,
 	) -> Self {
+		let mut rng = rand::rng();
+		Self::with_rng(in_features, head_dim, heads, concat, act, norm, drop_rate, &mut rng)
+	}
+
+	/// Construct a `GATLayer` with deterministic weight init from a seeded RNG.
+	/// Use this in tests asserting on training dynamics so runs are reproducible
+	/// regardless of system entropy (mirrors [`GCNLayer::with_rng`]).
+	#[allow(clippy::too_many_arguments)]
+	pub fn with_rng<R: rand::Rng>(
+		in_features: usize,
+		head_dim: usize,
+		heads: usize,
+		concat: bool,
+		act: Option<Activation>,
+		norm: bool,
+		drop_rate: f64,
+		rng: &mut R,
+	) -> Self {
 		let scale = (2.0 / (2 * head_dim) as f64).sqrt();
 		let w: Vec<_> = (0..heads)
-			.map(|_| LinearLayer::new(in_features, head_dim))
+			.map(|_| LinearLayer::with_rng(in_features, head_dim, rng))
 			.collect();
 		let a: Vec<_> = (0..heads)
-			.map(|_| Tensor::rand(1, 2 * head_dim, scale))
+			.map(|_| Tensor::rand_with(1, 2 * head_dim, scale, rng))
 			.collect();
 		let out_dim = if concat { heads * head_dim } else { head_dim };
 		Self {
@@ -73,6 +93,103 @@ impl GATLayer {
 			d_a: Vec::new(),
 		}
 	}
+
+	/// Attention weights α for one node over its neighbours: the GAT additive
+	/// score e_ij = aᵀ[Wh_i ‖ Wh_j], leaky-relu'd then softmax-normalised
+	/// (max-shifted for numerical stability). Returns the per-neighbour weights
+	/// and the pre-leaky sign mask, which the backward pass caches to route the
+	/// leaky-relu derivative.
+	fn node_attention(
+		&self,
+		wh: &Tensor,
+		i: usize,
+		nbrs: &[usize],
+		a_src: &[f64],
+		a_dst: &[f64],
+	) -> (Vec<f64>, Vec<bool>) {
+		let hd = self.head_dim;
+		let mut scores = vec![0.0; nbrs.len()];
+		let mut pre_pos = vec![false; nbrs.len()];
+		let mut max_score = f64::NEG_INFINITY;
+		for (ni, &j) in nbrs.iter().enumerate() {
+			let mut e = 0.0;
+			for d in 0..hd {
+				e += a_src[d] * wh.at(i, d);
+				e += a_dst[d] * wh.at(j, d);
+			}
+			pre_pos[ni] = e >= 0.0;
+			if e < 0.0 {
+				e *= self.leaky_slope;
+			}
+			scores[ni] = e;
+			if e > max_score {
+				max_score = e;
+			}
+		}
+		let mut sum_exp = 0.0;
+		for s in &mut scores {
+			*s = (*s - max_score).exp();
+			sum_exp += *s;
+		}
+		let alpha_i: Vec<f64> = scores.iter().map(|s| s / sum_exp).collect();
+		(alpha_i, pre_pos)
+	}
+
+	/// One attention head over the whole graph: for every node compute its
+	/// neighbour attention weights and aggregate the transformed neighbour
+	/// features Wh into `head_out`. Returns that output plus the cached α and
+	/// pre-leaky sign masks (`[N][|nbrs|]`) the backward pass needs.
+	fn aggregate_head(
+		&self,
+		wh: &Tensor,
+		nbr_idxs: &[Vec<usize>],
+		k: usize,
+		n: usize,
+	) -> (Tensor, Vec<Vec<f64>>, Vec<Vec<bool>>) {
+		let hd = self.head_dim;
+		let a_src = &self.a[k].data[..hd];
+		let a_dst = &self.a[k].data[hd..2 * hd];
+
+		let mut alpha_k: Vec<Vec<f64>> = vec![Vec::new(); n];
+		let mut pre_leaky_pos_k: Vec<Vec<bool>> = vec![Vec::new(); n];
+		let mut head_out = Tensor::zeros(n, hd);
+
+		for i in 0..n {
+			let nbrs = &nbr_idxs[i];
+			if nbrs.is_empty() {
+				continue;
+			}
+			let (alpha_i, pre_pos) = self.node_attention(wh, i, nbrs, a_src, a_dst);
+			for (ni, &j) in nbrs.iter().enumerate() {
+				let w_ni = alpha_i[ni];
+				for d in 0..hd {
+					head_out.data[i * hd + d] += w_ni * wh.at(j, d);
+				}
+			}
+			alpha_k[i] = alpha_i;
+			pre_leaky_pos_k[i] = pre_pos;
+		}
+		(head_out, alpha_k, pre_leaky_pos_k)
+	}
+
+	/// Scatter a head's output into the layer output: concat heads side-by-side
+	/// at the head's column offset, or accumulate into a shared block when heads
+	/// are averaged (the mean scale is applied once, after all heads).
+	fn write_head_output(&self, output: &mut Tensor, head_out: &Tensor, k: usize, n: usize) {
+		let hd = self.head_dim;
+		if self.concat {
+			let offset = k * hd;
+			for i in 0..n {
+				for d in 0..hd {
+					output.set(i, offset + d, head_out.at(i, d));
+				}
+			}
+		} else {
+			for (i, v) in output.data.iter_mut().enumerate() {
+				*v += head_out.data[i];
+			}
+		}
+	}
 }
 
 impl GraphLayer for GATLayer {
@@ -100,70 +217,11 @@ impl GraphLayer for GATLayer {
 
 		for k in 0..self.heads {
 			let wh = self.w[k].forward(features);
-			let hd = self.head_dim;
-			let a_src = &self.a[k].data[..hd];
-			let a_dst = &self.a[k].data[hd..2 * hd];
-
-			let mut alpha_k: Vec<Vec<f64>> = vec![Vec::new(); n];
-			let mut pre_leaky_pos_k: Vec<Vec<bool>> = vec![Vec::new(); n];
-			let mut head_out = Tensor::zeros(n, hd);
-
-			for i in 0..n {
-				let nbrs = &nbr_idxs[i];
-				if nbrs.is_empty() {
-					continue;
-				}
-				let mut scores = vec![0.0; nbrs.len()];
-				let mut pre_pos = vec![false; nbrs.len()];
-				let mut max_score = f64::NEG_INFINITY;
-				for (ni, &j) in nbrs.iter().enumerate() {
-					let mut e = 0.0;
-					for d in 0..hd {
-						e += a_src[d] * wh.at(i, d);
-						e += a_dst[d] * wh.at(j, d);
-					}
-					pre_pos[ni] = e >= 0.0;
-					if e < 0.0 {
-						e *= self.leaky_slope;
-					}
-					scores[ni] = e;
-					if e > max_score {
-						max_score = e;
-					}
-				}
-				let mut sum_exp = 0.0;
-				for s in &mut scores {
-					*s = (*s - max_score).exp();
-					sum_exp += *s;
-				}
-				let alpha_i: Vec<f64> = scores.iter().map(|s| s / sum_exp).collect();
-
-				for (ni, &j) in nbrs.iter().enumerate() {
-					let w_ni = alpha_i[ni];
-					for d in 0..hd {
-						head_out.data[i * hd + d] += w_ni * wh.at(j, d);
-					}
-				}
-				alpha_k[i] = alpha_i;
-				pre_leaky_pos_k[i] = pre_pos;
-			}
-
+			let (head_out, alpha_k, pre_leaky_pos_k) = self.aggregate_head(&wh, &nbr_idxs, k, n);
+			self.write_head_output(&mut output, &head_out, k, n);
 			self.last_wh.push(wh);
 			self.last_alpha.push(alpha_k);
 			self.last_pre_leaky_pos.push(pre_leaky_pos_k);
-
-			if self.concat {
-				let offset = k * hd;
-				for i in 0..n {
-					for d in 0..hd {
-						output.set(i, offset + d, head_out.at(i, d));
-					}
-				}
-			} else {
-				for (i, v) in output.data.iter_mut().enumerate() {
-					*v += head_out.data[i];
-				}
-			}
 		}
 
 		if !self.concat && self.heads > 1 {

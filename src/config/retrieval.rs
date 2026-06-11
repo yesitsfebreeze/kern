@@ -95,7 +95,7 @@ impl Default for RetrievalConfig {
 			qbst_recency_weight: constants::QBST_RECENCY_WEIGHT,
 			qbst_recency_half_life_secs: constants::QBST_RECENCY_HALF_LIFE.as_secs(),
 			qbst_cap: constants::QBST_CAP,
-			heat_half_life_secs: HeatConfig::defaults().half_life_secs,
+			heat_half_life_secs: HeatConfig::default().half_life_secs,
 			refine_traversal_weight: constants::REFINE_TRAVERSAL_WEIGHT,
 			refine_boost_cap: constants::REFINE_BOOST_CAP,
 			fact_score_boost: constants::FACT_SCORE_BOOST,
@@ -145,8 +145,87 @@ impl Default for RetrievalConfig {
 			adaptive_ef_max: 128,
 			adaptive_ef_step: 128,
 			adaptive_ef_spread_epsilon: 0.02,
-			query_cache_cap: crate::retrieval::cache::DEFAULT_CAP,
-			query_cache_theta: crate::retrieval::cache::DEFAULT_THETA,
+			query_cache_cap: constants::QUERY_CACHE_DEFAULT_CAP,
+			query_cache_theta: constants::QUERY_CACHE_DEFAULT_THETA,
 		}
+	}
+}
+
+impl RetrievalConfig {
+	/// Check cross-field invariants on a loaded config. Returns a list of
+	/// human-readable problems (empty = valid) so a caller can warn-and-continue or
+	/// reject as it sees fit. Cheap structural sanity check, not a tuning oracle.
+	pub fn validate(&self) -> Vec<String> {
+		let mut errs = Vec::new();
+
+		for (name, w) in [
+			("content", &self.weights_content),
+			("reason", &self.weights_reason),
+			("hybrid", &self.weights_hybrid),
+		] {
+			let sum = w.content + w.reason + w.edge + w.lexical;
+			if (sum - 1.0).abs() > 0.01 {
+				errs.push(format!("weights_{name} sum to {sum:.3}, expected ~1.0"));
+			}
+		}
+
+		if self.adaptive_ef_start > self.adaptive_ef_max {
+			errs.push(format!(
+				"adaptive_ef_start ({}) must be <= adaptive_ef_max ({})",
+				self.adaptive_ef_start, self.adaptive_ef_max,
+			));
+		}
+
+		for (name, v) in [
+			("query_cache_theta", self.query_cache_theta),
+			("mmr_lambda", self.mmr_lambda),
+			("hyde_fusion_weight", self.hyde_fusion_weight),
+		] {
+			if !(0.0..=1.0).contains(&v) {
+				errs.push(format!("{name} ({v}) must be in [0.0, 1.0]"));
+			}
+		}
+
+		if !(0.0..1.0).contains(&self.pagerank_damping) {
+			errs.push(format!("pagerank_damping ({}) must be in [0.0, 1.0)", self.pagerank_damping));
+		}
+
+		errs
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn default_config_is_valid() {
+		assert!(RetrievalConfig::default().validate().is_empty(), "shipped defaults must validate");
+	}
+
+	#[test]
+	fn weights_not_summing_to_one_are_flagged() {
+		let mut cfg = RetrievalConfig::default();
+		cfg.weights_hybrid.content = 0.9; // 0.9 + 0.30 + 0.20 + 0.0 = 1.4
+		let errs = cfg.validate();
+		assert!(errs.iter().any(|e| e.contains("weights_hybrid")), "got {errs:?}");
+	}
+
+	#[test]
+	fn adaptive_ef_start_above_max_is_flagged() {
+		let mut cfg = RetrievalConfig::default();
+		cfg.adaptive_ef_start = 200;
+		cfg.adaptive_ef_max = 128;
+		assert!(cfg.validate().iter().any(|e| e.contains("adaptive_ef_start")));
+	}
+
+	#[test]
+	fn out_of_range_unit_interval_fields_are_flagged() {
+		let mut cfg = RetrievalConfig::default();
+		cfg.query_cache_theta = 1.5;
+		cfg.mmr_lambda = -0.1;
+		let errs = cfg.validate();
+		assert!(errs.iter().any(|e| e.contains("query_cache_theta")), "got {errs:?}");
+		assert!(errs.iter().any(|e| e.contains("mmr_lambda")), "got {errs:?}");
 	}
 }

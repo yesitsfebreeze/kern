@@ -9,17 +9,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// Lifecycle of a plan step. `Pending` is the default for newly-emitted
 /// steps that haven't been picked up yet; `Active` is in-progress;
 /// `Done` and `Blocked` are terminal.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "snake_case")]
-#[derive(Default)]
 pub enum PlanStatus {
 	#[default]
- Pending,
+	Pending,
 	Active,
 	Done,
 	Blocked,
 }
-
 
 /// JSON-serialised payload for `Kind::PlanStep`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -120,6 +118,25 @@ pub struct ToolCallPayload {
 	pub phase: String,
 }
 
+/// Generate the `from_entry` parser for a single-payload event view: gate on
+/// the journal [`Kind`](super::Kind), deserialize `entry.payload` into the
+/// payload struct, then map its fields into the typed event. The turn/tool
+/// event views are structurally identical bar that field mapping, so it stays
+/// explicit in the closure while the gate + deserialize boilerplate lives once.
+macro_rules! impl_from_entry {
+	($event:ty, $payload:ty, $kind:pat, |$p:ident| $build:expr) => {
+		impl $event {
+			pub fn from_entry(entry: &super::Entry) -> Option<Self> {
+				if !matches!(entry.kind, $kind) {
+					return None;
+				}
+				let $p: $payload = serde_json::from_value(entry.payload.clone()).ok()?;
+				Some($build)
+			}
+		}
+	};
+}
+
 /// Typed view of a `turn_start` journal entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnStartEvent {
@@ -129,20 +146,12 @@ pub struct TurnStartEvent {
 	pub ts: SystemTime,
 }
 
-impl TurnStartEvent {
-	pub fn from_entry(entry: &super::Entry) -> Option<Self> {
-		if !matches!(entry.kind, super::Kind::TurnStart) {
-			return None;
-		}
-		let p: TurnStartPayload = serde_json::from_value(entry.payload.clone()).ok()?;
-		Some(Self {
-			turn_id: p.turn_id,
-			fork_id: p.fork_id,
-			phase: p.phase,
-			ts: system_time_from_ms(p.ts_ms),
-		})
-	}
-}
+impl_from_entry!(TurnStartEvent, TurnStartPayload, super::Kind::TurnStart, |p| Self {
+	turn_id: p.turn_id,
+	fork_id: p.fork_id,
+	phase: p.phase,
+	ts: system_time_from_ms(p.ts_ms),
+});
 
 /// Typed view of a `turn_end` journal entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,20 +162,12 @@ pub struct TurnEndEvent {
 	pub ts: SystemTime,
 }
 
-impl TurnEndEvent {
-	pub fn from_entry(entry: &super::Entry) -> Option<Self> {
-		if !matches!(entry.kind, super::Kind::TurnEnd) {
-			return None;
-		}
-		let p: TurnEndPayload = serde_json::from_value(entry.payload.clone()).ok()?;
-		Some(Self {
-			turn_id: p.turn_id,
-			fork_id: p.fork_id,
-			outcome: p.outcome,
-			ts: system_time_from_ms(p.ts_ms),
-		})
-	}
-}
+impl_from_entry!(TurnEndEvent, TurnEndPayload, super::Kind::TurnEnd, |p| Self {
+	turn_id: p.turn_id,
+	fork_id: p.fork_id,
+	outcome: p.outcome,
+	ts: system_time_from_ms(p.ts_ms),
+});
 
 /// Typed view of a `final` journal entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,20 +178,12 @@ pub struct FinalEvent {
 	pub ts: SystemTime,
 }
 
-impl FinalEvent {
-	pub fn from_entry(entry: &super::Entry) -> Option<Self> {
-		if !matches!(entry.kind, super::Kind::Final) {
-			return None;
-		}
-		let p: FinalPayload = serde_json::from_value(entry.payload.clone()).ok()?;
-		Some(Self {
-			turn_id: p.turn_id,
-			fork_id: p.fork_id,
-			text: p.text,
-			ts: system_time_from_ms(p.ts_ms),
-		})
-	}
-}
+impl_from_entry!(FinalEvent, FinalPayload, super::Kind::Final, |p| Self {
+	turn_id: p.turn_id,
+	fork_id: p.fork_id,
+	text: p.text,
+	ts: system_time_from_ms(p.ts_ms),
+});
 
 /// Typed view of a `tool_call` journal entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,23 +197,15 @@ pub struct ToolCallEvent {
 	pub ts: SystemTime,
 }
 
-impl ToolCallEvent {
-	pub fn from_entry(entry: &super::Entry) -> Option<Self> {
-		if !matches!(entry.kind, super::Kind::ToolCall) {
-			return None;
-		}
-		let p: ToolCallPayload = serde_json::from_value(entry.payload.clone()).ok()?;
-		Some(Self {
-			turn_id: p.turn_id,
-			fork_id: p.fork_id,
-			name: p.name,
-			args_json: p.args_json,
-			result: p.result,
-			phase: p.phase,
-			ts: system_time_from_ms(p.ts_ms),
-		})
-	}
-}
+impl_from_entry!(ToolCallEvent, ToolCallPayload, super::Kind::ToolCall, |p| Self {
+	turn_id: p.turn_id,
+	fork_id: p.fork_id,
+	name: p.name,
+	args_json: p.args_json,
+	result: p.result,
+	phase: p.phase,
+	ts: system_time_from_ms(p.ts_ms),
+});
 
 /// Discrete touch op recorded against an entity (slice I). A client
 /// uses these to seed its MRU recents ring; the same enum is logged into
@@ -465,5 +450,25 @@ mod tests {
 	fn non_plan_entry_returns_none() {
 		let entry = Entry::new(Kind::Log, "k", serde_json::Value::Null);
 		assert!(PlanEvent::from_entry(&entry).is_none());
+	}
+
+	#[test]
+	fn event_parsers_reject_fork_lifecycle_kinds() {
+		// Fork lifecycle kinds carry their data in the `Kind` itself (entry.rs)
+		// and have no payload-struct event view here, so every turn/tool parser
+		// must decline them rather than mis-claim a fork entry. (The Kind tag
+		// round-trip for these variants is covered in history.rs.)
+		for kind in [
+			Kind::ForkOpen { fork_id: "f".into(), parent: Some("p".into()) },
+			Kind::ForkResume { fork_id: "f".into() },
+			Kind::ForkClose { fork_id: "f".into() },
+		] {
+			let entry = Entry::new(kind, "f", serde_json::Value::Null);
+			assert!(TurnStartEvent::from_entry(&entry).is_none());
+			assert!(TurnEndEvent::from_entry(&entry).is_none());
+			assert!(FinalEvent::from_entry(&entry).is_none());
+			assert!(ToolCallEvent::from_entry(&entry).is_none());
+			assert!(EntityTouchedEvent::from_entry(&entry).is_none());
+		}
 	}
 }

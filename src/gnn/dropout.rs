@@ -1,6 +1,7 @@
 
 
 use crate::gnn::tensor::Tensor;
+use rand::RngExt;
 
 pub struct Dropout {
 	pub p: f64,
@@ -26,8 +27,10 @@ impl Dropout {
 			self.last_mask = Some(Tensor::zeros(input.rows, input.cols));
 			return Tensor::zeros(input.rows, input.cols);
 		}
-		use rand::RngExt;
 		let mut rng = rand::rng();
+		// Inverted dropout: surviving activations are scaled by 1/(1-p) at
+		// train time so the expected sum matches the unscaled inference pass
+		// (no scaling needed in forward when training == false).
 		let scale = 1.0 / (1.0 - self.p);
 		let mut mask = Tensor::zeros(input.rows, input.cols);
 		let mut out = Tensor::zeros(input.rows, input.cols);
@@ -50,5 +53,43 @@ impl Dropout {
 
 	pub fn set_training(&mut self, training: bool) {
 		self.training = training;
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn t() -> Tensor {
+		Tensor::new(1, 4, vec![1.0, 2.0, 3.0, 4.0]).unwrap()
+	}
+
+	#[test]
+	fn p_zero_passes_input_through_unchanged() {
+		let mut d = Dropout::new(0.0);
+		let out = d.forward(&t());
+		assert_eq!(out.data, t().data);
+	}
+
+	#[test]
+	fn p_one_zeroes_everything() {
+		let mut d = Dropout::new(1.0);
+		let out = d.forward(&t());
+		assert!(out.data.iter().all(|&x| x == 0.0));
+	}
+
+	#[test]
+	fn eval_mode_bypasses_masking() {
+		let mut d = Dropout::new(0.9);
+		d.set_training(false);
+		let out = d.forward(&t());
+		assert_eq!(out.data, t().data, "training=false must not drop");
+	}
+
+	#[test]
+	fn backward_without_forward_mask_is_identity() {
+		let d = Dropout::new(0.5); // no forward() called -> last_mask is None
+		let grad = t();
+		assert_eq!(d.backward(&grad).data, grad.data);
 	}
 }

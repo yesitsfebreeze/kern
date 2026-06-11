@@ -201,3 +201,84 @@ fn resource_content(uri: &str, text: &str) -> serde_json::Value {
 		}],
 	})
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::sync::{Arc, RwLock};
+
+	use crate::base::graph::GraphGnn;
+	use crate::base::locks::write_recovered;
+	use crate::base::reason::add_reason;
+	use crate::base::types::{Entity, Kern, Reason};
+	use crate::config::Config;
+	use crate::llm;
+	use crate::mcp::Server;
+
+	fn make_server() -> Server {
+		let graph = Arc::new(RwLock::new(GraphGnn::new()));
+		let embedder = llm::Client::new_embed_only("http://127.0.0.1:1", "test");
+		let worker = Arc::new(crate::ingest::Worker::new(graph.clone(), embedder, None, None));
+		Server {
+			graph,
+			worker,
+			llm: None,
+			save_fn: Arc::new(|| {}),
+			task_q: None,
+			cfg: Arc::new(Config::default()),
+			cache: crate::retrieval::cache::QueryCache::default_shared(),
+		}
+	}
+
+	/// Insert kern "kx" holding entity "e1" with one incident edge e1->e2, so the
+	/// thought/reason handlers have a populated graph to render.
+	fn seed(server: &Server) {
+		let mut g = write_recovered(&server.graph);
+		let mut k = Kern::new("kx", "");
+		k.entities.insert("e1".into(), Entity { id: "e1".into(), ..Default::default() });
+		add_reason(
+			&mut k,
+			Reason { from: "e1".into(), to: "e2".into(), id: "r1".into(), ..Default::default() },
+		);
+		g.kerns.insert("kx".into(), k);
+	}
+
+	#[tokio::test]
+	async fn resource_thought_renders_entity_with_its_edges() {
+		let srv = make_server();
+		seed(&srv);
+		let v: serde_json::Value =
+			serde_json::from_str(&resource_thought(&srv, "e1")).expect("valid json");
+		assert_eq!(v["id"], "e1");
+		assert_eq!(v["kern"], "kx");
+		assert_eq!(v["edges"].as_array().map(|a| a.len()), Some(1), "the one incident edge");
+		assert_eq!(v["edges"][0]["id"], "r1");
+	}
+
+	#[tokio::test]
+	async fn resource_thought_missing_returns_error_json() {
+		let srv = make_server();
+		let out = resource_thought(&srv, "nope");
+		let v: serde_json::Value = serde_json::from_str(&out).expect("error is still valid json");
+		assert!(v["error"].as_str().unwrap_or("").contains("not found"));
+	}
+
+	#[tokio::test]
+	async fn resource_reason_renders_reason_endpoints() {
+		let srv = make_server();
+		seed(&srv);
+		let v: serde_json::Value =
+			serde_json::from_str(&resource_reason(&srv, "r1")).expect("valid json");
+		assert_eq!(v["id"], "r1");
+		assert_eq!(v["from"], "e1");
+		assert_eq!(v["to"], "e2");
+	}
+
+	#[tokio::test]
+	async fn resource_reason_missing_returns_error_json() {
+		let srv = make_server();
+		let out = resource_reason(&srv, "nope");
+		let v: serde_json::Value = serde_json::from_str(&out).expect("error is still valid json");
+		assert!(v["error"].as_str().unwrap_or("").contains("not found"));
+	}
+}

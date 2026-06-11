@@ -68,11 +68,10 @@ pub fn build_gnn_snapshot(kern: &Kern, cfg: &GnnConfig) -> Option<GnnSnapshot> {
 		.map(|(i, id)| (id.as_str(), i))
 		.collect();
 	let mut gg = Graph::new();
-	let mut feat_data = vec![0.0f64; ids.len() * dim];
-
-	for (i, id) in ids.iter().enumerate() {
+	for id in &ids {
 		let t = &kern.entities[id];
-		feat_data[i * dim..(i + 1) * dim].copy_from_slice(&t.vector);
+		// The feature matrix is materialized once below via gg.feature_matrix();
+		// node vectors are stored on the Graph, so no separate feat_data buffer.
 		let _ = gg.add_node(id, t.vector.clone());
 	}
 
@@ -171,22 +170,17 @@ fn apply_gnn_updates(
 	}
 }
 
+/// Map cosine similarity into a `[0,1]` "alignment" weight: identical → 1.0,
+/// opposite → 0.0, orthogonal or degenerate → 0.5 (neutral). Delegates the dot/
+/// norm math to [`crate::base::math::cosine`] (its SIMD path) instead of a second
+/// hand-rolled copy; a zero-norm there returns 0.0, which maps to the same 0.5
+/// neutral. The length guard stays here so a dimension mismatch is neutral rather
+/// than a partial zip.
 fn cosine_align(a: &[f64], b: &[f64]) -> f64 {
 	if a.is_empty() || b.is_empty() || a.len() != b.len() {
 		return 0.5;
 	}
-	let mut dot = 0.0;
-	let mut na = 0.0;
-	let mut nb = 0.0;
-	for i in 0..a.len() {
-		dot += a[i] * b[i];
-		na += a[i] * a[i];
-		nb += b[i] * b[i];
-	}
-	if na == 0.0 || nb == 0.0 {
-		return 0.5;
-	}
-	let cos = dot / (na.sqrt() * nb.sqrt());
+	let cos = crate::base::math::cosine(a, b);
 	((cos + 1.0) * 0.5).clamp(0.0, 1.0)
 }
 
@@ -242,5 +236,65 @@ mod tests {
 			build_gnn_snapshot(&k, &cfg).is_some(),
 			"with a low floor and local edges, a snapshot builds"
 		);
+	}
+
+	#[test]
+	fn cosine_align_maps_similarity_into_zero_one() {
+		assert_eq!(cosine_align(&[1.0, 0.0], &[1.0, 0.0]), 1.0, "identical -> 1.0");
+		assert_eq!(cosine_align(&[1.0, 0.0], &[-1.0, 0.0]), 0.0, "opposite -> 0.0");
+		assert!((cosine_align(&[1.0, 0.0], &[0.0, 1.0]) - 0.5).abs() < 1e-9, "orthogonal -> 0.5");
+		// Degenerate inputs are neutral (0.5), not a panic or partial zip.
+		assert_eq!(cosine_align(&[], &[]), 0.5, "empty -> 0.5");
+		assert_eq!(cosine_align(&[1.0, 2.0], &[1.0]), 0.5, "length mismatch -> 0.5");
+		assert_eq!(cosine_align(&[0.0, 0.0], &[1.0, 1.0]), 0.5, "zero-norm -> 0.5");
+	}
+
+	#[test]
+	fn apply_gnn_updates_writes_gnn_vector_weights_and_enqueues_persist() {
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("k", "");
+		k.entities.insert("e0".into(), mk_entity("e0", "e0", 0.0, EntityKind::Claim));
+		g.kerns.insert("k".into(), k);
+		let g = Arc::new(RwLock::new(g));
+
+		let new_vec = vec![0.25, 0.5, 0.75];
+		let mut updates = HashMap::new();
+		updates.insert("e0".to_string(), new_vec.clone());
+		let q = Queue::new(16);
+
+		apply_gnn_updates(&q, &g, "k", updates, vec![9, 9]);
+
+		{
+			let gg = read_recovered(&g);
+			let kern = gg.kerns.get("k").unwrap();
+			assert_eq!(kern.entities["e0"].gnn_vector, new_vec, "gnn_vector overwritten");
+			assert_eq!(kern.gnn_weights, vec![9, 9], "kern gnn_weights stored");
+		}
+
+		let mut rx = q.take_receiver().unwrap();
+		let mut persisted = false;
+		while let Ok(t) = rx.try_recv() {
+			if matches!(t.kind, TaskKind::Persist) {
+				persisted = true;
+			}
+		}
+		assert!(persisted, "a Persist task is enqueued after updates land");
+	}
+
+	#[test]
+	fn apply_gnn_updates_skips_empty_update_vectors() {
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("k", "");
+		k.entities.insert("e0".into(), mk_entity("e0", "e0", 0.0, EntityKind::Claim));
+		g.kerns.insert("k".into(), k);
+		let g = Arc::new(RwLock::new(g));
+
+		let mut updates = HashMap::new();
+		updates.insert("e0".to_string(), Vec::new()); // empty -> skipped
+		let q = Queue::new(16);
+		apply_gnn_updates(&q, &g, "k", updates, Vec::new());
+
+		let gg = read_recovered(&g);
+		assert!(gg.kerns["k"].entities["e0"].gnn_vector.is_empty(), "empty update doesn't write");
 	}
 }

@@ -84,7 +84,12 @@ pub fn mmr(cfg: &RetrievalConfig, query_vec: &[f64], results: &mut Vec<ScoredEnt
 				best_i = i;
 			}
 		}
-		selected.push(pool.remove(best_i));
+		// swap_remove is O(1) vs remove's O(n) element shift. Safe here because
+		// the next iteration re-scans the ENTIRE pool for its max — the post-swap
+		// reordering cannot change which candidate is picked next (it only affects
+		// the arbitrary resolution of exact MMR-value ties, which MMR doesn't
+		// care about). Output order is `selected` push-order, untouched by this.
+		selected.push(pool.swap_remove(best_i));
 	}
 
 	*results = selected;
@@ -133,6 +138,23 @@ mod tests {
 		let mut results = vec![sect("a", "", 0.1), sect("b", "", 0.2)];
 		dedup_by_section(&cfg, &mut results);
 		assert_eq!(results.len(), 2, "empty-section entries are never collapsed");
+	}
+
+	#[test]
+	fn dedup_preserves_relative_order_of_survivors() {
+		// `retain` keeps survivors in their original positions — a regression
+		// guard so a future rewrite (e.g. to a collect/sort) can't silently
+		// reorder the delivered set.
+		let cfg = RetrievalConfig::default();
+		let mut results = vec![
+			sect("first", "alpha#chunk0", 0.5),
+			sect("second", "beta#chunk0", 0.9),
+			sect("beta_low", "beta#chunk1", 0.2), // same stem as second, lower -> dropped
+			sect("third", "gamma#chunk0", 0.7),
+		];
+		dedup_by_section(&cfg, &mut results);
+		let ids: Vec<&str> = results.iter().map(|r| r.entity.id.as_str()).collect();
+		assert_eq!(ids, vec!["first", "second", "third"], "survivors keep original order");
 	}
 
 	#[test]

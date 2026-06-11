@@ -8,6 +8,38 @@ use std::sync::Arc;
 use crate::retrieval;
 use crate::types::{EmbedFunc, LlmFunc};
 
+/// MCP schema for the `query` tool, co-located with its `tool_query` handler so
+/// the two cannot silently drift. Aggregated by `tools::tool_definitions`.
+pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
+	vec![serde_json::json!({
+		"name": "query",
+		"description": "Search the knowledge graph. Returns scored thoughts and optionally an LLM answer. Requires at least one of `text` (semantic/lexical search) or `id` (direct lookup).",
+		"inputSchema": {
+			"type": "object",
+			// Mirrors tool_query's runtime guard ("either text or id is required"):
+			// a filter-only call with neither is rejected, so the schema says so too.
+			"anyOf": [
+				{"required": ["text"]},
+				{"required": ["id"]},
+			],
+			"properties": {
+				"text":      {"type": "string", "description": "search query text"},
+				"id":        {"type": "string", "description": "thought ID for direct lookup"},
+				"k":         {"type": "integer", "description": "number of results (default 5)"},
+				"mode":      {"type": "string", "enum": ["content", "reason", "hybrid"], "description": "retrieval mode (default hybrid)"},
+				"answer":    {"type": "boolean", "description": "synthesize an LLM answer"},
+				"sort":      {"type": "string", "enum": ["", "date", "access", "confidence"], "description": "sort key"},
+				"ascending": {"type": "boolean", "description": "sort ascending (default false)"},
+				"source":    {"type": "string", "description": "filter by source system"},
+				"kind":      {"type": "string", "enum": ["", "normal", "fact", "document"], "description": "filter by thought kind"},
+				"since":     {"type": "string", "description": "ISO8601 timestamp; only include thoughts at or after this time"},
+				"before":    {"type": "string", "description": "ISO8601 timestamp; only include thoughts before this time"},
+				"min_conf":  {"type": "number", "description": "minimum confidence 0.0-1.0"},
+			},
+		},
+	})]
+}
+
 use super::{tool_error, tool_result_json, Server};
 
 /// Parse an optional RFC3339 time filter from a query arg. An empty string
@@ -18,7 +50,7 @@ fn parse_time_filter(field: &str, value: &str) -> Result<Option<std::time::Syste
 	if value.is_empty() {
 		return Ok(None);
 	}
-	super::parse_rfc3339(value)
+	crate::base::time::parse_rfc3339(value)
 		.map(Some)
 		.map_err(|()| format!("invalid `{field}` timestamp: {value}"))
 }
@@ -103,17 +135,7 @@ impl Server {
 		// non-default sort changes the result set/order while the query vector
 		// stays the same. The `tag` (mode) keeps the three retrieval modes from
 		// colliding on one entry.
-		let cacheable = answer_on
-			&& rcfg.query_cache_cap > 0
-			&& p.kind.is_none()
-			&& p.scheme.is_none()
-			&& p.source.is_empty()
-			&& p.since.is_empty()
-			&& p.before.is_empty()
-			&& p.valid_at.is_empty()
-			&& p.min_conf == 0.0
-			&& p.sort.is_empty()
-			&& !p.ascending;
+		let cacheable = query_is_cacheable(answer_on, rcfg.query_cache_cap, &p);
 		let tag = mode as u64;
 		let text_hash = retrieval::cache::hash_text(&p.text);
 
@@ -231,16 +253,20 @@ impl Server {
 		// cached hot result already reflects what a verbatim re-ask returned.
 		if let Some(ref vec) = vec {
 			if scored.len() < k {
-				let cold_dir = std::path::PathBuf::from(&self.cfg.data_dir).join("cold");
+				// Clone the store handle out from under a brief read guard, then drop
+				// the guard before the cold scan.
+				let store = crate::base::locks::read_recovered(&self.graph).store();
 				let have: std::collections::HashSet<String> =
 					scored.iter().map(|s| s.entity.id.clone()).collect();
-				for (entity, score) in crate::base::cold::search(&cold_dir, vec, k) {
-					if scored.len() >= k {
-						break;
-					}
-					if !have.contains(&entity.id) {
-						cold_ids.insert(entity.id.clone());
-						scored.push(retrieval::expand::ScoredEntity { entity, score });
+				if let Some(store) = &store {
+					for (entity, score) in store.cold_search(vec, k).unwrap_or_default() {
+						if scored.len() >= k {
+							break;
+						}
+						if !have.contains(&entity.id) {
+							cold_ids.insert(entity.id.clone());
+							scored.push(retrieval::expand::ScoredEntity { entity, score });
+						}
 					}
 				}
 			}
@@ -261,11 +287,6 @@ impl Server {
 					// (matches `EntityKindLite` serde repr), `scheme` is the
 					// stable `Source` URI tag, `status` is `"active"` or
 					// `"superseded"` mirroring `EntityStatusLite`.
-					let status_str = if st.entity.is_superseded() {
-						"superseded"
-					} else {
-						"active"
-					};
 					// Collect enriched edges so callers can see the specific
 					// logical connections between this entity and its neighbours.
 					// Only include reasons that have been enriched (have text) to
@@ -288,17 +309,8 @@ impl Server {
 								.collect()
 						})
 						.unwrap_or_default();
-					let mut v = serde_json::json!({
-						"id": st.entity.id,
-						"score": st.score,
-						"conf": st.entity.conf_mean(),
-						"conf_uncertainty": st.entity.conf_variance(),
-						"text": truncate(&st.entity.text(), 500),
-						"kind": st.entity.kind.as_str(),
-						"scheme": st.entity.source.scheme(),
-						"status": status_str,
-						"cold": cold_ids.contains(&st.entity.id),
-					});
+					let mut v = base_entity_json(&st.entity, st.score);
+					v["cold"] = serde_json::Value::Bool(cold_ids.contains(&st.entity.id));
 					if !edges.is_empty() {
 						v["edges"] = serde_json::Value::Array(edges);
 					}
@@ -368,6 +380,43 @@ fn entity_detail(
 	})
 }
 
+/// The core per-hit JSON shape emitted into `tool_query`'s `entities` array
+/// (id/score/conf/text/kind/scheme/status). `tool_query` overlays `cold` and any
+/// enriched `edges` on top. Defined ONCE so the kern_rpc-consumed contract has a
+/// single source of truth — the envelope tests build on this same fn instead of a
+/// hand-mirrored copy that could silently drift.
+pub(super) fn base_entity_json(entity: &crate::base::types::Entity, score: f64) -> serde_json::Value {
+	let status_str = if entity.is_superseded() { "superseded" } else { "active" };
+	serde_json::json!({
+		"id": entity.id,
+		"score": score,
+		"conf": entity.conf_mean(),
+		"conf_uncertainty": entity.conf_variance(),
+		"text": truncate(&entity.text(), 500),
+		"kind": entity.kind.as_str(),
+		"scheme": entity.source.scheme(),
+		"status": status_str,
+	})
+}
+
+/// Whether a `query` call is eligible for the semantic answer cache: only
+/// answer-on, cache-enabled, UNFILTERED, default-sorted queries qualify. Any
+/// filter or non-default sort changes the result set/order for the same query
+/// vector, so caching it would risk serving the wrong results for a later call.
+fn query_is_cacheable(answer: bool, cache_cap: usize, p: &QueryArgs) -> bool {
+	answer
+		&& cache_cap > 0
+		&& p.kind.is_none()
+		&& p.scheme.is_none()
+		&& p.source.is_empty()
+		&& p.since.is_empty()
+		&& p.before.is_empty()
+		&& p.valid_at.is_empty()
+		&& p.min_conf == 0.0
+		&& p.sort.is_empty()
+		&& !p.ascending
+}
+
 #[cfg(test)]
 mod answer_gating_tests {
 	//! The `query` tool must not spend LLM calls (HyDE / rerank / answer
@@ -405,10 +454,10 @@ mod envelope_shape_tests {
 	//! consumes these directly; if a future refactor drops them, the
 	//! handler silently falls back to defaults — these tests guard
 	//! against that regression at the source-of-truth level.
+	use super::base_entity_json as build_entity_json;
 	use crate::base::types::{
 		ChunkPart, ChunkPartKind, Entity, EntityKind, EntityStatus, Source,
 	};
-	use crate::base::util::truncate;
 
 	fn entity_with(kind: EntityKind, status: EntityStatus, source: Source) -> Entity {
 		Entity {
@@ -424,22 +473,6 @@ mod envelope_shape_tests {
 			}],
 			..Default::default()
 		}
-	}
-
-	/// Mirrors the envelope construction inside `tool_query` so a
-	/// drift between this test and the real builder will fail fast.
-	fn build_entity_json(entity: &Entity, score: f64) -> serde_json::Value {
-		let status_str = if entity.is_superseded() { "superseded" } else { "active" };
-		serde_json::json!({
-			"id": entity.id,
-			"score": score,
-			"conf": entity.conf_mean(),
-			"conf_uncertainty": entity.conf_variance(),
-			"text": truncate(&entity.text(), 500),
-			"kind": entity.kind.as_str(),
-			"scheme": entity.source.scheme(),
-			"status": status_str,
-		})
 	}
 
 	#[test]
@@ -516,5 +549,46 @@ mod time_filter_tests {
 		// silent unfiltered query.
 		let e = parse_time_filter("valid_at", "20XX-06-05T09:00:00Z").unwrap_err();
 		assert!(e.contains("valid_at"), "error names the field: {e}");
+	}
+}
+
+#[cfg(test)]
+mod cacheable_tests {
+	use super::{query_is_cacheable, QueryArgs};
+	use crate::base::types::EntityKind;
+
+	#[test]
+	fn plain_answer_query_is_cacheable() {
+		let p = QueryArgs::default();
+		assert!(query_is_cacheable(true, 256, &p), "unfiltered, default-sorted answer query caches");
+	}
+
+	#[test]
+	fn answer_off_or_disabled_cache_is_not_cacheable() {
+		let p = QueryArgs::default();
+		assert!(!query_is_cacheable(false, 256, &p), "answer:false is never cached");
+		assert!(!query_is_cacheable(true, 0, &p), "cache_cap 0 disables caching");
+	}
+
+	#[test]
+	fn any_filter_or_nondefault_sort_disables_caching() {
+		// Each mutation alone must flip cacheable to false: a filter changes the
+		// result set and a sort changes the order, both for the same query vector.
+		let cases: Vec<(&str, fn(&mut QueryArgs))> = vec![
+			("source", |p| p.source = "github".into()),
+			("kind", |p| p.kind = Some(EntityKind::Fact)),
+			("scheme", |p| p.scheme = Some("file".into())),
+			("since", |p| p.since = "2026-01-01T00:00:00Z".into()),
+			("before", |p| p.before = "2026-01-01T00:00:00Z".into()),
+			("valid_at", |p| p.valid_at = "2026-01-01T00:00:00Z".into()),
+			("min_conf", |p| p.min_conf = 0.5),
+			("sort", |p| p.sort = "date".into()),
+			("ascending", |p| p.ascending = true),
+		];
+		for (name, mutate) in cases {
+			let mut p = QueryArgs::default();
+			mutate(&mut p);
+			assert!(!query_is_cacheable(true, 256, &p), "`{name}` set must disable caching");
+		}
 	}
 }

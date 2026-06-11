@@ -80,7 +80,14 @@ pub fn render_timeline(profiles: &[Profile], width: usize) -> String {
 			bar.extend(std::iter::repeat('█').take(n.max(1)));
 		} else {
 			for (i, c) in p.checkpoints.iter().enumerate() {
-				let n = ((c.elapsed_ms / max) * width as f64).round() as usize;
+				// Floor a positive stage to at least one cell: rounding alone
+				// drops a small-but-nonzero stage (e.g. the second-slowest) to a
+				// 0-width, invisible bar. A genuinely zero stage stays empty.
+				let n = if c.elapsed_ms > 0.0 {
+					(((c.elapsed_ms / max) * width as f64).round() as usize).max(1)
+				} else {
+					0
+				};
 				bar.extend(std::iter::repeat(FILLS[i % FILLS.len()]).take(n));
 			}
 			if bar.is_empty() {
@@ -108,10 +115,13 @@ pub fn render_timeline(profiles: &[Profile], width: usize) -> String {
 macro_rules! profile_block {
 	($name:expr, $code:block) => {{
 		let mut prof = $crate::profile::Profiler::new($name);
-		let start = std::time::Instant::now();
 		let result = { $code };
-		let _profile = prof.finish();
-		tracing::debug!("{}", _profile);
+		// Record the block body as a single stage so `finish()` yields a
+		// non-empty profile. The previous version finished the Profiler with
+		// ZERO checkpoints (and held a dead `start` Instant that was never read),
+		// so the logged profile carried no stage timing at all.
+		prof.checkpoint("body");
+		tracing::debug!("{}", prof.finish());
 		result
 	}};
 }
@@ -197,5 +207,32 @@ mod tests {
 		assert_eq!(render_timeline(&[], 20), "");
 		let zero = vec![Profile { name: "z".to_string(), checkpoints: vec![], total_ms: 0.0 }];
 		assert_eq!(render_timeline(&zero, 20), "");
+	}
+
+	#[test]
+	fn render_timeline_tiny_nonzero_stage_gets_at_least_one_cell() {
+		// `tiny` is 0.4/100*20 = 0.08 -> round() = 0 cells without the min-1
+		// floor; with it, the stage (FILLS[1] = '▓') must still appear once.
+		let profiles = vec![Profile {
+			name: "p".to_string(),
+			checkpoints: vec![
+				Checkpoint { label: "big".to_string(), elapsed_ms: 99.0 },
+				Checkpoint { label: "tiny".to_string(), elapsed_ms: 0.4 },
+			],
+			total_ms: 100.0,
+		}];
+		let out = render_timeline(&profiles, 20);
+		assert!(out.contains('▓'), "tiny non-zero stage must render >=1 cell: {out}");
+	}
+
+	#[test]
+	fn profile_block_macro_returns_block_value_and_expands_clean() {
+		// Expanding the macro guards against the old dead-`start`/no-checkpoint
+		// regression; the macro must evaluate to the block's value.
+		let x = crate::profile_block!("unit", {
+			let a = 2;
+			a + 3
+		});
+		assert_eq!(x, 5);
 	}
 }

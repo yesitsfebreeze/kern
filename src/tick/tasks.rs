@@ -7,7 +7,6 @@ use crate::base::constants::{
 use crate::base::graph::GraphGnn;
 use crate::base::locks::{read_recovered, write_recovered};
 use crate::base::math::reason_id;
-use crate::base::persist::save_kern;
 use crate::base::reason::add_reason;
 use crate::base::search::search_all_unlocked;
 use crate::base::types::{Reason, ReasonKind};
@@ -22,6 +21,21 @@ use super::queue::{task, task_extra, Queue, TaskKind};
 pub use crate::types::{EmbedFunc, LlmFunc};
 pub type BroadcastQuestionFunc = Arc<dyn Fn(&str, &str, &[f64], &str) + Send + Sync>;
 
+/// Strip a leading `Theme:`/`Name:`/`Label:` label (a few case variants) that the
+/// naming LLM sometimes prepends, returning the trimmed remainder. Only the first
+/// matching prefix is removed. Pure, so the parsing is unit-testable apart from
+/// `do_name`'s graph/LLM plumbing.
+fn strip_name_prefixes(raw: &str) -> String {
+	let mut name = raw.trim().to_string();
+	for pfx in &["Theme:", "Name:", "Label:", "theme:", "name:"] {
+		if let Some(after) = name.strip_prefix(pfx) {
+			name = after.trim().to_string();
+			break;
+		}
+	}
+	name
+}
+
 pub fn do_name(
 	q: &Queue,
 	g: &Arc<RwLock<GraphGnn>>,
@@ -30,7 +44,7 @@ pub fn do_name(
 	llm: Option<&LlmFunc>,
 	embed: Option<&EmbedFunc>,
 ) {
-let llm = match llm {
+	let llm = match llm {
 		Some(f) => f,
 		None => return,
 	};
@@ -61,13 +75,7 @@ let llm = match llm {
 	};
 
 	let raw = llm(&prompt);
-	let mut name_text = raw.trim().to_string();
-	for pfx in &["Theme:", "Name:", "Label:", "theme:", "name:"] {
-		if let Some(after) = name_text.strip_prefix(pfx) {
-			name_text = after.trim().to_string();
-			break;
-		}
-	}
+	let name_text = strip_name_prefixes(&raw);
 	if name_text.is_empty() {
 		return;
 	}
@@ -138,7 +146,7 @@ pub fn do_enrich(
 	llm: Option<&LlmFunc>,
 	embed: Option<&EmbedFunc>,
 ) {
-let (llm, embed) = match (llm, embed) {
+	let (llm, embed) = match (llm, embed) {
 		(Some(l), Some(e)) => (l, e),
 		_ => return,
 	};
@@ -205,9 +213,12 @@ pub fn do_resolve(
 	rid: &str,
 	bq: Option<&BroadcastQuestionFunc>,
 ) {
-let mut graph = write_recovered(g);
-
-	let vec = {
+	// Phase 1 (read guard): snapshot the question vector and run the read-only
+	// whole-graph ANN search. The search is the expensive part — holding only a
+	// read guard here lets other ticks read/write concurrently instead of
+	// serializing every daemon operation behind one resolve.
+	let top_hit = {
+		let graph = read_recovered(g);
 		let kern = match graph.loaded(kern_id) {
 			Some(k) => k,
 			None => return,
@@ -219,23 +230,42 @@ let mut graph = write_recovered(g);
 		if r.kind != ReasonKind::Question || !r.to.is_empty() {
 			return;
 		}
-		r.vector.clone()
+		let vec = r.vector.clone();
+		search_all_unlocked(&graph, &vec, DEFAULT_SEED_K)
+			.into_iter()
+			.next()
+			.filter(|h| h.score >= QUESTION_RESOLVE_THRESHOLD)
+			.map(|h| h.entity_id)
 	};
 
-	let hits = search_all_unlocked(&graph, &vec, DEFAULT_SEED_K);
-	if !hits.is_empty() && hits[0].score >= QUESTION_RESOLVE_THRESHOLD {
-		if let Some(kern) = graph.kerns.get_mut(kern_id) {
-			if let Some(r) = kern.reasons.get_mut(rid) {
-				r.to = hits[0].entity_id.clone();
-				r.kind = ReasonKind::Similarity;
+	// Phase 2a (write guard, mutation only): resolved locally. The read guard
+	// was dropped, so re-validate under the write guard — another tick could
+	// have resolved or removed this question in between.
+	if let Some(entity_id) = top_hit {
+		{
+			let mut graph = write_recovered(g);
+			let kern = match graph.kerns.get_mut(kern_id) {
+				Some(k) => k,
+				None => return,
+			};
+			let r = match kern.reasons.get_mut(rid) {
+				Some(r) => r,
+				None => return,
+			};
+			if r.kind != ReasonKind::Question || !r.to.is_empty() {
+				return;
 			}
+			r.to = entity_id;
+			r.kind = ReasonKind::Similarity;
 		}
-		drop(graph);
 		q.enqueue(task(TaskKind::Persist, kern_id));
 		return;
 	}
 
+	// Phase 2b (read guard): unresolved locally — snapshot the question and
+	// broadcast it to peers. Read-only, so no write guard needed.
 	let broadcast_data = if bq.is_some() {
+		let graph = read_recovered(g);
 		graph.loaded(kern_id).and_then(|kern| {
 			kern.reasons.get(rid).map(|r| {
 				(
@@ -249,7 +279,6 @@ let mut graph = write_recovered(g);
 	} else {
 		None
 	};
-	drop(graph);
 
 	if let (Some(bq), Some((id, from_id, rvec, rtext))) = (bq, broadcast_data) {
 		bq(&id, &from_id, &rvec, &rtext);
@@ -258,21 +287,22 @@ let mut graph = write_recovered(g);
 
 pub fn do_persist(g: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
 	let graph = read_recovered(g);
-	if graph.data_dir.is_empty() {
-		return;
-	}
+	let store = match graph.store() {
+		Some(s) => s,
+		None => return,
+	};
 	// The root carries authoritative fields (purpose/descriptors/radii) that
 	// live on `graph.root`, not the map entry — persist it through the same
 	// merge `save_all` uses so a root Persist task can't drop them.
 	if kern_id == graph.root.id {
-		let _ = save_kern(&graph.data_dir, &crate::base::persist::merged_root(&graph));
+		let _ = store.save_one_kern(&crate::base::persist::merged_root(&graph));
 		return;
 	}
 	let kern = match graph.loaded(kern_id) {
 		Some(k) => k,
 		None => return,
 	};
-	let _ = save_kern(&graph.data_dir, kern);
+	let _ = store.save_one_kern(kern);
 }
 
 /// Re-embed every dirty entity (and recompute dirty reason vectors) in `kern_id`,
@@ -388,5 +418,114 @@ mod tests {
 		let e = g.kerns.get(&kid).unwrap().entities.get("e1").unwrap();
 		assert!(!e.dirty, "dirty must be cleared after reembed");
 		assert_eq!(e.vector, vec![0.1, 0.2, 0.3]);
+	}
+
+	#[test]
+	fn do_reembed_recomputes_dirty_reason_as_endpoint_mean() {
+		let mut g = GraphGnn::new();
+		let kid = "k1".to_string();
+		let mut kern = Kern::new(kid.clone(), "");
+		// Two already-embedded (non-dirty) entities and one dirty edge between them.
+		kern.entities.insert("a".into(), Entity { id: "a".into(), vector: vec![1.0, 0.0], ..Default::default() });
+		kern.entities.insert("b".into(), Entity { id: "b".into(), vector: vec![0.0, 1.0], ..Default::default() });
+		add_reason(&mut kern, Reason { id: "a->b".into(), from: "a".into(), to: "b".into(), dirty: true, ..Default::default() });
+		g.kerns.insert(kid.clone(), kern);
+		let g = Arc::new(RwLock::new(g));
+
+		// Embedder is unused here (no dirty entities), but required by the signature.
+		let embed: EmbedFunc = Arc::new(|_t: &str| Ok(vec![9.0, 9.0]));
+		do_reembed(&g, &kid, Some(&embed));
+
+		let g = g.read().unwrap();
+		let r = g.kerns.get(&kid).unwrap().reasons.get("a->b").unwrap();
+		assert!(!r.dirty, "dirty reason cleared once recomputed");
+		assert_eq!(r.vector, vec![0.5, 0.5], "reason vector is the mean of endpoint vectors");
+	}
+
+	#[test]
+	fn do_resolve_links_question_to_nearest_entity_above_threshold() {
+		// A pending Question whose vector matches an indexed entity should be
+		// resolved to that entity (kind flips to Similarity, `to` is filled).
+		// Exercises the read-search / write-mutate split: search runs under a
+		// read guard, the mutation re-validates under a write guard.
+		let mut g = GraphGnn::new();
+		let kid = "k1".to_string();
+		let mut kern = Kern::new(kid.clone(), "");
+		kern.entities.insert(
+			"target".into(),
+			Entity { id: "target".into(), vector: vec![1.0, 0.0, 0.0], ..Default::default() },
+		);
+		kern.entities.insert(
+			"asker".into(),
+			Entity { id: "asker".into(), vector: vec![0.0, 1.0, 0.0], ..Default::default() },
+		);
+		add_reason(
+			&mut kern,
+			Reason {
+				id: "q1".into(),
+				from: "asker".into(),
+				to: String::new(),
+				kind: ReasonKind::Question,
+				vector: vec![1.0, 0.0, 0.0], // identical to `target` -> cosine 1.0
+				..Default::default()
+			},
+		);
+		g.kerns.insert(kid.clone(), kern);
+		g.rebuild_index(); // populate entity_idx so search_all_unlocked can hit
+		let g = Arc::new(RwLock::new(g));
+
+		let q = Queue::new(16);
+		do_resolve(&q, &g, &kid, "q1", None);
+
+		let g = g.read().unwrap();
+		let r = g.kerns.get(&kid).unwrap().reasons.get("q1").unwrap();
+		assert_eq!(r.kind, ReasonKind::Similarity, "resolved question becomes a Similarity edge");
+		assert_eq!(r.to, "target", "linked to the nearest indexed entity");
+	}
+
+	#[test]
+	fn do_resolve_ignores_non_question_or_already_linked() {
+		// Guard clauses: a non-Question, or a Question already linked, is left
+		// untouched (and never takes the write guard).
+		let mut g = GraphGnn::new();
+		let kid = "k1".to_string();
+		let mut kern = Kern::new(kid.clone(), "");
+		kern.entities.insert(
+			"target".into(),
+			Entity { id: "target".into(), vector: vec![1.0, 0.0], ..Default::default() },
+		);
+		add_reason(
+			&mut kern,
+			Reason {
+				id: "linked".into(),
+				from: "x".into(),
+				to: "y".into(), // already linked
+				kind: ReasonKind::Question,
+				vector: vec![1.0, 0.0],
+				..Default::default()
+			},
+		);
+		g.kerns.insert(kid.clone(), kern);
+		g.rebuild_index();
+		let g = Arc::new(RwLock::new(g));
+
+		let q = Queue::new(16);
+		do_resolve(&q, &g, &kid, "linked", None);
+
+		let g = g.read().unwrap();
+		let r = g.kerns.get(&kid).unwrap().reasons.get("linked").unwrap();
+		assert_eq!(r.kind, ReasonKind::Question, "already-linked question is untouched");
+		assert_eq!(r.to, "y", "existing link preserved");
+	}
+
+	#[test]
+	fn strip_name_prefixes_removes_first_known_label_only() {
+		assert_eq!(strip_name_prefixes("Theme: rust ownership"), "rust ownership");
+		assert_eq!(strip_name_prefixes("  name:  caching layer  "), "caching layer");
+		assert_eq!(strip_name_prefixes("Label:x"), "x");
+		// No known prefix -> trimmed verbatim.
+		assert_eq!(strip_name_prefixes("  plain phrase "), "plain phrase");
+		// Only the first prefix is stripped.
+		assert_eq!(strip_name_prefixes("Theme: Name: nested"), "Name: nested");
 	}
 }

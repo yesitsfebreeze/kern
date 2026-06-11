@@ -42,11 +42,9 @@ use crate::base::graph::GraphGnn;
 use crate::base::math::cosine;
 use crate::retrieval::answer::QueryResult;
 
-/// Default number of cached queries before LRU eviction.
-pub const DEFAULT_CAP: usize = 256;
-/// Default cosine floor for a semantic hit. High enough that only paraphrases
-/// and re-asks collide, not merely topical neighbours.
-pub const DEFAULT_THETA: f64 = 0.97;
+// Cache defaults live in base::constants (QUERY_CACHE_DEFAULT_CAP / _THETA) so
+// `config` can default to them without a config -> retrieval module cycle.
+use crate::base::constants::{QUERY_CACHE_DEFAULT_CAP, QUERY_CACHE_DEFAULT_THETA};
 
 /// One cached query: the raw query embedding, a non-vector key component
 /// (`tag`), its result, and the graph mutation epoch at which it was stored.
@@ -79,6 +77,14 @@ impl QueryCache {
 	/// is the cosine floor for a semantic hit — high (≈0.97+) keeps distinct
 	/// questions from colliding onto one answer.
 	pub fn new(cap: usize, theta: f64) -> Self {
+		// `lookup`/`lookup_text` scan every entry linearly — O(cap) per call. That is
+		// negligible at the default cap (256; sub-µs against the ~30s LLM path this
+		// cache guards), but a cap in the thousands would turn every recall into a
+		// real linear scan. Before raising cap that far, replace the VecDeque with a
+		// hash index on (tag, text_hash) plus a small vector ANN for the semantic
+		// path. The assertion is a debug-build tripwire against an accidental runaway
+		// cap arriving from config.
+		debug_assert!(cap <= 4096, "QueryCache cap {cap} is large — lookup is O(cap); see the note in new()");
 		Self { entries: VecDeque::new(), cap: cap.max(1), theta }
 	}
 
@@ -91,7 +97,7 @@ impl QueryCache {
 	/// A cache with the default cap/theta. Used by tests and any caller without a
 	/// loaded config.
 	pub fn default_shared() -> Arc<Mutex<Self>> {
-		Self::shared(DEFAULT_CAP, DEFAULT_THETA)
+		Self::shared(QUERY_CACHE_DEFAULT_CAP, QUERY_CACHE_DEFAULT_THETA)
 	}
 
 	/// Exact-text fast path, checked *before* embedding the query. Returns a cached
@@ -311,5 +317,24 @@ mod tests {
 		assert_eq!(cache.len(), 2);
 		assert!(cache.lookup(&g, &[1.0, 0.0, 0.0], TAG).is_none(), "oldest evicted");
 		assert!(cache.lookup(&g, &[0.0, 0.0, 1.0], TAG).is_some(), "newest retained");
+	}
+
+	#[test]
+	fn lookup_promotes_an_entry_protecting_it_from_the_next_eviction() {
+		let g = graph_with_entity("k1", "e1");
+		let mut cache = QueryCache::new(2, 0.999); // theta high: each vec hits only itself
+		cache.insert(g.mutation_epoch(), 0, vec![1.0, 0.0, 0.0], TAG, result_with("e1", "a"));
+		cache.insert(g.mutation_epoch(), 0, vec![0.0, 1.0, 0.0], TAG, result_with("e1", "b"));
+
+		// Touch the OLDER entry (A) — it should jump to most-recently-used.
+		assert!(cache.lookup(&g, &[1.0, 0.0, 0.0], TAG).is_some(), "A hits and is promoted");
+
+		// Inserting C evicts the now-oldest, which is B (A was just promoted).
+		cache.insert(g.mutation_epoch(), 0, vec![0.0, 0.0, 1.0], TAG, result_with("e1", "c"));
+
+		assert_eq!(cache.len(), 2);
+		assert!(cache.lookup(&g, &[1.0, 0.0, 0.0], TAG).is_some(), "promoted A survived eviction");
+		assert!(cache.lookup(&g, &[0.0, 1.0, 0.0], TAG).is_none(), "unpromoted B was evicted");
+		assert!(cache.lookup(&g, &[0.0, 0.0, 1.0], TAG).is_some(), "newest C present");
 	}
 }

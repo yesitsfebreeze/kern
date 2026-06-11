@@ -103,6 +103,8 @@ protocol = { path = "shared/protocol" }
 trnsprt = { path = "shared/trnsprt" }
 watcher = { path = "shared/watcher" }
 async-trait = "0.1"
+heed = "0.20"
+zstd = "0.13"
 
 [dev-dependencies]
 proptest = "1"

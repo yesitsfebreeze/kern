@@ -99,7 +99,7 @@ pub fn retrieve(
 ) -> Retrieved {
 	let lexical = g.lexical();
 	let lex_ref = lexical.as_deref();
-	let dense_seeds = seed::seed(g, cfg, qvec, query_text, cfg.seed_k, mode, lex_ref);
+	let dense_seeds = seed::seed(g, cfg, qvec, cfg.seed_k, mode);
 
 	let seeds = if mode == Mode::Hybrid && cfg.lexical_enabled && !query_text.is_empty() {
 		if let Some(lex) = lex_ref {
@@ -303,8 +303,8 @@ pub fn refine_edges(g: &mut GraphGnn, chains: &[PathChain], llm: &LlmFunc) {
 			if j.is_multiple_of(2) {
 				continue;
 			}
-			let reason = match find_reason(g, node_id) {
-				Some((r, _)) => r,
+			let (reason, kern_id) = match find_reason(g, node_id) {
+				Some(pair) => pair,
 				None => continue,
 			};
 			let tc = reason.traversal_count.value();
@@ -330,16 +330,104 @@ pub fn refine_edges(g: &mut GraphGnn, chains: &[PathChain], llm: &LlmFunc) {
 				let response = llm(&prompt);
 				if let Ok(new_score) = response.trim().parse::<f64>() {
 					let clamped = new_score.clamp(0.0, 1.0);
-					for kern_id in g.all_ids() {
-						if let Some(kern) = g.get_mut(&kern_id) {
-							if let Some(r) = kern.reasons.get_mut(node_id) {
-								r.score = clamped;
-								break;
-							}
+					// O(1) write-back: find_reason already told us the owning kern, so
+					// update it directly instead of an O(N_kerns) all_ids() rescan per
+					// refined edge (which made the loop O(R * K)).
+					if let Some(kern) = g.get_mut(&kern_id) {
+						if let Some(r) = kern.reasons.get_mut(node_id) {
+							r.score = clamped;
 						}
 					}
 				}
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::base::reason::add_reason;
+	use crate::base::types::{mk_entity, EntityKind, Kern, Reason, ReasonKind};
+	use std::sync::Arc;
+
+	fn scored(id: &str, text: &str, score: f64) -> ScoredEntity {
+		ScoredEntity { entity: mk_entity(id, text, 0.0, EntityKind::Claim), score }
+	}
+
+	#[test]
+	fn synthesize_is_empty_without_a_query_or_an_llm() {
+		let s = [scored("a", "fact", 1.0)];
+		assert!(synthesize("ctx", &s, "", None).is_empty(), "empty query -> empty answer");
+		assert!(synthesize("ctx", &s, "q?", None).is_empty(), "no llm -> empty answer");
+	}
+
+	#[test]
+	fn synthesize_calls_the_llm_with_the_assembled_prompt() {
+		let s = [scored("a", "the sky is blue", 1.0)];
+		let seen = Arc::new(std::sync::Mutex::new(String::new()));
+		let seen2 = seen.clone();
+		let llm: LlmFunc = Arc::new(move |p: &str| {
+			*seen2.lock().unwrap() = p.to_string();
+			"blue".to_string()
+		});
+		let out = synthesize("CHAINS", &s, "what colour?", Some(&llm));
+		assert_eq!(out, "blue", "llm output returned verbatim");
+		let prompt = seen.lock().unwrap();
+		assert!(prompt.contains("what colour?"), "query in prompt: {prompt}");
+		assert!(prompt.contains("the sky is blue"), "fact in prompt");
+		assert!(prompt.contains("CHAINS"), "chain text in prompt");
+	}
+
+	#[test]
+	fn answer_prompt_from_numbers_facts_and_appends_the_question() {
+		let s = [scored("a", "first fact", 1.0), scored("b", "second fact", 0.9)];
+		let p = answer_prompt_from("", &s, "why?");
+		assert!(p.starts_with("Context from knowledge graph:"));
+		assert!(p.contains("1. first fact"));
+		assert!(p.contains("2. second fact"));
+		assert!(p.contains("Question: why?"));
+	}
+
+	#[test]
+	fn answer_prompt_from_inlines_chain_text_when_present() {
+		let p = answer_prompt_from("Chain 1:\n  [Entity] x\n", &[], "q");
+		assert!(p.contains("Chain 1:"), "chain text inlined ahead of the facts");
+	}
+
+	#[test]
+	fn format_chains_renders_entities_and_reason_labels() {
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("k", "");
+		k.entities.insert("e1".into(), mk_entity("e1", "alpha", 0.0, EntityKind::Claim));
+		k.entities.insert("e2".into(), mk_entity("e2", "beta", 0.0, EntityKind::Claim));
+		add_reason(
+			&mut k,
+			Reason {
+				from: "e1".into(),
+				to: "e2".into(),
+				id: "r1".into(),
+				text: "supports".into(),
+				kind: ReasonKind::Similarity,
+				..Default::default()
+			},
+		);
+		g.kerns.insert("k".into(), k);
+
+		let chains = [PathChain { nodes: vec!["e1".into(), "r1".into(), "e2".into()], score: 1.0 }];
+		let out = format_chains(&g, &chains);
+		assert!(out.contains("Chain 1:"));
+		assert!(out.contains("[Entity] alpha"));
+		assert!(out.contains("[Entity] beta"));
+		assert!(out.contains("--supports-->"), "reason text used as the edge label: {out}");
+	}
+
+	#[test]
+	fn build_answer_prompt_wraps_facts_and_the_question() {
+		let g = GraphGnn::new();
+		let s = [scored("a", "the fact", 1.0)];
+		let p = build_answer_prompt(&g, &[], &s, "ask?");
+		assert!(p.contains("1. the fact"));
+		assert!(p.contains("Question: ask?"));
 	}
 }

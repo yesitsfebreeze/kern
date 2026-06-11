@@ -33,36 +33,22 @@ pub(super) fn cmd_compress(src: &str, mode_str: &str, out: Option<&str>) {
 
 pub(super) fn cmd_health(cfg: &crate::config::Config) {
 	let g = load_graph(cfg);
+	// Headline counts via the shared roll-up (same one repl::do_health and the
+	// MCP health tool use), so the aggregation logic lives in exactly one place.
+	let h = crate::base::health::graph_health_stats(&g);
 
 	println!("data_dir:    {}", g.data_dir);
-	let anchors: Vec<String> = crate::base::accept::root_anchor_ids(&g)
-		.iter()
-		.filter_map(|cid| g.loaded(cid))
-		.map(|c| c.anchor_text.clone())
-		.collect();
-	if anchors.is_empty() {
+	if h.anchors.is_empty() {
 		println!("anchors:     (none)");
 	} else {
-		println!("anchors:     {}", anchors.join(", "));
+		println!("anchors:     {}", h.anchors.join(", "));
 	}
-
-	let kerns = g.all();
-	let mut total_entities = 0usize;
-	let mut total_reasons = 0usize;
-	let mut unnamed = 0usize;
-	for k in &kerns {
-		total_entities += k.entities.len();
-		total_reasons += k.reasons.len();
-		if k.is_unnamed() {
-			unnamed += 1;
-		}
-	}
-	println!("kerns:       {}", kerns.len());
-	println!("thoughts:    {} (unnamed: {})", total_entities, unnamed);
-	println!("reasons:     {}", total_reasons);
+	println!("kerns:       {}", h.kerns);
+	println!("thoughts:    {} (unnamed: {})", h.entities, h.unnamed);
+	println!("reasons:     {}", h.reasons);
 	println!("descriptors: {}", g.root.descriptors.len());
 
-	for k in &kerns {
+	for k in g.all() {
 		let label = if k.anchor_text.is_empty() {
 			"[unnamed]"
 		} else {
@@ -221,13 +207,63 @@ mod peers_tests {
 	}
 }
 
+#[cfg(test)]
+mod cmd_tests {
+	use super::*;
+	use crate::config::Config;
+
+	fn temp_cfg() -> (tempfile::TempDir, Config) {
+		let dir = tempfile::tempdir().expect("tempdir");
+		let mut cfg = Config::default();
+		cfg.data_dir = dir.path().to_string_lossy().into_owned();
+		(dir, cfg)
+	}
+
+	#[test]
+	fn descriptor_add_then_remove_persists_through_the_graph() {
+		let (_dir, cfg) = temp_cfg();
+		// A custom key, NOT one of the defaults that load_graph re-injects on every
+		// load (e.g. "code") — otherwise Rm would appear to "fail" as the default
+		// descriptor is re-added on the next load.
+		let key = "custom_test_kind";
+
+		cmd_descriptor(
+			&cfg,
+			DescriptorAction::Add { name: key.into(), description: "a custom kind".into() },
+		);
+		let g = load_graph(&cfg);
+		assert_eq!(
+			g.root.descriptors.get(key).map(String::as_str),
+			Some("a custom kind"),
+			"Add persists the descriptor onto the root",
+		);
+
+		cmd_descriptor(&cfg, DescriptorAction::Rm { name: key.into() });
+		let g = load_graph(&cfg);
+		assert!(!g.root.descriptors.contains_key(key), "Rm removes the custom descriptor");
+	}
+
+	#[test]
+	fn cmd_health_runs_on_a_fresh_graph_without_panicking() {
+		let (_dir, cfg) = temp_cfg();
+		// Exercises the load -> graph_health_stats roll-up -> per-kern print path.
+		// The contract under test is "does not panic on an empty/new data dir".
+		cmd_health(&cfg);
+	}
+}
+
 pub(super) fn cmd_register(cfg: &crate::config::Config, path: &str) {
+	// Copy the graph at `path` into THIS cwd's store. The loaded graph is bound to
+	// the source store, so we write into a freshly opened destination store rather
+	// than relying on `save_graph` (which would write back to the source).
 	match crate::base::persist::load_dir(path) {
-		Ok(mut g) => {
-			g.data_dir = cfg.data_dir.clone();
-			save_graph(&g);
-			println!("registered {path}");
-		}
+		Ok(g) => match crate::base::store::Store::open(&cfg.data_dir) {
+			Ok(dest) => {
+				let _ = crate::base::persist::save_graph_into(&dest, &g);
+				println!("registered {path}");
+			}
+			Err(e) => eprintln!("register: {e}"),
+		},
 		Err(e) => eprintln!("load: {e}"),
 	}
 }

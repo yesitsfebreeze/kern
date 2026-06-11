@@ -1,5 +1,3 @@
-
-
 use crate::gnn::tensor::Tensor;
 
 #[inline]
@@ -56,6 +54,28 @@ pub fn leaky_relu_deriv(alpha: f64, x: f64) -> f64 {
 	}
 }
 
+// GELU via the tanh approximation (the GPT/BERT formulation): the exact erf form
+// has no std primitive, and this approximation is what modern GNN/Transformer
+// stacks use in practice. `gelu_deriv` is the exact derivative OF THIS
+// approximation, so forward/backward stay consistent.
+const SQRT_2_OVER_PI: f64 = 0.797_884_560_802_865_4; // sqrt(2/π)
+const GELU_C: f64 = 0.044_715;
+
+#[inline]
+pub fn gelu(x: f64) -> f64 {
+	let inner = SQRT_2_OVER_PI * (x + GELU_C * x * x * x);
+	0.5 * x * (1.0 + inner.tanh())
+}
+
+#[inline]
+pub fn gelu_deriv(x: f64) -> f64 {
+	let inner = SQRT_2_OVER_PI * (x + GELU_C * x * x * x);
+	let t = inner.tanh();
+	let sech2 = 1.0 - t * t;
+	let d_inner = SQRT_2_OVER_PI * (1.0 + 3.0 * GELU_C * x * x);
+	0.5 * (1.0 + t) + 0.5 * x * sech2 * d_inner
+}
+
 /// An activation function paired with its analytic derivative.
 ///
 /// Layers store this instead of a bare `fn(f64) -> f64` so the backward pass
@@ -67,6 +87,7 @@ pub enum Activation {
 	Sigmoid,
 	Tanh,
 	LeakyRelu(f64),
+	Gelu,
 }
 
 impl Activation {
@@ -77,6 +98,7 @@ impl Activation {
 			Activation::Sigmoid => sigmoid(x),
 			Activation::Tanh => tanh_act(x),
 			Activation::LeakyRelu(alpha) => leaky_relu(alpha, x),
+			Activation::Gelu => gelu(x),
 		}
 	}
 
@@ -87,6 +109,7 @@ impl Activation {
 			Activation::Sigmoid => sigmoid_deriv(x),
 			Activation::Tanh => tanh_deriv(x),
 			Activation::LeakyRelu(alpha) => leaky_relu_deriv(alpha, x),
+			Activation::Gelu => gelu_deriv(x),
 		}
 	}
 }
@@ -182,5 +205,60 @@ mod tests {
 		assert_eq!(Activation::Relu.forward(2.0), 2.0);
 		assert!((Activation::LeakyRelu(0.1).forward(-3.0) - (-0.3)).abs() < 1e-12);
 		assert!((Activation::Tanh.forward(0.0)).abs() < 1e-12);
+		// Tanh is exposed through the enum and equals the bare method.
+		assert!((Activation::Tanh.forward(0.7) - 0.7_f64.tanh()).abs() < 1e-12);
+	}
+
+	#[test]
+	fn gelu_basic_properties_and_exact_derivative() {
+		// gelu(0)=0; large positive ~ identity; large negative ~ 0.
+		assert!((Activation::Gelu.forward(0.0)).abs() < 1e-12);
+		assert!((Activation::Gelu.forward(5.0) - 5.0).abs() < 0.01, "gelu(5) ~ 5");
+		assert!(Activation::Gelu.forward(-5.0).abs() < 0.01, "gelu(-5) ~ 0");
+		// Its analytic deriv matches a central finite difference (the deriv is the
+		// exact derivative of the tanh-approx forward, so they agree tightly).
+		const H: f64 = 1e-6;
+		for &x in &[-2.3, -0.5, 0.0, 0.7, 1.9] {
+			let numeric = (Activation::Gelu.forward(x + H) - Activation::Gelu.forward(x - H)) / (2.0 * H);
+			assert!(
+				(Activation::Gelu.deriv(x) - numeric).abs() < 1e-6,
+				"gelu at {x}: analytic {} vs numeric {numeric}",
+				Activation::Gelu.deriv(x)
+			);
+		}
+	}
+
+	#[test]
+	fn softmax_multirow_each_row_sums_to_one_and_is_row_independent() {
+		// Three rows with different scales; the row-loop must normalize each row
+		// independently (a bug in the bounds would leak across rows).
+		let t = Tensor::new(3, 3, vec![
+			1.0, 2.0, 3.0,
+			10.0, 10.0, 10.0, // uniform row -> 1/3 each
+			-5.0, 0.0, 5.0,
+		]).unwrap();
+		let s = softmax(&t);
+		for i in 0..3 {
+			let row_sum: f64 = (0..3).map(|j| s.at(i, j)).sum();
+			assert!((row_sum - 1.0).abs() < 1e-12, "row {i} sums to 1, got {row_sum}");
+		}
+		// Uniform row -> exactly 1/3 each.
+		for j in 0..3 {
+			assert!((s.at(1, j) - 1.0 / 3.0).abs() < 1e-12);
+		}
+		// Row 0 is monotonic in the logits (3 > 2 > 1).
+		assert!(s.at(0, 2) > s.at(0, 1) && s.at(0, 1) > s.at(0, 0));
+	}
+
+	#[test]
+	fn log_softmax_multirow_equals_log_of_softmax() {
+		let t = Tensor::new(2, 3, vec![0.1, 0.2, 0.7, -1.0, 0.0, 1.0]).unwrap();
+		let ls = log_softmax(&t);
+		let s = softmax(&t);
+		for i in 0..2 {
+			for j in 0..3 {
+				assert!((ls.at(i, j) - s.at(i, j).ln()).abs() < 1e-9, "log_softmax == ln(softmax)");
+			}
+		}
 	}
 }

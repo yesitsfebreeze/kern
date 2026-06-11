@@ -39,26 +39,8 @@ impl LexicalIndex {
 	}
 
 	pub fn insert(&self, entity_id: &str, text: &str) {
-		let tokens = tokenize(text);
 		let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
-		inner_remove(&mut inner, entity_id);
-		let dl = tokens.len() as u32;
-		if dl == 0 {
-			return;
-		}
-		let mut tfs: HashMap<String, u32> = HashMap::new();
-		for tok in tokens {
-			*tfs.entry(tok).or_insert(0) += 1;
-		}
-		for (tok, tf) in tfs {
-			inner
-				.postings
-				.entry(tok)
-				.or_default()
-				.insert(entity_id.to_string(), Posting { tf });
-		}
-		inner.doc_len.insert(entity_id.to_string(), dl);
-		inner.total_len += dl as u64;
+		inner_insert(&mut inner, entity_id, text);
 	}
 
 	pub fn remove(&self, entity_id: &str) {
@@ -113,17 +95,20 @@ impl LexicalIndex {
 	}
 
 	pub fn rebuild_from_graph(&self, g: &GraphGnn) {
-		{
-			let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
-			inner.postings.clear();
-			inner.doc_len.clear();
-			inner.total_len = 0;
-		}
+		// Single write acquisition for the whole rebuild: clear, then insert every
+		// entity under the SAME guard. The previous version dropped the lock after
+		// clearing and re-acquired it once per entity via self.insert(), which on a
+		// large graph meant thousands of lock round-trips (and a window where the
+		// index was visibly empty to concurrent readers).
+		let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
+		inner.postings.clear();
+		inner.doc_len.clear();
+		inner.total_len = 0;
 		for kern in g.all() {
 			for t in kern.entities.values() {
 				let joined = t.statements.join(" ");
 				if !joined.is_empty() {
-					self.insert(&t.id, &joined);
+					inner_insert(&mut inner, &t.id, &joined);
 				}
 			}
 		}
@@ -137,6 +122,32 @@ impl LexicalIndex {
 			.doc_len
 			.len()
 	}
+}
+
+/// Tokenize `text`, then upsert `entity_id`'s postings under an already-held
+/// write guard (no locking). Removing any prior version first makes it an
+/// idempotent upsert. Shared by `insert` (locks, single doc) and
+/// `rebuild_from_graph` (one lock, every doc).
+fn inner_insert(inner: &mut Inner, entity_id: &str, text: &str) {
+	let tokens = tokenize(text);
+	inner_remove(inner, entity_id);
+	let dl = tokens.len() as u32;
+	if dl == 0 {
+		return;
+	}
+	let mut tfs: HashMap<String, u32> = HashMap::new();
+	for tok in tokens {
+		*tfs.entry(tok).or_insert(0) += 1;
+	}
+	for (tok, tf) in tfs {
+		inner
+			.postings
+			.entry(tok)
+			.or_default()
+			.insert(entity_id.to_string(), Posting { tf });
+	}
+	inner.doc_len.insert(entity_id.to_string(), dl);
+	inner.total_len += dl as u64;
 }
 
 fn inner_remove(inner: &mut Inner, entity_id: &str) {
@@ -157,6 +168,9 @@ fn inner_remove(inner: &mut Inner, entity_id: &str) {
 	}
 }
 
+/// Split `text` into lowercased, stemmed terms on any non-alphanumeric
+/// boundary. There is no stopword list — common words still index (BM25's idf
+/// already down-weights them), so a query for a rare term isn't diluted.
 fn tokenize(text: &str) -> Vec<String> {
 	let mut out = Vec::new();
 	let mut cur = String::new();
@@ -176,6 +190,16 @@ fn tokenize(text: &str) -> Vec<String> {
 	out
 }
 
+/// Naive suffix-stripping stemmer: strip the FIRST matching suffix from a fixed
+/// ordered list, and only when the remaining stem stays longer than 2 chars.
+///
+/// Deliberately crude, with known failure modes: no irregular-form handling, so
+/// "mice"/"ran"/"better" are left as-is and never match their singular/base; and
+/// first-match ordering can over-strip ("ties" -> "t" via `ies`). It exists only
+/// to collapse the common regular English inflections (plurals, -ing/-ed/-ly)
+/// enough to lift lexical recall; a precise Porter/Snowball stemmer would add a
+/// dependency for marginal gain at this layer. There is also no stopword removal
+/// (see `tokenize`).
 fn stem(t: &str) -> String {
 	let s = t;
 	for suf in &["ing", "edly", "ed", "ly", "ies", "es", "s"] {
@@ -184,4 +208,97 @@ fn stem(t: &str) -> String {
 		}
 	}
 	s.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::base::types::{Entity, Kern};
+
+	#[test]
+	fn stem_strips_known_suffixes_and_guards_short_words() {
+		assert_eq!(stem("running"), "runn", "`ing` stripped");
+		assert_eq!(stem("cats"), "cat", "`s` stripped");
+		assert_eq!(stem("happily"), "happi", "`ly` stripped");
+		// Too short after stripping (stem must stay > 2 chars) — left intact.
+		assert_eq!(stem("bus"), "bus");
+		assert_eq!(stem("the"), "the", "no matching suffix");
+	}
+
+	#[test]
+	fn tokenize_splits_lowercases_and_stems() {
+		assert_eq!(tokenize("Running, the Cats!"), vec!["runn", "the", "cat"]);
+		assert!(tokenize("   ,.!").is_empty(), "punctuation-only yields no tokens");
+	}
+
+	#[test]
+	fn search_ranks_by_bm25_and_excludes_nonmatching_docs() {
+		let idx = LexicalIndex::new_in_ram(1.2, 0.75);
+		idx.insert("d1", "the quick brown fox");
+		idx.insert("d2", "lazy dog programming");
+		idx.insert("d3", "quick quick fox");
+
+		let hits = idx.search("quick fox", 10);
+		assert_eq!(hits.len(), 2, "only docs containing a query term score");
+		assert_eq!(hits[0].entity_id, "d3", "higher term frequency ranks first");
+		assert_eq!(hits[1].entity_id, "d1");
+		assert!(!hits.iter().any(|h| h.entity_id == "d2"), "d2 shares no terms");
+	}
+
+	#[test]
+	fn search_empty_query_or_zero_k_is_empty() {
+		let idx = LexicalIndex::new_in_ram(1.2, 0.75);
+		idx.insert("d1", "hello world");
+		assert!(idx.search("", 10).is_empty(), "empty query -> no hits");
+		assert!(idx.search("hello", 0).is_empty(), "k=0 -> no hits");
+		assert!(idx.search("absent", 10).is_empty(), "unindexed term -> no hits");
+	}
+
+	#[test]
+	fn insert_is_an_idempotent_upsert() {
+		let idx = LexicalIndex::new_in_ram(1.2, 0.75);
+		idx.insert("d1", "alpha beta");
+		idx.insert("d1", "alpha beta"); // re-insert same id must not double-count
+		assert_eq!(idx.doc_count(), 1, "re-inserting an id keeps one document");
+		idx.insert("d1", "gamma"); // upsert to new text -> old terms gone
+		assert!(idx.search("alpha", 10).is_empty(), "stale terms removed on upsert");
+		assert_eq!(idx.search("gamma", 10).len(), 1);
+	}
+
+	#[test]
+	fn remove_drops_the_document() {
+		let idx = LexicalIndex::new_in_ram(1.2, 0.75);
+		idx.insert("d1", "alpha");
+		idx.insert("d2", "alpha");
+		idx.remove("d1");
+		assert_eq!(idx.doc_count(), 1);
+		let hits = idx.search("alpha", 10);
+		assert_eq!(hits.len(), 1);
+		assert_eq!(hits[0].entity_id, "d2");
+	}
+
+	#[test]
+	fn rebuild_from_graph_indexes_every_nonempty_entity() {
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("k", "");
+		k.entities.insert(
+			"e1".into(),
+			Entity { id: "e1".into(), statements: vec!["quick brown fox".into()], ..Default::default() },
+		);
+		k.entities.insert(
+			"e2".into(),
+			Entity { id: "e2".into(), statements: vec!["lazy dog".into()], ..Default::default() },
+		);
+		// Empty-statement entity must be skipped, not indexed as a zero-len doc.
+		k.entities.insert("e3".into(), Entity { id: "e3".into(), ..Default::default() });
+		g.kerns.insert("k".into(), k);
+
+		let idx = LexicalIndex::new_in_ram(1.2, 0.75);
+		idx.rebuild_from_graph(&g);
+
+		assert_eq!(idx.doc_count(), 2, "only the two non-empty entities are indexed");
+		let hits = idx.search("fox", 10);
+		assert_eq!(hits.len(), 1);
+		assert_eq!(hits[0].entity_id, "e1");
+	}
 }

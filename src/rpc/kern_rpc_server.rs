@@ -50,13 +50,17 @@ fn build_touch_entry(entity_id: &str, op: TouchOp) -> Entry {
 /// the supplied sink. Spam control: the input is deduplicated, so a
 /// single query hitting the same entity 50 times produces one event.
 pub(crate) fn emit_agent_reads(ids: &[String], sink: &dyn Sink) {
-    let mut seen: Vec<&str> = Vec::with_capacity(ids.len());
+    // O(n) dedup via a HashSet rather than the old Vec::contains scan, which was
+    // O(n^2) when a query returned many hits. Emit in first-seen order (the set is
+    // only the membership check; emission order follows iteration).
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::with_capacity(ids.len());
     for id in ids {
-        if id.is_empty() || seen.contains(&id.as_str()) {
+        if id.is_empty() {
             continue;
         }
-        seen.push(id.as_str());
-        sink.emit(build_touch_entry(id, TouchOp::AgentRead));
+        if seen.insert(id.as_str()) {
+            sink.emit(build_touch_entry(id, TouchOp::AgentRead));
+        }
     }
 }
 
@@ -142,21 +146,6 @@ fn entity_kind_from_lite(k: EntityKindLite) -> EntityKind {
     }
 }
 
-/// Parse the lower-case kind label echoed by the MCP `tool_query`
-/// envelope back into the wire-side [`EntityKindLite`]. Returns `None`
-/// for unknown labels so the caller can apply its own default.
-fn parse_kind_label(s: &str) -> Option<EntityKindLite> {
-    match s {
-        "fact" => Some(EntityKindLite::Fact),
-        "claim" => Some(EntityKindLite::Claim),
-        "document" => Some(EntityKindLite::Document),
-        "question" => Some(EntityKindLite::Question),
-        "answer" => Some(EntityKindLite::Answer),
-        "conclusion" => Some(EntityKindLite::Conclusion),
-        _ => None,
-    }
-}
-
 /// Parse the lower-case status label echoed by the MCP `tool_query`
 /// envelope. Anything other than `"superseded"` is treated as Active.
 fn parse_status_label(s: &str) -> EntityStatusLite {
@@ -175,6 +164,28 @@ fn entity_kind_to_lite(k: EntityKind) -> EntityKindLite {
         EntityKind::Question => EntityKindLite::Question,
         EntityKind::Answer => EntityKindLite::Answer,
         EntityKind::Conclusion => EntityKindLite::Conclusion,
+    }
+}
+
+/// Decode the edge-kind discriminant the MCP `tool_query` envelope emits
+/// (`r.kind as i32`, a [`crate::base::types::ReasonKind`]) into the wire-side
+/// [`EdgeKind`]. The two enums are deliberately NOT 1:1: `ReasonKind` is kern's
+/// internal edge taxonomy (Similarity / Provenance / Question / Spawn /
+/// Supersedes / Ratification / Rephrase) while `EdgeKind` is the connected-index
+/// wire vocabulary, so this is a semantic projection, not a cast. Unknown or
+/// out-of-range ints fall back to the neutral `References`. Lives in the kern
+/// adapter rather than `shared/trnsprt` because `ReasonKind` is kern-internal
+/// and cannot be referenced from the transport crate.
+fn edge_kind_from_reason_int(kind: i32) -> EdgeKind {
+    match kind {
+        0 => EdgeKind::References,   // Similarity — generic semantic relatedness
+        1 => EdgeKind::Derives,     // Provenance — sourced/derived from
+        2 => EdgeKind::Answers,     // Question — resolved to its answer entity
+        3 => EdgeKind::PartOf,      // Spawn — sub-cluster under its parent kern
+        4 => EdgeKind::Consolidates, // Supersedes — newer folds in / replaces older
+        5 => EdgeKind::Supports,    // Ratification — confirms / upholds
+        6 => EdgeKind::References,  // Rephrase — restatement, no stronger wire kind
+        _ => EdgeKind::References,  // unknown / future discriminant
     }
 }
 
@@ -235,7 +246,7 @@ impl KernRpc for KernRpcHandler {
                     let kind = e
                         .get("kind")
                         .and_then(|v| v.as_str())
-                        .and_then(parse_kind_label)
+                        .and_then(EntityKindLite::from_label)
                         .unwrap_or(EntityKindLite::Claim);
                     let scheme = str_field(e, "scheme", "inline");
                     let status = e
@@ -259,7 +270,12 @@ impl KernRpc for KernRpcHandler {
                                     Some(EdgeRef {
                                         from: str_field(edge, "from", ""),
                                         to: str_field(edge, "to", ""),
-                                        kind: EdgeKind::References, // kind int→EdgeKind mapping not 1:1; use References as neutral wire value
+                                        // Decode the kern ReasonKind discriminant the
+                                        // envelope carries into the wire EdgeKind so
+                                        // callers see the actual relationship type.
+                                        kind: edge_kind_from_reason_int(
+                                            edge.get("kind").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                                        ),
                                         text,
                                         score: f32_field(edge, "score"),
                                     })
@@ -801,7 +817,7 @@ mod envelope_parse_tests {
     use super::*;
 
     #[test]
-    fn parse_kind_label_round_trips_every_kind() {
+    fn from_label_round_trips_every_kind() {
         for k in [
             EntityKind::Fact,
             EntityKind::Claim,
@@ -811,17 +827,17 @@ mod envelope_parse_tests {
             EntityKind::Conclusion,
         ] {
             let label = k.as_str();
-            let lite = parse_kind_label(label).expect("known label parses");
+            let lite = EntityKindLite::from_label(label).expect("known label parses");
             assert_eq!(lite, entity_kind_to_lite(k), "round-trip for {label}");
         }
     }
 
     #[test]
-    fn parse_kind_label_unknown_returns_none() {
-        assert!(parse_kind_label("").is_none());
-        assert!(parse_kind_label("bogus").is_none());
+    fn from_label_unknown_returns_none() {
+        assert!(EntityKindLite::from_label("").is_none());
+        assert!(EntityKindLite::from_label("bogus").is_none());
         // Superseded is a status, never a kind label.
-        assert!(parse_kind_label("superseded").is_none());
+        assert!(EntityKindLite::from_label("superseded").is_none());
     }
 
     #[test]
@@ -834,6 +850,37 @@ mod envelope_parse_tests {
         assert_eq!(parse_status_label("active"), EntityStatusLite::Active);
         assert_eq!(parse_status_label(""), EntityStatusLite::Active);
         assert_eq!(parse_status_label("garbage"), EntityStatusLite::Active);
+    }
+
+    #[test]
+    fn edge_kind_decode_projects_each_reason_kind() {
+        use crate::base::types::ReasonKind;
+        // The envelope carries `r.kind as i32`; decoding must surface a distinct,
+        // meaningful EdgeKind per ReasonKind rather than a blanket References.
+        let cases = [
+            (ReasonKind::Similarity, EdgeKind::References),
+            (ReasonKind::Provenance, EdgeKind::Derives),
+            (ReasonKind::Question, EdgeKind::Answers),
+            (ReasonKind::Spawn, EdgeKind::PartOf),
+            (ReasonKind::Supersedes, EdgeKind::Consolidates),
+            (ReasonKind::Ratification, EdgeKind::Supports),
+            (ReasonKind::Rephrase, EdgeKind::References),
+        ];
+        for (rk, expected) in cases {
+            assert_eq!(
+                edge_kind_from_reason_int(rk as i32),
+                expected,
+                "ReasonKind {rk:?} must project to {expected:?}",
+            );
+        }
+        // Non-References kinds prove the mapping isn't degenerate.
+        assert_ne!(edge_kind_from_reason_int(ReasonKind::Question as i32), EdgeKind::References);
+    }
+
+    #[test]
+    fn edge_kind_decode_unknown_falls_back_to_references() {
+        assert_eq!(edge_kind_from_reason_int(-1), EdgeKind::References);
+        assert_eq!(edge_kind_from_reason_int(99), EdgeKind::References);
     }
 }
 

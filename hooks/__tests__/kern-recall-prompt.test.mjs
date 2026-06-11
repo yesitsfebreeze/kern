@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   parseHits, buildContext, buildOutput, MIN_SCORE,
   contentWords, parseAnchors, shouldSearch,
+  resolveMinScore, kernSearch, TOP_K,
 } from '../kern-recall-prompt.mjs';
 
 const SAMPLE = [
@@ -42,6 +43,41 @@ test('buildContext respects max cap', () => {
 test('buildContext returns empty when nothing clears the floor', () => {
   assert.equal(buildContext(parseHits('1. [0.10] x  weak')), '');
   assert.ok(MIN_SCORE > 0.10);
+});
+
+// ── score-floor override ────────────────────────────────────────────────
+
+test('resolveMinScore: valid env override wins, junk/out-of-range falls back', () => {
+  assert.equal(resolveMinScore('0.5'), 0.5);
+  assert.equal(resolveMinScore('0'), 0);
+  assert.equal(resolveMinScore('1'), 1);
+  assert.equal(resolveMinScore(undefined), 0.85, 'missing -> default');
+  assert.equal(resolveMinScore('notanumber'), 0.85, 'non-numeric -> default');
+  assert.equal(resolveMinScore('1.5'), 0.85, 'above 1 -> default');
+  assert.equal(resolveMinScore('-0.2'), 0.85, 'below 0 -> default');
+  assert.equal(resolveMinScore('0.3', 0.9), 0.3, 'explicit fallback only used when invalid');
+});
+
+// ── kern invocation (dependency-injected exec) ──────────────────────────────
+
+test('kernSearch resolves stdout on success and "" on error', async () => {
+  const ok = await kernSearch('q', '/tmp', (_f, _a, _o, cb) => cb(null, 'OUT'));
+  assert.equal(ok, 'OUT');
+  const failed = await kernSearch('q', '/tmp', (_f, _a, _o, cb) => cb(new Error('boom'), 'ignored'));
+  assert.equal(failed, '', 'fail-open: any error -> empty string');
+  const nullStdout = await kernSearch('q', '/tmp', (_f, _a, _o, cb) => cb(null, undefined));
+  assert.equal(nullStdout, '', 'undefined stdout coerces to empty');
+});
+
+test('kernSearch dispatches the expected argv and cwd', async () => {
+  let seen;
+  await kernSearch('hello world', '/proj', (file, args, opts, cb) => {
+    seen = { file, args, cwd: opts.cwd };
+    cb(null, '');
+  });
+  assert.equal(seen.file, 'kern');
+  assert.deepEqual(seen.args, ['search', 'hello world', '--k', String(TOP_K)]);
+  assert.equal(seen.cwd, '/proj');
 });
 
 test('buildOutput wraps in the UserPromptSubmit envelope, empty stays empty', () => {

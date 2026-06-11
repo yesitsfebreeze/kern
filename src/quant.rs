@@ -26,7 +26,10 @@ impl QuantizationMode {
 		}
 	}
 
-	pub fn bytes_per_dim(self) -> f64 {
+	/// Storage cost per vector dimension, for size estimates only. `f32` (not
+	/// `f64`) because it feeds display/back-of-envelope math — keeping it narrow
+	/// avoids a silent widening at the (printf-style) call sites.
+	pub fn bytes_per_dim(self) -> f32 {
 		match self {
 			Self::None => 8.0,
 			Self::Int8 => 1.0,
@@ -128,6 +131,11 @@ pub fn f64_cosine_distance(a: &[f64], b: &[f64]) -> f64 {
 	let mut dot = 0.0_f64;
 	let mut na = 0.0_f64;
 	let mut nb = 0.0_f64;
+	// Hot path. This dot/norm accumulation over two equal-length f64 slices is a
+	// prime autovectorisation target; it is kept as a plain scalar loop (which the
+	// compiler auto-vectorises under -O) for portability. A future contributor
+	// wanting explicit SIMD should add a `#[cfg(target_feature = "avx2")]`
+	// specialisation here and fall back to this loop otherwise.
 	for i in 0..a.len() {
 		dot += a[i] * b[i];
 		na += a[i] * a[i];
@@ -217,6 +225,21 @@ mod tests {
 		let a = QuantizedVec::encode(&[1.0, 2.0, 3.0], QuantizationMode::Int8);
 		let b = QuantizedVec::encode(&[1.0, 2.0, 3.0], QuantizationMode::None);
 		assert!(quantized_cosine_distance(&a, &b) < 1e-2);
+	}
+
+	#[test]
+	fn mixed_mode_exactly_matches_the_decoded_f64_distance() {
+		// The `< 1e-2` check above only proves the result is SMALL (and can't be
+		// tighter — int8 is lossy, so a same-content mixed pair never reaches < eps).
+		// The precise contract is that the fallback arm decodes BOTH operands and
+		// delegates to f64_cosine_distance — so the result must equal that exactly,
+		// and be the same whichever operand is the quantized one (order-symmetric).
+		let int8 = QuantizedVec::encode(&[1.0, -2.0, 3.0, 0.5], QuantizationMode::Int8);
+		let none = QuantizedVec::encode(&[1.0, -2.0, 3.0, 0.5], QuantizationMode::None);
+		let expected = f64_cosine_distance(&int8.decode(), &none.decode());
+
+		assert_eq!(quantized_cosine_distance(&int8, &none), expected, "int8 vs none == decoded f64");
+		assert_eq!(quantized_cosine_distance(&none, &int8), expected, "none vs int8 is symmetric");
 	}
 
 	#[test]

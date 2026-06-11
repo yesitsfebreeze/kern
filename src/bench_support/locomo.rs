@@ -177,6 +177,12 @@ pub fn parse_judge_verdict(raw: &str) -> bool {
 }
 
 /// Length of the longest common subsequence of two token slices.
+///
+/// Rolling-row DP: `O(a.len() * b.len())` time, `O(b.len())` space. The
+/// quadratic product is fine because both inputs are *normalized-answer token
+/// lists* — for LoCoMo these are short (a handful to a few dozen tokens), and
+/// `rouge_l` never feeds document-length text here, so `m*n` stays tiny. If a
+/// future caller passes long sequences, cap the token count before calling.
 fn lcs_len(a: &[String], b: &[String]) -> usize {
 	let mut dp = vec![0usize; b.len() + 1];
 	for ai in a {
@@ -411,5 +417,28 @@ mod tests {
 		assert!(is_abstention("I don't have information about that."));
 		assert!(is_abstention("That was not mentioned in the conversation."));
 		assert!(!is_abstention("7 May 2023"));
+	}
+
+	#[test]
+	fn abstention_is_case_insensitive_and_position_independent() {
+		// pred is lowercased before matching, so casing of the marker is irrelevant.
+		assert!(is_abstention("Cannot determine that from the context"), "mixed-case 'Cannot'");
+		assert!(is_abstention("CANNOT"), "all-caps marker");
+		assert!(is_abstention("unanswerable given the dialogue"), "marker at the very start");
+		assert!(is_abstention("...ultimately this is unanswerable"), "marker at the end");
+		// Unicode around a marker doesn't break detection (lowercasing is char-wise).
+		assert!(is_abstention("Désolé — I don't know. 不知道"));
+		// Unicode content that simply answers is not a false positive.
+		assert!(!is_abstention("réponse : 7 mai 2023"));
+	}
+
+	#[test]
+	fn rouge_l_all_article_string_normalizes_to_empty() {
+		// Every token is a stripped article -> empty normalized form.
+		assert_eq!(normalize_answer("the a an"), "");
+		// Empty vs empty is a vacuous match (1.0); empty vs content is 0.0 — the
+		// guard in rouge_l handles both without a divide-by-zero.
+		assert!((rouge_l("the a an", "an the a") - 1.0).abs() < 1e-9);
+		assert_eq!(rouge_l("the a an", "real content here"), 0.0);
 	}
 }

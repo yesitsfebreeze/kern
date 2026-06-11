@@ -33,7 +33,8 @@ pub enum AgentLifecycle {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum OutputEvent {
-    /// Full response text (backward compat, used by drill view).
+    /// Full response text delivered in one shot (not streamed). The drill view
+    /// renders this as a complete reply; live turns emit `Chunk` deltas instead.
     Token(String),
     /// Per-chunk streaming delta emitted during a turn.
     Chunk(String),
@@ -179,5 +180,59 @@ mod tests {
             let back: ForkStateLite = serde_json::from_str(&j).unwrap();
             assert_eq!(s, back);
         }
+    }
+
+    #[test]
+    fn fork_kind_variants_serde_roundtrip() {
+        for k in [
+            ForkKind::Chat,
+            ForkKind::Orchestrator,
+            ForkKind::FileHandle { path: "src/main.rs".into() },
+            ForkKind::Worker,
+        ] {
+            let j = serde_json::to_string(&k).unwrap();
+            let back: ForkKind = serde_json::from_str(&j).unwrap();
+            assert_eq!(k, back, "round-trip for {k:?}");
+        }
+    }
+
+    #[test]
+    fn fork_kind_uses_adjacent_tag_content_tagging() {
+        // #[serde(tag = "t", content = "c")]: the content variant FileHandle carries
+        // its inner `path` under "c", unit variants carry only the tag.
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&ForkKind::FileHandle { path: "p.rs".into() }).unwrap())
+                .unwrap();
+        assert_eq!(v["t"], "FileHandle");
+        assert_eq!(v["c"]["path"], "p.rs");
+
+        let vc: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&ForkKind::Chat).unwrap()).unwrap();
+        assert_eq!(vc["t"], "Chat");
+        assert!(vc.get("c").is_none(), "a unit variant has no content payload");
+    }
+
+    #[test]
+    fn fork_kind_default_is_chat() {
+        assert_eq!(ForkKind::default(), ForkKind::Chat);
+    }
+
+    #[test]
+    fn usage_summary_and_turn_result_roundtrip() {
+        let usage = UsageSummary { input_tokens: 12, output_tokens: 34, cost_micro_usd: 56 };
+        let back: UsageSummary =
+            serde_json::from_str(&serde_json::to_string(&usage).unwrap()).unwrap();
+        assert_eq!(back.input_tokens, 12);
+        assert_eq!(back.output_tokens, 34);
+        assert_eq!(back.cost_micro_usd, 56);
+
+        // TurnResult::Ok carries an optional usage; Err carries a message.
+        let ok = TurnResult::Ok { reply: "hi".into(), usage: Some(usage) };
+        let ok_back: TurnResult =
+            serde_json::from_str(&serde_json::to_string(&ok).unwrap()).unwrap();
+        assert!(matches!(ok_back, TurnResult::Ok { reply, usage: Some(u) } if reply == "hi" && u.output_tokens == 34));
+        let err_back: TurnResult =
+            serde_json::from_str(&serde_json::to_string(&TurnResult::Err("boom".into())).unwrap()).unwrap();
+        assert!(matches!(err_back, TurnResult::Err(m) if m == "boom"));
     }
 }

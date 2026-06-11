@@ -1,7 +1,8 @@
-//! Shared append-only JSONL journal — used by every binary (repl, agnt,
-//! kern, plugins) so events from each process land in the same file.
-//! Append-only cross-process event journal. External consumers
-//! attach their own sinks via the `Sink` trait.
+//! Shared append-only JSONL event journal.
+//!
+//! Every binary (repl, agnt, kern, plugins) emits into the same per-day file so
+//! events from each process land together. External consumers attach their own
+//! sinks via the [`Sink`] trait.
 
 pub mod day_journal;
 pub mod entry;
@@ -67,31 +68,25 @@ pub use entry::{Entry, Kind, NullSink, Sink, SCHEMA_VERSION, now_ms};
 pub use history::{Filter, History};
 pub use state::{State, StateHandle};
 
-#[derive(Debug)]
-pub enum JournalError {
-	Io(std::io::Error),
-	Parse {
-		line: usize,
-		source: serde_json::Error,
-	},
-}
+#[cfg(test)]
+mod tests {
+	use super::*;
 
-impl std::fmt::Display for JournalError {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		match self {
-			Self::Io(e) => write!(f, "journal io error: {e}"),
-			Self::Parse { line, source } if *line > 0 => {
-				write!(f, "journal parse error on line {line}: {source}")
-			}
-			Self::Parse { source, .. } => write!(f, "journal serialise error: {source}"),
-		}
-}
-}
+	#[test]
+	fn global_returns_a_consistent_handle() {
+		// `global()` memoizes via a OnceLock: repeated calls must yield the SAME
+		// handle (or consistently `None` when no `.kern` exists in the test cwd).
+		// Comparing by pointer avoids needing a real journal dir.
+		let a = global().map(|j| j as *const DayJournal);
+		let b = global().map(|j| j as *const DayJournal);
+		assert_eq!(a, b, "global() is idempotent across calls");
+	}
 
-impl std::error::Error for JournalError {}
-
-impl From<std::io::Error> for JournalError {
-	fn from(e: std::io::Error) -> Self {
-		Self::Io(e)
-}
+	#[test]
+	fn emit_and_global_sink_are_panic_safe_when_journal_absent() {
+		// Both paths are documented best-effort: a failed/absent global journal
+		// must silently no-op, never panic.
+		emit(Entry::new(Kind::Log, "k", serde_json::Value::Null));
+		GlobalSink.emit(Entry::new(Kind::Log, "k", serde_json::Value::Null));
+	}
 }

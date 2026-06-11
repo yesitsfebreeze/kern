@@ -1,7 +1,4 @@
 use crate::base::graph::GraphGnn;
-use crate::base::math::{average_vec, cosine, reason_id};
-use crate::base::reason::add_reason;
-use crate::base::types::*;
 use crate::config::RetrievalConfig;
 use crate::retrieval::seed::Mode;
 
@@ -23,62 +20,6 @@ pub struct ReplayReport {
 	pub trace_name: String,
 	pub per_query: Vec<QueryReport>,
 	pub mean_ndcg10: f64,
-}
-
-pub fn build_graph(trace: &Trace) -> GraphGnn {
-	let mut g = GraphGnn::new();
-	let root_id = g.root.id.clone();
-
-	for doc in &trace.docs {
-		let vec = embed::embed(&doc.text);
-		let t = Entity {
-			id: doc.id.clone(),
-			statements: vec![doc.text.clone()],
-			chunks: vec![ChunkPart {
-				kind: ChunkPartKind::StatementRef,
-				text: String::new(),
-				index: 0,
-			}],
-			vector: vec,
-			score: 0.5,
-			kind: EntityKind::Claim,
-			..Default::default()
-		};
-		if let Some(kern) = g.kerns.get_mut(&root_id) {
-			kern.entities.insert(t.id.clone(), t);
-		}
-	}
-
-	let ids: Vec<String> = trace.docs.iter().map(|d| d.id.clone()).collect();
-	for i in 0..ids.len() {
-		for j in (i + 1)..ids.len() {
-			let from = ids[i].clone();
-			let to = ids[j].clone();
-			let kern = g.kerns.get(&root_id).expect("root kern exists");
-			let from_vec = kern.entities.get(&from).expect("inserted above").vector.clone();
-			let to_vec = kern.entities.get(&to).expect("inserted above").vector.clone();
-			let score = cosine(&from_vec, &to_vec);
-			if score < 0.1 {
-				continue;
-			}
-			let rid = reason_id(&from, &to, ReasonKind::Similarity, "", "");
-			let r = Reason {
-				id: rid,
-				from,
-				to,
-				kind: ReasonKind::Similarity,
-				vector: average_vec(&from_vec, &to_vec),
-				score,
-				..Default::default()
-			};
-			if let Some(kern) = g.kerns.get_mut(&root_id) {
-				add_reason(kern, r);
-			}
-		}
-	}
-
-	g.rebuild_index();
-	g
 }
 
 pub fn replay(g: &GraphGnn, cfg: &RetrievalConfig, trace: &Trace) -> ReplayReport {
@@ -109,5 +50,63 @@ fn run_one(g: &GraphGnn, cfg: &RetrievalConfig, q: &TraceQuery) -> QueryReport {
 		ranked_ids: ranked,
 		expected_ids: q.expected_ids.clone(),
 		ndcg10,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use super::super::build::build_graph;
+	use super::super::trace::{TraceDoc, TraceQuery};
+
+	fn doc(id: &str, text: &str) -> TraceDoc {
+		TraceDoc { id: id.into(), text: text.into() }
+	}
+
+	/// End-to-end: build a graph from a tiny trace, replay a query whose text
+	/// matches one doc, and assert that doc is retrieved with positive nDCG.
+	/// Uses the deterministic bench embedder, so no LLM/network needed. We assert
+	/// recall + positive ranking quality rather than an exact rank-1, because the
+	/// full retrieval pipeline (graph expansion, MMR, GNN blend) reorders results.
+	#[test]
+	fn replay_retrieves_relevant_doc_with_positive_ndcg() {
+		let trace = Trace {
+			name: "fixture".into(),
+			docs: vec![
+				doc("d1", "rust ownership and the borrow checker"),
+				doc("d2", "graph neural network message passing"),
+				doc("d3", "vector cosine similarity nearest neighbour"),
+			],
+			queries: vec![TraceQuery {
+				id: "q1".into(),
+				query: "rust ownership and the borrow checker".into(),
+				expected_ids: vec!["d1".into()],
+				mode: "semantic".into(),
+			}],
+		};
+
+		let g = build_graph(&trace);
+		let report = replay(&g, &RetrievalConfig::default(), &trace);
+
+		assert_eq!(report.per_query.len(), 1);
+		assert!(
+			report.per_query[0].ranked_ids.iter().any(|id| id == "d1"),
+			"the relevant doc must appear in the ranked results, got {:?}",
+			report.per_query[0].ranked_ids
+		);
+		assert!(
+			report.mean_ndcg10 > 0.0,
+			"expected positive ranking quality, got {}",
+			report.mean_ndcg10
+		);
+	}
+
+	#[test]
+	fn replay_of_empty_trace_is_zero_mean() {
+		let trace = Trace { name: "empty".into(), docs: vec![], queries: vec![] };
+		let g = build_graph(&trace);
+		let report = replay(&g, &RetrievalConfig::default(), &trace);
+		assert_eq!(report.mean_ndcg10, 0.0, "no queries -> zero mean, not NaN");
+		assert!(report.per_query.is_empty());
 	}
 }

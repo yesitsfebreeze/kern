@@ -61,3 +61,70 @@ pub fn merge(g: &GraphGnn, seeds: &[EntityHit], beam: Vec<ScoredEntity>) -> Vec<
 	});
 	results
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::base::types::{Entity, Kern};
+
+	fn ent(id: &str) -> Entity {
+		Entity { id: id.into(), ..Default::default() }
+	}
+	fn hit(id: &str, score: f64) -> EntityHit {
+		EntityHit { entity_id: id.into(), score }
+	}
+	fn scored(id: &str, score: f64) -> ScoredEntity {
+		ScoredEntity { entity: ent(id), score }
+	}
+	fn find<'a>(rs: &'a [ScoredEntity], id: &str) -> Option<&'a ScoredEntity> {
+		rs.iter().find(|s| s.entity.id == id)
+	}
+
+	#[test]
+	fn entity_seen_in_both_sources_outranks_one_seen_once() {
+		// `a` is surfaced by both the beam and the seeds; `b` only by the beam,
+		// at the same raw score. Log-sum-exp gives `a` a +ln(2) corroboration
+		// boost, so it must score strictly higher and sort first.
+		let g = GraphGnn::new();
+		let beam = vec![scored("a", 0.5), scored("b", 0.5)];
+		let seeds = [hit("a", 0.5)];
+		let out = merge(&g, &seeds, beam);
+
+		let a = find(&out, "a").expect("a present");
+		let b = find(&out, "b").expect("b present");
+		assert!(a.score > b.score, "corroborated a ({}) > lone b ({})", a.score, b.score);
+		// finalize(0.5, 0.5) = 0.5 + ln 2; finalize(0.5) = 0.5.
+		assert!((a.score - (0.5 + std::f64::consts::LN_2)).abs() < 1e-9);
+		assert!((b.score - 0.5).abs() < 1e-9);
+		assert_eq!(out[0].entity.id, "a", "higher score sorts first");
+	}
+
+	#[test]
+	fn seed_absent_from_graph_and_beam_is_silently_skipped() {
+		// `ghost` is neither in the beam nor resolvable via find_entity_in_graph
+		// (empty graph), so it contributes a score entry but no thought — it must
+		// not appear in the results rather than panic or surface a bare id.
+		let g = GraphGnn::new();
+		let beam = vec![scored("b", 0.5)];
+		let seeds = [hit("ghost", 0.9)];
+		let out = merge(&g, &seeds, beam);
+
+		assert!(find(&out, "ghost").is_none(), "unresolvable seed dropped");
+		assert_eq!(out.len(), 1, "only the beam entity survives");
+		assert_eq!(out[0].entity.id, "b");
+	}
+
+	#[test]
+	fn seed_only_entity_is_pulled_from_the_graph() {
+		// A seed not in the beam but present in the graph is resolved via
+		// find_entity_in_graph and included (exercises the Some branch).
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("kx", "");
+		k.entities.insert("c".into(), ent("c"));
+		g.kerns.insert("kx".into(), k);
+
+		let out = merge(&g, &[hit("c", 0.7)], Vec::new());
+		let c = find(&out, "c").expect("seed resolved from graph");
+		assert!((c.score - 0.7).abs() < 1e-9, "single observation unchanged");
+	}
+}

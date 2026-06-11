@@ -17,9 +17,11 @@ use serde::{Deserialize, Serialize};
 ///
 /// The canonical seven-variant enum from the PRD. Held here so the
 /// `repl` palette never needs the `kern` crate as a build dependency.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum EntityKindLite {
     Fact,
+    /// Default unverified statement — mirrors `kern::EntityKind`'s own default.
+    #[default]
     Claim,
     Document,
     Question,
@@ -28,9 +30,32 @@ pub enum EntityKindLite {
     Superseded,
 }
 
+impl EntityKindLite {
+    /// Parse a wire-side lower-case kind label (e.g. `"fact"`) into the lite
+    /// enum. The single source of truth for label→kind, shared by the mock and
+    /// the kern RPC server so the mapping can't drift between them.
+    ///
+    /// Returns `None` for unknown labels AND for `"superseded"`: Superseded is a
+    /// lifecycle *status* ([`EntityStatusLite`]), not a content kind — it mirrors
+    /// `kern::EntityKind`, which has no `Superseded` variant. Callers treat `None`
+    /// as "no kind filter", not "match nothing".
+    pub fn from_label(s: &str) -> Option<Self> {
+        match s {
+            "fact" => Some(Self::Fact),
+            "claim" => Some(Self::Claim),
+            "document" => Some(Self::Document),
+            "question" => Some(Self::Question),
+            "answer" => Some(Self::Answer),
+            "conclusion" => Some(Self::Conclusion),
+            _ => None,
+        }
+    }
+}
+
 /// Lightweight mirror of `kern::EntityStatus` — orthogonal lifecycle flag.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum EntityStatusLite {
+    #[default]
     Active,
     Superseded,
 }
@@ -59,7 +84,7 @@ pub enum EdgeKind {
 /// One enriched relationship edge attached to a search hit. Carries the
 /// sentence that explains the specific logical connection so callers can
 /// reason about WHY two entities are linked, not just THAT they are.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct EdgeRef {
     pub from: String,
     pub to: String,
@@ -76,7 +101,7 @@ pub struct EdgeRef {
 
 /// One result row delivered to the palette. Cheap to clone; carries
 /// only what `Card` needs to render plus the id used to drill in.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct EntityRef {
     pub id: String,
     pub kind: EntityKindLite,
@@ -154,7 +179,7 @@ pub struct PreviewReq {
 /// Preview pane payload. The variant carries everything the renderer
 /// needs — the palette decides which sub-renderer to dispatch to based
 /// on the discriminant.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PreviewRes {
     /// File-backed entity. `language` is a tree-sitter grammar id
     /// (`"rust"`, `"python"`, ...) or `None` for plain text.
@@ -255,7 +280,33 @@ mod dto_serde_tests {
         ];
         for c in cases {
             let s = serde_json::to_string(&c).unwrap();
-            let _back: PreviewRes = serde_json::from_str(&s).unwrap();
+            let back: PreviewRes = serde_json::from_str(&s).unwrap();
+            // PreviewRes now derives PartialEq, so a round-trip is a single `==`
+            // instead of per-variant field matching.
+            assert_eq!(back, c, "PreviewRes survives a JSON round-trip");
         }
+    }
+
+    #[test]
+    fn search_req_cancel_token_roundtrips_through_bincode() {
+        // Explicitly cover the Option<u64> serde path: None and the boundary
+        // values, since a codec bug there would silently break cancellation.
+        let cfg = bincode::config::standard();
+        for token in [None, Some(0u64), Some(42), Some(u64::MAX)] {
+            let req = SearchReq { query: "q".into(), facets: vec![], k: 5, cancel_token: token };
+            let bytes = bincode::serde::encode_to_vec(&req, cfg).unwrap();
+            let (back, _): (SearchReq, _) = bincode::serde::decode_from_slice(&bytes, cfg).unwrap();
+            assert_eq!(back.cancel_token, token, "Option<u64> cancel_token survives bincode");
+        }
+    }
+
+    #[test]
+    fn entity_ref_default_is_empty_with_sensible_kind_and_status() {
+        let d = EntityRef::default();
+        assert!(d.id.is_empty() && d.edges.is_empty());
+        assert_eq!(d.kind, EntityKindLite::Claim, "default kind mirrors kern's Claim");
+        assert_eq!(d.status, EntityStatusLite::Active, "default status is Active");
+        // Two defaults compare equal now that EntityRef derives PartialEq.
+        assert_eq!(EntityRef::default(), d);
     }
 }

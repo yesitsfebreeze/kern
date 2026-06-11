@@ -80,6 +80,15 @@ impl SeenSet {
 	fn len(&self) -> usize {
 		self.inner.lock().unwrap().live.len()
 	}
+
+	/// Length of the insertion-order `VecDeque`. In a settled state it equals
+	/// [`len`](Self::len) — every live id has exactly one order entry and expired
+	/// originals are reclaimed, not left as stale duplicates. Exposed so tests can
+	/// assert the two structures stay in lock-step.
+	#[cfg(test)]
+	fn len_order(&self) -> usize {
+		self.inner.lock().unwrap().order.len()
+	}
 }
 
 impl Default for SeenSet {
@@ -153,5 +162,26 @@ mod tests {
 		// only the oldest are evicted under flood).
 		let last = format!("f{}", GOSSIP_SEEN_SET_CAP + 499);
 		assert!(s.add_and_check_at(&last, t0), "recent id must survive the flood");
+	}
+
+	#[test]
+	fn reinsert_after_expiry_gets_a_fresh_ttl_and_leaves_no_stale_dupe() {
+		let s = SeenSet::new();
+		let t0 = Instant::now();
+		assert!(!s.add_and_check_at("a", t0), "first sight");
+
+		// Let it expire, then re-record well past the original TTL.
+		let past = t0 + GOSSIP_SEEN_TTL + Duration::from_secs(1);
+		assert!(!s.add_and_check_at("a", past), "expired id is treated as new again");
+
+		// FRESH TTL: the id is still live almost a full TTL after the RE-insert
+		// (measured from `past`, not from the original `t0`).
+		let near = past + GOSSIP_SEEN_TTL - Duration::from_millis(1);
+		assert!(s.add_and_check_at("a", near), "re-inserted id carries a fresh TTL");
+
+		// The expired original was reclaimed from the VecDeque, not left as a stale
+		// duplicate — so the two structures stay in lock-step at exactly one entry.
+		assert_eq!(s.len(), 1, "one live entry for the single id");
+		assert_eq!(s.len_order(), s.len(), "order and live lengths agree (no stale dupes)");
 	}
 }

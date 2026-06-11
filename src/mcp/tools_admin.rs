@@ -4,22 +4,87 @@ use crate::base::locks::{read_recovered, write_recovered};
 
 use super::{tool_error, tool_result_json, Server};
 
+// Argument DTOs for the admin tools, hoisted to module level (out of the method
+// bodies) so they can be reused and unit-tested in isolation.
+
+#[derive(Deserialize, Default)]
+struct AnchorArgs {
+	#[serde(default)]
+	action: String,
+	#[serde(default)]
+	name: String,
+	#[serde(default)]
+	text: String,
+}
+
+#[derive(Deserialize)]
+struct DescArgs {
+	action: String,
+	name: String,
+	#[serde(default)]
+	description: String,
+}
+
+#[derive(Deserialize, Default)]
+struct PulseArgs {
+	#[serde(default)]
+	strength: f64,
+}
+
+/// MCP schemas for the admin tools, co-located with their `tool_health` /
+/// `tool_anchor` / `tool_descriptor` / `tool_pulse` handlers so schema and
+/// handler can't drift. Aggregated (in this order) by `tools::tool_definitions`.
+pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
+	vec![
+		serde_json::json!({
+			"name": "health",
+			"description": "Graph statistics: thought/edge counts, tick heat, unnamed count.",
+			"inputSchema": {"type": "object", "properties": {}},
+		}),
+		serde_json::json!({
+			"name": "anchor",
+			"description": "Manage anchors: named top-level buckets the root routes matching memories into; non-matches fall through to `generic`. action=list (default) returns anchors; action=add needs name+text (text is embedded into the routing vector); action=remove needs name.",
+			"inputSchema": {
+				"type": "object",
+				"properties": {
+					"action": {"type": "string", "enum": ["list", "add", "remove"], "description": "list (default) | add | remove"},
+					"name": {"type": "string", "description": "anchor name (required for add/remove)"},
+					"text": {"type": "string", "description": "description embedded into the anchor's routing vector (required for add)"},
+				},
+			},
+		}),
+		serde_json::json!({
+			"name": "descriptor",
+			"description": "Add or remove a data-type descriptor.",
+			"inputSchema": {
+				"type": "object",
+				"required": ["action", "name"],
+				"properties": {
+					"action":      {"type": "string", "enum": ["add", "rm"], "description": "add or remove"},
+					"name":        {"type": "string", "description": "descriptor name"},
+					"description": {"type": "string", "description": "markdown description (required for add)"},
+				},
+			},
+		}),
+		serde_json::json!({
+			"name": "pulse",
+			"description": "Trigger a pulse through the Kern tree, enqueuing cluster tasks for all kerns with thoughts.",
+			"inputSchema": {
+				"type": "object",
+				"properties": {
+					"strength": {"type": "number", "description": "pulse strength (default 1.0)"},
+				},
+			},
+		}),
+	]
+}
+
 impl Server {
 	pub(crate) fn tool_health(&self) -> serde_json::Value {
 		tool_result_json(&self.health_stats())
 	}
 
 	pub(crate) fn tool_anchor(&self, args: &serde_json::Value) -> serde_json::Value {
-		#[derive(Deserialize, Default)]
-		struct AnchorArgs {
-			#[serde(default)]
-			action: String,
-			#[serde(default)]
-			name: String,
-			#[serde(default)]
-			text: String,
-		}
-
 		let p: AnchorArgs = serde_json::from_value(args.clone()).unwrap_or_default();
 		let action = if p.action.is_empty() {
 			"list"
@@ -80,14 +145,6 @@ impl Server {
 	}
 
 	pub(crate) fn tool_descriptor(&self, args: &serde_json::Value) -> serde_json::Value {
-		#[derive(Deserialize)]
-		struct DescArgs {
-			action: String,
-			name: String,
-			#[serde(default)]
-			description: String,
-		}
-
 		let p: DescArgs = match serde_json::from_value(args.clone()) {
 			Ok(v) => v,
 			Err(e) => return tool_error(&format!("invalid arguments: {e}")),
@@ -116,18 +173,21 @@ impl Server {
 	}
 
 	pub(crate) fn tool_pulse(&self, args: &serde_json::Value) -> serde_json::Value {
-		#[derive(Deserialize, Default)]
-		struct PulseArgs {
-			#[serde(default)]
-			strength: f64,
-		}
-
 		let p: PulseArgs = serde_json::from_value(args.clone()).unwrap_or_default();
 		let strength = if p.strength <= 0.0 { 1.0 } else { p.strength };
 
 		let q = match &self.task_q {
+			// No tick queue wired in (e.g. a one-shot CLI Server, not the daemon).
+			// Label the no-op so a caller can tell it apart from a real 0-enqueue
+			// pulse rather than silently seeing enqueued:0.
+			None => {
+				return tool_result_json(&serde_json::json!({
+					"status": "noop",
+					"enqueued": 0,
+					"reason": "no task queue configured; pulse requires the daemon tick queue",
+				}))
+			}
 			Some(q) => q,
-			None => return tool_result_json(&serde_json::json!({"enqueued": 0})),
 		};
 
 		let mut g = write_recovered(&self.graph);
@@ -178,6 +238,28 @@ mod descriptor_tests {
 
 	fn is_error(v: &serde_json::Value) -> bool {
 		v.get("isError").and_then(|x| x.as_bool()).unwrap_or(false)
+	}
+
+	#[tokio::test]
+	async fn health_stats_aggregates_entities_and_descriptors() {
+		// Server::health_stats wraps base::health::graph_health_stats and adds the
+		// root descriptor count. Seed a kern with two entities + one descriptor
+		// and assert the aggregation surfaces them (guards against the loop
+		// drifting from repl.rs's copy).
+		use crate::base::types::{Entity, Kern};
+		let (srv, _c) = make_server();
+		{
+			let mut g = crate::base::locks::write_recovered(&srv.graph);
+			let mut k = Kern::new("kx", "");
+			k.entities.insert("a".into(), Entity { id: "a".into(), ..Default::default() });
+			k.entities.insert("b".into(), Entity { id: "b".into(), ..Default::default() });
+			g.kerns.insert("kx".into(), k);
+			g.root.descriptors.insert("code".into(), "source".into());
+		}
+		let stats = srv.health_stats();
+		assert_eq!(stats["descriptors"], 1, "root descriptor counted");
+		assert_eq!(stats["entities"].as_u64().unwrap(), 2, "both seeded entities counted");
+		assert!(stats["kerns"].as_u64().unwrap() >= 1, "at least the seeded kern");
 	}
 
 	#[tokio::test]
@@ -244,5 +326,38 @@ mod descriptor_tests {
 		let out = srv.tool_descriptor(&serde_json::json!({"action": "list", "name": "x"}));
 		assert!(is_error(&out));
 		assert!(text(&out).contains("action must be add or rm"));
+	}
+
+	#[tokio::test]
+	async fn pulse_without_a_task_queue_is_a_labeled_noop() {
+		// make_server() wires task_q: None, so pulse can't enqueue. It must say so
+		// (status=noop + reason), not silently return a bare enqueued:0.
+		let (srv, _) = make_server();
+		let out = srv.tool_pulse(&serde_json::json!({}));
+		assert!(!is_error(&out));
+		let body: serde_json::Value = serde_json::from_str(&text(&out)).unwrap();
+		assert_eq!(body["status"], "noop");
+		assert_eq!(body["enqueued"], 0);
+		assert!(body["reason"].as_str().unwrap().contains("no task queue"));
+	}
+
+	#[tokio::test]
+	async fn anchor_remove_not_found_errors_and_does_not_save() {
+		// Guards the "save on not-found" concern: remove of a missing anchor must
+		// return an error and leave save_fn UNcalled (counter stays 0).
+		let (srv, counter) = make_server();
+		let out = srv.tool_anchor(&serde_json::json!({"action": "remove", "name": "ghost"}));
+		assert!(is_error(&out));
+		assert!(text(&out).contains("anchor not found"));
+		assert_eq!(counter.load(Ordering::SeqCst), 0, "no persist on a not-found remove");
+	}
+
+	#[tokio::test]
+	async fn anchor_list_on_empty_graph_returns_no_anchors() {
+		let (srv, _) = make_server();
+		let out = srv.tool_anchor(&serde_json::json!({})); // action defaults to "list"
+		assert!(!is_error(&out));
+		let body: serde_json::Value = serde_json::from_str(&text(&out)).unwrap();
+		assert!(body["anchors"].as_array().unwrap().is_empty(), "fresh graph has no anchors");
 	}
 }

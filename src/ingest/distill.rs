@@ -77,10 +77,11 @@ pub(crate) fn parse_claims(raw: &str) -> Vec<Claim> {
 		}
 	};
 	// LLMs sometimes wrap the array once more: `[[...]]`. Unwrap a lone
-	// nested array so its claims are not silently dropped.
+	// nested array so its claims are not silently dropped. `mem::take` moves the
+	// inner vec out (leaving an empty array behind) instead of cloning it.
 	if items.len() == 1 {
-		if let serde_json::Value::Array(inner) = &items[0] {
-			items = inner.clone();
+		if let Some(inner) = items[0].as_array_mut() {
+			items = std::mem::take(inner);
 		}
 	}
 	let mut out = Vec::new();
@@ -209,5 +210,25 @@ mod tests {
 		let claims = distill("c", &llm).expect("some");
 		assert_eq!(claims.len(), 1);
 		assert_eq!(claims[0].text, "a");
+	}
+
+	#[test]
+	fn multiple_sibling_arrays_fail_gracefully_to_empty() {
+		// Only a LONE nested array (`[[...]]`, len 1) is unwrapped. Two siblings
+		// must never be silently merged:
+		//  - `[..] [..]` — parse spans first '[' to last ']', so the whole thing is
+		//    invalid JSON (two arrays) -> empty vec.
+		let two_siblings = stub(r#"[{"text":"a","kind":"fact"}] [{"text":"b","kind":"fact"}]"#);
+		assert!(
+			distill("c", &two_siblings).expect("some").is_empty(),
+			"sibling arrays are not merged — invalid JSON spans to empty",
+		);
+		//  - `[[..],[..]]` — one array of two arrays (len 2, so no unwrap); each
+		//    element is an Array with no `text` field -> all skipped -> empty.
+		let array_of_arrays = stub(r#"[[{"text":"a","kind":"fact"}],[{"text":"b","kind":"fact"}]]"#);
+		assert!(
+			distill("c", &array_of_arrays).expect("some").is_empty(),
+			"a len-2 array-of-arrays is neither unwrapped nor merged",
+		);
 	}
 }

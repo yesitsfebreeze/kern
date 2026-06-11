@@ -114,10 +114,7 @@ pub(crate) fn dispatch(server: &dyn McpServer, frame: &Value) -> Option<Value> {
 			id.map(|id| match result {
 				Ok(v) => ok_response(id, v),
 				Err(e) => {
-					let (code, message) = match e {
-						McpError::Rpc { code, message } => (code, message),
-						other => (-32000, other.to_string()),
-					};
+					let (code, message) = rpc_code_message(e);
 					error_response(id, code, &message)
 				}
 			})
@@ -130,15 +127,22 @@ pub(crate) fn dispatch(server: &dyn McpServer, frame: &Value) -> Option<Value> {
 			match server.handle_method(method, params) {
 				Some(Ok(v)) => id.map(|id| ok_response(id, v)),
 				Some(Err(e)) => id.map(|id| {
-					let (code, msg) = match e {
-						McpError::Rpc { code, message } => (code, message),
-						other => (-32000, other.to_string()),
-					};
+					let (code, msg) = rpc_code_message(e);
 					error_response(id, code, &msg)
 				}),
 				None => id.map(|id| error_response(id, -32601, &format!("method not found: {method}"))),
 			}
 		}
+	}
+}
+
+/// Map an [`McpError`] to its JSON-RPC `(code, message)`: an explicit `Rpc`
+/// carries its own code; anything else collapses to a generic -32000 server
+/// error. Shared by the `tools/call` and `handle_method` error paths.
+fn rpc_code_message(e: McpError) -> (i64, String) {
+	match e {
+		McpError::Rpc { code, message } => (code, message),
+		other => (-32000, other.to_string()),
 	}
 }
 
@@ -164,4 +168,82 @@ pub(crate) fn write_frame<W: Write>(w: &mut W, value: &Value) -> io::Result<()> 
 	w.write_all(line.as_bytes())?;
 	w.flush()?;
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::io::Cursor;
+
+	// Local mock over this crate's own McpServer (a cross-crate test-utils server
+	// would link a different McpServer instance under trnsprt's dev-dep cycle).
+	struct Mock;
+	impl McpServer for Mock {
+		fn tools_list(&self) -> Vec<ToolSchema> {
+			vec![ToolSchema { name: "echo".into(), description: None, input_schema: None }]
+		}
+		fn call_tool(&self, name: &str, args: &Value) -> Result<ToolResult, McpError> {
+			if name == "echo" {
+				Ok(ToolResult { content: vec![args.clone()], is_error: false, structured_content: None })
+			} else {
+				Err(McpError::Rpc { code: -32601, message: format!("unknown tool: {name}") })
+			}
+		}
+	}
+
+	/// Run `serve_rw` over the newline-joined `lines` and return the written frames.
+	fn run(lines: &[&str]) -> Vec<Value> {
+		let input = lines.join("\n") + "\n";
+		let mut reader = Cursor::new(input.into_bytes());
+		let mut out: Vec<u8> = Vec::new();
+		serve_rw(&mut reader, &mut out, &Mock).unwrap();
+		String::from_utf8(out)
+			.unwrap()
+			.lines()
+			.filter(|l| !l.is_empty())
+			.map(|l| serde_json::from_str(l).unwrap())
+			.collect()
+	}
+
+	#[test]
+	fn serve_rw_runs_initialize_list_call_then_stops_at_shutdown() {
+		let frames = run(&[
+			r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
+			r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+			r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"x":1}}}"#,
+			r#"{"jsonrpc":"2.0","id":4,"method":"shutdown"}"#,
+			// Must NOT be processed — shutdown returns before reading it.
+			r#"{"jsonrpc":"2.0","id":5,"method":"tools/list"}"#,
+		]);
+		assert_eq!(frames.len(), 4, "shutdown stops the loop before id 5");
+		assert_eq!(frames[0]["id"], 1);
+		assert_eq!(frames[0]["result"]["protocolVersion"], PROTOCOL_VERSION);
+		assert_eq!(frames[1]["result"]["tools"][0]["name"], "echo");
+		assert_eq!(frames[2]["result"]["content"][0]["x"], 1);
+		assert_eq!(frames[3]["id"], 4);
+	}
+
+	#[test]
+	fn serve_rw_emits_parse_error_for_a_malformed_line() {
+		let frames = run(&["not json at all"]);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0]["error"]["code"], -32700);
+	}
+
+	#[test]
+	fn serve_rw_maps_a_tool_rpc_error_to_its_code() {
+		// Exercises rpc_code_message: an Rpc error keeps its own code (-32601).
+		let frames = run(&[
+			r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nope","arguments":{}}}"#,
+		]);
+		assert_eq!(frames[0]["id"], 1);
+		assert_eq!(frames[0]["error"]["code"], -32601);
+	}
+
+	#[test]
+	fn serve_rw_returns_method_not_found_for_unknown_method() {
+		let frames = run(&[r#"{"jsonrpc":"2.0","id":1,"method":"bogus"}"#]);
+		assert_eq!(frames[0]["error"]["code"], -32601);
+		assert!(frames[0]["error"]["message"].as_str().unwrap().contains("method not found"));
+	}
 }

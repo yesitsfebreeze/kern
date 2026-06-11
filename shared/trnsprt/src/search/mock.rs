@@ -282,4 +282,55 @@ mod facet_filter_tests {
         assert_eq!(res.hits[0].kind, EntityKindLite::Fact);
         assert_eq!(res.hits[0].scheme, "inline");
     }
+
+    // ── cancellation / freshness ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn cancel_token_marks_the_older_request_stale() {
+        let svc = MockSearchServer::new();
+        let sreq = |tok| SearchReq { query: String::new(), facets: vec![], k: 5, cancel_token: Some(tok) };
+        // The higher token bumps the high-water mark and is fresh.
+        assert!(svc.search(sreq(2)).await.fresh, "token 2 is high-water -> fresh");
+        // A lower token issued after is stale (1 < high-water 2).
+        assert!(!svc.search(sreq(1)).await.fresh, "token 1 < high-water -> stale");
+        // A still-higher token bumps again and is fresh.
+        assert!(svc.search(sreq(3)).await.fresh, "token 3 re-bumps -> fresh");
+    }
+
+    // ── neighbors edge-kind filter ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn neighbors_edge_kind_filter_drops_claim_when_supports_excluded() {
+        let svc = MockSearchServer::new();
+        let nreq = |kinds| NeighborsReq { entity_id: "e:fact:1".into(), edge_kinds: kinds, depth: 1 };
+        // No restriction -> the Claim-class neighbour is present.
+        let all = svc.neighbors(nreq(vec![])).await;
+        assert!(all.neighbors.iter().any(|e| e.kind == EntityKindLite::Claim), "Claim present unfiltered");
+        // Restrict to a non-Supports kind -> the Claim row is dropped.
+        let restricted = svc.neighbors(nreq(vec![EdgeKind::Contradicts])).await;
+        assert!(restricted.neighbors.iter().all(|e| e.kind != EntityKindLite::Claim), "Claim dropped");
+        // Explicitly including Supports keeps it.
+        let with_supports = svc.neighbors(nreq(vec![EdgeKind::Supports])).await;
+        assert!(with_supports.neighbors.iter().any(|e| e.kind == EntityKindLite::Claim), "Supports keeps Claim");
+    }
+
+    // ── preview variant dispatch ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn preview_dispatches_all_three_variants() {
+        // Guards against a future entity_id arm silently regressing a variant.
+        let svc = MockSearchServer::new();
+        assert!(matches!(
+            svc.preview(PreviewReq { entity_id: "e:doc:1".into() }).await,
+            PreviewRes::File { .. }
+        ));
+        assert!(matches!(
+            svc.preview(PreviewReq { entity_id: "e:edge:1".into() }).await,
+            PreviewRes::Edge { .. }
+        ));
+        assert!(matches!(
+            svc.preview(PreviewReq { entity_id: "e:other:9".into() }).await,
+            PreviewRes::Text { .. }
+        ));
+    }
 }

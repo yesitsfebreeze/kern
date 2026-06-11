@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::time::Duration;
 
 pub const DEFAULT_WEIGHT_CONTENT: f64 = 0.5;
@@ -36,6 +35,43 @@ pub const COLD_MAX_ENTRIES: usize = 50_000;
 /// a k=1 query.
 pub const DEDUP_EF: usize = 64;
 
+// ── Default ingest knobs ─────────────────────────────────────────────────────
+// Shared by the runtime `ingest::Config` and the serde-deserialized
+// `config::IngestConfig` so the two layers' defaults cannot silently drift.
+
+/// Cosine-similarity floor above which a freshly-ingested vector is treated as a
+/// duplicate of an existing entity (place::find_duplicate) and merged rather than
+/// inserted. Higher than the anchor-path [`DEFAULT_DEDUP_THRESHOLD`] (0.92):
+/// ingest dedup wants near-exact matches before collapsing two thoughts.
+pub const INGEST_DEDUP_THRESHOLD: f64 = 0.95;
+/// Nearest-neighbour count (`k`) for the ingest synthesis/rephrase HNSW probe.
+pub const INGEST_HNSW_K: usize = 8;
+/// HNSW search beam width (`ef`) for that probe; wider = better recall, more work.
+pub const INGEST_HNSW_EF: usize = 32;
+/// Lower edge of the rephrase similarity band: a candidate at or below this is
+/// too dissimilar to merge, so it stays a distinct entity.
+pub const INGEST_REPHRASE_LOWER: f64 = 0.85;
+/// Upper edge of the rephrase band: at or above this the candidate is a
+/// near-duplicate (dedup territory). Only entities STRICTLY between the two
+/// bounds are rephrase/merge candidates.
+pub const INGEST_REPHRASE_UPPER: f64 = 0.95;
+
+// ── Default autonomous-maintenance tick knobs (config::TickConfig) ────────────
+/// Max entities sampled when clustering a kern for auto-naming / child-spawn.
+/// Caps clustering cost on large kerns (coarser sampling above this size).
+pub const TICK_MAX_CLUSTER_SAMPLE: usize = 200;
+/// Bounded capacity of the maintenance-tick task queue.
+pub const TICK_QUEUE_CAPACITY: usize = 512;
+/// Default seconds between autonomous maintenance ticks; `0` disables the driver.
+pub const TICK_INTERVAL_SECS: u64 = 60;
+
+/// Sentinel for `GraphConfig::max_kerns` / `GraphGnn::max_loaded_kerns` meaning
+/// "no kern-eviction cap" (the shipped default). A finite cap is currently unsafe
+/// — see the `GraphConfig::default` comment for the evict/persist consistency bug
+/// it triggers — so this is the only value used. Named so the sentinel reads as
+/// intent at every site instead of a bare `usize::MAX`.
+pub const KERN_CAP_DISABLED: usize = usize::MAX;
+
 pub const KERN_INNER_RADIUS: f64 = 0.15;
 pub const KERN_OUTER_RADIUS: f64 = 0.35;
 
@@ -63,6 +99,14 @@ pub const REFINE_INTERVAL: u32 = 10;
 
 pub const IMPORTANT_MIN_COSINE: f64 = 0.20;
 pub const IMPORTANT_ACCESS_THRESHOLD: i32 = 3;
+
+/// Semantic query cache defaults. Live here (pure data) rather than in
+/// `retrieval::cache` so `config` can default them WITHOUT a `config -> retrieval`
+/// dependency cycle; the cache module reads them from here too.
+pub const QUERY_CACHE_DEFAULT_CAP: usize = 256;
+/// Cosine floor for a semantic cache hit — high enough that only paraphrases and
+/// re-asks collide, not merely topical neighbours.
+pub const QUERY_CACHE_DEFAULT_THETA: f64 = 0.97;
 
 pub const FACT_SCORE_BOOST: f64 = 0.3;
 
@@ -94,6 +138,13 @@ pub const GOSSIP_DISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
 pub const GOSSIP_DISCOVERY_MULTICAST: &str = "239.77.75.68";
 pub const GOSSIP_MAX_PEERS: usize = 50;
 pub const GOSSIP_SEED_ADDR: &str = "seed.kern.dev:7946";
+/// Connect timeout when dialing a peer for a one-way send or a fetch.
+pub const GOSSIP_DIAL_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a fetch waits for the peer's reply frame before giving up.
+pub const GOSSIP_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+/// Hard cap on a single length-prefixed gossip frame; a larger declared length
+/// is rejected before any body bytes are read, bounding per-connection memory.
+pub const GOSSIP_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 
 /// Maximum entities a per-network `remote-*` phantom kern may hold. Bounds
 /// memory growth from a peer spamming forged `EntitySync` bodies: once the cap
@@ -148,40 +199,6 @@ pub const SOURCE_CONFIG: &str = "config";
 pub const SOURCE_LOG: &str = "log";
 pub const SOURCE_SCHEMA: &str = "schema";
 pub const SOURCE_DEP: &str = "dep";
-pub const SOURCE_AGENT: &str = "agent";
-
-pub fn default_descriptors() -> HashMap<String, String> {
-	let pairs: &[(&str, &str)] = &[
-		(SOURCE_CHAT, "A conversation turn between a user and an AI agent. Extract decisions made, questions asked, action items, and key information exchanged."),
-		(SOURCE_REQUEST, "A user request or task description given to an AI agent. Extract the goal, constraints, acceptance criteria, and any referenced files or systems."),
-		(SOURCE_DECISION, "An architectural or design decision. Extract the decision itself, the alternatives considered, the rationale, and any trade-offs noted."),
-		(SOURCE_IDEA, "A brainstorm, hypothesis, or speculative note. Extract the core idea, any supporting reasoning, open questions, and connections to other concepts."),
-		(SOURCE_FILE, "File content from the project filesystem. Extract the file's purpose, key exports or interfaces, dependencies, and structural patterns."),
-		(SOURCE_CODE, "Source code from a programming language. Extract function signatures, type definitions, key algorithms, error handling patterns, and module boundaries."),
-		(SOURCE_DIFF, "A git diff or patch showing changes to source files. Extract what was added, removed, or modified, the intent behind the change, and any files affected."),
-		(SOURCE_ERROR, "A build error, test failure, or runtime exception. Extract the error type, message, location (file:line), likely cause, and any stack trace context."),
-		(SOURCE_DOC, "Documentation such as a README, wiki page, or manual. Extract the subject, key concepts, usage instructions, API surface, and any warnings or caveats."),
-		(SOURCE_TEST, "A test case or test output. Extract what is being tested, the expected vs actual behavior, assertion patterns, and pass/fail status."),
-		(SOURCE_CONFIG, "A configuration file (YAML, TOML, JSON, .env). Extract key settings, their values, what they control, and any environment-specific overrides."),
-		(SOURCE_LOG, "Log output or structured log entries. Extract timestamps, severity levels, error messages, request IDs, and any patterns or anomalies."),
-		(SOURCE_SCHEMA, "A database schema, API schema, or interface definition. Extract entity names, field types, relationships, constraints, and versioning information."),
-		(SOURCE_DEP, "Dependency information from a package manifest. Extract direct dependencies, version constraints, notable transitive dependencies, and any security notes."),
-		(SOURCE_AGENT, "An AI agent-generated summary, plan, or reflection. Extract the key conclusions, next steps, open questions, and any referenced artifacts."),
-	];
-	pairs
-		.iter()
-		.map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-		.collect()
-}
-
-pub fn register_default_descriptors(descriptors: &mut HashMap<String, String>) -> usize {
-	let defaults = default_descriptors();
-	let mut n = 0;
-	for (name, desc) in defaults {
-		if let std::collections::hash_map::Entry::Vacant(e) = descriptors.entry(name) {
-			e.insert(desc);
-			n += 1;
-		}
-	}
-	n
-}
+// "agent" as a source is canonically AGENT_SOURCE (paired with USER_SOURCE for
+// the Fact-tier gate); the default descriptor map (see `base::descriptors`)
+// reuses it rather than defining a second const with the same value.

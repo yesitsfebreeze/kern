@@ -87,3 +87,67 @@ pub fn lock_recovered<T: ?Sized>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
 		}
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::sync::Arc;
+	use std::thread;
+
+	/// Poison an `RwLock<i32>` by panicking inside a held write guard AFTER
+	/// committing `value`, so the recovered guard should observe `value`.
+	fn poison_rwlock(value: i32) -> Arc<RwLock<i32>> {
+		let lock = Arc::new(RwLock::new(0));
+		let l = lock.clone();
+		let h = thread::spawn(move || {
+			let mut g = l.write().unwrap();
+			*g = value; // committed before the panic
+			panic!("intentional poison");
+		});
+		assert!(h.join().is_err(), "spawned thread panicked");
+		assert!(lock.is_poisoned(), "lock is poisoned after a panic-in-write");
+		lock
+	}
+
+	#[test]
+	fn read_recovered_sees_committed_value_through_poison() {
+		let lock = poison_rwlock(42);
+		assert_eq!(*read_recovered(&lock), 42, "recovered read returns the pre-panic write");
+	}
+
+	#[test]
+	fn write_recovered_yields_a_usable_guard_through_poison() {
+		let lock = poison_rwlock(42);
+		{
+			let mut g = write_recovered(&lock);
+			assert_eq!(*g, 42);
+			*g = 7; // the recovered guard is fully writable
+		}
+		assert_eq!(*read_recovered(&lock), 7, "subsequent write took effect");
+	}
+
+	#[test]
+	fn lock_recovered_sees_committed_value_through_poison() {
+		let lock = Arc::new(Mutex::new(0));
+		let l = lock.clone();
+		let h = thread::spawn(move || {
+			let mut g = l.lock().unwrap();
+			*g = 99;
+			panic!("intentional poison");
+		});
+		assert!(h.join().is_err());
+		assert!(lock.is_poisoned());
+		assert_eq!(*lock_recovered(&lock), 99);
+	}
+
+	#[test]
+	fn helpers_pass_through_healthy_locks_unchanged() {
+		let rw = RwLock::new(5);
+		assert_eq!(*read_recovered(&rw), 5);
+		*write_recovered(&rw) += 1;
+		assert_eq!(*read_recovered(&rw), 6);
+		let mx = Mutex::new(1);
+		*lock_recovered(&mx) += 10;
+		assert_eq!(*lock_recovered(&mx), 11);
+	}
+}

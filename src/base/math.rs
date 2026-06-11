@@ -30,6 +30,14 @@ fn cosine_scalar(a: &[f64], b: &[f64]) -> f64 {
 unsafe fn cosine_avx2(a: &[f64], b: &[f64]) -> f64 {
 	use std::arch::x86_64::*;
 
+	// SAFETY INVARIANT for every unchecked access below: `n = min(a.len, b.len)`,
+	// `chunks = n / 4`, `rem = n % 4`, `tail = chunks * 4`. Therefore:
+	//  - the loaded chunks span offsets `0..tail` and each `loadu_pd` reads 4
+	//    lanes at `off = i*4` where `off + 4 <= chunks*4 = tail <= n`, so it stays
+	//    within both slices (`tail <= a.len()` and `tail <= b.len()`);
+	//  - the tail loop indexes `tail + i` for `i in 0..rem`, and
+	//    `tail + rem = chunks*4 + n%4 = n <= a.len()` (and `<= b.len()`),
+	//    so `get_unchecked(tail + i)` is always in bounds.
 	let n = a.len().min(b.len());
 	let chunks = n / 4;
 	let rem = n % 4;
@@ -43,6 +51,7 @@ unsafe fn cosine_avx2(a: &[f64], b: &[f64]) -> f64 {
 
 	for i in 0..chunks {
 		let off = i * 4;
+		// In bounds: off + 4 <= chunks*4 = tail <= n <= len of both slices.
 		let va = _mm256_loadu_pd(pa.add(off));
 		let vb = _mm256_loadu_pd(pb.add(off));
 		vdot = _mm256_fmadd_pd(va, vb, vdot);
@@ -56,6 +65,7 @@ unsafe fn cosine_avx2(a: &[f64], b: &[f64]) -> f64 {
 
 	let tail = chunks * 4;
 	for i in 0..rem {
+		// In bounds: tail + i < tail + rem = n <= len of both slices.
 		let ai = *a.get_unchecked(tail + i);
 		let bi = *b.get_unchecked(tail + i);
 		dot += ai * bi;
@@ -90,6 +100,19 @@ pub fn average_vec(a: &[f64], b: &[f64]) -> Vec<f64> {
 		.zip(b.iter())
 		.map(|(ai, bi)| (ai + bi) / 2.0)
 		.collect()
+}
+
+/// L2-normalize `v` in place to unit Euclidean norm. A zero vector (norm 0) is
+/// left unchanged rather than producing NaNs from a divide-by-zero. General
+/// vector utility — lives here beside the other `base::math` primitives so every
+/// retrieval/fusion path shares one implementation.
+pub fn l2_normalize(v: &mut [f64]) {
+	let norm: f64 = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+	if norm > 0.0 {
+		for x in v.iter_mut() {
+			*x /= norm;
+		}
+	}
 }
 
 pub fn reason_id(from: &str, to: &str, kind: ReasonKind, text: &str, to_net_id: &str) -> String {
@@ -218,6 +241,79 @@ pub fn clamp_confidence(conf: f64, source: &str) -> (f64, EntityKind) {
 		EntityKind::Claim
 	};
 	(conf, kind)
+}
+
+#[cfg(test)]
+mod cosine_tests {
+	use super::*;
+
+	#[test]
+	fn identical_vectors_are_one_orthogonal_are_zero() {
+		assert!((cosine(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0]) - 1.0).abs() < 1e-9);
+		assert!(cosine(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-9, "orthogonal -> 0");
+	}
+
+	#[test]
+	fn zero_norm_inputs_return_zero_not_nan() {
+		// na == 0 or nb == 0 short-circuits before the divide, so no NaN.
+		assert_eq!(cosine(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
+		assert_eq!(cosine(&[1.0, 1.0], &[0.0, 0.0]), 0.0);
+		assert_eq!(cosine(&[0.0, 0.0], &[0.0, 0.0]), 0.0);
+	}
+
+	#[test]
+	fn mismatched_lengths_compare_the_shared_prefix() {
+		// n = min(len) = 2; the extra dim on the longer vector is ignored.
+		let c = cosine(&[1.0, 0.0, 9.0], &[1.0, 0.0]);
+		assert!((c - 1.0).abs() < 1e-9, "shared prefix is identical -> 1.0, got {c}");
+		// Empty slice -> n = 0 -> both norms 0 -> 0.0 (no panic).
+		assert_eq!(cosine(&[], &[1.0, 2.0]), 0.0);
+	}
+
+	/// On a machine with AVX2+FMA the public `cosine` takes the SIMD path; assert
+	/// it agrees with the scalar reference across a length that exercises BOTH the
+	/// 4-wide chunk loop and the unchecked tail (17 = 4*4 + 1).
+	#[cfg(target_arch = "x86_64")]
+	#[test]
+	fn avx2_path_matches_scalar_reference() {
+		if !(is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")) {
+			return; // no SIMD on this host; scalar already covered above
+		}
+		let a: Vec<f64> = (0..17).map(|i| i as f64 * 0.1 - 0.5).collect();
+		let b: Vec<f64> = (0..17).map(|i| (17 - i) as f64 * 0.2 + 0.3).collect();
+		let scalar = cosine_scalar(&a, &b);
+		// SAFETY: guarded by the runtime avx2+fma feature check above.
+		let simd = unsafe { cosine_avx2(&a, &b) };
+		assert!((scalar - simd).abs() < 1e-9, "avx2 {simd} vs scalar {scalar}");
+	}
+}
+
+#[cfg(test)]
+mod l2_normalize_tests {
+	use super::l2_normalize;
+
+	#[test]
+	fn scales_to_unit_norm() {
+		let mut v = vec![3.0, 4.0]; // norm 5
+		l2_normalize(&mut v);
+		assert!((v[0] - 0.6).abs() < 1e-12 && (v[1] - 0.8).abs() < 1e-12);
+		let norm: f64 = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+		assert!((norm - 1.0).abs() < 1e-12);
+	}
+
+	#[test]
+	fn zero_vector_is_left_unchanged() {
+		let mut v = vec![0.0, 0.0, 0.0];
+		l2_normalize(&mut v);
+		assert_eq!(v, vec![0.0, 0.0, 0.0], "no divide-by-zero / NaN");
+	}
+
+	#[test]
+	fn empty_slice_is_a_noop() {
+		let mut v: Vec<f64> = vec![];
+		l2_normalize(&mut v);
+		assert!(v.is_empty());
+	}
 }
 
 #[cfg(test)]

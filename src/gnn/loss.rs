@@ -1,5 +1,3 @@
-
-
 use crate::gnn::activation::{log_softmax, sigmoid, softmax};
 use crate::gnn::tensor::Tensor;
 
@@ -89,6 +87,23 @@ pub fn accuracy(predicted: &Tensor, target: &Tensor) -> f64 {
 	correct as f64 / predicted.rows as f64
 }
 
+/// Gradient of [`nll_loss`] w.r.t. `predicted`. NLL on raw scores is linear in
+/// the true-class score (`-predicted[i, class]`), so the gradient is `-1/n` at
+/// each row's true class and `0` elsewhere. Invalid labels contribute no
+/// gradient (the row stays zero), matching `nll_loss`'s row-skip behaviour.
+pub fn nll_grad(predicted: &Tensor, target: &Tensor) -> Tensor {
+	let (n, cols) = (predicted.rows, predicted.cols);
+	let mut grad = Tensor::zeros(n, cols);
+	let scale = 1.0 / n as f64;
+	for i in 0..n {
+		let Some(class_idx) = class_index(target.at(i, 0), cols) else {
+			tracing::warn!(target: "kern.gnn", row = i, label = target.at(i, 0), "invalid class label; zeroing grad row in nll_grad");
+			continue;
+		};
+		grad.set(i, class_idx, -scale);
+	}
+	grad
+}
 
 fn row_dot(t: &Tensor, i: usize, j: usize) -> f64 {
 	let d = t.cols;
@@ -205,5 +220,71 @@ mod tests {
 		// Correct label scores 1.0.
 		let good = Tensor::new(1, 1, vec![2.0]).unwrap();
 		assert_eq!(accuracy(&predicted, &good), 1.0);
+	}
+
+	// ── nll_grad ────────────────────────────────────────────────────────────
+
+	#[test]
+	fn nll_grad_is_minus_one_over_n_at_true_class_only() {
+		let predicted = Tensor::new(2, 3, vec![0.1, 0.2, 0.7, 0.3, 0.3, 0.4]).unwrap();
+		let target = Tensor::new(2, 1, vec![2.0, 0.0]).unwrap();
+		let g = nll_grad(&predicted, &target); // n=2 -> -1/n = -0.5
+		assert_eq!(g.at(0, 2), -0.5);
+		assert_eq!(g.at(1, 0), -0.5);
+		// Every other cell is zero.
+		assert_eq!(g.at(0, 0) + g.at(0, 1) + g.at(1, 1) + g.at(1, 2), 0.0);
+	}
+
+	#[test]
+	fn nll_grad_invalid_label_leaves_row_zero() {
+		let predicted = Tensor::new(1, 3, vec![0.1, 0.2, 0.7]).unwrap();
+		let target = Tensor::new(1, 1, vec![9.0]).unwrap();
+		assert!(nll_grad(&predicted, &target).data.iter().all(|&v| v == 0.0));
+	}
+
+	// ── link prediction ─────────────────────────────────────────────────────
+
+	#[test]
+	fn link_prediction_empty_edges_is_zero_loss_and_grad() {
+		let emb = Tensor::new(3, 2, vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0]).unwrap();
+		assert_eq!(link_prediction_loss(&emb, &[], &[]), 0.0);
+		let g = link_prediction_grad(&emb, &[], &[]);
+		assert_eq!((g.rows, g.cols), (3, 2));
+		assert!(g.data.iter().all(|&v| v == 0.0));
+	}
+
+	#[test]
+	fn link_prediction_aligned_positive_edge_has_lower_loss_than_opposed() {
+		let aligned = Tensor::new(2, 2, vec![3.0, 0.0, 3.0, 0.0]).unwrap(); // dot +9
+		let opposed = Tensor::new(2, 2, vec![3.0, 0.0, -3.0, 0.0]).unwrap(); // dot -9
+		let pos = [[0usize, 1usize]];
+		assert!(
+			link_prediction_loss(&aligned, &pos, &[]) < link_prediction_loss(&opposed, &pos, &[]),
+			"a positive edge between aligned embeddings is cheaper than between opposed ones"
+		);
+	}
+
+	#[test]
+	fn link_prediction_grad_matches_numerical_gradient() {
+		// The analytic grad must match a central finite-difference of the loss —
+		// the strongest check for the file's most complex math.
+		let emb = Tensor::new(3, 2, vec![0.5, -0.2, 0.1, 0.3, -0.4, 0.6]).unwrap();
+		let pos = [[0usize, 1usize], [1, 2]];
+		let neg = [[0usize, 2usize]];
+		let analytic = link_prediction_grad(&emb, &pos, &neg);
+		const H: f64 = 1e-6;
+		for idx in 0..emb.data.len() {
+			let mut ep = emb.clone();
+			ep.data[idx] += H;
+			let mut em = emb.clone();
+			em.data[idx] -= H;
+			let num = (link_prediction_loss(&ep, &pos, &neg) - link_prediction_loss(&em, &pos, &neg)) / (2.0 * H);
+			let den = 1.0_f64.max(analytic.data[idx].abs()).max(num.abs());
+			assert!(
+				(analytic.data[idx] - num).abs() / den < 1e-4,
+				"grad[{idx}]: analytic {} vs numeric {num}",
+				analytic.data[idx]
+			);
+		}
 	}
 }

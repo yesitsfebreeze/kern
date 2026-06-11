@@ -187,22 +187,7 @@ impl McpServer for ProxyServer {
 			message: format!("kern_rpc call_tool: {e}"),
 		})?;
 
-		let content = res
-			.envelope
-			.get("content")
-			.and_then(|v| v.as_array())
-			.cloned()
-			.unwrap_or_default();
-		let is_error = res
-			.envelope
-			.get("isError")
-			.and_then(|v| v.as_bool())
-			.unwrap_or(false);
-		Ok(ToolResult {
-			content,
-			is_error,
-			structured_content: None,
-		})
+		Ok(tool_result_from_envelope(&res.envelope))
 	}
 
 	fn extra_capabilities(&self) -> serde_json::Value {
@@ -214,15 +199,61 @@ impl McpServer for ProxyServer {
 	}
 }
 
+/// Map a kern_rpc `call_tool` reply envelope to an MCP [`ToolResult`]: take the
+/// `content` array (empty when absent or not an array) and the `isError` flag
+/// (false when absent). Pure, so the envelope decoding is testable without a
+/// live kern.sock connection.
+fn tool_result_from_envelope(envelope: &serde_json::Value) -> ToolResult {
+	let content = envelope
+		.get("content")
+		.and_then(|v| v.as_array())
+		.cloned()
+		.unwrap_or_default();
+	let is_error = envelope
+		.get("isError")
+		.and_then(|v| v.as_bool())
+		.unwrap_or(false);
+	ToolResult {
+		content,
+		is_error,
+		structured_content: None,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use serde_json::json;
+
+	#[test]
+	fn envelope_extracts_content_array_and_error_flag() {
+		let env = json!({ "content": [{ "type": "text", "text": "hi" }], "isError": true });
+		let r = tool_result_from_envelope(&env);
+		assert!(r.is_error);
+		assert_eq!(r.content.len(), 1);
+		assert_eq!(r.content[0]["text"], "hi");
+		assert!(r.structured_content.is_none());
+	}
+
+	#[test]
+	fn envelope_missing_fields_default_to_empty_and_ok() {
+		let r = tool_result_from_envelope(&json!({}));
+		assert!(!r.is_error, "missing isError defaults to false");
+		assert!(r.content.is_empty(), "missing content defaults to empty");
+	}
+
+	#[test]
+	fn envelope_non_array_content_falls_back_to_empty() {
+		let r = tool_result_from_envelope(&json!({ "content": "oops", "isError": false }));
+		assert!(r.content.is_empty(), "a non-array content is ignored, not panicked on");
+	}
+}
+
 // ---- Standalone (legacy heavy path) --------------------------------------
 
 async fn run_standalone(cfg: &crate::config::Config) {
 	let g = Arc::new(StdRwLock::new(load_graph(cfg)));
-	let llm_client = crate::llm::Client::new(
-		crate::llm::Endpoint::new(cfg.reason_url(), &cfg.reason.model, cfg.reason_key()),
-		crate::llm::Endpoint::new(cfg.answer_url(), &cfg.answer.model, cfg.answer_key()),
-		crate::llm::Endpoint::new(&cfg.embed.url, &cfg.embed.model, &cfg.embed.key),
-	);
+	let llm_client = super::server_llm_client(cfg, cfg.reason_url(), &cfg.reason.model);
 	let save_g = g.clone();
 	let save_fn: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
 		let g = read_recovered(&save_g);
@@ -256,16 +287,16 @@ async fn run_standalone(cfg: &crate::config::Config) {
 			}
 		})
 	};
-	let cold_dir = Some(std::path::PathBuf::from(&cfg.data_dir).join("cold"));
 	crate::tick::start(
 		q.clone(),
 		g.clone(),
-		Some(tick_llm),
-		Some(tick_embed),
-		None,
-		cfg.gnn.into(),
-		cfg.tick,
-		cold_dir,
+		crate::tick::TickContext {
+			llm: Some(tick_llm),
+			embed: Some(tick_embed),
+			broadcast_q: None,
+			gnn_cfg: cfg.gnn.into(),
+			tick_cfg: cfg.tick,
+		},
 	);
 
 	let server = crate::mcp::Server {

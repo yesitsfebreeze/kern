@@ -97,81 +97,90 @@ pub fn build_digest(graph: &GraphGnn, k: usize, min_trust: f64, token_budget: us
 		}
 	}
 
-	// Append top enriched relationship edges: the specific logical connections
-	// between entities, ranked by heat×confidence of their from-entity.
-	// Capped at 1/3 of the remaining token budget so connections don't crowd
-	// out the entity bullets. Only Similarity/Provenance/Ratification edges
-	// (the semantically meaningful ones) are included — structural kinds like
-	// Spawn/Supersedes carry no explanatory prose.
+	// Append the connections section (capped at 1/3 of the remaining budget so it
+	// doesn't crowd out the entity bullets).
 	let conn_budget = if token_budget > 0 {
 		let used = est_tokens(&out);
 		(token_budget.saturating_sub(used)) / 3
 	} else {
 		500 // default connection budget when no cap
 	};
-
-	if conn_budget > 0 {
-		let mut conn_lines: Vec<String> = Vec::new();
-		let mut conn_tokens = 0usize;
-		let mut conn_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-		// Build entity map once: id → (display_text, heat×conf). Avoids an
-		// O(N×M) nested kerns scan per reason during scoring and formatting.
-		let entity_cache: std::collections::HashMap<&str, (String, f64)> = graph
-			.kerns
-			.values()
-			.flat_map(|k| k.entities.values())
-			.map(|e| {
-				let t = e.text();
-				let display = match t.char_indices().nth(39) {
-					Some((byte_pos, _)) => format!("{}…", &t[..byte_pos]),
-					None => t,
-				};
-				(e.id.as_str(), (display, e.heat as f64 * e.conf_mean()))
-			})
-			.collect();
-
-		let mut kern_reasons: Vec<_> = graph
-			.kerns
-			.values()
-			.flat_map(|kern| kern.reasons.values())
-			.filter(|r| r.is_enriched() && r.kind.is_semantic())
-			.map(|r| {
-				let heat_conf = entity_cache.get(r.from.as_str()).map(|(_, hc)| *hc).unwrap_or(0.0);
-				(r, heat_conf)
-			})
-			.collect();
-		kern_reasons.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-		for (r, _) in kern_reasons {
-			let from_text = entity_cache
-				.get(r.from.as_str())
-				.map(|(t, _)| t.as_str())
-				.unwrap_or_else(|| &r.from[..8.min(r.from.len())]);
-			let line = format!("{} → {}", from_text, r.text.trim());
-			let key = dedup_key(&line);
-			if !conn_seen.insert(key) {
-				continue;
-			}
-			let t = est_tokens(&line);
-			if !conn_lines.is_empty() && conn_tokens + t > conn_budget {
-				break;
-			}
-			conn_tokens += t;
-			conn_lines.push(line);
-		}
-
-		if !conn_lines.is_empty() {
-			out.push_str("\n## Connections\n\n");
-			for l in &conn_lines {
-				out.push_str("- ");
-				out.push_str(l);
-				out.push('\n');
-			}
-		}
-	}
+	out.push_str(&build_connections(graph, conn_budget));
 
 	out
+}
+
+/// Build the `## Connections` markdown section: the top enriched relationship
+/// edges (the specific logical connections between entities), ranked by the
+/// heat×confidence of their from-entity, deduped, and trimmed to `conn_budget`
+/// approximate tokens. Only Similarity/Provenance/Ratification edges (the
+/// semantically meaningful ones) are included — structural kinds like
+/// Spawn/Supersedes carry no explanatory prose. Returns the section with its
+/// leading newline + header, or an empty string when nothing qualifies/fits.
+fn build_connections(graph: &GraphGnn, conn_budget: usize) -> String {
+	if conn_budget == 0 {
+		return String::new();
+	}
+	let mut conn_lines: Vec<String> = Vec::new();
+	let mut conn_tokens = 0usize;
+	let mut conn_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+	// Build entity map once: id → (display_text, heat×conf). Avoids an
+	// O(N×M) nested kerns scan per reason during scoring and formatting.
+	let entity_cache: std::collections::HashMap<&str, (String, f64)> = graph
+		.kerns
+		.values()
+		.flat_map(|k| k.entities.values())
+		.map(|e| {
+			let t = e.text();
+			let display = match t.char_indices().nth(39) {
+				Some((byte_pos, _)) => format!("{}…", &t[..byte_pos]),
+				None => t,
+			};
+			(e.id.as_str(), (display, e.heat as f64 * e.conf_mean()))
+		})
+		.collect();
+
+	let mut kern_reasons: Vec<_> = graph
+		.kerns
+		.values()
+		.flat_map(|kern| kern.reasons.values())
+		.filter(|r| r.is_enriched() && r.kind.is_semantic())
+		.map(|r| {
+			let heat_conf = entity_cache.get(r.from.as_str()).map(|(_, hc)| *hc).unwrap_or(0.0);
+			(r, heat_conf)
+		})
+		.collect();
+	kern_reasons.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+	for (r, _) in kern_reasons {
+		let from_text = entity_cache
+			.get(r.from.as_str())
+			.map(|(t, _)| t.as_str())
+			.unwrap_or_else(|| &r.from[..8.min(r.from.len())]);
+		let line = format!("{} → {}", from_text, r.text.trim());
+		let key = dedup_key(&line);
+		if !conn_seen.insert(key) {
+			continue;
+		}
+		let t = est_tokens(&line);
+		if !conn_lines.is_empty() && conn_tokens + t > conn_budget {
+			break;
+		}
+		conn_tokens += t;
+		conn_lines.push(line);
+	}
+
+	if conn_lines.is_empty() {
+		return String::new();
+	}
+	let mut section = String::from("\n## Connections\n\n");
+	for l in &conn_lines {
+		section.push_str("- ");
+		section.push_str(l);
+		section.push('\n');
+	}
+	section
 }
 
 /// Render and write the digest to `path`, creating parent dirs. Best effort.
@@ -389,5 +398,27 @@ mod tests {
 		let g = graph_with_reason(ReasonKind::Supersedes, "superseded by a newer version");
 		let md = build_digest(&g, 10, 0.0, 0);
 		assert!(!md.contains("## Connections"), "Supersedes reason excluded from connections");
+	}
+
+	#[test]
+	fn write_digest_creates_parent_dirs_and_writes_the_markdown() {
+		let dir = tempfile::tempdir().unwrap();
+		// A nested path so create_dir_all is exercised.
+		let path = dir.path().join("a/b/digest.md");
+		let mut g = GraphGnn::default();
+		let root_id = g.root.id.clone();
+		let kern = g.kerns.get_mut(&root_id).expect("root kern");
+		kern.entities.insert("a".into(), mk_entity("a", "a written claim", 9.0, EntityKind::Claim));
+
+		write_digest(&g, &path, 10, 0.0, 0);
+		let contents = std::fs::read_to_string(&path).expect("digest file exists after write");
+		assert!(contents.contains("# kern memory"), "header written");
+		assert!(contents.contains("a written claim"), "claim body written");
+		// Matches the pure builder exactly (writer is a thin wrapper).
+		assert_eq!(contents, build_digest(&g, 10, 0.0, 0));
+
+		// Second write overwrites cleanly (no append / leftover).
+		write_digest(&g, &path, 10, 0.0, 0);
+		assert_eq!(std::fs::read_to_string(&path).unwrap().matches("# kern memory").count(), 1);
 	}
 }

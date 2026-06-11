@@ -48,11 +48,15 @@ pub fn l2_norm_backward(pre_norm: &Tensor, d_out: &Tensor) -> Tensor {
 		if sum_sq == 0.0 {
 			continue;
 		}
-		let norm = sum_sq.sqrt();
-		let inv_norm = 1.0 / norm;
+		let inv_norm = 1.0 / sum_sq.sqrt();
+		// Tangent-space projection: dL/dx = (d_out - x̂·(d_out·x̂)) / ‖x‖, where
+		// x̂ = x/‖x‖. The dot is with the NORMALIZED row x̂ — dotting with the raw
+		// `pre_norm` here drops a 1/‖x‖ factor and inflates the gradient (verified
+		// against a numeric central difference).
 		let mut dot_val = 0.0;
 		for j in 0..pre_norm.cols {
-			dot_val += d_out.at(i, j) * pre_norm.at(i, j);
+			let x_hat = pre_norm.at(i, j) * inv_norm;
+			dot_val += d_out.at(i, j) * x_hat;
 		}
 		for j in 0..pre_norm.cols {
 			let x_hat = pre_norm.at(i, j) * inv_norm;
@@ -113,6 +117,43 @@ mod tests {
 		};
 		let g = act_deriv_mul(Activation::LeakyRelu(0.2), &d_out, &pre);
 		assert_eq!(g.data, vec![0.5, 0.1]); // 0.5*1, 0.5*0.2
+	}
+
+	#[test]
+	fn l2_norm_backward_matches_numeric_gradient() {
+		// loss = sum(l2_normalize_rows(x)); d_out is all-ones. The analytic
+		// backward must match a central finite-difference of the loss w.r.t. each
+		// input element (the projection `(I - x̂x̂ᵀ)/‖x‖` is easy to get subtly
+		// wrong, so pin it against numerics).
+		let x = Tensor { data: vec![0.5, -0.2, 0.1, -0.4, 0.6, 0.2], rows: 2, cols: 3 };
+		let d_out = Tensor { data: vec![1.0; 6], rows: 2, cols: 3 };
+		let analytic = l2_norm_backward(&x, &d_out);
+		let loss = |t: &Tensor| -> f64 { l2_normalize_rows(t).data.iter().sum() };
+		const H: f64 = 1e-6;
+		for idx in 0..x.data.len() {
+			let mut xp = x.clone();
+			xp.data[idx] += H;
+			let mut xm = x.clone();
+			xm.data[idx] -= H;
+			let num = (loss(&xp) - loss(&xm)) / (2.0 * H);
+			let den = 1.0_f64.max(analytic.data[idx].abs()).max(num.abs());
+			assert!(
+				(analytic.data[idx] - num).abs() / den < 1e-4,
+				"grad[{idx}]: analytic {} vs numeric {num}",
+				analytic.data[idx]
+			);
+		}
+	}
+
+	#[test]
+	fn l2_norm_backward_zero_row_yields_zero_grad() {
+		// A zero row has no defined direction; forward and backward both skip it,
+		// so its gradient stays zero (no NaN from a 1/0 norm).
+		let x = Tensor { data: vec![0.0, 0.0, 3.0, 4.0], rows: 2, cols: 2 };
+		let d_out = Tensor { data: vec![1.0; 4], rows: 2, cols: 2 };
+		let g = l2_norm_backward(&x, &d_out);
+		assert_eq!(&g.data[0..2], &[0.0, 0.0], "zero row -> zero grad, no NaN");
+		assert!(g.data[2..].iter().all(|v| v.is_finite()), "non-zero row grad is finite");
 	}
 }
 
@@ -211,11 +252,13 @@ mod gnn_math_tests {
 
 	#[test]
 	fn gat_backward_produces_finite_grads() {
-		// A full numeric grad-check on GAT is flaky (leaky-relu kink in
-		// attention + no seeded ctor), so assert the backward path yields
-		// finite, correctly-shaped gradients without NaN/inf.
+		// A full numeric grad-check on GAT is flaky (leaky-relu kink in the
+		// attention scores), so assert the backward path yields finite,
+		// correctly-shaped gradients without NaN/inf. Seeded ctor keeps the
+		// weight init reproducible across runs.
 		let (g, x) = tiny_graph();
-		let mut l = GATLayer::new(4, 3, 1, true, None, false, 0.0);
+		let mut rng = rand::rngs::StdRng::seed_from_u64(13);
+		let mut l = GATLayer::with_rng(4, 3, 1, true, None, false, 0.0, &mut rng);
 		let out = l.forward_graph(&g, &x);
 		assert_eq!(out.rows, g.num_nodes());
 		l.zero_grads();

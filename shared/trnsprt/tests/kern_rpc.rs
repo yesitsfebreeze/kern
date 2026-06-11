@@ -14,16 +14,16 @@ use trnsprt::kern_rpc::{
     EdgeKind, EntityKindLite, IngestReq, KernRpcClient, LinkReq, MockKernServer, NeighborsReq,
     QueryReq, SourceLite, TruncateAfterReq,
 };
-use trnsprt::typed::{Channel, InprocAdapter, JsonEnvelopeCodec};
+use trnsprt::typed::JsonEnvelopeCodec;
+
+mod common;
 
 fn spawn_mock_server() -> (
     KernRpcClient<JsonEnvelopeCodec>,
     tokio::task::JoinHandle<()>,
     Arc<MockKernServer>,
 ) {
-    let (client_side, server_side) = InprocAdapter::pair();
-    let server_chan = Channel::new(server_side, JsonEnvelopeCodec::new());
-    let client_chan = Channel::new(client_side, JsonEnvelopeCodec::new());
+    let (client_chan, server_chan) = common::channel_pair();
     let client = KernRpcClient::new(client_chan);
     let mock = Arc::new(MockKernServer::new());
     let mock_for_server = (*mock).clone();
@@ -31,6 +31,13 @@ fn spawn_mock_server() -> (
         let _ = trnsprt::kern_rpc::serve_kern_rpc(server_chan, mock_for_server).await;
     });
     (client, handle, mock)
+}
+
+/// Build a `QueryReq` with the common fields, leaving mode/answer/kind/source at
+/// their `Default` (empty) — collapses the repeated empty-string boilerplate the
+/// query tests would otherwise spell out per call.
+fn query_req(text: &str, k: u32, cancel_token: Option<u64>) -> QueryReq {
+    QueryReq { text: text.into(), k, cancel_token, ..Default::default() }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -55,15 +62,7 @@ async fn ingest_then_query_returns_the_new_entity() {
     assert_eq!(res.status, "ingested");
 
     let q = client
-        .query(QueryReq {
-            text: "borrow".into(),
-            k: 5,
-            mode: String::new(),
-            answer: false,
-            kind: String::new(),
-            source: String::new(),
-            cancel_token: Some(1),
-        })
+        .query(query_req("borrow", 5, Some(1)))
         .await
         .expect("query rpc");
     assert!(q.fresh);
@@ -149,18 +148,66 @@ async fn truncate_after_drops_newer_entities() {
         .expect("truncate");
 
     let q = client
-        .query(QueryReq {
-            text: String::new(),
-            k: 10,
-            mode: String::new(),
-            answer: false,
-            kind: String::new(),
-            source: String::new(),
-            cancel_token: None,
-        })
+        .query(query_req("", 10, None))
         .await
         .expect("query");
     assert!(q.hits.is_empty(), "truncate should have cleared the store");
+
+    handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ingest_with_descriptor_succeeds() {
+    // Exercises the non-None `descriptor` branch on IngestReq through the wire:
+    // the field must serialize, deserialize, and be accepted by the server.
+    let (client, handle, _mock) = spawn_mock_server();
+
+    let res = client
+        .ingest(IngestReq {
+            text: "graph nodes carry confidence".into(),
+            source: SourceLite::Inline { hash: "h2".into(), section: String::new() },
+            kind: EntityKindLite::Claim,
+            descriptor: Some("provenance=test note=annotated".into()),
+            conf: 0.7,
+            sync: true,
+        })
+        .await
+        .expect("ingest with descriptor");
+    assert!(!res.entity_id.is_empty());
+    assert_eq!(res.status, "ingested");
+
+    handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn truncate_after_u64_max_is_a_noop() {
+    // Boundary guard: truncate keeps rows with ts_ms <= cutoff. A cutoff of
+    // u64::MAX is >= every possible timestamp, so nothing is dropped — the
+    // freshly-ingested entity survives.
+    let (client, handle, _mock) = spawn_mock_server();
+
+    let _ = client
+        .ingest(IngestReq {
+            text: "survivor".into(),
+            source: SourceLite::default(),
+            kind: EntityKindLite::Claim,
+            descriptor: None,
+            conf: 0.5,
+            sync: true,
+        })
+        .await
+        .expect("ingest");
+
+    let _ = client
+        .truncate_after(TruncateAfterReq { ts_ms: u64::MAX })
+        .await
+        .expect("truncate");
+
+    let q = client
+        .query(query_req("", 10, None))
+        .await
+        .expect("query");
+    assert!(!q.hits.is_empty(), "u64::MAX cutoff must drop nothing");
 
     handle.abort();
 }
@@ -172,29 +219,13 @@ async fn cancellation_marks_older_keystroke_as_stale() {
     let (client, handle, _mock) = spawn_mock_server();
 
     let newer = client
-        .query(QueryReq {
-            text: "rust".into(),
-            k: 5,
-            mode: String::new(),
-            answer: false,
-            kind: String::new(),
-            source: String::new(),
-            cancel_token: Some(2),
-        })
+        .query(query_req("rust", 5, Some(2)))
         .await
         .expect("newer");
     assert!(newer.fresh);
 
     let older = client
-        .query(QueryReq {
-            text: "rust".into(),
-            k: 5,
-            mode: String::new(),
-            answer: false,
-            kind: String::new(),
-            source: String::new(),
-            cancel_token: Some(1),
-        })
+        .query(query_req("rust", 5, Some(1)))
         .await
         .expect("older");
     assert!(!older.fresh, "older keystroke must be reported stale");

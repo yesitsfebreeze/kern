@@ -1,7 +1,21 @@
-
+//! GNN subsystem: kern's learned re-embedder.
+//!
+//! A small from-scratch graph neural network that periodically re-embeds the
+//! entity graph so the GNN index (`gnn_entity_idx` on [`crate::base::graph`])
+//! captures structural/relational signal the raw content embeddings miss. The
+//! tick loop trains it on the live graph and writes back per-node `gnn_vector`s,
+//! which retrieval fuses with content similarity (see `base::search::merge_hits`).
+//!
+//! Layers ([`gat`], [`gcn`], [`sage`]) implement the [`GraphLayer`] /
+//! [`BackwardGraphLayer`] traits; [`loss`], [`optim`], and [`train`] drive the
+//! training step; [`tensor`] is the minimal dense-matrix backbone (no external
+//! BLAS). Operation errors surface as [`GnnError`].
 
 pub mod activation;
 pub mod backward;
+
+pub use activation::Activation;
+pub use backward::{BackwardGraphLayer, GraphLayer};
 
 /// Errors raised by GNN layer operations.
 ///

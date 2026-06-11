@@ -12,9 +12,6 @@ use clap::{Parser, Subcommand};
 
 use crate::base::graph::GraphGnn;
 use crate::base::locks::read_recovered;
-use crate::base::search::find_entity;
-use crate::base::types::Kern;
-use crate::base::util::{short_id, truncate};
 
 #[derive(Parser)]
 #[command(name = "kern", version, about = "Self-organizing knowledge graph")]
@@ -178,6 +175,12 @@ pub enum Commands {
 		#[arg(long)]
 		out: Option<String>,
 	},
+	/// One-shot: migrate a legacy file-shard data dir to the LMDB store (in place).
+	/// The old `.kern` files are left for you to delete.
+	Migrate {
+		/// Data dir to migrate; defaults to the configured data_dir.
+		path: Option<String>,
+	},
 	/// Run a timed self-improvement hunt (feature-gated).
 	#[cfg(feature = "hunt")]
 	Hunt {
@@ -218,8 +221,13 @@ pub(crate) fn load_graph(cfg: &crate::config::Config) -> GraphGnn {
 	let mut g = match crate::base::persist::load_dir(&cfg.data_dir) {
 		Ok(g) => g,
 		Err(_) => {
+			// load_dir only errors on a real LMDB/IO fault (an empty store yields a
+			// fresh graph, not an error). Still bind a store so saves persist.
 			let mut g = GraphGnn::new();
 			g.data_dir = cfg.data_dir.clone();
+			if let Ok(store) = crate::base::store::Store::open(&cfg.data_dir) {
+				g.set_store(std::sync::Arc::new(store));
+			}
 			g
 		}
 	};
@@ -246,50 +254,40 @@ pub(crate) fn resolve<'a>(arg: &'a Option<String>, fallback: &'a str) -> &'a str
 
 pub(crate) use crate::llm::{Client, Endpoint};
 
-pub(crate) fn find_entity_by_prefix(
-	g: &GraphGnn,
-	id: &str,
-) -> Option<(crate::base::types::Entity, String)> {
-	if let Some(pair) = find_entity(g, id) {
-		return Some(pair);
-	}
-	for k in g.all() {
-		for t in k.entities.values() {
-			if t.id.starts_with(id) {
-				return Some((t.clone(), k.id.clone()));
-			}
+/// Build the shared blocking embed closure used by the tick worker and the
+/// `profile` command: clone the LLM client into an `EmbedFunc` that drives
+/// `embed` on the current runtime via `block_on_in_place`. One definition so the
+/// call sites can't drift. (The standalone MCP path uses a distinct
+/// runtime-handle variant and is intentionally not routed through this.)
+pub(crate) fn embed_fn(client: &Client) -> crate::types::EmbedFunc {
+	let c = client.clone();
+	std::sync::Arc::new(move |text: &str| -> Result<Vec<f64>, String> {
+		let c = c.clone();
+		let text = text.to_string();
+		match crate::llm::block_on_in_place(c.embed(&text)) {
+			Some(r) => r.map_err(|e| e.to_string()),
+			None => Err("no runtime".to_string()),
 		}
-	}
-	None
+	})
 }
 
-pub(crate) fn print_kern(kern: &Kern, g: &GraphGnn, depth: usize) {
-	let indent = "  ".repeat(depth);
-	let label = if kern.anchor_text.is_empty() {
-		"[unnamed]".to_string()
-	} else {
-		kern.anchor_text.clone()
-	};
-	println!(
-		"{}kern:{}  thoughts:{}  reasons:{}",
-		indent,
-		label,
-		kern.entities.len(),
-		kern.reasons.len(),
-	);
-	for t in kern.entities.values() {
-		println!(
-			"{}  [{}] {}",
-			indent,
-			short_id(&t.id),
-			truncate(&t.text(), 72),
-		);
-	}
-	for child_id in &kern.children {
-		if let Some(child) = g.kerns.get(child_id) {
-			print_kern(child, g, depth + 1);
-		}
-	}
+/// Build the full reason+answer+embed [`Client`] shared by the long-lived daemon
+/// (`run_server`) and the standalone MCP server (`mcp_cmd::run_standalone`). The
+/// reason endpoint is passed in already resolved — `run_server` lets a CLI flag
+/// win over the `[reason]` config section, the MCP path uses config directly —
+/// while answer and embed are ALWAYS taken from config: the daemon must embed
+/// with the same model the graph was built with, never a CLI default, or every
+/// cosine degenerates on a dimension mismatch.
+pub(crate) fn server_llm_client(
+	cfg: &crate::config::Config,
+	reason_url: &str,
+	reason_model: &str,
+) -> Client {
+	Client::new(
+		Endpoint::new(reason_url, reason_model, cfg.reason_key()),
+		Endpoint::new(cfg.answer_url(), &cfg.answer.model, cfg.answer_key()),
+		Endpoint::new(&cfg.embed.url, &cfg.embed.model, &cfg.embed.key),
+	)
 }
 
 pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
@@ -327,13 +325,15 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 		} => {
 			query::cmd_query(
 				cfg,
-				&text,
-				&mode,
-				answer,
-				resolve(&embed_url, &cfg.embed.url),
-				resolve(&embed_model, &cfg.embed.model),
-				resolve(&reason_url, &cfg.reason.url),
-				resolve(&reason_model, &cfg.reason.model),
+				query::QueryParams {
+					text: &text,
+					mode: &mode,
+					answer,
+					embed_url: resolve(&embed_url, &cfg.embed.url),
+					embed_model: resolve(&embed_model, &cfg.embed.model),
+					reason_url: resolve(&reason_url, &cfg.reason.url),
+					reason_model: resolve(&reason_model, &cfg.reason.model),
+				},
 			)
 			.await
 		}
@@ -405,6 +405,16 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 		Commands::Unnamed { action } => admin::cmd_unnamed(cfg, action),
 		Commands::Mcp => mcp_cmd::cmd_mcp(cfg).await,
 		Commands::Compress { src, mode, out } => admin::cmd_compress(&src, &mode, out.as_deref()),
+		Commands::Migrate { path } => {
+			let dir = path.unwrap_or_else(|| cfg.data_dir.clone());
+			match crate::base::migrate::migrate_dir(&dir) {
+				Ok(r) => println!(
+					"migrated {} kerns ({} entities) → {dir}/data.mdb (old .kern files left in place)",
+					r.kerns, r.entities
+				),
+				Err(e) => eprintln!("migrate: {e}"),
+			}
+		}
 		#[cfg(feature = "hunt")]
 		Commands::Hunt { secs } => {
 			// Run the full daemon (TCP MCP + tick worker) and bail after
@@ -447,47 +457,7 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	// `viewer::FAILOVER_RETRY`. The threshold (30s) is far above any single LLM
 	// call: normal blocking work pins one worker, never the time driver, so the
 	// beat keeps advancing — only a TOTAL stall trips the watchdog.
-	{
-		use std::sync::atomic::{AtomicU64, Ordering};
-		let beat = Arc::new(AtomicU64::new(0));
-		{
-			let beat = beat.clone();
-			tokio::spawn(async move {
-				let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
-				loop {
-					tick.tick().await;
-					beat.fetch_add(1, Ordering::Relaxed);
-				}
-			});
-		}
-		std::thread::Builder::new()
-			.name("kern-watchdog".into())
-			.spawn(move || {
-				const CHECK_SECS: u64 = 5;
-				const STALL_LIMIT: u32 = 6; // 6 * 5s = 30s of no async progress
-				let mut last = 0u64;
-				let mut stalls = 0u32;
-				loop {
-					std::thread::sleep(std::time::Duration::from_secs(CHECK_SECS));
-					let now = beat.load(Ordering::Relaxed);
-					if now == last {
-						stalls += 1;
-						if stalls >= STALL_LIMIT {
-							// stderr → daemon.err.log, so the next wedge is visible.
-							eprintln!(
-								"kern watchdog: async runtime stalled ~{}s (graph deadlock or worker starvation) — exiting so a peer can take the hub",
-								u64::from(stalls) * CHECK_SECS
-							);
-							std::process::exit(101);
-						}
-					} else {
-						stalls = 0;
-						last = now;
-					}
-				}
-			})
-			.expect("spawn kern-watchdog thread");
-	}
+	spawn_watchdog();
 	// Effective reason endpoint: CLI flag wins when set, else fall back to the
 	// `[reason]` config section (which itself falls back to `[embed]`). Without
 	// this the daemon ignored configured reasoning entirely, so distillation /
@@ -507,11 +477,7 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	// so reading them here ignored `[embed]` in kern.toml — the daemon embedded
 	// with the default model even when the graph was built with another, a
 	// dimension mismatch that makes every cosine degenerate. Use cfg.embed.
-	let llm_client = Client::new(
-		Endpoint::new(&reason_url, &reason_model, cfg.reason_key()),
-		Endpoint::new(cfg.answer_url(), &cfg.answer.model, cfg.answer_key()),
-		Endpoint::new(&cfg.embed.url, &cfg.embed.model, &cfg.embed.key),
-	);
+	let llm_client = server_llm_client(cfg, &reason_url, &reason_model);
 
 	let llm_fn: Option<crate::ingest::LlmFunc> = if !reason_url.is_empty() {
 		Some(Arc::new(llm_client.complete_func()))
@@ -525,46 +491,10 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	// for the 4b answer model). A tiny embed + a 1-token answer ping every 4 min
 	// re-touches both so retrieval and the user-facing /ask stay warm. Cheap and
 	// self-contained — no dependency on OLLAMA_KEEP_ALIVE.
-	{
-		let warm = llm_client.clone();
-		tokio::spawn(async move {
-			use futures_util::StreamExt as _;
-			// First tick fires immediately, so both models start loading at boot.
-			let mut tick = tokio::time::interval(std::time::Duration::from_secs(240));
-			loop {
-				tick.tick().await;
-				// Warm BOTH models concurrently. They load into separate Ollama
-				// runners (the embedder and the 4b answer model coexist on an 8 GB
-				// GPU at num_ctx=8192), so serializing them just doubles the cold
-				// window before the first `/ask` is warm. The answer warm is a
-				// 1-token `/api/chat` with the real `num_ctx`/`keep_alive`, holding
-				// the exact runner the next `/ask` reuses; drain and discard it.
-				let embed = warm.embed("kern-keepalive");
-				let answer = async {
-					let mut gen = std::pin::pin!(warm.answer(crate::llm::AnswerParams {
-						messages: vec![("user".to_string(), "warm".to_string())],
-						stream: false,
-						num_predict: Some(1),
-					}));
-					while gen.next().await.is_some() {}
-				};
-				let (_, _) = tokio::join!(embed, answer);
-			}
-		});
-	}
+	spawn_keepalive(&llm_client);
 
 	let tick_llm: crate::tick::tasks::LlmFunc = Arc::new(llm_client.complete_func());
-	let tick_embed: crate::tick::tasks::EmbedFunc = {
-		let c = llm_client.clone();
-		Arc::new(move |text: &str| -> Result<Vec<f64>, String> {
-			let c = c.clone();
-			let text = text.to_string();
-			match crate::llm::block_on_in_place(c.embed(&text)) {
-				Some(r) => r.map_err(|e| e.to_string()),
-				None => Err("no runtime".to_string()),
-			}
-		})
-	};
+	let tick_embed: crate::tick::tasks::EmbedFunc = embed_fn(&llm_client);
 
 	let registry = Arc::new(crate::store::Registry::new());
 	let entry = registry.open(
@@ -616,188 +546,17 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 		),
 	});
 
-	// Live graph viewer — a read-only web UI over the current graph. Localhost
-	// by default (cfg.serve.viewer); empty disables it.
-	if !cfg.serve.viewer.is_empty() {
-		let vg = g.clone();
-		let vaddr = cfg.serve.viewer.clone();
-		let viewer_llm = llm_client.clone();
-		let viewer_retrieval = cfg.retrieval.clone();
-		let viewer_q = q.clone();
-		let viewer_mcp = mcp_server.clone();
-		tokio::spawn(async move {
-			if let Err(e) = crate::viewer::run(vg, viewer_llm, viewer_retrieval, viewer_q, viewer_mcp, &vaddr).await {
-				tracing::warn!(target: "kern.viewer", error = %e, "graph viewer failed to start");
-			}
-		});
-	}
+	spawn_viewer(cfg, &g, &llm_client, &q, &mcp_server);
 
-	// Slice K — session mirror. Tails the shared journal `fork_*`
-	// lifecycle events and ingests each new fork as a `Document` entity
-	// with `Source::Session`. Skipped silently if the project's history
-	// SQLite cannot be opened (e.g. read-only filesystem during tests).
-	{
-		use crate::ingest::session_mirror::{run, SessionMirror, WorkerSink};
-		let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-		match journal::History::open(&cwd) {
-			Ok(history) => {
-				if cfg.journal.retain_days > 0 {
-					match history.retain_days(cfg.journal.retain_days) {
-						Ok(n) if n > 0 => tracing::info!(
-							target: "kern.journal",
-							pruned = n,
-							retain_days = cfg.journal.retain_days,
-							"history.db pruned"
-						),
-						Ok(_) => {}
-						Err(e) => tracing::warn!(
-							target: "kern.journal",
-							error = %e,
-							"history.db prune failed"
-						),
-					}
-				}
-				let history = Arc::new(history);
-				let sink = WorkerSink::new(worker.clone());
-				let mut sm = SessionMirror::new(sink);
-				sm.set_max_seen(cfg.ingest.session_mirror_max_seen);
-				let mirror = Arc::new(tokio::sync::Mutex::new(sm));
-				tokio::spawn(run(history, mirror, std::time::Duration::from_secs(2)));
-			}
-			Err(e) => {
-				tracing::warn!(target: "kern.session_mirror", error = %e, "history open failed; session mirror disabled");
-			}
-		}
-	}
+	spawn_session_mirror(cfg, &worker);
 
-	// Slice O — kern-side filesystem watcher. Off unless the project's
-	// `[watcher]` section in `.relay/kern.toml` sets `enabled = true`.
-	// Roots default to cwd when `enabled = true` but no roots are listed.
-	if cfg.watcher.enabled {
-		use crate::ingest::file_watcher::{run as run_file_watcher, KernFileWatcherSink};
-		use watcher::IgnoreRules;
-		let roots: Vec<std::path::PathBuf> = if cfg.watcher.roots.is_empty() {
-			vec![std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))]
-		} else {
-			cfg.watcher.roots.iter().map(std::path::PathBuf::from).collect()
-		};
-		let ignore = IgnoreRules::from_roots(&roots);
-		let sink = Arc::new(KernFileWatcherSink::new(worker.clone()));
-		tokio::spawn(async move {
-			if let Err(e) = run_file_watcher(roots, ignore, sink).await {
-				tracing::warn!(target: "kern.file_watcher", error = %e, "watcher exited");
-			}
-		});
-	}
+	spawn_file_watcher(cfg, &worker);
 
-	// Claude-Code memory: capture spool drain + recall digest writer.
-	// Both file-mediated; off unless `[capture] enabled = true` in
-	// `.relay/kern.toml`.
-	if cfg.capture.enabled {
-		let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+	spawn_capture(cfg, &worker, &llm_fn, &g);
 
-		// Capture drain: spool deltas -> distill -> enqueue -> archive.
-		if let Some(llm_fn) = llm_fn.clone() {
-			let spool = cwd.join(&cfg.capture.dir);
-			let worker_c = worker.clone();
-			let dedup = cfg.ingest.dedup_threshold;
-			let poll = std::time::Duration::from_secs(cfg.capture.poll_secs);
-			let done_retention =
-				std::time::Duration::from_secs(cfg.capture.done_retention_secs);
-			tokio::spawn(crate::ingest::capture_spool::run(
-				spool, worker_c, llm_fn, dedup, poll, done_retention,
-			));
-		} else {
-			tracing::warn!(
-				target: "kern.capture",
-				"capture enabled but no reason LLM configured; distillation disabled"
-			);
-		}
+	start_gossip(cfg, &g, &q, &save_fn).await;
 
-		// Digest writer: periodically snapshot purpose + hot thoughts.
-		{
-			let digest_path = cwd.join(&cfg.capture.digest_path);
-			let g_digest = g.clone();
-			let k = cfg.capture.digest_k;
-			let min_trust = cfg.capture.digest_min_trust as f64;
-			let token_budget = cfg.capture.digest_token_budget;
-			let every = std::time::Duration::from_secs(cfg.capture.digest_secs);
-			tokio::spawn(async move {
-				loop {
-					{
-						let g = read_recovered(&g_digest);
-						crate::retrieval::digest::write_digest(
-							&g,
-							&digest_path,
-							k,
-							min_trust,
-							token_budget,
-						);
-					}
-					tokio::time::sleep(every).await;
-				}
-			});
-		}
-	}
-
-	// Federation: start the gossip node so this kern can share/receive
-	// knowledge with peers. OFF by default (`[gossip] enabled`). When on, it
-	// binds a TCP listener, runs heartbeat, and (optionally) LAN multicast
-	// discovery to auto-peer with same-network nodes.
-	if cfg.gossip.enabled {
-		let network_id = {
-			let g = read_recovered(&g);
-			g.network_id.clone()
-		};
-		let node = crate::gossip::node::Node::new(&cfg.gossip.addr, &network_id, cfg.gossip.peers.clone());
-		let deps = Arc::new(crate::gossip::handler::Deps {
-			graph: g.clone(),
-			node: node.clone(),
-			queue: Some(q.clone()),
-			save: Some(save_fn.clone()),
-		});
-		node.set_handler(crate::gossip::handler::new_handler(deps));
-		match node.listen().await {
-			Ok(addr) => {
-				tracing::info!(target: "kern.gossip", addr = %addr, network = %network_id, "gossip listening");
-				node.start_heartbeat();
-				crate::gossip::handler::start_announce(node.clone(), g.clone());
-				crate::gossip::handler::start_entity_sync(node.clone(), g.clone());
-				if cfg.gossip.discovery {
-					crate::gossip::discovery::start_broadcast(&node, cfg.gossip.discovery_port);
-					crate::gossip::discovery::start_listen(&node, cfg.gossip.discovery_port);
-				}
-			}
-			Err(e) => {
-				tracing::warn!(target: "kern.gossip", error = %e, "gossip listen failed; federation disabled");
-			}
-		}
-	}
-
-	// Autonomous maintenance tick: drives self-compaction on a timer instead
-	// of only when something calls `pulse()`. Each tick pulses the root
-	// (heat decay + stigmergy GC of cold nodes) and re-enqueues clustering,
-	// so an idle daemon still decays, merges, and evicts. `interval_secs = 0`
-	// disables it.
-	if cfg.tick.interval_secs > 0 {
-		let g_tick = g.clone();
-		let q_tick = q.clone();
-		let every = std::time::Duration::from_secs(cfg.tick.interval_secs);
-		tokio::spawn(async move {
-			loop {
-				tokio::time::sleep(every).await;
-				let root_id = {
-					let g = read_recovered(&g_tick);
-					g.root.id.clone()
-				};
-				{
-					let mut g = crate::base::locks::write_recovered(&g_tick);
-					crate::tick::pulse::pulse(&q_tick, &mut g, &root_id, 1.0);
-				}
-				crate::tick::enqueue_all(&q_tick, &g_tick);
-			}
-		});
-	}
+	spawn_maintenance_tick(cfg, &g, &q);
 
 	let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 	tokio::spawn(async move {
@@ -846,7 +605,7 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 			let mcp_s = mcp_server.clone();
 			tokio::spawn(async move {
 				if let Err(e) = crate::mcp::sse::run_sse(mcp_s, &mcp_addr).await {
-					eprintln!("mcp-sse: {e}");
+					tracing::error!(target: "kern.mcp_sse", error = %e, "MCP-over-HTTP server exited");
 				}
 			});
 		}
@@ -874,4 +633,276 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 		save_graph(&g);
 	}
 	eprintln!("done");
+}
+
+/// Shared shape of the live graph handle the daemon subsystems read/write.
+type SharedGraph = Arc<std::sync::RwLock<GraphGnn>>;
+
+/// Dedicated OS-thread watchdog: force-exits the process if the async runtime
+/// stalls (graph deadlock or total worker starvation) so a healthy peer can take
+/// over the hub socket. An async task bumps `beat` every second; the OS thread —
+/// immune to runtime starvation — exits if `beat` stops advancing for ~30s.
+fn spawn_watchdog() {
+	use std::sync::atomic::{AtomicU64, Ordering};
+	let beat = Arc::new(AtomicU64::new(0));
+	{
+		let beat = beat.clone();
+		tokio::spawn(async move {
+			let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+			loop {
+				tick.tick().await;
+				beat.fetch_add(1, Ordering::Relaxed);
+			}
+		});
+	}
+	std::thread::Builder::new()
+		.name("kern-watchdog".into())
+		.spawn(move || {
+			const CHECK_SECS: u64 = 5;
+			const STALL_LIMIT: u32 = 6; // 6 * 5s = 30s of no async progress
+			let mut last = 0u64;
+			let mut stalls = 0u32;
+			loop {
+				std::thread::sleep(std::time::Duration::from_secs(CHECK_SECS));
+				let now = beat.load(Ordering::Relaxed);
+				if now == last {
+					stalls += 1;
+					if stalls >= STALL_LIMIT {
+						// stderr → daemon.err.log, so the next wedge is visible.
+						eprintln!(
+							"kern watchdog: async runtime stalled ~{}s (graph deadlock or worker starvation) — exiting so a peer can take the hub",
+							u64::from(stalls) * CHECK_SECS
+						);
+						std::process::exit(101);
+					}
+				} else {
+					stalls = 0;
+					last = now;
+				}
+			}
+		})
+		.expect("spawn kern-watchdog thread");
+}
+
+/// Keep the embedding AND answer models resident. Ollama unloads after ~5 min
+/// idle and the /v1 endpoint ignores `keep_alive`, so the next call pays a cold
+/// reload. A tiny embed + a 1-token answer ping every 4 min re-touches both
+/// (warmed concurrently — they live in separate runners) so retrieval and `/ask`
+/// stay warm. The first tick fires immediately, loading both at boot.
+fn spawn_keepalive(llm_client: &Client) {
+	let warm = llm_client.clone();
+	tokio::spawn(async move {
+		use futures_util::StreamExt as _;
+		let mut tick = tokio::time::interval(std::time::Duration::from_secs(240));
+		loop {
+			tick.tick().await;
+			let embed = warm.embed("kern-keepalive");
+			let answer = async {
+				let mut gen = std::pin::pin!(warm.answer(crate::llm::AnswerParams {
+					messages: vec![("user".to_string(), "warm".to_string())],
+					stream: false,
+					num_predict: Some(1),
+				}));
+				while gen.next().await.is_some() {}
+			};
+			let (_, _) = tokio::join!(embed, answer);
+		}
+	});
+}
+
+/// Live graph viewer — a read-only web UI over the current graph. Localhost by
+/// default (`cfg.serve.viewer`); empty disables it.
+fn spawn_viewer(
+	cfg: &crate::config::Config,
+	g: &SharedGraph,
+	llm_client: &Client,
+	q: &Arc<crate::tick::queue::Queue>,
+	mcp_server: &Arc<crate::mcp::Server>,
+) {
+	if cfg.serve.viewer.is_empty() {
+		return;
+	}
+	let vg = g.clone();
+	let vaddr = cfg.serve.viewer.clone();
+	let viewer_llm = llm_client.clone();
+	let viewer_retrieval = cfg.retrieval.clone();
+	let viewer_q = q.clone();
+	let viewer_mcp = mcp_server.clone();
+	tokio::spawn(async move {
+		if let Err(e) = crate::viewer::run(vg, viewer_llm, viewer_retrieval, viewer_q, viewer_mcp, &vaddr).await {
+			tracing::warn!(target: "kern.viewer", error = %e, "graph viewer failed to start");
+		}
+	});
+}
+
+/// Slice K — session mirror. Tails the shared journal `fork_*` lifecycle events
+/// and ingests each new fork as a `Document` entity with `Source::Session`.
+/// Skipped silently if the project's history SQLite cannot be opened.
+fn spawn_session_mirror(cfg: &crate::config::Config, worker: &Arc<crate::ingest::Worker>) {
+	use crate::ingest::session_mirror::{run, SessionMirror, WorkerSink};
+	let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+	match journal::History::open(&cwd) {
+		Ok(history) => {
+			if cfg.journal.retain_days > 0 {
+				match history.retain_days(cfg.journal.retain_days) {
+					Ok(n) if n > 0 => tracing::info!(
+						target: "kern.journal",
+						pruned = n,
+						retain_days = cfg.journal.retain_days,
+						"history.db pruned"
+					),
+					Ok(_) => {}
+					Err(e) => tracing::warn!(
+						target: "kern.journal",
+						error = %e,
+						"history.db prune failed"
+					),
+				}
+			}
+			let history = Arc::new(history);
+			let sink = WorkerSink::new(worker.clone());
+			let mut sm = SessionMirror::new(sink);
+			sm.set_max_seen(cfg.ingest.session_mirror_max_seen);
+			let mirror = Arc::new(tokio::sync::Mutex::new(sm));
+			tokio::spawn(run(history, mirror, std::time::Duration::from_secs(2)));
+		}
+		Err(e) => {
+			tracing::warn!(target: "kern.session_mirror", error = %e, "history open failed; session mirror disabled");
+		}
+	}
+}
+
+/// Slice O — kern-side filesystem watcher. Off unless `[watcher] enabled = true`.
+/// Roots default to cwd when enabled but none are listed.
+fn spawn_file_watcher(cfg: &crate::config::Config, worker: &Arc<crate::ingest::Worker>) {
+	if !cfg.watcher.enabled {
+		return;
+	}
+	use crate::ingest::file_watcher::{run as run_file_watcher, KernFileWatcherSink};
+	use watcher::IgnoreRules;
+	// `effective_roots` applies the documented "empty roots → cwd" rule.
+	let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+	let roots = cfg.watcher.effective_roots(&cwd);
+	let ignore = IgnoreRules::from_roots(&roots);
+	let sink = Arc::new(KernFileWatcherSink::new(worker.clone()));
+	tokio::spawn(async move {
+		if let Err(e) = run_file_watcher(roots, ignore, sink).await {
+			tracing::warn!(target: "kern.file_watcher", error = %e, "watcher exited");
+		}
+	});
+}
+
+/// Claude-Code memory: capture spool drain + recall digest writer. Both
+/// file-mediated; off unless `[capture] enabled = true`.
+fn spawn_capture(
+	cfg: &crate::config::Config,
+	worker: &Arc<crate::ingest::Worker>,
+	llm_fn: &Option<crate::ingest::LlmFunc>,
+	g: &SharedGraph,
+) {
+	if !cfg.capture.enabled {
+		return;
+	}
+	let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+	// Capture drain: spool deltas -> distill -> enqueue -> archive.
+	if let Some(llm_fn) = llm_fn.clone() {
+		let spool = cwd.join(&cfg.capture.dir);
+		let worker_c = worker.clone();
+		let dedup = cfg.ingest.dedup_threshold;
+		let poll = std::time::Duration::from_secs(cfg.capture.poll_secs);
+		let done_retention = std::time::Duration::from_secs(cfg.capture.done_retention_secs);
+		tokio::spawn(crate::ingest::capture_spool::run(
+			spool, worker_c, llm_fn, dedup, poll, done_retention,
+		));
+	} else {
+		tracing::warn!(
+			target: "kern.capture",
+			"capture enabled but no reason LLM configured; distillation disabled"
+		);
+	}
+
+	// Digest writer: periodically snapshot purpose + hot thoughts.
+	let digest_path = cwd.join(&cfg.capture.digest_path);
+	let g_digest = g.clone();
+	let k = cfg.capture.digest_k;
+	let min_trust = cfg.capture.digest_min_trust;
+	let token_budget = cfg.capture.digest_token_budget;
+	let every = std::time::Duration::from_secs(cfg.capture.digest_secs);
+	tokio::spawn(async move {
+		loop {
+			{
+				let g = read_recovered(&g_digest);
+				crate::retrieval::digest::write_digest(&g, &digest_path, k, min_trust, token_budget);
+			}
+			tokio::time::sleep(every).await;
+		}
+	});
+}
+
+/// Federation: start the gossip node so this kern can share/receive knowledge
+/// with peers. OFF by default (`[gossip] enabled`). When on, binds a TCP
+/// listener, runs heartbeat, and (optionally) LAN multicast discovery.
+async fn start_gossip(
+	cfg: &crate::config::Config,
+	g: &SharedGraph,
+	q: &Arc<crate::tick::queue::Queue>,
+	save_fn: &Arc<dyn Fn() + Send + Sync>,
+) {
+	if !cfg.gossip.enabled {
+		return;
+	}
+	let network_id = {
+		let g = read_recovered(g);
+		g.network_id.clone()
+	};
+	let node = crate::gossip::node::Node::new(&cfg.gossip.addr, &network_id, cfg.gossip.peers.clone());
+	let deps = Arc::new(crate::gossip::handler::Deps {
+		graph: g.clone(),
+		node: node.clone(),
+		queue: Some(q.clone()),
+		save: Some(save_fn.clone()),
+	});
+	node.set_handler(crate::gossip::handler::new_handler(deps));
+	match node.listen().await {
+		Ok(addr) => {
+			tracing::info!(target: "kern.gossip", addr = %addr, network = %network_id, "gossip listening");
+			node.start_heartbeat();
+			crate::gossip::handler::start_announce(node.clone(), g.clone());
+			crate::gossip::handler::start_entity_sync(node.clone(), g.clone());
+			if cfg.gossip.discovery {
+				crate::gossip::discovery::start_broadcast(&node, cfg.gossip.discovery_port);
+				crate::gossip::discovery::start_listen(&node, cfg.gossip.discovery_port);
+			}
+		}
+		Err(e) => {
+			tracing::warn!(target: "kern.gossip", error = %e, "gossip listen failed; federation disabled");
+		}
+	}
+}
+
+/// Autonomous maintenance tick: pulses the root (heat decay + stigmergy GC of
+/// cold nodes) and re-enqueues clustering on a timer so an idle daemon still
+/// decays, merges, and evicts. `interval_secs = 0` disables it.
+fn spawn_maintenance_tick(cfg: &crate::config::Config, g: &SharedGraph, q: &Arc<crate::tick::queue::Queue>) {
+	if cfg.tick.interval_secs == 0 {
+		return;
+	}
+	let g_tick = g.clone();
+	let q_tick = q.clone();
+	let every = std::time::Duration::from_secs(cfg.tick.interval_secs);
+	tokio::spawn(async move {
+		loop {
+			tokio::time::sleep(every).await;
+			let root_id = {
+				let g = read_recovered(&g_tick);
+				g.root.id.clone()
+			};
+			{
+				let mut g = crate::base::locks::write_recovered(&g_tick);
+				crate::tick::pulse::pulse(&q_tick, &mut g, &root_id, 1.0);
+			}
+			crate::tick::enqueue_all(&q_tick, &g_tick);
+		}
+	});
 }

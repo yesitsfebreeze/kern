@@ -167,31 +167,23 @@ impl History {
 		since_ms: Option<u64>,
 	) -> rusqlite::Result<Vec<(String, u64)>> {
 		let conn = self.conn.lock().expect("history mutex poisoned");
-		let kind_s = kind_tag(kind).to_string();
-		let rows: Vec<(String, i64)> = if let Some(since) = since_ms {
-			let mut stmt = conn.prepare(
-				"SELECT key, COUNT(*) FROM entries WHERE kind = ? AND ts_ms >= ? \
-				 GROUP BY key ORDER BY 2 DESC",
-			)?;
-			let out: rusqlite::Result<Vec<(String, i64)>> = stmt
-				.query_map(params![kind_s, since as i64], |r| {
-					Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-				})?
-				.collect();
-			out?
-		} else {
-			let mut stmt = conn.prepare(
-				"SELECT key, COUNT(*) FROM entries WHERE kind = ? \
-				 GROUP BY key ORDER BY 2 DESC",
-			)?;
-			let out: rusqlite::Result<Vec<(String, i64)>> = stmt
-				.query_map(params![kind_s], |r| {
-					Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-				})?
-				.collect();
-			out?
-		};
-		Ok(rows.into_iter().map(|(k, n)| (k, n as u64)).collect())
+		// Single prepared statement with an optional `ts_ms >= ?` clause, mirroring
+		// the dynamic-WHERE pattern in `query()` (was two near-identical branches).
+		let mut sql = String::from("SELECT key, COUNT(*) FROM entries WHERE kind = ?");
+		let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(kind_tag(kind).to_string())];
+		if let Some(since) = since_ms {
+			sql.push_str(" AND ts_ms >= ?");
+			args.push(Box::new(since as i64));
+		}
+		sql.push_str(" GROUP BY key ORDER BY 2 DESC");
+
+		let mut stmt = conn.prepare(&sql)?;
+		let rows: rusqlite::Result<Vec<(String, i64)>> = stmt
+			.query_map(params_from_iter(args.iter().map(|b| b.as_ref())), |r| {
+				Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+			})?
+			.collect();
+		Ok(rows?.into_iter().map(|(k, n)| (k, n as u64)).collect())
 }
 
 	pub fn prune_before(&self, day: &str) -> rusqlite::Result<usize> {
@@ -332,4 +324,179 @@ impl crate::day_journal::HistorySink for History {
 	) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 		History::bulk_insert(self, entries).map_err(|e| Box::new(e) as _)
 }
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn entry(ts_ms: u64, kind: Kind, key: &str, payload: serde_json::Value) -> Entry {
+		Entry { v: SCHEMA_VERSION, ts_ms, kind, key: key.into(), payload }
+	}
+
+	#[test]
+	fn bulk_insert_then_query_round_trips_ordered_by_time() {
+		let h = History::open_in_memory().unwrap();
+		assert!(h.is_empty().unwrap());
+		h.bulk_insert(&[
+			entry(200, Kind::Assistant, "b", serde_json::json!({"t": "yo"})),
+			entry(100, Kind::User, "a", serde_json::json!({"t": "hi"})),
+		])
+		.unwrap();
+		assert_eq!(h.len().unwrap(), 2);
+		let all = h.query(Filter::all()).unwrap();
+		assert_eq!(all.len(), 2);
+		assert_eq!(all[0].ts_ms, 100, "ORDER BY ts_ms ASC");
+		assert_eq!(all[1].key, "b");
+	}
+
+	#[test]
+	fn query_filters_by_kind_and_since_window() {
+		let h = History::open_in_memory().unwrap();
+		h.bulk_insert(&[
+			entry(100, Kind::User, "a", serde_json::json!({})),
+			entry(300, Kind::User, "b", serde_json::json!({})),
+			entry(200, Kind::Assistant, "c", serde_json::json!({})),
+		])
+		.unwrap();
+		assert_eq!(h.query(Filter::kind(Kind::User)).unwrap().len(), 2);
+		let mut f = Filter::kind(Kind::User);
+		f.since_ms = Some(150);
+		let recent = h.query(f).unwrap();
+		assert_eq!(recent.len(), 1);
+		assert_eq!(recent[0].key, "b");
+	}
+
+	#[test]
+	fn count_by_key_groups_descending_and_respects_since() {
+		let h = History::open_in_memory().unwrap();
+		h.bulk_insert(&[
+			entry(100, Kind::User, "a", serde_json::json!({})),
+			entry(150, Kind::User, "a", serde_json::json!({})),
+			entry(300, Kind::User, "b", serde_json::json!({})),
+		])
+		.unwrap();
+		let counts = h.count_by_key(&Kind::User, None).unwrap();
+		assert_eq!(counts[0], ("a".to_string(), 2), "highest count first");
+		assert_eq!(counts[1], ("b".to_string(), 1));
+		// since filter drops the two ts=100/150 'a' rows.
+		assert_eq!(h.count_by_key(&Kind::User, Some(200)).unwrap(), vec![("b".to_string(), 1)]);
+	}
+
+	#[test]
+	fn payload_carrying_kinds_round_trip_through_decode() {
+		let h = History::open_in_memory().unwrap();
+		h.bulk_insert(&[
+			entry(
+				100,
+				Kind::Edit { target_ts_ms: 42, new_text: "x".into() },
+				"e",
+				serde_json::json!({"target_ts_ms": 42, "new_text": "x"}),
+			),
+			entry(
+				200,
+				Kind::ForkOpen { fork_id: "f1".into(), parent: Some("p".into()) },
+				"f",
+				serde_json::json!({"fork_id": "f1", "parent": "p"}),
+			),
+		])
+		.unwrap();
+		let all = h.query(Filter::all()).unwrap();
+		assert!(matches!(&all[0].kind, Kind::Edit { target_ts_ms: 42, new_text } if new_text == "x"));
+		assert!(matches!(&all[1].kind, Kind::ForkOpen { fork_id, parent: Some(p) } if fork_id == "f1" && p == "p"));
+	}
+
+	/// A payload carrying the inner fields the decoder needs for payload-bearing
+	/// kinds (Edit/Fork/Fork*); other kinds ignore it.
+	fn payload_for(k: &Kind) -> serde_json::Value {
+		match k {
+			Kind::Edit { target_ts_ms, new_text } => {
+				serde_json::json!({ "target_ts_ms": target_ts_ms, "new_text": new_text })
+			}
+			Kind::Fork { from_ts_ms, new_fork_id } => {
+				serde_json::json!({ "from_ts_ms": from_ts_ms, "new_fork_id": new_fork_id })
+			}
+			Kind::ForkOpen { fork_id, parent } => {
+				serde_json::json!({ "fork_id": fork_id, "parent": parent })
+			}
+			Kind::ForkResume { fork_id } => serde_json::json!({ "fork_id": fork_id }),
+			Kind::ForkClose { fork_id } => serde_json::json!({ "fork_id": fork_id }),
+			_ => serde_json::json!({}),
+		}
+	}
+
+	#[test]
+	fn every_kind_tag_round_trips_through_kind_from_tag() {
+		// Exhaustiveness guard: this match has NO `_` arm, so adding a new Kind
+		// variant fails to compile here until it's acknowledged — which forces it
+		// into `all` below and thus through the round-trip check (catching a tag
+		// added to kind_tag but missing its kind_from_tag decode arm).
+		fn _exhaustive(k: &Kind) {
+			match k {
+				Kind::User | Kind::Assistant | Kind::Final | Kind::TurnStart | Kind::TurnEnd
+				| Kind::Usage | Kind::ToolCall | Kind::RecipeInvoke | Kind::PluginCall | Kind::Error
+				| Kind::Ask | Kind::Answer | Kind::Goal | Kind::GoalSnapshot | Kind::Milestone
+				| Kind::Edit { .. } | Kind::Fork { .. } | Kind::RpcSend | Kind::RpcRecv
+				| Kind::RpcError | Kind::Log | Kind::PlanStep | Kind::PlanProposal
+				| Kind::EntityTouched | Kind::ForkOpen { .. } | Kind::ForkResume { .. }
+				| Kind::ForkClose { .. } => {}
+			}
+		}
+
+		let all: Vec<Kind> = vec![
+			Kind::User,
+			Kind::Assistant,
+			Kind::Final,
+			Kind::TurnStart,
+			Kind::TurnEnd,
+			Kind::Usage,
+			Kind::ToolCall,
+			Kind::RecipeInvoke,
+			Kind::PluginCall,
+			Kind::Error,
+			Kind::Ask,
+			Kind::Answer,
+			Kind::Goal,
+			Kind::GoalSnapshot,
+			Kind::Milestone,
+			Kind::Edit { target_ts_ms: 1, new_text: "t".into() },
+			Kind::Fork { from_ts_ms: 2, new_fork_id: "f".into() },
+			Kind::RpcSend,
+			Kind::RpcRecv,
+			Kind::RpcError,
+			Kind::Log,
+			Kind::PlanStep,
+			Kind::PlanProposal,
+			Kind::EntityTouched,
+			Kind::ForkOpen { fork_id: "fo".into(), parent: Some("p".into()) },
+			Kind::ForkResume { fork_id: "fr".into() },
+			Kind::ForkClose { fork_id: "fc".into() },
+		];
+		assert_eq!(all.len(), 27, "list every Kind variant exactly once (see _exhaustive)");
+
+		for k in &all {
+			let tag = kind_tag(k);
+			let decoded = kind_from_tag(tag, &payload_for(k)).unwrap_or_else(|| {
+				panic!("kind_from_tag has no arm for tag {tag:?} — kind_tag and kind_from_tag drifted")
+			});
+			// No PartialEq on Kind needed: re-tag the decoded value and require the
+			// tag to be stable, proving the decoder maps the tag back to its variant.
+			assert_eq!(kind_tag(&decoded), tag, "tag not stable across decode for {tag:?}");
+		}
+	}
+
+	#[test]
+	fn prune_before_deletes_older_days_only() {
+		let h = History::open_in_memory().unwrap();
+		h.bulk_insert(&[
+			entry(0, Kind::User, "old", serde_json::json!({})), // 1970-01-01
+			entry(crate::entry::now_ms(), Kind::User, "new", serde_json::json!({})),
+		])
+		.unwrap();
+		let removed = h.prune_before("2000-01-01").unwrap();
+		assert_eq!(removed, 1, "only the 1970 row predates 2000-01-01");
+		let remaining = h.query(Filter::all()).unwrap();
+		assert_eq!(remaining.len(), 1);
+		assert_eq!(remaining[0].key, "new");
+	}
 }
