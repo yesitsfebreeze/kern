@@ -109,7 +109,7 @@ mod tests {
 
 	#[test]
 	fn validate_rejects_zero_intervals_only_when_enabled() {
-		assert!(CaptureConfig::default().validate().is_ok(), "disabled default is fine");
+		assert!(CaptureConfig::default().validate().is_ok(), "default (enabled, non-zero intervals) is valid");
 
 		let enabled = CaptureConfig { enabled: true, ..Default::default() };
 		assert!(enabled.validate().is_ok(), "enabled default intervals are non-zero");
