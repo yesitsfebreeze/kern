@@ -441,6 +441,9 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 			}
 		}
 		Commands::Daemon => {
+			// Fallback: `main.rs` handles this arm first (before calling dispatch),
+			// but keeping it here ensures `dispatch` handles all Commands variants,
+			// so future call sites don't need to special-case Daemon.
 			let default_cli = Cli {
 				command:     None,
 				daemon:      true,

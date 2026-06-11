@@ -60,6 +60,12 @@ pub async fn run_mux(cfg: &Config) {
                 result = listener.accept() => {
                     let Ok((stream, _)) = result else { continue };
                     let Ok(std_stream) = stream.into_std() else { continue };
+                    // Tokio sets the fd non-blocking; restore blocking mode so the OS thread's
+                    // BufReader::read_line in serve_rw blocks correctly instead of getting WouldBlock.
+                    if let Err(e) = std_stream.set_nonblocking(false) {
+                        tracing::warn!(target: "kern.mux", error = %e, "set_nonblocking(false) failed; skipping connection");
+                        continue;
+                    }
                     let reg  = reg_mcp.clone();
                     let cmd  = agent_cmd.clone();
                     std::thread::spawn(move || {
@@ -78,6 +84,11 @@ pub async fn run_mux(cfg: &Config) {
     });
 
     // ── TUI loop (blocking) ───────────────────────────────────────────────
+    // The registry lock is held for the entire TUI session. MCP worker threads
+    // (spawned above) will block on `.lock()` while a TUI frame or keypress
+    // handler is running. This is intentional: the TUI is the single writer;
+    // MCP operations are serialised behind it. No deadlock is possible because
+    // neither side re-acquires the lock while holding it.
     let keymap = KeyMap::from_config(&cfg.mux);
     {
         let mut reg = registry.lock().expect("registry lock");

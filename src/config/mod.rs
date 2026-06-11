@@ -12,6 +12,7 @@ mod gossip;
 mod graph;
 mod ingest;
 mod journal;
+mod mux;
 mod reason;
 mod retrieval;
 mod serve;
@@ -26,6 +27,7 @@ pub use gossip::GossipConfig;
 pub use graph::GraphConfig;
 pub use ingest::IngestConfig;
 pub use journal::{DEFAULT_MAX_TODAY_BYTES, DEFAULT_RETAIN_DAYS, JournalConfig};
+pub use mux::{KeyMap, MuxConfig, parse_key_event};
 pub use reason::{DEFAULT_REASON_MODEL, ReasonConfig};
 pub use retrieval::{ModeWeights, RetrievalConfig};
 pub use serve::ServeConfig;
@@ -57,6 +59,7 @@ pub struct Config {
 	pub capture: CaptureConfig,
 	pub graph: GraphConfig,
 	pub journal: JournalConfig,
+	pub mux: MuxConfig,
 }
 
 impl Default for Config {
@@ -104,6 +107,7 @@ impl Config {
 			capture: CaptureConfig::default(),
 			graph: GraphConfig::default(),
 			journal: JournalConfig::default(),
+			mux: MuxConfig::default(),
 		}
 	}
 
