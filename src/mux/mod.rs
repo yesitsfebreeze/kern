@@ -3,13 +3,11 @@
 //! `run_mux` starts the TUI and a background MCP server task that exposes
 //! the four `mux_*` tools on a TCP loopback socket.
 
-pub mod delegate;
 pub mod mcp;
 pub mod pty;
 pub mod registry;
 pub mod tui;
 
-pub use delegate::{boot_message, kern_ingest_text, result_key, task_key, DelegateSpec};
 pub use mcp::MuxMcpServer;
 pub use pty::{new_session_id, PtySession};
 pub use registry::{PaneRegistry, SharedRegistry};
