@@ -1,7 +1,8 @@
 use clap::Parser;
 
-use kern::commands::{Cli, dispatch, run_server};
+use kern::commands::{Cli, Commands, dispatch, run_server};
 use kern::config::Config;
+use kern::mux::run_mux;
 
 /// Worker-thread count for the tokio runtime: the detected core count, but never
 /// below the hard floor of 4 (and 4 when detection fails). The floor keeps the
@@ -55,8 +56,10 @@ fn main() {
 		let cli = Cli::parse();
 
 		match cli.command {
-			Some(cmd) => dispatch(cmd, &cfg).await,
-			None => run_server(&cli, &cfg).await,
+			Some(Commands::Daemon) => run_server(&cli, &cfg).await,
+			Some(cmd)              => dispatch(cmd, &cfg).await,
+			None if cli.daemon     => run_server(&cli, &cfg).await,
+			None                   => run_mux(&cfg).await,
 		}
 	});
 }

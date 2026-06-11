@@ -187,6 +187,8 @@ pub enum Commands {
 		#[arg(long, default_value = "60")]
 		secs: u64,
 	},
+	/// Start the long-lived daemon (same as `--daemon`). Convenience alias.
+	Daemon,
 }
 
 #[derive(Subcommand)]
@@ -437,6 +439,19 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 					eprintln!("kern hunt: {secs}s elapsed, exiting");
 				}
 			}
+		}
+		Commands::Daemon => {
+			let default_cli = Cli {
+				command:     None,
+				daemon:      true,
+				mcp_addr:    String::new(),
+				mcp_stdio:   false,
+				embed_url:   crate::config::DEFAULT_EMBED_URL.to_string(),
+				embed_model: crate::config::DEFAULT_EMBED_MODEL.to_string(),
+				reason_url:  String::new(),
+				reason_model: String::new(),
+			};
+			run_server(&default_cli, cfg).await;
 		}
 	}
 }
@@ -905,4 +920,15 @@ fn spawn_maintenance_tick(cfg: &crate::config::Config, g: &SharedGraph, q: &Arc<
 			crate::tick::enqueue_all(&q_tick, &g_tick);
 		}
 	});
+}
+
+#[cfg(test)]
+mod entry_point_tests {
+	use super::Commands;
+
+	#[test]
+	fn daemon_subcommand_exists() {
+		// Regression guard: confirms Commands::Daemon compiles.
+		let _ = Commands::Daemon;
+	}
 }
