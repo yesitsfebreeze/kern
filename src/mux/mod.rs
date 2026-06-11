@@ -4,12 +4,14 @@
 //! the four `mux_*` tools on a TCP loopback socket.
 
 pub mod delegate;
+pub mod kern_client;
 pub mod mcp;
 pub mod pty;
 pub mod registry;
 pub mod tui;
 
 pub use delegate::{boot_message, kern_ingest_text, result_key, task_key, DelegateSpec};
+pub use kern_client::KernClient;
 pub use mcp::MuxMcpServer;
 pub use pty::{new_session_id, PtySession};
 pub use registry::{PaneRegistry, SharedRegistry};
@@ -84,17 +86,12 @@ pub async fn run_mux(cfg: &Config) {
     });
 
     // ── TUI loop (blocking) ───────────────────────────────────────────────
-    // The registry lock is held for the entire TUI session. MCP worker threads
-    // (spawned above) will block on `.lock()` while a TUI frame or keypress
-    // handler is running. This is intentional: the TUI is the single writer;
-    // MCP operations are serialised behind it. No deadlock is possible because
-    // neither side re-acquires the lock while holding it.
+    // The registry is passed as Arc<Mutex<>> so the TUI acquires the lock
+    // only for brief drain/draw/key operations, releasing it between frames
+    // to allow MCP worker threads to call mux_* tools concurrently.
     let keymap = KeyMap::from_config(&cfg.mux);
-    {
-        let mut reg = registry.lock().expect("registry lock");
-        if let Err(e) = run_tui(&mut reg, &keymap) {
-            eprintln!("kern mux: TUI error: {e}");
-        }
+    if let Err(e) = run_tui(&registry, &keymap) {
+        eprintln!("kern mux: TUI error: {e}");
     }
 
     // Signal the MCP task to stop.
