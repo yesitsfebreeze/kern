@@ -346,6 +346,7 @@ async fn run_standalone(cfg: &crate::config::Config) {
 			cfg.retrieval.query_cache_cap,
 			cfg.retrieval.query_cache_theta,
 		),
+		mux: None,
 	};
 	server.run_stdio();
 }

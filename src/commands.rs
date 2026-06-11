@@ -583,6 +583,7 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 			cfg.retrieval.query_cache_cap,
 			cfg.retrieval.query_cache_theta,
 		),
+		mux: None,
 	});
 
 	spawn_viewer(cfg, &g, &llm_client, &q, &mcp_server);

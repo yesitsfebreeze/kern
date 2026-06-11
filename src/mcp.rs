@@ -50,6 +50,11 @@ pub struct Server {
 	/// `Mutex`; lookups/inserts are brief (a linear scan of a small bounded
 	/// ring). See [`crate::retrieval::cache`].
 	pub cache: Arc<Mutex<QueryCache>>,
+	/// Present only when this engine is hosted inside the mux TUI process.
+	/// `Some` → the comms tools (`delegate`/`collect`/`spawn`/`send`/`panes`/
+	/// `status`) are advertised and dispatched against this live pane registry.
+	/// `None` → headless daemon; comms tools are absent.
+	pub mux: Option<Arc<Mutex<crate::mux::registry::PaneRegistry>>>,
 }
 
 impl Server {

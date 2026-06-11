@@ -227,6 +227,7 @@ mod tests {
 			task_q: None,
 			cfg: Arc::new(Config::default()),
 			cache: crate::retrieval::cache::QueryCache::default_shared(),
+			mux: None,
 		}
 	}
 
