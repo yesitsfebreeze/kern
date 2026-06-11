@@ -350,16 +350,48 @@ async fn run_standalone(cfg: &crate::config::Config) {
 	server.run_stdio();
 }
 
+// ── Mux MCP proxy ────────────────────────────────────────────────────────────
+
+/// Bridge stdin/stdout to the running mux MCP server (TCP at `addr`).
+///
+/// Used as `kern mcp-mux` — the entry point registered in `.mcp.json` so the
+/// `mux_delegate`, `mux_collect`, `mux_spawn`, `mux_send`, `mux_list`, and
+/// `mux_status` tools are accessible in the Claude Code session whenever the
+/// mux is running. Exits with code 1 if the mux is not up.
+pub(crate) async fn run_mux_proxy(addr: &str) {
+    use tokio::io::copy;
+
+    let stream = match tokio::net::TcpStream::connect(addr).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("kern mcp-mux: cannot connect to mux MCP at {addr}: {e}");
+            eprintln!("kern mcp-mux: start kern (mux mode) first");
+            std::process::exit(1);
+        }
+    };
+
+    let (mut tcp_rx, mut tcp_tx) = stream.into_split();
+    let mut stdin  = tokio::io::stdin();
+    let mut stdout = tokio::io::stdout();
+
+    // Drive both directions concurrently. Either EOF (client disconnect or
+    // server shutdown) terminates the proxy cleanly.
+    tokio::select! {
+        _ = copy(&mut stdin,  &mut tcp_tx) => {}
+        _ = copy(&mut tcp_rx, &mut stdout) => {}
+    }
+}
+
 // ── Claude Code MCP auto-registration ────────────────────────────────────────
 
-/// Ensure the kern MCP server is registered in the project's `.mcp.json`.
+/// Ensure both kern MCP servers are registered in the project's `.mcp.json`.
 ///
 /// `.mcp.json` is Claude Code's project-level MCP config file (sits at the
 /// project root alongside `CLAUDE.md`). Called at daemon/mux startup so any
-/// project directory that runs kern automatically gains `mcp__kern__*` tools
-/// in the Claude Code session without manual setup. Idempotent — exits
-/// immediately if the `mcpServers.kern` entry is already present. Does not
-/// touch any other key.
+/// project directory that runs kern automatically gains `mcp__kern__*` and
+/// `mcp__kern_mux__*` tools in the Claude Code session without manual setup.
+/// Idempotent — only inserts entries that are absent. Does not touch any key
+/// that is already present.
 pub(crate) fn ensure_mcp_registered(cwd: &std::path::Path) {
     let mcp_path = cwd.join(".mcp.json");
 
@@ -367,31 +399,35 @@ pub(crate) fn ensure_mcp_registered(cwd: &std::path::Path) {
     let raw = std::fs::read_to_string(&mcp_path).unwrap_or_else(|_| "{}".to_string());
     let mut root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
 
-    // If kern is already registered, nothing to do.
-    if root
-        .get("mcpServers")
-        .and_then(|s| s.get("kern"))
-        .is_some()
-    {
-        return;
-    }
+    // Entries we want present; skip any that already exist.
+    let wanted: &[(&str, serde_json::Value)] = &[
+        ("kern",     serde_json::json!({"command": "kern", "args": ["mcp"]})),
+        ("kern-mux", serde_json::json!({"command": "kern", "args": ["mcp-mux"]})),
+    ];
 
-    // Upsert the mcpServers.kern entry.
-    root.as_object_mut()
+    let servers = root
+        .as_object_mut()
         .map(|obj| {
             obj.entry("mcpServers")
                 .or_insert_with(|| serde_json::json!({}))
-                .as_object_mut()
-                .map(|servers| {
-                    servers.insert(
-                        "kern".to_string(),
-                        serde_json::json!({
-                            "command": "kern",
-                            "args":    ["mcp"]
-                        }),
-                    )
-                })
         });
+
+    let Some(servers) = servers.and_then(|s| s.as_object_mut()) else {
+        tracing::warn!(target: "kern.mcp", "ensure_mcp_registered: mcpServers is not an object");
+        return;
+    };
+
+    let mut changed = false;
+    for (name, entry) in wanted {
+        if !servers.contains_key(*name) {
+            servers.insert(name.to_string(), entry.clone());
+            changed = true;
+        }
+    }
+
+    if !changed {
+        return;
+    }
 
     match serde_json::to_string_pretty(&root) {
         Ok(json) => {
@@ -414,13 +450,15 @@ mod ensure_mcp_tests {
     use super::*;
 
     #[test]
-    fn writes_kern_entry_when_file_absent() {
+    fn writes_both_entries_when_file_absent() {
         let dir = tempfile::tempdir().unwrap();
         ensure_mcp_registered(dir.path());
         let raw = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(v["mcpServers"]["kern"]["command"], "kern");
         assert_eq!(v["mcpServers"]["kern"]["args"][0], "mcp");
+        assert_eq!(v["mcpServers"]["kern-mux"]["command"], "kern");
+        assert_eq!(v["mcpServers"]["kern-mux"]["args"][0], "mcp-mux");
     }
 
     #[test]
@@ -428,20 +466,15 @@ mod ensure_mcp_tests {
         let dir = tempfile::tempdir().unwrap();
         let mcp = dir.path().join(".mcp.json");
         // Seed with an unrelated mcpServer.
-        std::fs::write(
-            &mcp,
-            r#"{"mcpServers":{"other":{"command":"other"}}}"#,
-        )
-        .unwrap();
+        std::fs::write(&mcp, r#"{"mcpServers":{"other":{"command":"other"}}}"#).unwrap();
 
         ensure_mcp_registered(dir.path());
 
         let raw = std::fs::read_to_string(&mcp).unwrap();
         let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        // Existing entry preserved.
         assert_eq!(v["mcpServers"]["other"]["command"], "other");
-        // New kern entry added.
         assert_eq!(v["mcpServers"]["kern"]["command"], "kern");
+        assert_eq!(v["mcpServers"]["kern-mux"]["args"][0], "mcp-mux");
 
         // Second call is idempotent — file unchanged.
         let before = std::fs::read_to_string(&mcp).unwrap();
@@ -451,12 +484,12 @@ mod ensure_mcp_tests {
     }
 
     #[test]
-    fn does_not_overwrite_existing_kern_entry() {
+    fn does_not_overwrite_existing_custom_entries() {
         let dir = tempfile::tempdir().unwrap();
         let mcp = dir.path().join(".mcp.json");
         std::fs::write(
             &mcp,
-            r#"{"mcpServers":{"kern":{"command":"custom-kern","args":["custom"]}}}"#,
+            r#"{"mcpServers":{"kern":{"command":"custom","args":["x"]},"kern-mux":{"command":"custom-mux","args":["y"]}}}"#,
         )
         .unwrap();
 
@@ -464,8 +497,23 @@ mod ensure_mcp_tests {
 
         let raw = std::fs::read_to_string(&mcp).unwrap();
         let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        // Custom entry must not be overwritten.
-        assert_eq!(v["mcpServers"]["kern"]["command"], "custom-kern");
-        assert_eq!(v["mcpServers"]["kern"]["args"][0], "custom");
+        assert_eq!(v["mcpServers"]["kern"]["command"], "custom");
+        assert_eq!(v["mcpServers"]["kern-mux"]["command"], "custom-mux");
+    }
+
+    #[test]
+    fn adds_missing_mux_entry_when_only_kern_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let mcp = dir.path().join(".mcp.json");
+        std::fs::write(&mcp, r#"{"mcpServers":{"kern":{"command":"kern","args":["mcp"]}}}"#)
+            .unwrap();
+
+        ensure_mcp_registered(dir.path());
+
+        let raw = std::fs::read_to_string(&mcp).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        // kern untouched, kern-mux added.
+        assert_eq!(v["mcpServers"]["kern"]["args"][0], "mcp");
+        assert_eq!(v["mcpServers"]["kern-mux"]["args"][0], "mcp-mux");
     }
 }
