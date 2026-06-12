@@ -223,6 +223,13 @@ fn for_each_entry(path: &Path, mut f: impl FnMut(Entry)) -> io::Result<()> {
 	Ok(())
 }
 
+/// Scan the parsed entries of a JSONL journal file at `path`, invoking `f` for
+/// each (header + blank/unparsable lines skipped). The read primitive for
+/// tailing a live `today.jsonl` without opening a writable `DayJournal`.
+pub fn scan_path(path: &Path, f: impl FnMut(Entry)) -> io::Result<()> {
+	for_each_entry(path, f)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

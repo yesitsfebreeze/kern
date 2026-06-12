@@ -798,39 +798,47 @@ fn spawn_viewer(
 
 /// Slice K — session mirror. Tails the shared journal `fork_*` lifecycle events
 /// and ingests each new fork as a `Document` entity with `Source::Session`.
-/// Skipped silently if the project's history SQLite cannot be opened.
+/// The live mirror tails `today.jsonl`; the SQLite archive is only pruned here
+/// (a missing history.db does not disable mirroring).
 fn spawn_session_mirror(cfg: &crate::config::Config, worker: &Arc<crate::ingest::Worker>) {
 	use crate::ingest::session_mirror::{run, SessionMirror, WorkerSink};
 	let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-	match journal::History::open(&cwd) {
-		Ok(history) => {
-			if cfg.journal.retain_days > 0 {
-				match history.retain_days(cfg.journal.retain_days) {
-					Ok(n) if n > 0 => tracing::info!(
-						target: "kern.journal",
-						pruned = n,
-						retain_days = cfg.journal.retain_days,
-						"history.db pruned"
-					),
-					Ok(_) => {}
-					Err(e) => tracing::warn!(
-						target: "kern.journal",
-						error = %e,
-						"history.db prune failed"
-					),
-				}
-			}
-			let history = Arc::new(history);
-			let sink = WorkerSink::new(worker.clone());
-			let mut sm = SessionMirror::new(sink);
-			sm.set_max_seen(cfg.ingest.session_mirror_max_seen);
-			let mirror = Arc::new(tokio::sync::Mutex::new(sm));
-			tokio::spawn(run(history, mirror, std::time::Duration::from_secs(2)));
-		}
-		Err(e) => {
-			tracing::warn!(target: "kern.session_mirror", error = %e, "history open failed; session mirror disabled");
+
+	// Archive maintenance (independent of live mirroring): prune the SQLite
+	// history of days older than the retention window. Best-effort — a missing
+	// history.db must NOT disable the live mirror, which reads today.jsonl.
+	if cfg.journal.retain_days > 0 {
+		match journal::History::open(&cwd) {
+			Ok(history) => match history.retain_days(cfg.journal.retain_days) {
+				Ok(n) if n > 0 => tracing::info!(
+					target: "kern.journal",
+					pruned = n,
+					retain_days = cfg.journal.retain_days,
+					"history.db pruned"
+				),
+				Ok(_) => {}
+				Err(e) => tracing::warn!(
+					target: "kern.journal",
+					error = %e,
+					"history.db prune failed"
+				),
+			},
+			Err(e) => tracing::warn!(
+				target: "kern.journal",
+				error = %e,
+				"history.db open failed; archive prune skipped"
+			),
 		}
 	}
+
+	// Live mirror: tail today.jsonl for fork lifecycle events. This is the file
+	// `journal::emit` writes, so mux panes are mirrored as they open.
+	let sink = WorkerSink::new(worker.clone());
+	let mut sm = SessionMirror::new(sink);
+	sm.set_max_seen(cfg.ingest.session_mirror_max_seen);
+	let mirror = Arc::new(tokio::sync::Mutex::new(sm));
+	let journal_path = cwd.join(".kern").join("journal").join("today.jsonl");
+	tokio::spawn(run(journal_path, mirror, std::time::Duration::from_secs(2)));
 }
 
 /// Slice O — kern-side filesystem watcher. Off unless `[watcher] enabled = true`.

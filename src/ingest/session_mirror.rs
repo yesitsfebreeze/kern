@@ -21,10 +21,11 @@
 //!   searchable.
 
 use std::collections::{HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use journal::{Entry, Filter, History, Kind};
+use journal::{Entry, Kind};
 use tokio::sync::Mutex;
 
 use crate::base::types::{EntityKind, Source};
@@ -274,16 +275,38 @@ impl<S: MirrorSink> SessionMirror<S> {
 	}
 }
 
-/// Background task. Polls the SQLite history every `interval` for new
-/// fork lifecycle events and forwards them through `mirror`. Reads
-/// each `fork_*` kind separately because `Filter` is keyed on a single
-/// `Kind` (cheap: three small queries every few seconds).
+/// Read fork-lifecycle entries (`ForkOpen`/`ForkResume`/`ForkClose`) from the
+/// live JSONL journal at `path`, keeping only those with `ts_ms > since_ms`,
+/// returned in ascending ts order. This is the mirror's poll source: the same
+/// `today.jsonl` that `journal::emit` (and thus `mux/registry.rs`) writes to —
+/// NOT the SQLite archive, which only fills at day-rollover.
+fn read_fork_events(path: &Path, since_ms: u64) -> Vec<Entry> {
+	let mut out = Vec::new();
+	let _ = journal::scan_path(path, |e| {
+		if e.ts_ms > since_ms
+			&& matches!(
+				e.kind,
+				Kind::ForkOpen { .. } | Kind::ForkResume { .. } | Kind::ForkClose { .. }
+			) {
+			out.push(e);
+		}
+	});
+	out.sort_by_key(|e| e.ts_ms);
+	out
+}
+
+/// Background task. Tails the live `today.jsonl` every `interval` for new fork
+/// lifecycle events and forwards them through `mirror`. The journal is the same
+/// file `journal::emit` (and thus `mux/registry.rs`) writes to, so producer and
+/// consumer finally agree — fork events are visible immediately, not at the next
+/// day-rollover. The mirror's `seen` set + `since` cursor make re-scanning the
+/// file each tick idempotent.
 ///
 /// The task runs forever; spawn it on startup and let it die with the
 /// process. `Arc<Mutex<...>>` lets future code (e.g. an admin probe)
 /// inspect the mirror without racing with the poll loop.
 pub async fn run<S: MirrorSink + 'static>(
-	history: Arc<History>,
+	journal_path: PathBuf,
 	mirror: Arc<Mutex<SessionMirror<S>>>,
 	interval: Duration,
 ) {
@@ -292,36 +315,10 @@ pub async fn run<S: MirrorSink + 'static>(
 			let m = mirror.lock().await;
 			m.last_ts_ms
 		};
-		// Fetch each of the three fork kinds; merge in ts order.
-		let mut all: Vec<Entry> = Vec::new();
-		for kind in [
-			Kind::ForkOpen {
-				fork_id: String::new(),
-				parent: None,
-			},
-			Kind::ForkResume {
-				fork_id: String::new(),
-			},
-			Kind::ForkClose {
-				fork_id: String::new(),
-			},
-		] {
-			let f = Filter {
-				kind: Some(kind),
-				since_ms: if since > 0 { Some(since + 1) } else { None },
-				..Filter::default()
-			};
-			match history.query(f) {
-				Ok(rows) => all.extend(rows),
-				Err(e) => {
-					tracing::warn!(target: "kern.session_mirror", error = %e, "history query failed");
-				}
-			}
-		}
-		all.sort_by_key(|e| e.ts_ms);
-		if !all.is_empty() {
+		let new = read_fork_events(&journal_path, since);
+		if !new.is_empty() {
 			let mut m = mirror.lock().await;
-			m.process_all(all.iter());
+			m.process_all(new.iter());
 		}
 		tokio::time::sleep(interval).await;
 	}
@@ -481,6 +478,41 @@ mod tests {
 		assert_eq!(mirror.seen_count(), 3);
 		mirror.set_max_seen(1); // evict down to the newest
 		assert_eq!(mirror.seen_count(), 1, "shrunk to cap immediately");
+	}
+
+	/// The mirror's poll source is the live `today.jsonl` (where `journal::emit`
+	/// writes), NOT the SQLite archive. A fork emitted into the day journal must
+	/// be readable by `read_fork_events`, with non-fork noise (Log) filtered out
+	/// and the `since_ms` cursor excluding already-consumed entries.
+	#[test]
+	fn read_fork_events_tails_live_jsonl() {
+		use journal::Sink;
+		let dir = tempfile::tempdir().unwrap();
+		let dj = journal::DayJournal::open(dir.path(), Arc::new(journal::NullHistorySink)).unwrap();
+		// Producer path: exactly what mux/registry.rs does via journal::emit.
+		dj.emit(fork_open(100, "fork-a", None));
+		dj.emit(Entry {
+			v: 5,
+			ts_ms: 150,
+			kind: Kind::Log,
+			key: "noise".into(),
+			payload: serde_json::Value::Null,
+		});
+		dj.emit(fork_close(200, "fork-a"));
+		let path = dj.path().to_path_buf();
+
+		// since=0 -> both fork events, Log filtered out, ts-ordered.
+		let forks = read_fork_events(&path, 0);
+		assert_eq!(forks.len(), 2, "ForkOpen+ForkClose read from today.jsonl; Log filtered");
+		assert!(forks[0].ts_ms <= forks[1].ts_ms, "returned in ascending ts order");
+
+		// Feeding them through the mirror ingests fork-a exactly once.
+		let mut mirror = SessionMirror::new(CountingSink::default());
+		mirror.process_all(forks.iter());
+		assert_eq!(mirror.seen_count(), 1, "fork-a mirrored once");
+
+		// since cursor past the last event yields nothing new.
+		assert!(read_fork_events(&path, 200).is_empty(), "since_ms excludes ts <= cursor");
 	}
 
 	/// `ForkResume` for a never-seen fork still mirrors it (mid-life

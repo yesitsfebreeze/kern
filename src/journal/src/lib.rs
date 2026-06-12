@@ -17,7 +17,7 @@ pub use events::{
 };
 pub use tracing_layer::{FieldRecorder, JournalTracingLayer};
 
-pub use day_journal::{DayJournal, HistorySink, NullHistorySink};
+pub use day_journal::{scan_path, DayJournal, HistorySink, NullHistorySink};
 
 /// Open the workspace-default journal: `<cwd>/.kern/journal/today.jsonl`
 /// with a `NullHistorySink` (no warm SQLite store). Use this from any
