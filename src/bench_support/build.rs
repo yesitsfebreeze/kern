@@ -58,11 +58,20 @@ fn insert_docs(g: &mut GraphGnn, root_id: &str, trace: &Trace) {
 	}
 }
 
-/// Seed similarity edges between every pair of documents whose cosine clears a
-/// floor. O(n^2) on purpose: benchmark traces are small (tens to low-hundreds of
-/// docs), so the full pairwise edge set is cheaper and more faithful than
-/// approximating it via the ANN index. If trace corpora ever grow large, replace
-/// this with a top-k batch index build.
+/// Cosine floor for a similarity edge. A REAL graph's reason-edges connect
+/// genuinely related entities; a near-orthogonal pair (cosine ~0.1) is not
+/// "related". A loose floor wires almost every pair together, and that dense
+/// graph lets graph expansion's corroboration boost promote well-connected
+/// central nodes over the direct best match — which tanks ranking (NDCG) without
+/// changing recall. 0.5 keeps only substantively-similar pairs, matching a
+/// realistic edge density (NDCG@10 on synthetic.json: 0.54 at 0.1 -> ~1.0 here).
+const SIMILARITY_EDGE_FLOOR: f64 = 0.5;
+
+/// Seed similarity edges between every pair of documents whose cosine clears
+/// [`SIMILARITY_EDGE_FLOOR`]. O(n^2) on purpose: benchmark traces are small (tens
+/// to low-hundreds of docs), so the full pairwise edge set is cheaper and more
+/// faithful than approximating it via the ANN index. If trace corpora ever grow
+/// large, replace this with a top-k batch index build.
 fn seed_similarity_edges(g: &mut GraphGnn, root_id: &str, trace: &Trace) {
 	let ids: Vec<String> = trace.docs.iter().map(|d| d.id.clone()).collect();
 	for i in 0..ids.len() {
@@ -73,7 +82,7 @@ fn seed_similarity_edges(g: &mut GraphGnn, root_id: &str, trace: &Trace) {
 			let from_vec = kern.entities.get(&from).expect("inserted above").vector.clone();
 			let to_vec = kern.entities.get(&to).expect("inserted above").vector.clone();
 			let score = cosine(&from_vec, &to_vec);
-			if score < 0.1 {
+			if score < SIMILARITY_EDGE_FLOOR {
 				continue;
 			}
 			let rid = reason_id(&from, &to, ReasonKind::Similarity, "", "");
