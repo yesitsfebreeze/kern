@@ -37,6 +37,13 @@ struct Args {
 	/// instead of scoring recall/NDCG. Warmup + timed iterations per query.
 	#[arg(long)]
 	latency: bool,
+	/// Measure retrieval throughput (queries/sec) under N concurrent reader
+	/// threads (default: available parallelism). LLM-free.
+	#[arg(long)]
+	throughput: bool,
+	/// Reader threads for --throughput (default: detected parallelism).
+	#[arg(long)]
+	threads: Option<usize>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -63,6 +70,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			"retrieval latency (ms):  mean={:.3}  p50={:.3}  p95={:.3}  p99={:.3}",
 			r.mean_ms, r.p50_ms, r.p95_ms, r.p99_ms
 		);
+		return Ok(());
+	}
+
+	if args.throughput {
+		let threads = args.threads.unwrap_or_else(|| {
+			std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
+		});
+		let r = kern::bench_support::latency::measure_throughput(
+			&g,
+			&RetrievalConfig::default(),
+			&t,
+			threads,
+			100,
+		);
+		println!("trace: {}   threads: {}   queries: {}", r.trace_name, r.threads, r.total_queries);
+		println!("retrieval throughput: {:.0} qps  ({:.3}s elapsed)", r.qps, r.elapsed_secs);
 		return Ok(());
 	}
 

@@ -1,12 +1,15 @@
-//! Wall-clock latency measurement for the trace harness: times the (LLM-free)
-//! graph retrieval path so index/config changes can be A/B'd for speed — the
-//! complement to [`replay`](super::replay)'s recall/NDCG quality scoring.
+//! Performance measurement for the trace harness — the speed complement to
+//! [`replay`](super::replay)'s recall/NDCG quality scoring. Two views, both over
+//! the (LLM-free) graph retrieval path so index/config changes can be A/B'd:
 //!
-//! Methodology: each query runs `warmup` untimed times (to fill caches), then
-//! `iters` timed times; every timing across the trace's queries is pooled and
-//! reduced to p50/p95/p99 + mean via nearest-rank percentiles. This is a
-//! kern-internal A/B number over a FIXED trace ("did a change move latency?"),
-//! not an absolute SLA and not yet a Qdrant baseline.
+//! - [`measure_latency`] — single-reader p50/p95/p99 + mean over warmup+timed
+//!   iterations of each query.
+//! - [`measure_throughput`] — queries/sec with `threads` concurrent readers, which
+//!   exercises the read-only graph's concurrent-read scaling (the path the MCP
+//!   server and recall hooks share).
+//!
+//! These are kern-internal A/B numbers over a FIXED trace ("did a change move
+//! latency / throughput?"), not absolute SLAs and not yet a Qdrant baseline.
 
 use std::time::Instant;
 
@@ -94,6 +97,66 @@ pub fn measure_latency(
 	}
 }
 
+#[derive(Debug, Clone)]
+pub struct ThroughputReport {
+	pub trace_name: String,
+	pub threads: usize,
+	/// Total queries executed across all threads.
+	pub total_queries: usize,
+	pub elapsed_secs: f64,
+	pub qps: f64,
+}
+
+/// Run the whole trace `per_thread_iters` times on each of `threads` concurrent
+/// readers and report queries/sec. The graph is shared `&GraphGnn` across scoped
+/// threads — retrieval never mutates it, so this measures honest concurrent-read
+/// scaling (a `RwLock` write would serialize; there is none on this path).
+pub fn measure_throughput(
+	g: &GraphGnn,
+	cfg: &RetrievalConfig,
+	trace: &Trace,
+	threads: usize,
+	per_thread_iters: usize,
+) -> ThroughputReport {
+	let threads = threads.max(1);
+	let start = Instant::now();
+	std::thread::scope(|s| {
+		for _ in 0..threads {
+			s.spawn(|| {
+				for _ in 0..per_thread_iters {
+					for q in &trace.queries {
+						let mode = Mode::parse(&q.mode);
+						let qvec = embed::embed(&q.query);
+						let opts = q
+							.filter_kind
+							.as_deref()
+							.and_then(crate::base::types::EntityKind::parse)
+							.map(|kind| crate::retrieval::score::QueryOptions {
+								kind: Some(kind),
+								..Default::default()
+							});
+						let _ = crate::retrieval::answer::query(g, cfg, &qvec, &q.query, mode, None, None, opts);
+					}
+				}
+			});
+		}
+	});
+	let elapsed_secs = start.elapsed().as_secs_f64();
+	let total_queries = threads * per_thread_iters * trace.queries.len();
+	let qps = if elapsed_secs > 0.0 {
+		total_queries as f64 / elapsed_secs
+	} else {
+		0.0
+	};
+	ThroughputReport {
+		trace_name: trace.name.clone(),
+		threads,
+		total_queries,
+		elapsed_secs,
+		qps,
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -134,5 +197,25 @@ mod tests {
 		assert_eq!(r.samples, 5, "1 query x 5 iters = 5 timed samples");
 		assert!(r.mean_ms >= 0.0 && r.p50_ms >= 0.0);
 		assert!(r.p50_ms <= r.p95_ms && r.p95_ms <= r.p99_ms, "percentiles are monotonic");
+	}
+
+	#[test]
+	fn measure_throughput_runs_every_query_on_every_thread() {
+		let trace = Trace {
+			name: "tput".into(),
+			docs: vec![
+				TraceDoc { id: "d1".into(), text: "rust ownership borrow checker".into(), kind: None },
+				TraceDoc { id: "d2".into(), text: "graph neural network".into(), kind: None },
+			],
+			queries: vec![
+				TraceQuery { id: "q1".into(), query: "rust ownership".into(), expected_ids: vec!["d1".into()], mode: "hybrid".into(), filter_kind: None },
+				TraceQuery { id: "q2".into(), query: "graph network".into(), expected_ids: vec!["d2".into()], mode: "hybrid".into(), filter_kind: None },
+			],
+		};
+		let g = build_graph(&trace);
+		let r = measure_throughput(&g, &RetrievalConfig::default(), &trace, 4, 3);
+		assert_eq!(r.total_queries, 24, "4 threads x 3 iters x 2 queries");
+		assert_eq!(r.threads, 4);
+		assert!(r.qps > 0.0 && r.elapsed_secs >= 0.0, "positive throughput");
 	}
 }
