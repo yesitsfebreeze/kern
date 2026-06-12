@@ -9,6 +9,7 @@ pub struct SweepRow {
 	pub param: String,
 	pub value: String,
 	pub mean_ndcg10: f64,
+	pub mean_recall10: f64,
 	pub num_queries: usize,
 }
 
@@ -74,6 +75,7 @@ pub fn sweep(g: &GraphGnn, trace: &Trace, param: SweepParam, values: &[f64]) -> 
 			param: param.name().to_string(),
 			value: format!("{v}"),
 			mean_ndcg10: report.mean_ndcg10,
+			mean_recall10: report.mean_recall10,
 			num_queries: report.per_query.len(),
 		});
 	}
@@ -81,11 +83,11 @@ pub fn sweep(g: &GraphGnn, trace: &Trace, param: SweepParam, values: &[f64]) -> 
 }
 
 pub fn to_csv(rows: &[SweepRow]) -> String {
-	let mut out = String::from("param,value,mean_ndcg10,num_queries\n");
+	let mut out = String::from("param,value,mean_ndcg10,mean_recall10,num_queries\n");
 	for r in rows {
 		out.push_str(&format!(
-			"{},{},{:.6},{}\n",
-			r.param, r.value, r.mean_ndcg10, r.num_queries
+			"{},{},{:.6},{:.6},{}\n",
+			r.param, r.value, r.mean_ndcg10, r.mean_recall10, r.num_queries
 		));
 	}
 	out
@@ -137,13 +139,13 @@ mod tests {
 	#[test]
 	fn to_csv_has_a_header_and_one_six_decimal_row_per_entry() {
 		let rows = vec![
-			SweepRow { param: "rrf_k".into(), value: "10".into(), mean_ndcg10: 0.5, num_queries: 3 },
-			SweepRow { param: "rrf_k".into(), value: "20".into(), mean_ndcg10: 0.75, num_queries: 3 },
+			SweepRow { param: "rrf_k".into(), value: "10".into(), mean_ndcg10: 0.5, mean_recall10: 0.6, num_queries: 3 },
+			SweepRow { param: "rrf_k".into(), value: "20".into(), mean_ndcg10: 0.75, mean_recall10: 0.8, num_queries: 3 },
 		];
 		let lines: Vec<String> = to_csv(&rows).lines().map(str::to_string).collect();
-		assert_eq!(lines[0], "param,value,mean_ndcg10,num_queries");
+		assert_eq!(lines[0], "param,value,mean_ndcg10,mean_recall10,num_queries");
 		assert_eq!(lines.len(), 3, "header + 2 data rows");
-		assert_eq!(lines[1], "rrf_k,10,0.500000,3", "ndcg formatted to 6 decimals");
-		assert_eq!(lines[2], "rrf_k,20,0.750000,3");
+		assert_eq!(lines[1], "rrf_k,10,0.500000,0.600000,3", "metrics formatted to 6 decimals");
+		assert_eq!(lines[2], "rrf_k,20,0.750000,0.800000,3");
 	}
 }

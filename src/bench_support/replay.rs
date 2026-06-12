@@ -13,6 +13,8 @@ pub struct QueryReport {
 	pub ranked_ids: Vec<String>,
 	pub expected_ids: Vec<String>,
 	pub ndcg10: f64,
+	/// Recall@10: coverage of the expected ids in the top-10, order-insensitive.
+	pub recall10: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -20,21 +22,30 @@ pub struct ReplayReport {
 	pub trace_name: String,
 	pub per_query: Vec<QueryReport>,
 	pub mean_ndcg10: f64,
+	pub mean_recall10: f64,
 }
 
 pub fn replay(g: &GraphGnn, cfg: &RetrievalConfig, trace: &Trace) -> ReplayReport {
 	let mut per_query = Vec::with_capacity(trace.queries.len());
-	let mut sum = 0.0;
+	let mut ndcg_sum = 0.0;
+	let mut recall_sum = 0.0;
 	for q in &trace.queries {
 		let rep = run_one(g, cfg, q);
-		sum += rep.ndcg10;
+		ndcg_sum += rep.ndcg10;
+		recall_sum += rep.recall10;
 		per_query.push(rep);
 	}
-	let mean = if per_query.is_empty() { 0.0 } else { sum / per_query.len() as f64 };
+	let n = per_query.len() as f64;
+	let (mean_ndcg10, mean_recall10) = if per_query.is_empty() {
+		(0.0, 0.0)
+	} else {
+		(ndcg_sum / n, recall_sum / n)
+	};
 	ReplayReport {
 		trace_name: trace.name.clone(),
 		per_query,
-		mean_ndcg10: mean,
+		mean_ndcg10,
+		mean_recall10,
 	}
 }
 
@@ -44,12 +55,14 @@ fn run_one(g: &GraphGnn, cfg: &RetrievalConfig, q: &TraceQuery) -> QueryReport {
 	let result = crate::retrieval::answer::query(g, cfg, &qvec, &q.query, mode, None, None, None);
 	let ranked: Vec<String> = result.entities.iter().map(|st| st.entity.id.clone()).collect();
 	let ndcg10 = ndcg::ndcg_at_k(&ranked, &q.expected_ids, 10);
+	let recall10 = ndcg::recall_at_k(&ranked, &q.expected_ids, 10);
 	QueryReport {
 		id: q.id.clone(),
 		mode,
 		ranked_ids: ranked,
 		expected_ids: q.expected_ids.clone(),
 		ndcg10,
+		recall10,
 	}
 }
 
@@ -99,6 +112,13 @@ mod tests {
 			"expected positive ranking quality, got {}",
 			report.mean_ndcg10
 		);
+		// The relevant doc is among only 3 results, so it is within the top-10 ->
+		// full recall. (Coverage assertion, distinct from the ordering NDCG asserts.)
+		assert_eq!(
+			report.mean_recall10, 1.0,
+			"the single expected doc is retrieved within k -> recall@10 = 1.0"
+		);
+		assert_eq!(report.per_query[0].recall10, 1.0, "per-query recall is populated");
 	}
 
 	#[test]

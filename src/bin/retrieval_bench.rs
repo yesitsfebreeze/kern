@@ -58,9 +58,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			println!("trace: {}", report.trace_name);
 			println!("queries: {}", report.per_query.len());
 			for q in &report.per_query {
-				println!("  {:<20} mode={:?} ndcg@10={:.4}", q.id, q.mode, q.ndcg10);
+				println!(
+					"  {:<20} mode={:?} ndcg@10={:.4} recall@10={:.4}",
+					q.id, q.mode, q.ndcg10, q.recall10
+				);
 			}
-			println!("mean NDCG@10: {:.4}", report.mean_ndcg10);
+			println!("mean NDCG@10:   {:.4}", report.mean_ndcg10);
+			println!("mean recall@10: {:.4}", report.mean_recall10);
 		}
 		Some(name) => {
 			// Validate up front so the user gets a clear message instead of an empty
