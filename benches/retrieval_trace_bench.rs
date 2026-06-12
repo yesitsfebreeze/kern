@@ -1,5 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use kern::bench_support::replay::{build_graph, replay};
+use kern::bench_support::build::build_graph;
+use kern::bench_support::replay::replay;
 use kern::bench_support::sweep::{sweep, SweepParam};
 use kern::bench_support::trace;
 use kern::config::RetrievalConfig;

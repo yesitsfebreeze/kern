@@ -354,15 +354,17 @@ fn bench_hnsw_adaptive_vs_fixed(c: &mut Criterion) {
 /// latency baseline future index slices are measured against.
 fn bench_cold_search(c: &mut Criterion) {
 	let dir = tempfile::tempdir().expect("tempdir");
+	let store = kern::base::store::Store::open(dir.path().to_str().expect("utf-8 tempdir path"))
+		.expect("open cold store");
 	let n = 2_000;
 	for i in 0..n {
 		let mut e = make_entity(&format!("c{i}"), &format!("cold thought {i} topic {}", i % 10));
 		e.vector = stub_embed(&format!("cold thought {i} topic {}", i % 10));
-		kern::base::cold::spill(dir.path(), &e);
+		store.cold_spill(&e).expect("cold spill");
 	}
 	let query = stub_embed("cold thought 5 topic 5");
 	c.bench_function("cold_search_2000", |bench| {
-		bench.iter(|| kern::base::cold::search(black_box(dir.path()), black_box(&query), 5));
+		bench.iter(|| store.cold_search(black_box(&query), 5).expect("cold search"));
 	});
 }
 
