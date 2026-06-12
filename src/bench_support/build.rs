@@ -92,3 +92,32 @@ fn seed_similarity_edges(g: &mut GraphGnn, root_id: &str, trace: &Trace) {
 		}
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::bench_support::trace::{Trace, TraceDoc};
+
+	#[test]
+	fn build_graph_populates_a_searchable_lexical_index() {
+		// Regression for the empty-lexical-index bug: a built graph's BM25 index must
+		// return the token-overlapping doc, so "hybrid" trace queries actually use it
+		// instead of silently falling back to dense-only.
+		let trace = Trace {
+			name: "t".into(),
+			docs: vec![
+				TraceDoc { id: "go_concurrency".into(), text: "Go goroutines channels select concurrency primitives".into(), kind: None },
+				TraceDoc { id: "rust_ownership".into(), text: "Rust ownership borrow checker memory safety".into(), kind: None },
+			],
+			queries: vec![],
+		};
+		let g = build_graph(&trace);
+		let lex = g.lexical().expect("graph carries a lexical index");
+		let hits = lex.search("go goroutines channels", 5);
+		assert!(!hits.is_empty(), "the lexical index is populated, not empty");
+		assert_eq!(
+			hits[0].entity_id, "go_concurrency",
+			"strong token overlap must rank first, got {hits:?}"
+		);
+	}
+}
