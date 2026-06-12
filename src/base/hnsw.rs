@@ -57,6 +57,7 @@ pub struct HnswIndex {
 enum Query<'a> {
 	Float(&'a [f64]),
 	Int8 { q: QuantizedVec, raw: &'a [f64] },
+	Binary { q: QuantizedVec, raw: &'a [f64] },
 }
 
 impl<'a> Query<'a> {
@@ -64,6 +65,10 @@ impl<'a> Query<'a> {
 		match mode {
 			QuantizationMode::Int8 => Self::Int8 {
 				q: QuantizedVec::encode(vec, QuantizationMode::Int8),
+				raw: vec,
+			},
+			QuantizationMode::Binary => Self::Binary {
+				q: QuantizedVec::encode(vec, QuantizationMode::Binary),
 				raw: vec,
 			},
 			_ => Self::Float(vec),
@@ -122,10 +127,9 @@ impl HnswIndex {
 		}
 		let level = self.random_level();
 		let (stored_vec, qvec) = match self.quant_mode {
-			QuantizationMode::Int8 => (
-				Vec::new(),
-				Some(QuantizedVec::encode(&vec, QuantizationMode::Int8)),
-			),
+			QuantizationMode::Int8 | QuantizationMode::Binary => {
+				(Vec::new(), Some(QuantizedVec::encode(&vec, self.quant_mode)))
+			}
 			_ => (vec.clone(), None),
 		};
 		let node = HnswNode {
@@ -383,7 +387,7 @@ impl HnswIndex {
 		};
 		match query {
 			Query::Float(v) => cosine_distance(&node.vec, v),
-			Query::Int8 { q, raw } => match &node.qvec {
+			Query::Int8 { q, raw } | Query::Binary { q, raw } => match &node.qvec {
 				Some(nq) => quantized_cosine_distance(nq, q),
 				None => cosine_distance(&node.vec, raw),
 			},
@@ -395,7 +399,7 @@ impl HnswIndex {
 			return 1.0;
 		};
 		match self.quant_mode {
-			QuantizationMode::Int8 => match (&na.qvec, &nb.qvec) {
+			QuantizationMode::Int8 | QuantizationMode::Binary => match (&na.qvec, &nb.qvec) {
 				(Some(qa), Some(qb)) => quantized_cosine_distance(qa, qb),
 				_ => cosine_distance(&na.vec, &nb.vec),
 			},
@@ -799,6 +803,43 @@ mod tests {
 		}
 		let agreement = total / queries as f64;
 		assert!(agreement >= 0.75, "int8 vs f64 top-{k} agreement too low: {agreement:.3}");
+	}
+
+	#[test]
+	fn binary_recall_tracks_f64() {
+		// 1-bit sign quantization cuts vector memory ~64x but is far coarser than
+		// int8: each dimension keeps only its sign. The honest bar is therefore
+		// lower than int8's 0.75 — this test MEASURES the recall floor of pure
+		// Hamming candidate-gen (no rescore yet) so the tradeoff is a number, not a
+		// guess. Binary must still recover a substantial fraction of the f64 top-k.
+		let dim = 32;
+		let corpus = random_corpus(13, 300, dim);
+		let mut f64_idx = HnswIndex::new(16, 128);
+		let mut bin_idx = HnswIndex::with_mode(16, 128, QuantizationMode::Binary);
+		for (id, v) in &corpus {
+			f64_idx.insert(id.clone(), v.clone());
+			bin_idx.insert(id.clone(), v.clone());
+		}
+		let k = 10;
+		let queries = 25;
+		let mut qrng = rand::rngs::StdRng::seed_from_u64(123);
+		let mut total = 0.0;
+		for _ in 0..queries {
+			let q = rand_vec(&mut qrng, dim);
+			let f: HashSet<String> =
+				f64_idx.search(&q, k, 128).into_iter().map(|h| h.id).collect();
+			let b: HashSet<String> =
+				bin_idx.search(&q, k, 128).into_iter().map(|h| h.id).collect();
+			total += f.intersection(&b).count() as f64 / k as f64;
+		}
+		let agreement = total / queries as f64;
+		// Measured ~0.33 at dim=32 (run 2026-06-12). Pure 1-bit Hamming WITHOUT
+		// rescore loses ~2/3 of the f64 top-k — this number is the whole point of
+		// the test: it proves int8-rescore is REQUIRED before binary is a usable
+		// mode (hence it stays out of `QuantizationMode::parse`). The floor locks
+		// the measured behaviour; the rescore phase must raise both, then this
+		// asserts the lifted floor.
+		assert!(agreement >= 0.30, "binary vs f64 top-{k} agreement below floor: {agreement:.3}");
 	}
 
 	#[test]

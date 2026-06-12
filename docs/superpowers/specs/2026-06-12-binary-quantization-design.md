@@ -125,18 +125,40 @@ in memory. (A `quant_mode = Binary` graph still persists int8 on disk.)
 - **No-compat law**: one quantizer path; `Binary` extends the same `QuantizedVec`
   + `quantized_cosine_distance`, no parallel code path.
 
+## Implementation findings (Phase 1, commit pending)
+
+Two facts surfaced once the code was written — they correct the original plan:
+
+1. **The f64 vector is NOT retained under quantization.** `HnswIndex::insert`
+   stores `stored_vec = Vec::new()` for Int8 (the f64 is dropped; the int8 *is*
+   the stored form — that is where int8's 8× saving comes from). So "rescore with
+   the retained f64 `HnswNode.vec`" is impossible as written: there is no f64 to
+   rescore against. Rescoring must use a *retained int8* representation instead.
+2. **Pure 1-bit Hamming (no rescore) measures recall@10 ≈ 0.33** at dim=32
+   (`base::hnsw::tests::binary_recall_tracks_f64`), vs int8's 0.75. Unusable as a
+   drop-in. This is the measured proof that **rescore is mandatory**, not optional.
+
+**Decision:** Phase 1 ships the tested binary primitive + the HNSW wiring +
+the recall measurement, but `Binary` is **removed from `QuantizationMode::parse`**
+(internal/`with_mode`-only) so no user can select a 0.33-recall mode. The "better
+tool" for a configurable quant mode today remains int8. Phase 2 (below) makes
+binary viable by retaining int8 per binary node and rescoring the Hamming
+shortlist; only then is it exposed via config.
+
 ## Phasing
 
-1. **quant.rs primitive** — `Binary` variant, `b`/`dim_bits`, `encode_binary`,
-   decode, `dim`, Hamming proxy in `quantized_cosine_distance`, `bytes_per_dim`,
-   `parse`/`as_str`. Unit tests: pack round-trip, Hamming, monotonicity vs f64
-   cosine, sizes. **Compiles and is fully tested in isolation; search still uses
-   the f64 path, so no live behaviour change yet.**
-2. **hnsw wire-in + rescore** — `Query::Binary`, distance arms, top-k f64 rescore.
-3. **Recall validation** — `binary_recall_tracks_f64` on the bench corpus + the
-   `estimate_memory` 0.125 column; set the documented recall floor.
-4. **Config + default** — expose `binary` in the quant-mode config; ship
-   default-off until Phase 3's number clears the floor.
+1. **quant.rs primitive + hnsw wiring + measurement (DONE).** `Binary` variant,
+   `b`/`dim_bits`, `encode_binary`, decode, `dim`, Hamming proxy in
+   `quantized_cosine_distance`, `bytes_per_dim`, `as_str`; `Query::Binary`,
+   distance arms, `insert` stores binary qvec. Unit tests (pack round-trip,
+   Hamming, monotonicity) + `binary_recall_tracks_f64` measuring **0.33**.
+   `Binary` is **NOT** in `parse` (internal-only) given that number.
+2. **int8-rescore (makes binary viable).** Retain an int8 vector per binary node
+   (≈1.125 B/dim total, still ~7× smaller than f64); after Hamming candidate-gen,
+   rescore the top-`ef` shortlist by int8 cosine and re-rank before truncating to
+   `k`. Re-measure `binary_recall_tracks_f64`; target ≥ int8's 0.75 floor.
+3. **Config + default** — once Phase 2 clears the floor, add `binary` back to
+   `parse` and surface the `estimate_memory` 0.125/1.125 column; ship default-off.
 
 ## Leverages (already built)
 
