@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use super::constants::KERN_CAP_DISABLED;
-use super::hnsw::HnswIndex;
 use super::lexical::LexicalIndex;
+use super::vector_backend::VectorBackend;
 use super::store::{Store, StoreError};
 use super::types::{EntityStatus, Kern};
 use super::util;
@@ -21,9 +21,9 @@ fn index_kern_into(
 	entity_kern: &mut HashMap<String, String>,
 	reason_kern: &mut HashMap<String, String>,
 	src_index: &mut HashMap<String, String>,
-	entity_idx: &mut HnswIndex,
-	gnn_entity_idx: &mut HnswIndex,
-	reason_idx: &mut HnswIndex,
+	entity_idx: &mut VectorBackend,
+	gnn_entity_idx: &mut VectorBackend,
+	reason_idx: &mut VectorBackend,
 ) {
 	for t in kern.entities.values() {
 		entity_kern.insert(t.id.clone(), kern.id.clone());
@@ -62,9 +62,9 @@ pub struct GraphGnn {
 	/// in a process). Cheap to clone — it is reference-counted.
 	store: Option<Arc<Store>>,
 	pub quant_mode: QuantizationMode,
-	pub gnn_entity_idx: HnswIndex,
-	pub entity_idx: HnswIndex,
-	pub reason_idx: HnswIndex,
+	pub gnn_entity_idx: VectorBackend,
+	pub entity_idx: VectorBackend,
+	pub reason_idx: VectorBackend,
 	pub kerns: HashMap<String, Kern>,
 	unloaded: HashSet<String>,
 	src_index: HashMap<String, String>,
@@ -112,9 +112,9 @@ impl GraphGnn {
 			data_dir: String::new(),
 			store: None,
 			quant_mode,
-			entity_idx: HnswIndex::with_mode(16, 200, quant_mode),
-			gnn_entity_idx: HnswIndex::with_mode(16, 200, quant_mode),
-			reason_idx: HnswIndex::with_mode(16, 200, quant_mode),
+			entity_idx: VectorBackend::resident(16, 200, quant_mode),
+			gnn_entity_idx: VectorBackend::resident(16, 200, quant_mode),
+			reason_idx: VectorBackend::resident(16, 200, quant_mode),
 			kerns,
 			unloaded: HashSet::new(),
 			src_index: HashMap::new(),
@@ -175,9 +175,9 @@ impl GraphGnn {
 	}
 
 	pub fn rebuild_index(&mut self) {
-		self.entity_idx = HnswIndex::with_mode(16, 200, self.quant_mode);
-		self.gnn_entity_idx = HnswIndex::with_mode(16, 200, self.quant_mode);
-		self.reason_idx = HnswIndex::with_mode(16, 200, self.quant_mode);
+		self.entity_idx = VectorBackend::resident(16, 200, self.quant_mode);
+		self.gnn_entity_idx = VectorBackend::resident(16, 200, self.quant_mode);
+		self.reason_idx = VectorBackend::resident(16, 200, self.quant_mode);
 		self.src_index.clear();
 		self.entity_kern.clear();
 		self.reason_kern.clear();
@@ -507,9 +507,9 @@ impl GraphGnn {
 			data_dir,
 			store: None,
 			quant_mode,
-			entity_idx: HnswIndex::with_mode(16, 200, quant_mode),
-			gnn_entity_idx: HnswIndex::with_mode(16, 200, quant_mode),
-			reason_idx: HnswIndex::with_mode(16, 200, quant_mode),
+			entity_idx: VectorBackend::resident(16, 200, quant_mode),
+			gnn_entity_idx: VectorBackend::resident(16, 200, quant_mode),
+			reason_idx: VectorBackend::resident(16, 200, quant_mode),
 			kerns,
 			unloaded,
 			src_index: HashMap::new(),

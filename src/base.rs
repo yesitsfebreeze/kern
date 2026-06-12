@@ -23,3 +23,4 @@ pub mod store;
 pub mod time;
 pub mod types;
 pub mod util;
+pub mod vector_backend;
