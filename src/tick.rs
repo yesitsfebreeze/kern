@@ -134,15 +134,26 @@ fn do_cluster(
 /// off-core enough to spin out into their own child kern. Pure read over `kern`;
 /// returns every cluster plus the indices selected for spawning.
 fn select_spawn_clusters(kern: &crate::base::types::Kern, max_sample: usize) -> (Vec<Cluster>, Vec<usize>) {
+	// UNNAMED KERNS NEVER SPAWN. A fresh child is by construction one cohesive
+	// cluster, and `do_cluster` spawns grandchildren (phase 2) before the Name
+	// task is even enqueued (phase 5) — so an unnamed kern that may spawn
+	// descends one level per pass, unboundedly (observed live: tens of
+	// thousands of empty unnamed kerns). An unnamed kern also has an empty
+	// `anchor_vec`, so the `is_core_cluster` skip below cannot protect it.
+	// Holding its thoughts until Name succeeds is loss-free: nothing is moved,
+	// dropped, or evicted, and the named kern splits off-core clusters normally.
+	if !kern.is_named() {
+		return (Vec::new(), Vec::new());
+	}
+
 	// `vector_cluster` requires `&[&Entity]`; materialize a Vec of refs because
 	// `kern.entities` is a HashMap and produces an iterator, not a slice.
 	let entities: Vec<_> = kern.entities.values().collect();
 	let clusters = vector_cluster(&entities, max_sample);
-	let is_named = kern.is_named();
 
 	let mut spawn_indices = Vec::new();
 	for (i, c) in clusters.iter().enumerate() {
-		if is_named && is_core_cluster(c, &kern.anchor_vec) {
+		if is_core_cluster(c, &kern.anchor_vec) {
 			continue;
 		}
 		if c.members.len() >= KERN_MIN_CLUSTER_SIZE && cohesion(&c.members) >= KERN_COHESION_THRESHOLD {
@@ -441,6 +452,58 @@ mod tests {
 		assert!(
 			g.kerns.get(&pid).unwrap().entities.is_empty(),
 			"all clustered members moved out of the parent",
+		);
+	}
+
+	#[test]
+	fn select_spawn_clusters_never_spawns_from_an_unnamed_kern() {
+		// Regression: the unnamed-split runaway. A freshly spawned child is by
+		// construction one cohesive cluster, and `do_cluster` spawns grandchildren
+		// (phase 2) BEFORE its Name task runs (phase 5) — so an unnamed kern that
+		// may spawn descends one level per tick pass forever (observed live:
+		// tens of thousands of empty unnamed kerns). An unnamed kern has no
+		// anchor_vec, so the is_core_cluster skip cannot protect it; it must not
+		// spawn at all until named.
+		let mut kern = Kern::new("k", "");
+		assert!(!kern.is_named(), "precondition: kern is unnamed");
+		for i in 0..crate::base::constants::KERN_MIN_CLUSTER_SIZE {
+			let id = format!("e{i}");
+			kern.entities.insert(
+				id.clone(),
+				Entity { id, vector: vec![1.0, 0.0], ..Default::default() },
+			);
+		}
+
+		let (_, spawn_indices) = select_spawn_clusters(&kern, 100);
+		assert!(
+			spawn_indices.is_empty(),
+			"an unnamed kern must never spawn children; got {spawn_indices:?}",
+		);
+	}
+
+	#[test]
+	fn select_spawn_clusters_still_spawns_off_core_cluster_from_named_kern() {
+		// Counterpart guard: the unnamed gate must not disable legitimate splits.
+		// A NAMED kern with a cohesive cluster orthogonal to its anchor still
+		// spins that cluster out.
+		let mut kern = Kern::new("k", "");
+		kern.anchor_text = "named".into();
+		kern.anchor_vec = vec![1.0, 0.0];
+		assert!(kern.is_named(), "precondition: kern is named");
+		for i in 0..crate::base::constants::KERN_MIN_CLUSTER_SIZE {
+			let id = format!("e{i}");
+			// Orthogonal to the anchor -> off-core, cohesive among themselves.
+			kern.entities.insert(
+				id.clone(),
+				Entity { id, vector: vec![0.0, 1.0], ..Default::default() },
+			);
+		}
+
+		let (_, spawn_indices) = select_spawn_clusters(&kern, 100);
+		assert_eq!(
+			spawn_indices.len(),
+			1,
+			"a named kern's off-core cohesive cluster still spawns",
 		);
 	}
 
