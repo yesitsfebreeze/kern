@@ -68,9 +68,36 @@ impl History {
 			);
 			CREATE INDEX IF NOT EXISTS idx_day_kind ON entries(day, kind);
 			CREATE INDEX IF NOT EXISTS idx_kind_key ON entries(kind, key);
-			CREATE INDEX IF NOT EXISTS idx_ts ON entries(ts_ms);",
+			CREATE INDEX IF NOT EXISTS idx_ts ON entries(ts_ms);
+				CREATE TABLE IF NOT EXISTS compacted_segments (
+					name  TEXT    PRIMARY KEY,
+					ts_ms INTEGER NOT NULL
+				);",
 		)
 }
+
+	/// Whether the named rollover segment was already compacted into the archive.
+	/// The compactor checks this before inserting so a crash between insert and
+	/// segment-delete cannot double-insert on retry.
+	pub fn segment_done(&self, name: &str) -> rusqlite::Result<bool> {
+		let conn = self.conn.lock().expect("history mutex poisoned");
+		let n: i64 = conn.query_row(
+			"SELECT COUNT(*) FROM compacted_segments WHERE name = ?",
+			params![name],
+			|r| r.get(0),
+		)?;
+		Ok(n > 0)
+	}
+
+	/// Record that a segment has been compacted (idempotent).
+	pub fn mark_segment(&self, name: &str) -> rusqlite::Result<()> {
+		let conn = self.conn.lock().expect("history mutex poisoned");
+		conn.execute(
+			"INSERT OR IGNORE INTO compacted_segments (name, ts_ms) VALUES (?, ?)",
+			params![name, crate::entry::now_ms() as i64],
+		)?;
+		Ok(())
+	}
 
 	pub fn bulk_insert(&self, entries: &[Entry]) -> rusqlite::Result<()> {
 		if entries.is_empty() {

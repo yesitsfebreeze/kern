@@ -16,6 +16,7 @@
 //! forked sessions; [`distill`] extracts durable claims from conversation text.
 
 pub mod capture_spool;
+pub mod compactor;
 pub mod config;
 pub mod dedup;
 pub mod distill;
