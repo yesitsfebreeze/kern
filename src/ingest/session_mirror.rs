@@ -488,7 +488,7 @@ mod tests {
 	fn read_fork_events_tails_live_jsonl() {
 		use journal::Sink;
 		let dir = tempfile::tempdir().unwrap();
-		let dj = journal::DayJournal::open(dir.path(), Arc::new(journal::NullHistorySink)).unwrap();
+		let dj = journal::DayJournal::open(dir.path()).unwrap();
 		// Producer path: exactly what mux/registry.rs does via journal::emit.
 		dj.emit(fork_open(100, "fork-a", None));
 		dj.emit(Entry {

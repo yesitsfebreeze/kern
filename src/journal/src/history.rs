@@ -317,15 +317,6 @@ fn day_for(ts_ms: u64) -> String {
 	dt.date().to_string()
 }
 
-impl crate::day_journal::HistorySink for History {
-	fn bulk_insert(
-		&self,
-		entries: &[Entry],
-	) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-		History::bulk_insert(self, entries).map_err(|e| Box::new(e) as _)
-}
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;

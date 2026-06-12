@@ -1,32 +1,12 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::entry::{now_ms, Entry, Sink};
-
-pub trait HistorySink: Send + Sync {
-	fn bulk_insert(
-		&self,
-		entries: &[Entry],
-	) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
-}
-
-/// `HistorySink` that drops everything. Used by binaries that don't want
-/// the SQLite warm-store layer.
-pub struct NullHistorySink;
-
-impl HistorySink for NullHistorySink {
-	fn bulk_insert(
-		&self,
-		_entries: &[Entry],
-	) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-		Ok(())
-}
-}
 
 const HEADER_VERSION: u32 = 2;
 
@@ -56,13 +36,12 @@ const DEFAULT_MAX_TODAY_BYTES: u64 = 50 * 1024 * 1024;
 pub struct DayJournal {
 	path: PathBuf,
 	project_abs: String,
-	history: Arc<dyn HistorySink>,
 	inner: Mutex<Inner>,
 	max_bytes: std::sync::atomic::AtomicU64,
 }
 
 impl DayJournal {
-	pub fn open(project_root: &Path, history: Arc<dyn HistorySink>) -> io::Result<Self> {
+	pub fn open(project_root: &Path) -> io::Result<Self> {
 		let dir = project_root.join(".kern").join("journal");
 		fs::create_dir_all(&dir)?;
 		let path = dir.join("today.jsonl");
@@ -78,11 +57,9 @@ impl DayJournal {
 		if path.exists() {
 			if let Some(existing_day) = read_header_day(&path)? {
 				if existing_day != today {
-					let entries = read_entries(&path)?;
-					if let Err(e) = history.bulk_insert(&entries) {
-						eprintln!("day_journal: history bulk_insert failed on open rollover: {e}");
-					}
-					write_fresh(&path, &project_abs, &today)?;
+					// Stale day on disk: archive it as a segment for the
+					// out-of-band compactor, then start fresh.
+					rotate_to_segment(&path, &project_abs, &today)?;
 				}
 			} else {
 				write_fresh(&path, &project_abs, &today)?;
@@ -97,7 +74,6 @@ impl DayJournal {
 		Ok(Self {
 			path,
 			project_abs,
-			history,
 			inner: Mutex::new(Inner {
 				file,
 				current_day: today,
@@ -121,11 +97,7 @@ impl DayJournal {
 }
 
 	fn rollover_locked(&self, inner: &mut Inner, today: &str) -> io::Result<()> {
-		let entries = read_entries(&self.path)?;
-		if let Err(e) = self.history.bulk_insert(&entries) {
-			eprintln!("day_journal: history bulk_insert failed on emit rollover: {e}");
-		}
-		write_fresh(&self.path, &self.project_abs, today)?;
+		rotate_to_segment(&self.path, &self.project_abs, today)?;
 		let file = OpenOptions::new()
 			.read(true)
 			.append(true)
@@ -135,6 +107,24 @@ impl DayJournal {
 		inner.bytes_written = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
 		Ok(())
 }
+}
+
+/// Move the closed `today.jsonl` into `segments/<closed_day>-<stamp>.jsonl` and
+/// write a fresh `today.jsonl` for `today`. The closed day comes from the file's
+/// own header (so a byte-cap segment and the day-change segment for the same day
+/// share the `YYYY-MM-DD` prefix); `<stamp>` (`now_ms`) keeps each segment unique.
+/// Archival of the segment is the out-of-band compactor's job.
+fn rotate_to_segment(path: &Path, project_abs: &str, today: &str) -> io::Result<()> {
+	let seg_dir = path
+		.parent()
+		.expect("journal path always has a parent dir")
+		.join("segments");
+	fs::create_dir_all(&seg_dir)?;
+	let closed_day = read_header_day(path)?.unwrap_or_else(|| today.to_string());
+	let seg = seg_dir.join(format!("{closed_day}-{}.jsonl", now_ms()));
+	fs::rename(path, &seg)?;
+	write_fresh(path, project_abs, today)?;
+	Ok(())
 }
 
 impl Sink for DayJournal {
@@ -197,16 +187,10 @@ fn read_header_day(path: &Path) -> io::Result<Option<String>> {
 	}
 }
 
-fn read_entries(path: &Path) -> io::Result<Vec<Entry>> {
-	let mut out = Vec::new();
-	for_each_entry(path, |e| out.push(e))?;
-	Ok(out)
-}
-
 /// Iterate the parsed entries of a journal file: skip the header (line 0) and
 /// blank lines, parse each remaining line as an [`Entry`], and call `f` for each.
 /// An unparsable line is logged and skipped so one bad line can't abort the whole
-/// read. Shared by `scan` (borrows each entry) and `read_entries` (collects them).
+/// read. Shared by `scan` (borrows each entry) and `scan_path` (the free fn).
 fn for_each_entry(path: &Path, mut f: impl FnMut(Entry)) -> io::Result<()> {
 	let file = File::open(path)?;
 	let reader = BufReader::new(file);
@@ -234,17 +218,10 @@ pub fn scan_path(path: &Path, f: impl FnMut(Entry)) -> io::Result<()> {
 mod tests {
 	use super::*;
 	use crate::entry::{Kind, SCHEMA_VERSION};
-	use std::sync::Mutex as StdMutex;
 
-	#[derive(Default)]
-	struct CapturingHistory {
-		rolled: StdMutex<Vec<Entry>>,
-	}
-	impl HistorySink for CapturingHistory {
-		fn bulk_insert(&self, entries: &[Entry]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-			self.rolled.lock().unwrap().extend_from_slice(entries);
-			Ok(())
-		}
+	fn seg_count(root: &Path) -> usize {
+		let d = root.join(".kern").join("journal").join("segments");
+		std::fs::read_dir(&d).map(|it| it.count()).unwrap_or(0)
 	}
 
 	fn entry(key: &str) -> Entry {
@@ -258,7 +235,67 @@ mod tests {
 	}
 
 	#[test]
-	fn open_rolls_a_stale_day_into_history_and_rewrites_the_header() {
+	fn rollover_renames_closed_day_to_a_segment() {
+		let dir = tempfile::tempdir().unwrap();
+		let dj = DayJournal::open(dir.path()).unwrap();
+		// Accumulate under the default cap, then shrink the cap so the next emit
+		// rolls the prior content into exactly one segment.
+		dj.emit(entry("a"));
+		dj.set_max_bytes(1);
+		dj.emit(entry("b"));
+
+		let seg_dir = dir.path().join(".kern").join("journal").join("segments");
+		let segs: Vec<_> = std::fs::read_dir(&seg_dir).unwrap().filter_map(|e| e.ok()).collect();
+		assert_eq!(segs.len(), 1, "the rolled-over content became one segment file");
+		let name = segs[0].file_name().into_string().unwrap();
+		assert!(name.ends_with(".jsonl"), "segment is a .jsonl");
+		assert!(name.len() > "YYYY-MM-DD".len(), "segment name carries a day prefix + stamp");
+		assert!(dir.path().join(".kern/journal/today.jsonl").exists(), "fresh today.jsonl");
+	}
+
+	#[test]
+	fn emit_rolls_over_when_the_byte_cap_is_exceeded() {
+		let dir = tempfile::tempdir().unwrap();
+		let dj = DayJournal::open(dir.path()).unwrap();
+		dj.emit(entry("first"));
+		dj.set_max_bytes(1); // tiny cap: the next emit rolls the prior content over.
+		dj.emit(entry("second"));
+
+		// 'first' was archived into the rolled-over segment.
+		let seg_dir = dir.path().join(".kern").join("journal").join("segments");
+		let seg = std::fs::read_dir(&seg_dir).unwrap().next().unwrap().unwrap().path();
+		let mut seg_keys = Vec::new();
+		scan_path(&seg, |e| seg_keys.push(e.key.clone())).unwrap();
+		assert!(seg_keys.iter().any(|k| k == "first"), "segment carries the earlier entry");
+
+		// today.jsonl now holds only 'second'.
+		let mut live = Vec::new();
+		dj.scan(|e| live.push(e.key.clone())).unwrap();
+		assert_eq!(live, vec!["second".to_string()]);
+	}
+
+	#[test]
+	fn cap_of_zero_disables_size_rollover() {
+		// max_today_bytes == 0 means "no size cap" — emits accumulate in today.jsonl
+		// and never trigger a mid-day rollover (the `cap > 0 &&` guard in emit makes
+		// 0 a no-op; only a day change would roll over).
+		let dir = tempfile::tempdir().unwrap();
+		let dj = DayJournal::open(dir.path()).unwrap();
+		dj.set_max_bytes(0); // disabled
+
+		for k in ["a", "b", "c", "d"] {
+			dj.emit(entry(k));
+		}
+
+		assert_eq!(seg_count(dir.path()), 0, "cap=0 disables size rollover -> no segments");
+		// All four entries remain in the single today.jsonl (header skipped by scan).
+		let mut keys = Vec::new();
+		dj.scan(|e| keys.push(e.key.clone())).unwrap();
+		assert_eq!(keys, vec!["a", "b", "c", "d"].into_iter().map(String::from).collect::<Vec<_>>());
+	}
+
+	#[test]
+	fn stale_day_rotates_into_a_segment_on_open() {
 		let dir = tempfile::tempdir().unwrap();
 		let jdir = dir.path().join(".kern").join("journal");
 		std::fs::create_dir_all(&jdir).unwrap();
@@ -275,13 +312,15 @@ mod tests {
 			}
 		}
 
-		let hist = Arc::new(CapturingHistory::default());
-		let _dj = DayJournal::open(dir.path(), hist.clone()).unwrap();
+		let _dj = DayJournal::open(dir.path()).unwrap();
 
-		let rolled = hist.rolled.lock().unwrap();
-		assert_eq!(rolled.len(), 2, "the stale day's entries are flushed to history on open");
-		assert_eq!(rolled[0].key, "a");
-		drop(rolled);
+		// The stale day was archived as a segment named with its own date.
+		let segs: Vec<_> = std::fs::read_dir(jdir.join("segments")).unwrap().filter_map(|e| e.ok()).collect();
+		assert_eq!(segs.len(), 1, "stale day archived as one segment on open");
+		assert!(
+			segs[0].file_name().into_string().unwrap().starts_with("2000-01-01-"),
+			"segment carries the stale day's date",
+		);
 		assert_ne!(
 			read_header_day(&today_path).unwrap().as_deref(),
 			Some("2000-01-01"),
@@ -290,50 +329,9 @@ mod tests {
 	}
 
 	#[test]
-	fn emit_rolls_over_when_the_byte_cap_is_exceeded() {
-		let dir = tempfile::tempdir().unwrap();
-		let hist = Arc::new(CapturingHistory::default());
-		let dj = DayJournal::open(dir.path(), hist.clone()).unwrap();
-		dj.set_max_bytes(1); // tiny cap: each emit rolls over the prior content.
-
-		dj.emit(entry("first"));
-		dj.emit(entry("second"));
-
-		// 'first' was flushed to history by the rollover that ran before 'second'.
-		assert!(
-			hist.rolled.lock().unwrap().iter().any(|e| e.key == "first"),
-			"a cap-triggered rollover flushes earlier entries to history",
-		);
-	}
-
-	#[test]
-	fn cap_of_zero_disables_size_rollover() {
-		// max_today_bytes == 0 means "no size cap" — emits accumulate in today.jsonl
-		// and never trigger a mid-day rollover (the `cap > 0 &&` guard in emit makes
-		// 0 a no-op; only a day change would roll over).
-		let dir = tempfile::tempdir().unwrap();
-		let hist = Arc::new(CapturingHistory::default());
-		let dj = DayJournal::open(dir.path(), hist.clone()).unwrap();
-		dj.set_max_bytes(0); // disabled
-
-		for k in ["a", "b", "c", "d"] {
-			dj.emit(entry(k));
-		}
-
-		assert!(
-			hist.rolled.lock().unwrap().is_empty(),
-			"cap=0 disables size rollover -> nothing flushed to history mid-day",
-		);
-		// All four entries remain in the single today.jsonl (header skipped by scan).
-		let mut keys = Vec::new();
-		dj.scan(|e| keys.push(e.key.clone())).unwrap();
-		assert_eq!(keys, vec!["a", "b", "c", "d"].into_iter().map(String::from).collect::<Vec<_>>());
-	}
-
-	#[test]
 	fn scan_visits_entries_in_order_and_skips_the_header() {
 		let dir = tempfile::tempdir().unwrap();
-		let dj = DayJournal::open(dir.path(), Arc::new(NullHistorySink)).unwrap();
+		let dj = DayJournal::open(dir.path()).unwrap();
 		dj.emit(entry("x"));
 		dj.emit(entry("y"));
 

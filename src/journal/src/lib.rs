@@ -17,14 +17,15 @@ pub use events::{
 };
 pub use tracing_layer::{FieldRecorder, JournalTracingLayer};
 
-pub use day_journal::{scan_path, DayJournal, HistorySink, NullHistorySink};
+pub use day_journal::{scan_path, DayJournal};
 
-/// Open the workspace-default journal: `<cwd>/.kern/journal/today.jsonl`
-/// with a `NullHistorySink` (no warm SQLite store). Use this from any
-/// binary that wants to emit cross-process events into the shared file.
+/// Open the workspace-default journal: `<cwd>/.kern/journal/today.jsonl`.
+/// Use this from any binary that wants to emit cross-process events into the
+/// shared file. Day/size rollovers archive the closed day as a segment under
+/// `journal/segments/` for the out-of-band compactor.
 pub fn open_default() -> std::io::Result<DayJournal> {
 	let cwd = std::env::current_dir()?;
-	DayJournal::open(&cwd, std::sync::Arc::new(NullHistorySink))
+	DayJournal::open(&cwd)
 }
 
 use std::sync::OnceLock;
