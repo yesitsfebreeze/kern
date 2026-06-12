@@ -252,7 +252,7 @@ fn handle_peer_exchange(d: &Deps, msg: GossipMessage) {
 		if peer == &self_addr {
 			continue;
 		}
-		if d.node.peer_list().len() >= GOSSIP_MAX_PEERS {
+		if d.node.peer_count() >= GOSSIP_MAX_PEERS {
 			break;
 		}
 		d.node.add_peer(peer);
@@ -526,6 +526,28 @@ mod tests {
 			None
 		);
 		assert_eq!(validated_delta_value("r1", "obj", u64::MAX), None);
+	}
+
+	#[test]
+	fn peer_exchange_caps_at_max_peers() {
+		// A flood of distinct peers in one exchange must not grow the table past
+		// GOSSIP_MAX_PEERS — the loop breaks on peer_count() (the cheap length read
+		// that replaced the per-iteration peer_list().clone()).
+		let g = Arc::new(RwLock::new(GraphGnn::new()));
+		let d = mk_deps(g);
+		let peers: Vec<String> = (0..100).map(|i| format!("10.0.0.{i}:7400")).collect();
+		let msg = GossipMessage {
+			kind: GossipKind::PeerExchange,
+			id: "pe-test".to_string(),
+			origin: "127.0.0.1:1".to_string(),
+			payload: GossipPayload::PeerExchange(PeerExchangePayload { peers }),
+		};
+		handle_peer_exchange(&d, msg);
+		assert_eq!(
+			d.node.peer_count(),
+			GOSSIP_MAX_PEERS,
+			"peer table is capped at GOSSIP_MAX_PEERS"
+		);
 	}
 
 	fn mk_deps_with_save(
