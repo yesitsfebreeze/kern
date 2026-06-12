@@ -110,17 +110,33 @@ pub fn pagerank(
 		}
 	}
 
+	let take = top_k.min(n);
+	if take == 0 {
+		return Vec::new();
+	}
 	let mut scored: Vec<(usize, f64)> = rank.iter().copied().enumerate().collect();
-	scored.sort_by(|a, b| {
+	// Rank order: score descending, ties broken by id ascending. Because `ids` are
+	// unique (deduped above), this is a STRICT total order — no two distinct
+	// entries compare Equal — so a top-k partition followed by sorting only those k
+	// yields exactly the same result as a full sort + take.
+	let cmp = |a: &(usize, f64), b: &(usize, f64)| {
 		b.1
 			.partial_cmp(&a.1)
 			.unwrap_or(std::cmp::Ordering::Equal)
 			.then_with(|| ids[a.0].cmp(&ids[b.0]))
-	});
+	};
+	// Partition the top-k into [0, take) in O(n) average instead of fully sorting
+	// all n entities in O(n log n). pagerank runs per query over the entire entity
+	// graph, so this matters as the graph grows toward Qdrant scale; the final
+	// sort then orders only the k survivors.
+	if take < scored.len() {
+		scored.select_nth_unstable_by(take - 1, &cmp);
+		scored.truncate(take);
+	}
+	scored.sort_by(&cmp);
 
-	let take = top_k.min(n);
 	let mut out_list: Vec<EntityHit> = Vec::with_capacity(take);
-	for (idx, score) in scored.into_iter().take(take) {
+	for (idx, score) in scored {
 		out_list.push(EntityHit {
 			entity_id: ids[idx].clone(),
 			score,
@@ -230,6 +246,55 @@ mod tests {
 			assert_eq!(a.entity_id, b.entity_id);
 			assert!((a.score - b.score).abs() < 1e-6, "converged result is iteration-count-independent");
 		}
+	}
+
+	#[test]
+	fn top_k_partition_matches_full_sort_prefix() {
+		// Distinct in-degrees -> distinct ranks. A top_k=3 query must return the
+		// exact same first three (id and score) as the full ranking, proving the
+		// select_nth_unstable_by partition agrees with a full sort + take.
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("k", "");
+		let nodes = ["A", "B", "C", "D", "E", "F", "G", "H"];
+		for id in nodes {
+			k.entities.insert(id.into(), ent(id));
+		}
+		for e in [
+			edge("A", "D"),
+			edge("B", "D"),
+			edge("C", "D"),
+			edge("D", "E"),
+			edge("F", "E"),
+			edge("G", "E"),
+			edge("H", "A"),
+		] {
+			k.reasons.insert(e.id.clone(), e);
+		}
+		g.register(k);
+		let full = pagerank(&g, &[], 0.85, 200, nodes.len());
+		let topk = pagerank(&g, &[], 0.85, 200, 3);
+		assert_eq!(topk.len(), 3, "top_k truncates to 3");
+		for i in 0..3 {
+			assert_eq!(topk[i].entity_id, full[i].entity_id, "top-{i} id matches full prefix");
+			assert!((topk[i].score - full[i].score).abs() < 1e-12, "top-{i} score matches");
+		}
+	}
+
+	#[test]
+	fn ties_break_by_id_ascending_under_top_k() {
+		// No edges -> uniform rank -> every node ties. With top_k=1 the partition
+		// must still resolve the tie by id ascending ("A"), not by hash/insertion
+		// order. This is the case that would break if the comparator were not a
+		// strict total order through select_nth_unstable_by.
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("k", "");
+		for id in ["C", "A", "B"] {
+			k.entities.insert(id.into(), ent(id));
+		}
+		g.register(k);
+		let r = pagerank(&g, &[], 0.85, 50, 1);
+		assert_eq!(r.len(), 1);
+		assert_eq!(r[0].entity_id, "A", "tied ranks resolve to the id-ascending winner");
 	}
 
 	#[test]
