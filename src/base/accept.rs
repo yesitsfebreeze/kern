@@ -323,6 +323,16 @@ fn supersede(
 		}
 	}
 
+	// A superseded entity is never a valid retrieval result — `score::matches_filter`
+	// / the `status != Superseded` retain in `retrieval::score` always drop it. Left
+	// in the ANN indices it would still be RETURNED by candidate generation, occupy
+	// top-k slots, and then be filtered downstream — costing active hits
+	// (fewer-than-k recall loss, the same class fixed for kind filters) and index
+	// memory on data that can never surface. Remove it from the search indices here;
+	// it stays in `kern.entities` (Superseded) so the supersede chain/history holds.
+	g.entity_idx.delete(&old_id);
+	g.gnn_entity_idx.delete(&old_id);
+
 	let vec = if !thought_vec.is_empty() && !old_vec.is_empty() {
 		average_vec(thought_vec, &old_vec)
 	} else {
@@ -653,6 +663,47 @@ mod tests {
 		}
 		// root + parent + exactly one unnamed child. No per-call runaway.
 		assert_eq!(g.count(), 3, "no runaway: root + parent + one unnamed child");
+	}
+
+	#[test]
+	fn supersede_drops_the_old_entity_from_the_search_index() {
+		// A superseded entity is filtered from results downstream, so leaving it in
+		// the ANN index only wastes top-k candidate slots (fewer-than-k recall loss)
+		// and memory. supersede must remove it from the search index while keeping it
+		// in the kern as Superseded history.
+		let mut g = GraphGnn::new();
+		let kid = g.root.id.clone();
+		let old = Entity {
+			id: "old".into(),
+			external_id: "ext1".into(),
+			vector: vec![1.0, 0.0],
+			status: EntityStatus::Active,
+			..Default::default()
+		};
+		g.entity_idx.insert("old".into(), vec![1.0, 0.0]);
+		if let Some(k) = g.get_mut(&kid) {
+			k.entities.insert("old".into(), old);
+			k.source_index.insert("ext1".into(), "old".into());
+		}
+		g.index_entity("old", &kid);
+		g.set_source_entry("ext1".into(), kid.clone());
+
+		// Searchable before supersede.
+		let before: Vec<String> =
+			search_all_unlocked(&g, &[1.0, 0.0], 5).into_iter().map(|h| h.entity_id).collect();
+		assert!(before.contains(&"old".to_string()), "old is indexed before supersede");
+
+		supersede(&mut g, &kid, "new", &[1.0, 0.0], "ext1");
+
+		// Gone from the ANN index...
+		let after: Vec<String> =
+			search_all_unlocked(&g, &[1.0, 0.0], 5).into_iter().map(|h| h.entity_id).collect();
+		assert!(!after.contains(&"old".to_string()), "superseded entity removed from search index");
+		// ...but retained as Superseded history for the chain.
+		let kern = g.loaded(&kid).unwrap();
+		let old_e = kern.entities.get("old").expect("superseded entity still stored");
+		assert_eq!(old_e.status, EntityStatus::Superseded, "kept as Superseded history");
+		assert_eq!(old_e.superseded_by, "new", "supersede chain preserved");
 	}
 
 	/// The orphan-shard leak that grew the data dir to 347k files was empty,

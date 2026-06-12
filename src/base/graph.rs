@@ -6,7 +6,7 @@ use super::constants::KERN_CAP_DISABLED;
 use super::hnsw::HnswIndex;
 use super::lexical::LexicalIndex;
 use super::store::{Store, StoreError};
-use super::types::Kern;
+use super::types::{EntityStatus, Kern};
 use super::util;
 use crate::quant::QuantizationMode;
 
@@ -27,10 +27,17 @@ fn index_kern_into(
 ) {
 	for t in kern.entities.values() {
 		entity_kern.insert(t.id.clone(), kern.id.clone());
-		if t.has_vector() {
+		// A Superseded entity can never be a retrieval result (`retrieval::score`
+		// drops it), so it must not enter the ANN search indices on load/rebuild —
+		// otherwise it burns top-k candidate slots and index memory only to be
+		// filtered downstream (the durable half of the supersede index-removal; the
+		// live transition is handled in `accept::supersede`). Its `entity_kern`
+		// mapping is kept so the supersede chain still resolves.
+		let searchable = t.status != EntityStatus::Superseded;
+		if searchable && t.has_vector() {
 			entity_idx.insert(t.id.clone(), t.vector.clone());
 		}
-		if t.has_gnn_vector() {
+		if searchable && t.has_gnn_vector() {
 			gnn_entity_idx.insert(t.id.clone(), t.gnn_vector.clone());
 		}
 	}
@@ -511,6 +518,32 @@ mod tests {
 		let mut k = Kern::new(id, parent);
 		k.children = children.iter().map(|s| s.to_string()).collect();
 		k
+	}
+
+	#[test]
+	fn rebuild_index_excludes_superseded_entities() {
+		// Superseded entities are always filtered from retrieval, so re-indexing them
+		// on load/rebuild only pollutes candidate generation. rebuild_index must skip
+		// them while keeping active entities searchable.
+		let mut g = GraphGnn::new();
+		let kid = g.root.id.clone();
+		if let Some(k) = g.get_mut(&kid) {
+			k.entities.insert(
+				"active".into(),
+				Entity { id: "active".into(), vector: vec![1.0, 0.0], status: EntityStatus::Active, ..Default::default() },
+			);
+			k.entities.insert(
+				"dead".into(),
+				Entity { id: "dead".into(), vector: vec![1.0, 0.0], status: EntityStatus::Superseded, ..Default::default() },
+			);
+		}
+		g.rebuild_index();
+		let hits: Vec<String> = crate::base::search::search_all_unlocked(&g, &[1.0, 0.0], 5)
+			.into_iter()
+			.map(|h| h.entity_id)
+			.collect();
+		assert!(hits.contains(&"active".to_string()), "active entity is indexed");
+		assert!(!hits.contains(&"dead".to_string()), "superseded entity excluded from rebuilt index");
 	}
 
 	#[test]
