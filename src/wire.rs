@@ -1,3 +1,8 @@
+//! Wire-format payload types and trust-boundary validation: the serde shapes
+//! exchanged over MCP / RPC, plus the validators that reject out-of-range `conf`
+//! or internal-only `EntityKind`s before they enter the graph. Bad inputs surface
+//! as structured [`WireError`]s — never silently saturated or coerced.
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

@@ -1,3 +1,10 @@
+//! Provider-agnostic LLM dispatch. Three legs: `embed` (embeddings), `reason`
+//! (distillation/edge-proposal — local Ollama runs it CPU-only via `num_gpu:0`
+//! so the 8 GB GPU stays free for embed+answer; cloud reason endpoints use the
+//! OpenAI-compat `/v1` path), and `answer` (the streamed `/ask` completion over
+//! native `/api/chat`). Each leg caps `num_ctx`, keeps the model warm via
+//! `keep_alive`, and retries transient (timeout/connect) errors.
+
 use futures_util::StreamExt as _;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
