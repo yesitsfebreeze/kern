@@ -144,8 +144,11 @@ pub enum Commands {
 		#[arg(long)]
 		no_llm: bool,
 	},
-	/// Reap empty unnamed kerns and persist (run with the daemon stopped).
+	/// Reap empty unnamed kerns, persist, and shrink data.mdb (daemon stopped).
 	Gc,
+	/// Shrink data.mdb to its live size without reaping (daemon stopped). LMDB
+	/// keeps freed pages in-file after a delete; this rewrites the env compactly.
+	Compact,
 	/// Manage anchors: named top-level buckets the root routes memories into.
 	/// Memories that match no anchor fall through to `generic`.
 	Anchor {
@@ -253,6 +256,50 @@ pub(crate) fn load_graph(cfg: &crate::config::Config) -> GraphGnn {
 pub(crate) fn save_graph(g: &GraphGnn) {
 	if let Err(e) = crate::base::persist::save_all(g) {
 		eprintln!("save: {e}");
+	}
+}
+
+/// data.mdb size above which a startup self-heal (reap + compact) is worth its
+/// double-load cost. A clean graph is a few MB; this only fires on the runaway
+/// bloat (observed up to 4 GiB) the unnamed-kern fragmentation used to leave.
+const SELF_HEAL_BLOAT_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
+
+/// If `data.mdb` is bloated, reap empty kerns and compact the env in place — once,
+/// at startup, before the serving env opens. MUST be called only while this
+/// process holds the cwd exclusively (no other daemon serving it), or the reap
+/// would race a live writer and the swap would fail on a held file. Idempotent and
+/// best-effort: any failure is logged and startup continues with the un-compacted
+/// (but still functional) store.
+fn maybe_self_heal_store(cfg: &crate::config::Config) {
+	let data = std::path::Path::new(&cfg.data_dir).join("data.mdb");
+	let len = std::fs::metadata(&data).map(|m| m.len()).unwrap_or(0);
+	if len < SELF_HEAL_BLOAT_BYTES {
+		return;
+	}
+	tracing::info!(target: "kern.startup", bytes = len, "data.mdb is bloated; self-healing (reap + compact)");
+
+	// Reap empties and persist the deletions in a throwaway graph, then drop it so
+	// its env handle releases before the compaction swap.
+	{
+		let mut g = load_graph(cfg);
+		let (before, reaped, after) = g.gc_empty_kerns_counted();
+		if reaped > 0 {
+			save_graph(&g);
+			eprintln!("kern: self-heal reaped {reaped} empty kerns ({before} -> {after})");
+		}
+		// g (and its env handle) dropped here.
+	}
+	// `compact_dir` opens its own env and closes it deterministically before the
+	// swap, so the just-reaped data.mdb shrinks to its live size.
+	match crate::base::store::compact_dir(&cfg.data_dir) {
+		Ok((old, new)) => eprintln!(
+			"kern: self-heal compacted data.mdb {} MiB -> {} MiB",
+			old / (1024 * 1024),
+			new / (1024 * 1024),
+		),
+		Err(e) => {
+			tracing::warn!(target: "kern.startup", error = %e, "self-heal compaction skipped (store may be held by another process)");
+		}
 	}
 }
 
@@ -410,6 +457,7 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 		Commands::Health => admin::cmd_health(cfg),
 		Commands::Profile { text, no_llm } => profile_cmd::cmd_profile(cfg, &text, no_llm).await,
 		Commands::Gc => admin::cmd_gc(cfg),
+		Commands::Compact => admin::cmd_compact(cfg),
 
 		Commands::Anchor { action } => admin::cmd_anchor(cfg, action).await,
 
@@ -497,6 +545,15 @@ pub(crate) async fn bootstrap(
 	if let Some(j) = journal::global() {
 		j.set_max_bytes(cfg.journal.max_today_bytes);
 	}
+
+	// Self-heal a bloated store BEFORE the serving env opens. LMDB never returns
+	// freed pages to the OS, so a graph that was once fragmented to a runaway of
+	// empty unnamed kerns leaves a multi-GB `data.mdb` that every load must mmap
+	// and that the startup reap alone can't shrink. Here — while we still hold the
+	// cwd exclusively (the mux calls bootstrap only after winning kern.sock) and
+	// no serving env is open yet — reap the empties and rewrite the file compactly.
+	// Guarded by a size threshold so a normal small graph pays nothing.
+	maybe_self_heal_store(cfg);
 
 	// Runtime watchdog. A wedged daemon — deadlock on the graph lock, a panic
 	// loop, or every worker thread pinned in a blocking LLM call — keeps holding

@@ -119,6 +119,7 @@ impl trnsprt::McpServer for Server {
 			"anchor"     => self.tool_anchor(args),
 			"descriptor" => self.tool_descriptor(args),
 			"pulse"      => self.tool_pulse(args),
+			"gc"         => self.tool_gc(),
 			// Comms tools — return a clear error when not hosted in a mux.
 			"delegate"   => self.tool_delegate(args),
 			"collect"    => self.tool_collect(args),

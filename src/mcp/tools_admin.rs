@@ -76,6 +76,11 @@ pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 				},
 			},
 		}),
+		serde_json::json!({
+			"name": "gc",
+			"description": "Reap empty/orphan kerns from THIS running daemon's graph (the cwd it serves) and persist, live — no need to stop the daemon. Removes the residue of unnamed-kern churn so load, retrieval, and the viewer stop paying for dead shards. Returns before/after kern counts and the data.mdb file size. (Deleting rows frees pages inside the file but LMDB only returns that disk to the OS on a compaction; the file shrinks on the next restart, which auto-compacts, or via offline `kern compact`.)",
+			"inputSchema": {"type": "object", "properties": {}},
+		}),
 	]
 }
 
@@ -170,6 +175,37 @@ impl Server {
 			}
 			_ => tool_error("action must be add or rm"),
 		}
+	}
+
+	/// Live garbage-collect: reap empty/orphan kerns from this daemon's graph and
+	/// persist. Safe to call while serving — it takes the graph write lock only for
+	/// the reap, then persists through the shared save closure (which prunes the
+	/// deleted rows from the store). No env close, so no restart needed.
+	pub(crate) fn tool_gc(&self) -> serde_json::Value {
+		let (before, reaped, after) = {
+			let mut g = write_recovered(&self.graph);
+			g.gc_empty_kerns_counted()
+		};
+		if reaped > 0 {
+			(self.save_fn)();
+		}
+		// Report the on-disk footprint so the caller knows when a restart/`kern
+		// compact` would reclaim the freed pages (LMDB keeps them until then).
+		let data_bytes = read_recovered(&self.graph)
+			.store()
+			.map(|s| s.data_file_len())
+			.unwrap_or(0);
+		tool_result_json(&serde_json::json!({
+			"reaped": reaped,
+			"before": before,
+			"after": after,
+			"data_mdb_bytes": data_bytes,
+			"note": if data_bytes > 256 * 1024 * 1024 {
+				"rows pruned live; data.mdb keeps freed pages until the next restart auto-compacts (or run `kern compact` with the daemon stopped)"
+			} else {
+				"clean"
+			},
+		}))
 	}
 
 	pub(crate) fn tool_pulse(&self, args: &serde_json::Value) -> serde_json::Value {

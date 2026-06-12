@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use heed::types::{Bytes, Str};
-use heed::{Database, Env, EnvOpenOptions};
+use heed::{CompactionOption, Database, Env, EnvOpenOptions};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -210,6 +210,9 @@ pub struct Store {
 	kern: Database<Str, Bytes>,
 	cold: Database<Str, Bytes>,
 	meta: Database<Str, Bytes>,
+	/// The data directory this env lives in. Held so the offline compactor can
+	/// locate `data.mdb`/`lock.mdb` for the copy-and-swap.
+	dir: std::path::PathBuf,
 }
 
 impl Store {
@@ -238,7 +241,18 @@ impl Store {
 			kern,
 			cold,
 			meta,
+			dir: path.to_path_buf(),
 		})
+	}
+
+	/// Apparent size of the backing `data.mdb` in bytes (the LMDB high-water mark).
+	/// LMDB never returns freed pages to the OS, so after a bulk delete this stays
+	/// at its peak until [`compact_dir`] rewrites the env. Used to decide whether a
+	/// compaction is worth its cost. Returns 0 if the file can't be stat'd.
+	pub fn data_file_len(&self) -> u64 {
+		std::fs::metadata(self.dir.join("data.mdb"))
+			.map(|m| m.len())
+			.unwrap_or(0)
 	}
 
 	// ---- generic typed KV (used by the graph-level helpers + tests) ----
@@ -466,6 +480,77 @@ impl Store {
 	}
 }
 
+/// The sidecar path a compacted copy is written to before the swap.
+fn compact_tmp(dir: &Path) -> std::path::PathBuf {
+	dir.join("data.mdb.compact")
+}
+
+/// Replace `dir/data.mdb` with the compacted copy at `dir/data.mdb.compact` and
+/// drop the stale `lock.mdb`. Returns `(old_bytes, new_bytes)`.
+///
+/// The caller MUST have dropped every [`Store`]/`Env` handle to `dir` first. Even
+/// then, heed/LMDB unmaps the file ASYNCHRONOUSLY on Windows, so a rename issued
+/// immediately can still hit `Access is denied` while the unmap drains. We retry
+/// with a short backoff to ride out that lag rather than failing the whole compaction.
+pub fn swap_compacted(dir: &str) -> Result<(u64, u64), StoreError> {
+	let path = Path::new(dir);
+	let data = path.join("data.mdb");
+	let tmp = compact_tmp(path);
+	let old_len = std::fs::metadata(&data).map(|m| m.len()).unwrap_or(0);
+
+	let mut last_err = None;
+	for attempt in 0..25 {
+		match std::fs::rename(&tmp, &data) {
+			Ok(()) => {
+				let _ = std::fs::remove_file(path.join("lock.mdb"));
+				let new_len = std::fs::metadata(&data).map(|m| m.len()).unwrap_or(0);
+				return Ok((old_len, new_len));
+			}
+			Err(e) => {
+				last_err = Some(e);
+				// Backoff up to ~2.5s total while the OS releases the old mmap.
+				std::thread::sleep(std::time::Duration::from_millis(100 + attempt * 4));
+			}
+		}
+	}
+	// Give up: clean the tmp so a retry isn't confused by a stale copy.
+	let _ = std::fs::remove_file(&tmp);
+	Err(StoreError::Io(last_err.unwrap_or_else(|| {
+		std::io::Error::new(std::io::ErrorKind::Other, "compaction swap failed")
+	})))
+}
+
+/// Compact the LMDB env under `dir` in place, reclaiming the disk that a bulk
+/// delete (e.g. the empty-kern reap) freed inside the file but never returned to
+/// the OS. LMDB only ever grows `data.mdb` to a high-water mark; deleted pages
+/// are reused for future writes but the file stays at peak size (and on Windows
+/// NTFS it is not even sparse, so that peak is real disk). The only way to shrink
+/// it is to rewrite the live data into a fresh env.
+///
+/// Opens its OWN env, writes the compacted copy, closes the env deterministically
+/// (`prepare_for_closing().wait()`), then swaps. REQUIRES exclusive access — no
+/// daemon or other process may have the env open. Run from an offline command
+/// with the daemon stopped. Returns `(old_bytes, new_bytes)`.
+pub fn compact_dir(dir: &str) -> Result<(u64, u64), StoreError> {
+	let path = Path::new(dir);
+	let tmp = compact_tmp(path);
+	let _ = std::fs::remove_file(&tmp); // clear any stale tmp
+
+	{
+		let env = unsafe {
+			EnvOpenOptions::new()
+				.map_size(MAP_SIZE)
+				.max_dbs(MAX_DBS)
+				.open(path)?
+		};
+		env.copy_to_file(&tmp, CompactionOption::Enabled)?;
+		// Block until the env is truly closed (mmap released, handles shut).
+		env.prepare_for_closing().wait();
+	}
+
+	swap_compacted(dir)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -668,6 +753,50 @@ mod tests {
 		let (loaded, _, _) = s.load_all_kerns().unwrap();
 		assert!(loaded.contains_key("a"));
 		assert!(!loaded.contains_key("b"), "removed kern pruned from disk");
+	}
+
+	#[test]
+	fn compact_dir_shrinks_after_bulk_delete() {
+		let d = tmp();
+		let dir = dir_of(&d);
+		// Grow the env well past its initial pages: write many fat kern rows so the
+		// file's high-water mark climbs, then delete almost all of them.
+		{
+			let s = Store::open(&dir).unwrap();
+			let mut kerns = HashMap::new();
+			kerns.insert("root".to_string(), Kern::new("root", ""));
+			for i in 0..2000 {
+				let mut e = mk_entity(&format!("e{i}"), &"x".repeat(512), 1.0, EntityKind::Claim);
+				e.vector = (0..256).map(|j| ((i + j) as f64).sin()).collect();
+				kerns.insert(format!("k{i}"), kern_with(&format!("k{i}"), e));
+			}
+			s.save_all_kerns(&kerns, "n", QuantizationMode::Int8).unwrap();
+			let bloated = s.data_file_len();
+
+			// Reap down to just root + one survivor and persist the deletion.
+			let mut small = HashMap::new();
+			small.insert("root".to_string(), Kern::new("root", ""));
+			small.insert("k0".to_string(), kerns.remove("k0").unwrap());
+			s.save_all_kerns(&small, "n", QuantizationMode::Int8).unwrap();
+			// The delete frees pages INSIDE the file but does not return them to the
+			// OS, so the file stays at (essentially) its high-water mark — that is the
+			// whole bug. It must remain far larger than the handful of live rows need.
+			assert!(
+				s.data_file_len() >= bloated * 9 / 10,
+				"LMDB keeps ~all of the high-water mark after delete: {} vs peak {bloated}",
+				s.data_file_len(),
+			);
+		} // env dropped so the offline compactor can swap the file
+
+		let (old_len, new_len) = compact_dir(&dir).unwrap();
+		assert!(new_len < old_len, "compaction shrinks the file: {old_len} -> {new_len}");
+
+		// Live data survives the rewrite.
+		let s2 = Store::open(&dir).unwrap();
+		let (loaded, _, _) = s2.load_all_kerns().unwrap();
+		assert!(loaded.contains_key("root"), "root survives compaction");
+		assert!(loaded.contains_key("k0"), "survivor survives compaction");
+		assert_eq!(loaded.len(), 2, "only the live rows remain after compaction");
 	}
 
 	#[test]

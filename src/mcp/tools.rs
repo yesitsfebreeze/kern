@@ -24,7 +24,7 @@ mod tests {
 
 		let expected = [
 			"query", "ingest", "link", "forget", "degrade", "health", "anchor", "descriptor",
-			"pulse",
+			"pulse", "gc",
 		];
 		assert_eq!(names, expected, "tool set must match (order intentional)");
 

@@ -63,16 +63,61 @@ pub(super) fn cmd_health(cfg: &crate::config::Config) {
 	}
 }
 
-/// Offline compaction: reap empty unnamed kerns and persist the result. Run with
-/// the daemon stopped — it loads from disk, GCs, and saves, so a live daemon would
-/// race and re-persist the bloated in-memory graph. Cheap, idempotent, safe to
-/// re-run. The daemon also does this on startup; this command is for a one-shot
-/// compaction without spinning up the full daemon.
+/// Offline compaction: reap empty unnamed kerns, persist the result, then shrink
+/// the on-disk env. Run with the daemon stopped — it loads from disk, GCs, and
+/// saves, so a live daemon would race and re-persist the bloated in-memory graph.
+/// Cheap, idempotent, safe to re-run. The daemon also reaps on startup; this
+/// command is the one-shot full clean (reap + file shrink) without the daemon.
+///
+/// The reap deletes rows but LMDB never returns freed pages to the OS, so the
+/// `data.mdb` file stays at its high-water mark (4 GiB on a runaway-bloated graph)
+/// until it is rewritten. We drop the graph's env handle, then [`compact_dir`]
+/// rewrites the live data into a fresh, gap-free file.
 pub(super) fn cmd_gc(cfg: &crate::config::Config) {
 	let mut g = load_graph(cfg);
 	let (before, reaped, after) = g.gc_empty_kerns_counted();
 	save_graph(&g);
 	println!("gc: reaped {reaped} empty kerns ({before} -> {after})");
+
+	// Drop the graph FIRST so its env handle is released, then compact. `compact_dir`
+	// opens its own env and closes it deterministically via `prepare_for_closing().wait()`
+	// — a plain drop is lazy on Windows and would leave data.mdb mmap'd past the swap.
+	drop(g);
+	match crate::base::store::compact_dir(&cfg.data_dir) {
+		Ok((old, new)) => println!(
+			"gc: compacted data.mdb {} -> {} ({:.0}% reclaimed)",
+			human_bytes(old),
+			human_bytes(new),
+			if old > new && old > 0 { (old - new) as f64 * 100.0 / old as f64 } else { 0.0 },
+		),
+		Err(e) => eprintln!("gc: compaction failed: {e}"),
+	}
+}
+
+/// Compact-only: shrink `data.mdb` to its live size without reaping. Daemon must
+/// be stopped. Useful when the reap already ran but the file never shrank.
+pub(super) fn cmd_compact(cfg: &crate::config::Config) {
+	match crate::base::store::compact_dir(&cfg.data_dir) {
+		Ok((old, new)) => println!(
+			"compact: data.mdb {} -> {} ({:.0}% reclaimed)",
+			human_bytes(old),
+			human_bytes(new),
+			if old > 0 { (old - new) as f64 * 100.0 / old as f64 } else { 0.0 },
+		),
+		Err(e) => eprintln!("compact: failed: {e}"),
+	}
+}
+
+/// Terse human-readable byte size for the gc/compact reports.
+fn human_bytes(n: u64) -> String {
+	const U: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+	let mut v = n as f64;
+	let mut i = 0;
+	while v >= 1024.0 && i < U.len() - 1 {
+		v /= 1024.0;
+		i += 1;
+	}
+	if i == 0 { format!("{n} B") } else { format!("{v:.1} {}", U[i]) }
 }
 
 pub(super) async fn cmd_anchor(cfg: &crate::config::Config, action: AnchorAction) {
