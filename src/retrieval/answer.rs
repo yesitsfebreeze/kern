@@ -104,7 +104,7 @@ pub fn retrieve(
 	let seeds = if mode == Mode::Hybrid && cfg.lexical_enabled && !query_text.is_empty() {
 		if let Some(lex) = lex_ref {
 			let lex_hits = seed::seed_lexical(lex, query_text, cfg.seed_k * 4);
-			let imp_hits = seed::seed_important(g, cfg, qvec);
+			let imp_hits = seed::seed_important(g, cfg, qvec, opts);
 			let pr_hits = if cfg.pagerank_enabled {
 				// Personalize the teleport at the query's seed entities
 				// (dense + lexical hits) — query-independent importance is

@@ -89,7 +89,7 @@ pub fn seed(
 			_ => search_all_unlocked(g, query_vec, k),
 		},
 	};
-	let important = seed_important(g, cfg, query_vec);
+	let important = seed_important(g, cfg, query_vec, opts);
 	hits = merge_seeds(hits, important);
 	hits.truncate(k.max(cfg.seed_k));
 	hits
@@ -129,16 +129,32 @@ fn seed_by_reason(g: &GraphGnn, query_vec: &[f64], k: usize) -> Vec<EntityHit> {
 	hits
 }
 
-pub fn seed_important(g: &GraphGnn, cfg: &RetrievalConfig, query_vec: &[f64]) -> Vec<EntityHit> {
+pub fn seed_important(
+	g: &GraphGnn,
+	cfg: &RetrievalConfig,
+	query_vec: &[f64],
+	opts: Option<&QueryOptions>,
+) -> Vec<EntityHit> {
 	let kerns = g.all();
 	let min_cos = cfg.important_min_cosine;
 	let access_threshold = cfg.important_access_threshold;
+	// When a filter is active, importance must respect it at the SOURCE: otherwise
+	// non-matching important entities (Facts / frequently-accessed) crowd the merged
+	// seed and truncate matching ones out before the post-filter ever runs. The
+	// check is cheap (field comparisons) and runs BEFORE the cosine, so non-matching
+	// entities also skip the dot product.
+	let active_filter = opts.filter(|o| o.is_active());
 	let mut hits: Vec<EntityHit> = kerns
 		.par_iter()
 		.flat_map_iter(|kern| {
 			kern.entities.values().filter_map(|t| {
 				if !t.has_vector() {
 					return None;
+				}
+				if let Some(o) = active_filter {
+					if !matches_filter(t, o) {
+						return None;
+					}
 				}
 				let dominated = !t.is_fact() && t.access_count.value_i32() < access_threshold;
 				if dominated {
@@ -217,12 +233,30 @@ mod tests {
 			ent("fact", vec![1.0, 0.0], 0, true),  // a Fact bypasses the access gate -> in
 			ent("off", vec![0.0, 1.0], 10, false), // accessed but cosine 0 < 0.5 -> out
 		]);
-		let hits = seed_important(&g, &cfg(), &[1.0, 0.0]);
+		let hits = seed_important(&g, &cfg(), &[1.0, 0.0], None);
 		let ids: std::collections::HashSet<&str> = hits.iter().map(|h| h.entity_id.as_str()).collect();
 		assert!(ids.contains("hot"), "accessed + aligned is important");
 		assert!(ids.contains("fact"), "a Fact is important regardless of access count");
 		assert!(!ids.contains("cold"), "low-access non-fact is dominated");
 		assert!(!ids.contains("off"), "below the cosine threshold is excluded");
+	}
+
+	#[test]
+	fn seed_important_respects_an_active_filter_at_source() {
+		// Two aligned, qualifying important entities — one Fact, one accessed Claim.
+		// A kind=Fact filter must drop the Claim at the source (not leave it to be
+		// post-filtered), so only the Fact survives. A None filter keeps both.
+		let g = graph_with(vec![
+			ent("the_fact", vec![1.0, 0.0], 0, true),     // Fact, aligned -> in
+			ent("the_claim", vec![1.0, 0.0], 10, false),  // accessed Claim, aligned -> in (unfiltered)
+		]);
+		let both = seed_important(&g, &cfg(), &[1.0, 0.0], None);
+		assert_eq!(both.len(), 2, "no filter keeps both important entities");
+
+		let opts = QueryOptions { kind: Some(EntityKind::Fact), ..Default::default() };
+		let facts_only = seed_important(&g, &cfg(), &[1.0, 0.0], Some(&opts));
+		let ids: Vec<&str> = facts_only.iter().map(|h| h.entity_id.as_str()).collect();
+		assert_eq!(ids, vec!["the_fact"], "kind=Fact filter drops the Claim at the source");
 	}
 
 	#[test]
