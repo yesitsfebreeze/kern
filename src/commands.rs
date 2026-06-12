@@ -229,6 +229,19 @@ pub enum UnnamedAction {
 	List,
 }
 
+/// Apply the `[graph]` config to a freshly loaded graph. `load_dir` already ran
+/// `rebuild_index` once, but with the DEFAULT `disk_threshold` — so when spilling
+/// is enabled we rebuild ONCE more here, after the configured threshold is set, or
+/// the disk tier would stay inert until some later organic rebuild. Guarded so the
+/// common default-off case pays nothing (no second rebuild).
+pub(crate) fn apply_graph_config(g: &mut GraphGnn, cfg: &crate::config::GraphConfig) {
+	g.set_max_loaded_kerns(cfg.max_kerns);
+	g.set_disk_threshold(cfg.disk_threshold);
+	if cfg.disk_threshold != crate::base::constants::KERN_CAP_DISABLED {
+		g.rebuild_index();
+	}
+}
+
 pub(crate) fn load_graph(cfg: &crate::config::Config) -> GraphGnn {
 	let mut g = match crate::base::persist::load_dir(&cfg.data_dir) {
 		Ok(g) => g,
@@ -243,8 +256,7 @@ pub(crate) fn load_graph(cfg: &crate::config::Config) -> GraphGnn {
 			g
 		}
 	};
-	g.set_max_loaded_kerns(cfg.graph.max_kerns);
-	g.set_disk_threshold(cfg.graph.disk_threshold);
+	apply_graph_config(&mut g, &cfg.graph);
 	// Wire the configured BM25 parameters into the lexical index. Without this the
 	// `config.retrieval.bm25_k1`/`bm25_b` fields were dead — the index always scored
 	// with the hardcoded construction defaults regardless of config.
@@ -1069,5 +1081,44 @@ mod entry_point_tests {
 	fn daemon_subcommand_exists() {
 		// Regression guard: confirms Commands::Daemon compiles.
 		let _ = Commands::Daemon;
+	}
+
+	#[test]
+	fn apply_graph_config_spills_to_disk_when_threshold_enabled() {
+		// Regression: load_dir rebuilds with the DEFAULT threshold; apply_graph_config
+		// must rebuild again once the configured threshold is set, or a configured
+		// disk_threshold never engages at startup (the entity index stays in-RAM).
+		use crate::base::constants::KERN_CAP_DISABLED;
+		use crate::base::graph::GraphGnn;
+		use crate::base::types::{Entity, EntityStatus, Kern};
+		use crate::base::vector_backend::VectorBackend;
+		use crate::config::GraphConfig;
+
+		let dir = tempfile::tempdir().unwrap();
+		let mut g = GraphGnn::new();
+		g.data_dir = dir.path().to_string_lossy().into_owned();
+		let mut kern = Kern::new("k", "");
+		for i in 0..30 {
+			let v: Vec<f64> = (0..8).map(|j| ((i as f64) * (0.13 + 0.07 * j as f64)).sin()).collect();
+			kern.entities.insert(
+				format!("e{i}"),
+				Entity { id: format!("e{i}"), vector: v, status: EntityStatus::Active, ..Default::default() },
+			);
+		}
+		g.kerns.insert("k".into(), kern);
+		g.rebuild_index(); // mimics load_dir's rebuild under the default threshold
+		assert!(matches!(g.entity_idx, VectorBackend::Resident(_)), "default load stays in-RAM");
+
+		// Enabled threshold -> apply_graph_config must rebuild and spill.
+		let cfg = GraphConfig { max_kerns: KERN_CAP_DISABLED, max_ledger_entries: 10_000, disk_threshold: 10 };
+		super::apply_graph_config(&mut g, &cfg);
+		assert!(matches!(g.entity_idx, VectorBackend::Disk { .. }), "configured threshold spills at startup");
+
+		// Disabled threshold -> no spill, no redundant rebuild side effects.
+		let mut g2 = GraphGnn::new();
+		g2.data_dir = dir.path().to_string_lossy().into_owned();
+		let cfg_off = GraphConfig { max_kerns: KERN_CAP_DISABLED, max_ledger_entries: 10_000, disk_threshold: KERN_CAP_DISABLED };
+		super::apply_graph_config(&mut g2, &cfg_off);
+		assert!(matches!(g2.entity_idx, VectorBackend::Resident(_)), "default-off stays in-RAM");
 	}
 }
