@@ -64,7 +64,10 @@ pub struct PaneRegistry {
     pub panes: Vec<PtySession>,
     /// Index of the currently focused pane. 0 = main.
     pub focus: usize,
-    /// Terminal dimensions at the time of last resize.
+    /// Dimensions for a newly spawned **sub-pane** (right-column width, pane
+    /// height). Updated on every resize so panes created later via the MCP
+    /// `spawn`/`delegate` tools match the rendered layout instead of being
+    /// sized to the full terminal width.
     pub cols: u16,
     pub rows: u16,
     pub thoughts: u32,
@@ -75,9 +78,14 @@ pub struct PaneRegistry {
 
 impl PaneRegistry {
     /// Create a new registry and immediately spawn the main pane.
-    pub fn new(main_cmd: String, cols: u16, rows: u16) -> anyhow::Result<Self> {
+    ///
+    /// `main_cols` sizes the main pane (left column); `sub_cols` is stored as the
+    /// spawn width for future sub-panes (right column). Both come from
+    /// [`pane_layout`](crate::mux::tui::pane_layout) so the PTY matches the
+    /// region it is painted into.
+    pub fn new(main_cmd: String, main_cols: u16, sub_cols: u16, rows: u16) -> anyhow::Result<Self> {
         let id   = new_session_id();
-        let pane = PtySession::spawn(id.clone(), "main".to_string(), main_cmd, cols, rows)?;
+        let pane = PtySession::spawn(id.clone(), "main".to_string(), main_cmd, main_cols, rows)?;
         // Emit ForkOpen so SessionMirror can index this pane when a kern daemon is running.
         // Payload carries fork_id redundantly because history.db's kind_from_tag reads from
         // the payload column; the inline enum field alone is lost after JSONL→SQLite rollover.
@@ -86,7 +94,7 @@ impl PaneRegistry {
             "mux",
             serde_json::json!({ "fork_id": id }),
         ));
-        Ok(Self { panes: vec![pane], focus: 0, cols, rows, thoughts: 0, reasons: 0, questions: QuestionRegistry::default() })
+        Ok(Self { panes: vec![pane], focus: 0, cols: sub_cols, rows, thoughts: 0, reasons: 0, questions: QuestionRegistry::default() })
     }
 
     /// Spawn a new sub-pane and return its session id.
@@ -165,12 +173,19 @@ impl PaneRegistry {
         if self.panes.is_empty() { self.focus = 0; }
     }
 
-    /// Resize every pane to `(cols, rows)`.
-    pub fn resize_all(&mut self, cols: u16, rows: u16) {
-        self.cols = cols;
+    /// Resize panes to match the two-column split: pane 0 (main) gets
+    /// `main_cols`, every sub-pane gets `sub_cols`; all panes use `rows`. The
+    /// renderer (`draw_frame`) derives the same widths from `pane_layout`, so
+    /// each PTY's width matches the region it is painted into.
+    ///
+    /// `sub_cols`/`rows` are stored as the spawn dimensions for panes created
+    /// later via the MCP `spawn`/`delegate` tools (always sub-panes).
+    pub fn resize_split(&mut self, main_cols: u16, sub_cols: u16, rows: u16) {
+        self.cols = sub_cols;
         self.rows = rows;
-        for pane in &mut self.panes {
-            pane.resize(cols, rows);
+        for (i, pane) in self.panes.iter_mut().enumerate() {
+            let w = if i == 0 { main_cols } else { sub_cols };
+            pane.resize(w, rows);
         }
     }
 
@@ -197,7 +212,7 @@ mod tests {
         let cmd = "cmd";
         #[cfg(not(windows))]
         let cmd = "sh";
-        PaneRegistry::new(cmd.to_string(), 80, 24).expect("spawn main pane")
+        PaneRegistry::new(cmd.to_string(), 40, 39, 24).expect("spawn main pane")
     }
 
     #[test]
@@ -219,6 +234,30 @@ mod tests {
         assert_eq!(id.len(), 8);
         assert_eq!(reg.panes.len(), 2);
         assert_eq!(reg.panes[1].label, "sub-1");
+    }
+
+    #[test]
+    fn resize_split_sizes_main_and_subs_independently() {
+        // Regression: panes must be sized to the column they are PAINTED into,
+        // not the full terminal width. Main (index 0) = left half; subs = right
+        // half minus the divider. The old `resize_all` gave every pane the full
+        // width, so the right ~half of each agent's screen was clipped.
+        let mut reg = make_registry();
+        #[cfg(windows)]
+        let cmd = "cmd";
+        #[cfg(not(windows))]
+        let cmd = "sh";
+        reg.spawn_pane("sub-1".to_string(), cmd.to_string(), 10, 10).unwrap();
+
+        reg.resize_split(40, 39, 23);
+
+        assert_eq!(reg.panes[0].parser.screen().size(), (23, 40), "main pane = main_cols");
+        assert_eq!(reg.panes[1].parser.screen().size(), (23, 39), "sub pane = sub_cols");
+        assert_eq!(
+            (reg.cols, reg.rows),
+            (39, 23),
+            "stored spawn dims track the sub-pane width so MCP spawn/delegate match the layout"
+        );
     }
 
     #[test]

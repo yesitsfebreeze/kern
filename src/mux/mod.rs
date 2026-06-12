@@ -39,9 +39,14 @@ pub async fn run_mux(cli: &crate::commands::Cli, cfg: &Config) {
 
     // Determine terminal size (fall back to 80×24 if detection fails).
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-    let pane_rows    = rows.saturating_sub(1);
+    let layout       = crate::mux::tui::pane_layout(cols, rows);
 
-    let registry = match PaneRegistry::new(cfg.mux.agent_cmd.clone(), cols / 2, pane_rows) {
+    let registry = match PaneRegistry::new(
+        cfg.mux.agent_cmd.clone(),
+        layout.main_cols,
+        layout.sub_cols,
+        layout.pane_rows,
+    ) {
         Ok(r)  => Arc::new(Mutex::new(r)),
         Err(e) => {
             eprintln!("kern mux: failed to spawn main pane: {e}");

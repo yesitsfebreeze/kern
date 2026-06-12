@@ -220,8 +220,9 @@ pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap) -> io::Result<()> {
                     cols = w;
                     rows = h;
                     if !research_visible {
+                        let layout = pane_layout(cols, rows);
                         let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
-                        reg.resize_all(cols, rows.saturating_sub(1));
+                        reg.resize_split(layout.main_cols, layout.sub_cols, layout.pane_rows);
                     }
                     queue!(stdout, Clear(ClearType::All))?;
                     snapshots.clear();
@@ -266,13 +267,14 @@ pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap) -> io::Result<()> {
                         if keymap.matches_cycle(&kev) {
                             reg.cycle_focus();
                         } else if keymap.matches_new_pane(&kev) {
-                            let n   = reg.panes.len();
-                            let cmd = reg.panes[0].cmd.clone();
+                            let n      = reg.panes.len();
+                            let cmd    = reg.panes[0].cmd.clone();
+                            let layout = pane_layout(cols, rows);
                             let _ = reg.spawn_pane(
                                 format!("sub-{n}"),
                                 cmd,
-                                cols / 2,
-                                rows.saturating_sub(1),
+                                layout.sub_cols,
+                                layout.pane_rows,
                             );
                         } else if keymap.matches_close_pane(&kev) {
                             if reg.focus > 0 {
@@ -291,6 +293,39 @@ pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap) -> io::Result<()> {
     Ok(())
 }
 
+// ── Pane layout (single source of truth) ───────────────────────────────────
+
+/// Geometry of the two-column pane split for a given terminal size.
+///
+/// The renderer ([`draw_frame`]) and the resizer
+/// ([`PaneRegistry::resize_split`](crate::mux::registry::PaneRegistry::resize_split))
+/// BOTH derive widths from this, so a pane's PTY size can never drift from the
+/// region it is painted into.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PaneLayout {
+    /// Width of the main pane (index 0): the left column.
+    pub main_cols: u16,
+    /// Width of a sub-pane (index > 0): the right column minus the divider.
+    pub sub_cols: u16,
+    /// Usable pane height: terminal rows minus the status bar row.
+    pub pane_rows: u16,
+    /// Column x of the vertical divider between the two panes.
+    pub divider_col: u16,
+}
+
+/// Compute the pane split geometry from the full terminal `(cols, rows)`.
+pub(crate) fn pane_layout(cols: u16, rows: u16) -> PaneLayout {
+    let pane_rows  = rows.saturating_sub(1);        // row 0 = status bar
+    let left_cols  = cols / 2;
+    let right_cols = cols - left_cols;
+    PaneLayout {
+        main_cols:   left_cols,
+        sub_cols:    right_cols.saturating_sub(1),  // reserve 1 col for the divider
+        pane_rows,
+        divider_col: left_cols,
+    }
+}
+
 // ── Rendering ─────────────────────────────────────────────────────────────────
 
 /// Render one frame: top status bar + two-column pane split.
@@ -302,9 +337,9 @@ pub(crate) fn draw_frame(
     cwd: &str,
     snapshots: &mut HashMap<String, ScreenSnapshot>,
 ) -> io::Result<()> {
-    let pane_rows  = rows.saturating_sub(1);
-    let left_cols  = cols / 2;
-    let right_cols = cols - left_cols;
+    let layout     = pane_layout(cols, rows);
+    let pane_rows  = layout.pane_rows;
+    let left_cols  = layout.main_cols;
     let row_offset: u16 = 1;   // row 0 = status bar
 
     // Fake cursor: only the focused pane gets a cursor_pos; others get None.
@@ -336,7 +371,7 @@ pub(crate) fn draw_frame(
                 sub.parser.screen(),
                 snap,
                 left_cols + 1,
-                right_cols.saturating_sub(1),
+                layout.sub_cols,
                 pane_rows,
                 row_offset,
                 sub_cursor,
@@ -543,6 +578,24 @@ pub fn format_status_right(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pane_layout_splits_within_terminal_width() {
+        let l = pane_layout(80, 24);
+        assert_eq!(l.main_cols, 40, "main = left half");
+        assert_eq!(l.sub_cols, 39, "sub = right half minus the divider");
+        assert_eq!(l.pane_rows, 23, "rows minus the status bar");
+        assert_eq!(l.divider_col, 40, "divider sits at the main/sub boundary");
+        // main + divider + sub must fit EXACTLY in the terminal width, so a
+        // pane never lays out wider than the region it is painted into.
+        assert_eq!(l.main_cols + 1 + l.sub_cols, 80, "split fills width exactly");
+    }
+
+    #[test]
+    fn pane_layout_handles_degenerate_sizes() {
+        let l = pane_layout(0, 0);
+        assert_eq!((l.main_cols, l.sub_cols, l.pane_rows), (0, 0, 0));
+    }
 
     #[test]
     fn format_status_right_marks_active_pane() {
