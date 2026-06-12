@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::base::graph::GraphGnn;
 use crate::base::locks::{read_recovered, write_recovered};
-use crate::base::types::Kern;
+use crate::base::types::{EntityStatus, Kern};
 use crate::gnn::graph::Graph;
 use crate::gnn::propagate::{self, GnnConfig, GnnSnapshot};
 
@@ -48,6 +48,13 @@ pub fn build_gnn_snapshot(kern: &Kern, cfg: &GnnConfig) -> Option<GnnSnapshot> {
 	let mut dim = 0usize;
 	for (id, t) in &kern.entities {
 		if !t.has_vector() {
+			continue;
+		}
+		// Superseded entities are never searchable (excluded from entity_idx /
+		// gnn_entity_idx), so propagating GNN re-embeddings over them is useless work
+		// that would also RE-INSERT them into gnn_entity_idx via `apply_gnn_updates`,
+		// undoing the supersede index-removal. Exclude them from the propagation set.
+		if t.status == EntityStatus::Superseded {
 			continue;
 		}
 		if dim == 0 {
@@ -236,6 +243,23 @@ mod tests {
 			build_gnn_snapshot(&k, &cfg).is_some(),
 			"with a low floor and local edges, a snapshot builds"
 		);
+	}
+
+	#[test]
+	fn superseded_entities_excluded_from_gnn_snapshot() {
+		// A superseded entity is not searchable, so it must not enter GNN
+		// propagation — apply_gnn_updates would otherwise re-insert it into
+		// gnn_entity_idx, undoing accept::supersede's index removal, and re-embedding
+		// it is wasted work. Supersede a LEAF (e3) so e0->e1->e2 stay connected.
+		let mut k = kern_with_n(4);
+		k.entities.get_mut("e3").unwrap().status = EntityStatus::Superseded;
+		let mut cfg = GnnConfig::defaults();
+		cfg.min_thoughts = 2;
+		let snap = build_gnn_snapshot(&k, &cfg).expect("active e0..e2 still build a snapshot");
+		assert!(!snap.ids.contains(&"e3".to_string()), "superseded leaf excluded from GNN membership");
+		for id in ["e0", "e1", "e2"] {
+			assert!(snap.ids.contains(&id.to_string()), "active {id} included");
+		}
 	}
 
 	#[test]
