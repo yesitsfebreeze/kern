@@ -22,6 +22,8 @@ pub struct MuxConfig {
     pub key_quit: String,
     /// Key binding to toggle the kern research panel. Default `ctrl+l`.
     pub key_research: String,
+    /// Key binding to toggle the waiting-questions overlay. Default `ctrl+k`.
+    pub key_questions: String,
 }
 
 impl Default for MuxConfig {
@@ -33,6 +35,7 @@ impl Default for MuxConfig {
             key_cycle:      "tab".into(),
             key_quit:       "ctrl+q".into(),
             key_research:   "ctrl+l".into(),
+            key_questions:  "ctrl+k".into(),
         }
     }
 }
@@ -44,6 +47,7 @@ pub struct KeyMap {
     pub cycle:      KeyEvent,
     pub quit:       KeyEvent,
     pub research:   KeyEvent,
+    pub questions:  KeyEvent,
 }
 
 impl KeyMap {
@@ -59,6 +63,8 @@ impl KeyMap {
                 .unwrap_or_else(|| KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
             research:   parse_key_event(&cfg.key_research)
                 .unwrap_or_else(|| KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)),
+            questions:  parse_key_event(&cfg.key_questions)
+                .unwrap_or_else(|| KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL)),
         }
     }
 
@@ -67,6 +73,7 @@ impl KeyMap {
     pub fn matches_cycle(&self, ev: &KeyEvent) -> bool      { self.cycle == *ev }
     pub fn matches_quit(&self, ev: &KeyEvent) -> bool       { self.quit == *ev }
     pub fn matches_research(&self, ev: &KeyEvent) -> bool   { self.research == *ev }
+    pub fn matches_questions(&self, ev: &KeyEvent) -> bool  { self.questions == *ev }
 }
 
 /// Parse a key-binding string like `"alt+n"`, `"ctrl+w"`, or `"tab"` into a
@@ -150,6 +157,17 @@ mod tests {
     fn mux_config_key_research_default() {
         let c = MuxConfig::default();
         assert_eq!(c.key_research, "ctrl+l");
+    }
+
+    #[test]
+    fn mux_config_key_questions_default() {
+        assert_eq!(MuxConfig::default().key_questions, "ctrl+k");
+    }
+
+    #[test]
+    fn keymap_matches_questions_ctrl_k() {
+        let km = KeyMap::from_config(&MuxConfig::default());
+        assert!(km.matches_questions(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL)));
     }
 
     #[test]
