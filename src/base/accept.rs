@@ -373,6 +373,14 @@ pub fn get_or_spawn_unnamed_child(g: &mut GraphGnn, kern_id: &str) -> String {
 			}
 		}
 	}
+	spawn_unnamed_child(g, kern_id)
+}
+
+/// Always create a FRESH unnamed child of `kern_id` — no reuse. Use when each call
+/// needs its OWN distinct child (e.g. the tick spawns one child per discovered
+/// cluster). For a single reusable holding-pen child (the placement-reject path),
+/// use [`get_or_spawn_unnamed_child`], which reuses the existing one.
+pub fn spawn_unnamed_child(g: &mut GraphGnn, kern_id: &str) -> String {
 	let root_id = g
 		.get(kern_id)
 		.map(|k| k.root_id.clone())

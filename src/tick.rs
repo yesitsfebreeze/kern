@@ -161,7 +161,14 @@ fn spawn_child_clusters(
 ) -> Vec<String> {
 	let mut spawned_children = Vec::new();
 	for i in spawn_indices {
-		let child_id = crate::base::accept::get_or_spawn_unnamed_child(graph, kern_id);
+		// One DISTINCT child per cluster. Using `get_or_spawn_unnamed_child` here was
+		// a bug: it reuses the parent's first unnamed child, so every selected cluster
+		// collapsed into the SAME kern (and `spawned_children` carried that id N times,
+		// enqueuing N duplicate Cluster/Persist tasks for it). `spawn_unnamed_child`
+		// always creates a fresh child, so each cohesive cluster materialises as its
+		// own sub-kern — the documented intent and what Phase 5's per-child task
+		// enqueue assumes.
+		let child_id = crate::base::accept::spawn_unnamed_child(graph, kern_id);
 		for m in &clusters[*i].members {
 			let entity_id = m.id.clone();
 			let thought = graph
@@ -389,6 +396,50 @@ mod tests {
 		assert!(
 			child.entities.contains_key("a") && child.entities.contains_key("b"),
 			"both members landed in the new child kern",
+		);
+	}
+
+	#[test]
+	fn spawn_child_clusters_creates_a_distinct_child_per_cluster() {
+		// Regression: spawn_child_clusters used get_or_spawn_unnamed_child, which
+		// REUSES the parent's first unnamed child — so two selected clusters
+		// collapsed into ONE kern (and `spawned_children` carried that id twice,
+		// enqueuing duplicate Cluster/Persist tasks). Each cluster must materialise
+		// as its OWN child, with no cross-contamination of members.
+		let mut g = GraphGnn::new();
+		let pid = "p".to_string();
+		let mut parent = Kern::new(&pid, "");
+		for id in ["a", "b", "c", "d"] {
+			parent.entities.insert(id.into(), Entity { id: id.into(), ..Default::default() });
+		}
+		g.kerns.insert(pid.clone(), parent);
+
+		let clusters = vec![
+			Cluster {
+				members: vec![
+					Entity { id: "a".into(), ..Default::default() },
+					Entity { id: "b".into(), ..Default::default() },
+				],
+			},
+			Cluster {
+				members: vec![
+					Entity { id: "c".into(), ..Default::default() },
+					Entity { id: "d".into(), ..Default::default() },
+				],
+			},
+		];
+		let spawned = spawn_child_clusters(&mut g, &pid, &clusters, &[0, 1]);
+
+		assert_eq!(spawned.len(), 2, "two selected clusters spawn two ids");
+		assert_ne!(spawned[0], spawned[1], "each cluster lands in a DISTINCT child kern");
+		let c0 = g.kerns.get(&spawned[0]).expect("first child exists");
+		assert!(c0.entities.contains_key("a") && c0.entities.contains_key("b"), "cluster 0 members");
+		assert!(!c0.entities.contains_key("c") && !c0.entities.contains_key("d"), "no cross-contamination");
+		let c1 = g.kerns.get(&spawned[1]).expect("second child exists");
+		assert!(c1.entities.contains_key("c") && c1.entities.contains_key("d"), "cluster 1 members");
+		assert!(
+			g.kerns.get(&pid).unwrap().entities.is_empty(),
+			"all clustered members moved out of the parent",
 		);
 	}
 
