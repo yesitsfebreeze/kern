@@ -225,6 +225,57 @@ mod gnn_math_tests {
 		}
 	}
 
+	/// Compare the analytic INPUT gradient (the tensor `backward_graph` returns —
+	/// dL/d(input features) for the scalar loss `sum(output)`) against central
+	/// finite differences over every input element. This is the gradient that
+	/// chains to the PREVIOUS layer in a stacked model (`Model::backward` feeds it
+	/// back as the next layer's `d_out`). The param-gradient check above never
+	/// exercises it, and every `model.rs` test is single-layer, so without this the
+	/// layer-to-layer gradient flow is unverified.
+	fn assert_input_grad_matches_numeric(layer: &mut dyn BackwardGraphLayer, g: &Graph, x: &Tensor) {
+		const H: f64 = 1e-6;
+		let out = layer.forward_graph(g, x);
+		let d_out = Tensor::ones(out.rows, out.cols);
+		layer.zero_grads();
+		let analytic = layer.backward_graph(g, &d_out);
+		assert_eq!(analytic.shape(), x.shape(), "d_input shape must match features");
+
+		let mut numeric = Vec::with_capacity(x.data.len());
+		for ei in 0..x.data.len() {
+			let mut xp = x.clone();
+			xp.data[ei] += H;
+			let lp = layer.forward_graph(g, &xp).sum_all();
+			let mut xm = x.clone();
+			xm.data[ei] -= H;
+			let lm = layer.forward_graph(g, &xm).sum_all();
+			numeric.push((lp - lm) / (2.0 * H));
+		}
+		for (i, (a, n)) in analytic.data.iter().zip(&numeric).enumerate() {
+			let denom = 1.0_f64.max(a.abs()).max(n.abs());
+			assert!(
+				(a - n).abs() / denom < 1e-4,
+				"input grad[{i}]: analytic {a} vs numeric {n}"
+			);
+		}
+	}
+
+	#[test]
+	fn gcn_linear_input_grad_matches_numeric() {
+		// d_input = Aᵀ·(d_out·Wᵀ): the layer-chaining gradient, previously unchecked.
+		let (g, x) = tiny_graph();
+		let mut rng = rand::rngs::StdRng::seed_from_u64(23);
+		let mut l = GCNLayer::with_rng(4, 3, None, false, 0.0, &mut rng);
+		assert_input_grad_matches_numeric(&mut l, &g, &x);
+	}
+
+	#[test]
+	fn gcn_relu_input_grad_matches_numeric() {
+		let (g, x) = tiny_graph();
+		let mut rng = rand::rngs::StdRng::seed_from_u64(29);
+		let mut l = GCNLayer::with_rng(4, 3, Some(Activation::Relu), false, 0.0, &mut rng);
+		assert_input_grad_matches_numeric(&mut l, &g, &x);
+	}
+
 	#[test]
 	fn gcn_linear_backward_matches_numeric() {
 		let (g, x) = tiny_graph();
@@ -248,6 +299,16 @@ mod gnn_math_tests {
 		let (g, x) = tiny_graph();
 		let mut l = SAGELayer::new(4, 3, mean_aggregate, None, false, false, 0.0);
 		assert_grad_matches_numeric(&mut l, &g, &x);
+	}
+
+	#[test]
+	fn sage_input_grad_matches_numeric() {
+		// SAGE's d_input splits the concat([self, mean-aggregated neighbours])
+		// gradient back across both halves and scatters the neighbour half along
+		// the (mean-normalized) adjacency — the most error-prone d_input path.
+		let (g, x) = tiny_graph();
+		let mut l = SAGELayer::new(4, 3, mean_aggregate, None, false, false, 0.0);
+		assert_input_grad_matches_numeric(&mut l, &g, &x);
 	}
 
 	#[test]
