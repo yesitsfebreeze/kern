@@ -516,7 +516,7 @@ pub fn swap_compacted(dir: &str) -> Result<(u64, u64), StoreError> {
 	// Give up: clean the tmp so a retry isn't confused by a stale copy.
 	let _ = std::fs::remove_file(&tmp);
 	Err(StoreError::Io(last_err.unwrap_or_else(|| {
-		std::io::Error::new(std::io::ErrorKind::Other, "compaction swap failed")
+		std::io::Error::other("compaction swap failed")
 	})))
 }
 
