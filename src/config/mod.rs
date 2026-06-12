@@ -149,6 +149,13 @@ impl Config {
 		// section name so a bad value reports where it lives.
 		self.ingest.validate().map_err(|e| format!("ingest: {e}"))?;
 		self.capture.validate().map_err(|e| format!("capture: {e}"))?;
+		self.serve.validate().map_err(|e| format!("serve: {e}"))?;
+		// RetrievalConfig::validate accumulates issues into a Vec rather than
+		// short-circuiting; surface them all under the section prefix.
+		let retrieval = self.retrieval.validate();
+		if !retrieval.is_empty() {
+			return Err(format!("retrieval: {}", retrieval.join("; ")));
+		}
 		Ok(())
 	}
 
@@ -257,5 +264,13 @@ mod tests {
 		bad_ingest.ingest.rephrase_upper = 0.8;
 		let err = bad_ingest.validate().unwrap_err();
 		assert!(err.contains("ingest"), "sub-config error is surfaced + tagged: {err}");
+
+		// Retrieval invariants are now aggregated too (previously orphaned): a
+		// retrieval-breaking value must surface through the top-level validate.
+		let mut bad_retr = Config::default_in(Path::new("x"));
+		bad_retr.retrieval.seed_k = 0;
+		let err = bad_retr.validate().unwrap_err();
+		assert!(err.contains("retrieval"), "retrieval error surfaced + tagged: {err}");
+		assert!(err.contains("seed_k"), "the specific issue is named: {err}");
 	}
 }

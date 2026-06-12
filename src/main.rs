@@ -53,6 +53,16 @@ fn main() {
 			let _ = std::env::set_current_dir(&root);
 		}
 		let cfg = Config::load(&root).unwrap_or_default();
+		// Surface a misconfigured config loudly instead of silently running with
+		// values that break retrieval/ingest. Non-fatal (consistent with the
+		// tolerant load above), but no longer invisible.
+		if let Err(e) = cfg.validate() {
+			tracing::warn!(
+				target: "kern.config",
+				error = %e,
+				"loaded config failed validation; behaviour may be degraded — fix or remove the offending value"
+			);
+		}
 		let cli = Cli::parse();
 
 		match cli.command {
