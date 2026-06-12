@@ -178,10 +178,19 @@ impl RetrievalConfig {
 			("query_cache_theta", self.query_cache_theta),
 			("mmr_lambda", self.mmr_lambda),
 			("hyde_fusion_weight", self.hyde_fusion_weight),
+			// bm25_b is BM25's length-normalisation weight; outside [0,1] the score
+			// term `1 - b + b*dl/avgdl` goes negative or over-normalises. Now that the
+			// field is wired into the lexical index (was dead before), range-check it.
+			("bm25_b", self.bm25_b),
 		] {
 			if !(0.0..=1.0).contains(&v) {
 				errs.push(format!("{name} ({v}) must be in [0.0, 1.0]"));
 			}
+		}
+
+		if self.bm25_k1 < 0.0 {
+			// BM25 tf-saturation term; a negative k1 inverts the saturation curve.
+			errs.push(format!("bm25_k1 ({}) must be >= 0.0", self.bm25_k1));
 		}
 
 		if !(0.0..1.0).contains(&self.pagerank_damping) {
@@ -244,6 +253,17 @@ mod tests {
 		let errs = cfg.validate();
 		assert!(errs.iter().any(|e| e.contains("query_cache_theta")), "got {errs:?}");
 		assert!(errs.iter().any(|e| e.contains("mmr_lambda")), "got {errs:?}");
+	}
+
+	#[test]
+	fn out_of_range_bm25_params_are_flagged() {
+		// bm25_k1/bm25_b are now wired into the lexical index, so invalid values must
+		// be caught at config load rather than silently clamped at query time.
+		let bad_b = RetrievalConfig { bm25_b: 2.0, ..Default::default() };
+		assert!(bad_b.validate().iter().any(|e| e.contains("bm25_b")), "bm25_b > 1");
+
+		let neg_k1 = RetrievalConfig { bm25_k1: -0.5, ..Default::default() };
+		assert!(neg_k1.validate().iter().any(|e| e.contains("bm25_k1")), "negative bm25_k1");
 	}
 
 	#[test]
