@@ -143,28 +143,43 @@ segment envs + two manifest rows → delete the old env + old manifest row + old
 summary, insert two new summaries. (For the **hot** env, the larger/colder half
 detaches as a segment until the hot env is under cap.)
 
-### 5. Phase 0 — compaction + reader-check (`Store` + out-of-band task)
-Independent of the forest; ships first and fixes the live bug.
+### 5. Phase 0 — reader-check + compaction (`Store`)
+Independent of the forest; ships first and fixes the live bug. **Revised after
+panel review (Bjorn/Otto): a live in-daemon dir swap is NOT possible on Windows
+while the env mmap is held — verified first-hand (`Access denied` renaming
+`.kern\data` with daemon PID 52180 up). Compaction is split into a growth-stopper
+that runs live and a shrink step that runs daemon-down.**
 
-- `Store::open` and the maintenance tick call `env.clear_stale_readers()`.
-- An out-of-band **compaction task** (mirrors the journal compactor's drain pattern,
-  `src/ingest/compactor.rs`): when `real_disk_size > compact_floor_bytes` AND
-  `real_disk_size / non_free_pages_size > compact_bloat_ratio` (default 3.0), run
-  `env.copy_to_file(tmp, CompactionOption::Enabled)`, then atomically swap the dir
-  at a safe point (under the graph write lock, no in-flight write txn) and reopen.
-  `copy_to_file` snapshots a live env, so the copy runs without blocking writers;
-  only the swap is brief.
+- **Live (in-daemon) — stop the growth.** `Store::open` and the maintenance tick
+  call `env.clear_stale_readers()`. This lets LMDB reuse freed pages (the reason
+  the file climbed was readers pinning old snapshots), so the file stops growing.
+  It does **not** shrink an already-bloated file — LMDB never returns pages to the
+  OS. A bloat-ratio metric (`real_disk_size / non_free_pages_size`) is exposed via
+  `kern health` so bloat is observable.
+- **Daemon-down — shrink.** A `kern compact [dir]` subcommand (and the existing
+  `kern compress … --mode int8`) runs `copy_to_file(CompactionOption::Enabled)` →
+  fsync → backup-rename old dir to `*.bloated.bak` → rename compacted dir into
+  place → verify reopen + `load_all_kerns` before deleting the backup. Requires the
+  cwd daemon stopped (it holds the mmap); the command refuses if a lock is held.
+  The daemon MAY trigger this opportunistically only via a **coordinated restart**
+  (write a `compact.request` marker, exit through the watchdog, recompact on next
+  boot before opening for writes) — never an in-place swap of a live mmap.
 
 All of `clear_stale_readers`, `copy_to_file`, `CompactionOption`,
 `non_free_pages_size`, `real_disk_size` are confirmed present in the locked
-**heed 0.20.5**.
+**heed 0.20.5**. The same daemon-down constraint applies to per-segment compaction
+in later phases.
 
 ---
 
 ## Data flow
 
 - **Detach (condense):** tick → `do_condense` qualifies a cold subtree → segment
-  env written+fsync → manifest committed → hot rows pruned + summary indexed.
+  env written+fsync → **reopen + `load_all_kerns` verify** (Otto: never prune hot
+  rows trusting an unverified segment; a silently corrupt zstd/bincode value would
+  be dropped by corrupt-skip = silent loss) → manifest committed → hot rows pruned
+  + summary indexed. `do_condense` makes **zero LLM calls** (centroid is pure
+  vector math; naming/enrich is not re-run on a moved subtree — Kenji).
 - **Retrieve (by-vector):** query embed → `seed` over hot index → a `seg:<id>`
   summary ranks in top-k → `Forest::resident(seg)` pages it in → search within →
   RRF-merge with hot hits → (segment cools → re-detach).
@@ -173,8 +188,8 @@ All of `clear_stale_readers`, `copy_to_file`, `CompactionOption`,
   accepts, and lets it re-detach on cooldown.
 - **Bisect (size):** maintenance sees an env over cap → 2-means split → two
   segments replace one.
-- **Compact (Phase 0):** bloat ratio crossed → `copy_to_file(Enabled)` → atomic
-  swap → reopen.
+- **Compact (Phase 0):** live = `clear_stale_readers` (stops growth); shrink =
+  `kern compact` daemon-down or a coordinated-restart recompact (NOT a live swap).
 
 ## Crash safety
 
@@ -189,9 +204,40 @@ All of `clear_stale_readers`, `copy_to_file`, `CompactionOption`,
 - **Bisect** writes both new envs + manifest rows before deleting the old env/row,
   so a crash mid-bisect leaves the old segment authoritative (new envs are orphans,
   swept).
-- **Compaction** swaps via atomic rename with the old dir retained as `*.bak` until
-  the reopened env verifies, so a crash leaves a complete old or new dir, never a
-  torn one.
+- **Compaction** (daemon-down / coordinated-restart only) swaps via atomic rename
+  with the old dir retained as `*.bloated.bak` until the reopened env verifies, so a
+  crash leaves a complete old or new dir, never a torn one.
+
+## Correctness rules (from panel review)
+
+- **Reason edges across the detach boundary (Mara — must-fix).** A `Reason` lives
+  in its `from` kern; `to_kern_id`/`to_net_id` may point outside the subtree. On
+  detach, an edge crossing the boundary must NOT be orphaned: (a) the segment
+  carries its own outbound edges as today (they already stamp `to_kern_id`), and
+  (b) beam `expand` / `route_entity`, on hitting a `to_kern_id` that resolves to a
+  manifest stub, **pages the segment in** (the by-id path) rather than dropping the
+  hop. Detach is rejected for a subtree with a live (hot) inbound edge from outside
+  until that source cools, to avoid thrash.
+- **Cross-tier retrieval fusion (Priya — must-define).** A paged-in segment's hits
+  re-enter the *global* fusion: segment seed scores are recomputed in the hot
+  index's space and fused with one RRF pass over the merged candidate list, not
+  concatenated post-rank. `dedup_by_section` runs across tiers.
+- **Recall gate (Priya — gating).** Phase 2 and Phase 3 do not ship until a
+  `benches/` + `locomo_eval` run shows recall within noise of the pre-condensation
+  baseline on a corpus that exercises a cold segment. Single-centroid summaries are
+  the v1; multi-centroid (≤4 k-means) is adopted only if the gate shows a regression.
+- **Summary invalidation on re-embed (Kenji).** A model swap forces a clean
+  re-embed; summary vectors are embeddings, so the re-embed path must recompute
+  every manifest `summary_vecs` (or mark them stale → recompute on next page-in).
+- **Tick-task isolation (Bjorn).** `do_condense` / `maybe_bisect` run inside
+  `catch_unwind` (or an isolated task) so a panic fails open and never poisons
+  `Arc<RwLock<GraphGnn>>`. Segment env open/close happens off the graph write lock
+  except for the brief manifest commit.
+- **do_condense vs do_cluster ownership (open).** `do_cluster` reshapes by cohesion;
+  `do_condense` detaches by heat. They must not fight: a subtree is a condense
+  candidate only when `do_cluster` considers it settled (no pending Name/Enrich) and
+  its aggregate heat (defined as **max** over descendants, not sum, so one hot entity
+  keeps it resident) is below floor.
 
 ## Config (`[graph]`)
 
@@ -209,9 +255,12 @@ All of `clear_stale_readers`, `copy_to_file`, `CompactionOption`,
 
 ## Phasing (each independently shippable + persona-reviewed)
 
-- **Phase 0 — reader-check + threshold compaction.** Unblocks the live bug. Lowest
-  risk, no forest. *Recovery for the current 4 GiB file: `kern compress … --mode
-  int8` into a fresh dir and swap during a controlled daemon restart.*
+- **Phase 0 — reader-check (live) + `kern compact` (daemon-down).** Unblocks the
+  live bug. Lowest risk, no forest. `clear_stale_readers` stops growth in-daemon;
+  shrinking is daemon-down only (Windows holds the env mmap — no live dir swap).
+  *Recovery for the current 4 GiB file: a clean 52.6 MB int8 store is already staged
+  at `.kern/data_int8`; back up `.kern/data` → `.bloated.bak` and swap during a
+  controlled daemon restart.*
 - **Phase 1 — manifest DB + segment env read/write + by-id page-in.** The forest
   exists; `Forest` resolves ids across hot + segment envs; LRU of open envs.
 - **Phase 2 — `do_condense` + summary nodes in hot index (by-vector page-in).**
@@ -222,18 +271,24 @@ All of `clear_stale_readers`, `copy_to_file`, `CompactionOption`,
 
 ## Testing
 
-- **Phase 0:** unit — `clear_stale_readers` invoked on open; compaction triggers
-  only above floor+ratio; `copy_to_file` output is smaller and round-trips
-  (`load_all_kerns` equal). Integration — synthesise a bloated env (many
-  put/overwrite cycles with a held reader), assert post-compaction `real_disk_size`
-  drops and data is intact.
+- **Phase 0:** unit — `clear_stale_readers` invoked on open and tick; `kern compact`
+  output is smaller and round-trips (`load_all_kerns` equal); compact refuses while a
+  lock is held. Integration — synthesise a bloated env (many put/overwrite cycles
+  with a held reader), assert `clear_stale_readers` lets the file stop growing, and
+  that daemon-down `kern compact` drops `real_disk_size` with data intact. Negative —
+  assert no code path attempts a live dir swap of an open env (the Windows trap).
 - **Phase 1:** `manifest` round-trip; `Forest::resident` pages a segment in and a
   `get(id)` across the boundary returns the kern; LRU eviction closes a clean handle
   without data loss; orphan-segment sweep on load.
 - **Phase 2:** a cold cohesive subtree detaches (hot row count drops, segment env
   appears, manifest row written, summary node present); a query whose vector matches
   the summary pages the segment in and returns its entities; crash-injection between
-  manifest commit and hot prune → reconcile leaves exactly one copy.
+  manifest commit and hot prune → reconcile leaves exactly one copy; **a reason edge
+  crossing the boundary still traverses** (beam `expand` pages the segment in on the
+  `to_kern_id` hop, no orphaned hop); **segment-verify-before-prune** — a corrupted
+  segment write aborts the detach with hot rows intact (no silent loss); assert
+  `do_condense` issues zero LLM calls. **Recall gate:** `locomo_eval` within noise of
+  the pre-condensation baseline on a cold-segment corpus.
 - **Phase 3:** an over-cap env bisects into two envs whose kern sets partition the
   original by nearest centroid; recall over the union is preserved (extend
   `benches/` recall harness).
