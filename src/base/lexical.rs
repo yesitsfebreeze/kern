@@ -38,6 +38,22 @@ impl LexicalIndex {
 		}
 	}
 
+	/// Update the BM25 `k1`/`b` scoring parameters. These are read at QUERY time
+	/// (`search_filtered`), so no re-indexing is needed. Wired from
+	/// `config.retrieval.bm25_k1`/`bm25_b` at daemon load — without this the
+	/// configured values were dead and BM25 always used the hardcoded construction
+	/// defaults. Guards against nonsensical inputs (negative `k1`, `b` outside
+	/// `[0,1]`, NaN) that would corrupt the score formula.
+	pub fn set_bm25_params(&self, k1: f32, b: f32) {
+		let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
+		if k1.is_finite() {
+			inner.k1 = k1.max(0.0);
+		}
+		if b.is_finite() {
+			inner.b = b.clamp(0.0, 1.0);
+		}
+	}
+
 	pub fn insert(&self, entity_id: &str, text: &str) {
 		let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
 		inner_insert(&mut inner, entity_id, text);
@@ -239,6 +255,27 @@ mod tests {
 	fn tokenize_splits_lowercases_and_stems() {
 		assert_eq!(tokenize("Running, the Cats!"), vec!["runn", "the", "cat"]);
 		assert!(tokenize("   ,.!").is_empty(), "punctuation-only yields no tokens");
+	}
+
+	#[test]
+	fn set_bm25_params_changes_query_scores_and_clamps_invalid() {
+		let idx = LexicalIndex::new_in_ram(1.2, 0.75);
+		idx.insert("short", "alpha beta");
+		idx.insert("long", "alpha alpha alpha gamma delta epsilon");
+
+		let base: Vec<f32> = idx.search("alpha", 10).into_iter().map(|h| h.score).collect();
+		// k1/b are query-time params: changing them re-scores with no re-indexing.
+		idx.set_bm25_params(2.5, 0.0); // drop length normalisation, raise tf saturation
+		let tuned: Vec<f32> = idx.search("alpha", 10).into_iter().map(|h| h.score).collect();
+		assert_ne!(base, tuned, "new k1/b change BM25 scores without re-indexing");
+
+		// Nonsensical inputs are clamped, not applied raw (would corrupt the formula).
+		idx.set_bm25_params(-5.0, 9.0);
+		let hits = idx.search("alpha", 10);
+		assert!(!hits.is_empty() && hits.iter().all(|h| h.score.is_finite()), "clamped params keep scores finite: {hits:?}");
+		// NaN is ignored entirely (previous valid values retained → still finite).
+		idx.set_bm25_params(f32::NAN, f32::NAN);
+		assert!(idx.search("alpha", 10).iter().all(|h| h.score.is_finite()), "NaN ignored, not applied");
 	}
 
 	#[test]
