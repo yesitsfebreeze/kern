@@ -52,7 +52,18 @@ pub fn replay(g: &GraphGnn, cfg: &RetrievalConfig, trace: &Trace) -> ReplayRepor
 fn run_one(g: &GraphGnn, cfg: &RetrievalConfig, q: &TraceQuery) -> QueryReport {
 	let mode = Mode::parse(&q.mode);
 	let qvec = embed::embed(&q.query);
-	let result = crate::retrieval::answer::query(g, cfg, &qvec, &q.query, mode, None, None, None);
+	// An optional kind filter makes the bench run the FILTERED retrieval path
+	// (post-filtering today; the place to A/B filtered-ANN wiring). An unparseable
+	// kind falls back to no filter rather than silently scoring the wrong thing.
+	let opts = q
+		.filter_kind
+		.as_deref()
+		.and_then(crate::base::types::EntityKind::parse)
+		.map(|kind| crate::retrieval::score::QueryOptions {
+			kind: Some(kind),
+			..Default::default()
+		});
+	let result = crate::retrieval::answer::query(g, cfg, &qvec, &q.query, mode, None, None, opts);
 	let ranked: Vec<String> = result.entities.iter().map(|st| st.entity.id.clone()).collect();
 	let ndcg10 = ndcg::ndcg_at_k(&ranked, &q.expected_ids, 10);
 	let recall10 = ndcg::recall_at_k(&ranked, &q.expected_ids, 10);
@@ -95,6 +106,7 @@ mod tests {
 				query: "rust ownership and the borrow checker".into(),
 				expected_ids: vec!["d1".into()],
 				mode: "semantic".into(),
+				filter_kind: None,
 			}],
 		};
 
@@ -119,6 +131,44 @@ mod tests {
 			"the single expected doc is retrieved within k -> recall@10 = 1.0"
 		);
 		assert_eq!(report.per_query[0].recall10, 1.0, "per-query recall is populated");
+	}
+
+	#[test]
+	fn replay_applies_the_kind_filter_end_to_end() {
+		// build_graph inserts every doc as a Claim, so a `fact` filter matches
+		// NOTHING: the filtered query must score recall@10 = 0, proving the filter
+		// runs through the full retrieve -> post-filter path. The same query with no
+		// filter (or kind=claim) retrieves the relevant doc, confirming it is the
+		// filter — not a broken query — that zeroed recall.
+		let docs = vec![
+			doc("d1", "rust ownership and the borrow checker"),
+			doc("d2", "graph neural network message passing"),
+		];
+		let mk = |filter: Option<&str>| Trace {
+			name: "filtered".into(),
+			docs: docs.clone(),
+			queries: vec![TraceQuery {
+				id: "q1".into(),
+				query: "rust ownership and the borrow checker".into(),
+				expected_ids: vec!["d1".into()],
+				mode: "semantic".into(),
+				filter_kind: filter.map(str::to_string),
+			}],
+		};
+		let g = build_graph(&mk(None));
+		let cfg = RetrievalConfig::default();
+
+		assert_eq!(replay(&g, &cfg, &mk(None)).mean_recall10, 1.0, "unfiltered finds the doc");
+		assert_eq!(
+			replay(&g, &cfg, &mk(Some("fact"))).mean_recall10,
+			0.0,
+			"a fact filter on a Claim-only graph zeroes recall -> filter applied end-to-end"
+		);
+		assert_eq!(
+			replay(&g, &cfg, &mk(Some("claim"))).mean_recall10,
+			1.0,
+			"kind=claim matches -> recall restored, so it was the filter, not the query"
+		);
 	}
 
 	#[test]

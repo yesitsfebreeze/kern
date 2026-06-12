@@ -19,6 +19,12 @@ pub struct TraceQuery {
 	/// defaults to `"hybrid"` via [`default_mode`].
 	#[serde(default = "default_mode")]
 	pub mode: String,
+	/// Optional entity-kind filter (`"fact"` | `"claim"` | …, parsed by
+	/// [`EntityKind::parse`](crate::base::types::EntityKind::parse)). When set, the
+	/// query runs with that metadata filter so the bench exercises — and scores —
+	/// the filtered retrieval path end-to-end, not just unfiltered recall.
+	#[serde(default)]
+	pub filter_kind: Option<String>,
 }
 
 fn default_mode() -> String {
