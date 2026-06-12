@@ -123,12 +123,25 @@ pub fn merge_remote_entity(g: &mut GraphGnn, target_kern_id: &str, remote: Entit
 	match host {
 		// Known shared content in the same network scope: CRDT-merge.
 		Some(kid) if kid == target_kern_id => {
-			if let Some(kern) = g.kerns.get_mut(&kid) {
-				if let Some(local) = kern.entities.get_mut(&remote.id) {
-					return merge_entity(local, &remote);
-				}
+			let (changed, now_superseded) = match g.kerns.get_mut(&kid) {
+				Some(kern) => match kern.entities.get_mut(&remote.id) {
+					Some(local) => {
+						let changed = merge_entity(local, &remote);
+						(changed, local.status == EntityStatus::Superseded)
+					}
+					None => (false, false),
+				},
+				None => (false, false),
+			};
+			// A CRDT join that flipped the entity to Superseded must drop it from the
+			// ANN search indices too — the same invariant `accept::supersede` and
+			// `graph::index_kern_into` enforce: a superseded entity is never a valid
+			// result, so leaving it indexed wastes top-k slots until the next rebuild.
+			if now_superseded {
+				g.entity_idx.delete(&remote.id);
+				g.gnn_entity_idx.delete(&remote.id);
 			}
-			false
+			changed
 		}
 		// Id owned by another kern (local-origin or another network): a remote
 		// peer must not be able to alter or hijack it.
@@ -312,6 +325,43 @@ mod tests {
 			g.kerns.get(&fallback).unwrap().entities.get("eX").unwrap().heat,
 			9.0
 		);
+	}
+
+	#[test]
+	fn merge_to_superseded_drops_entity_from_search_index() {
+		// A CRDT join that flips a local entity to Superseded must also evict it from
+		// the ANN search index — same invariant as accept::supersede, enforced for
+		// the gossip path so a federated supersede doesn't leave a never-returnable
+		// entity burning top-k candidate slots until the next rebuild.
+		let mut g = GraphGnn::new();
+		let kid = g.root.id.clone();
+		let mut local = mk_entity("eX", "x", 1.0, EntityKind::Fact);
+		local.vector = vec![1.0, 0.0];
+		local.status = EntityStatus::Active;
+		g.entity_idx.insert("eX".into(), vec![1.0, 0.0]);
+		g.kerns.get_mut(&kid).unwrap().entities.insert("eX".into(), local);
+		g.index_entity("eX", &kid);
+
+		let before: Vec<String> = crate::base::search::search_all_unlocked(&g, &[1.0, 0.0], 5)
+			.into_iter()
+			.map(|h| h.entity_id)
+			.collect();
+		assert!(before.contains(&"eX".to_string()), "active entity indexed before merge");
+
+		let mut remote = mk_entity("eX", "x", 1.0, EntityKind::Fact);
+		remote.status = EntityStatus::Superseded;
+		merge_remote_entity(&mut g, &kid, remote);
+
+		assert_eq!(
+			g.kerns.get(&kid).unwrap().entities.get("eX").unwrap().status,
+			EntityStatus::Superseded,
+			"CRDT join propagated Superseded",
+		);
+		let after: Vec<String> = crate::base::search::search_all_unlocked(&g, &[1.0, 0.0], 5)
+			.into_iter()
+			.map(|h| h.entity_id)
+			.collect();
+		assert!(!after.contains(&"eX".to_string()), "merge-superseded entity removed from search index");
 	}
 
 	#[test]
