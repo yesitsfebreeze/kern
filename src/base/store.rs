@@ -31,9 +31,21 @@ use crate::quant::{QuantizationMode, QuantizedVec};
 
 /// Max size of the LMDB memory map (and therefore the store's max on-disk size).
 /// LMDB mmaps this virtual range up front; NTFS/most filesystems keep the backing
-/// file sparse, so actual disk use tracks real data, not this cap. Bump if a
-/// single project's graph + cold tier can exceed it.
-const MAP_SIZE: usize = 4 * 1024 * 1024 * 1024; // 4 GiB
+/// file sparse, so actual disk use tracks real data, not this cap. On 64-bit the
+/// reservation is virtual address space (near-free), so this is set generously.
+///
+/// Headroom is a DURABILITY requirement, not just a growth allowance: when the env
+/// fills, LMDB returns `MDB_MAP_FULL` even for the *deletes* that would free space
+/// (a copy-on-write B-tree needs free pages to commit a deletion). The startup
+/// liveness reap (`gc_empty_kerns`) is exactly such a bulk delete — under the old
+/// 4 GiB cap, an env bloated to the limit by the unnamed-child spawn runaway could
+/// not commit its own cleanup (observed: 178k empty kerns reaped in memory but the
+/// save failed `MDB_MAP_FULL`, so the bloat never cleared and every restart
+/// re-failed). The cap must stay well above the largest transient bloat so the
+/// graph can always self-heal. Bump further if a real graph + cold tier approaches
+/// it. (Kept moderate rather than enormous: on Windows not every filesystem keeps
+/// the LMDB map sparse, so the cap also bounds worst-case file size.)
+const MAP_SIZE: usize = 16 * 1024 * 1024 * 1024; // 16 GiB
 /// Named databases: kern, cold, meta.
 const MAX_DBS: u32 = 3;
 
