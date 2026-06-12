@@ -2,6 +2,12 @@
 pub enum OutcomeStatus {
 	Committed,
 	Partial,
+	/// The document matched an existing entity (cosine ≥ dedup threshold) and
+	/// was MERGED into it instead of placed fresh: the acked content-hash
+	/// `doc_id` never enters the graph — the surviving id is the existing
+	/// entity's. Distinct from `Committed` so a merge is distinguishable from
+	/// silent loss at every call site (in-memory only; never persisted).
+	Deduped,
 	Failed,
 }
 
@@ -10,6 +16,7 @@ impl OutcomeStatus {
 		match self {
 			Self::Committed => "committed",
 			Self::Partial => "partial",
+			Self::Deduped => "deduped",
 			Self::Failed => "failed",
 		}
 	}
@@ -94,6 +101,11 @@ mod tests {
 		assert_eq!(OutcomeStatus::Committed.as_str(), "committed");
 		assert_eq!(OutcomeStatus::Partial.as_str(), "partial");
 		assert_eq!(OutcomeStatus::Failed.as_str(), "failed");
+		// Dedup-merge must be distinguishable from a fresh commit: the caller's
+		// acked content-hash doc_id does NOT exist in the graph after a merge
+		// (the surviving id is the existing entity's), so reporting it as a
+		// plain "committed" made merges indistinguishable from silent loss.
+		assert_eq!(OutcomeStatus::Deduped.as_str(), "deduped");
 	}
 
 	#[test]

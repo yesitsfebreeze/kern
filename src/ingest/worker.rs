@@ -104,6 +104,13 @@ async fn run_loop(
 ) {
 	while let Some(job) = rx.recv().await {
 		let outcome = process(&graph, &embedder, &llm, &job).await;
+		// Every job's outcome is journaled (the tracing layer feeds the
+		// journal), fire-and-forget jobs included. Before this, an `enqueue`d
+		// job that failed vanished without a trace: result_tx is None on that
+		// path, so the Outcome — including its FailureReports — was dropped
+		// unread. Observed live: 8/8 MCP ingests acked "queued" with nothing
+		// in the graph and nothing in the journal to say why.
+		log_outcome(&outcome);
 		if let Some(sf) = &save_fn {
 			sf();
 		}
@@ -111,6 +118,76 @@ async fn run_loop(
 			let _ = tx.send(outcome);
 		}
 	}
+}
+
+/// Severity bucket for an ingest outcome: failures are loud, success is quiet.
+/// Pure so the mapping is unit-testable; `log_outcome` applies it.
+fn outcome_log_severity(o: &Outcome) -> &'static str {
+	match o.status {
+		OutcomeStatus::Failed => "error",
+		OutcomeStatus::Partial => "warn",
+		OutcomeStatus::Committed | OutcomeStatus::Deduped => "info",
+	}
+}
+
+/// Journal one processed job. The first failure's class+error is inlined so a
+/// single journal line answers "what happened to doc X" without a debugger.
+fn log_outcome(o: &Outcome) {
+	let first_failure = o
+		.failures
+		.first()
+		.map(|f| format!("{}/{}: {}", f.scope, f.class, f.error))
+		.unwrap_or_default();
+	match outcome_log_severity(o) {
+		"error" => tracing::error!(
+			target: "kern.ingest",
+			doc_id = %o.doc_id,
+			status = o.status.as_str(),
+			total = o.total_chunks,
+			embedded = o.embedded_chunks,
+			failed = o.failed_chunks,
+			first_failure = %first_failure,
+			"ingest job failed"
+		),
+		"warn" => tracing::warn!(
+			target: "kern.ingest",
+			doc_id = %o.doc_id,
+			status = o.status.as_str(),
+			total = o.total_chunks,
+			embedded = o.embedded_chunks,
+			failed = o.failed_chunks,
+			first_failure = %first_failure,
+			"ingest job partially committed"
+		),
+		_ => tracing::info!(
+			target: "kern.ingest",
+			doc_id = %o.doc_id,
+			status = o.status.as_str(),
+			total = o.total_chunks,
+			embedded = o.embedded_chunks,
+			"ingest job committed"
+		),
+	}
+}
+
+/// Resolve the outcome's document identity after placement. `place_document`
+/// returns the SURVIVING entity id: the content hash on a fresh place, or an
+/// existing entity's id on a dedup merge. The outcome must carry the surviving
+/// id — the caller was acked the content hash, and after a merge that id does
+/// not exist in the graph — and a `Committed` merge becomes `Deduped` so the
+/// two are distinguishable. Partial/Failed are never upgraded.
+fn finalize_doc_identity(
+	content_id: &str,
+	surviving_id: String,
+	status: OutcomeStatus,
+) -> (String, OutcomeStatus) {
+	let deduped = surviving_id != content_id;
+	let status = if deduped && status == OutcomeStatus::Committed {
+		OutcomeStatus::Deduped
+	} else {
+		status
+	};
+	(surviving_id, status)
 }
 
 async fn process(
@@ -129,7 +206,7 @@ async fn process(
 
 	let (doc_thought, doc_fail) =
 		place_document(graph, embedder, job, &doc_id, job.config.dedup_threshold).await;
-	if doc_thought.is_none() {
+	let Some(surviving_id) = doc_thought else {
 		let fail = doc_fail.unwrap_or_else(|| FailureReport::document_permanent("unknown"));
 		return Outcome {
 			status: OutcomeStatus::Failed,
@@ -142,7 +219,7 @@ async fn process(
 			failures: vec![fail],
 			message: "document embedding failed".into(),
 		};
-	}
+	};
 
 	let (chunk_vecs, failures) = embed_chunks(embedder, &chunks).await;
 
@@ -162,6 +239,10 @@ async fn process(
 	let permanent = failures.iter().filter(|f| f.class != "transient").count();
 
 	let status = classify_status(embedded_chunks, failed_chunks);
+	// Carry the SURVIVING id (existing entity on a dedup merge) and mark the
+	// merge as Deduped — the acked content hash does not exist in the graph
+	// after a merge, which previously made merges look like silent loss.
+	let (doc_id, status) = finalize_doc_identity(&doc_id, surviving_id, status);
 
 	Outcome {
 		status,
@@ -241,6 +322,53 @@ mod tests {
 			Config::default(),
 		);
 		assert_eq!(doc_id, util::content_hash(&text));
+	}
+
+	fn outcome_with(status: OutcomeStatus) -> Outcome {
+		Outcome {
+			status,
+			doc_id: "d".into(),
+			total_chunks: 1,
+			embedded_chunks: 1,
+			failed_chunks: 0,
+			transient_failures: 0,
+			permanent_failures: 0,
+			failures: Vec::new(),
+			message: String::new(),
+		}
+	}
+
+	#[test]
+	fn finalize_doc_identity_marks_dedup_and_keeps_surviving_id() {
+		// Dedup merge: place_document returned an EXISTING entity id, not the
+		// content hash — the outcome must carry the surviving id and say so,
+		// otherwise the caller holds a doc_id that does not exist in the graph
+		// (indistinguishable from silent loss).
+		let (id, st) =
+			finalize_doc_identity("hash-a", "existing-b".to_string(), OutcomeStatus::Committed);
+		assert_eq!(id, "existing-b");
+		assert_eq!(st, OutcomeStatus::Deduped);
+
+		// Fresh placement: surviving id IS the content hash — status unchanged.
+		let (id, st) =
+			finalize_doc_identity("hash-a", "hash-a".to_string(), OutcomeStatus::Committed);
+		assert_eq!(id, "hash-a");
+		assert_eq!(st, OutcomeStatus::Committed);
+
+		// Partial/Failed outcomes are never upgraded to Deduped — chunk failures
+		// still need to surface as such.
+		let (_, st) =
+			finalize_doc_identity("hash-a", "existing-b".to_string(), OutcomeStatus::Partial);
+		assert_eq!(st, OutcomeStatus::Partial);
+	}
+
+	#[test]
+	fn outcome_log_severity_maps_status_to_level() {
+		// Every processed job must be observable: failures loudly, success quietly.
+		assert_eq!(outcome_log_severity(&outcome_with(OutcomeStatus::Committed)), "info");
+		assert_eq!(outcome_log_severity(&outcome_with(OutcomeStatus::Deduped)), "info");
+		assert_eq!(outcome_log_severity(&outcome_with(OutcomeStatus::Partial)), "warn");
+		assert_eq!(outcome_log_severity(&outcome_with(OutcomeStatus::Failed)), "error");
 	}
 
 	#[tokio::test]

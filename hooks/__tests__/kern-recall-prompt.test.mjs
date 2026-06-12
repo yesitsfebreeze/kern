@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   parseHits, buildContext, buildOutput, MIN_SCORE,
   contentWords, parseAnchors, shouldSearch,
-  resolveMinScore, kernSearch, TOP_K,
+  resolveMinScore, kernSearch, TOP_K, TIMEOUT_MS,
 } from '../kern-recall-prompt.mjs';
 
 const SAMPLE = [
@@ -78,6 +78,55 @@ test('kernSearch dispatches the expected argv and cwd', async () => {
   assert.equal(seen.file, 'kern');
   assert.deepEqual(seen.args, ['search', 'hello world', '--k', String(TOP_K)]);
   assert.equal(seen.cwd, '/proj');
+});
+
+test('TIMEOUT_MS accommodates measured kern CLI startup', () => {
+  // Regression: TIMEOUT_MS was 2500 while `kern search` measured ~4100ms on
+  // the installed binary (the CLI loads the whole on-disk graph per call) —
+  // so EVERY UserPromptSubmit recall timed out and fail-open silently
+  // injected nothing. Demand-recall was dead in production for as long as
+  // nobody watched. The floor encodes the measurement with headroom.
+  assert.ok(
+    TIMEOUT_MS >= 8000,
+    `TIMEOUT_MS=${TIMEOUT_MS} must cover measured CLI search wall time (~4100ms) with headroom`,
+  );
+});
+
+test('kernSearch warns to stderr on failure when KERN_HOOK_DEBUG is set', async () => {
+  // Fail-open must not mean fail-silent: with KERN_HOOK_DEBUG set, a timeout
+  // or spawn error leaves a trace so a dead recall path is diagnosable.
+  const captured = [];
+  const origWrite = process.stderr.write;
+  process.stderr.write = (s) => { captured.push(String(s)); return true; };
+  const origEnv = process.env.KERN_HOOK_DEBUG;
+  process.env.KERN_HOOK_DEBUG = '1';
+  try {
+    const out = await kernSearch('q', '/tmp', (_f, _a, _o, cb) => cb(new Error('ETIMEDOUT'), ''));
+    assert.equal(out, '', 'still fail-open');
+    assert.ok(
+      captured.some((s) => s.includes('kern-recall-prompt') && s.includes('ETIMEDOUT')),
+      `expected a debug warning naming the error, got: ${JSON.stringify(captured)}`,
+    );
+  } finally {
+    process.stderr.write = origWrite;
+    if (origEnv === undefined) delete process.env.KERN_HOOK_DEBUG;
+    else process.env.KERN_HOOK_DEBUG = origEnv;
+  }
+});
+
+test('kernSearch stays silent on failure without KERN_HOOK_DEBUG', async () => {
+  const captured = [];
+  const origWrite = process.stderr.write;
+  process.stderr.write = (s) => { captured.push(String(s)); return true; };
+  const origEnv = process.env.KERN_HOOK_DEBUG;
+  delete process.env.KERN_HOOK_DEBUG;
+  try {
+    await kernSearch('q', '/tmp', (_f, _a, _o, cb) => cb(new Error('boom'), ''));
+    assert.equal(captured.length, 0, 'no stderr noise in normal sessions');
+  } finally {
+    process.stderr.write = origWrite;
+    if (origEnv !== undefined) process.env.KERN_HOOK_DEBUG = origEnv;
+  }
 });
 
 test('buildOutput wraps in the UserPromptSubmit envelope, empty stays empty', () => {

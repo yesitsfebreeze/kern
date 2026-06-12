@@ -12,7 +12,11 @@ import { fileURLToPath } from 'node:url';
 export const TOP_K          = 6;     // hits to ask kern for
 export const MAX_INJECT     = 5;     // hits to actually inject
 export const MIN_PROMPT     = 4;     // skip trivially short prompts
-export const TIMEOUT_MS     = 2500;  // hard bound; slow kern = inject nothing
+// Hard bound; slow kern = inject nothing. MUST cover the measured `kern
+// search` wall time: the CLI loads the whole on-disk graph per invocation
+// (~4100ms measured on a 32k-kern store, 2026-06-12). At 2500ms every recall
+// timed out and fail-open silently injected nothing — demand-recall was dead.
+export const TIMEOUT_MS     = 9000;
 export const MIN_OVERLAP    = 2;     // word overlap with digest required to spawn kern
 
 /**
@@ -139,7 +143,15 @@ export function kernSearch(prompt, cwd, exec = execFile) {
       'kern',
       ['search', prompt, '--k', String(TOP_K)],
       { cwd, timeout: TIMEOUT_MS, windowsHide: true, maxBuffer: 1 << 20 },
-      (err, stdout) => resolve(err ? '' : stdout || ''),
+      (err, stdout) => {
+        if (err && process.env.KERN_HOOK_DEBUG) {
+          // Fail-open must not mean fail-silent: a timeout/spawn error here is
+          // exactly how demand-recall dies invisibly. Debug-only, like the
+          // cwd-fallback warning in kern-recall.mjs.
+          process.stderr.write(`kern-recall-prompt: kern search failed: ${err.message ?? err}\n`);
+        }
+        resolve(err ? '' : stdout || '');
+      },
     );
   });
 }

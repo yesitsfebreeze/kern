@@ -439,7 +439,17 @@ pub(crate) fn get_or_spawn_generic_child(g: &mut GraphGnn, parent_id: &str) -> S
 
 /// Create a named child of the root carrying `vec` as its routing vector — i.e.
 /// a new anchor. Shared by the CLI `anchor add` and the MCP `anchor` tool.
+/// One anchor per name: if a root anchor with the same (trimmed,
+/// case-insensitive) name already exists, its routing vector is updated in
+/// place instead of minting a sibling — the live root carried the same anchor
+/// string twice before this guard.
 pub(crate) fn add_anchor(g: &mut GraphGnn, name: &str, vec: Vec<f64>) {
+	if let Some(existing) = find_anchor_by_name(g, name) {
+		if let Some(k) = g.get_mut(&existing) {
+			k.anchor_vec = vec;
+		}
+		return;
+	}
 	let root = g.root.id.clone();
 	let root_net = g.root.root_id.clone();
 	let child = Kern::new_named_child(&root, &root_net, name, vec);
@@ -450,6 +460,39 @@ pub(crate) fn add_anchor(g: &mut GraphGnn, name: &str, vec: Vec<f64>) {
 			r.children.push(cid);
 		}
 	}
+}
+
+/// Root anchor whose name matches `name` after trim + lowercase, if any.
+fn find_anchor_by_name(g: &GraphGnn, name: &str) -> Option<String> {
+	let needle = name.trim().to_lowercase();
+	root_anchor_ids(g).into_iter().find(|cid| {
+		g.loaded(cid)
+			.map(|c| c.anchor_text.trim().to_lowercase() == needle)
+			.unwrap_or(false)
+	})
+}
+
+/// Does the root already carry an anchor equivalent to (`name`, `vec`)?
+/// Equivalent = same normalized name, OR routing vectors near-parallel
+/// (cosine ≥ `ANCHOR_DEDUP_THRESHOLD`). The duplicate-anchor guard for
+/// promotion: the naming LLM rephrases one concept many ways, and every
+/// rephrasing used to mint a fresh root anchor.
+fn equivalent_anchor_exists(g: &GraphGnn, name: &str, vec: &[f64]) -> bool {
+	if find_anchor_by_name(g, name).is_some() {
+		return true;
+	}
+	if vec.is_empty() {
+		return false;
+	}
+	root_anchor_ids(g).into_iter().any(|cid| {
+		g.loaded(&cid)
+			.map(|c| {
+				!c.anchor_vec.is_empty()
+					&& crate::base::math::cosine(&c.anchor_vec, vec)
+						>= crate::base::constants::ANCHOR_DEDUP_THRESHOLD
+			})
+			.unwrap_or(false)
+	})
 }
 
 /// The root's user-facing anchors — its named children excluding the `generic`
@@ -485,6 +528,19 @@ pub(crate) fn promote_to_root_if_generic(g: &mut GraphGnn, kern_id: &str) -> boo
 		.map(|p| p.anchor_text == GENERIC_ANCHOR)
 		.unwrap_or(false);
 	if !under_generic {
+		return false;
+	}
+	// Duplicate-anchor guard: if the root already carries an equivalent anchor
+	// (same normalized name, or near-parallel routing vector), do NOT promote —
+	// the kern stays named under generic and the existing anchor keeps catching
+	// matching memories. Loss-free: nothing is moved or merged. Without this,
+	// every LLM rephrasing of one concept minted another root anchor (observed
+	// live: 9+ for a single concept, including an exact-string duplicate).
+	let (cand_name, cand_vec) = match g.loaded(kern_id) {
+		Some(k) => (k.anchor_text.clone(), k.anchor_vec.clone()),
+		None => return false,
+	};
+	if equivalent_anchor_exists(g, &cand_name, &cand_vec) {
 		return false;
 	}
 	let root_id = g.root.id.clone();
@@ -824,6 +880,81 @@ mod tests {
 			"anchor no longer a named root child"
 		);
 		assert!(!remove_anchor(&mut g, "missing"), "missing anchor -> false");
+	}
+
+	#[test]
+	fn promote_skips_when_root_has_equivalent_anchor_by_name() {
+		// Regression: anchor proliferation. The naming LLM phrases the same
+		// concept differently each pass, and promotion never checked existing
+		// anchors — observed live: 9+ root anchors for one concept including a
+		// byte-identical duplicate. An exact (trimmed, case-insensitive) name
+		// match must block promotion; the kern stays named under generic.
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		add_anchor(&mut g, "sessions with no parent", vec![1.0, 0.0, 0.0]);
+		let generic = get_or_spawn_generic_child(&mut g, &root);
+		let root_net = g.root.root_id.clone();
+		let child =
+			Kern::new_named_child(&generic, &root_net, " Sessions With No Parent ", vec![0.0, 1.0, 0.0]);
+		let cid = child.id.clone();
+		g.register(child);
+		g.get_mut(&generic).unwrap().children.push(cid.clone());
+
+		assert!(
+			!promote_to_root_if_generic(&mut g, &cid),
+			"name-equivalent anchor exists -> no promotion"
+		);
+		assert!(!root_anchor_ids(&g).contains(&cid), "not minted as a root anchor");
+		assert_eq!(g.loaded(&cid).unwrap().parent, generic, "stays under generic");
+	}
+
+	#[test]
+	fn promote_skips_when_root_anchor_vec_is_near_duplicate() {
+		// Same concept, different phrasing: the anchor VECTORS are near-parallel
+		// even when the names differ. Cosine >= the anchor-dedup threshold must
+		// block promotion; an orthogonal concept still promotes.
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		add_anchor(&mut g, "parentless sessions", vec![1.0, 0.0, 0.0]);
+		let generic = get_or_spawn_generic_child(&mut g, &root);
+		let root_net = g.root.root_id.clone();
+
+		// Near-duplicate direction (cosine ~0.995 to the existing anchor).
+		let near = Kern::new_named_child(&generic, &root_net, "sessions without parents", vec![1.0, 0.1, 0.0]);
+		let near_id = near.id.clone();
+		g.register(near);
+		g.get_mut(&generic).unwrap().children.push(near_id.clone());
+		assert!(
+			!promote_to_root_if_generic(&mut g, &near_id),
+			"vector-equivalent anchor exists -> no promotion"
+		);
+
+		// Orthogonal direction: a genuinely new concept still promotes.
+		let fresh = Kern::new_named_child(&generic, &root_net, "shader pipelines", vec![0.0, 0.0, 1.0]);
+		let fresh_id = fresh.id.clone();
+		g.register(fresh);
+		g.get_mut(&generic).unwrap().children.push(fresh_id.clone());
+		assert!(
+			promote_to_root_if_generic(&mut g, &fresh_id),
+			"orthogonal concept still promotes"
+		);
+	}
+
+	#[test]
+	fn add_anchor_updates_existing_same_name_instead_of_minting_duplicate() {
+		// Regression: the live root carried the SAME anchor string twice —
+		// add_anchor never checked for an existing anchor of that name.
+		let mut g = GraphGnn::new();
+		add_anchor(&mut g, "work", vec![1.0, 0.0, 0.0]);
+		add_anchor(&mut g, "work", vec![0.0, 1.0, 0.0]);
+
+		let ids: Vec<String> = root_anchor_ids(&g)
+			.into_iter()
+			.filter(|cid| g.loaded(cid).map(|c| c.anchor_text == "work").unwrap_or(false))
+			.collect();
+		assert_eq!(ids.len(), 1, "one anchor per name, not one per call");
+		let vec = g.loaded(&ids[0]).unwrap().anchor_vec.clone();
+		assert_eq!(vec, vec![0.0, 1.0, 0.0], "second call updates the routing vector in place");
 	}
 
 	#[test]

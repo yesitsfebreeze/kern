@@ -85,6 +85,16 @@ pub const ACCEPT_FLOOR: f64 = 0.5;
 /// empty `anchor_vec`, so similarity routing never matches it — it is reachable
 /// only as the fallback when no named anchor clears `ACCEPT_FLOOR`.
 pub const GENERIC_ANCHOR: &str = "generic";
+
+/// Cosine floor above which two anchor routing vectors are considered the SAME
+/// concept, blocking promotion of a near-duplicate root anchor. Deliberately
+/// well above `KERN_COHESION_THRESHOLD` (cluster membership) and `ACCEPT_FLOOR`
+/// (routing): merging two genuinely distinct anchors is worse than tolerating a
+/// borderline duplicate, so the gate only fires on near-parallel vectors.
+/// Chosen against the observed failure (9+ rephrasings of one concept minted as
+/// separate anchors, whose name embeddings are near-parallel); re-tune with a
+/// measured embedding-similarity distribution if the embed model changes.
+pub const ANCHOR_DEDUP_THRESHOLD: f64 = 0.85;
 pub const KERN_COHESION_THRESHOLD: f64 = 0.60;
 pub const KERN_MIN_CLUSTER_SIZE: usize = 10;
 pub const KERN_NAMING_COHESION_THRESHOLD: f64 = 0.50;
