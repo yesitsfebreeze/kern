@@ -90,9 +90,9 @@ impl EvalReport {
 		lat.sort_unstable();
 		out.push_str(&format!(
 			"latency ms: p50={} p95={} p99={} max={}\n",
-			percentile(&lat, 50.0),
-			percentile(&lat, 95.0),
-			percentile(&lat, 99.0),
+			crate::base::util::percentile_sorted(&lat, 0.50).unwrap_or(0),
+			crate::base::util::percentile_sorted(&lat, 0.95).unwrap_or(0),
+			crate::base::util::percentile_sorted(&lat, 0.99).unwrap_or(0),
 			lat.last().copied().unwrap_or(0),
 		));
 		if self.n_queries > 0 {
@@ -134,15 +134,6 @@ impl EvalReport {
 		));
 		out
 	}
-}
-
-/// Nearest-rank percentile of an already-sorted slice.
-fn percentile(sorted: &[u128], p: f64) -> u128 {
-	if sorted.is_empty() {
-		return 0;
-	}
-	let idx = ((p / 100.0) * (sorted.len() - 1) as f64).round() as usize;
-	sorted[idx.min(sorted.len() - 1)]
 }
 
 /// Run the full eval and return the aggregated report.
@@ -340,10 +331,11 @@ mod tests {
 
 	#[test]
 	fn percentile_nearest_rank() {
+		// Uses the shared base::util::percentile_sorted; same values as before.
 		let v = [10u128, 20, 30, 40, 50];
-		assert_eq!(percentile(&v, 50.0), 30);
-		assert_eq!(percentile(&v, 95.0), 50);
-		assert_eq!(percentile(&[], 95.0), 0);
+		assert_eq!(crate::base::util::percentile_sorted(&v, 0.50), Some(30));
+		assert_eq!(crate::base::util::percentile_sorted(&v, 0.95), Some(50));
+		assert_eq!(crate::base::util::percentile_sorted::<u128>(&[], 0.95), None);
 	}
 
 	#[test]

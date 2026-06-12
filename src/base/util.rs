@@ -58,6 +58,25 @@ pub fn cmp_rank<S: PartialOrd>(a_score: S, a_id: &str, b_score: S, b_id: &str) -
 	cmp_partial(&b_score, &a_score).then_with(|| a_id.cmp(b_id))
 }
 
+/// Nearest-rank percentile of an ascending-SORTED slice. `p` is a fraction in
+/// `[0, 1]` (`0.95` = p95). `None` only for an empty slice; `p <= 0` -> first
+/// element, `p >= 1` -> last, otherwise the element at 1-based rank
+/// `ceil(p * len)`. Generic so latency/timing percentiles (`u128`, `f64`, …)
+/// share one implementation instead of re-deriving the index math per call site.
+pub fn percentile_sorted<T: Copy>(sorted: &[T], p: f64) -> Option<T> {
+	if sorted.is_empty() {
+		return None;
+	}
+	if p <= 0.0 {
+		return Some(sorted[0]);
+	}
+	if p >= 1.0 {
+		return Some(sorted[sorted.len() - 1]);
+	}
+	let rank = (p * sorted.len() as f64).ceil() as usize;
+	Some(sorted[rank.clamp(1, sorted.len()) - 1])
+}
+
 /// Wall-clock nanoseconds since the Unix epoch. Single source for the
 /// `SystemTime::now().duration_since(UNIX_EPOCH)` stamp used to mint
 /// gossip message ids.
@@ -107,6 +126,20 @@ mod tests {
 	fn hex_encode_is_lowercase_two_chars_per_byte() {
 		assert_eq!(hex::encode([0x00, 0xff, 0x10, 0xab]), "00ff10ab");
 		assert_eq!(hex::encode([]), "");
+	}
+
+	#[test]
+	fn percentile_sorted_is_nearest_rank_with_edges_and_generic_types() {
+		let xs: Vec<f64> = (1..=10).map(|i| i as f64).collect();
+		assert_eq!(percentile_sorted(&xs, 0.0), Some(1.0), "p<=0 -> first");
+		assert_eq!(percentile_sorted(&xs, 1.0), Some(10.0), "p>=1 -> last");
+		assert_eq!(percentile_sorted(&xs, 0.5), Some(5.0), "ceil(0.5*10)=5 -> xs[4]");
+		assert_eq!(percentile_sorted(&xs, 0.95), Some(10.0));
+		assert_eq!(percentile_sorted::<f64>(&[], 0.5), None, "empty -> None");
+		// Generic over the element type (u128 nanos, the locomo latency case).
+		let ns: Vec<u128> = vec![10, 20, 30, 40, 50];
+		assert_eq!(percentile_sorted(&ns, 0.5), Some(30u128));
+		assert_eq!(percentile_sorted(&ns, 0.95), Some(50u128));
 	}
 
 	#[test]

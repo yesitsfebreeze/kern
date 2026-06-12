@@ -30,22 +30,7 @@ pub struct LatencyReport {
 	pub p99_ms: f64,
 }
 
-/// Nearest-rank percentile of an ascending-SORTED slice. `p` in `[0, 1]`. An
-/// empty slice is `0.0`; `p <= 0` returns the first element, `p >= 1` the last.
-fn percentile_sorted(sorted: &[f64], p: f64) -> f64 {
-	if sorted.is_empty() {
-		return 0.0;
-	}
-	if p <= 0.0 {
-		return sorted[0];
-	}
-	if p >= 1.0 {
-		return sorted[sorted.len() - 1];
-	}
-	// Nearest-rank: 1-based rank = ceil(p * n), clamped into range.
-	let rank = (p * sorted.len() as f64).ceil() as usize;
-	sorted[rank.clamp(1, sorted.len()) - 1]
-}
+use crate::base::util::percentile_sorted;
 
 /// Time the retrieval path for every query in `trace`. The LLM/embedder hooks are
 /// `None`, so this measures only the graph/index work (the sub-ms path), never an
@@ -91,9 +76,9 @@ pub fn measure_latency(
 		trace_name: trace.name.clone(),
 		samples,
 		mean_ms,
-		p50_ms: percentile_sorted(&timings, 0.50),
-		p95_ms: percentile_sorted(&timings, 0.95),
-		p99_ms: percentile_sorted(&timings, 0.99),
+		p50_ms: percentile_sorted(&timings, 0.50).unwrap_or(0.0),
+		p95_ms: percentile_sorted(&timings, 0.95).unwrap_or(0.0),
+		p99_ms: percentile_sorted(&timings, 0.99).unwrap_or(0.0),
 	}
 }
 
@@ -163,18 +148,6 @@ mod tests {
 	use crate::bench_support::build::build_graph;
 	use crate::bench_support::trace::{TraceDoc, TraceQuery};
 
-	#[test]
-	fn percentile_sorted_uses_nearest_rank_and_handles_edges() {
-		let xs: Vec<f64> = (1..=10).map(|i| i as f64).collect(); // 1..=10, sorted
-		assert_eq!(percentile_sorted(&xs, 0.0), 1.0, "p0 -> first");
-		assert_eq!(percentile_sorted(&xs, 1.0), 10.0, "p100 -> last");
-		// nearest-rank: ceil(0.5*10)=5 -> xs[4] = 5.0
-		assert_eq!(percentile_sorted(&xs, 0.5), 5.0);
-		// ceil(0.95*10)=10 -> xs[9] = 10.0; ceil(0.9*10)=9 -> xs[8]=9.0
-		assert_eq!(percentile_sorted(&xs, 0.9), 9.0);
-		assert_eq!(percentile_sorted(&xs, 0.95), 10.0);
-		assert_eq!(percentile_sorted(&[], 0.5), 0.0, "empty -> 0");
-	}
 
 	#[test]
 	fn measure_latency_pools_samples_and_orders_percentiles() {
