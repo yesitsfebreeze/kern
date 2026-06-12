@@ -18,6 +18,14 @@ pub fn build_graph(trace: &Trace) -> GraphGnn {
 	insert_docs(&mut g, &root_id, trace);
 	seed_similarity_edges(&mut g, &root_id, trace);
 	g.rebuild_index();
+	// Populate the BM25 lexical index from the docs, mirroring the real load path
+	// (graph.rs builds it via rebuild_from_graph). Without this the index exists but
+	// is empty, so "hybrid" trace queries silently fall back to dense-only — and the
+	// bench's deterministic stub embedder is not semantic, so the lexical leg (and
+	// any hybrid recall number) would be a fiction.
+	if let Some(lex) = g.lexical() {
+		lex.rebuild_from_graph(&g);
+	}
 	g
 }
 
