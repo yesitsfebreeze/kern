@@ -169,7 +169,12 @@ async fn drain_once(
 			archived += 1;
 		}
 	}
+	// The durable direct-ingest lane shares this drain cycle: MCP `ingest`
+	// payloads spooled under `<spool>/direct/` replay through the same worker
+	// (verbatim — no distill) and archive into `direct/done/` on success.
+	archived += super::direct::drain_direct_once(&spool_dir.join("direct"), worker, cfg).await;
 	prune_done(done, done_retention, now);
+	prune_done(&spool_dir.join("direct").join("done"), done_retention, now);
 	archived
 }
 

@@ -20,6 +20,7 @@ pub mod compactor;
 pub mod config;
 pub mod day_digest;
 pub mod dedup;
+pub mod direct;
 pub mod distill;
 pub mod embed;
 pub mod file_watcher;
