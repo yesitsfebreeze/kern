@@ -21,7 +21,13 @@ fn index_kern_into(
 	entity_kern: &mut HashMap<String, String>,
 	reason_kern: &mut HashMap<String, String>,
 	src_index: &mut HashMap<String, String>,
-	entity_idx: &mut VectorBackend,
+	// `None` skips entity-vector insertion — used by `rebuild_index` when the
+	// entity index is a disk `snapshot` that ALREADY holds every resident entity
+	// (re-inserting would tombstone the whole snapshot into the delta). The reverse
+	// `entity_kern` map is still populated regardless. The lazy-load path passes
+	// `Some`, so a newly loaded kern's entities enter the live index (the delta,
+	// when disk-backed — correct, since they were not in the snapshot).
+	mut entity_idx: Option<&mut VectorBackend>,
 	gnn_entity_idx: &mut VectorBackend,
 	reason_idx: &mut VectorBackend,
 ) {
@@ -35,7 +41,9 @@ fn index_kern_into(
 		// mapping is kept so the supersede chain still resolves.
 		let searchable = t.status != EntityStatus::Superseded;
 		if searchable && t.has_vector() {
-			entity_idx.insert(t.id.clone(), t.vector.clone());
+			if let Some(ei) = entity_idx.as_deref_mut() {
+				ei.insert(t.id.clone(), t.vector.clone());
+			}
 		}
 		if searchable && t.has_gnn_vector() {
 			gnn_entity_idx.insert(t.id.clone(), t.gnn_vector.clone());
@@ -75,6 +83,11 @@ pub struct GraphGnn {
 	/// would exceed this, the LRU (oldest `last_access`) non-root kern is
 	/// `unload`ed to disk. [`KERN_CAP_DISABLED`] disables the cap.
 	max_loaded_kerns: usize,
+	/// Resident searchable-entity count above which `rebuild_index` spills the
+	/// entity index to a disk-resident DiskANN snapshot (see
+	/// [`GraphConfig::disk_threshold`](crate::config::graph::GraphConfig)).
+	/// [`KERN_CAP_DISABLED`] (the default) means never spill.
+	disk_threshold: usize,
 	/// Monotonic graph-wide mutation counter, bumped on every content mutation:
 	/// a kern handed out mutably (`get_mut`), registered, or deregistered. The
 	/// query result cache stamps each entry with the epoch at creation and treats
@@ -122,12 +135,20 @@ impl GraphGnn {
 			reason_kern: HashMap::new(),
 			lexical: Some(Arc::new(LexicalIndex::new_in_ram(1.2, 0.75))),
 			max_loaded_kerns: KERN_CAP_DISABLED,
+			disk_threshold: KERN_CAP_DISABLED,
 			mutation_epoch: 0,
 		}
 	}
 
 	pub fn set_max_loaded_kerns(&mut self, cap: usize) {
 		self.max_loaded_kerns = cap.max(1);
+	}
+
+	/// Set the resident-entity count above which the entity index spills to a disk
+	/// DiskANN snapshot on the next [`rebuild_index`](Self::rebuild_index).
+	/// [`KERN_CAP_DISABLED`] disables spilling. Takes effect on the next rebuild.
+	pub fn set_disk_threshold(&mut self, threshold: usize) {
+		self.disk_threshold = threshold;
 	}
 
 	/// Bind this graph to an open LMDB store. Called once after load so the
@@ -175,41 +196,60 @@ impl GraphGnn {
 	}
 
 	pub fn rebuild_index(&mut self) {
-		self.entity_idx = VectorBackend::resident(16, 200, self.quant_mode);
 		self.gnn_entity_idx = VectorBackend::resident(16, 200, self.quant_mode);
 		self.reason_idx = VectorBackend::resident(16, 200, self.quant_mode);
 		self.src_index.clear();
 		self.entity_kern.clear();
 		self.reason_kern.clear();
+
+		// Choose the entity backend. Above `disk_threshold` (and with a data_dir to
+		// write to) the entity vectors spill to a disk-resident DiskANN snapshot,
+		// keeping them off the heap; otherwise the historical in-RAM HNSW. The
+		// default threshold is the disabled sentinel, so this is a no-op for small
+		// deployments. A build/open failure falls back to the in-RAM index — the
+		// graph stays searchable, never broken, on a disk error.
+		let entity_count = self.resident_searchable_entity_count();
+		let spill = !self.data_dir.is_empty() && entity_count > self.disk_threshold;
+		self.entity_idx = match spill.then(|| self.build_entity_disk_snapshot()).flatten() {
+			Some(snapshot) => VectorBackend::disk(snapshot, self.quant_mode),
+			None => VectorBackend::resident(16, 200, self.quant_mode),
+		};
+
+		// When the entity index is a disk snapshot it ALREADY holds every resident
+		// entity, so the populate loop must not re-insert them (that would tombstone
+		// the whole snapshot into the delta). `None` skips entity insertion while
+		// still filling the reverse maps and the gnn/reason indices.
+		let skip_entity_insert = matches!(self.entity_idx, VectorBackend::Disk { .. });
 		for kern in self.kerns.values() {
 			index_kern_into(
 				kern,
 				&mut self.entity_kern,
 				&mut self.reason_kern,
 				&mut self.src_index,
-				&mut self.entity_idx,
+				(!skip_entity_insert).then_some(&mut self.entity_idx),
 				&mut self.gnn_entity_idx,
 				&mut self.reason_idx,
 			);
 		}
 	}
 
-	/// Snapshot every searchable resident entity's content vector into a
-	/// disk-resident Vamana index under `dir`, mirroring EXACTLY the membership
-	/// of [`entity_idx`](Self::entity_idx): Superseded entities are skipped (same
-	/// rule as [`index_kern_into`]) and vector-less entities are skipped. Entities
-	/// are keyed and emitted in id order, so a `f64`-snapshot of a fixed resident
-	/// set yields a byte-reproducible index (DiskANN's build is seeded). Vectors
-	/// are narrowed `f64 -> f32` at the boundary — lossy but consistent with the
-	/// int8-on-disk storage posture; ANN recall is unaffected in practice.
-	///
-	/// This is the BUILD half of the DiskANN integration (increment I2 of
-	/// `docs/superpowers/plans/2026-06-12-diskann-wiring.md`). Search routing
-	/// through the snapshot lands in a later increment; this method has no effect
-	/// on the live search path. Returns the number of vectors written.
-	pub fn build_entity_disk_index(&self, dir: &std::path::Path) -> std::io::Result<usize> {
-		// BTreeMap: dedup by id (mirroring the id-keyed HnswIndex) AND deterministic
-		// id ordering so the seeded Vamana build is reproducible across runs.
+	/// Count of resident entities eligible for the entity index — non-Superseded
+	/// and vector-bearing, mirroring [`index_kern_into`]'s filter. Cheap (no
+	/// vector clones); drives the [`rebuild_index`](Self::rebuild_index) spill
+	/// decision.
+	fn resident_searchable_entity_count(&self) -> usize {
+		self.kerns
+			.values()
+			.flat_map(|k| k.entities.values())
+			.filter(|t| t.status != EntityStatus::Superseded && t.has_vector())
+			.count()
+	}
+
+	/// Collect every searchable resident entity's content vector as `(id, f32)`,
+	/// deduped by id and id-sorted (via `BTreeMap`) so the seeded Vamana build is
+	/// reproducible. Mirrors `entity_idx` membership exactly. `f64 -> f32` narrowing
+	/// matches the int8-on-disk posture; ANN recall is unaffected in practice.
+	fn collect_entity_items(&self) -> Vec<(String, Vec<f32>)> {
 		let mut items: std::collections::BTreeMap<String, Vec<f32>> =
 			std::collections::BTreeMap::new();
 		for kern in self.kerns.values() {
@@ -219,8 +259,33 @@ impl GraphGnn {
 				}
 			}
 		}
-		let items: Vec<(String, Vec<f32>)> = items.into_iter().collect();
-		super::diskann::build_and_save(dir, &items, super::diskann::Params::default())
+		items.into_iter().collect()
+	}
+
+	/// Snapshot every searchable resident entity into a disk-resident Vamana index
+	/// under `dir` (see [`collect_entity_items`](Self::collect_entity_items)).
+	/// Returns the number of vectors written. The build half of the DiskANN
+	/// integration; used by [`rebuild_index`](Self::rebuild_index) when spilling.
+	pub fn build_entity_disk_index(&self, dir: &std::path::Path) -> std::io::Result<usize> {
+		super::diskann::build_and_save(dir, &self.collect_entity_items(), super::diskann::Params::default())
+	}
+
+	/// Build the entity snapshot under `<data_dir>/diskann/entity` and open it.
+	/// Returns `None` (logging a warning) on any build/open failure so the caller
+	/// can fall back to the in-RAM index rather than break the graph.
+	fn build_entity_disk_snapshot(&self) -> Option<super::diskann::DiskIndex> {
+		let dir = std::path::Path::new(&self.data_dir).join("diskann").join("entity");
+		if let Err(e) = self.build_entity_disk_index(&dir) {
+			tracing::warn!(target: "kern.diskann", error = %e, "entity snapshot build failed; using in-RAM index");
+			return None;
+		}
+		match super::diskann::DiskIndex::open(&dir) {
+			Ok(idx) => Some(idx),
+			Err(e) => {
+				tracing::warn!(target: "kern.diskann", error = %e, "entity snapshot open failed; using in-RAM index");
+				None
+			}
+		}
 	}
 
 	pub fn get(&mut self, id: &str) -> Option<&Kern> {
@@ -240,7 +305,7 @@ impl GraphGnn {
 					&mut self.entity_kern,
 					&mut self.reason_kern,
 					&mut self.src_index,
-					&mut self.entity_idx,
+					Some(&mut self.entity_idx),
 					&mut self.gnn_entity_idx,
 					&mut self.reason_idx,
 				);
@@ -517,6 +582,7 @@ impl GraphGnn {
 			reason_kern: HashMap::new(),
 			lexical: Some(Arc::new(LexicalIndex::new_in_ram(1.2, 0.75))),
 			max_loaded_kerns: KERN_CAP_DISABLED,
+			disk_threshold: KERN_CAP_DISABLED,
 			mutation_epoch: 0,
 		};
 		g.rebuild_index();
@@ -624,6 +690,70 @@ mod tests {
 		let ram_set: std::collections::HashSet<&String> = ram.iter().collect();
 		let overlap = disk_hits.iter().filter(|id| ram_set.contains(id)).count();
 		assert!(overlap >= 6, "disk vs in-RAM top-10 overlap too low: {overlap}/10 (ram={ram:?} disk={disk_hits:?})");
+	}
+
+	fn vec8(i: usize) -> Vec<f64> {
+		(0..8).map(|j| ((i as f64) * (0.13 + 0.07 * j as f64)).sin()).collect()
+	}
+
+	#[test]
+	fn rebuild_index_spills_entity_index_to_disk_above_threshold() {
+		// I5: rebuild_index routes the entity index to a disk DiskANN snapshot once
+		// the resident searchable-entity count crosses disk_threshold, and search
+		// keeps working through it. gnn/reason stay in-RAM (entity-only spill here).
+		let dir = tempfile::tempdir().unwrap();
+		let mut g = GraphGnn::new();
+		g.data_dir = dir.path().to_string_lossy().into_owned();
+		let kid = g.root.id.clone();
+		if let Some(k) = g.get_mut(&kid) {
+			for i in 0..40 {
+				k.entities.insert(
+					format!("e{i}"),
+					Entity { id: format!("e{i}"), vector: vec8(i), status: EntityStatus::Active, ..Default::default() },
+				);
+			}
+		}
+
+		// Default threshold (disabled): in-RAM index.
+		g.rebuild_index();
+		assert!(matches!(g.entity_idx, VectorBackend::Resident(_)), "default threshold keeps the in-RAM index");
+
+		// Above threshold: spill to disk, and the snapshot files must exist.
+		g.set_disk_threshold(10);
+		g.rebuild_index();
+		assert!(matches!(g.entity_idx, VectorBackend::Disk { .. }), "entity index spilled to disk above threshold");
+		assert!(
+			dir.path().join("diskann").join("entity").join("meta.bin").exists(),
+			"on-disk snapshot written"
+		);
+		// gnn/reason remain resident in this increment.
+		assert!(matches!(g.gnn_entity_idx, VectorBackend::Resident(_)));
+		assert!(matches!(g.reason_idx, VectorBackend::Resident(_)));
+
+		// Parity across the boundary: an indexed query point ranks itself first via
+		// the disk-backed path, and the reverse entity_kern map is still populated.
+		let hits = crate::base::search::search_all_unlocked(&g, &vec8(7), 5);
+		assert_eq!(hits.first().map(|h| h.entity_id.clone()), Some("e7".into()), "disk-backed search returns the query point first");
+		assert!(g.kern_of_entity("e7").is_some(), "reverse map populated despite skipped entity insert");
+	}
+
+	#[test]
+	fn rebuild_index_never_spills_without_a_data_dir() {
+		// In-memory graph (empty data_dir): there is nowhere to write a snapshot, so
+		// the entity index must stay resident even below a tiny threshold.
+		let mut g = GraphGnn::new();
+		let kid = g.root.id.clone();
+		if let Some(k) = g.get_mut(&kid) {
+			for i in 0..20 {
+				k.entities.insert(
+					format!("e{i}"),
+					Entity { id: format!("e{i}"), vector: vec8(i), status: EntityStatus::Active, ..Default::default() },
+				);
+			}
+		}
+		g.set_disk_threshold(1);
+		g.rebuild_index();
+		assert!(matches!(g.entity_idx, VectorBackend::Resident(_)), "no data_dir -> never spill (nowhere to write)");
 	}
 
 	#[test]

@@ -244,6 +244,7 @@ pub(crate) fn load_graph(cfg: &crate::config::Config) -> GraphGnn {
 		}
 	};
 	g.set_max_loaded_kerns(cfg.graph.max_kerns);
+	g.set_disk_threshold(cfg.graph.disk_threshold);
 	// Wire the configured BM25 parameters into the lexical index. Without this the
 	// `config.retrieval.bm25_k1`/`bm25_b` fields were dead — the index always scored
 	// with the hardcoded construction defaults regardless of config.
