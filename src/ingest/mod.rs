@@ -31,11 +31,25 @@ pub mod split;
 pub mod synthesis;
 pub mod worker;
 
+pub use crate::types::LlmFunc;
 pub use config::Config;
 pub use outcome::{FailureReport, Outcome, OutcomeStatus};
-pub use crate::types::LlmFunc;
 pub use worker::Worker;
 // Crate-internal: `Job` is the Worker's mpsc message (pub(crate)); re-exported
 // here so in-crate producers use `ingest::Job` consistently with `ingest::Worker`
 // rather than reaching into `ingest::worker::Job`.
 pub(crate) use worker::Job;
+
+/// Test-only embedder: a 256-dim one-hot unit vector derived from `seed`'s
+/// content hash. Two distinct seeds almost certainly land in different slots,
+/// so cosine similarity is ~0 and `commit_entity`'s dedup check (similarity >
+/// threshold) is dodged. Production paths use real embeddings.
+#[cfg(test)]
+pub(crate) fn stub_one_hot(seed: &str) -> Vec<f64> {
+	let h = crate::base::util::content_hash(seed);
+	let bytes = h.as_bytes();
+	let slot = if bytes.is_empty() { 0 } else { bytes[0] as usize };
+	let mut v = vec![0.0_f64; 256];
+	v[slot] = 1.0;
+	v
+}

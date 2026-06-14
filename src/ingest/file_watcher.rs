@@ -15,10 +15,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use journal::{EntityTouchedPayload, Entry, Kind, Sink, TouchOp, now_ms};
-use watcher::{
-	FileWatcher, IgnoreRules, IngestPipeline, IngestRecord, IngestSink, WatcherError,
-};
+use journal::{now_ms, EntityTouchedPayload, Entry, Kind, Sink, TouchOp};
+use watcher::{FileWatcher, IgnoreRules, IngestPipeline, IngestRecord, IngestSink, WatcherError};
 
 use crate::base::types::{EntityKind, Source};
 use crate::ingest::{Config as IngestRunConfig, Worker};
@@ -179,17 +177,8 @@ mod tests {
 			Self { graph }
 		}
 
-		fn stub_vector(seed: &str) -> Vec<f64> {
-			let h = util::content_hash(seed);
-			let bytes = h.as_bytes();
-			let slot = if bytes.is_empty() { 0 } else { bytes[0] as usize };
-			let mut v = vec![0.0_f64; 256];
-			v[slot] = 1.0;
-			v
-		}
-
 		fn build_entity(&self, source: Source, text: String) -> Entity {
-			let vec = Self::stub_vector(&text);
+			let vec = crate::ingest::stub_one_hot(&text);
 			let id = util::content_hash(&text);
 			let mut t = Entity {
 				id,
@@ -277,7 +266,11 @@ mod tests {
 		assert_eq!(strip_file_uri("file:///abs/posix.rs"), "abs/posix.rs");
 		// Non-empty authority: the host is dropped, the path keeps its leading slash.
 		assert_eq!(strip_file_uri("file://host/p.rs"), "/p.rs");
-		assert_eq!(strip_file_uri("file://host"), "", "bare authority with no path");
+		assert_eq!(
+			strip_file_uri("file://host"),
+			"",
+			"bare authority with no path"
+		);
 		assert_eq!(strip_file_uri("plain/path.rs"), "plain/path.rs");
 	}
 
@@ -312,8 +305,7 @@ mod tests {
 		let g = Arc::new(RwLock::new(GraphGnn::new()));
 		let sink = DirectFileSink::new(g.clone());
 
-		let mut fw =
-			FileWatcher::new(vec![root.clone()], IgnoreRules::empty()).expect("watcher new");
+		let mut fw = FileWatcher::new(vec![root.clone()], IgnoreRules::empty()).expect("watcher new");
 		let pipeline = IngestPipeline::new(sink);
 
 		// Give the watcher a moment to register before we touch the fs.
@@ -345,7 +337,9 @@ mod tests {
 		);
 		let target_str = target.to_string_lossy().replace('\\', "/");
 		assert!(
-			paths.iter().any(|p| target_str.ends_with(p) || p.ends_with("note.md")),
+			paths
+				.iter()
+				.any(|p| target_str.ends_with(p) || p.ends_with("note.md")),
 			"expected stored path to reference note.md; got {paths:?}"
 		);
 	}

@@ -32,10 +32,6 @@ use crate::base::types::{EntityKind, Source};
 use crate::ingest::Worker;
 
 #[cfg(test)]
-use std::sync::RwLock;
-#[cfg(test)]
-use std::time::SystemTime;
-#[cfg(test)]
 use crate::base::accept;
 #[cfg(test)]
 use crate::base::graph::GraphGnn;
@@ -43,6 +39,10 @@ use crate::base::graph::GraphGnn;
 use crate::base::types::{ChunkPart, ChunkPartKind, Entity, EntityStatus};
 #[cfg(test)]
 use crate::base::util;
+#[cfg(test)]
+use std::sync::RwLock;
+#[cfg(test)]
+use std::time::SystemTime;
 
 /// Pluggable target for mirrored sessions. Implementations must be
 /// idempotent on `fork_id` (the mirror itself dedupes via its `seen`
@@ -106,20 +106,6 @@ impl DirectSink {
 	pub fn new(graph: Arc<RwLock<GraphGnn>>) -> Self {
 		Self { graph }
 	}
-
-	fn stub_vector(seed: &str) -> Vec<f64> {
-		// Near-orthogonal unit vector per fork id: a 256-dim one-hot
-		// derived from the hash. Two distinct fork_ids almost certainly
-		// land in different slots, so cosine similarity is ~0 and
-		// `commit_entity`'s dedup check (similarity > threshold) is
-		// dodged. This is test-only; production uses real embeddings.
-		let h = util::content_hash(seed);
-		let bytes = h.as_bytes();
-		let slot = if bytes.is_empty() { 0 } else { bytes[0] as usize };
-		let mut v = vec![0.0_f64; 256];
-		v[slot] = 1.0;
-		v
-	}
 }
 
 #[cfg(test)]
@@ -130,7 +116,7 @@ impl MirrorSink for DirectSink {
 			section: String::new(),
 			title: format!("session://{fork_id}"),
 		};
-		let vec = Self::stub_vector(fork_id);
+		let vec = super::stub_one_hot(fork_id);
 		let id = util::content_hash(text);
 		// Only the fields that differ from `Entity::default()` are spelled out;
 		// the ~14 zero/empty/None fields the old literal listed by hand are the
@@ -229,9 +215,7 @@ impl<S: MirrorSink> SessionMirror<S> {
 				}
 				let parent_label = parent.as_deref().unwrap_or("none");
 				let text = format!("Session {fork_id} (parent={parent_label})");
-				self
-					.sink
-					.ingest_session(fork_id, parent.as_deref(), &text);
+				self.sink.ingest_session(fork_id, parent.as_deref(), &text);
 				self.remember(fork_id.clone());
 			}
 			Kind::ForkResume { fork_id } => {
@@ -362,10 +346,12 @@ mod tests {
 		let sink = DirectSink::new(g.clone());
 		let mut mirror = SessionMirror::new(sink);
 
-		let entries = [fork_open(100, "fork-a", None),
+		let entries = [
+			fork_open(100, "fork-a", None),
 			fork_open(200, "fork-b", Some("fork-a")),
 			fork_close(300, "fork-a"),
-			fork_close(400, "fork-b")];
+			fork_close(400, "fork-b"),
+		];
 		mirror.process_all(entries.iter());
 		assert_eq!(mirror.seen_count(), 2);
 
@@ -374,15 +360,16 @@ mod tests {
 		let mut session_ids: Vec<String> = Vec::new();
 		for kern in g.kerns.values() {
 			for t in kern.entities.values() {
-				if matches!(t.kind, EntityKind::Document)
-					&& t.source.scheme() == "session"
-				{
+				if matches!(t.kind, EntityKind::Document) && t.source.scheme() == "session" {
 					session_ids.push(t.source.object_id().to_string());
 				}
 			}
 		}
 		session_ids.sort();
-		assert_eq!(session_ids, vec!["fork-a".to_string(), "fork-b".to_string()]);
+		assert_eq!(
+			session_ids,
+			vec!["fork-a".to_string(), "fork-b".to_string()]
+		);
 	}
 
 	/// Replaying the same journal twice must not produce duplicate
@@ -393,8 +380,10 @@ mod tests {
 		let sink = DirectSink::new(g.clone());
 		let mut mirror = SessionMirror::new(sink);
 
-		let entries = [fork_open(100, "fork-a", None),
-			fork_open(200, "fork-b", None)];
+		let entries = [
+			fork_open(100, "fork-a", None),
+			fork_open(200, "fork-b", None),
+		];
 		mirror.process_all(entries.iter());
 		mirror.process_all(entries.iter()); // second pass
 
@@ -463,8 +452,16 @@ mod tests {
 		mirror.process(&fork_open(5, "a", None));
 
 		let calls = mirror.sink.calls.lock().unwrap();
-		assert_eq!(calls.iter().filter(|x| *x == "c").count(), 1, "still-seen c skipped on replay");
-		assert_eq!(calls.iter().filter(|x| *x == "a").count(), 2, "evicted a re-mirrors");
+		assert_eq!(
+			calls.iter().filter(|x| *x == "c").count(),
+			1,
+			"still-seen c skipped on replay"
+		);
+		assert_eq!(
+			calls.iter().filter(|x| *x == "a").count(),
+			2,
+			"evicted a re-mirrors"
+		);
 		assert_eq!(calls.len(), 4, "a,b,c then a again — c not repeated");
 	}
 
@@ -503,8 +500,15 @@ mod tests {
 
 		// since=0 -> both fork events, Log filtered out, ts-ordered.
 		let forks = read_fork_events(&path, 0);
-		assert_eq!(forks.len(), 2, "ForkOpen+ForkClose read from today.jsonl; Log filtered");
-		assert!(forks[0].ts_ms <= forks[1].ts_ms, "returned in ascending ts order");
+		assert_eq!(
+			forks.len(),
+			2,
+			"ForkOpen+ForkClose read from today.jsonl; Log filtered"
+		);
+		assert!(
+			forks[0].ts_ms <= forks[1].ts_ms,
+			"returned in ascending ts order"
+		);
 
 		// Feeding them through the mirror ingests fork-a exactly once.
 		let mut mirror = SessionMirror::new(CountingSink::default());
@@ -512,7 +516,10 @@ mod tests {
 		assert_eq!(mirror.seen_count(), 1, "fork-a mirrored once");
 
 		// since cursor past the last event yields nothing new.
-		assert!(read_fork_events(&path, 200).is_empty(), "since_ms excludes ts <= cursor");
+		assert!(
+			read_fork_events(&path, 200).is_empty(),
+			"since_ms excludes ts <= cursor"
+		);
 	}
 
 	/// `ForkResume` for a never-seen fork still mirrors it (mid-life
