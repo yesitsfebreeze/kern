@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::base::math::average_vec;
 
-use super::{Client, Endpoint, load_graph, save_graph};
+use super::{load_graph, save_graph, Client, Endpoint};
 
 const BATCH: usize = 64;
 
@@ -92,10 +92,7 @@ async fn embed_all(
 	let mut out: HashMap<String, Vec<f64>> = HashMap::with_capacity(ids.len());
 	let mut done = 0usize;
 	for chunk in texts.chunks(BATCH) {
-		let vs = client
-			.embed_batch(chunk)
-			.await
-			.map_err(|e| e.to_string())?;
+		let vs = client.embed_batch(chunk).await.map_err(|e| e.to_string())?;
 		if vs.len() != chunk.len() {
 			return Err(format!(
 				"embed returned {} vectors for {} inputs",
@@ -176,6 +173,15 @@ async fn reembed_cold(
 mod tests {
 	use super::*;
 
+	/// Spin `app` on an ephemeral port; returns its base URL and the server task
+	/// (abort it to release the port at test end).
+	async fn serve(app: axum::Router) -> (String, tokio::task::JoinHandle<()>) {
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let addr = listener.local_addr().unwrap();
+		let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+		(format!("http://{addr}"), server)
+	}
+
 	#[tokio::test]
 	async fn embed_all_errs_when_server_returns_a_mismatched_vector_count() {
 		// Stub /api/embed that always returns exactly ONE embedding regardless of
@@ -187,11 +193,9 @@ mod tests {
 				axum::Json(serde_json::json!({ "embeddings": [[0.1, 0.2, 0.3]] }))
 			}),
 		);
-		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-		let addr = listener.local_addr().unwrap();
-		let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+		let (url, server) = serve(app).await;
 
-		let client = crate::llm::Client::new_embed_only(&format!("http://{addr}"), "test-model");
+		let client = crate::llm::Client::new_embed_only(&url, "test-model");
 		let ids = vec!["a".to_string(), "b".to_string()];
 		let texts = vec!["alpha".to_string(), "beta".to_string()];
 
@@ -219,34 +223,49 @@ mod tests {
 				axum::Json(serde_json::json!({ "embeddings": [[0.5, 0.5]] }))
 			}),
 		);
-		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-		let addr = listener.local_addr().unwrap();
-		let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+		let (url, server) = serve(app).await;
 
 		let dir = tempfile::tempdir().unwrap();
 		let store = std::sync::Arc::new(Store::open(&dir.path().to_string_lossy()).unwrap());
 		// Seed two cold entities carrying a recognizable OLD vector.
 		let old = vec![9.0, 9.0];
 		let seed = vec![
-			Entity { id: "c1".into(), vector: old.clone(), ..Default::default() },
-			Entity { id: "c2".into(), vector: old.clone(), ..Default::default() },
+			Entity {
+				id: "c1".into(),
+				vector: old.clone(),
+				..Default::default()
+			},
+			Entity {
+				id: "c2".into(),
+				vector: old.clone(),
+				..Default::default()
+			},
 		];
 		store.cold_put_all(&seed).unwrap();
 
-		let client = crate::llm::Client::new_embed_only(&format!("http://{addr}"), "m");
+		let client = crate::llm::Client::new_embed_only(&url, "m");
 		let err = reembed_cold(Some(store.clone()), &client)
 			.await
 			.expect_err("a mismatched cold batch must surface a partial-failure error");
 
 		// Precise partial-success reporting: names how many were left stale + that
 		// the tier is untouched.
-		assert!(err.contains("2 of 2"), "names the stale entity count: {err}");
-		assert!(err.contains("left unchanged"), "states the cold tier is untouched: {err}");
+		assert!(
+			err.contains("2 of 2"),
+			"names the stale entity count: {err}"
+		);
+		assert!(
+			err.contains("left unchanged"),
+			"states the cold tier is untouched: {err}"
+		);
 
 		// Atomicity: the cold tier still holds the ORIGINAL vectors, never the stub's.
 		let after = store.cold_all().unwrap();
 		assert_eq!(after.len(), 2);
-		assert!(after.iter().all(|e| e.vector == old), "no partial write on failure");
+		assert!(
+			after.iter().all(|e| e.vector == old),
+			"no partial write on failure"
+		);
 
 		server.abort();
 	}
