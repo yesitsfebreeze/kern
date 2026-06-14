@@ -1,20 +1,19 @@
 {
-  "target": "setup sweep — .claude machine + .proj layer: no external naming, cohesive unit",
+  "target": "code sweep — complexity, duplication, unimplemented code (implement-or-delete)",
   "indexed": true,
   "rating": {
     "min": 0, "max": 10,
-    "categories": ["accuracy", "external_naming", "cohesion", "clarity", "duplication"],
-    "weights": { "external_naming": 2, "accuracy": 2 }
+    "categories": ["complexity", "duplication", "unimpl_implement", "unimpl_delete"],
+    "weights": { "duplication": 2 }
   },
-  "note": "Iteration 1 (2026-06-12) completed all indexed items: stripped phantom MCP tools (sequential-thinking/github/pencil/claude-in-chrome) from all 22 agents; replaced 'EN:' template prefix with 'Keywords:'; de-Nextra'd manager-docs (now mdbook-aware); removed disabled trello integration (skill dir, skillOverrides, default.md, bootstrap.md); deleted 14 language rule files for languages absent from repo (kept rust, javascript); deleted orphaned foundation-cc/references/ duplicate; fixed glossary.md->glossary.csv in default.md + bootstrap.md. .claude/ is gitignored — improvements live on disk, not in repo history.",
+  "note": "Iter2 (2026-06-14): src/ sweep. (a) zero todo!/unimplemented!/TODO/FIXME — no actionable unimpl debt; ForkClose no-op + McpError/RpcError coexistence are DELIBERATE design. (b) clippy orphan store.rs:519 RESOLVED by 4bf0b09 (clippy --lib exit 0). (c) DUP FIXED: 12-line #[cfg(test)] stub_vector copy-pasted in ingest/session_mirror.rs + ingest/file_watcher.rs -> one ingest::stub_one_hot; 89 tests green (commit f953296). Iter3: DUP FIXED: reembed.rs inlined the ephemeral-port axum serve boilerplate twice -> local `serve(app)->(url,handle)` helper; 2 tests green. EVALUATED+DEFERRED: cross-module consolidation of the `serve` helper (embed.rs/profile_cmd.rs/locomo_run.rs each have a near-identical copy) — test_utils is a separate crate unreachable from unit tests, and a crate-level #[cfg(test)] module for 4-line boilerplate costs locality > it saves; left per-module on purpose.",
   "files": [],
-  "tree": { "path": ".claude", "score": 8.4, "weakest": "accuracy", "fileCount": 0, "children": [] },
+  "tree": { "path": "src", "score": 8.0, "weakest": "complexity", "fileCount": 0, "children": [] },
   "ranking": { "folders": [], "files": [] },
   "next_iteration_candidates": [
-    "Coherence check: .proj/agent.md law 6 mandates mux_delegate/mux_collect MCP tools + a PreToolUse hook that hard-blocks the built-in Agent tool — but settings.json has NO PreToolUse hook and .mcp.json's kern server was not connectable this session to confirm mux tools exist. Either wire the hook or soften the law to match reality. NEEDS daemon running to verify.",
-    "Deep-rate remaining skills individually (coder, clean, learn, parallel, gate, personas, specialists/*, foundation-*) — only surface-scanned this pass.",
-    "default.md mentions ctx_* shorthand for the context-mode plugin; plugin not connected this session — verify the plugin is installed or trim the section.",
-    "foundation-cc/SKILL.md version-history mentions v4.0.0 dates — check for staleness against reference/ contents."
+    "No complexity tooling installed (tokei/lizard/jscpd all absent) — ratings are judged, not measured. Consider `cargo install tokei` for LOC and a duplication scan to sharpen future passes.",
+    "Largest production files to deep-rate for complexity next: src/commands.rs (1150), src/base/graph.rs (1086), src/base/accept.rs (1056), src/rpc/kern_rpc_server.rs (978), src/base/store.rs (943), src/base/hnsw.rs (941).",
+    "trnsprt/typed/error.rs phase-2: McpError removal once the typed-RPC migration lands."
   ],
-  "carryover_orphan": "cargo clippy --lib fails on src/base/store.rs:519 (io_other_error) under rust 1.94 -D warnings — pre-existing, 1-line fix, flagged to user; still blocks a clean clippy gate."
+  "carryover_orphan": null
 }
