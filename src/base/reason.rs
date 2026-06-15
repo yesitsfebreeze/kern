@@ -103,19 +103,7 @@ pub fn move_entity(g: &mut GraphGnn, from_kern_id: &str, to_kern_id: &str, entit
 	// Partition reasons touching `entity_id` into outgoing (move) vs incoming
 	// (stay). A self-loop `from == to == E` is treated as outgoing: both
 	// endpoints land in the destination kern, so no stamping is needed.
-	let mut outgoing_rids: Vec<String> = Vec::new();
-	let mut incoming_rids: Vec<String> = Vec::new();
-	if let Some(from_rids) = src.by_from.get(entity_id) {
-		outgoing_rids.extend(from_rids.iter().cloned());
-	}
-	if let Some(to_rids) = src.by_to.get(entity_id) {
-		for rid in to_rids {
-			// Self-loops already captured via `by_from`; skip the dup.
-			if !outgoing_rids.iter().any(|x| x == rid) {
-				incoming_rids.push(rid.clone());
-			}
-		}
-	}
+	let (outgoing_rids, incoming_rids) = reasons_touching(src, entity_id);
 
 	// Stamp incoming reasons in place: their `from` stays in the source kern,
 	// but `to == E` now lives in `to_kern_id`. Only stamp when neither
@@ -200,13 +188,8 @@ pub fn remove_entity(g: &mut GraphGnn, kern_id: &str, id: &str) {
 		return;
 	}
 
-	let mut rids = Vec::new();
-	if let Some(from_rids) = kern.by_from.get(id) {
-		rids.extend(from_rids.clone());
-	}
-	if let Some(to_rids) = kern.by_to.get(id) {
-		rids.extend(to_rids.clone());
-	}
+	let (outgoing, incoming) = reasons_touching(kern, id);
+	let rids: Vec<String> = outgoing.into_iter().chain(incoming).collect();
 	for rid in &rids {
 		remove_reason(kern, rid);
 	}
@@ -225,6 +208,23 @@ pub fn remove_entity(g: &mut GraphGnn, kern_id: &str, id: &str) {
 	if let Some(lex) = g.lexical() {
 		lex.remove(id);
 	}
+}
+
+/// Partition the reasons in `kern` that touch `entity_id` into
+/// `(outgoing, incoming)`: outgoing = edges sourced at the entity (`by_from`);
+/// incoming = edges pointing at it (`by_to`) that are not already outgoing, so a
+/// self-loop counts once, as outgoing. Both lists are owned rid clones.
+fn reasons_touching(kern: &Kern, entity_id: &str) -> (Vec<String>, Vec<String>) {
+	let outgoing: Vec<String> = kern.by_from.get(entity_id).cloned().unwrap_or_default();
+	let mut incoming = Vec::new();
+	if let Some(to_rids) = kern.by_to.get(entity_id) {
+		for rid in to_rids {
+			if !outgoing.contains(rid) {
+				incoming.push(rid.clone());
+			}
+		}
+	}
+	(outgoing, incoming)
 }
 
 /// Remove the first occurrence of `s` from `vec` (if present).
