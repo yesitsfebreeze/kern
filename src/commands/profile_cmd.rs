@@ -140,14 +140,6 @@ mod tests {
 	use super::*;
 	use serde_json::{json, Value};
 
-	/// Spawn a throwaway HTTP server on an ephemeral port; returns its base URL.
-	async fn serve(app: axum::Router) -> String {
-		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-		let addr = listener.local_addr().unwrap();
-		tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-		format!("http://{addr}")
-	}
-
 	/// The no-LLM path must run end-to-end without panicking on an empty graph:
 	/// load → cold/warm embed → vector search → the three no-LLM query modes →
 	/// digest build. The reason/answer endpoints are never touched (no_llm=true),
@@ -162,7 +154,7 @@ mod tests {
 				axum::Json(json!({ "embeddings": [[0.1, 0.2, 0.3]] }))
 			}),
 		);
-		let embed_url = serve(app).await;
+		let (embed_url, _server) = crate::test_support::spawn_http(app).await;
 
 		// Isolated empty data dir so load_graph yields a fresh graph (and Store::open
 		// has a real directory to bind).

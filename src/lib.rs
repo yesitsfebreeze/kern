@@ -51,3 +51,7 @@ pub mod types;
 pub mod viewer;
 /// Serialisation helpers for wire-format encoding and decoding.
 pub mod wire;
+
+/// Shared test-only helpers (ephemeral HTTP stub server, etc.).
+#[cfg(test)]
+mod test_support;

@@ -629,13 +629,6 @@ mod tests {
 
 	// -- embed batch-then-single fallback (stub server) --------------------
 
-	async fn serve(app: axum::Router) -> String {
-		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-		let addr = listener.local_addr().unwrap();
-		tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-		format!("http://{addr}")
-	}
-
 	/// `/api/embed` distinguishes a batch attempt (array `input`) from the single
 	/// retry (string `input`): the embed() fallback fires `embed_single` only
 	/// after a retry-worthy batch failure.
@@ -658,7 +651,7 @@ mod tests {
 				}
 			}),
 		);
-		let url = serve(app).await;
+		let (url, _server) = crate::test_support::spawn_http(app).await;
 		let client = Client::new_embed_only(&url, "m");
 		let v = client
 			.embed("hello")
@@ -681,7 +674,7 @@ mod tests {
 				}
 			}),
 		);
-		let url = serve(app).await;
+		let (url, _server) = crate::test_support::spawn_http(app).await;
 		let client = Client::new_embed_only(&url, "m");
 		let v = client
 			.embed("x")
@@ -712,7 +705,7 @@ mod tests {
 				}
 			}),
 		);
-		let url = serve(app).await;
+		let (url, _server) = crate::test_support::spawn_http(app).await;
 		let client = Client::new_embed_only(&url, "m");
 		let err = client.embed("hello").await.unwrap_err();
 		assert!(

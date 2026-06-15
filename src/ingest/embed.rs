@@ -82,14 +82,6 @@ mod tests {
 	use super::*;
 	use serde_json::{json, Value};
 
-	/// Spin a stub server on an ephemeral port; returns its base URL.
-	async fn serve(app: axum::Router) -> String {
-		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-		let addr = listener.local_addr().unwrap();
-		tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-		format!("http://{addr}")
-	}
-
 	/// `/api/embed` stub returning exactly one embedding per input string — the
 	/// "honest" server, so the batch path matches counts and short-circuits.
 	fn echo_count_app() -> axum::Router {
@@ -110,7 +102,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn embed_chunks_short_circuits_on_the_batch_path_when_counts_match() {
-		let url = serve(echo_count_app()).await;
+		let (url, _server) = crate::test_support::spawn_http(echo_count_app()).await;
 		let client = LlmClient::new_embed_only(&url, "m");
 		let (vecs, fails) = embed_chunks(&client, &["a".into(), "b".into()]).await;
 		assert_eq!(vecs.len(), 2);
@@ -129,7 +121,7 @@ mod tests {
 			"/api/embed",
 			axum::routing::post(|| async { axum::Json(json!({ "embeddings": [[0.5, 0.6]] })) }),
 		);
-		let url = serve(app).await;
+		let (url, _server) = crate::test_support::spawn_http(app).await;
 		let client = LlmClient::new_embed_only(&url, "m");
 		let (vecs, fails) = embed_chunks(&client, &["a".into(), "b".into()]).await;
 		assert_eq!(vecs.len(), 2);
@@ -148,7 +140,7 @@ mod tests {
 			"/api/embed",
 			axum::routing::post(|| async { axum::Json(json!({ "embeddings": [] })) }),
 		);
-		let url = serve(app).await;
+		let (url, _server) = crate::test_support::spawn_http(app).await;
 		let client = LlmClient::new_embed_only(&url, "m");
 		let fail = embed_with_retry(&client, "x", "chunk", 0)
 			.await
@@ -170,7 +162,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn embed_chunks_empty_input_short_circuits_to_empty() {
-		let url = serve(echo_count_app()).await;
+		let (url, _server) = crate::test_support::spawn_http(echo_count_app()).await;
 		let client = LlmClient::new_embed_only(&url, "m");
 		let (vecs, fails) = embed_chunks(&client, &[]).await;
 		assert!(vecs.is_empty() && fails.is_empty());

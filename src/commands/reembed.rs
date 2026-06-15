@@ -173,15 +173,6 @@ async fn reembed_cold(
 mod tests {
 	use super::*;
 
-	/// Spin `app` on an ephemeral port; returns its base URL and the server task
-	/// (abort it to release the port at test end).
-	async fn serve(app: axum::Router) -> (String, tokio::task::JoinHandle<()>) {
-		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-		let addr = listener.local_addr().unwrap();
-		let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-		(format!("http://{addr}"), server)
-	}
-
 	#[tokio::test]
 	async fn embed_all_errs_when_server_returns_a_mismatched_vector_count() {
 		// Stub /api/embed that always returns exactly ONE embedding regardless of
@@ -193,7 +184,7 @@ mod tests {
 				axum::Json(serde_json::json!({ "embeddings": [[0.1, 0.2, 0.3]] }))
 			}),
 		);
-		let (url, server) = serve(app).await;
+		let (url, server) = crate::test_support::spawn_http(app).await;
 
 		let client = crate::llm::Client::new_embed_only(&url, "test-model");
 		let ids = vec!["a".to_string(), "b".to_string()];
@@ -223,7 +214,7 @@ mod tests {
 				axum::Json(serde_json::json!({ "embeddings": [[0.5, 0.5]] }))
 			}),
 		);
-		let (url, server) = serve(app).await;
+		let (url, server) = crate::test_support::spawn_http(app).await;
 
 		let dir = tempfile::tempdir().unwrap();
 		let store = std::sync::Arc::new(Store::open(&dir.path().to_string_lossy()).unwrap());
