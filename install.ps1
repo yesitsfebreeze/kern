@@ -1,20 +1,21 @@
 # kern one-line installer (Windows).
 #
-#   irm https://raw.githubusercontent.com/yesitsfebreeze/relay-kern/master/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/yesitsfebreeze/kern/master/install.ps1 | iex
 #
 # Downloads the prebuilt kern.exe for this platform from the latest GitHub
 # release and installs it to %LOCALAPPDATA%\kern\bin (override with
 # $env:KERN_BIN_DIR), adding that directory to the user PATH.
 $ErrorActionPreference = 'Stop'
 
-$repo = 'yesitsfebreeze/relay-kern'
+$repo = 'yesitsfebreeze/kern'
 $binDir = if ($env:KERN_BIN_DIR) { $env:KERN_BIN_DIR } else { "$env:LOCALAPPDATA\kern\bin" }
 
-$arch = $env:PROCESSOR_ARCHITECTURE
-if ($arch -ne 'AMD64') {
-  Write-Error "kern: no prebuilt Windows binary for $arch (build from source)"
+switch ($env:PROCESSOR_ARCHITECTURE) {
+  'AMD64' { $target = 'x86_64-pc-windows-msvc' }
+  'ARM64' { $target = 'aarch64-pc-windows-msvc' }
+  'x86'   { $target = 'i686-pc-windows-msvc' }
+  default { Write-Error "kern: no prebuilt Windows binary for $($env:PROCESSOR_ARCHITECTURE) (build from source)" }
 }
-$target = 'x86_64-pc-windows-msvc'
 $url = "https://github.com/$repo/releases/latest/download/kern-$target.zip"
 
 Write-Host "kern: downloading $target ..."

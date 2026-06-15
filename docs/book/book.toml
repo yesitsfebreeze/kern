@@ -7,8 +7,8 @@ src = "src"
 [output.html]
 default-theme = "ayu"
 preferred-dark-theme = "ayu"
-git-repository-url = "https://github.com/yesitsfebreeze/relay-kern"
-edit-url-template = "https://github.com/yesitsfebreeze/relay-kern/edit/master/docs/book/{path}"
+git-repository-url = "https://github.com/yesitsfebreeze/kern"
+edit-url-template = "https://github.com/yesitsfebreeze/kern/edit/master/docs/book/{path}"
 additional-css = ["theme/custom.css"]
 additional-js = ["theme/custom.js", "mermaid.min.js", "mermaid-init.js"]
 no-section-label = false

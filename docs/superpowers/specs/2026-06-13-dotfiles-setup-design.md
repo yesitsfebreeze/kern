@@ -16,10 +16,10 @@ sync command brings any machine up to date.
 
 In scope:
 
-- **Terminal:** WezTerm — one Lua config, all three OSes; provides tabs/splits/multiplexing.
-- **Multiplexer:** tmux — Unix only, scoped to **remote/SSH session persistence**
-  (NOT the primary source of splits; WezTerm covers that, and is the multiplexer
-  on Windows where tmux has no native build).
+- **Terminal + multiplexer + session manager:** WezTerm — one Lua config, all three
+  OSes. Provides tabs/splits/multiplexing, named workspaces (live session switching,
+  zero plugins), and layout persistence across restarts via the guarded
+  `resurrect.wezterm` plugin. There is no tmux: WezTerm fully replaces it on every OS.
 - **Editor:** Neovim — from-scratch Lua config with `lazy.nvim` plugin manager.
 - **Shell:** Nushell — the single interactive shell on all three OSes.
 - **CLI tools:** ripgrep, fd, fzf, bat, eza, zoxide, starship, git + delta,
@@ -62,7 +62,7 @@ setup/
   README.md                          # what this is, how to run it, how to sync
   home/
     .chezmoi.toml.tmpl               # one-time prompt: name + email; derives per-OS vars
-    .chezmoiignore                   # templated: excludes tmux.conf on Windows
+    .chezmoiignore                   # templated per-OS exclusion hook (currently empty)
     .chezmoidata/
       packages.yaml                  # tool -> {winget, scoop, brew, apt, pacman} name map
     .chezmoitemplates/
@@ -82,8 +82,6 @@ setup/
       bat/config                     # Catppuccin Mocha theme
       lazygit/config.yml             # Catppuccin Mocha + keys
       gh/config.yml
-    dot_config/tmux/
-      tmux.conf                      # Unix only (gated by run/template); session persistence
     dot_gitconfig.tmpl               # aliases, delta pager, name/email templated
     run_onchange_install-packages.sh.tmpl   # Unix: read packages.yaml, install via brew/apt/pacman
     run_onchange_install-packages.ps1.tmpl  # Windows: install via winget/scoop
@@ -104,9 +102,9 @@ Notes on chezmoi conventions:
 - WezTerm: conditional `default_prog` (Nushell exe path differs per OS) and font
   fallback; otherwise shared.
 - Nushell: shared `config.nu`; `env.nu` sets OS-appropriate PATH entries.
-- tmux: `tmux.conf` deploys only on Unix. A templated `.chezmoiignore` lists
-  `.config/tmux/tmux.conf` when `.chezmoi.os` is `windows`, so chezmoi skips it there
-  and WezTerm multiplexing stands in.
+- Sessions: WezTerm named workspaces work identically on all OSes; `resurrect.wezterm`
+  handles persistence and is loaded under `pcall`, so an offline/first-run machine
+  still starts cleanly.
 - Package install scripts: separate `.sh` (Unix) and `.ps1` (Windows); each reads the
   same `packages.yaml` and maps each tool to that platform's package name. A tool with
   no entry for the current OS is skipped with a logged note (no silent drop).
@@ -148,8 +146,9 @@ A machine is correctly provisioned when, after running bootstrap:
 4. `nu -c "version"` loads `config.nu`/`env.nu` without error.
 5. Starship prompt renders in Nushell; zoxide/fzf integrations are active.
 6. WezTerm opens with Nushell as the default program and Catppuccin Mocha applied.
-7. On Unix: `tmux.conf` is present at the expected path; on Windows: it is absent and
-   WezTerm multiplexing is the documented substitute.
+7. WezTerm named workspaces switch via the leader launcher on all OSes; the
+   `resurrect.wezterm` plugin loads without error (and the config still starts if it
+   cannot be fetched).
 8. `git config --get core.pager` returns delta; theme matches.
 9. Re-running bootstrap on an already-provisioned machine is a no-op (no errors, no
    duplicate work beyond chezmoi's change detection).

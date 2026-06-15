@@ -34,7 +34,6 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 axum = "0.8.9"
 rayon = "1.12"
 trnsprt-macros = { path = "src/trnsprt/macros" }
-crossterm = "0.29"
 toml = "0.8"
 unicode-segmentation = "1"
 unicode-width = "0.2"
@@ -104,10 +103,7 @@ trnsprt = { path = "src/trnsprt" }
 watcher = { path = "src/watcher" }
 async-trait = "0.1"
 heed = "0.20"
-crossterm.workspace = true
 anyhow.workspace = true
-portable-pty = "0.8"
-vt100 = "0.15"
 zstd = "0.13"
 
 [dev-dependencies]

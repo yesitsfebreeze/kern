@@ -15,7 +15,13 @@ build:
 release:
     cargo build --release
 
+# Launch the mux: spawns the agent pane, becomes the cwd singleton daemon
+# (engine in-process), and registers/serves the kern MCP — all in one process.
 run:
+    cargo run --bin kern
+
+# Headless daemon only (no TUI/panes) — for servers or background use.
+daemon:
     cargo run --bin kern -- --daemon
 
 test:

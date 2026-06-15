@@ -9,27 +9,69 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-and-test:
-    name: build & test
-    runs-on: ubuntu-latest
+  # Full build + test on the three native runner archs (tests actually execute).
+  test:
+    name: test (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry and target
-        uses: actions/cache@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
       - name: Build (workspace)
         run: cargo build --workspace --locked
-
       - name: Test (workspace)
         run: cargo test --workspace --locked
+
+  # Cross-compile the kern binary for the widest target set we can. Build-only:
+  # non-native targets can't run tests on the runner, but a green build proves
+  # the code compiles everywhere. fail-fast:false so one exotic target failing
+  # doesn't mask the rest.
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ---- Linux (glibc + musl, multiple archs) ----
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-musl }
+          - { os: ubuntu-latest, target: armv7-unknown-linux-gnueabihf }
+          - { os: ubuntu-latest, target: arm-unknown-linux-gnueabihf }
+          - { os: ubuntu-latest, target: riscv64gc-unknown-linux-gnu }
+          - { os: ubuntu-latest, target: powerpc64le-unknown-linux-gnu }
+          - { os: ubuntu-latest, target: s390x-unknown-linux-gnu }
+          # ---- macOS (Intel + Apple Silicon) ----
+          - { os: macos-13, target: x86_64-apple-darwin }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          # ---- Windows (msvc + gnu, multiple archs) ----
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: windows-latest, target: aarch64-pc-windows-msvc }
+          - { os: windows-latest, target: i686-pc-windows-msvc }
+          - { os: windows-latest, target: x86_64-pc-windows-gnu }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ${{ matrix.target }}
+        uses: houseabsolute/actions-rust-cross@v1
+        with:
+          command: build
+          target: ${{ matrix.target }}
+          args: "--release --bin kern --locked"

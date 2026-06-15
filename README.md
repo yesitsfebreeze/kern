@@ -112,11 +112,11 @@ published to GitHub Releases):
 
 ```bash
 # Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/yesitsfebreeze/relay-kern/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/yesitsfebreeze/kern/master/install.sh | sh
 ```
 ```powershell
 # Windows (PowerShell)
-irm https://raw.githubusercontent.com/yesitsfebreeze/relay-kern/master/install.ps1 | iex
+irm https://raw.githubusercontent.com/yesitsfebreeze/kern/master/install.ps1 | iex
 ```
 
 > Or build from source (needs a Rust toolchain): `cargo build --release` →
@@ -132,7 +132,7 @@ claude mcp add kern -- kern mcp
 ```
 
 **3. Install the capture + recall hooks.** The simplest path is the Claude
-plugin (`/plugin marketplace add yesitsfebreeze/relay-kern` then
+plugin (`/plugin marketplace add yesitsfebreeze/kern` then
 `/plugin install kern@kern`), which registers all three hooks plus the MCP
 server in one step. The scripts ship in [`hooks/`](hooks/); see the *Hooks*
 section below for the full table and behavior. They are guarded to no-op outside
@@ -234,7 +234,7 @@ timeout and injects nothing rather than blocking the prompt.
 Claude Code session:
 
 ```
-/plugin marketplace add yesitsfebreeze/relay-kern
+/plugin marketplace add yesitsfebreeze/kern
 /plugin install kern@kern
 ```
 
