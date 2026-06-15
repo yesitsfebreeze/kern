@@ -101,6 +101,24 @@ struct IngestArgs {
 	kind: Option<EntityKind>,
 }
 
+/// Wire-boundary validation for an MCP ingest payload, run before any graph
+/// access (see docs/kern/safety-architecture.md): confidence range, typed kind,
+/// and the fact-tier source-trust guard — an agent caller can mint neither
+/// Fact-kind nor Fact-confidence entities. Returns the tool-error text on reject.
+fn validate_ingest_wire(p: &IngestArgs) -> Result<(), String> {
+	validate_wire_conf(p.conf).map_err(|e| e.to_string())?;
+	if let Some(k) = p.kind {
+		validate_wire_kind(k).map_err(|e| e.to_string())?;
+		if k == EntityKind::Fact {
+			validate_fact_source(AGENT_SOURCE).map_err(|e| e.to_string())?;
+		}
+	}
+	if p.conf >= crate::base::constants::FACT_CONFIDENCE {
+		validate_fact_source(AGENT_SOURCE).map_err(|e| e.to_string())?;
+	}
+	Ok(())
+}
+
 #[derive(Deserialize)]
 struct LinkArgs {
 	from: String,
@@ -131,23 +149,8 @@ impl Server {
 
 		// Wire-boundary validation: reject drift-via-mutation before any
 		// graph access. See docs/kern/safety-architecture.md.
-		if let Err(e) = validate_wire_conf(p.conf) {
-			return tool_error(&e.to_string());
-		}
-		if let Some(k) = p.kind {
-			if let Err(e) = validate_wire_kind(k) {
-				return tool_error(&e.to_string());
-			}
-			if k == EntityKind::Fact {
-				if let Err(e) = validate_fact_source(AGENT_SOURCE) {
-					return tool_error(&e.to_string());
-				}
-			}
-		}
-		if p.conf >= crate::base::constants::FACT_CONFIDENCE {
-			if let Err(e) = validate_fact_source(AGENT_SOURCE) {
-				return tool_error(&e.to_string());
-			}
+		if let Err(e) = validate_ingest_wire(&p) {
+			return tool_error(&e);
 		}
 
 		// MCP callers are agents by construction; clamp against AGENT_SOURCE
