@@ -76,10 +76,13 @@ pub enum StoreError {
 	BadVersion(u8),
 }
 
-/// Cap bincode-decoded allocations at 1 GiB — same guard as the legacy persist
-/// layer: a corrupt/fuzzed length prefix can otherwise trick the decoder into
-/// requesting petabytes. Real values are far smaller.
-fn bincode_cfg() -> impl bincode::config::Config {
+/// The one bincode wire config shared by both persistence backends (this LMDB
+/// store and the legacy file-shard `persist` module), so their encodings can
+/// never drift apart. Caps decoded allocations at 1 GiB: without a limit a
+/// corrupt/fuzzed length prefix can trick the decoder into requesting petabytes
+/// (observed: a 5 EiB allocation on random bytes in tests/persist_fuzz.rs). Real
+/// kern snapshots are far smaller, so the cap only rejects pathological inputs.
+pub(crate) fn bincode_cfg() -> impl bincode::config::Config {
 	bincode::config::standard().with_limit::<{ 1024 * 1024 * 1024 }>()
 }
 

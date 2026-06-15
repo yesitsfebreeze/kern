@@ -11,6 +11,7 @@
 // encryption, filesystem ACLs); do not store secrets in kern expecting the file
 // layer to guard them.
 use super::graph::{migrate_root_id, GraphGnn};
+use super::store::bincode_cfg;
 use super::types::Kern;
 use super::util;
 use crate::quant::QuantizationMode;
@@ -39,16 +40,6 @@ pub enum PersistError {
 		#[source]
 		source: std::io::Error,
 	},
-}
-
-/// Cap bincode-decoded allocations at 1 GiB. Without a limit, a corrupt
-/// or fuzzed length prefix can trick `decode_from_slice` into requesting
-/// petabytes (observed: a 5 EiB allocation on random bytes from
-/// `tests/persist_fuzz.rs`). Real kern snapshots are far smaller — even
-/// the largest deployments stay well under this cap — so the limit only
-/// rejects pathological inputs while permitting all real-world data.
-fn bincode_cfg() -> impl bincode::config::Config {
-	bincode::config::standard().with_limit::<{ 1024 * 1024 * 1024 }>()
 }
 
 /// Append a literal suffix to a path (whole filename, not the extension).
