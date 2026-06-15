@@ -65,14 +65,9 @@ pub fn merge(g: &GraphGnn, seeds: &[EntityHit], beam: Vec<ScoredEntity>) -> Vec<
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::base::types::{Entity, Kern};
+	use crate::base::types::Kern;
 
-	fn ent(id: &str) -> Entity {
-		Entity {
-			id: id.into(),
-			..Default::default()
-		}
-	}
+	use crate::test_support::entity as ent;
 	fn hit(id: &str, score: f64) -> EntityHit {
 		EntityHit {
 			entity_id: id.into(),

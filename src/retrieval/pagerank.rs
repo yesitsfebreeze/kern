@@ -149,22 +149,9 @@ pub fn pagerank(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::base::types::{Entity, Kern, Reason};
+	use crate::base::types::Kern;
 
-	fn ent(id: &str) -> Entity {
-		Entity {
-			id: id.into(),
-			..Default::default()
-		}
-	}
-	fn edge(from: &str, to: &str) -> Reason {
-		Reason {
-			from: from.into(),
-			to: to.into(),
-			id: format!("{from}->{to}"),
-			..Default::default()
-		}
-	}
+	use crate::test_support::{edge, entity as ent};
 
 	fn hit(id: &str, score: f64) -> EntityHit {
 		EntityHit {

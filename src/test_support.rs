@@ -1,8 +1,16 @@
 //! Shared test-only helpers used by unit tests across the crate. Compiled only
 //! under `#[cfg(test)]` (see the gated `mod test_support` in `lib.rs`).
 
-use crate::base::types::Entity;
+use crate::base::types::{Entity, Reason};
 use tokio::task::JoinHandle;
+
+/// A default [`Entity`] with the given id; all other fields `Default`.
+pub(crate) fn entity(id: &str) -> Entity {
+	Entity {
+		id: id.into(),
+		..Default::default()
+	}
+}
 
 /// A default [`Entity`] with the given id and vector; all other fields
 /// `Default`. The fixture several `base`/`retrieval`/`tick` test modules each
@@ -11,6 +19,17 @@ pub(crate) fn entity_vec(id: &str, vector: Vec<f64>) -> Entity {
 	Entity {
 		id: id.into(),
 		vector,
+		..Default::default()
+	}
+}
+
+/// A default [`Reason`] edge `from -> to`, id `"{from}->{to}"`; all other fields
+/// `Default`. The fixture `reason`/`pagerank` test modules each open-coded.
+pub(crate) fn edge(from: &str, to: &str) -> Reason {
+	Reason {
+		id: format!("{from}->{to}"),
+		from: from.into(),
+		to: to.into(),
 		..Default::default()
 	}
 }

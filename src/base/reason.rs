@@ -248,18 +248,9 @@ fn remove_string_from_vec(vec: Option<&mut Vec<String>>, s: &str) {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::base::types::{Entity, EntityKind, Kern, Reason};
+	use crate::base::types::{Entity, EntityKind, Kern};
 
-	fn edge(from: &str, to: &str) -> Reason {
-		Reason {
-			from: from.into(),
-			to: to.into(),
-			id: format!("{from}->{to}"),
-			..Default::default()
-		}
-	}
-
-	use crate::test_support::entity_vec as ent;
+	use crate::test_support::{edge, entity_vec as ent};
 
 	#[test]
 	fn add_reason_is_idempotent_on_adjacency() {
