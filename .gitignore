@@ -13,6 +13,9 @@
 # relay daemon runtime state (capture, journal, graph, logs)
 /.relay/
 
+# mesh daemon runtime state (LMDB store + history journal)
+/.mesh/
+
 # local tooling / vaults (not part of the product)
 /.claude
 /.obsidian
