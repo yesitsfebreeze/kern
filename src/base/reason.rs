@@ -259,13 +259,7 @@ mod tests {
 		}
 	}
 
-	fn ent(id: &str, vector: Vec<f64>) -> Entity {
-		Entity {
-			id: id.into(),
-			vector,
-			..Default::default()
-		}
-	}
+	use crate::test_support::entity_vec as ent;
 
 	#[test]
 	fn add_reason_is_idempotent_on_adjacency() {

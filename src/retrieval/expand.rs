@@ -199,13 +199,7 @@ mod tests {
 	use super::*;
 	use crate::base::reason::add_reason;
 
-	fn ent(id: &str, vector: Vec<f64>) -> Entity {
-		Entity {
-			id: id.into(),
-			vector,
-			..Default::default()
-		}
-	}
+	use crate::test_support::entity_vec as ent;
 	fn edge(from: &str, to: &str, score: f64) -> Reason {
 		Reason {
 			id: format!("{from}->{to}"),

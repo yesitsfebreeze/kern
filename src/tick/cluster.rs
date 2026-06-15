@@ -185,13 +185,7 @@ pub fn anchor_prompt(c: &Cluster) -> String {
 mod tests {
 	use super::*;
 
-	fn ent(id: &str, vector: Vec<f64>) -> Entity {
-		Entity {
-			id: id.into(),
-			vector,
-			..Default::default()
-		}
-	}
+	use crate::test_support::entity_vec as ent;
 
 	#[test]
 	fn anchor_prompt_keeps_header_then_one_bullet_per_member() {

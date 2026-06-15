@@ -1,7 +1,19 @@
 //! Shared test-only helpers used by unit tests across the crate. Compiled only
 //! under `#[cfg(test)]` (see the gated `mod test_support` in `lib.rs`).
 
+use crate::base::types::Entity;
 use tokio::task::JoinHandle;
+
+/// A default [`Entity`] with the given id and vector; all other fields
+/// `Default`. The fixture several `base`/`retrieval`/`tick` test modules each
+/// open-coded as a local `fn ent(id, vector)`.
+pub(crate) fn entity_vec(id: &str, vector: Vec<f64>) -> Entity {
+	Entity {
+		id: id.into(),
+		vector,
+		..Default::default()
+	}
+}
 
 /// Bind an axum app to an ephemeral localhost port, spawn it, and return its
 /// base URL plus the server task handle. Replaces the per-module
