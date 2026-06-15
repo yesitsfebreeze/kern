@@ -104,7 +104,10 @@ mod tests {
 		let t0 = Instant::now();
 		assert!(rc.admit_at("p", t0));
 		assert!(rc.admit_at("p", t0));
-		assert!(!rc.admit_at("p", t0), "third call within the window is dropped");
+		assert!(
+			!rc.admit_at("p", t0),
+			"third call within the window is dropped"
+		);
 		assert_eq!(rc.dropped_count(), 1);
 	}
 
@@ -116,7 +119,10 @@ mod tests {
 		assert!(!rc.admit_at("p", t0), "over cap in the same window");
 		// Advance past the window: the bucket resets.
 		let t1 = t0 + Duration::from_secs(6);
-		assert!(rc.admit_at("p", t1), "capacity restored after the window elapses");
+		assert!(
+			rc.admit_at("p", t1),
+			"capacity restored after the window elapses"
+		);
 	}
 
 	#[test]
@@ -132,7 +138,11 @@ mod tests {
 		// Past the window: a and b are stale. A new peer at cap triggers retain.
 		let t1 = t0 + Duration::from_secs(6);
 		assert!(rc.admit_at("c", t1));
-		assert_eq!(rc.bucket_count(), 1, "stale a,b reclaimed; only live c remains");
+		assert_eq!(
+			rc.bucket_count(),
+			1,
+			"stale a,b reclaimed; only live c remains"
+		);
 	}
 
 	#[test]
@@ -142,7 +152,10 @@ mod tests {
 		let rc = RateClipper::with_peer_cap(1, Duration::from_secs(10), 2);
 		let t0 = Instant::now();
 		assert!(rc.admit_at("a", t0));
-		assert!(!rc.admit_at("a", t0), "a is over its cap (live limiter engaged)");
+		assert!(
+			!rc.admit_at("a", t0),
+			"a is over its cap (live limiter engaged)"
+		);
 		assert!(rc.admit_at("b", t0)); // map now at cap, both a and b live
 		assert!(rc.admit_at("c", t0)); // triggers the sweep; a,b are live -> kept
 		assert!(

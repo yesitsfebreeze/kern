@@ -84,7 +84,8 @@ impl VectorBackend for KernBackend {
 		let hits = match kind_filter {
 			Some(kind) => {
 				let keep = |id: &str| {
-					self.graph
+					self
+						.graph
 						.kern_of_entity(id)
 						.and_then(|kid| self.graph.kerns.get(kid))
 						.and_then(|kn| kn.entities.get(id))
@@ -96,7 +97,10 @@ impl VectorBackend for KernBackend {
 		};
 		hits
 			.into_iter()
-			.map(|h| QueryHit { id: h.entity_id, score: h.score })
+			.map(|h| QueryHit {
+				id: h.entity_id,
+				score: h.score,
+			})
 			.collect()
 	}
 
@@ -135,7 +139,10 @@ impl VectorBackend for BruteForceBackend {
 			.iter()
 			.filter(|d| kind_filter.is_none_or(|kf| d.kind == Some(kf)))
 			.filter(|d| !d.vector.is_empty() && d.vector.len() == vec.len())
-			.map(|d| QueryHit { id: d.id.clone(), score: cosine(vec, &d.vector) })
+			.map(|d| QueryHit {
+				id: d.id.clone(),
+				score: cosine(vec, &d.vector),
+			})
 			.collect();
 		// Same deterministic ranking as the rest of the stack: score desc, id asc.
 		hits.sort_by(|a, b| cmp_rank(a.score, &a.id, b.score, &b.id));
@@ -144,7 +151,11 @@ impl VectorBackend for BruteForceBackend {
 	}
 
 	fn vector_bytes(&self) -> usize {
-		let dim = self.docs.iter().find(|d| !d.vector.is_empty()).map_or(0, |d| d.vector.len());
+		let dim = self
+			.docs
+			.iter()
+			.find(|d| !d.vector.is_empty())
+			.map_or(0, |d| d.vector.len());
 		self.docs.iter().filter(|d| !d.vector.is_empty()).count() * dim * std::mem::size_of::<f64>()
 	}
 }
@@ -154,7 +165,11 @@ mod tests {
 	use super::*;
 
 	fn doc(id: &str, v: Vec<f64>, kind: EntityKind) -> Doc {
-		Doc { id: id.into(), vector: v, kind: Some(kind) }
+		Doc {
+			id: id.into(),
+			vector: v,
+			kind: Some(kind),
+		}
 	}
 
 	#[test]
@@ -183,10 +198,16 @@ mod tests {
 		let hits = b.query(&[1.0, 0.0], 3, None);
 		assert_eq!(hits[0].id, "a", "the identical vector is the exact nearest");
 		assert_eq!(hits[1].id, "c", "then the close one");
-		assert!(hits[0].score >= hits[1].score && hits[1].score >= hits[2].score, "sorted desc");
+		assert!(
+			hits[0].score >= hits[1].score && hits[1].score >= hits[2].score,
+			"sorted desc"
+		);
 		// kind filter applies to the exact scan too.
 		let f = b.query(&[1.0, 0.0], 5, Some(EntityKind::Fact));
-		assert!(!f.is_empty() && f.iter().all(|h| h.id == "a"), "only the Fact: {f:?}");
+		assert!(
+			!f.is_empty() && f.iter().all(|h| h.id == "a"),
+			"only the Fact: {f:?}"
+		);
 	}
 
 	#[test]

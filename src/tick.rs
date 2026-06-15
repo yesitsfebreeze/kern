@@ -21,7 +21,10 @@ use crate::gnn::propagate::GnnConfig;
 use cluster::{cohesion, is_core_cluster, vector_cluster, Cluster};
 use gnn_propagate::do_gnn_propagate;
 use queue::{task, task_extra, Queue, Task, TaskKind};
-use tasks::{do_disk_consolidate, do_enrich, do_name, do_persist, do_reembed, do_resolve, BroadcastQuestionFunc, EmbedFunc, LlmFunc};
+use tasks::{
+	do_disk_consolidate, do_enrich, do_name, do_persist, do_reembed, do_resolve, do_seed_questions,
+	BroadcastQuestionFunc, EmbedFunc, LlmFunc,
+};
 
 /// Long-lived dependencies the tick worker carries across every task it
 /// processes: the LLM / embed / broadcast hooks plus the GNN, tick, and
@@ -36,7 +39,11 @@ pub struct TickContext {
 	pub tick_cfg: TickConfig,
 }
 
-pub fn start(q: Arc<Queue>, g: Arc<RwLock<GraphGnn>>, ctx: TickContext) -> tokio::task::JoinHandle<()> {
+pub fn start(
+	q: Arc<Queue>,
+	g: Arc<RwLock<GraphGnn>>,
+	ctx: TickContext,
+) -> tokio::task::JoinHandle<()> {
 	let mut rx = q.take_receiver().expect("receiver already taken");
 	tokio::spawn(async move {
 		while let Some(t) = rx.recv().await {
@@ -53,7 +60,7 @@ fn process_task(q: &Queue, g: &Arc<RwLock<GraphGnn>>, t: &Task, ctx: &TickContex
 	let (llm, embed) = (ctx.llm.as_ref(), ctx.embed.as_ref());
 	match t.kind {
 		TaskKind::Cluster => do_cluster(q, g, &t.kern_id, &ctx.tick_cfg, llm, embed),
-		TaskKind::Split => {}
+		TaskKind::SeedQuestions => do_seed_questions(g, &t.extra, llm),
 		TaskKind::Name => do_name(q, g, &t.kern_id, &ctx.tick_cfg, llm, embed),
 		TaskKind::Enrich => do_enrich(q, g, &t.kern_id, &t.extra, llm, embed),
 		TaskKind::ResolveQuestion => do_resolve(q, g, &t.kern_id, &t.extra, ctx.broadcast_q.as_ref()),
@@ -117,10 +124,8 @@ fn do_cluster(
 	for rid in &question_jobs {
 		q.enqueue(task_extra(TaskKind::ResolveQuestion, kern_id, rid));
 	}
-	let did_structural_work = !spawned_children.is_empty()
-		|| evicted
-		|| !enrich_jobs.is_empty()
-		|| !question_jobs.is_empty();
+	let did_structural_work =
+		!spawned_children.is_empty() || evicted || !enrich_jobs.is_empty() || !question_jobs.is_empty();
 	if !spawned_children.is_empty() || evicted {
 		q.enqueue(task(TaskKind::Persist, kern_id));
 	}
@@ -133,7 +138,10 @@ fn do_cluster(
 /// Phase 1 — cluster the kern's thoughts and pick which clusters are dense and
 /// off-core enough to spin out into their own child kern. Pure read over `kern`;
 /// returns every cluster plus the indices selected for spawning.
-fn select_spawn_clusters(kern: &crate::base::types::Kern, max_sample: usize) -> (Vec<Cluster>, Vec<usize>) {
+fn select_spawn_clusters(
+	kern: &crate::base::types::Kern,
+	max_sample: usize,
+) -> (Vec<Cluster>, Vec<usize>) {
 	// UNNAMED KERNS NEVER SPAWN. A fresh child is by construction one cohesive
 	// cluster, and `do_cluster` spawns grandchildren (phase 2) before the Name
 	// task is even enqueued (phase 5) — so an unnamed kern that may spawn
@@ -271,7 +279,6 @@ fn evict_empty_children(graph: &mut GraphGnn, kern_id: &str) -> bool {
 	evicted
 }
 
-
 pub fn enqueue_all(q: &Queue, g: &Arc<RwLock<GraphGnn>>) {
 	let graph = read_recovered(g);
 	for kern in graph.all() {
@@ -324,7 +331,13 @@ mod tests {
 			child.anchor_text = "named".into();
 		}
 		if child_has_thought {
-			child.entities.insert("e1".into(), Entity { id: "e1".into(), ..Default::default() });
+			child.entities.insert(
+				"e1".into(),
+				Entity {
+					id: "e1".into(),
+					..Default::default()
+				},
+			);
 		}
 		g.kerns.insert(pid.clone(), parent);
 		g.kerns.insert(cid.clone(), child);
@@ -335,8 +348,14 @@ mod tests {
 	fn evict_reaps_empty_unnamed_child() {
 		let (mut g, pid, cid) = parent_child(false, false);
 		assert!(evict_empty_children(&mut g, &pid));
-		assert!(!g.kerns.contains_key(&cid), "empty unnamed child deregistered");
-		assert!(g.kerns.get(&pid).unwrap().children.is_empty(), "child pruned from parent");
+		assert!(
+			!g.kerns.contains_key(&cid),
+			"empty unnamed child deregistered"
+		);
+		assert!(
+			g.kerns.get(&pid).unwrap().children.is_empty(),
+			"child pruned from parent"
+		);
 	}
 
 	#[test]
@@ -350,31 +369,75 @@ mod tests {
 	#[test]
 	fn collect_jobs_splits_enrich_and_question_edges() {
 		let mut k = Kern::new("k", "");
-		k.entities.insert("a".into(), Entity { id: "a".into(), ..Default::default() });
-		k.entities.insert("b".into(), Entity { id: "b".into(), ..Default::default() });
+		k.entities.insert(
+			"a".into(),
+			Entity {
+				id: "a".into(),
+				..Default::default()
+			},
+		);
+		k.entities.insert(
+			"b".into(),
+			Entity {
+				id: "b".into(),
+				..Default::default()
+			},
+		);
 		// Real edge a->b (both endpoints present) -> enrich; dangling question -> resolve.
 		add_reason(
 			&mut k,
-			Reason { from: "a".into(), to: "b".into(), id: "a->b".into(), kind: ReasonKind::Similarity, ..Default::default() },
+			Reason {
+				from: "a".into(),
+				to: "b".into(),
+				id: "a->b".into(),
+				kind: ReasonKind::Similarity,
+				..Default::default()
+			},
 		);
 		add_reason(
 			&mut k,
-			Reason { from: "a".into(), to: String::new(), id: "q1".into(), kind: ReasonKind::Question, ..Default::default() },
+			Reason {
+				from: "a".into(),
+				to: String::new(),
+				id: "q1".into(),
+				kind: ReasonKind::Question,
+				..Default::default()
+			},
 		);
 
 		let (enrich, questions) = collect_follow_up_jobs(&k);
-		assert_eq!(enrich, vec!["a->b".to_string()], "only the un-enriched real edge");
-		assert_eq!(questions, vec!["q1".to_string()], "only the open question edge");
+		assert_eq!(
+			enrich,
+			vec!["a->b".to_string()],
+			"only the un-enriched real edge"
+		);
+		assert_eq!(
+			questions,
+			vec!["q1".to_string()],
+			"only the open question edge"
+		);
 	}
 
 	#[test]
 	fn collect_jobs_skips_edges_with_missing_endpoint() {
 		let mut k = Kern::new("k", "");
-		k.entities.insert("a".into(), Entity { id: "a".into(), ..Default::default() });
+		k.entities.insert(
+			"a".into(),
+			Entity {
+				id: "a".into(),
+				..Default::default()
+			},
+		);
 		// b is absent, so a->b is not enrichable.
 		add_reason(
 			&mut k,
-			Reason { from: "a".into(), to: "b".into(), id: "a->b".into(), kind: ReasonKind::Similarity, ..Default::default() },
+			Reason {
+				from: "a".into(),
+				to: "b".into(),
+				id: "a->b".into(),
+				kind: ReasonKind::Similarity,
+				..Default::default()
+			},
 		);
 		let (enrich, questions) = collect_follow_up_jobs(&k);
 		assert!(enrich.is_empty(), "edge with a missing endpoint is skipped");
@@ -386,14 +449,32 @@ mod tests {
 		let mut g = GraphGnn::new();
 		let pid = "p".to_string();
 		let mut parent = Kern::new(&pid, "");
-		parent.entities.insert("a".into(), Entity { id: "a".into(), ..Default::default() });
-		parent.entities.insert("b".into(), Entity { id: "b".into(), ..Default::default() });
+		parent.entities.insert(
+			"a".into(),
+			Entity {
+				id: "a".into(),
+				..Default::default()
+			},
+		);
+		parent.entities.insert(
+			"b".into(),
+			Entity {
+				id: "b".into(),
+				..Default::default()
+			},
+		);
 		g.kerns.insert(pid.clone(), parent);
 
 		let clusters = vec![Cluster {
 			members: vec![
-				Entity { id: "a".into(), ..Default::default() },
-				Entity { id: "b".into(), ..Default::default() },
+				Entity {
+					id: "a".into(),
+					..Default::default()
+				},
+				Entity {
+					id: "b".into(),
+					..Default::default()
+				},
 			],
 		}];
 		let spawned = spawn_child_clusters(&mut g, &pid, &clusters, &[0]);
@@ -422,33 +503,63 @@ mod tests {
 		let pid = "p".to_string();
 		let mut parent = Kern::new(&pid, "");
 		for id in ["a", "b", "c", "d"] {
-			parent.entities.insert(id.into(), Entity { id: id.into(), ..Default::default() });
+			parent.entities.insert(
+				id.into(),
+				Entity {
+					id: id.into(),
+					..Default::default()
+				},
+			);
 		}
 		g.kerns.insert(pid.clone(), parent);
 
 		let clusters = vec![
 			Cluster {
 				members: vec![
-					Entity { id: "a".into(), ..Default::default() },
-					Entity { id: "b".into(), ..Default::default() },
+					Entity {
+						id: "a".into(),
+						..Default::default()
+					},
+					Entity {
+						id: "b".into(),
+						..Default::default()
+					},
 				],
 			},
 			Cluster {
 				members: vec![
-					Entity { id: "c".into(), ..Default::default() },
-					Entity { id: "d".into(), ..Default::default() },
+					Entity {
+						id: "c".into(),
+						..Default::default()
+					},
+					Entity {
+						id: "d".into(),
+						..Default::default()
+					},
 				],
 			},
 		];
 		let spawned = spawn_child_clusters(&mut g, &pid, &clusters, &[0, 1]);
 
 		assert_eq!(spawned.len(), 2, "two selected clusters spawn two ids");
-		assert_ne!(spawned[0], spawned[1], "each cluster lands in a DISTINCT child kern");
+		assert_ne!(
+			spawned[0], spawned[1],
+			"each cluster lands in a DISTINCT child kern"
+		);
 		let c0 = g.kerns.get(&spawned[0]).expect("first child exists");
-		assert!(c0.entities.contains_key("a") && c0.entities.contains_key("b"), "cluster 0 members");
-		assert!(!c0.entities.contains_key("c") && !c0.entities.contains_key("d"), "no cross-contamination");
+		assert!(
+			c0.entities.contains_key("a") && c0.entities.contains_key("b"),
+			"cluster 0 members"
+		);
+		assert!(
+			!c0.entities.contains_key("c") && !c0.entities.contains_key("d"),
+			"no cross-contamination"
+		);
 		let c1 = g.kerns.get(&spawned[1]).expect("second child exists");
-		assert!(c1.entities.contains_key("c") && c1.entities.contains_key("d"), "cluster 1 members");
+		assert!(
+			c1.entities.contains_key("c") && c1.entities.contains_key("d"),
+			"cluster 1 members"
+		);
 		assert!(
 			g.kerns.get(&pid).unwrap().entities.is_empty(),
 			"all clustered members moved out of the parent",
@@ -470,7 +581,11 @@ mod tests {
 			let id = format!("e{i}");
 			kern.entities.insert(
 				id.clone(),
-				Entity { id, vector: vec![1.0, 0.0], ..Default::default() },
+				Entity {
+					id,
+					vector: vec![1.0, 0.0],
+					..Default::default()
+				},
 			);
 		}
 
@@ -495,7 +610,11 @@ mod tests {
 			// Orthogonal to the anchor -> off-core, cohesive among themselves.
 			kern.entities.insert(
 				id.clone(),
-				Entity { id, vector: vec![0.0, 1.0], ..Default::default() },
+				Entity {
+					id,
+					vector: vec![0.0, 1.0],
+					..Default::default()
+				},
 			);
 		}
 
@@ -516,7 +635,13 @@ mod tests {
 		let mut g = GraphGnn::new();
 		let root_id = g.root.id.clone();
 		if let Some(k) = g.kerns.get_mut(&root_id) {
-			k.entities.insert("e1".into(), Entity { id: "e1".into(), ..Default::default() });
+			k.entities.insert(
+				"e1".into(),
+				Entity {
+					id: "e1".into(),
+					..Default::default()
+				},
+			);
 		}
 		let g = Arc::new(RwLock::new(g));
 
@@ -527,7 +652,10 @@ mod tests {
 		while let Ok(t) = rx.try_recv() {
 			kinds.push(t.kind);
 		}
-		let gnn = kinds.iter().filter(|k| matches!(k, TaskKind::GnnPropagate)).count();
+		let gnn = kinds
+			.iter()
+			.filter(|k| matches!(k, TaskKind::GnnPropagate))
+			.count();
 		assert_eq!(gnn, 0, "no structural change -> GNN propagation skipped");
 	}
 }

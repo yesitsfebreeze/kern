@@ -44,7 +44,11 @@ where
 		sum += ndcg_at_k(&ranked, &expected, k);
 		n += 1;
 	}
-	if n == 0 { 0.0 } else { sum / n as f64 }
+	if n == 0 {
+		0.0
+	} else {
+		sum / n as f64
+	}
 }
 
 /// Recall@k: the fraction of the expected (relevant) ids that appear *anywhere*
@@ -75,7 +79,11 @@ where
 		sum += recall_at_k(&ranked, &expected, k);
 		n += 1;
 	}
-	if n == 0 { 0.0 } else { sum / n as f64 }
+	if n == 0 {
+		0.0
+	} else {
+		sum / n as f64
+	}
 }
 
 #[cfg(test)]
@@ -89,7 +97,10 @@ mod tests {
 	#[test]
 	fn perfect_ranking_is_one() {
 		let r = ndcg_at_k(&ids(&["a", "b", "c"]), &ids(&["a", "b", "c"]), 3);
-		assert!((r - 1.0).abs() < 1e-9, "all relevant, ideally ordered -> 1.0, got {r}");
+		assert!(
+			(r - 1.0).abs() < 1e-9,
+			"all relevant, ideally ordered -> 1.0, got {r}"
+		);
 	}
 
 	#[test]
@@ -113,7 +124,10 @@ mod tests {
 		let high = ndcg_at_k(&ids(&["a", "x", "y"]), &ids(&["a"]), 3);
 		let low = ndcg_at_k(&ids(&["x", "y", "a"]), &ids(&["a"]), 3);
 		assert!((high - 1.0).abs() < 1e-9, "hit at rank 0 -> 1.0");
-		assert!(low < high, "hit deeper in the list is discounted ({low} < {high})");
+		assert!(
+			low < high,
+			"hit deeper in the list is discounted ({low} < {high})"
+		);
 	}
 
 	#[test]
@@ -134,9 +148,15 @@ mod tests {
 	fn recall_counts_coverage_ignoring_order() {
 		// All relevant ids found within k -> 1.0, regardless of WHERE they land
 		// (the order-insensitivity that distinguishes recall from NDCG).
-		assert_eq!(recall_at_k(&ids(&["x", "y", "a", "b"]), &ids(&["a", "b"]), 4), 1.0);
+		assert_eq!(
+			recall_at_k(&ids(&["x", "y", "a", "b"]), &ids(&["a", "b"]), 4),
+			1.0
+		);
 		// Half the relevant set found -> 0.5.
-		assert_eq!(recall_at_k(&ids(&["a", "x", "y"]), &ids(&["a", "b"]), 3), 0.5);
+		assert_eq!(
+			recall_at_k(&ids(&["a", "x", "y"]), &ids(&["a", "b"]), 3),
+			0.5
+		);
 		// No overlap -> 0.0.
 		assert_eq!(recall_at_k(&ids(&["x", "y"]), &ids(&["a", "b"]), 2), 0.0);
 	}
@@ -145,7 +165,10 @@ mod tests {
 	fn recall_is_bounded_by_k_and_never_exceeds_one() {
 		// 3 relevant ids but k=1: only the top slot counts -> 1/3.
 		let r = recall_at_k(&ids(&["a", "b", "c"]), &ids(&["a", "b", "c"]), 1);
-		assert!((r - 1.0 / 3.0).abs() < 1e-9, "k caps reachable recall, got {r}");
+		assert!(
+			(r - 1.0 / 3.0).abs() < 1e-9,
+			"k caps reachable recall, got {r}"
+		);
 		// A repeated relevant id in the ranked list must not inflate recall past 1.0.
 		assert_eq!(recall_at_k(&ids(&["a", "a"]), &ids(&["a"]), 2), 1.0);
 	}
@@ -168,10 +191,7 @@ mod tests {
 	#[test]
 	fn mean_ndcg_averages_per_query_scores() {
 		// One perfect query (1.0) + one zero-overlap query (0.0) -> mean 0.5.
-		let results = vec![
-			(ids(&["a"]), ids(&["a"])),
-			(ids(&["x"]), ids(&["a"])),
-		];
+		let results = vec![(ids(&["a"]), ids(&["a"])), (ids(&["x"]), ids(&["a"]))];
 		assert!((mean_ndcg(results, 3) - 0.5).abs() < 1e-9);
 		// Empty input -> 0.0, no divide-by-zero.
 		let empty: Vec<(Vec<String>, Vec<String>)> = Vec::new();

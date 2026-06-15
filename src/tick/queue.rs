@@ -9,10 +9,14 @@ use tokio::sync::mpsc;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TaskKind {
 	Cluster,
-	Split,
 	Name,
 	Enrich,
 	ResolveQuestion,
+	/// Generate up to 3 dangling Question edges for a freshly placed entity
+	/// (`extra` = entity id). Enqueued by the ingest worker's defer hook so
+	/// the reason-LLM never blocks the commit path; dispatched to
+	/// `tasks::do_seed_questions`. (Replaces the long-dead no-op `Split`.)
+	SeedQuestions,
 	Persist,
 	GnnPropagate,
 	/// Stigmergic cold-path garbage collection: drop thoughts whose pheromone
@@ -157,7 +161,10 @@ mod tests {
 	fn enqueue_dedups_an_already_pending_key() {
 		let q = Queue::new(8);
 		assert!(q.enqueue(task(TaskKind::Cluster, "k")));
-		assert!(!q.enqueue(task(TaskKind::Cluster, "k")), "same key is deduped");
+		assert!(
+			!q.enqueue(task(TaskKind::Cluster, "k")),
+			"same key is deduped"
+		);
 		assert_eq!(q.pending_count(), 1);
 	}
 
@@ -180,7 +187,11 @@ mod tests {
 		assert!(q.enqueue(task(TaskKind::Cluster, "a")));
 		let b = task(TaskKind::Cluster, "b");
 		assert!(!q.enqueue(b.clone()), "full channel -> enqueue fails");
-		assert_eq!(q.pending_count(), 1, "only 'a' remains pending; 'b' was rolled back");
+		assert_eq!(
+			q.pending_count(),
+			1,
+			"only 'a' remains pending; 'b' was rolled back"
+		);
 		// Free a slot, then 'b' can enqueue (its key was not blocked).
 		let mut rx = q.take_receiver().unwrap();
 		let _ = rx.try_recv();

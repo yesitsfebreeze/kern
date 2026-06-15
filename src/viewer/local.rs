@@ -10,11 +10,11 @@ use axum::Json;
 use serde_json::{json, Value};
 
 use super::{Graph, MAX_SEARCH_K};
-use trnsprt::McpServer as _;
 use crate::base::locks::{read_recovered, write_recovered};
 use crate::base::util::truncate;
 use crate::config::RetrievalConfig;
 use crate::tick::queue::{task, TaskKind};
+use trnsprt::McpServer as _;
 
 #[derive(Clone)]
 pub(super) struct LocalState {
@@ -24,7 +24,9 @@ pub(super) struct LocalState {
 	pub(super) mcp: Arc<crate::mcp::Server>,
 }
 
-fn default_k() -> usize { 10 }
+fn default_k() -> usize {
+	10
+}
 
 #[derive(serde::Deserialize)]
 pub(super) struct AskRetrieveBody {
@@ -37,7 +39,10 @@ pub(super) struct AskRetrieveBody {
 /// Peer endpoint for the oracle: retrieve (no generation) over THIS daemon's
 /// graph and return scored source thoughts + a pre-formatted provenance string.
 /// The hub merges these across daemons and does the single generation.
-pub(super) async fn ask_retrieve(State(st): State<LocalState>, Json(body): Json<AskRetrieveBody>) -> Json<Value> {
+pub(super) async fn ask_retrieve(
+	State(st): State<LocalState>,
+	Json(body): Json<AskRetrieveBody>,
+) -> Json<Value> {
 	use crate::retrieval::answer;
 	use crate::retrieval::seed::Mode;
 	let k = body.k.min(MAX_SEARCH_K);
@@ -52,25 +57,34 @@ pub(super) async fn ask_retrieve(State(st): State<LocalState>, Json(body): Json<
 		None,
 		None::<crate::retrieval::score::QueryOptions>,
 	);
-	let sources: Vec<Value> = result.entities.iter().take(k).map(|se| {
-		json!({
-			"id": se.entity.id,
-			"label": truncate(&se.entity.text(), 80),
-			"text": truncate(&se.entity.text(), 300),
-			"kind": format!("{:?}", se.entity.kind),
-			"kern": g.kern_of_entity(&se.entity.id).map(str::to_owned).unwrap_or_default(),
-			"heat": se.entity.heat,
-			"conf": se.entity.conf_mean(),
-			"score": se.score,
+	let sources: Vec<Value> = result
+		.entities
+		.iter()
+		.take(k)
+		.map(|se| {
+			json!({
+				"id": se.entity.id,
+				"label": truncate(&se.entity.text(), 80),
+				"text": truncate(&se.entity.text(), 300),
+				"kind": format!("{:?}", se.entity.kind),
+				"kern": g.kern_of_entity(&se.entity.id).map(str::to_owned).unwrap_or_default(),
+				"heat": se.entity.heat,
+				"conf": se.entity.conf_mean(),
+				"score": se.score,
+			})
 		})
-	}).collect();
+		.collect();
 	let chain_text = answer::format_chains(&g, &result.path_chains);
 	let mut reasons: Vec<Value> = Vec::new();
 	let mut seen = std::collections::HashSet::new();
 	for chain in &result.path_chains {
 		for (j, node_id) in chain.nodes.iter().enumerate() {
-			if j % 2 == 0 { continue; } // even = entity, odd = reason
-			if !seen.insert(node_id.clone()) { continue; }
+			if j % 2 == 0 {
+				continue;
+			} // even = entity, odd = reason
+			if !seen.insert(node_id.clone()) {
+				continue;
+			}
 			if let Some((r, _)) = crate::base::search::find_reason(&g, node_id) {
 				reasons.push(json!({
 					"id": r.id,
@@ -97,10 +111,15 @@ pub(super) struct ToolBody {
 }
 
 /// Peer endpoint: execute a kern MCP tool locally and return the result.
-pub(super) async fn local_tool(State(st): State<LocalState>, Json(body): Json<ToolBody>) -> Json<Value> {
+pub(super) async fn local_tool(
+	State(st): State<LocalState>,
+	Json(body): Json<ToolBody>,
+) -> Json<Value> {
 	match st.mcp.call_tool(&body.name, &body.args) {
 		Ok(r) => {
-			let text = r.content.iter()
+			let text = r
+				.content
+				.iter()
 				.filter_map(|c: &Value| c.get("text").and_then(Value::as_str))
 				.collect::<Vec<_>>()
 				.join("\n");

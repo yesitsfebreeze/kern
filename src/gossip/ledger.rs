@@ -96,7 +96,12 @@ impl Ledger {
 	/// [`LEDGER_ROUTING_TTL`]. May evict the soonest-expiring entry if at capacity.
 	pub fn put_routing(&self, kern_id: &str, addr: &str) {
 		let expires = Instant::now() + LEDGER_ROUTING_TTL;
-		write_recovered(&self.routing).insert(kern_id.to_string(), addr.to_string(), expires, self.cap());
+		write_recovered(&self.routing).insert(
+			kern_id.to_string(),
+			addr.to_string(),
+			expires,
+			self.cap(),
+		);
 	}
 
 	/// Peer address for thought `id`, or `None` if unknown or past its TTL.
@@ -147,7 +152,10 @@ mod tests {
 	#[test]
 	fn live_addr_returns_addr_before_expiry_and_none_after() {
 		let base = Instant::now();
-		let e = Entry { addr: "peer".into(), expires: base + Duration::from_secs(10) };
+		let e = Entry {
+			addr: "peer".into(),
+			expires: base + Duration::from_secs(10),
+		};
 		// Querying before the deadline yields the address.
 		assert_eq!(live_addr(&e, base), Some("peer".to_string()));
 		// Querying past the deadline yields None.
@@ -169,7 +177,11 @@ mod tests {
 		assert_eq!(live, 2, "cap=2 holds at most two entries");
 		// "a" was inserted first, so it has the soonest expiry (and, on an equal
 		// Instant, the lexicographically smallest key) — it is the one evicted.
-		assert_eq!(l.lookup_routing("a"), None, "soonest-expiring entry is evicted");
+		assert_eq!(
+			l.lookup_routing("a"),
+			None,
+			"soonest-expiring entry is evicted"
+		);
 		assert_eq!(l.lookup_routing("b"), Some("2".to_string()));
 		assert_eq!(l.lookup_routing("c"), Some("3".to_string()));
 	}
@@ -184,8 +196,16 @@ mod tests {
 		l.put_routing("a", "1");
 		l.put_routing("b", "2");
 		l.put_routing("a", "1b"); // overwrite — must not displace "b"
-		assert_eq!(l.lookup_routing("b"), Some("2".to_string()), "overwrite must not evict b");
-		assert_eq!(l.lookup_routing("a"), Some("1b".to_string()), "a updated in place");
+		assert_eq!(
+			l.lookup_routing("b"),
+			Some("2".to_string()),
+			"overwrite must not evict b"
+		);
+		assert_eq!(
+			l.lookup_routing("a"),
+			Some("1b".to_string()),
+			"a updated in place"
+		);
 	}
 
 	#[test]

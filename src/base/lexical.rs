@@ -74,7 +74,12 @@ impl LexicalIndex {
 	/// over-fetch, and none of the post-filtering fewer-than-k loss. `keep` is built
 	/// at the retrieval layer from a `QueryOptions` filter (`score::matches_filter`),
 	/// keeping this base-layer index free of any retrieval dependency.
-	pub fn search_filtered(&self, query: &str, k: usize, keep: &dyn Fn(&str) -> bool) -> Vec<LexicalHit> {
+	pub fn search_filtered(
+		&self,
+		query: &str,
+		k: usize,
+		keep: &dyn Fn(&str) -> bool,
+	) -> Vec<LexicalHit> {
 		let tokens = tokenize(query);
 		if tokens.is_empty() || k == 0 {
 			return Vec::new();
@@ -254,7 +259,10 @@ mod tests {
 	#[test]
 	fn tokenize_splits_lowercases_and_stems() {
 		assert_eq!(tokenize("Running, the Cats!"), vec!["runn", "the", "cat"]);
-		assert!(tokenize("   ,.!").is_empty(), "punctuation-only yields no tokens");
+		assert!(
+			tokenize("   ,.!").is_empty(),
+			"punctuation-only yields no tokens"
+		);
 	}
 
 	#[test]
@@ -263,19 +271,36 @@ mod tests {
 		idx.insert("short", "alpha beta");
 		idx.insert("long", "alpha alpha alpha gamma delta epsilon");
 
-		let base: Vec<f32> = idx.search("alpha", 10).into_iter().map(|h| h.score).collect();
+		let base: Vec<f32> = idx
+			.search("alpha", 10)
+			.into_iter()
+			.map(|h| h.score)
+			.collect();
 		// k1/b are query-time params: changing them re-scores with no re-indexing.
 		idx.set_bm25_params(2.5, 0.0); // drop length normalisation, raise tf saturation
-		let tuned: Vec<f32> = idx.search("alpha", 10).into_iter().map(|h| h.score).collect();
-		assert_ne!(base, tuned, "new k1/b change BM25 scores without re-indexing");
+		let tuned: Vec<f32> = idx
+			.search("alpha", 10)
+			.into_iter()
+			.map(|h| h.score)
+			.collect();
+		assert_ne!(
+			base, tuned,
+			"new k1/b change BM25 scores without re-indexing"
+		);
 
 		// Nonsensical inputs are clamped, not applied raw (would corrupt the formula).
 		idx.set_bm25_params(-5.0, 9.0);
 		let hits = idx.search("alpha", 10);
-		assert!(!hits.is_empty() && hits.iter().all(|h| h.score.is_finite()), "clamped params keep scores finite: {hits:?}");
+		assert!(
+			!hits.is_empty() && hits.iter().all(|h| h.score.is_finite()),
+			"clamped params keep scores finite: {hits:?}"
+		);
 		// NaN is ignored entirely (previous valid values retained → still finite).
 		idx.set_bm25_params(f32::NAN, f32::NAN);
-		assert!(idx.search("alpha", 10).iter().all(|h| h.score.is_finite()), "NaN ignored, not applied");
+		assert!(
+			idx.search("alpha", 10).iter().all(|h| h.score.is_finite()),
+			"NaN ignored, not applied"
+		);
 	}
 
 	#[test]
@@ -289,7 +314,10 @@ mod tests {
 		assert_eq!(hits.len(), 2, "only docs containing a query term score");
 		assert_eq!(hits[0].entity_id, "d3", "higher term frequency ranks first");
 		assert_eq!(hits[1].entity_id, "d1");
-		assert!(!hits.iter().any(|h| h.entity_id == "d2"), "d2 shares no terms");
+		assert!(
+			!hits.iter().any(|h| h.entity_id == "d2"),
+			"d2 shares no terms"
+		);
 	}
 
 	#[test]
@@ -304,24 +332,39 @@ mod tests {
 
 		// Unfiltered top-1 is a high-tf drop doc.
 		let top1 = idx.search("rust", 1);
-		assert!(top1[0].entity_id.starts_with("drop_"), "unfiltered top-1: {}", top1[0].entity_id);
+		assert!(
+			top1[0].entity_id.starts_with("drop_"),
+			"unfiltered top-1: {}",
+			top1[0].entity_id
+		);
 
 		// Filtered top-1: higher-scoring non-matching docs are removed BEFORE the
 		// truncate, so a matching doc is returned — not an empty/fewer-than-1 result.
 		let keep = |id: &str| id.starts_with("keep_");
 		let f = idx.search_filtered("rust", 1, &keep);
 		assert_eq!(f.len(), 1, "still a full k=1 after filtering");
-		assert!(f[0].entity_id.starts_with("keep_"), "only matching docs survive: {}", f[0].entity_id);
+		assert!(
+			f[0].entity_id.starts_with("keep_"),
+			"only matching docs survive: {}",
+			f[0].entity_id
+		);
 
 		// k beyond the match count returns exactly the matches.
 		let want: std::collections::HashSet<String> =
 			["keep_1", "keep_2"].iter().map(|s| s.to_string()).collect();
-		let got: std::collections::HashSet<String> =
-			idx.search_filtered("rust", 10, &keep).into_iter().map(|h| h.entity_id).collect();
+		let got: std::collections::HashSet<String> = idx
+			.search_filtered("rust", 10, &keep)
+			.into_iter()
+			.map(|h| h.entity_id)
+			.collect();
 		assert_eq!(got, want, "filtered to all matches");
 
 		// search delegates to search_filtered with an always-true keep: unchanged.
-		assert_eq!(idx.search("rust", 10).len(), 5, "unfiltered returns all 5 docs");
+		assert_eq!(
+			idx.search("rust", 10).len(),
+			5,
+			"unfiltered returns all 5 docs"
+		);
 	}
 
 	#[test]
@@ -330,7 +373,10 @@ mod tests {
 		idx.insert("d1", "hello world");
 		assert!(idx.search("", 10).is_empty(), "empty query -> no hits");
 		assert!(idx.search("hello", 0).is_empty(), "k=0 -> no hits");
-		assert!(idx.search("absent", 10).is_empty(), "unindexed term -> no hits");
+		assert!(
+			idx.search("absent", 10).is_empty(),
+			"unindexed term -> no hits"
+		);
 	}
 
 	#[test]
@@ -340,7 +386,10 @@ mod tests {
 		idx.insert("d1", "alpha beta"); // re-insert same id must not double-count
 		assert_eq!(idx.doc_count(), 1, "re-inserting an id keeps one document");
 		idx.insert("d1", "gamma"); // upsert to new text -> old terms gone
-		assert!(idx.search("alpha", 10).is_empty(), "stale terms removed on upsert");
+		assert!(
+			idx.search("alpha", 10).is_empty(),
+			"stale terms removed on upsert"
+		);
 		assert_eq!(idx.search("gamma", 10).len(), 1);
 	}
 
@@ -362,20 +411,38 @@ mod tests {
 		let mut k = Kern::new("k", "");
 		k.entities.insert(
 			"e1".into(),
-			Entity { id: "e1".into(), statements: vec!["quick brown fox".into()], ..Default::default() },
+			Entity {
+				id: "e1".into(),
+				statements: vec!["quick brown fox".into()],
+				..Default::default()
+			},
 		);
 		k.entities.insert(
 			"e2".into(),
-			Entity { id: "e2".into(), statements: vec!["lazy dog".into()], ..Default::default() },
+			Entity {
+				id: "e2".into(),
+				statements: vec!["lazy dog".into()],
+				..Default::default()
+			},
 		);
 		// Empty-statement entity must be skipped, not indexed as a zero-len doc.
-		k.entities.insert("e3".into(), Entity { id: "e3".into(), ..Default::default() });
+		k.entities.insert(
+			"e3".into(),
+			Entity {
+				id: "e3".into(),
+				..Default::default()
+			},
+		);
 		g.kerns.insert("k".into(), k);
 
 		let idx = LexicalIndex::new_in_ram(1.2, 0.75);
 		idx.rebuild_from_graph(&g);
 
-		assert_eq!(idx.doc_count(), 2, "only the two non-empty entities are indexed");
+		assert_eq!(
+			idx.doc_count(),
+			2,
+			"only the two non-empty entities are indexed"
+		);
 		let hits = idx.search("fox", 10);
 		assert_eq!(hits.len(), 1);
 		assert_eq!(hits[0].entity_id, "e1");

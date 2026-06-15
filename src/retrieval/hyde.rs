@@ -54,7 +54,10 @@ mod tests {
 			hyde_enabled: false,
 			..Default::default()
 		};
-		assert_eq!(expand_query(&cfg, None, None, &[1.0, 2.0], "cat"), vec![1.0, 2.0]);
+		assert_eq!(
+			expand_query(&cfg, None, None, &[1.0, 2.0], "cat"),
+			vec![1.0, 2.0]
+		);
 	}
 
 	#[test]
@@ -63,14 +66,23 @@ mod tests {
 		let llm: LlmFunc = Arc::new(|_: &str| "x".to_string());
 		let embed: EmbedFunc = Arc::new(|_: &str| Ok(vec![9.0, 9.0]));
 		let qv = vec![1.0, 0.0];
-		let out = expand_query(&cfg, Some(&llm), Some(&embed), &qv, "one two three four five six");
+		let out = expand_query(
+			&cfg,
+			Some(&llm),
+			Some(&embed),
+			&qv,
+			"one two three four five six",
+		);
 		assert_eq!(out, qv, "queries at/over the token floor are not expanded");
 	}
 
 	#[test]
 	fn missing_llm_or_embed_returns_query() {
 		let cfg = RetrievalConfig::default();
-		assert_eq!(expand_query(&cfg, None, None, &[1.0, 0.0], "cat"), vec![1.0, 0.0]);
+		assert_eq!(
+			expand_query(&cfg, None, None, &[1.0, 0.0], "cat"),
+			vec![1.0, 0.0]
+		);
 	}
 
 	#[test]

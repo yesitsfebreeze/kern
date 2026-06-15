@@ -26,7 +26,11 @@ pub fn embed(text: &str) -> Vec<f64> {
 		for chunk in 0..4 {
 			let base = chunk * 4;
 			let slot = (hex_u32(&bytes[base..base + 4]) as usize) % DIM;
-			let sign = if (bytes[base + 4] & 1) == 0 { 1.0 } else { -1.0 };
+			let sign = if (bytes[base + 4] & 1) == 0 {
+				1.0
+			} else {
+				-1.0
+			};
 			v[slot] += sign;
 		}
 	}
@@ -73,7 +77,11 @@ mod tests {
 	#[test]
 	fn deterministic_and_tokenization_is_case_punct_insensitive() {
 		assert_eq!(embed("hello world"), embed("hello world"), "deterministic");
-		assert_eq!(embed("Hello, World!"), embed("hello world"), "case/punct folded");
+		assert_eq!(
+			embed("Hello, World!"),
+			embed("hello world"),
+			"case/punct folded"
+		);
 	}
 
 	#[test]
@@ -89,7 +97,13 @@ mod tests {
 		// Same tokens, different order -> identical vector (sum is order-free).
 		let same = embed("gamma alpha beta");
 		let diff = embed("delta epsilon zeta");
-		assert!((cosine(&base, &same) - 1.0).abs() < 1e-9, "same token set -> cosine 1.0");
-		assert!(cosine(&base, &diff) < cosine(&base, &same), "disjoint tokens less similar");
+		assert!(
+			(cosine(&base, &same) - 1.0).abs() < 1e-9,
+			"same token set -> cosine 1.0"
+		);
+		assert!(
+			cosine(&base, &diff) < cosine(&base, &same),
+			"disjoint tokens less similar"
+		);
 	}
 }

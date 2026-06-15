@@ -1,5 +1,3 @@
-
-
 use std::collections::{HashMap, HashSet};
 
 use crate::gnn::activation::Activation;
@@ -80,8 +78,13 @@ pub fn run_learned_propagation(
 		return Err("could not sample negative edges".into());
 	}
 
-	let l1: Box<dyn BackwardGraphLayer> =
-		Box::new(GCNLayer::new(dim, hidden, Some(Activation::Relu), true, 0.0));
+	let l1: Box<dyn BackwardGraphLayer> = Box::new(GCNLayer::new(
+		dim,
+		hidden,
+		Some(Activation::Relu),
+		true,
+		0.0,
+	));
 	let l2: Box<dyn BackwardGraphLayer> = Box::new(GCNLayer::new(hidden, dim, None, false, 0.0));
 	let mut model = Model::new(vec![l1, l2], None);
 
@@ -257,7 +260,11 @@ mod tests {
 		let neg = sample_negative_edges(5, &pos, 4);
 		for e in &neg {
 			assert_ne!(e[0], e[1], "no self loops");
-			let (lo, hi) = if e[0] < e[1] { (e[0], e[1]) } else { (e[1], e[0]) };
+			let (lo, hi) = if e[0] < e[1] {
+				(e[0], e[1])
+			} else {
+				(e[1], e[0])
+			};
 			assert!(
 				!pos.contains(&[lo, hi]),
 				"negative edge must not be a positive edge"

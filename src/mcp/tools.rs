@@ -23,17 +23,22 @@ mod tests {
 			.collect();
 
 		let expected = [
-			"query", "ingest", "link", "forget", "degrade", "health", "anchor", "descriptor",
-			"pulse", "gc",
+			"query",
+			"ingest",
+			"link",
+			"forget",
+			"degrade",
+			"health",
+			"anchor",
+			"descriptor",
+			"pulse",
+			"gc",
 		];
 		assert_eq!(names, expected, "tool set must match (order intentional)");
 
 		for d in &defs {
 			let name = d["name"].as_str().unwrap();
-			assert!(
-				!name.is_empty(),
-				"tool name must not be empty"
-			);
+			assert!(!name.is_empty(), "tool name must not be empty");
 			let schema = &d["inputSchema"];
 			assert!(
 				schema.is_object(),
@@ -49,7 +54,10 @@ mod tests {
 	#[test]
 	fn query_schema_requires_text_or_id() {
 		let defs = tool_definitions();
-		let query = defs.iter().find(|d| d["name"] == "query").expect("query tool present");
+		let query = defs
+			.iter()
+			.find(|d| d["name"] == "query")
+			.expect("query tool present");
 		let any_of = query["inputSchema"]["anyOf"]
 			.as_array()
 			.expect("query schema declares an anyOf branch");
@@ -59,8 +67,14 @@ mod tests {
 			.iter()
 			.filter_map(|b| b["required"][0].as_str())
 			.collect();
-		assert!(required.contains(&"text"), "anyOf must allow `text`, got {required:?}");
-		assert!(required.contains(&"id"), "anyOf must allow `id`, got {required:?}");
+		assert!(
+			required.contains(&"text"),
+			"anyOf must allow `text`, got {required:?}"
+		);
+		assert!(
+			required.contains(&"id"),
+			"anyOf must allow `id`, got {required:?}"
+		);
 	}
 
 	#[test]
@@ -76,13 +90,19 @@ mod tests {
 			("descriptor", &["action", "name"]),
 		];
 		for (name, fields) in want {
-			let tool = defs.iter().find(|d| d["name"] == *name).expect("tool present");
+			let tool = defs
+				.iter()
+				.find(|d| d["name"] == *name)
+				.expect("tool present");
 			let required: Vec<&str> = tool["inputSchema"]["required"]
 				.as_array()
 				.map(|a| a.iter().filter_map(|v| v.as_str()).collect())
 				.unwrap_or_default();
 			for f in *fields {
-				assert!(required.contains(f), "{name} schema must require `{f}`, got {required:?}");
+				assert!(
+					required.contains(f),
+					"{name} schema must require `{f}`, got {required:?}"
+				);
 			}
 		}
 	}

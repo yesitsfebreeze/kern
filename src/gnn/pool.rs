@@ -1,5 +1,3 @@
-
-
 use crate::gnn::tensor::Tensor;
 
 pub type PoolFunc = fn(&Tensor) -> Tensor;
@@ -69,7 +67,10 @@ pub struct ReadoutLayer {
 impl ReadoutLayer {
 	pub fn new(pool: PoolFunc, in_features: usize, out_features: usize) -> Self {
 		let linear = if out_features > 0 {
-			Some(crate::gnn::layer::LinearLayer::new(in_features, out_features))
+			Some(crate::gnn::layer::LinearLayer::new(
+				in_features,
+				out_features,
+			))
 		} else {
 			None
 		};

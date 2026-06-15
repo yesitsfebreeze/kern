@@ -253,7 +253,12 @@ mod descriptor_tests {
 		let counter = Arc::new(AtomicUsize::new(0));
 		let c2 = counter.clone();
 		let embedder = llm::Client::new_embed_only("http://127.0.0.1:1", "test");
-		let worker = Arc::new(crate::ingest::Worker::new(graph.clone(), embedder, None, None));
+		let worker = Arc::new(crate::ingest::Worker::new(
+			graph.clone(),
+			embedder,
+			None,
+			None,
+		));
 		let server = Server {
 			graph,
 			worker,
@@ -264,7 +269,6 @@ mod descriptor_tests {
 			task_q: None,
 			cfg: Arc::new(Config::default()),
 			cache: crate::retrieval::cache::QueryCache::default_shared(),
-			mux: None,
 		};
 		(server, counter)
 	}
@@ -288,15 +292,34 @@ mod descriptor_tests {
 		{
 			let mut g = crate::base::locks::write_recovered(&srv.graph);
 			let mut k = Kern::new("kx", "");
-			k.entities.insert("a".into(), Entity { id: "a".into(), ..Default::default() });
-			k.entities.insert("b".into(), Entity { id: "b".into(), ..Default::default() });
+			k.entities.insert(
+				"a".into(),
+				Entity {
+					id: "a".into(),
+					..Default::default()
+				},
+			);
+			k.entities.insert(
+				"b".into(),
+				Entity {
+					id: "b".into(),
+					..Default::default()
+				},
+			);
 			g.kerns.insert("kx".into(), k);
 			g.root.descriptors.insert("code".into(), "source".into());
 		}
 		let stats = srv.health_stats();
 		assert_eq!(stats["descriptors"], 1, "root descriptor counted");
-		assert_eq!(stats["entities"].as_u64().unwrap(), 2, "both seeded entities counted");
-		assert!(stats["kerns"].as_u64().unwrap() >= 1, "at least the seeded kern");
+		assert_eq!(
+			stats["entities"].as_u64().unwrap(),
+			2,
+			"both seeded entities counted"
+		);
+		assert!(
+			stats["kerns"].as_u64().unwrap() >= 1,
+			"at least the seeded kern"
+		);
 	}
 
 	#[tokio::test]
@@ -310,14 +333,17 @@ mod descriptor_tests {
 		assert_eq!(body["added"], "code");
 		assert_eq!(counter.load(Ordering::SeqCst), 1);
 		let g = read_recovered(&srv.graph);
-		assert_eq!(g.root.descriptors.get("code").map(String::as_str), Some("source code snippets"));
+		assert_eq!(
+			g.root.descriptors.get("code").map(String::as_str),
+			Some("source code snippets")
+		);
 	}
 
 	#[tokio::test]
 	async fn add_empty_description_returns_error_no_save() {
 		let (srv, counter) = make_server();
-		let out = srv
-			.tool_descriptor(&serde_json::json!({"action": "add", "name": "code", "description": ""}));
+		let out =
+			srv.tool_descriptor(&serde_json::json!({"action": "add", "name": "code", "description": ""}));
 		assert!(is_error(&out));
 		assert!(text(&out).contains("description required"));
 		assert_eq!(counter.load(Ordering::SeqCst), 0);
@@ -386,7 +412,11 @@ mod descriptor_tests {
 		let out = srv.tool_anchor(&serde_json::json!({"action": "remove", "name": "ghost"}));
 		assert!(is_error(&out));
 		assert!(text(&out).contains("anchor not found"));
-		assert_eq!(counter.load(Ordering::SeqCst), 0, "no persist on a not-found remove");
+		assert_eq!(
+			counter.load(Ordering::SeqCst),
+			0,
+			"no persist on a not-found remove"
+		);
 	}
 
 	#[tokio::test]
@@ -395,6 +425,9 @@ mod descriptor_tests {
 		let out = srv.tool_anchor(&serde_json::json!({})); // action defaults to "list"
 		assert!(!is_error(&out));
 		let body: serde_json::Value = serde_json::from_str(&text(&out)).unwrap();
-		assert!(body["anchors"].as_array().unwrap().is_empty(), "fresh graph has no anchors");
+		assert!(
+			body["anchors"].as_array().unwrap().is_empty(),
+			"fresh graph has no anchors"
+		);
 	}
 }

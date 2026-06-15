@@ -1,8 +1,8 @@
 use crate::base::util::short_id;
 
 use super::{
-	AnchorAction, Client, DescriptorAction, Endpoint, UnnamedAction, load_graph, save_graph,
-	with_graph,
+	load_graph, save_graph, with_graph, AnchorAction, Client, DescriptorAction, Endpoint,
+	UnnamedAction,
 };
 
 pub(super) fn cmd_compress(src: &str, mode_str: &str, out: Option<&str>) {
@@ -88,7 +88,11 @@ pub(super) fn cmd_gc(cfg: &crate::config::Config) {
 			"gc: compacted data.mdb {} -> {} ({:.0}% reclaimed)",
 			human_bytes(old),
 			human_bytes(new),
-			if old > new && old > 0 { (old - new) as f64 * 100.0 / old as f64 } else { 0.0 },
+			if old > new && old > 0 {
+				(old - new) as f64 * 100.0 / old as f64
+			} else {
+				0.0
+			},
 		),
 		Err(e) => eprintln!("gc: compaction failed: {e}"),
 	}
@@ -102,7 +106,11 @@ pub(super) fn cmd_compact(cfg: &crate::config::Config) {
 			"compact: data.mdb {} -> {} ({:.0}% reclaimed)",
 			human_bytes(old),
 			human_bytes(new),
-			if old > 0 { (old - new) as f64 * 100.0 / old as f64 } else { 0.0 },
+			if old > 0 {
+				(old - new) as f64 * 100.0 / old as f64
+			} else {
+				0.0
+			},
 		),
 		Err(e) => eprintln!("compact: failed: {e}"),
 	}
@@ -117,7 +125,11 @@ fn human_bytes(n: u64) -> String {
 		v /= 1024.0;
 		i += 1;
 	}
-	if i == 0 { format!("{n} B") } else { format!("{v:.1} {}", U[i]) }
+	if i == 0 {
+		format!("{n} B")
+	} else {
+		format!("{v:.1} {}", U[i])
+	}
 }
 
 pub(super) async fn cmd_anchor(cfg: &crate::config::Config, action: AnchorAction) {
@@ -276,7 +288,10 @@ mod cmd_tests {
 
 		cmd_descriptor(
 			&cfg,
-			DescriptorAction::Add { name: key.into(), description: "a custom kind".into() },
+			DescriptorAction::Add {
+				name: key.into(),
+				description: "a custom kind".into(),
+			},
 		);
 		let g = load_graph(&cfg);
 		assert_eq!(
@@ -287,7 +302,10 @@ mod cmd_tests {
 
 		cmd_descriptor(&cfg, DescriptorAction::Rm { name: key.into() });
 		let g = load_graph(&cfg);
-		assert!(!g.root.descriptors.contains_key(key), "Rm removes the custom descriptor");
+		assert!(
+			!g.root.descriptors.contains_key(key),
+			"Rm removes the custom descriptor"
+		);
 	}
 
 	#[test]

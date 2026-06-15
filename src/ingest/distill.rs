@@ -17,7 +17,13 @@ pub struct Claim {
 /// Covers semantic + episodic knowledge plus `procedural` (Letta/MemGPT-style
 /// "how we do X" — learned workflows, rules, and conventions, not just facts).
 pub const DESCRIPTORS: [&str; 7] = [
-	"preference", "decision", "project", "fact", "code-fact", "reference", "procedural",
+	"preference",
+	"decision",
+	"project",
+	"fact",
+	"code-fact",
+	"reference",
+	"procedural",
 ];
 
 /// Extract durable claims from `conversation`.
@@ -120,7 +126,9 @@ mod tests {
 
 	#[test]
 	fn extracts_claims_and_maps_kind() {
-		let llm = stub(r#"[{"text":"User prefers tabs","kind":"preference"},{"text":"kern owns the graph","kind":"code-fact"}]"#);
+		let llm = stub(
+			r#"[{"text":"User prefers tabs","kind":"preference"},{"text":"kern owns the graph","kind":"code-fact"}]"#,
+		);
 		let claims = distill("some conversation", &llm).expect("some");
 		assert_eq!(claims.len(), 2);
 		assert_eq!(claims[0].text, "User prefers tabs");

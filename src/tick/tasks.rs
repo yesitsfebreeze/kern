@@ -14,7 +14,7 @@ use crate::base::util;
 use crate::config::TickConfig;
 
 use super::cluster::{
-	centroid_thought, largest_cohesive_cluster_for_naming, anchor_prompt, vector_cluster,
+	anchor_prompt, centroid_thought, largest_cohesive_cluster_for_naming, vector_cluster,
 };
 use super::queue::{task, task_extra, Queue, TaskKind};
 
@@ -34,6 +34,75 @@ fn strip_name_prefixes(raw: &str) -> String {
 		}
 	}
 	name
+}
+
+/// Seed up to 3 dangling Question edges for a freshly ingested entity.
+///
+/// Relocated from the ingest worker's `place_chunks` (where it was one
+/// BLOCKING reason-LLM call per placed chunk on the commit path — measured
+/// live: a one-line sync ingest queued 69.7 minutes behind LLM-bound jobs).
+/// The ingest worker now enqueues a `SeedQuestions` tick task per placed
+/// chunk via its defer hook, and the tick — which already serializes LLM
+/// work off the interactive path — runs this. Locks: text + root id read
+/// under one read guard, the LLM call runs UNLOCKED, edges written under one
+/// write guard (same discipline as `do_name`).
+pub fn do_seed_questions(g: &Arc<RwLock<GraphGnn>>, entity_id: &str, llm: Option<&LlmFunc>) {
+	let Some(llm) = llm else { return };
+	let (text, root_id) = {
+		let g = read_recovered(g);
+		let Some(kid) = g.kern_of_entity(entity_id).map(|s| s.to_string()) else {
+			return;
+		};
+		let Some(text) = g
+			.kerns
+			.get(&kid)
+			.and_then(|k| k.entities.get(entity_id))
+			.map(|e| e.text())
+		else {
+			return;
+		};
+		(text, g.root.id.clone())
+	};
+	if text.trim().is_empty() {
+		return;
+	}
+
+	let prompt = format!(
+		"Given this knowledge chunk, generate up to 3 questions that this chunk answers. \
+		 One question per line. No numbering.\n\n{text}"
+	);
+	let response = llm(&prompt);
+	if response.is_empty() {
+		return;
+	}
+	let questions: Vec<String> = response
+		.lines()
+		.map(|l| l.trim().to_string())
+		.filter(|l| !l.is_empty())
+		.take(3)
+		.collect();
+
+	let mut g = write_recovered(g);
+	for q in questions {
+		let rid = reason_id(entity_id, "", ReasonKind::Question, &q, "");
+		let reason = Reason {
+			id: rid,
+			from: entity_id.to_string(),
+			to: String::new(),
+			to_kern_id: String::new(),
+			to_net_id: String::new(),
+			kind: ReasonKind::Question,
+			dirty: false,
+			text: q,
+			vector: Vec::new(),
+			score: 0.5,
+			traversal_count: crate::crdt::GCounter::new(),
+			producer_id: String::new(),
+		};
+		if let Some(kern) = g.kerns.get_mut(&root_id) {
+			add_reason(kern, reason);
+		}
+	}
 }
 
 pub fn do_name(
@@ -315,17 +384,15 @@ pub fn do_persist(g: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
 /// Re-embed every dirty entity (and recompute dirty reason vectors) in `kern_id`,
 /// then clear the flag and rebuild the index. The dirty flag is the durable
 /// source of truth — set on edit, cleared here once the stale vector is replaced.
-pub fn do_reembed(
-	g: &Arc<RwLock<GraphGnn>>,
-	kern_id: &str,
-	embed: Option<&EmbedFunc>,
-) {
+pub fn do_reembed(g: &Arc<RwLock<GraphGnn>>, kern_id: &str, embed: Option<&EmbedFunc>) {
 	let Some(embed) = embed else { return };
 
 	// Snapshot dirty entity (id, text) under a read guard.
 	let dirty_ents: Vec<(String, String)> = {
 		let g = read_recovered(g);
-		let Some(k) = g.kerns.get(kern_id) else { return };
+		let Some(k) = g.kerns.get(kern_id) else {
+			return;
+		};
 		k.entities
 			.values()
 			.filter(|e| e.dirty)
@@ -359,7 +426,9 @@ pub fn do_reembed(
 	// Write back under a write guard.
 	{
 		let mut g = write_recovered(g);
-		let Some(k) = g.kerns.get_mut(kern_id) else { return };
+		let Some(k) = g.kerns.get_mut(kern_id) else {
+			return;
+		};
 		for (id, v) in &new_vecs {
 			if let Some(e) = k.entities.get_mut(id) {
 				e.vector = v.clone();
@@ -370,7 +439,10 @@ pub fn do_reembed(
 		// Recompute dirty reason vectors as the mean of their (now-updated)
 		// endpoint vectors; clear the flag.
 		let endpoint = |k: &crate::base::types::Kern, id: &str| -> Option<Vec<f64>> {
-			k.entities.get(id).map(|e| e.vector.clone()).filter(|v| !v.is_empty())
+			k.entities
+				.get(id)
+				.map(|e| e.vector.clone())
+				.filter(|v| !v.is_empty())
 		};
 		let reason_ids: Vec<String> = k
 			.reasons
@@ -410,11 +482,70 @@ mod tests {
 	use std::sync::{Arc, RwLock};
 
 	#[test]
+	fn do_seed_questions_adds_question_edges_for_the_entity() {
+		// Question seeding moved OFF the ingest commit path (it was one blocking
+		// reason-LLM call per placed chunk inside the worker — measured live: a
+		// one-line sync ingest queued 69.7 minutes behind LLM-bound jobs). The
+		// tick owns it now: read the entity text, ask the LLM, attach dangling
+		// Question edges to the root kern — same shape the resolver consumes.
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		let mut e = Entity {
+			id: "e1".into(),
+			..Default::default()
+		};
+		e.set_text("the spawn gate shipped today".into());
+		g.kerns
+			.get_mut(&root)
+			.unwrap()
+			.entities
+			.insert("e1".into(), e);
+		// Repopulate entity_kern (private) from the kern maps, like load does.
+		g.rebuild_index();
+		let g = Arc::new(RwLock::new(g));
+
+		let llm: LlmFunc =
+			Arc::new(|_p: &str| "What shipped today?\nWhen did the gate ship?".to_string());
+		do_seed_questions(&g, "e1", Some(&llm));
+
+		let gg = g.read().unwrap();
+		let qs: Vec<_> = gg
+			.kerns
+			.get(&root)
+			.unwrap()
+			.reasons
+			.values()
+			.filter(|r| r.kind == ReasonKind::Question && r.from == "e1" && r.to.is_empty())
+			.collect();
+		assert_eq!(qs.len(), 2, "one dangling Question edge per LLM line");
+	}
+
+	#[test]
+	fn do_seed_questions_is_a_noop_without_llm_or_entity() {
+		let g = Arc::new(RwLock::new(GraphGnn::new()));
+		// No LLM -> noop.
+		do_seed_questions(&g, "e1", None);
+		// LLM but unknown entity -> noop (no panic, no edges).
+		let llm: LlmFunc = Arc::new(|_p: &str| "Q?".to_string());
+		do_seed_questions(&g, "missing", Some(&llm));
+		let gg = g.read().unwrap();
+		let root = gg.root.id.clone();
+		assert!(
+			gg.kerns.get(&root).unwrap().reasons.is_empty(),
+			"no edges minted"
+		);
+	}
+
+	#[test]
 	fn do_reembed_clears_dirty_and_sets_vector() {
 		let mut g = GraphGnn::new();
 		let kid = "k1".to_string();
 		let mut kern = Kern::new(kid.clone(), "");
-		let mut e = Entity { id: "e1".into(), dirty: true, ..Default::default() };
+		let mut e = Entity {
+			id: "e1".into(),
+			dirty: true,
+			..Default::default()
+		};
 		e.set_text("hello world".into());
 		kern.entities.insert(e.id.clone(), e);
 		g.kerns.insert(kid.clone(), kern);
@@ -433,9 +564,32 @@ mod tests {
 		let kid = "k1".to_string();
 		let mut kern = Kern::new(kid.clone(), "");
 		// Two already-embedded (non-dirty) entities and one dirty edge between them.
-		kern.entities.insert("a".into(), Entity { id: "a".into(), vector: vec![1.0, 0.0], ..Default::default() });
-		kern.entities.insert("b".into(), Entity { id: "b".into(), vector: vec![0.0, 1.0], ..Default::default() });
-		add_reason(&mut kern, Reason { id: "a->b".into(), from: "a".into(), to: "b".into(), dirty: true, ..Default::default() });
+		kern.entities.insert(
+			"a".into(),
+			Entity {
+				id: "a".into(),
+				vector: vec![1.0, 0.0],
+				..Default::default()
+			},
+		);
+		kern.entities.insert(
+			"b".into(),
+			Entity {
+				id: "b".into(),
+				vector: vec![0.0, 1.0],
+				..Default::default()
+			},
+		);
+		add_reason(
+			&mut kern,
+			Reason {
+				id: "a->b".into(),
+				from: "a".into(),
+				to: "b".into(),
+				dirty: true,
+				..Default::default()
+			},
+		);
 		g.kerns.insert(kid.clone(), kern);
 		let g = Arc::new(RwLock::new(g));
 
@@ -446,7 +600,11 @@ mod tests {
 		let g = g.read().unwrap();
 		let r = g.kerns.get(&kid).unwrap().reasons.get("a->b").unwrap();
 		assert!(!r.dirty, "dirty reason cleared once recomputed");
-		assert_eq!(r.vector, vec![0.5, 0.5], "reason vector is the mean of endpoint vectors");
+		assert_eq!(
+			r.vector,
+			vec![0.5, 0.5],
+			"reason vector is the mean of endpoint vectors"
+		);
 	}
 
 	#[test]
@@ -460,11 +618,19 @@ mod tests {
 		let mut kern = Kern::new(kid.clone(), "");
 		kern.entities.insert(
 			"target".into(),
-			Entity { id: "target".into(), vector: vec![1.0, 0.0, 0.0], ..Default::default() },
+			Entity {
+				id: "target".into(),
+				vector: vec![1.0, 0.0, 0.0],
+				..Default::default()
+			},
 		);
 		kern.entities.insert(
 			"asker".into(),
-			Entity { id: "asker".into(), vector: vec![0.0, 1.0, 0.0], ..Default::default() },
+			Entity {
+				id: "asker".into(),
+				vector: vec![0.0, 1.0, 0.0],
+				..Default::default()
+			},
 		);
 		add_reason(
 			&mut kern,
@@ -486,7 +652,11 @@ mod tests {
 
 		let g = g.read().unwrap();
 		let r = g.kerns.get(&kid).unwrap().reasons.get("q1").unwrap();
-		assert_eq!(r.kind, ReasonKind::Similarity, "resolved question becomes a Similarity edge");
+		assert_eq!(
+			r.kind,
+			ReasonKind::Similarity,
+			"resolved question becomes a Similarity edge"
+		);
 		assert_eq!(r.to, "target", "linked to the nearest indexed entity");
 	}
 
@@ -499,7 +669,11 @@ mod tests {
 		let mut kern = Kern::new(kid.clone(), "");
 		kern.entities.insert(
 			"target".into(),
-			Entity { id: "target".into(), vector: vec![1.0, 0.0], ..Default::default() },
+			Entity {
+				id: "target".into(),
+				vector: vec![1.0, 0.0],
+				..Default::default()
+			},
 		);
 		add_reason(
 			&mut kern,
@@ -521,14 +695,24 @@ mod tests {
 
 		let g = g.read().unwrap();
 		let r = g.kerns.get(&kid).unwrap().reasons.get("linked").unwrap();
-		assert_eq!(r.kind, ReasonKind::Question, "already-linked question is untouched");
+		assert_eq!(
+			r.kind,
+			ReasonKind::Question,
+			"already-linked question is untouched"
+		);
 		assert_eq!(r.to, "y", "existing link preserved");
 	}
 
 	#[test]
 	fn strip_name_prefixes_removes_first_known_label_only() {
-		assert_eq!(strip_name_prefixes("Theme: rust ownership"), "rust ownership");
-		assert_eq!(strip_name_prefixes("  name:  caching layer  "), "caching layer");
+		assert_eq!(
+			strip_name_prefixes("Theme: rust ownership"),
+			"rust ownership"
+		);
+		assert_eq!(
+			strip_name_prefixes("  name:  caching layer  "),
+			"caching layer"
+		);
 		assert_eq!(strip_name_prefixes("Label:x"), "x");
 		// No known prefix -> trimmed verbatim.
 		assert_eq!(strip_name_prefixes("  plain phrase "), "plain phrase");

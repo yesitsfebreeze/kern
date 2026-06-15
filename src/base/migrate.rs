@@ -54,6 +54,9 @@ mod tests {
 		assert!(g.loaded("child").is_some(), "child present in the store");
 		let be = &g.loaded("child").unwrap().entities["e1"];
 		assert_eq!(be.text(), "legacy fact");
-		assert!((be.vector[0] - 0.2).abs() < 0.02, "vector survived (int8 on disk)");
+		assert!(
+			(be.vector[0] - 0.2).abs() < 0.02,
+			"vector survived (int8 on disk)"
+		);
 	}
 }

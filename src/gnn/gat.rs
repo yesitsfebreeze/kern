@@ -1,5 +1,3 @@
-
-
 use crate::gnn::activation::Activation;
 use crate::gnn::backward::{act_deriv_mul, BackwardGraphLayer, GraphLayer};
 use crate::gnn::dropout::Dropout;
@@ -41,7 +39,16 @@ impl GATLayer {
 		drop_rate: f64,
 	) -> Self {
 		let mut rng = rand::rng();
-		Self::with_rng(in_features, head_dim, heads, concat, act, norm, drop_rate, &mut rng)
+		Self::with_rng(
+			in_features,
+			head_dim,
+			heads,
+			concat,
+			act,
+			norm,
+			drop_rate,
+			&mut rng,
+		)
 	}
 
 	/// Construct a `GATLayer` with deterministic weight init from a seeded RNG.

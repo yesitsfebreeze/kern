@@ -10,7 +10,7 @@ mod query;
 mod reembed;
 
 /// Register kern MCP servers in the project's `.mcp.json`.
-/// Called at mux and daemon startup — idempotent, safe to call every boot.
+/// Called at daemon startup — idempotent, safe to call every boot.
 pub(crate) use mcp_cmd::ensure_mcp_registered;
 
 use std::sync::Arc;
@@ -58,12 +58,13 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
 	/// Add text (or a --file) to the graph; distills into typed claims.
+	/// (The old `--no_llm` flag is gone: the ingest commit path no longer
+	/// makes reason-LLM calls at all — splitting is heuristic and question
+	/// seeding belongs to the daemon's tick.)
 	Ingest {
 		text: Vec<String>,
 		#[arg(long)]
 		file: Option<String>,
-		#[arg(long)]
-		no_llm: bool,
 		#[arg(long)]
 		embed_url: Option<String>,
 		#[arg(long)]
@@ -108,15 +109,11 @@ pub enum Commands {
 		embed_model: Option<String>,
 	},
 	/// Print a single thought by id (rehydrates from the cold store).
-	Get {
-		id: String,
-	},
+	Get { id: String },
 	/// List all thoughts in the graph.
 	List,
 	/// Remove a thought and cascade its edges (Facts are immune).
-	Forget {
-		id: String,
-	},
+	Forget { id: String },
 	/// Create a reason edge between two thoughts (LLM writes the reason if blank).
 	Link {
 		from: String,
@@ -156,9 +153,7 @@ pub enum Commands {
 		action: AnchorAction,
 	},
 	/// Down-weight the edges along a bad retrieval path (learn from a miss).
-	Degrade {
-		id: String,
-	},
+	Degrade { id: String },
 	/// Add or remove data-type descriptors.
 	Descriptor {
 		#[command(subcommand)]
@@ -167,9 +162,7 @@ pub enum Commands {
 	/// List known gossip peers.
 	Peers,
 	/// Import a kern store from a directory into this graph.
-	Register {
-		path: String,
-	},
+	Register { path: String },
 	/// Inspect kerns that have no name yet.
 	Unnamed {
 		#[command(subcommand)]
@@ -370,7 +363,6 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 		Commands::Ingest {
 			text,
 			file,
-			no_llm,
 			embed_url,
 			embed_model,
 			reason_url,
@@ -380,7 +372,6 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 				cfg,
 				text,
 				file,
-				no_llm,
 				resolve(&embed_url, &cfg.embed.url),
 				resolve(&embed_model, &cfg.embed.model),
 				resolve(&reason_url, &cfg.reason.url),
@@ -519,13 +510,13 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 			// but keeping it here ensures `dispatch` handles all Commands variants,
 			// so future call sites don't need to special-case Daemon.
 			let default_cli = Cli {
-				command:     None,
-				daemon:      true,
-				mcp_addr:    String::new(),
-				mcp_stdio:   false,
-				embed_url:   crate::config::DEFAULT_EMBED_URL.to_string(),
+				command: None,
+				daemon: true,
+				mcp_addr: String::new(),
+				mcp_stdio: false,
+				embed_url: crate::config::DEFAULT_EMBED_URL.to_string(),
 				embed_model: crate::config::DEFAULT_EMBED_MODEL.to_string(),
-				reason_url:  String::new(),
+				reason_url: String::new(),
 				reason_model: String::new(),
 			};
 			run_server(&default_cli, cfg).await;
@@ -534,27 +525,19 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 }
 
 /// Handles produced by [`bootstrap`]: the live engine plus the side-channels a
-/// caller's serve/park loop (or TUI) needs.
+/// caller's serve/park loop needs.
 pub(crate) struct EngineHandle {
-	pub server:  std::sync::Arc<crate::mcp::Server>,
-	pub graph:   SharedGraph,
-	pub worker:  std::sync::Arc<crate::ingest::Worker>,
-	pub task_q:  std::sync::Arc<crate::tick::queue::Queue>,
-	pub llm:     crate::llm::Client,
+	pub server: std::sync::Arc<crate::mcp::Server>,
+	pub graph: SharedGraph,
+	pub task_q: std::sync::Arc<crate::tick::queue::Queue>,
 }
 
 /// Build the engine stack (graph + worker + tick + MCP server) and spawn every
 /// background service: watchdog, keepalive, viewer, session-mirror, file-watcher,
-/// capture, gossip, maintenance tick. Shared by `run_server` (headless daemon)
-/// and `run_mux` (TUI host). Does NOT register `.mcp.json`, does NOT bind
-/// `kern.sock`, and does NOT block — the caller owns the serve/park loop and
-/// decides whether to attach a TUI. `mux` is threaded into `mcp::Server` so the
-/// comms tools advertise + dispatch against the live pane registry.
-pub(crate) async fn bootstrap(
-	cli: &Cli,
-	cfg: &crate::config::Config,
-	mux: Option<std::sync::Arc<std::sync::Mutex<crate::mux::registry::PaneRegistry>>>,
-) -> EngineHandle {
+/// capture, gossip, maintenance tick. Used by `run_server`. Does NOT register
+/// `.mcp.json`, does NOT bind `kern.sock`, and does NOT block — the caller owns
+/// the serve/park loop.
+pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineHandle {
 	if let Some(j) = journal::global() {
 		j.set_max_bytes(cfg.journal.max_today_bytes);
 	}
@@ -563,8 +546,8 @@ pub(crate) async fn bootstrap(
 	// freed pages to the OS, so a graph that was once fragmented to a runaway of
 	// empty unnamed kerns leaves a multi-GB `data.mdb` that every load must mmap
 	// and that the startup reap alone can't shrink. Here — while we still hold the
-	// cwd exclusively (the mux calls bootstrap only after winning kern.sock) and
-	// no serving env is open yet — reap the empties and rewrite the file compactly.
+	// cwd exclusively (bootstrap runs only after winning kern.sock) and no serving
+	// env is open yet — reap the empties and rewrite the file compactly.
 	// Guarded by a size threshold so a normal small graph pays nothing.
 	maybe_self_heal_store(cfg);
 
@@ -615,7 +598,17 @@ pub(crate) async fn bootstrap(
 	// self-contained — no dependency on OLLAMA_KEEP_ALIVE.
 	spawn_keepalive(&llm_client);
 
-	let tick_llm: crate::tick::tasks::LlmFunc = Arc::new(llm_client.complete_func());
+	// Gate the tick's reason hook exactly like `llm_fn` above: with no reason
+	// endpoint configured, `complete_func` POSTs to a relative URL and returns
+	// "" — but `do_cluster` gates Name-enqueue on `llm.is_some()`, so an
+	// ungated Some here meant infinite no-op Name re-enqueue churn (and now
+	// SeedQuestions no-ops) that masked the misconfiguration instead of the
+	// capture path's loud warning.
+	let tick_llm: Option<crate::tick::tasks::LlmFunc> = if reason_url.is_empty() {
+		None
+	} else {
+		Some(Arc::new(llm_client.complete_func()))
+	};
 	let tick_embed: crate::tick::tasks::EmbedFunc = embed_fn(&llm_client);
 
 	let registry = Arc::new(crate::store::Registry::new());
@@ -623,8 +616,7 @@ pub(crate) async fn bootstrap(
 		std::path::Path::new(&cfg.data_dir),
 		cfg,
 		llm_client.clone(),
-		llm_fn.clone(),
-		Some(tick_llm),
+		tick_llm,
 		Some(tick_embed),
 		None,
 	);
@@ -666,7 +658,6 @@ pub(crate) async fn bootstrap(
 			cfg.retrieval.query_cache_cap,
 			cfg.retrieval.query_cache_theta,
 		),
-		mux,
 	});
 
 	spawn_viewer(cfg, &g, &llm_client, &q, &mcp_server);
@@ -682,7 +673,11 @@ pub(crate) async fn bootstrap(
 
 	spawn_maintenance_tick(cfg, &g, &q);
 
-	EngineHandle { server: mcp_server, graph: g, worker, task_q: q, llm: llm_client }
+	EngineHandle {
+		server: mcp_server,
+		graph: g,
+		task_q: q,
+	}
 }
 
 pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
@@ -692,11 +687,9 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 		ensure_mcp_registered(&cwd);
 	}
 
-	let h = bootstrap(cli, cfg, None).await;
+	let h = bootstrap(cli, cfg).await;
 	let g = h.graph.clone();
-	let worker = h.worker.clone();
 	let q = h.task_q.clone();
-	let llm_client = h.llm.clone();
 	let mcp_server = h.server.clone();
 
 	let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -709,10 +702,11 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	// Bound synchronously here so an `AlreadyRunning` outcome (another
 	// daemon owns the endpoint) can short-circuit run_server before any
 	// other daemon scaffolding spins up. The accept loop runs in a
-	// detached task; this function returns when ctrl-c arrives (daemon
-	// mode) or when the repl exits (interactive mode).
+	// detached task; this function returns when ctrl-c arrives.
 	{
-		let mem = Arc::new(std::sync::Mutex::new(crate::memory_service::MemoryService::new()));
+		let mem = Arc::new(std::sync::Mutex::new(
+			crate::memory_service::MemoryService::new(),
+		));
 		let handler = crate::rpc::KernRpcHandler::new(mcp_server.clone(), mem);
 		let endpoint = trnsprt::typed::Endpoint::kern();
 		match trnsprt::typed::bind_kern_listener(&endpoint).await {
@@ -751,19 +745,8 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 			});
 		}
 
-		if !cli.daemon {
-			crate::repl::run(
-				g.clone(),
-				worker,
-				llm_client,
-				Some(q.clone()),
-				cfg.ingest.dedup_threshold,
-			)
-			.await;
-		} else {
-			println!("kern running in daemon mode (ctrl-c to stop)");
-			let _ = shutdown_rx.await;
-		}
+		println!("kern running in daemon mode (ctrl-c to stop)");
+		let _ = shutdown_rx.await;
 	}
 
 	drop(q);
@@ -870,7 +853,16 @@ fn spawn_viewer(
 	let viewer_q = q.clone();
 	let viewer_mcp = mcp_server.clone();
 	tokio::spawn(async move {
-		if let Err(e) = crate::viewer::run(vg, viewer_llm, viewer_retrieval, viewer_q, viewer_mcp, &vaddr).await {
+		if let Err(e) = crate::viewer::run(
+			vg,
+			viewer_llm,
+			viewer_retrieval,
+			viewer_q,
+			viewer_mcp,
+			&vaddr,
+		)
+		.await
+		{
 			tracing::warn!(target: "kern.viewer", error = %e, "graph viewer failed to start");
 		}
 	});
@@ -912,7 +904,7 @@ fn spawn_session_mirror(cfg: &crate::config::Config, worker: &Arc<crate::ingest:
 	}
 
 	// Live mirror: tail today.jsonl for fork lifecycle events. This is the file
-	// `journal::emit` writes, so mux panes are mirrored as they open.
+	// `journal::emit` writes, so agent sessions are mirrored as they open.
 	let sink = WorkerSink::new(worker.clone());
 	let mut sm = SessionMirror::new(sink);
 	sm.set_max_seen(cfg.ingest.session_mirror_max_seen);
@@ -975,7 +967,12 @@ fn spawn_capture(
 		let poll = std::time::Duration::from_secs(cfg.capture.poll_secs);
 		let done_retention = std::time::Duration::from_secs(cfg.capture.done_retention_secs);
 		tokio::spawn(crate::ingest::capture_spool::run(
-			spool, worker_c, llm_fn, dedup, poll, done_retention,
+			spool,
+			worker_c,
+			llm_fn,
+			dedup,
+			poll,
+			done_retention,
 		));
 	} else {
 		tracing::warn!(
@@ -1018,7 +1015,8 @@ async fn start_gossip(
 		let g = read_recovered(g);
 		g.network_id.clone()
 	};
-	let node = crate::gossip::node::Node::new(&cfg.gossip.addr, &network_id, cfg.gossip.peers.clone());
+	let node =
+		crate::gossip::node::Node::new(&cfg.gossip.addr, &network_id, cfg.gossip.peers.clone());
 	// Wire the configured ledger cap. Without this `config.graph.max_ledger_entries`
 	// was dead — the routing/thought ledger always used the hardcoded
 	// DEFAULT_LEDGER_CAP regardless of config.
@@ -1050,7 +1048,11 @@ async fn start_gossip(
 /// Autonomous maintenance tick: pulses the root (heat decay + stigmergy GC of
 /// cold nodes) and re-enqueues clustering on a timer so an idle daemon still
 /// decays, merges, and evicts. `interval_secs = 0` disables it.
-fn spawn_maintenance_tick(cfg: &crate::config::Config, g: &SharedGraph, q: &Arc<crate::tick::queue::Queue>) {
+fn spawn_maintenance_tick(
+	cfg: &crate::config::Config,
+	g: &SharedGraph,
+	q: &Arc<crate::tick::queue::Queue>,
+) {
 	if cfg.tick.interval_secs == 0 {
 		return;
 	}
@@ -1099,26 +1101,50 @@ mod entry_point_tests {
 		g.data_dir = dir.path().to_string_lossy().into_owned();
 		let mut kern = Kern::new("k", "");
 		for i in 0..30 {
-			let v: Vec<f64> = (0..8).map(|j| ((i as f64) * (0.13 + 0.07 * j as f64)).sin()).collect();
+			let v: Vec<f64> = (0..8)
+				.map(|j| ((i as f64) * (0.13 + 0.07 * j as f64)).sin())
+				.collect();
 			kern.entities.insert(
 				format!("e{i}"),
-				Entity { id: format!("e{i}"), vector: v, status: EntityStatus::Active, ..Default::default() },
+				Entity {
+					id: format!("e{i}"),
+					vector: v,
+					status: EntityStatus::Active,
+					..Default::default()
+				},
 			);
 		}
 		g.kerns.insert("k".into(), kern);
 		g.rebuild_index(); // mimics load_dir's rebuild under the default threshold
-		assert!(matches!(g.entity_idx, VectorBackend::Resident(_)), "default load stays in-RAM");
+		assert!(
+			matches!(g.entity_idx, VectorBackend::Resident(_)),
+			"default load stays in-RAM"
+		);
 
 		// Enabled threshold -> apply_graph_config must rebuild and spill.
-		let cfg = GraphConfig { max_kerns: KERN_CAP_DISABLED, max_ledger_entries: 10_000, disk_threshold: 10 };
+		let cfg = GraphConfig {
+			max_kerns: KERN_CAP_DISABLED,
+			max_ledger_entries: 10_000,
+			disk_threshold: 10,
+		};
 		super::apply_graph_config(&mut g, &cfg);
-		assert!(matches!(g.entity_idx, VectorBackend::Disk { .. }), "configured threshold spills at startup");
+		assert!(
+			matches!(g.entity_idx, VectorBackend::Disk { .. }),
+			"configured threshold spills at startup"
+		);
 
 		// Disabled threshold -> no spill, no redundant rebuild side effects.
 		let mut g2 = GraphGnn::new();
 		g2.data_dir = dir.path().to_string_lossy().into_owned();
-		let cfg_off = GraphConfig { max_kerns: KERN_CAP_DISABLED, max_ledger_entries: 10_000, disk_threshold: KERN_CAP_DISABLED };
+		let cfg_off = GraphConfig {
+			max_kerns: KERN_CAP_DISABLED,
+			max_ledger_entries: 10_000,
+			disk_threshold: KERN_CAP_DISABLED,
+		};
 		super::apply_graph_config(&mut g2, &cfg_off);
-		assert!(matches!(g2.entity_idx, VectorBackend::Resident(_)), "default-off stays in-RAM");
+		assert!(
+			matches!(g2.entity_idx, VectorBackend::Resident(_)),
+			"default-off stays in-RAM"
+		);
 	}
 }

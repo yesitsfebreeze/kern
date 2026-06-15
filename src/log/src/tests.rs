@@ -89,5 +89,9 @@ fn concurrent_pushes_are_thread_safe_and_stay_capped() {
 	for h in handles {
 		h.join().unwrap();
 	}
-	assert_eq!(s.snapshot().len(), MAX_ENTRIES, "ring stays capped under contention");
+	assert_eq!(
+		s.snapshot().len(),
+		MAX_ENTRIES,
+		"ring stays capped under contention"
+	);
 }

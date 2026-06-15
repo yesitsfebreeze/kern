@@ -56,11 +56,13 @@ pub fn measure_latency(
 				..Default::default()
 			});
 		for _ in 0..warmup {
-			let _ = crate::retrieval::answer::query(g, cfg, &qvec, &q.query, mode, None, None, opts.clone());
+			let _ =
+				crate::retrieval::answer::query(g, cfg, &qvec, &q.query, mode, None, None, opts.clone());
 		}
 		for _ in 0..iters {
 			let t0 = Instant::now();
-			let _ = crate::retrieval::answer::query(g, cfg, &qvec, &q.query, mode, None, None, opts.clone());
+			let _ =
+				crate::retrieval::answer::query(g, cfg, &qvec, &q.query, mode, None, None, opts.clone());
 			timings.push(t0.elapsed().as_secs_f64() * 1000.0);
 		}
 	}
@@ -120,7 +122,8 @@ pub fn measure_throughput(
 								kind: Some(kind),
 								..Default::default()
 							});
-						let _ = crate::retrieval::answer::query(g, cfg, &qvec, &q.query, mode, None, None, opts);
+						let _ =
+							crate::retrieval::answer::query(g, cfg, &qvec, &q.query, mode, None, None, opts);
 					}
 				}
 			});
@@ -148,14 +151,21 @@ mod tests {
 	use crate::bench_support::build::build_graph;
 	use crate::bench_support::trace::{TraceDoc, TraceQuery};
 
-
 	#[test]
 	fn measure_latency_pools_samples_and_orders_percentiles() {
 		let trace = Trace {
 			name: "lat".into(),
 			docs: vec![
-				TraceDoc { id: "d1".into(), text: "rust ownership borrow checker".into(), kind: None },
-				TraceDoc { id: "d2".into(), text: "graph neural network".into(), kind: None },
+				TraceDoc {
+					id: "d1".into(),
+					text: "rust ownership borrow checker".into(),
+					kind: None,
+				},
+				TraceDoc {
+					id: "d2".into(),
+					text: "graph neural network".into(),
+					kind: None,
+				},
 			],
 			queries: vec![TraceQuery {
 				id: "q1".into(),
@@ -169,7 +179,10 @@ mod tests {
 		let r = measure_latency(&g, &RetrievalConfig::default(), &trace, 1, 5);
 		assert_eq!(r.samples, 5, "1 query x 5 iters = 5 timed samples");
 		assert!(r.mean_ms >= 0.0 && r.p50_ms >= 0.0);
-		assert!(r.p50_ms <= r.p95_ms && r.p95_ms <= r.p99_ms, "percentiles are monotonic");
+		assert!(
+			r.p50_ms <= r.p95_ms && r.p95_ms <= r.p99_ms,
+			"percentiles are monotonic"
+		);
 	}
 
 	#[test]
@@ -177,12 +190,32 @@ mod tests {
 		let trace = Trace {
 			name: "tput".into(),
 			docs: vec![
-				TraceDoc { id: "d1".into(), text: "rust ownership borrow checker".into(), kind: None },
-				TraceDoc { id: "d2".into(), text: "graph neural network".into(), kind: None },
+				TraceDoc {
+					id: "d1".into(),
+					text: "rust ownership borrow checker".into(),
+					kind: None,
+				},
+				TraceDoc {
+					id: "d2".into(),
+					text: "graph neural network".into(),
+					kind: None,
+				},
 			],
 			queries: vec![
-				TraceQuery { id: "q1".into(), query: "rust ownership".into(), expected_ids: vec!["d1".into()], mode: "hybrid".into(), filter_kind: None },
-				TraceQuery { id: "q2".into(), query: "graph network".into(), expected_ids: vec!["d2".into()], mode: "hybrid".into(), filter_kind: None },
+				TraceQuery {
+					id: "q1".into(),
+					query: "rust ownership".into(),
+					expected_ids: vec!["d1".into()],
+					mode: "hybrid".into(),
+					filter_kind: None,
+				},
+				TraceQuery {
+					id: "q2".into(),
+					query: "graph network".into(),
+					expected_ids: vec!["d2".into()],
+					mode: "hybrid".into(),
+					filter_kind: None,
+				},
 			],
 		};
 		let g = build_graph(&trace);

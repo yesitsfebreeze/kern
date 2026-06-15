@@ -85,8 +85,7 @@ pub fn parse_ranking(response: &str, pool: usize) -> Option<Vec<usize>> {
 		// Accept integer JSON (1) or whole-number float JSON (1.0); reject fractions (1.5).
 		let i = v
 			.as_i64()
-			.or_else(|| v.as_f64().filter(|f| f.fract() == 0.0).map(|f| f as i64))?
-			as usize;
+			.or_else(|| v.as_f64().filter(|f| f.fract() == 0.0).map(|f| f as i64))? as usize;
 		if i < pool {
 			out.push(i);
 		}
@@ -105,13 +104,20 @@ mod tests {
 	use std::sync::{Arc, Mutex};
 
 	fn scored(id: &str, text: &str, score: f64) -> ScoredEntity {
-		let mut e = Entity { id: id.into(), ..Default::default() };
+		let mut e = Entity {
+			id: id.into(),
+			..Default::default()
+		};
 		e.set_text(text.into());
 		ScoredEntity { entity: e, score }
 	}
 
 	fn cfg(pool: usize) -> RetrievalConfig {
-		RetrievalConfig { rerank_enabled: true, rerank_pool_size: pool, ..Default::default() }
+		RetrievalConfig {
+			rerank_enabled: true,
+			rerank_pool_size: pool,
+			..Default::default()
+		}
 	}
 
 	fn ids(rs: &[ScoredEntity]) -> Vec<String> {
@@ -122,9 +128,17 @@ mod tests {
 	fn llm_rerank_reorders_head_by_returned_ranking() {
 		// Mock returns [2,0,1]: c,a,b. The original order is a,b,c.
 		let llm: LlmFunc = Arc::new(|_p: &str| "[2,0,1]".to_string());
-		let mut results = vec![scored("a", "alpha", 0.9), scored("b", "beta", 0.8), scored("c", "gamma", 0.7)];
+		let mut results = vec![
+			scored("a", "alpha", 0.9),
+			scored("b", "beta", 0.8),
+			scored("c", "gamma", 0.7),
+		];
 		llm_rerank(&cfg(3), Some(&llm), "q", &mut results);
-		assert_eq!(ids(&results), vec!["c", "a", "b"], "head reordered to the LLM ranking");
+		assert_eq!(
+			ids(&results),
+			vec!["c", "a", "b"],
+			"head reordered to the LLM ranking"
+		);
 	}
 
 	#[test]
@@ -138,15 +152,27 @@ mod tests {
 			scored("d", "d", 0.6),
 		];
 		llm_rerank(&cfg(2), Some(&llm), "q", &mut results);
-		assert_eq!(ids(&results), vec!["b", "a", "c", "d"], "head swapped, tail untouched");
+		assert_eq!(
+			ids(&results),
+			vec!["b", "a", "c", "d"],
+			"head swapped, tail untouched"
+		);
 	}
 
 	#[test]
 	fn llm_rerank_unparseable_response_leaves_order_untouched() {
 		let llm: LlmFunc = Arc::new(|_p: &str| "sorry, no idea".to_string());
-		let mut results = vec![scored("a", "a", 0.9), scored("b", "b", 0.8), scored("c", "c", 0.7)];
+		let mut results = vec![
+			scored("a", "a", 0.9),
+			scored("b", "b", 0.8),
+			scored("c", "c", 0.7),
+		];
 		llm_rerank(&cfg(3), Some(&llm), "q", &mut results);
-		assert_eq!(ids(&results), vec!["a", "b", "c"], "garbage ranking is a no-op");
+		assert_eq!(
+			ids(&results),
+			vec!["a", "b", "c"],
+			"garbage ranking is a no-op"
+		);
 	}
 
 	#[test]
@@ -159,13 +185,17 @@ mod tests {
 			*captured.lock().unwrap() = p.to_string();
 			"[0]".to_string()
 		});
-		let mut results: Vec<ScoredEntity> =
-			(0..40).map(|i| scored(&format!("e{i}"), "txt", 1.0 - i as f64 * 0.01)).collect();
+		let mut results: Vec<ScoredEntity> = (0..40)
+			.map(|i| scored(&format!("e{i}"), "txt", 1.0 - i as f64 * 0.01))
+			.collect();
 		llm_rerank(&cfg(1000), Some(&llm), "q", &mut results);
 
 		let prompt = seen.lock().unwrap().clone();
 		let last = MAX_RERANK_CANDIDATES - 1;
-		assert!(prompt.contains(&format!("[{last}]")), "includes the last allowed candidate");
+		assert!(
+			prompt.contains(&format!("[{last}]")),
+			"includes the last allowed candidate"
+		);
 		assert!(
 			!prompt.contains(&format!("[{MAX_RERANK_CANDIDATES}]")),
 			"never lists a candidate at the cap index"

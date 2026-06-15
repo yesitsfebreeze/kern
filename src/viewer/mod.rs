@@ -48,11 +48,23 @@ pub(super) const MAX_SEARCH_K: usize = 200;
 
 /// Run the viewer: start this daemon's local graph server, register it, and
 /// contend for the aggregator role. Never returns under normal operation.
-pub async fn run(graph: Graph, llm: crate::llm::Client, retrieval: RetrievalConfig, queue: std::sync::Arc<crate::tick::queue::Queue>, mcp: Arc<crate::mcp::Server>, agg_addr: &str) -> std::io::Result<()> {
+pub async fn run(
+	graph: Graph,
+	llm: crate::llm::Client,
+	retrieval: RetrievalConfig,
+	queue: std::sync::Arc<crate::tick::queue::Queue>,
+	mcp: Arc<crate::mcp::Server>,
+	agg_addr: &str,
+) -> std::io::Result<()> {
 	// 1. Local graph server on an ephemeral loopback port (this daemon's own data).
 	let local = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
 	let local_addr = local.local_addr()?.to_string();
-	let local_state = local::LocalState { graph: graph.clone(), retrieval: retrieval.clone(), queue: queue.clone(), mcp };
+	let local_state = local::LocalState {
+		graph: graph.clone(),
+		retrieval: retrieval.clone(),
+		queue: queue.clone(),
+		mcp,
+	};
 	let local_app = Router::new()
 		.route("/graph", get(local::graph_json))
 		.route("/ask_retrieve", post(local::ask_retrieve))
@@ -79,7 +91,10 @@ pub async fn run(graph: Graph, llm: crate::llm::Client, retrieval: RetrievalConf
 		match tokio::net::TcpListener::bind(&agg_addr).await {
 			Ok(listener) => {
 				tracing::info!(target: "kern.viewer", addr = %agg_addr, "aggregator hub listening");
-				let hub = hub::HubState { client: client.clone(), llm: llm.clone() };
+				let hub = hub::HubState {
+					client: client.clone(),
+					llm: llm.clone(),
+				};
 				let app = Router::new()
 					.route("/", get(hub::index))
 					.route("/graph", get(hub::aggregate))

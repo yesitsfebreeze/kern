@@ -3,9 +3,9 @@ use serde::Deserialize;
 use crate::base::constants::AGENT_SOURCE;
 use crate::base::locks::{read_recovered, write_recovered};
 use crate::base::math::{average_vec, clamp_confidence, cosine, reason_id};
-use crate::base::reason::{add_reason, remove_reason, remove_entity};
+use crate::base::reason::{add_reason, remove_entity, remove_reason};
 use crate::base::search::find_entity;
-use crate::base::types::{Reason, ReasonKind, Source, EntityKind};
+use crate::base::types::{EntityKind, Reason, ReasonKind, Source};
 use crate::base::util::explain_relationship_prompt;
 use crate::ingest;
 use crate::wire::{validate_fact_source, validate_wire_conf, validate_wire_kind};
@@ -396,7 +396,9 @@ impl Server {
 				* (crate::base::constants::DEGRADE_DECAY_POW).powi(i as i32);
 
 			// One mutable borrow of the kern per edge (was a get-then-get_mut pair).
-			let Some(kern) = g.kerns.get_mut(&kern_id) else { continue };
+			let Some(kern) = g.kerns.get_mut(&kern_id) else {
+				continue;
+			};
 			let should_remove = match kern.reasons.get(rid) {
 				Some(r) => r.score - decay < crate::base::constants::DEGRADE_MIN_THRESHOLD,
 				None => continue,
@@ -429,7 +431,12 @@ mod tests {
 	fn make_server() -> Server {
 		let graph = Arc::new(RwLock::new(GraphGnn::new()));
 		let embedder = llm::Client::new_embed_only("http://127.0.0.1:1", "test");
-		let worker = Arc::new(crate::ingest::Worker::new(graph.clone(), embedder, None, None));
+		let worker = Arc::new(crate::ingest::Worker::new(
+			graph.clone(),
+			embedder,
+			None,
+			None,
+		));
 		Server {
 			graph,
 			worker,
@@ -438,7 +445,6 @@ mod tests {
 			task_q: None,
 			cfg: Arc::new(Config::default()),
 			cache: crate::retrieval::cache::QueryCache::default_shared(),
-			mux: None,
 		}
 	}
 
@@ -449,20 +455,45 @@ mod tests {
 		serde_json::from_str(&text(out)).expect("success body is json")
 	}
 	fn is_error(out: &serde_json::Value) -> bool {
-		out.get("isError").and_then(|x| x.as_bool()).unwrap_or(false)
+		out
+			.get("isError")
+			.and_then(|x| x.as_bool())
+			.unwrap_or(false)
 	}
 
 	fn insert_kern(srv: &Server, kern: Kern) {
-		write_recovered(&srv.graph).kerns.insert(kern.id.clone(), kern);
+		write_recovered(&srv.graph)
+			.kerns
+			.insert(kern.id.clone(), kern);
 	}
 
 	#[tokio::test]
 	async fn tool_forget_removes_entity_and_counts_cascaded_edges() {
 		let srv = make_server();
 		let mut k = Kern::new("kx", "");
-		k.entities.insert("a".into(), Entity { id: "a".into(), ..Default::default() });
-		k.entities.insert("b".into(), Entity { id: "b".into(), ..Default::default() });
-		add_reason(&mut k, Reason { id: "a->b".into(), from: "a".into(), to: "b".into(), ..Default::default() });
+		k.entities.insert(
+			"a".into(),
+			Entity {
+				id: "a".into(),
+				..Default::default()
+			},
+		);
+		k.entities.insert(
+			"b".into(),
+			Entity {
+				id: "b".into(),
+				..Default::default()
+			},
+		);
+		add_reason(
+			&mut k,
+			Reason {
+				id: "a->b".into(),
+				from: "a".into(),
+				to: "b".into(),
+				..Default::default()
+			},
+		);
 		insert_kern(&srv, k);
 
 		let out = srv.tool_forget(&serde_json::json!({ "id": "a" }));
@@ -470,14 +501,24 @@ mod tests {
 		assert_eq!(body(&out)["removed_edges"], 1, "the incident edge cascades");
 
 		let g = read_recovered(&srv.graph);
-		assert!(!g.kerns.get("kx").unwrap().entities.contains_key("a"), "entity is gone");
+		assert!(
+			!g.kerns.get("kx").unwrap().entities.contains_key("a"),
+			"entity is gone"
+		);
 	}
 
 	#[tokio::test]
 	async fn tool_forget_refuses_a_fact() {
 		let srv = make_server();
 		let mut k = Kern::new("kx", "");
-		k.entities.insert("f".into(), Entity { id: "f".into(), kind: EntityKind::Fact, ..Default::default() });
+		k.entities.insert(
+			"f".into(),
+			Entity {
+				id: "f".into(),
+				kind: EntityKind::Fact,
+				..Default::default()
+			},
+		);
 		insert_kern(&srv, k);
 
 		let out = srv.tool_forget(&serde_json::json!({ "id": "f" }));
@@ -489,36 +530,91 @@ mod tests {
 	async fn tool_degrade_decays_survivors_and_reaps_subthreshold() {
 		let srv = make_server();
 		let mut k = Kern::new("kx", "");
-		k.entities.insert("a".into(), Entity { id: "a".into(), ..Default::default() });
-		add_reason(&mut k, Reason { id: "a->b".into(), from: "a".into(), to: "b".into(), score: 1.0, ..Default::default() });
-		add_reason(&mut k, Reason { id: "a->c".into(), from: "a".into(), to: "c".into(), score: 0.0, ..Default::default() });
+		k.entities.insert(
+			"a".into(),
+			Entity {
+				id: "a".into(),
+				..Default::default()
+			},
+		);
+		add_reason(
+			&mut k,
+			Reason {
+				id: "a->b".into(),
+				from: "a".into(),
+				to: "b".into(),
+				score: 1.0,
+				..Default::default()
+			},
+		);
+		add_reason(
+			&mut k,
+			Reason {
+				id: "a->c".into(),
+				from: "a".into(),
+				to: "c".into(),
+				score: 0.0,
+				..Default::default()
+			},
+		);
 		insert_kern(&srv, k);
 
 		let out = srv.tool_degrade(&serde_json::json!({ "query_id": "a" }));
 		assert!(!is_error(&out));
-		assert_eq!(body(&out)["decayed_edges"], 2, "both incident edges visited");
+		assert_eq!(
+			body(&out)["decayed_edges"],
+			2,
+			"both incident edges visited"
+		);
 
 		let g = read_recovered(&srv.graph);
 		let kern = g.kerns.get("kx").unwrap();
 		assert_eq!(kern.reasons.len(), 1, "the sub-threshold edge is reaped");
-		assert!(kern.reasons.contains_key("a->b"), "the healthy edge survives");
+		assert!(
+			kern.reasons.contains_key("a->b"),
+			"the healthy edge survives"
+		);
 	}
 
 	#[tokio::test]
 	async fn tool_link_adds_edge_with_provided_reason_text() {
 		let srv = make_server();
 		let mut k = Kern::new("kx", "");
-		k.entities.insert("a".into(), Entity { id: "a".into(), vector: vec![1.0, 0.0], ..Default::default() });
-		k.entities.insert("b".into(), Entity { id: "b".into(), vector: vec![0.0, 1.0], ..Default::default() });
+		k.entities.insert(
+			"a".into(),
+			Entity {
+				id: "a".into(),
+				vector: vec![1.0, 0.0],
+				..Default::default()
+			},
+		);
+		k.entities.insert(
+			"b".into(),
+			Entity {
+				id: "b".into(),
+				vector: vec![0.0, 1.0],
+				..Default::default()
+			},
+		);
 		insert_kern(&srv, k);
 
-		let out = srv.tool_link(&serde_json::json!({ "from": "a", "to": "b", "reason": "because related" }));
+		let out =
+			srv.tool_link(&serde_json::json!({ "from": "a", "to": "b", "reason": "because related" }));
 		assert!(!is_error(&out));
 		let edge_id = body(&out)["edge_id"].as_str().expect("edge_id").to_string();
 
 		let g = read_recovered(&srv.graph);
-		let r = g.kerns.get("kx").unwrap().reasons.get(&edge_id).expect("edge added to from-kern");
-		assert_eq!(r.text, "because related", "provided reason used verbatim (no LLM configured)");
+		let r = g
+			.kerns
+			.get("kx")
+			.unwrap()
+			.reasons
+			.get(&edge_id)
+			.expect("edge added to from-kern");
+		assert_eq!(
+			r.text, "because related",
+			"provided reason used verbatim (no LLM configured)"
+		);
 		assert_eq!((r.from.as_str(), r.to.as_str()), ("a", "b"));
 	}
 

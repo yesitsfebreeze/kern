@@ -1,5 +1,3 @@
-
-
 use crate::gnn::tensor::Tensor;
 use crate::gnn::GnnError;
 
@@ -33,11 +31,7 @@ impl LinearLayer {
 	/// Construct a `LinearLayer` with deterministic weight init from a
 	/// seeded RNG. Bias is zero-initialized (no RNG draw). Use this
 	/// constructor in tests so loss-decrease assertions are reproducible.
-	pub fn with_rng<R: rand::Rng>(
-		in_features: usize,
-		out_features: usize,
-		rng: &mut R,
-	) -> Self {
+	pub fn with_rng<R: rand::Rng>(in_features: usize, out_features: usize, rng: &mut R) -> Self {
 		let scale = (2.0 / (in_features + out_features) as f64).sqrt();
 		let weight = Tensor::rand_with(in_features, out_features, scale, rng);
 		let bias = Tensor::zeros(1, out_features);
@@ -144,9 +138,15 @@ mod tests {
 
 		assert_eq!((d_in.rows, d_in.cols), (2, 4), "dInput matches input shape");
 		// d_bias[j] = sum over rows of d_out[:,j] = 2 rows * 1.0 = 2.0.
-		assert!(l.d_bias.data.iter().all(|&b| (b - 2.0).abs() < 1e-12), "d_bias = column sums of d_out");
+		assert!(
+			l.d_bias.data.iter().all(|&b| (b - 2.0).abs() < 1e-12),
+			"d_bias = column sums of d_out"
+		);
 		// d_weight = Xᵀ·dOut; X all 1s (2x4), dOut all 1s (2x3) -> each elem = 2.0.
-		assert!(l.d_weight.data.iter().all(|&w| (w - 2.0).abs() < 1e-12), "d_weight = Xᵀ·dOut");
+		assert!(
+			l.d_weight.data.iter().all(|&w| (w - 2.0).abs() < 1e-12),
+			"d_weight = Xᵀ·dOut"
+		);
 	}
 
 	#[test]
@@ -157,10 +157,16 @@ mod tests {
 		let _ = l.forward(&x);
 		l.backward(&d_out);
 		l.backward(&d_out);
-		assert!(l.d_bias.data.iter().all(|&b| (b - 2.0).abs() < 1e-12), "two calls accumulate d_bias");
+		assert!(
+			l.d_bias.data.iter().all(|&b| (b - 2.0).abs() < 1e-12),
+			"two calls accumulate d_bias"
+		);
 
 		l.zero_grads();
-		assert!(l.d_weight.data.iter().all(|&w| w == 0.0), "zero_grads clears d_weight in place");
+		assert!(
+			l.d_weight.data.iter().all(|&w| w == 0.0),
+			"zero_grads clears d_weight in place"
+		);
 		assert!(l.d_bias.data.iter().all(|&b| b == 0.0));
 	}
 
@@ -168,11 +174,18 @@ mod tests {
 	fn try_backward_before_forward_is_a_missing_state_error() {
 		let mut l = layer(2, 2);
 		let d_out = Tensor::new(1, 2, vec![1.0, 1.0]).unwrap();
-		assert!(matches!(l.try_backward(&d_out).unwrap_err(), GnnError::MissingForwardState(_)));
+		assert!(matches!(
+			l.try_backward(&d_out).unwrap_err(),
+			GnnError::MissingForwardState(_)
+		));
 
 		// The infallible trait method degrades to a zero gradient of input shape.
 		let z = l.backward(&d_out);
-		assert_eq!((z.rows, z.cols), (1, 2), "fallback dInput is (n_samples, in_features)");
+		assert_eq!(
+			(z.rows, z.cols),
+			(1, 2),
+			"fallback dInput is (n_samples, in_features)"
+		);
 		assert!(z.data.iter().all(|&v| v == 0.0));
 	}
 }

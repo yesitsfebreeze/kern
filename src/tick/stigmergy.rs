@@ -114,7 +114,11 @@ fn evict_victims(
 ) -> usize {
 	let mut kept = 0usize;
 	for id in victims {
-		let victim = g.kerns.get(kern_id).and_then(|k| k.entities.get(id)).cloned();
+		let victim = g
+			.kerns
+			.get(kern_id)
+			.and_then(|k| k.entities.get(id))
+			.cloned();
 		if let Some(e) = victim {
 			if !spill(&e) {
 				// Spill failed → leave the thought in the hot tier for retry.
@@ -134,7 +138,13 @@ mod tests {
 	use std::time::Duration;
 
 	fn ent(kind: EntityKind, heat: f32, accessed_at: Option<SystemTime>) -> Entity {
-		Entity { id: "e".into(), kind, heat, accessed_at, ..Default::default() }
+		Entity {
+			id: "e".into(),
+			kind,
+			heat,
+			accessed_at,
+			..Default::default()
+		}
 	}
 
 	fn graph_with_cold_claim(id: &str) -> GraphGnn {
@@ -183,26 +193,44 @@ mod tests {
 	fn heat_above_threshold_is_preserved_even_when_old() {
 		let now = SystemTime::now();
 		let old = now - (COLD_GC_AGE + Duration::from_secs(1));
-		assert!(!is_cold_victim(&ent(EntityKind::Claim, 1e9, Some(old)), now));
+		assert!(!is_cold_victim(
+			&ent(EntityKind::Claim, 1e9, Some(old)),
+			now
+		));
 	}
 
 	#[test]
 	fn durable_kinds_are_never_collected() {
 		let now = SystemTime::now();
 		let old = now - (COLD_GC_AGE + Duration::from_secs(1));
-		assert!(!is_cold_victim(&ent(EntityKind::Fact, 0.0, Some(old)), now), "Fact preserved");
-		assert!(!is_cold_victim(&ent(EntityKind::Document, 0.0, Some(old)), now), "Document preserved");
+		assert!(
+			!is_cold_victim(&ent(EntityKind::Fact, 0.0, Some(old)), now),
+			"Fact preserved"
+		);
+		assert!(
+			!is_cold_victim(&ent(EntityKind::Document, 0.0, Some(old)), now),
+			"Document preserved"
+		);
 	}
 
 	#[test]
 	fn recent_untouched_or_clock_skewed_is_preserved() {
 		let now = SystemTime::now();
 		// Cold but just accessed -> not yet abandoned.
-		assert!(!is_cold_victim(&ent(EntityKind::Claim, 0.0, Some(now)), now), "recently accessed");
+		assert!(
+			!is_cold_victim(&ent(EntityKind::Claim, 0.0, Some(now)), now),
+			"recently accessed"
+		);
 		// No accessed_at -> treated as freshly created.
-		assert!(!is_cold_victim(&ent(EntityKind::Claim, 0.0, None), now), "never accessed");
+		assert!(
+			!is_cold_victim(&ent(EntityKind::Claim, 0.0, None), now),
+			"never accessed"
+		);
 		// accessed_at in the future (clock skew) -> not stale.
 		let future = now + Duration::from_secs(3600);
-		assert!(!is_cold_victim(&ent(EntityKind::Claim, 0.0, Some(future)), now), "clock skew");
+		assert!(
+			!is_cold_victim(&ent(EntityKind::Claim, 0.0, Some(future)), now),
+			"clock skew"
+		);
 	}
 }

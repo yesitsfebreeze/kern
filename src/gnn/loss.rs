@@ -208,7 +208,10 @@ mod tests {
 		let predicted = Tensor::new(1, 3, vec![0.1, 0.2, 0.7]).unwrap();
 		let target = Tensor::new(1, 1, vec![9.0]).unwrap();
 		let grad = cross_entropy_grad(&predicted, &target);
-		assert!(grad.data.iter().all(|&v| v == 0.0), "invalid row grad must be zero");
+		assert!(
+			grad.data.iter().all(|&v| v == 0.0),
+			"invalid row grad must be zero"
+		);
 	}
 
 	#[test]
@@ -278,7 +281,8 @@ mod tests {
 			ep.data[idx] += H;
 			let mut em = emb.clone();
 			em.data[idx] -= H;
-			let num = (link_prediction_loss(&ep, &pos, &neg) - link_prediction_loss(&em, &pos, &neg)) / (2.0 * H);
+			let num =
+				(link_prediction_loss(&ep, &pos, &neg) - link_prediction_loss(&em, &pos, &neg)) / (2.0 * H);
 			let den = 1.0_f64.max(analytic.data[idx].abs()).max(num.abs());
 			assert!(
 				(analytic.data[idx] - num).abs() / den < 1e-4,

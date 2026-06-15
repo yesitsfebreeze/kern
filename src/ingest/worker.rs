@@ -10,8 +10,6 @@ use crate::llm::Client as LlmClient;
 use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::types::LlmFunc;
-
 pub(crate) struct Job {
 	pub(crate) text: String,
 	pub(crate) source: Source,
@@ -22,19 +20,31 @@ pub(crate) struct Job {
 	pub(crate) result_tx: Option<oneshot::Sender<Outcome>>,
 }
 
+/// Post-placement hook: called with each freshly placed (non-deduped) entity
+/// id so question seeding can be DEFERRED to the tick instead of running a
+/// blocking reason-LLM call on the commit path. The hook must be cheap (it
+/// enqueues a `SeedQuestions` task); the worker stays embed-bound.
+pub type DeferQuestionsFn = Arc<dyn Fn(&str) + Send + Sync>;
+
 pub struct Worker {
 	tx: mpsc::Sender<Job>,
 }
 
 impl Worker {
+	/// The worker deliberately takes NO reason-LLM: every LLM-bound step
+	/// (question seeding, enrichment, naming) is deferred to the tick via
+	/// `defer_questions`, and chunk splitting always uses the heuristic
+	/// splitter. This is a type-level guarantee that the ingest commit path
+	/// is embed-bound — measured before the change: a one-line sync ingest
+	/// queued 69.7 minutes behind LLM-bound jobs (600s timeout each).
 	pub fn new(
 		graph: Arc<RwLock<GraphGnn>>,
 		embedder: LlmClient,
-		llm: Option<LlmFunc>,
+		defer_questions: Option<DeferQuestionsFn>,
 		save_fn: Option<Arc<dyn Fn() + Send + Sync>>,
 	) -> Self {
 		let (tx, rx) = mpsc::channel(64);
-		tokio::spawn(run_loop(graph, embedder, llm, save_fn, rx));
+		tokio::spawn(run_loop(graph, embedder, defer_questions, save_fn, rx));
 		Self { tx }
 	}
 
@@ -86,7 +96,9 @@ impl Worker {
 		if let Err(e) = self.tx.send(job).await {
 			return Outcome::failed(
 				"failed to enqueue",
-				vec![FailureReport::document_permanent(format!("send failed: {e}"))],
+				vec![FailureReport::document_permanent(format!(
+					"send failed: {e}"
+				))],
 			);
 		}
 		result_rx
@@ -98,12 +110,12 @@ impl Worker {
 async fn run_loop(
 	graph: Arc<RwLock<GraphGnn>>,
 	embedder: LlmClient,
-	llm: Option<LlmFunc>,
+	defer_questions: Option<DeferQuestionsFn>,
 	save_fn: Option<Arc<dyn Fn() + Send + Sync>>,
 	mut rx: mpsc::Receiver<Job>,
 ) {
 	while let Some(job) = rx.recv().await {
-		let outcome = process(&graph, &embedder, &llm, &job).await;
+		let outcome = process(&graph, &embedder, &defer_questions, &job).await;
 		// Every job's outcome is journaled (the tracing layer feeds the
 		// journal), fire-and-forget jobs included. Before this, an `enqueue`d
 		// job that failed vanished without a trace: result_tx is None on that
@@ -193,16 +205,15 @@ fn finalize_doc_identity(
 async fn process(
 	graph: &Arc<RwLock<GraphGnn>>,
 	embedder: &LlmClient,
-	llm: &Option<LlmFunc>,
+	defer_questions: &Option<DeferQuestionsFn>,
 	job: &Job,
 ) -> Outcome {
 	let doc_id = util::content_hash(&job.text);
 
-	let chunks = split::split(
-		&job.text,
-		&job.descriptor,
-		llm.as_ref().map(|f| f.as_ref() as &dyn Fn(&str) -> String),
-	);
+	// Heuristic splitting ONLY — the LLM splitter was one reason-LLM call per
+	// document on the commit path. The heuristic fallback was already the
+	// common case (any LLM hiccup) and keeps the worker embed-bound.
+	let chunks = split::split(&job.text, &job.descriptor, None);
 
 	let (doc_thought, doc_fail) =
 		place_document(graph, embedder, job, &doc_id, job.config.dedup_threshold).await;
@@ -225,7 +236,7 @@ async fn process(
 
 	let placed = place_chunks(
 		graph,
-		llm,
+		defer_questions.as_ref(),
 		job,
 		&chunks,
 		&chunk_vecs,
@@ -297,7 +308,11 @@ mod tests {
 	}
 
 	fn session_source() -> Source {
-		Source::Session { session_id: "s".into(), section: "sec".into(), title: String::new() }
+		Source::Session {
+			session_id: "s".into(),
+			section: "sec".into(),
+			title: String::new(),
+		}
 	}
 
 	fn dead_worker(graph: Arc<RwLock<GraphGnn>>) -> Worker {
@@ -350,25 +365,35 @@ mod tests {
 		assert_eq!(st, OutcomeStatus::Deduped);
 
 		// Fresh placement: surviving id IS the content hash — status unchanged.
-		let (id, st) =
-			finalize_doc_identity("hash-a", "hash-a".to_string(), OutcomeStatus::Committed);
+		let (id, st) = finalize_doc_identity("hash-a", "hash-a".to_string(), OutcomeStatus::Committed);
 		assert_eq!(id, "hash-a");
 		assert_eq!(st, OutcomeStatus::Committed);
 
 		// Partial/Failed outcomes are never upgraded to Deduped — chunk failures
 		// still need to surface as such.
-		let (_, st) =
-			finalize_doc_identity("hash-a", "existing-b".to_string(), OutcomeStatus::Partial);
+		let (_, st) = finalize_doc_identity("hash-a", "existing-b".to_string(), OutcomeStatus::Partial);
 		assert_eq!(st, OutcomeStatus::Partial);
 	}
 
 	#[test]
 	fn outcome_log_severity_maps_status_to_level() {
 		// Every processed job must be observable: failures loudly, success quietly.
-		assert_eq!(outcome_log_severity(&outcome_with(OutcomeStatus::Committed)), "info");
-		assert_eq!(outcome_log_severity(&outcome_with(OutcomeStatus::Deduped)), "info");
-		assert_eq!(outcome_log_severity(&outcome_with(OutcomeStatus::Partial)), "warn");
-		assert_eq!(outcome_log_severity(&outcome_with(OutcomeStatus::Failed)), "error");
+		assert_eq!(
+			outcome_log_severity(&outcome_with(OutcomeStatus::Committed)),
+			"info"
+		);
+		assert_eq!(
+			outcome_log_severity(&outcome_with(OutcomeStatus::Deduped)),
+			"info"
+		);
+		assert_eq!(
+			outcome_log_severity(&outcome_with(OutcomeStatus::Partial)),
+			"warn"
+		);
+		assert_eq!(
+			outcome_log_severity(&outcome_with(OutcomeStatus::Failed)),
+			"error"
+		);
 	}
 
 	#[tokio::test]
@@ -377,15 +402,36 @@ mod tests {
 		let worker = dead_worker(graph.clone());
 		let text = "a document that cannot be embedded".to_string();
 		let outcome = worker
-			.run(text.clone(), session_source(), EntityKind::Claim, String::new(), 1.0, Config::default())
+			.run(
+				text.clone(),
+				session_source(),
+				EntityKind::Claim,
+				String::new(),
+				1.0,
+				Config::default(),
+			)
 			.await;
 
 		assert_eq!(outcome.status, OutcomeStatus::Failed);
-		assert_eq!(outcome.doc_id, util::content_hash(&text), "doc id is the content hash");
-		assert!(outcome.total_chunks >= 1, "non-empty text splits into at least one chunk");
-		assert_eq!(outcome.failed_chunks, outcome.total_chunks, "all chunks counted as failed");
+		assert_eq!(
+			outcome.doc_id,
+			util::content_hash(&text),
+			"doc id is the content hash"
+		);
+		assert!(
+			outcome.total_chunks >= 1,
+			"non-empty text splits into at least one chunk"
+		);
+		assert_eq!(
+			outcome.failed_chunks, outcome.total_chunks,
+			"all chunks counted as failed"
+		);
 		assert_eq!(outcome.embedded_chunks, 0);
-		assert_eq!(outcome.failures.len(), 1, "one document-level failure recorded");
+		assert_eq!(
+			outcome.failures.len(),
+			1,
+			"one document-level failure recorded"
+		);
 		assert_eq!(
 			outcome.transient_failures + outcome.permanent_failures,
 			1,

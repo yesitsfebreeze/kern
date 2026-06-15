@@ -96,7 +96,12 @@ mod tests {
 		axum::Router::new().route(
 			"/api/embed",
 			axum::routing::post(|body: axum::Json<Value>| async move {
-				let n = body.0.get("input").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(1);
+				let n = body
+					.0
+					.get("input")
+					.and_then(|v| v.as_array())
+					.map(|a| a.len())
+					.unwrap_or(1);
 				let embs: Vec<Vec<f64>> = (0..n).map(|_| vec![0.1, 0.2, 0.3]).collect();
 				axum::Json(json!({ "embeddings": embs }))
 			}),
@@ -109,7 +114,10 @@ mod tests {
 		let client = LlmClient::new_embed_only(&url, "m");
 		let (vecs, fails) = embed_chunks(&client, &["a".into(), "b".into()]).await;
 		assert_eq!(vecs.len(), 2);
-		assert!(vecs.iter().all(|v| !v.is_empty()), "both embedded via the batch call");
+		assert!(
+			vecs.iter().all(|v| !v.is_empty()),
+			"both embedded via the batch call"
+		);
 		assert!(fails.is_empty());
 	}
 
@@ -125,7 +133,10 @@ mod tests {
 		let client = LlmClient::new_embed_only(&url, "m");
 		let (vecs, fails) = embed_chunks(&client, &["a".into(), "b".into()]).await;
 		assert_eq!(vecs.len(), 2);
-		assert!(vecs.iter().all(|v| !v.is_empty()), "per-item fallback embedded each chunk");
+		assert!(
+			vecs.iter().all(|v| !v.is_empty()),
+			"per-item fallback embedded each chunk"
+		);
 		assert!(fails.is_empty());
 	}
 
@@ -139,7 +150,9 @@ mod tests {
 		);
 		let url = serve(app).await;
 		let client = LlmClient::new_embed_only(&url, "m");
-		let fail = embed_with_retry(&client, "x", "chunk", 0).await.unwrap_err();
+		let fail = embed_with_retry(&client, "x", "chunk", 0)
+			.await
+			.unwrap_err();
 		assert_eq!(fail.class, "permanent");
 		assert_eq!(fail.scope, "chunk");
 	}
@@ -148,7 +161,9 @@ mod tests {
 	async fn embed_with_retry_treats_a_connection_failure_as_transient() {
 		// Dead port -> connect error -> transient -> exhausts the retry schedule.
 		let client = LlmClient::new_embed_only("http://127.0.0.1:1", "m");
-		let fail = embed_with_retry(&client, "x", "document", 3).await.unwrap_err();
+		let fail = embed_with_retry(&client, "x", "document", 3)
+			.await
+			.unwrap_err();
 		assert_eq!(fail.class, "transient");
 		assert_eq!(fail.chunk_index, 3);
 	}

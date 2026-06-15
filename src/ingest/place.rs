@@ -1,13 +1,12 @@
 use crate::base::accept;
 use crate::base::graph::GraphGnn;
 use crate::base::types::*;
-use crate::base::{math, util};
+use crate::base::util;
 use crate::crdt::GCounter;
 use crate::ingest::dedup::{find_duplicate, update_existing_entity};
 use crate::ingest::embed::embed_with_retry;
 use crate::ingest::outcome::FailureReport;
 use crate::ingest::Job;
-use crate::types::LlmFunc;
 use crate::llm::Client as LlmClient;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
@@ -83,7 +82,7 @@ pub(crate) async fn place_document(
 	doc_id: &str,
 	dedup_threshold: f64,
 ) -> (Option<String>, Option<FailureReport>) {
-let vec = match embed_with_retry(embedder, &job.text, "document", 0).await {
+	let vec = match embed_with_retry(embedder, &job.text, "document", 0).await {
 		Ok(v) => v,
 		Err(fail) => return (None, Some(fail)),
 	};
@@ -118,7 +117,9 @@ let vec = match embed_with_retry(embedder, &job.text, "document", 0).await {
 		Err(e) => {
 			return (
 				None,
-				Some(FailureReport::document_permanent(format!("graph lock poisoned: {e}"))),
+				Some(FailureReport::document_permanent(format!(
+					"graph lock poisoned: {e}"
+				))),
 			)
 		}
 	};
@@ -131,7 +132,9 @@ let vec = match embed_with_retry(embedder, &job.text, "document", 0).await {
 		Err(e) => {
 			return (
 				None,
-				Some(FailureReport::document_permanent(format!("graph lock poisoned: {e}"))),
+				Some(FailureReport::document_permanent(format!(
+					"graph lock poisoned: {e}"
+				))),
 			)
 		}
 	};
@@ -143,7 +146,7 @@ let vec = match embed_with_retry(embedder, &job.text, "document", 0).await {
 }
 
 pub(crate) fn document_kind(job: &Job) -> (EntityKind, i32) {
-match job.kind {
+	match job.kind {
 		EntityKind::Fact => (EntityKind::Fact, -1),
 		_ => (EntityKind::Document, 0),
 	}
@@ -151,14 +154,14 @@ match job.kind {
 
 pub(crate) fn place_chunks(
 	graph: &Arc<RwLock<GraphGnn>>,
-	llm: &Option<LlmFunc>,
+	defer_questions: Option<&crate::ingest::worker::DeferQuestionsFn>,
 	job: &Job,
 	chunks: &[String],
 	chunk_vecs: &[Vec<f64>],
 	doc_id: &str,
 	dedup_threshold: f64,
 ) -> usize {
-let root_id = match graph.read() {
+	let root_id = match graph.read() {
 		Ok(g) => g.root.id.clone(),
 		Err(_) => return 0,
 	};
@@ -205,8 +208,12 @@ let root_id = match graph.read() {
 		}
 
 		if !result.deduped {
-			if let Some(ref llm_fn) = llm {
-				generate_questions(graph, llm_fn, &result, chunk);
+			// Question seeding is DEFERRED to the tick (`SeedQuestions` task) —
+			// it was a blocking reason-LLM call per chunk right here, which made
+			// the worker LLM-bound and starved every queued ingest (measured: a
+			// one-line sync ingest waited 69.7 minutes). The hook just enqueues.
+			if let Some(defer) = defer_questions {
+				defer(&result.entity_id);
 			}
 		}
 
@@ -241,58 +248,9 @@ pub fn chunk_source_id(source: &Source, index: usize) -> String {
 	format!("{}#chunk{}", source.section(), index)
 }
 
-
-pub(crate) fn generate_questions(
-	graph: &Arc<RwLock<GraphGnn>>,
-	llm_fn: &LlmFunc,
-	result: &accept::AcceptResult,
-	chunk_text: &str,
-) {
-	let prompt = format!(
-		"Given this knowledge chunk, generate up to 3 questions that this chunk answers. \
-		 One question per line. No numbering.\n\n{chunk_text}"
-	);
-	let response = llm_fn(&prompt);
-	if response.is_empty() {
-		return;
-	}
-
-	let questions: Vec<&str> = response
-		.lines()
-		.map(|l| l.trim())
-		.filter(|l| !l.is_empty())
-		.take(3)
-		.collect();
-
-	// Single write acquisition: read the root id from the same guard we mutate
-	// under, so there is no TOCTOU window between picking the root and editing it
-	// (and one fewer lock round-trip).
-	let mut g = match graph.write() {
-		Ok(g) => g,
-		Err(_) => return,
-	};
-	let root_id = g.root.id.clone();
-	for q in questions {
-		let rid = math::reason_id(&result.entity_id, "", ReasonKind::Question, q, "");
-		let reason = Reason {
-			id: rid,
-			from: result.entity_id.clone(),
-			to: String::new(),
-			to_kern_id: String::new(),
-			to_net_id: String::new(),
-			kind: ReasonKind::Question,
-			dirty: false,
-			text: q.to_string(),
-			vector: Vec::new(),
-			score: 0.5,
-			traversal_count: GCounter::new(),
-			producer_id: String::new(),
-		};
-		if let Some(kern) = g.get_mut(&root_id) {
-			crate::base::reason::add_reason(kern, reason);
-		}
-	}
-}
+// Question seeding RELOCATED to `tick::tasks::do_seed_questions` — the worker
+// defers it via `DeferQuestionsFn` so the reason-LLM never runs on the ingest
+// commit path. One implementation, one owner (the tick).
 
 #[cfg(test)]
 mod tests {
@@ -300,7 +258,11 @@ mod tests {
 	use crate::ingest::Config;
 
 	fn session_source() -> Source {
-		Source::Session { session_id: "s".into(), section: "sec".into(), title: String::new() }
+		Source::Session {
+			session_id: "s".into(),
+			section: "sec".into(),
+			title: String::new(),
+		}
 	}
 
 	fn job(text: &str, confidence: f64) -> Job {
@@ -350,7 +312,11 @@ mod tests {
 			1.0,
 			None,
 		);
-		assert_eq!(e.id, util::content_hash("hello world"), "id is the content hash");
+		assert_eq!(
+			e.id,
+			util::content_hash("hello world"),
+			"id is the content hash"
+		);
 		assert_eq!(e.statements, vec!["hello world".to_string()]);
 		assert_eq!(e.vector, vec![0.1, 0.2, 0.3]);
 		assert_eq!(e.external_id, "sec#chunk0");
@@ -365,9 +331,25 @@ mod tests {
 	#[test]
 	fn build_chunk_entity_clamps_out_of_range_confidence() {
 		// Above 1.0 clamps to 1.0 -> Beta(2,1); below 0 clamps to 0 -> Beta(1,2).
-		let hi = build_chunk_entity("x", &[1.0], EntityKind::Claim, &session_source(), "e", 5.0, None);
+		let hi = build_chunk_entity(
+			"x",
+			&[1.0],
+			EntityKind::Claim,
+			&session_source(),
+			"e",
+			5.0,
+			None,
+		);
 		assert_eq!((hi.conf_alpha, hi.conf_beta), (2.0, 1.0));
-		let lo = build_chunk_entity("y", &[1.0], EntityKind::Claim, &session_source(), "e", -3.0, None);
+		let lo = build_chunk_entity(
+			"y",
+			&[1.0],
+			EntityKind::Claim,
+			&session_source(),
+			"e",
+			-3.0,
+			None,
+		);
 		assert_eq!((lo.conf_alpha, lo.conf_beta), (1.0, 2.0));
 	}
 
@@ -377,9 +359,13 @@ mod tests {
 		let chunks = vec!["alpha beta".to_string(), "gamma delta".to_string()];
 		// Orthogonal vectors so neither chunk dedups against the other.
 		let vecs = vec![vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]];
-		let placed = place_chunks(&g, &None, &job("doc", 1.0), &chunks, &vecs, "doc1", 0.95);
+		let placed = place_chunks(&g, None, &job("doc", 1.0), &chunks, &vecs, "doc1", 0.95);
 		assert_eq!(placed, 2, "both distinct chunks placed");
-		assert_eq!(total_entity_count(&g), 2, "both accepted into the root kern");
+		assert_eq!(
+			total_entity_count(&g),
+			2,
+			"both accepted into the root kern"
+		);
 	}
 
 	#[test]
@@ -388,30 +374,40 @@ mod tests {
 		let chunks = vec!["a".to_string(), "b".to_string()];
 		// First chunk failed to embed (empty vec) — it must be skipped, not placed.
 		let vecs = vec![Vec::new(), vec![1.0, 0.0]];
-		let placed = place_chunks(&g, &None, &job("doc", 1.0), &chunks, &vecs, "doc1", 0.95);
+		let placed = place_chunks(&g, None, &job("doc", 1.0), &chunks, &vecs, "doc1", 0.95);
 		assert_eq!(placed, 1, "only the chunk with a real vector is placed");
 		assert_eq!(total_entity_count(&g), 1);
 	}
 
 	#[test]
-	fn place_chunks_generates_question_edges_when_llm_present() {
+	fn place_chunks_defers_question_seeding_via_the_hook() {
+		// Question seeding moved to the tick: instead of a blocking reason-LLM
+		// call per chunk, place_chunks hands each freshly placed entity id to
+		// the defer hook (which the daemon wires to enqueue a SeedQuestions
+		// tick task). The hook must fire once per placed, non-deduped chunk.
+		use std::sync::Mutex;
 		let g = empty_graph();
 		let chunks = vec!["the sky is blue".to_string()];
 		let vecs = vec![vec![1.0, 0.0, 0.0]];
-		// Stub LLM returns two non-empty lines -> two Question edges off the new entity.
-		let llm: Option<LlmFunc> =
-			Some(Arc::new(|_: &str| "why is the sky blue?\nwhat color is the sky?".to_string()));
-		let placed = place_chunks(&g, &llm, &job("doc", 1.0), &chunks, &vecs, "doc1", 0.95);
+		let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+		let seen_c = seen.clone();
+		let defer: crate::ingest::worker::DeferQuestionsFn =
+			Arc::new(move |id: &str| seen_c.lock().unwrap().push(id.to_string()));
+
+		let placed = place_chunks(
+			&g,
+			Some(&defer),
+			&job("doc", 1.0),
+			&chunks,
+			&vecs,
+			"doc1",
+			0.95,
+		);
 		assert_eq!(placed, 1);
 
-		let gg = g.read().unwrap();
-		let root = gg.kerns.get(&gg.root.id).unwrap();
-		let questions = root
-			.reasons
-			.values()
-			.filter(|r| matches!(r.kind, ReasonKind::Question))
-			.count();
-		assert_eq!(questions, 2, "two question edges from the 2-line LLM response");
+		let ids = seen.lock().unwrap();
+		assert_eq!(ids.len(), 1, "one defer per placed chunk");
+		assert!(!ids[0].is_empty(), "hook receives the placed entity id");
 	}
 
 	#[tokio::test]
@@ -421,8 +417,15 @@ mod tests {
 		// bail with a FailureReport before mutating the graph.
 		let embedder = LlmClient::new_embed_only("http://127.0.0.1:1", "test");
 		let (id, fail) = place_document(&g, &embedder, &job("a document", 1.0), "doc1", 0.95).await;
-		assert!(id.is_none(), "no entity id is returned when embedding fails");
+		assert!(
+			id.is_none(),
+			"no entity id is returned when embedding fails"
+		);
 		assert!(fail.is_some(), "a failure report is surfaced");
-		assert_eq!(total_entity_count(&g), 0, "graph is untouched on embed failure");
+		assert_eq!(
+			total_entity_count(&g),
+			0,
+			"graph is untouched on embed failure"
+		);
 	}
 }

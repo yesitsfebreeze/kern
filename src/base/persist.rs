@@ -382,7 +382,10 @@ mod tests {
 
 		let err = atomic_write(&dst, b"payload").unwrap_err();
 		assert!(matches!(err, PersistError::TmpRename { .. }), "got {err:?}");
-		assert!(!tmp_path(&dst).exists(), "the .tmp file must be cleaned up on rename failure");
+		assert!(
+			!tmp_path(&dst).exists(),
+			"the .tmp file must be cleaned up on rename failure"
+		);
 	}
 
 	#[test]
@@ -411,7 +414,10 @@ mod tests {
 		let merged = merged_root(&g);
 		assert_eq!(merged.id, g.root.id);
 		assert_eq!(merged.anchor_text, "guiding purpose");
-		assert_eq!(merged.descriptors.get("chat").map(String::as_str), Some("desc"));
+		assert_eq!(
+			merged.descriptors.get("chat").map(String::as_str),
+			Some("desc")
+		);
 	}
 
 	#[test]
@@ -490,6 +496,9 @@ mod tests {
 		for i in 0..64 {
 			assert!(g.loaded(&format!("child{i}")).is_some(), "child{i} loaded");
 		}
-		assert!(g.map().keys().all(|k| k != "bad"), "corrupt sibling skipped");
+		assert!(
+			g.map().keys().all(|k| k != "bad"),
+			"corrupt sibling skipped"
+		);
 	}
 }

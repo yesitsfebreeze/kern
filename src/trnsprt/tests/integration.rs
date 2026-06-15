@@ -1,8 +1,7 @@
 use serde_json::json;
 use test_utils::mcp_pipe::{new_pipe, reply_error, reply_result, AdderServer};
 use trnsprt::{
-	Client, InProcTransport, LiveServer, McpError, Registry, ServerId, ToolSchema,
-	PROTOCOL_VERSION,
+	Client, InProcTransport, LiveServer, McpError, Registry, ServerId, ToolSchema, PROTOCOL_VERSION,
 };
 
 /// In-process round-trip latency budget. The transport is a direct function
@@ -17,7 +16,10 @@ const LATENCY_ITERS: u32 = 100;
 fn handshake_sends_initialize_and_initialized_notification() {
 	let (transport, wire) = new_pipe();
 	let mut client = Client::new(Box::new(transport));
-	wire.push_reply(&reply_result(1, json!({ "protocolVersion": PROTOCOL_VERSION })));
+	wire.push_reply(&reply_result(
+		1,
+		json!({ "protocolVersion": PROTOCOL_VERSION }),
+	));
 	let result = client.initialize("kern", "test").expect("initialize");
 	assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
 	let frames = wire.drain_frames();
@@ -198,7 +200,10 @@ fn inproc_call_tool_missing_argument_is_invalid_params() {
 	let err = client
 		.call_tool("add", &json!({ "a": 1 })) // missing "b"
 		.expect_err("missing argument must error");
-	assert!(matches!(err, McpError::Rpc { code: -32602, .. }), "got {err:?}");
+	assert!(
+		matches!(err, McpError::Rpc { code: -32602, .. }),
+		"got {err:?}"
+	);
 }
 
 #[test]
@@ -208,9 +213,14 @@ fn registry_register_inproc_rejects_duplicate_server_id() {
 	// the integration crate's public Registry surface with AdderServer).
 	let mut reg = Registry::new();
 	let id = ServerId::new("dup");
-	reg.register_inproc(id.clone(), Box::new(AdderServer)).expect("first registration");
+	reg
+		.register_inproc(id.clone(), Box::new(AdderServer))
+		.expect("first registration");
 	let again = reg.register_inproc(id.clone(), Box::new(AdderServer));
-	assert!(matches!(again, Err(McpError::DuplicateServer(_))), "second register must error");
+	assert!(
+		matches!(again, Err(McpError::DuplicateServer(_))),
+		"second register must error"
+	);
 }
 
 #[test]
@@ -230,7 +240,7 @@ fn registry_stores_and_serves_tools() {
 	assert_eq!(listed.len(), 1);
 	assert_eq!(listed[0].name, "ping");
 
-	wire.push_reply(&reply_result(1, json!({ "content": [], "isError": false })),);
+	wire.push_reply(&reply_result(1, json!({ "content": [], "isError": false })));
 	let out = reg.call_tool(&id, "ping", &json!({})).expect("call_tool");
 	assert!(!out.is_error);
 }

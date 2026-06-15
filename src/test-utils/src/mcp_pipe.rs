@@ -129,14 +129,20 @@ impl McpServer for AdderServer {
 		// missing or non-integer arg is a -32602 (Invalid params) Rpc error
 		// rather than a silent default-to-zero, so callers can exercise the
 		// argument-validation error path.
-		let a = args.get("a").and_then(Value::as_i64).ok_or_else(|| McpError::Rpc {
-			code: -32602,
-			message: "missing or non-integer argument: a".into(),
-		})?;
-		let b = args.get("b").and_then(Value::as_i64).ok_or_else(|| McpError::Rpc {
-			code: -32602,
-			message: "missing or non-integer argument: b".into(),
-		})?;
+		let a = args
+			.get("a")
+			.and_then(Value::as_i64)
+			.ok_or_else(|| McpError::Rpc {
+				code: -32602,
+				message: "missing or non-integer argument: a".into(),
+			})?;
+		let b = args
+			.get("b")
+			.and_then(Value::as_i64)
+			.ok_or_else(|| McpError::Rpc {
+				code: -32602,
+				message: "missing or non-integer argument: b".into(),
+			})?;
 		Ok(ToolResult {
 			content: vec![json!({ "type": "text", "text": (a + b).to_string() })],
 			is_error: false,
@@ -169,15 +175,22 @@ mod tests {
 		// Client -> server direction: bytes written to the transport's Write half
 		// are recovered as parsed JSON frames by the handle.
 		let (mut transport, handle) = new_pipe();
-		let mut line = serde_json::to_string(&json!({ "jsonrpc": "2.0", "id": 7, "method": "ping" })).unwrap();
+		let mut line =
+			serde_json::to_string(&json!({ "jsonrpc": "2.0", "id": 7, "method": "ping" })).unwrap();
 		line.push('\n');
-		transport.writer().write_all(line.as_bytes()).expect("write");
+		transport
+			.writer()
+			.write_all(line.as_bytes())
+			.expect("write");
 
 		let frames = handle.drain_frames();
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0]["id"], 7);
 		assert_eq!(frames[0]["method"], "ping");
-		assert!(handle.drain_frames().is_empty(), "draining consumes the buffer");
+		assert!(
+			handle.drain_frames().is_empty(),
+			"draining consumes the buffer"
+		);
 	}
 
 	#[test]

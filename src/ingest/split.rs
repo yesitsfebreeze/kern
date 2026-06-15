@@ -65,19 +65,28 @@ mod tests {
 
 	#[test]
 	fn paragraph_split_single_and_multi() {
-		assert_eq!(paragraph_split("one paragraph"), vec!["one paragraph".to_string()]);
+		assert_eq!(
+			paragraph_split("one paragraph"),
+			vec!["one paragraph".to_string()]
+		);
 		assert_eq!(
 			paragraph_split("first\n\nsecond"),
 			vec!["first".to_string(), "second".to_string()]
 		);
 		// Extra blank lines and surrounding whitespace are trimmed off.
-		assert_eq!(paragraph_split("  a  \n\n\n\n  b  "), vec!["a".to_string(), "b".to_string()]);
+		assert_eq!(
+			paragraph_split("  a  \n\n\n\n  b  "),
+			vec!["a".to_string(), "b".to_string()]
+		);
 	}
 
 	#[test]
 	fn whitespace_or_empty_input_yields_no_chunks() {
 		assert!(paragraph_split("").is_empty(), "empty -> no chunks");
-		assert!(paragraph_split("   \n\n \t ").is_empty(), "whitespace-only -> no bogus chunk");
+		assert!(
+			paragraph_split("   \n\n \t ").is_empty(),
+			"whitespace-only -> no bogus chunk"
+		);
 	}
 
 	#[test]
@@ -101,7 +110,10 @@ mod tests {
 
 	#[test]
 	fn split_without_llm_uses_paragraph_split() {
-		assert_eq!(split("x\n\ny", "", None), vec!["x".to_string(), "y".to_string()]);
+		assert_eq!(
+			split("x\n\ny", "", None),
+			vec!["x".to_string(), "y".to_string()]
+		);
 	}
 
 	#[test]
@@ -112,7 +124,10 @@ mod tests {
 			"s".to_string()
 		};
 		let _ = llm_split("body", "rust code", &llm);
-		assert!(seen.borrow().contains("describes rust code"), "descriptor is named in the prompt");
+		assert!(
+			seen.borrow().contains("describes rust code"),
+			"descriptor is named in the prompt"
+		);
 		// Empty descriptor -> no "describes" clause.
 		let _ = llm_split("body", "", &llm);
 		assert!(!seen.borrow().contains("describes"));

@@ -1,8 +1,7 @@
 use clap::Parser;
 
-use kern::commands::{Cli, Commands, dispatch, run_server};
+use kern::commands::{dispatch, run_server, Cli, Commands};
 use kern::config::Config;
-use kern::mux::run_mux;
 
 /// Worker-thread count for the tokio runtime: the detected core count, but never
 /// below the hard floor of 4 (and 4 when detection fails). The floor keeps the
@@ -65,11 +64,15 @@ fn main() {
 		}
 		let cli = Cli::parse();
 
+		// kern is a pure serving daemon: the bare invocation, `--daemon`, and the
+		// `daemon` subcommand all boot the server and bind the channels (MCP over
+		// stdio/HTTP-SSE + kern_rpc). A subcommand runs that one-shot tool against
+		// the graph. There is no interactive surface — every tool is reached over a
+		// channel (CLI subcommand or MCP), never a REPL or TUI.
 		match cli.command {
 			Some(Commands::Daemon) => run_server(&cli, &cfg).await,
-			Some(cmd)              => dispatch(cmd, &cfg).await,
-			None if cli.daemon     => run_server(&cli, &cfg).await,
-			None                   => run_mux(&cli, &cfg).await,
+			Some(cmd) => dispatch(cmd, &cfg).await,
+			None => run_server(&cli, &cfg).await,
 		}
 	});
 }

@@ -1,5 +1,3 @@
-
-
 use crate::gnn::tensor::Tensor;
 use rand::RngExt;
 

@@ -196,7 +196,10 @@ fn max_merge_hits(
 	}
 	map
 		.into_iter()
-		.map(|(id, score)| kern::base::search::EntityHit { entity_id: id, score })
+		.map(|(id, score)| kern::base::search::EntityHit {
+			entity_id: id,
+			score,
+		})
 		.collect()
 }
 
@@ -358,13 +361,20 @@ fn bench_cold_search(c: &mut Criterion) {
 		.expect("open cold store");
 	let n = 2_000;
 	for i in 0..n {
-		let mut e = make_entity(&format!("c{i}"), &format!("cold thought {i} topic {}", i % 10));
+		let mut e = make_entity(
+			&format!("c{i}"),
+			&format!("cold thought {i} topic {}", i % 10),
+		);
 		e.vector = stub_embed(&format!("cold thought {i} topic {}", i % 10));
 		store.cold_spill(&e).expect("cold spill");
 	}
 	let query = stub_embed("cold thought 5 topic 5");
 	c.bench_function("cold_search_2000", |bench| {
-		bench.iter(|| store.cold_search(black_box(&query), 5).expect("cold search"));
+		bench.iter(|| {
+			store
+				.cold_search(black_box(&query), 5)
+				.expect("cold search")
+		});
 	});
 }
 

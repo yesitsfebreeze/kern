@@ -103,7 +103,11 @@ pub fn pagerank(
 		}
 		// L1 movement this step; once below epsilon the ranks have converged and
 		// further iterations only re-derive the same fixed point.
-		let delta: f64 = next.iter().zip(rank.iter()).map(|(a, b)| (a - b).abs()).sum();
+		let delta: f64 = next
+			.iter()
+			.zip(rank.iter())
+			.map(|(a, b)| (a - b).abs())
+			.sum();
 		std::mem::swap(&mut rank, &mut next);
 		if delta < CONVERGENCE_EPS {
 			break;
@@ -241,7 +245,10 @@ mod tests {
 		let many = pagerank(&g, &[], 0.85, 1000, 3);
 		for (a, b) in few.iter().zip(many.iter()) {
 			assert_eq!(a.entity_id, b.entity_id);
-			assert!((a.score - b.score).abs() < 1e-6, "converged result is iteration-count-independent");
+			assert!(
+				(a.score - b.score).abs() < 1e-6,
+				"converged result is iteration-count-independent"
+			);
 		}
 	}
 
@@ -272,8 +279,14 @@ mod tests {
 		let topk = pagerank(&g, &[], 0.85, 200, 3);
 		assert_eq!(topk.len(), 3, "top_k truncates to 3");
 		for i in 0..3 {
-			assert_eq!(topk[i].entity_id, full[i].entity_id, "top-{i} id matches full prefix");
-			assert!((topk[i].score - full[i].score).abs() < 1e-12, "top-{i} score matches");
+			assert_eq!(
+				topk[i].entity_id, full[i].entity_id,
+				"top-{i} id matches full prefix"
+			);
+			assert!(
+				(topk[i].score - full[i].score).abs() < 1e-12,
+				"top-{i} score matches"
+			);
 		}
 	}
 
@@ -291,7 +304,10 @@ mod tests {
 		g.register(k);
 		let r = pagerank(&g, &[], 0.85, 50, 1);
 		assert_eq!(r.len(), 1);
-		assert_eq!(r[0].entity_id, "A", "tied ranks resolve to the id-ascending winner");
+		assert_eq!(
+			r[0].entity_id, "A",
+			"tied ranks resolve to the id-ascending winner"
+		);
 	}
 
 	#[test]

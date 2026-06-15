@@ -260,7 +260,11 @@ mod tests {
 	}
 
 	fn ent(id: &str, vector: Vec<f64>) -> Entity {
-		Entity { id: id.into(), vector, ..Default::default() }
+		Entity {
+			id: id.into(),
+			vector,
+			..Default::default()
+		}
 	}
 
 	#[test]
@@ -273,8 +277,16 @@ mod tests {
 		add_reason(&mut k, edge("a", "b"));
 
 		assert_eq!(k.reasons.len(), 1, "one reason in the map");
-		assert_eq!(k.by_from.get("a").map(|v| v.len()), Some(1), "no dup in by_from");
-		assert_eq!(k.by_to.get("b").map(|v| v.len()), Some(1), "no dup in by_to");
+		assert_eq!(
+			k.by_from.get("a").map(|v| v.len()),
+			Some(1),
+			"no dup in by_from"
+		);
+		assert_eq!(
+			k.by_to.get("b").map(|v| v.len()),
+			Some(1),
+			"no dup in by_to"
+		);
 		// collect_reason_ids returns the edge exactly once.
 		assert_eq!(collect_reason_ids(&k, "a"), vec!["a->b".to_string()]);
 	}
@@ -292,7 +304,10 @@ mod tests {
 			k.by_from.get("a").map(|v| v.is_empty()).unwrap_or(true),
 			"no stale id left in by_from"
 		);
-		assert!(collect_reason_ids(&k, "a").is_empty(), "no dangling edge id");
+		assert!(
+			collect_reason_ids(&k, "a").is_empty(),
+			"no dangling edge id"
+		);
 	}
 
 	// ---- move_entity --------------------------------------------------------
@@ -317,15 +332,33 @@ mod tests {
 		assert!(!src.entities.contains_key("E"), "entity gone from src");
 
 		// Outgoing E->X moved and stamped with the SOURCE kern (X left behind there).
-		assert_eq!(dst.reasons.get("E->X").map(|r| r.to_kern_id.as_str()), Some("src"));
-		assert!(!src.reasons.contains_key("E->X"), "outgoing detached from src maps");
-		assert!(src.by_from.get("E").map(|v| v.is_empty()).unwrap_or(true), "src by_from[E] cleared");
+		assert_eq!(
+			dst.reasons.get("E->X").map(|r| r.to_kern_id.as_str()),
+			Some("src")
+		);
+		assert!(
+			!src.reasons.contains_key("E->X"),
+			"outgoing detached from src maps"
+		);
+		assert!(
+			src.by_from.get("E").map(|v| v.is_empty()).unwrap_or(true),
+			"src by_from[E] cleared"
+		);
 		// Self-loop E->E moved with both endpoints -> no cross-kern stamp.
-		assert_eq!(dst.reasons.get("E->E").map(|r| r.to_kern_id.as_str()), Some(""));
+		assert_eq!(
+			dst.reasons.get("E->E").map(|r| r.to_kern_id.as_str()),
+			Some("")
+		);
 
 		// Incoming Y->E stays in src (its `from` didn't move) but is stamped to dst.
-		assert_eq!(src.reasons.get("Y->E").map(|r| r.to_kern_id.as_str()), Some("dst"));
-		assert!(!dst.reasons.contains_key("Y->E"), "incoming reason not moved");
+		assert_eq!(
+			src.reasons.get("Y->E").map(|r| r.to_kern_id.as_str()),
+			Some("dst")
+		);
+		assert!(
+			!dst.reasons.contains_key("Y->E"),
+			"incoming reason not moved"
+		);
 	}
 
 	#[test]
@@ -366,10 +399,20 @@ mod tests {
 		assert!(!k.entities.contains_key("a"), "entity removed from map");
 		assert!(!k.by_from.contains_key("a"), "by_from[a] purged");
 		assert!(!k.by_to.contains_key("a"), "by_to[a] purged");
-		assert!(k.reasons.is_empty(), "both incident reasons removed (a->b and b->a)");
-		assert!(collect_reason_ids(k, "b").is_empty(), "b left with no dangling edges");
+		assert!(
+			k.reasons.is_empty(),
+			"both incident reasons removed (a->b and b->a)"
+		);
+		assert!(
+			collect_reason_ids(k, "b").is_empty(),
+			"b left with no dangling edges"
+		);
 		// HNSW purge: a gone (b stays); both reasons gone.
-		assert_eq!(g.entity_idx.len(), 1, "entity a purged from entity_idx, b remains");
+		assert_eq!(
+			g.entity_idx.len(),
+			1,
+			"entity a purged from entity_idx, b remains"
+		);
 		assert_eq!(g.reason_idx.len(), 0, "both reasons purged from reason_idx");
 	}
 
@@ -377,11 +420,18 @@ mod tests {
 	fn remove_entity_fact_is_immune() {
 		let mut g = GraphGnn::new();
 		let mut k = Kern::new("k", "");
-		let fact = Entity { id: "f".into(), kind: EntityKind::Fact, ..Default::default() };
+		let fact = Entity {
+			id: "f".into(),
+			kind: EntityKind::Fact,
+			..Default::default()
+		};
 		k.entities.insert("f".into(), fact);
 		g.kerns.insert("k".into(), k);
 
 		remove_entity(&mut g, "k", "f");
-		assert!(g.kerns.get("k").unwrap().entities.contains_key("f"), "facts are immune to removal");
+		assert!(
+			g.kerns.get("k").unwrap().entities.contains_key("f"),
+			"facts are immune to removal"
+		);
 	}
 }

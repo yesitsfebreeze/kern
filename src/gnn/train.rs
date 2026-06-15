@@ -1,5 +1,3 @@
-
-
 use crate::gnn::graph::Graph;
 use crate::gnn::model::Model;
 use crate::gnn::optim::Optimizer;
@@ -44,11 +42,7 @@ pub struct TrainContext<'a> {
 	pub labels: &'a Tensor,
 }
 
-pub fn train(
-	model: &mut Model,
-	optim: &mut dyn Optimizer,
-	ctx: &TrainContext,
-) -> Vec<EpochResult> {
+pub fn train(model: &mut Model, optim: &mut dyn Optimizer, ctx: &TrainContext) -> Vec<EpochResult> {
 	let config = ctx.config;
 	let mut results = Vec::with_capacity(config.epochs);
 
@@ -103,7 +97,11 @@ mod tests {
 
 	fn tiny_graph() -> (Graph, Tensor) {
 		let mut g = Graph::new();
-		let feats = [[0.5, -0.2, 0.1, 0.3], [-0.4, 0.6, 0.2, -0.1], [0.2, 0.1, -0.5, 0.4]];
+		let feats = [
+			[0.5, -0.2, 0.1, 0.3],
+			[-0.4, 0.6, 0.2, -0.1],
+			[0.2, 0.1, -0.5, 0.4],
+		];
 		for (i, f) in feats.iter().enumerate() {
 			g.add_node(&format!("n{i}"), f.to_vec()).unwrap();
 		}
@@ -117,11 +115,22 @@ mod tests {
 
 	fn mse(pred: &Tensor, label: &Tensor) -> f64 {
 		let n = pred.data.len() as f64;
-		pred.data.iter().zip(&label.data).map(|(p, y)| (p - y) * (p - y)).sum::<f64>() / n
+		pred
+			.data
+			.iter()
+			.zip(&label.data)
+			.map(|(p, y)| (p - y) * (p - y))
+			.sum::<f64>()
+			/ n
 	}
 	fn mse_grad(pred: &Tensor, label: &Tensor) -> Tensor {
 		let n = pred.data.len() as f64;
-		let data: Vec<f64> = pred.data.iter().zip(&label.data).map(|(p, y)| 2.0 * (p - y) / n).collect();
+		let data: Vec<f64> = pred
+			.data
+			.iter()
+			.zip(&label.data)
+			.map(|(p, y)| 2.0 * (p - y) / n)
+			.collect();
 		Tensor::new(pred.rows, pred.cols, data).unwrap()
 	}
 
@@ -140,11 +149,18 @@ mod tests {
 		let mut rng = StdRng::seed_from_u64(11);
 		// Linear GCN (no activation) -> MSE toward zero is convex, so GD must reduce loss.
 		let mut model = Model::new(
-			vec![Box::new(GCNLayer::with_rng(4, 2, None, false, 0.0, &mut rng))],
+			vec![Box::new(GCNLayer::with_rng(
+				4, 2, None, false, 0.0, &mut rng,
+			))],
 			None,
 		);
 		let labels = Tensor::zeros(3, 2);
-		let cfg = TrainConfig { epochs: 30, lr: 0.1, log_every: 0, clip_norm: 0.0 };
+		let cfg = TrainConfig {
+			epochs: 30,
+			lr: 0.1,
+			log_every: 0,
+			clip_norm: 0.0,
+		};
 		let mut optim = SGD::new(cfg.lr);
 		let ctx = TrainContext {
 			loss_fn: mse,
@@ -172,7 +188,9 @@ mod tests {
 		let (g, x) = tiny_graph();
 		let mut rng = StdRng::seed_from_u64(5);
 		let mut model = Model::new(
-			vec![Box::new(GCNLayer::with_rng(4, 2, None, false, 0.0, &mut rng))],
+			vec![Box::new(GCNLayer::with_rng(
+				4, 2, None, false, 0.0, &mut rng,
+			))],
 			None,
 		);
 		let pred = model.forward(&g, &x);

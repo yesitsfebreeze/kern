@@ -145,7 +145,11 @@ impl Server {
 		// `None` on this path; cold-tier fill below is guarded on it.
 		let text_hit = if cacheable {
 			let g = crate::base::locks::read_recovered(&self.graph);
-			self.cache.lock().ok().and_then(|mut c| c.lookup_text(&g, text_hash, tag))
+			self
+				.cache
+				.lock()
+				.ok()
+				.and_then(|mut c| c.lookup_text(&g, text_hash, tag))
 		} else {
 			None
 		};
@@ -162,12 +166,13 @@ impl Server {
 			let complete = llm.complete_func();
 			let llm_fn: LlmFunc = Arc::new(complete);
 			let llm_embed = llm.clone();
-			let embed_fn: EmbedFunc = Arc::new(move |s: &str| {
-				match crate::llm::block_on_in_place(llm_embed.embed(s)) {
-					Some(r) => r.map_err(|e| e.to_string()),
-					None => Err("no tokio runtime".to_string()),
-				}
-			});
+			let embed_fn: EmbedFunc =
+				Arc::new(
+					move |s: &str| match crate::llm::block_on_in_place(llm_embed.embed(s)) {
+						Some(r) => r.map_err(|e| e.to_string()),
+						None => Err("no tokio runtime".to_string()),
+					},
+				);
 
 			let mut opts = retrieval::score::QueryOptions::default();
 			opts.sort = retrieval::score::SortField::parse(&p.sort);
@@ -203,7 +208,11 @@ impl Server {
 			// enough to starve writers and trip the 30s watchdog.
 			let cached = if cacheable {
 				let g = crate::base::locks::read_recovered(&self.graph);
-				self.cache.lock().ok().and_then(|mut c| c.lookup(&g, &vec, tag))
+				self
+					.cache
+					.lock()
+					.ok()
+					.and_then(|mut c| c.lookup(&g, &vec, tag))
 			} else {
 				None
 			};
@@ -299,13 +308,15 @@ impl Server {
 								.into_iter()
 								.filter_map(|rid| kern.reasons.get(&rid))
 								.filter(|r| r.is_enriched())
-								.map(|r| serde_json::json!({
-									"from": r.from,
-									"to": r.to,
-									"kind": r.kind as i32,
-									"text": truncate(&r.text, 120),
-									"score": r.score,
-								}))
+								.map(|r| {
+									serde_json::json!({
+										"from": r.from,
+										"to": r.to,
+										"kind": r.kind as i32,
+										"text": truncate(&r.text, 120),
+										"score": r.score,
+									})
+								})
 								.collect()
 						})
 						.unwrap_or_default();
@@ -385,8 +396,15 @@ fn entity_detail(
 /// enriched `edges` on top. Defined ONCE so the kern_rpc-consumed contract has a
 /// single source of truth — the envelope tests build on this same fn instead of a
 /// hand-mirrored copy that could silently drift.
-pub(super) fn base_entity_json(entity: &crate::base::types::Entity, score: f64) -> serde_json::Value {
-	let status_str = if entity.is_superseded() { "superseded" } else { "active" };
+pub(super) fn base_entity_json(
+	entity: &crate::base::types::Entity,
+	score: f64,
+) -> serde_json::Value {
+	let status_str = if entity.is_superseded() {
+		"superseded"
+	} else {
+		"active"
+	};
 	serde_json::json!({
 		"id": entity.id,
 		"score": score,
@@ -455,9 +473,7 @@ mod envelope_shape_tests {
 	//! handler silently falls back to defaults — these tests guard
 	//! against that regression at the source-of-truth level.
 	use super::base_entity_json as build_entity_json;
-	use crate::base::types::{
-		ChunkPart, ChunkPartKind, Entity, EntityKind, EntityStatus, Source,
-	};
+	use crate::base::types::{ChunkPart, ChunkPartKind, Entity, EntityKind, EntityStatus, Source};
 
 	fn entity_with(kind: EntityKind, status: EntityStatus, source: Source) -> Entity {
 		Entity {
@@ -560,14 +576,23 @@ mod cacheable_tests {
 	#[test]
 	fn plain_answer_query_is_cacheable() {
 		let p = QueryArgs::default();
-		assert!(query_is_cacheable(true, 256, &p), "unfiltered, default-sorted answer query caches");
+		assert!(
+			query_is_cacheable(true, 256, &p),
+			"unfiltered, default-sorted answer query caches"
+		);
 	}
 
 	#[test]
 	fn answer_off_or_disabled_cache_is_not_cacheable() {
 		let p = QueryArgs::default();
-		assert!(!query_is_cacheable(false, 256, &p), "answer:false is never cached");
-		assert!(!query_is_cacheable(true, 0, &p), "cache_cap 0 disables caching");
+		assert!(
+			!query_is_cacheable(false, 256, &p),
+			"answer:false is never cached"
+		);
+		assert!(
+			!query_is_cacheable(true, 0, &p),
+			"cache_cap 0 disables caching"
+		);
 	}
 
 	#[test]
@@ -589,7 +614,10 @@ mod cacheable_tests {
 		for (name, mutate) in cases {
 			let mut p = QueryArgs::default();
 			mutate(&mut p);
-			assert!(!query_is_cacheable(true, 256, &p), "`{name}` set must disable caching");
+			assert!(
+				!query_is_cacheable(true, 256, &p),
+				"`{name}` set must disable caching"
+			);
 		}
 	}
 }

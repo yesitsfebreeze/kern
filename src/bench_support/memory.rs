@@ -63,7 +63,11 @@ mod tests {
 	use crate::bench_support::trace::{Trace, TraceDoc, TraceQuery};
 
 	fn doc(id: &str) -> TraceDoc {
-		TraceDoc { id: id.into(), text: format!("text for {id} about rust and graphs"), kind: None }
+		TraceDoc {
+			id: id.into(),
+			text: format!("text for {id} about rust and graphs"),
+			kind: None,
+		}
 	}
 
 	#[test]
@@ -87,12 +91,19 @@ mod tests {
 		assert!(m.dim > 0, "a real embedding dimension");
 		assert_eq!(m.f64_vector_bytes, m.vectors * m.dim * 8);
 		assert_eq!(m.int8_vector_bytes, m.vectors * m.dim);
-		assert!((m.quant_ratio() - 8.0).abs() < 1e-9, "int8 is 8x smaller than f64");
+		assert!(
+			(m.quant_ratio() - 8.0).abs() < 1e-9,
+			"int8 is 8x smaller than f64"
+		);
 	}
 
 	#[test]
 	fn empty_graph_reports_zero_and_no_divide_by_zero() {
-		let g = build_graph(&Trace { name: "e".into(), docs: vec![], queries: vec![] });
+		let g = build_graph(&Trace {
+			name: "e".into(),
+			docs: vec![],
+			queries: vec![],
+		});
 		let m = estimate_memory(&g);
 		assert_eq!((m.entities, m.vectors, m.dim), (0, 0, 0));
 		assert_eq!(m.quant_ratio(), 0.0, "no vectors -> ratio 0, not NaN");

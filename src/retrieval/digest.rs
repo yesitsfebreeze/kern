@@ -16,7 +16,11 @@ fn est_tokens(s: &str) -> usize {
 /// collapsed, capped length. Two claims that restate the same fact collapse to
 /// the same key so only the first (hottest) is kept.
 fn dedup_key(s: &str) -> String {
-	let norm: String = s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+	let norm: String = s
+		.split_whitespace()
+		.collect::<Vec<_>>()
+		.join(" ")
+		.to_lowercase();
 	norm.chars().take(80).collect()
 }
 
@@ -61,9 +65,7 @@ pub fn build_digest(graph: &GraphGnn, k: usize, min_trust: f64, token_budget: us
 		})
 		.map(|e| (e, e.heat as f64 * e.conf_mean()))
 		.collect();
-	ranked.sort_by(|a, b| {
-		b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-	});
+	ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
 	// Greedy select: cap by item count (k) AND token budget, skipping
 	// near-duplicate restatements.
@@ -147,7 +149,10 @@ fn build_connections(graph: &GraphGnn, conn_budget: usize) -> String {
 		.flat_map(|kern| kern.reasons.values())
 		.filter(|r| r.is_enriched() && r.kind.is_semantic())
 		.map(|r| {
-			let heat_conf = entity_cache.get(r.from.as_str()).map(|(_, hc)| *hc).unwrap_or(0.0);
+			let heat_conf = entity_cache
+				.get(r.from.as_str())
+				.map(|(_, hc)| *hc)
+				.unwrap_or(0.0);
 			(r, heat_conf)
 		})
 		.collect();
@@ -210,17 +215,26 @@ mod tests {
 		let mut g = GraphGnn::default();
 		let root_id = g.root.id.clone();
 		let kern = g.kerns.get_mut(&root_id).expect("root kern");
-		kern.entities.insert("a".into(), mk_entity("a", "entity alpha", 9.0, EntityKind::Claim));
-		kern.entities.insert("b".into(), mk_entity("b", "entity beta", 8.0, EntityKind::Claim));
-		add_reason(kern, Reason {
-			id: "a->b".into(),
-			from: "a".into(),
-			to: "b".into(),
-			kind,
-			text: text.to_string(),
-			score: 0.9,
-			..Default::default()
-		});
+		kern.entities.insert(
+			"a".into(),
+			mk_entity("a", "entity alpha", 9.0, EntityKind::Claim),
+		);
+		kern.entities.insert(
+			"b".into(),
+			mk_entity("b", "entity beta", 8.0, EntityKind::Claim),
+		);
+		add_reason(
+			kern,
+			Reason {
+				id: "a->b".into(),
+				from: "a".into(),
+				to: "b".into(),
+				kind,
+				text: text.to_string(),
+				score: 0.9,
+				..Default::default()
+			},
+		);
 		g
 	}
 
@@ -231,11 +245,20 @@ mod tests {
 		crate::base::accept::add_anchor(&mut g, "durable facts", vec![1.0, 0.0, 0.0]);
 		let root_id = g.root.id.clone();
 		let kern = g.kerns.get_mut(&root_id).expect("root kern");
-		kern.entities.insert("a".into(), mk_entity("a", "cold fact", 0.1, EntityKind::Claim));
-		kern.entities.insert("b".into(), mk_entity("b", "hot fact", 9.0, EntityKind::Claim));
+		kern.entities.insert(
+			"a".into(),
+			mk_entity("a", "cold fact", 0.1, EntityKind::Claim),
+		);
+		kern.entities.insert(
+			"b".into(),
+			mk_entity("b", "hot fact", 9.0, EntityKind::Claim),
+		);
 
 		let md = build_digest(&g, 1, 0.0, 0);
-		assert!(md.contains("Anchors: durable facts"), "anchor present in header");
+		assert!(
+			md.contains("Anchors: durable facts"),
+			"anchor present in header"
+		);
 		assert!(md.contains("hot fact"), "hottest included");
 		assert!(!md.contains("cold fact"), "capped at k=1");
 	}
@@ -245,12 +268,21 @@ mod tests {
 		let mut g = GraphGnn::default();
 		let root_id = g.root.id.clone();
 		let kern = g.kerns.get_mut(&root_id).expect("root kern");
-		kern.entities.insert("doc".into(), mk_entity("doc", "raw document chunk", 9.0, EntityKind::Document));
-		kern.entities.insert("clm".into(), mk_entity("clm", "a distilled claim", 0.5, EntityKind::Claim));
+		kern.entities.insert(
+			"doc".into(),
+			mk_entity("doc", "raw document chunk", 9.0, EntityKind::Document),
+		);
+		kern.entities.insert(
+			"clm".into(),
+			mk_entity("clm", "a distilled claim", 0.5, EntityKind::Claim),
+		);
 
 		let md = build_digest(&g, 10, 0.0, 0);
 		assert!(md.contains("a distilled claim"), "claim kept");
-		assert!(!md.contains("raw document chunk"), "document excluded even though hotter");
+		assert!(
+			!md.contains("raw document chunk"),
+			"document excluded even though hotter"
+		);
 	}
 
 	#[test]
@@ -271,18 +303,26 @@ mod tests {
 		poisoned.conf_beta = 9.0; // conf_mean = 0.1
 		poisoned.refresh_score();
 		kern.entities.insert("p".into(), poisoned);
-		kern.entities
-			.insert("t".into(), mk_entity("t", "trusted cool claim", 0.5, EntityKind::Claim));
+		kern.entities.insert(
+			"t".into(),
+			mk_entity("t", "trusted cool claim", 0.5, EntityKind::Claim),
+		);
 
 		// Gate at 0.35: poisoned (0.1) quarantined despite being hottest;
 		// trusted (mk_entity mean 0.667) survives.
 		let gated = build_digest(&g, 10, 0.35, 0);
-		assert!(!gated.contains("poisoned hot claim"), "low-trust claim quarantined");
+		assert!(
+			!gated.contains("poisoned hot claim"),
+			"low-trust claim quarantined"
+		);
 		assert!(gated.contains("trusted cool claim"), "trusted claim kept");
 
 		// Gate off: poisoned claim re-injected (hottest first).
 		let ungated = build_digest(&g, 10, 0.0, 0);
-		assert!(ungated.contains("poisoned hot claim"), "gate off → re-injected");
+		assert!(
+			ungated.contains("poisoned hot claim"),
+			"gate off → re-injected"
+		);
 	}
 
 	#[test]
@@ -293,15 +333,30 @@ mod tests {
 		// Three ~40-char claims; hotter = earlier. Budget admits ~the first one.
 		kern.entities.insert(
 			"a".into(),
-			mk_entity("a", "alpha claim with some length to it here", 9.0, EntityKind::Claim),
+			mk_entity(
+				"a",
+				"alpha claim with some length to it here",
+				9.0,
+				EntityKind::Claim,
+			),
 		);
 		kern.entities.insert(
 			"b".into(),
-			mk_entity("b", "bravo claim with some length to it here", 8.0, EntityKind::Claim),
+			mk_entity(
+				"b",
+				"bravo claim with some length to it here",
+				8.0,
+				EntityKind::Claim,
+			),
 		);
 		kern.entities.insert(
 			"c".into(),
-			mk_entity("c", "charlie claim with some length here too", 7.0, EntityKind::Claim),
+			mk_entity(
+				"c",
+				"charlie claim with some length here too",
+				7.0,
+				EntityKind::Claim,
+			),
 		);
 		// ~10 tokens budget: first bullet always admitted, later ones trimmed.
 		let md = build_digest(&g, 10, 0.0, 10);
@@ -314,13 +369,24 @@ mod tests {
 		let mut g = GraphGnn::default();
 		let root_id = g.root.id.clone();
 		let kern = g.kerns.get_mut(&root_id).expect("root kern");
-		kern.entities
-			.insert("a".into(), mk_entity("a", "The build uses cargo nextest", 9.0, EntityKind::Claim));
+		kern.entities.insert(
+			"a".into(),
+			mk_entity("a", "The build uses cargo nextest", 9.0, EntityKind::Claim),
+		);
 		// Same fact, different casing/spacing → same dedup key → skipped.
-		kern.entities
-			.insert("b".into(), mk_entity("b", "the build   uses CARGO nextest", 8.0, EntityKind::Claim));
-		kern.entities
-			.insert("c".into(), mk_entity("c", "Deploys run on fridays", 7.0, EntityKind::Claim));
+		kern.entities.insert(
+			"b".into(),
+			mk_entity(
+				"b",
+				"the build   uses CARGO nextest",
+				8.0,
+				EntityKind::Claim,
+			),
+		);
+		kern.entities.insert(
+			"c".into(),
+			mk_entity("c", "Deploys run on fridays", 7.0, EntityKind::Claim),
+		);
 
 		let md = build_digest(&g, 10, 0.0, 0);
 		let bullets = md.matches("\n- ").count();
@@ -347,23 +413,35 @@ mod tests {
 
 		// k=1, no gate: heat*conf picks the warm trusted claim over the hot shaky one.
 		let md = build_digest(&g, 1, 0.0, 0);
-		assert!(md.contains("warm and solid"), "heat*conf ranks trusted above hot-but-shaky");
+		assert!(
+			md.contains("warm and solid"),
+			"heat*conf ranks trusted above hot-but-shaky"
+		);
 		assert!(!md.contains("hot but shaky"));
 	}
 
 	#[test]
 	fn enriched_connections_appear_in_digest() {
-		let g = graph_with_reason(ReasonKind::Similarity, "alpha and beta share the same indexing mechanism");
+		let g = graph_with_reason(
+			ReasonKind::Similarity,
+			"alpha and beta share the same indexing mechanism",
+		);
 		let md = build_digest(&g, 10, 0.0, 0);
 		assert!(md.contains("## Connections"), "connections section present");
-		assert!(md.contains("alpha and beta share the same indexing mechanism"), "enriched reason text in digest");
+		assert!(
+			md.contains("alpha and beta share the same indexing mechanism"),
+			"enriched reason text in digest"
+		);
 	}
 
 	#[test]
 	fn unenriched_reasons_excluded_from_connections() {
 		let g = graph_with_reason(ReasonKind::Similarity, "");
 		let md = build_digest(&g, 10, 0.0, 0);
-		assert!(!md.contains("## Connections"), "unenriched reason produces no connections section");
+		assert!(
+			!md.contains("## Connections"),
+			"unenriched reason produces no connections section"
+		);
 	}
 
 	#[test]
@@ -376,28 +454,45 @@ mod tests {
 		let kern = g.kerns.get_mut(&root_id).expect("root kern");
 		// 38 ASCII bytes, then a 3-byte '→' spanning bytes 38..41.
 		let text = "UDP multicast discovery works for kern→kern but not browser→kern.";
-		kern.entities.insert("a".into(), mk_entity("a", text, 9.0, EntityKind::Claim));
-		kern.entities.insert("b".into(), mk_entity("b", "entity beta", 8.0, EntityKind::Claim));
-		add_reason(kern, Reason {
-			id: "a->b".into(),
-			from: "a".into(),
-			to: "b".into(),
-			kind: ReasonKind::Similarity,
-			text: "shared discovery path".into(),
-			score: 0.9,
-			..Default::default()
-		});
+		kern
+			.entities
+			.insert("a".into(), mk_entity("a", text, 9.0, EntityKind::Claim));
+		kern.entities.insert(
+			"b".into(),
+			mk_entity("b", "entity beta", 8.0, EntityKind::Claim),
+		);
+		add_reason(
+			kern,
+			Reason {
+				id: "a->b".into(),
+				from: "a".into(),
+				to: "b".into(),
+				kind: ReasonKind::Similarity,
+				text: "shared discovery path".into(),
+				score: 0.9,
+				..Default::default()
+			},
+		);
 		// Must not panic on the char boundary; truncated label ends with the ellipsis.
 		let md = build_digest(&g, 10, 0.0, 0);
-		assert!(md.contains("## Connections"), "connection rendered without panic");
-		assert!(md.contains('…'), "long entity label truncated with ellipsis");
+		assert!(
+			md.contains("## Connections"),
+			"connection rendered without panic"
+		);
+		assert!(
+			md.contains('…'),
+			"long entity label truncated with ellipsis"
+		);
 	}
 
 	#[test]
 	fn supersedes_reasons_excluded_from_connections() {
 		let g = graph_with_reason(ReasonKind::Supersedes, "superseded by a newer version");
 		let md = build_digest(&g, 10, 0.0, 0);
-		assert!(!md.contains("## Connections"), "Supersedes reason excluded from connections");
+		assert!(
+			!md.contains("## Connections"),
+			"Supersedes reason excluded from connections"
+		);
 	}
 
 	#[test]
@@ -408,7 +503,10 @@ mod tests {
 		let mut g = GraphGnn::default();
 		let root_id = g.root.id.clone();
 		let kern = g.kerns.get_mut(&root_id).expect("root kern");
-		kern.entities.insert("a".into(), mk_entity("a", "a written claim", 9.0, EntityKind::Claim));
+		kern.entities.insert(
+			"a".into(),
+			mk_entity("a", "a written claim", 9.0, EntityKind::Claim),
+		);
 
 		write_digest(&g, &path, 10, 0.0, 0);
 		let contents = std::fs::read_to_string(&path).expect("digest file exists after write");
@@ -419,6 +517,12 @@ mod tests {
 
 		// Second write overwrites cleanly (no append / leftover).
 		write_digest(&g, &path, 10, 0.0, 0);
-		assert_eq!(std::fs::read_to_string(&path).unwrap().matches("# kern memory").count(), 1);
+		assert_eq!(
+			std::fs::read_to_string(&path)
+				.unwrap()
+				.matches("# kern memory")
+				.count(),
+			1
+		);
 	}
 }

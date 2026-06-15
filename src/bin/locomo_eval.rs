@@ -11,7 +11,10 @@ use kern::bench_support::locomo_run::{run_eval, EvalConfig};
 use kern::config::{DEFAULT_ANSWER_MODEL, DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL};
 
 #[derive(Parser, Debug)]
-#[command(name = "locomo_eval", about = "Measure kern memory quality on the LoCoMo benchmark.")]
+#[command(
+	name = "locomo_eval",
+	about = "Measure kern memory quality on the LoCoMo benchmark."
+)]
 struct Args {
 	/// Path to locomo10.json. Defaults to $KERN_LOCOMO_PATH, then eval/locomo10.json.
 	#[arg(long)]
@@ -49,7 +52,9 @@ struct Args {
 /// Resolve the dataset path: explicit `--dataset` wins, then `$KERN_LOCOMO_PATH`,
 /// then the `eval/locomo10.json` default. Pure so the precedence is unit-testable.
 fn resolve_dataset(arg: Option<String>, env: Option<String>) -> String {
-	arg.or(env).unwrap_or_else(|| "eval/locomo10.json".to_string())
+	arg
+		.or(env)
+		.unwrap_or_else(|| "eval/locomo10.json".to_string())
 }
 
 #[tokio::main]
@@ -79,7 +84,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 		dedup_threshold: args.dedup,
 	};
 
-	eprintln!("locomo_eval: dataset={dataset} embed={} answer={} judge={}", cfg.embed_model, cfg.answer_model, cfg.judge_model);
+	eprintln!(
+		"locomo_eval: dataset={dataset} embed={} answer={} judge={}",
+		cfg.embed_model, cfg.answer_model, cfg.judge_model
+	);
 	let report = run_eval(&cfg).await?;
 
 	let body = if args.json {

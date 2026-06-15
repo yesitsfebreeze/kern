@@ -139,13 +139,31 @@ mod tests {
 	#[test]
 	fn to_csv_has_a_header_and_one_six_decimal_row_per_entry() {
 		let rows = vec![
-			SweepRow { param: "rrf_k".into(), value: "10".into(), mean_ndcg10: 0.5, mean_recall10: 0.6, num_queries: 3 },
-			SweepRow { param: "rrf_k".into(), value: "20".into(), mean_ndcg10: 0.75, mean_recall10: 0.8, num_queries: 3 },
+			SweepRow {
+				param: "rrf_k".into(),
+				value: "10".into(),
+				mean_ndcg10: 0.5,
+				mean_recall10: 0.6,
+				num_queries: 3,
+			},
+			SweepRow {
+				param: "rrf_k".into(),
+				value: "20".into(),
+				mean_ndcg10: 0.75,
+				mean_recall10: 0.8,
+				num_queries: 3,
+			},
 		];
 		let lines: Vec<String> = to_csv(&rows).lines().map(str::to_string).collect();
-		assert_eq!(lines[0], "param,value,mean_ndcg10,mean_recall10,num_queries");
+		assert_eq!(
+			lines[0],
+			"param,value,mean_ndcg10,mean_recall10,num_queries"
+		);
 		assert_eq!(lines.len(), 3, "header + 2 data rows");
-		assert_eq!(lines[1], "rrf_k,10,0.500000,0.600000,3", "metrics formatted to 6 decimals");
+		assert_eq!(
+			lines[1], "rrf_k,10,0.500000,0.600000,3",
+			"metrics formatted to 6 decimals"
+		);
 		assert_eq!(lines[2], "rrf_k,20,0.750000,0.800000,3");
 	}
 }

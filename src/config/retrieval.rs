@@ -194,7 +194,10 @@ impl RetrievalConfig {
 		}
 
 		if !(0.0..1.0).contains(&self.pagerank_damping) {
-			errs.push(format!("pagerank_damping ({}) must be in [0.0, 1.0)", self.pagerank_damping));
+			errs.push(format!(
+				"pagerank_damping ({}) must be in [0.0, 1.0)",
+				self.pagerank_damping
+			));
 		}
 
 		// Fields whose out-of-range value silently breaks retrieval (no graceful
@@ -222,7 +225,10 @@ mod tests {
 
 	#[test]
 	fn default_config_is_valid() {
-		assert!(RetrievalConfig::default().validate().is_empty(), "shipped defaults must validate");
+		assert!(
+			RetrievalConfig::default().validate().is_empty(),
+			"shipped defaults must validate"
+		);
 	}
 
 	#[test]
@@ -230,7 +236,10 @@ mod tests {
 		let mut cfg = RetrievalConfig::default();
 		cfg.weights_hybrid.content = 0.9; // 0.9 + 0.30 + 0.20 + 0.0 = 1.4
 		let errs = cfg.validate();
-		assert!(errs.iter().any(|e| e.contains("weights_hybrid")), "got {errs:?}");
+		assert!(
+			errs.iter().any(|e| e.contains("weights_hybrid")),
+			"got {errs:?}"
+		);
 	}
 
 	#[test]
@@ -240,7 +249,10 @@ mod tests {
 			adaptive_ef_max: 128,
 			..Default::default()
 		};
-		assert!(cfg.validate().iter().any(|e| e.contains("adaptive_ef_start")));
+		assert!(cfg
+			.validate()
+			.iter()
+			.any(|e| e.contains("adaptive_ef_start")));
 	}
 
 	#[test]
@@ -251,38 +263,77 @@ mod tests {
 			..Default::default()
 		};
 		let errs = cfg.validate();
-		assert!(errs.iter().any(|e| e.contains("query_cache_theta")), "got {errs:?}");
-		assert!(errs.iter().any(|e| e.contains("mmr_lambda")), "got {errs:?}");
+		assert!(
+			errs.iter().any(|e| e.contains("query_cache_theta")),
+			"got {errs:?}"
+		);
+		assert!(
+			errs.iter().any(|e| e.contains("mmr_lambda")),
+			"got {errs:?}"
+		);
 	}
 
 	#[test]
 	fn out_of_range_bm25_params_are_flagged() {
 		// bm25_k1/bm25_b are now wired into the lexical index, so invalid values must
 		// be caught at config load rather than silently clamped at query time.
-		let bad_b = RetrievalConfig { bm25_b: 2.0, ..Default::default() };
-		assert!(bad_b.validate().iter().any(|e| e.contains("bm25_b")), "bm25_b > 1");
+		let bad_b = RetrievalConfig {
+			bm25_b: 2.0,
+			..Default::default()
+		};
+		assert!(
+			bad_b.validate().iter().any(|e| e.contains("bm25_b")),
+			"bm25_b > 1"
+		);
 
-		let neg_k1 = RetrievalConfig { bm25_k1: -0.5, ..Default::default() };
-		assert!(neg_k1.validate().iter().any(|e| e.contains("bm25_k1")), "negative bm25_k1");
+		let neg_k1 = RetrievalConfig {
+			bm25_k1: -0.5,
+			..Default::default()
+		};
+		assert!(
+			neg_k1.validate().iter().any(|e| e.contains("bm25_k1")),
+			"negative bm25_k1"
+		);
 	}
 
 	#[test]
 	fn retrieval_breaking_values_are_flagged() {
 		// Each silently breaks every query if it slips through unvalidated.
-		let neg_rrf = RetrievalConfig { rrf_k: -1.0, ..Default::default() };
-		assert!(neg_rrf.validate().iter().any(|e| e.contains("rrf_k")), "negative rrf_k");
-
-		let zero_seed = RetrievalConfig { seed_k: 0, ..Default::default() };
-		assert!(zero_seed.validate().iter().any(|e| e.contains("seed_k")), "seed_k 0");
-
-		let zero_deliver = RetrievalConfig { max_deliver_results: 0, ..Default::default() };
+		let neg_rrf = RetrievalConfig {
+			rrf_k: -1.0,
+			..Default::default()
+		};
 		assert!(
-			zero_deliver.validate().iter().any(|e| e.contains("max_deliver_results")),
+			neg_rrf.validate().iter().any(|e| e.contains("rrf_k")),
+			"negative rrf_k"
+		);
+
+		let zero_seed = RetrievalConfig {
+			seed_k: 0,
+			..Default::default()
+		};
+		assert!(
+			zero_seed.validate().iter().any(|e| e.contains("seed_k")),
+			"seed_k 0"
+		);
+
+		let zero_deliver = RetrievalConfig {
+			max_deliver_results: 0,
+			..Default::default()
+		};
+		assert!(
+			zero_deliver
+				.validate()
+				.iter()
+				.any(|e| e.contains("max_deliver_results")),
 			"max_deliver_results 0"
 		);
 
 		// rrf_k == 0 is valid (1/(0+rank) is well-defined RRF), so it must NOT flag.
-		let zero_rrf = RetrievalConfig { rrf_k: 0.0, ..Default::default() };
+		let zero_rrf = RetrievalConfig {
+			rrf_k: 0.0,
+			..Default::default()
+		};
 		assert!(
 			!zero_rrf.validate().iter().any(|e| e.contains("rrf_k")),
 			"rrf_k 0 is valid, must not flag"

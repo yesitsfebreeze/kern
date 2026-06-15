@@ -5,14 +5,13 @@ use crate::base::math::clamp_confidence;
 use crate::base::types::Source;
 use crate::base::util::truncate;
 
-use super::{Client, Endpoint, load_graph, save_graph};
+use super::{load_graph, save_graph, Client, Endpoint};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn cmd_ingest(
 	cfg: &crate::config::Config,
 	text_parts: Vec<String>,
 	file: Option<String>,
-	no_llm: bool,
 	embed_url: &str,
 	embed_model: &str,
 	reason_url: &str,
@@ -42,17 +41,16 @@ pub(super) async fn cmd_ingest(
 		Endpoint::default(),
 		Endpoint::new(embed_url, embed_model, embed_key),
 	);
-	let llm_fn: Option<crate::ingest::LlmFunc> = if !no_llm && !reason_url.is_empty() {
-		Some(Arc::new(llm_client.complete_func()))
-	} else {
-		None
-	};
 	let save_g = g.clone();
 	let save_fn: Option<Arc<dyn Fn() + Send + Sync>> = Some(Arc::new(move || {
 		let g = read_recovered(&save_g);
 		save_graph(&g);
 	}));
-	let worker = crate::ingest::Worker::new(g.clone(), llm_client, llm_fn, save_fn);
+	// One-shot CLI ingest: no tick loop exists here, so question seeding is
+	// skipped (no defer hook). Questions are enrichment, not data — the daemon's
+	// tick will not backfill them for CLI-ingested entities, which is the
+	// documented trade for keeping the worker free of reason-LLM calls.
+	let worker = crate::ingest::Worker::new(g.clone(), llm_client, None, save_fn);
 
 	let (conf, kind) = clamp_confidence(1.0, "user");
 	let src = Source::Inline {
@@ -61,7 +59,14 @@ pub(super) async fn cmd_ingest(
 	};
 
 	let outcome = worker
-		.run(text.clone(), src, kind, String::new(), conf, ingest_config(cfg))
+		.run(
+			text.clone(),
+			src,
+			kind,
+			String::new(),
+			conf,
+			ingest_config(cfg),
+		)
 		.await;
 	// No explicit save here: the worker's `save_fn` (above) runs after the job in
 	// the worker loop and before `run` returns its outcome, so the graph is
@@ -93,10 +98,16 @@ mod tests {
 		let mut cfg = crate::config::Config::default();
 		cfg.ingest.dedup_threshold = 0.87;
 		let ic = ingest_config(&cfg);
-		assert_eq!(ic.dedup_threshold, 0.87, "dedup_threshold comes from the user config");
+		assert_eq!(
+			ic.dedup_threshold, 0.87,
+			"dedup_threshold comes from the user config"
+		);
 		// Everything else matches ingest defaults (not the user config).
 		assert_eq!(ic.dedup_threshold, 0.87);
 		let default_dedup = crate::ingest::Config::default().dedup_threshold;
-		assert_ne!(0.87, default_dedup, "test value differs from the default, so the assertion is meaningful");
+		assert_ne!(
+			0.87, default_dedup,
+			"test value differs from the default, so the assertion is meaningful"
+		);
 	}
 }

@@ -26,7 +26,11 @@ pub struct ToolResult {
 	pub content: Vec<Value>,
 	#[serde(default, rename = "isError")]
 	pub is_error: bool,
-	#[serde(default, skip_serializing_if = "Option::is_none", rename = "structuredContent")]
+	#[serde(
+		default,
+		skip_serializing_if = "Option::is_none",
+		rename = "structuredContent"
+	)]
 	pub structured_content: Option<Value>,
 }
 
@@ -60,7 +64,10 @@ mod tests {
 			input_schema: Some(json!({ "type": "object" })),
 		};
 		assert_eq!(a, a.clone(), "PartialEq compares whole schemas in one ==");
-		let b = ToolSchema { name: "sub".into(), ..a.clone() };
+		let b = ToolSchema {
+			name: "sub".into(),
+			..a.clone()
+		};
 		assert_ne!(a, b);
 
 		let r = ToolResult {

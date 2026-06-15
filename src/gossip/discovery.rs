@@ -111,7 +111,10 @@ mod tests {
 	#[test]
 	fn parse_announce_rejects_wrong_prefix() {
 		let raw = format!("gossip:{NID}:127.0.0.1:7400");
-		assert!(parse_announce(&raw).is_none(), "non-kern prefix is rejected");
+		assert!(
+			parse_announce(&raw).is_none(),
+			"non-kern prefix is rejected"
+		);
 	}
 
 	#[test]
@@ -124,6 +127,9 @@ mod tests {
 	fn parse_announce_rejects_missing_separator_colon() {
 		// Position 36 (just after the id) must be ':'; here it's 'X'.
 		let raw = format!("kern:{NID}X127.0.0.1:7400");
-		assert!(parse_announce(&raw).is_none(), "missing id/addr separator is rejected");
+		assert!(
+			parse_announce(&raw).is_none(),
+			"missing id/addr separator is rejected"
+		);
 	}
 }

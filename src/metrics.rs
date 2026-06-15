@@ -32,7 +32,11 @@ pub fn gini_from_iter<I: IntoIterator<Item = f64>>(values: I) -> f64 {
 		.into_iter()
 		.map(|x| {
 			debug_assert!(x >= 0.0, "gini input must be non-negative, got {x}");
-			if x < 0.0 { 0.0 } else { x }
+			if x < 0.0 {
+				0.0
+			} else {
+				x
+			}
 		})
 		.collect();
 
@@ -71,7 +75,12 @@ pub fn snapshot_heat<'a>(thoughts: impl IntoIterator<Item = &'a Entity>) -> Stig
 	let max_heat = heats.iter().copied().fold(0.0_f64, f64::max);
 	let mean_heat = sum / n as f64;
 	let gini = gini_from_iter(heats.iter().copied());
-	StigmergySnapshot { gini, max_heat, mean_heat, n }
+	StigmergySnapshot {
+		gini,
+		max_heat,
+		mean_heat,
+		n,
+	}
 }
 
 #[cfg(test)]
@@ -134,8 +143,14 @@ mod tests {
 
 	#[test]
 	fn snapshot_heat_computes_fields() {
-		let t1 = Entity { heat: 1.0, ..Default::default() };
-		let t2 = Entity { heat: 3.0, ..Default::default() };
+		let t1 = Entity {
+			heat: 1.0,
+			..Default::default()
+		};
+		let t2 = Entity {
+			heat: 3.0,
+			..Default::default()
+		};
 		let s = snapshot_heat([&t1, &t2]);
 		assert_eq!(s.n, 2);
 		assert_eq!(s.max_heat, 3.0);

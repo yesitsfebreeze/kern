@@ -73,15 +73,35 @@ mod tests {
 
 	#[test]
 	fn default_validates_and_bad_knobs_are_rejected() {
-		assert!(IngestConfig::default().validate().is_ok(), "shipped defaults are valid");
+		assert!(
+			IngestConfig::default().validate().is_ok(),
+			"shipped defaults are valid"
+		);
 
-		let inverted = IngestConfig { rephrase_lower: 0.9, rephrase_upper: 0.8, ..Default::default() };
-		assert!(inverted.validate().is_err(), "inverted rephrase band is rejected");
+		let inverted = IngestConfig {
+			rephrase_lower: 0.9,
+			rephrase_upper: 0.8,
+			..Default::default()
+		};
+		assert!(
+			inverted.validate().is_err(),
+			"inverted rephrase band is rejected"
+		);
 
-		let out_of_range = IngestConfig { dedup_threshold: 2.0, ..Default::default() };
-		assert!(out_of_range.validate().is_err(), "threshold outside [0,1] is rejected");
+		let out_of_range = IngestConfig {
+			dedup_threshold: 2.0,
+			..Default::default()
+		};
+		assert!(
+			out_of_range.validate().is_err(),
+			"threshold outside [0,1] is rejected"
+		);
 
-		let narrow_beam = IngestConfig { hnsw_k: 16, hnsw_ef: 8, ..Default::default() };
+		let narrow_beam = IngestConfig {
+			hnsw_k: 16,
+			hnsw_ef: 8,
+			..Default::default()
+		};
 		assert!(narrow_beam.validate().is_err(), "ef < k is rejected");
 	}
 }

@@ -1,5 +1,3 @@
-
-
 use crate::gnn::layer::{Backward, Layer};
 use crate::gnn::tensor::Tensor;
 use crate::gnn::GnnError;
@@ -152,8 +150,16 @@ mod tests {
 		let out = ln.forward(&x);
 		let mean: f64 = out.data.iter().sum::<f64>() / 3.0;
 		assert!(mean.abs() < 1e-9, "row mean ~0, got {mean}");
-		let var: f64 = out.data.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / 3.0;
-		assert!((var - 1.0).abs() < 1e-3, "row var ~1 (minus epsilon), got {var}");
+		let var: f64 = out
+			.data
+			.iter()
+			.map(|v| (v - mean) * (v - mean))
+			.sum::<f64>()
+			/ 3.0;
+		assert!(
+			(var - 1.0).abs() < 1e-3,
+			"row var ~1 (minus epsilon), got {var}"
+		);
 	}
 
 	#[test]
@@ -162,14 +168,23 @@ mod tests {
 		let params = ln.parameters();
 		assert_eq!(params.len(), 2);
 		// gamma is ones, beta is zeros at init — confirms order + identity.
-		assert!(params[0].data.iter().all(|&v| v == 1.0), "param[0] is gamma (ones)");
-		assert!(params[1].data.iter().all(|&v| v == 0.0), "param[1] is beta (zeros)");
+		assert!(
+			params[0].data.iter().all(|&v| v == 1.0),
+			"param[0] is gamma (ones)"
+		);
+		assert!(
+			params[1].data.iter().all(|&v| v == 0.0),
+			"param[1] is beta (zeros)"
+		);
 		assert_eq!((params[0].rows, params[0].cols), (1, 3));
 		assert_eq!((params[1].rows, params[1].cols), (1, 3));
 		// param_grads mirrors the same (gamma, beta) order and starts zeroed.
 		let grads = ln.param_grads();
 		assert_eq!(grads.len(), 2);
-		assert!(grads.iter().all(|g| g.data.iter().all(|&v| v == 0.0)), "fresh grads are zero");
+		assert!(
+			grads.iter().all(|g| g.data.iter().all(|&v| v == 0.0)),
+			"fresh grads are zero"
+		);
 	}
 
 	#[test]
@@ -191,13 +206,23 @@ mod tests {
 		);
 
 		ln.zero_grads();
-		assert!(ln.d_gamma.data.iter().all(|&v| v == 0.0), "zero_grads clears d_gamma");
-		assert!(ln.d_beta.data.iter().all(|&v| v == 0.0), "zero_grads clears d_beta");
+		assert!(
+			ln.d_gamma.data.iter().all(|&v| v == 0.0),
+			"zero_grads clears d_gamma"
+		);
+		assert!(
+			ln.d_beta.data.iter().all(|&v| v == 0.0),
+			"zero_grads clears d_beta"
+		);
 
 		// After reset, a single backward equals exactly one pass — no residue.
 		ln.backward(&d_out);
 		assert!(
-			ln.d_beta.data.iter().zip(&after_one).all(|(now, one)| (now - one).abs() < 1e-12),
+			ln.d_beta
+				.data
+				.iter()
+				.zip(&after_one)
+				.all(|(now, one)| (now - one).abs() < 1e-12),
 			"accumulation restarts from zero after zero_grads"
 		);
 	}
@@ -220,8 +245,15 @@ mod tests {
 		let mut ln = LayerNorm::new(3);
 		let d_out = Tensor::ones(2, 3);
 		let d_in = ln.backward(&d_out);
-		assert_eq!((d_in.rows, d_in.cols), (2, 3), "zero gradient matches d_out shape");
-		assert!(d_in.data.iter().all(|&v| v == 0.0), "missing forward state -> all-zero gradient");
+		assert_eq!(
+			(d_in.rows, d_in.cols),
+			(2, 3),
+			"zero gradient matches d_out shape"
+		);
+		assert!(
+			d_in.data.iter().all(|&v| v == 0.0),
+			"missing forward state -> all-zero gradient"
+		);
 	}
 
 	#[test]
@@ -238,7 +270,10 @@ mod tests {
 		b.forward(&x);
 		let via_infallible = b.backward(&d_out);
 
-		assert_eq!(via_try.data, via_infallible.data, "delegation preserves the gradient");
+		assert_eq!(
+			via_try.data, via_infallible.data,
+			"delegation preserves the gradient"
+		);
 	}
 
 	#[test]

@@ -88,7 +88,11 @@ mod tests {
 	use std::collections::HashSet;
 
 	fn cfg() -> Config {
-		Config { rephrase_lower: 0.5, rephrase_upper: 0.95, ..Default::default() }
+		Config {
+			rephrase_lower: 0.5,
+			rephrase_upper: 0.95,
+			..Default::default()
+		}
 	}
 
 	#[test]
@@ -109,7 +113,10 @@ mod tests {
 		consider_pair("a", "b", 0.95, &cfg(), &mut seen, &mut out); // == upper bound -> excluded
 		consider_pair("a", "b", 0.2, &cfg(), &mut seen, &mut out); // below window
 		consider_pair("a", "b", 0.99, &cfg(), &mut seen, &mut out); // above window
-		assert!(out.is_empty(), "boundary and out-of-window sims are excluded");
+		assert!(
+			out.is_empty(),
+			"boundary and out-of-window sims are excluded"
+		);
 	}
 
 	#[test]

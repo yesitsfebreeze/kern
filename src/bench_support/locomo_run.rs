@@ -130,7 +130,11 @@ impl EvalReport {
 		out.push_str(&format!(
 			"overall      {:>3}                   {:>5.3} (judge+abstain)\n",
 			tot_n,
-			if tot_n == 0 { 0.0 } else { tot_correct as f64 / tot_n as f64 },
+			if tot_n == 0 {
+				0.0
+			} else {
+				tot_correct as f64 / tot_n as f64
+			},
 		));
 		out
 	}
@@ -159,7 +163,10 @@ pub async fn run_eval(cfg: &EvalConfig) -> Result<EvalReport, String> {
 		Arc::new(move |t: &str| block_on_embed(&c, t))
 	};
 	let rcfg = RetrievalConfig::default();
-	let icfg = Config { dedup_threshold: cfg.dedup_threshold, ..Default::default() };
+	let icfg = Config {
+		dedup_threshold: cfg.dedup_threshold,
+		..Default::default()
+	};
 
 	let eval_ctx = EvalContext {
 		client: &client,
@@ -175,15 +182,33 @@ pub async fn run_eval(cfg: &EvalConfig) -> Result<EvalReport, String> {
 		eprintln!("[{}/{}] ingesting {} ...", i + 1, take, sample.sample_id);
 		// Fresh graph per dialogue: LoCoMo dialogues are independent personas.
 		let graph: Arc<RwLock<GraphGnn>> = Arc::new(RwLock::new(GraphGnn::new()));
-		let worker = Worker::new(graph.clone(), client.clone(), Some(llm.clone()), None);
+		// Bench: no tick loop here, question seeding not measured — no defer hook.
+		let worker = Worker::new(graph.clone(), client.clone(), None, None);
 
 		let claims = ingest_sample(&worker, &llm, sample, &icfg).await;
-		eprintln!("[{}/{}] ingested {claims} claims, running {} QA probes ...", i + 1, take, sample.qa.len());
+		eprintln!(
+			"[{}/{}] ingested {claims} claims, running {} QA probes ...",
+			i + 1,
+			take,
+			sample.qa.len()
+		);
 		report.total_claims += claims;
 		report.n_samples += 1;
 
-		eval_sample(&eval_ctx, &graph, sample, cfg.max_qa_per_sample, &mut report).await;
-		eprintln!("[{}/{}] done (total queries so far: {})", i + 1, take, report.n_queries);
+		eval_sample(
+			&eval_ctx,
+			&graph,
+			sample,
+			cfg.max_qa_per_sample,
+			&mut report,
+		)
+		.await;
+		eprintln!(
+			"[{}/{}] done (total queries so far: {})",
+			i + 1,
+			take,
+			report.n_queries
+		);
 	}
 
 	Ok(report)
@@ -244,7 +269,16 @@ async fn ingest_sample(worker: &Worker, llm: &LlmFunc, sample: &Sample, icfg: &C
 				title: format!("locomo://{}", c.descriptor),
 			};
 			// The capture spool ingests every distilled claim as `EntityKind::Claim`.
-			let _ = worker.run(c.text, src, EntityKind::Claim, c.descriptor, 0.6, icfg.clone()).await;
+			let _ = worker
+				.run(
+					c.text,
+					src,
+					EntityKind::Claim,
+					c.descriptor,
+					0.6,
+					icfg.clone(),
+				)
+				.await;
 			total += 1;
 		}
 	}
@@ -282,13 +316,26 @@ async fn eval_sample(
 		let t0 = Instant::now();
 		let res = {
 			let g = crate::base::locks::read_recovered(graph);
-			answer::query(&g, ctx.rcfg, &qvec, &q.question, Mode::Hybrid, Some(ctx.llm), Some(ctx.embed_fn), None)
+			answer::query(
+				&g,
+				ctx.rcfg,
+				&qvec,
+				&q.question,
+				Mode::Hybrid,
+				Some(ctx.llm),
+				Some(ctx.embed_fn),
+				None,
+			)
 		};
 		report.latencies_ms.push(t0.elapsed().as_millis());
 
 		report.n_queries += 1;
 		report.ctx_entities_sum += res.entities.len();
-		report.ctx_chars_sum += res.entities.iter().map(|e| e.entity.text().len()).sum::<usize>();
+		report.ctx_chars_sum += res
+			.entities
+			.iter()
+			.map(|e| e.entity.text().len())
+			.sum::<usize>();
 
 		let pred = res.answer.trim();
 		let agg = report.per_category.entry(q.category).or_default();
@@ -335,7 +382,10 @@ mod tests {
 		let v = [10u128, 20, 30, 40, 50];
 		assert_eq!(crate::base::util::percentile_sorted(&v, 0.50), Some(30));
 		assert_eq!(crate::base::util::percentile_sorted(&v, 0.95), Some(50));
-		assert_eq!(crate::base::util::percentile_sorted::<u128>(&[], 0.95), None);
+		assert_eq!(
+			crate::base::util::percentile_sorted::<u128>(&[], 0.95),
+			None
+		);
 	}
 
 	#[test]
@@ -397,13 +447,19 @@ mod tests {
 		// parse_claims is graceful: bad JSON → empty vec, not None
 		let llm = |_: &str| "not json at all".to_string();
 		let claims = distill_locomo("Alice: Hi.", &llm).expect("Some result");
-		assert!(claims.is_empty(), "malformed JSON produces no claims, not outage");
+		assert!(
+			claims.is_empty(),
+			"malformed JSON produces no claims, not outage"
+		);
 	}
 
 	#[test]
 	fn distill_locomo_prompt_includes_dialogue_text() {
 		let llm = |p: &str| {
-			assert!(p.contains("Bob: I love Rust."), "dialogue text must be in prompt");
+			assert!(
+				p.contains("Bob: I love Rust."),
+				"dialogue text must be in prompt"
+			);
 			assert!(p.contains("DIALOGUE:"), "DIALOGUE marker must be in prompt");
 			"[]".to_string()
 		};
@@ -447,7 +503,7 @@ mod tests {
 		});
 
 		let graph: Arc<RwLock<GraphGnn>> = Arc::new(RwLock::new(GraphGnn::new()));
-		let worker = Worker::new(graph.clone(), embedder, Some(llm.clone()), None);
+		let worker = Worker::new(graph.clone(), embedder, None, None);
 
 		let sample = Sample {
 			sample_id: "t1".into(),
@@ -462,7 +518,10 @@ mod tests {
 			}],
 			qa: Vec::new(),
 		};
-		let icfg = Config { dedup_threshold: 0.95, ..Default::default() };
+		let icfg = Config {
+			dedup_threshold: 0.95,
+			..Default::default()
+		};
 
 		let claims = ingest_sample(&worker, &llm, &sample, &icfg).await;
 		assert_eq!(claims, 1, "the single distilled claim is counted");
@@ -470,6 +529,9 @@ mod tests {
 		// The claim flowed through the canonical Worker into the shared graph.
 		let g = crate::base::locks::read_recovered(&graph);
 		let entities: usize = g.all().iter().map(|k| k.entities.len()).sum();
-		assert!(entities > 0, "worker placed at least the claim document into the graph");
+		assert!(
+			entities > 0,
+			"worker placed at least the claim document into the graph"
+		);
 	}
 }

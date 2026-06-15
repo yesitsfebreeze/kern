@@ -81,20 +81,22 @@ impl DayJournal {
 			}),
 			max_bytes: std::sync::atomic::AtomicU64::new(DEFAULT_MAX_TODAY_BYTES),
 		})
-}
+	}
 
 	/// Override the within-day size cap. `0` disables the cap.
 	pub fn set_max_bytes(&self, cap: u64) {
-		self.max_bytes.store(cap, std::sync::atomic::Ordering::Relaxed);
-}
+		self
+			.max_bytes
+			.store(cap, std::sync::atomic::Ordering::Relaxed);
+	}
 
 	pub fn path(&self) -> &Path {
 		&self.path
-}
+	}
 
 	pub fn scan<F: FnMut(&Entry)>(&self, mut f: F) -> io::Result<()> {
 		for_each_entry(&self.path, |e| f(&e))
-}
+	}
 
 	fn rollover_locked(&self, inner: &mut Inner, today: &str) -> io::Result<()> {
 		rotate_to_segment(&self.path, &self.project_abs, today)?;
@@ -106,7 +108,7 @@ impl DayJournal {
 		inner.current_day = today.to_string();
 		inner.bytes_written = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
 		Ok(())
-}
+	}
 }
 
 /// Move the closed `today.jsonl` into `segments/<closed_day>-<stamp>.jsonl` and
@@ -136,8 +138,7 @@ impl Sink for DayJournal {
 		};
 
 		let cap = self.max_bytes.load(std::sync::atomic::Ordering::Relaxed);
-		let needs_rollover = inner.current_day != today
-			|| (cap > 0 && inner.bytes_written >= cap);
+		let needs_rollover = inner.current_day != today || (cap > 0 && inner.bytes_written >= cap);
 		if needs_rollover {
 			if let Err(e) = self.rollover_locked(&mut inner, &today) {
 				eprintln!("day_journal: rollover failed: {e}");
@@ -163,7 +164,7 @@ impl Sink for DayJournal {
 		} else {
 			inner.bytes_written = inner.bytes_written.saturating_add(line_bytes);
 		}
-}
+	}
 }
 
 fn today_str() -> String {
@@ -245,12 +246,25 @@ mod tests {
 		dj.emit(entry("b"));
 
 		let seg_dir = dir.path().join(".kern").join("journal").join("segments");
-		let segs: Vec<_> = std::fs::read_dir(&seg_dir).unwrap().filter_map(|e| e.ok()).collect();
-		assert_eq!(segs.len(), 1, "the rolled-over content became one segment file");
+		let segs: Vec<_> = std::fs::read_dir(&seg_dir)
+			.unwrap()
+			.filter_map(|e| e.ok())
+			.collect();
+		assert_eq!(
+			segs.len(),
+			1,
+			"the rolled-over content became one segment file"
+		);
 		let name = segs[0].file_name().into_string().unwrap();
 		assert!(name.ends_with(".jsonl"), "segment is a .jsonl");
-		assert!(name.len() > "YYYY-MM-DD".len(), "segment name carries a day prefix + stamp");
-		assert!(dir.path().join(".kern/journal/today.jsonl").exists(), "fresh today.jsonl");
+		assert!(
+			name.len() > "YYYY-MM-DD".len(),
+			"segment name carries a day prefix + stamp"
+		);
+		assert!(
+			dir.path().join(".kern/journal/today.jsonl").exists(),
+			"fresh today.jsonl"
+		);
 	}
 
 	#[test]
@@ -263,10 +277,18 @@ mod tests {
 
 		// 'first' was archived into the rolled-over segment.
 		let seg_dir = dir.path().join(".kern").join("journal").join("segments");
-		let seg = std::fs::read_dir(&seg_dir).unwrap().next().unwrap().unwrap().path();
+		let seg = std::fs::read_dir(&seg_dir)
+			.unwrap()
+			.next()
+			.unwrap()
+			.unwrap()
+			.path();
 		let mut seg_keys = Vec::new();
 		scan_path(&seg, |e| seg_keys.push(e.key.clone())).unwrap();
-		assert!(seg_keys.iter().any(|k| k == "first"), "segment carries the earlier entry");
+		assert!(
+			seg_keys.iter().any(|k| k == "first"),
+			"segment carries the earlier entry"
+		);
 
 		// today.jsonl now holds only 'second'.
 		let mut live = Vec::new();
@@ -287,11 +309,21 @@ mod tests {
 			dj.emit(entry(k));
 		}
 
-		assert_eq!(seg_count(dir.path()), 0, "cap=0 disables size rollover -> no segments");
+		assert_eq!(
+			seg_count(dir.path()),
+			0,
+			"cap=0 disables size rollover -> no segments"
+		);
 		// All four entries remain in the single today.jsonl (header skipped by scan).
 		let mut keys = Vec::new();
 		dj.scan(|e| keys.push(e.key.clone())).unwrap();
-		assert_eq!(keys, vec!["a", "b", "c", "d"].into_iter().map(String::from).collect::<Vec<_>>());
+		assert_eq!(
+			keys,
+			vec!["a", "b", "c", "d"]
+				.into_iter()
+				.map(String::from)
+				.collect::<Vec<_>>()
+		);
 	}
 
 	#[test]
@@ -315,10 +347,17 @@ mod tests {
 		let _dj = DayJournal::open(dir.path()).unwrap();
 
 		// The stale day was archived as a segment named with its own date.
-		let segs: Vec<_> = std::fs::read_dir(jdir.join("segments")).unwrap().filter_map(|e| e.ok()).collect();
+		let segs: Vec<_> = std::fs::read_dir(jdir.join("segments"))
+			.unwrap()
+			.filter_map(|e| e.ok())
+			.collect();
 		assert_eq!(segs.len(), 1, "stale day archived as one segment on open");
 		assert!(
-			segs[0].file_name().into_string().unwrap().starts_with("2000-01-01-"),
+			segs[0]
+				.file_name()
+				.into_string()
+				.unwrap()
+				.starts_with("2000-01-01-"),
 			"segment carries the stale day's date",
 		);
 		assert_ne!(
@@ -337,7 +376,11 @@ mod tests {
 
 		let mut keys = Vec::new();
 		dj.scan(|e| keys.push(e.key.clone())).unwrap();
-		assert_eq!(keys, vec!["x".to_string(), "y".to_string()], "header skipped, order preserved");
+		assert_eq!(
+			keys,
+			vec!["x".to_string(), "y".to_string()],
+			"header skipped, order preserved"
+		);
 	}
 }
 
@@ -350,8 +393,7 @@ fn write_fresh(path: &Path, project_abs: &str, day: &str) -> io::Result<()> {
 			created_day: day.to_string(),
 		},
 	};
-	let mut line = serde_json::to_string(&header)
-		.map_err(io::Error::other)?;
+	let mut line = serde_json::to_string(&header).map_err(io::Error::other)?;
 	line.push('\n');
 
 	let mut file = OpenOptions::new()

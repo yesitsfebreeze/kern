@@ -175,10 +175,15 @@ mod tests {
 
 		let ev = WatchEvent {
 			path: to.clone(),
-			kind: WatchKind::Renamed { from: non_utf8_path(), to: to.clone() },
+			kind: WatchKind::Renamed {
+				from: non_utf8_path(),
+				to: to.clone(),
+			},
 			ts: SystemTime::now(),
 		};
-		let rec = build_record(&ev).await.expect("record built from the `to` path");
+		let rec = build_record(&ev)
+			.await
+			.expect("record built from the `to` path");
 		assert_eq!(rec.content, "fn main() {}");
 		assert_eq!(rec.language_hint.as_deref(), Some("rust"));
 		assert!(rec.source_uri.starts_with("file://"));

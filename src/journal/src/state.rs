@@ -19,14 +19,25 @@ impl std::fmt::Display for State {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		writeln!(f, "state:")?;
 		writeln!(f, "  project        {}", self.project_root.display())?;
-		writeln!(f, "  active recipe  {}", self.active_recipe.as_deref().unwrap_or("(none)"))?;
-		let model = match (self.current_provider.as_deref(), self.current_model.as_deref()) {
+		writeln!(
+			f,
+			"  active recipe  {}",
+			self.active_recipe.as_deref().unwrap_or("(none)")
+		)?;
+		let model = match (
+			self.current_provider.as_deref(),
+			self.current_model.as_deref(),
+		) {
 			(Some(p), Some(m)) => format!("{p} / {m}"),
 			_ => "(unbound)".into(),
 		};
 		writeln!(f, "  model          {model}")?;
 		// Last line: no trailing newline (write!, not writeln!).
-		write!(f, "  journal day    {}", self.journal_day.as_deref().unwrap_or("(not opened)"))
+		write!(
+			f,
+			"  journal day    {}",
+			self.journal_day.as_deref().unwrap_or("(not opened)")
+		)
 	}
 }
 
@@ -80,15 +91,26 @@ mod tests {
 
 	#[test]
 	fn model_is_unbound_unless_both_provider_and_model_are_set() {
-		let only_model = State { current_model: Some("m".into()), ..Default::default() };
+		let only_model = State {
+			current_model: Some("m".into()),
+			..Default::default()
+		};
 		assert!(only_model.to_string().contains("model          (unbound)"));
-		let only_provider = State { current_provider: Some("p".into()), ..Default::default() };
-		assert!(only_provider.to_string().contains("model          (unbound)"));
+		let only_provider = State {
+			current_provider: Some("p".into()),
+			..Default::default()
+		};
+		assert!(only_provider
+			.to_string()
+			.contains("model          (unbound)"));
 	}
 
 	#[test]
 	fn handle_render_matches_snapshot_display() {
-		let h = StateHandle::new(State { active_recipe: Some("r".into()), ..Default::default() });
+		let h = StateHandle::new(State {
+			active_recipe: Some("r".into()),
+			..Default::default()
+		});
 		assert_eq!(h.render(), h.snapshot().to_string());
 	}
 }

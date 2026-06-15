@@ -84,8 +84,15 @@ impl QueryCache {
 		// hash index on (tag, text_hash) plus a small vector ANN for the semantic
 		// path. The assertion is a debug-build tripwire against an accidental runaway
 		// cap arriving from config.
-		debug_assert!(cap <= 4096, "QueryCache cap {cap} is large — lookup is O(cap); see the note in new()");
-		Self { entries: VecDeque::new(), cap: cap.max(1), theta }
+		debug_assert!(
+			cap <= 4096,
+			"QueryCache cap {cap} is large — lookup is O(cap); see the note in new()"
+		);
+		Self {
+			entries: VecDeque::new(),
+			cap: cap.max(1),
+			theta,
+		}
 	}
 
 	/// A cache with the given cap/theta, wrapped for sharing across the daemon's
@@ -107,9 +114,10 @@ impl QueryCache {
 	/// [`hash_text`]). Promotes the hit to most-recently-used.
 	pub fn lookup_text(&mut self, g: &GraphGnn, text_hash: u64, tag: u64) -> Option<QueryResult> {
 		let epoch = g.mutation_epoch();
-		let hit = self.entries.iter().position(|e| {
-			e.epoch == epoch && e.tag == tag && e.text_hash == text_hash
-		})?;
+		let hit = self
+			.entries
+			.iter()
+			.position(|e| e.epoch == epoch && e.tag == tag && e.text_hash == text_hash)?;
 		let entry = self.entries.remove(hit)?;
 		let result = entry.result.clone();
 		self.entries.push_front(entry);
@@ -141,11 +149,24 @@ impl QueryCache {
 	/// misses — which is correct. Empty results are not cached: a query that found
 	/// nothing is cheap to re-run and caching it would suppress a later query after
 	/// data lands.
-	pub fn insert(&mut self, epoch: u64, text_hash: u64, qvec: Vec<f64>, tag: u64, result: QueryResult) {
+	pub fn insert(
+		&mut self,
+		epoch: u64,
+		text_hash: u64,
+		qvec: Vec<f64>,
+		tag: u64,
+		result: QueryResult,
+	) {
 		if result.entities.is_empty() {
 			return;
 		}
-		self.entries.push_front(Entry { qvec, tag, result, epoch, text_hash });
+		self.entries.push_front(Entry {
+			qvec,
+			tag,
+			result,
+			epoch,
+			text_hash,
+		});
 		while self.entries.len() > self.cap {
 			self.entries.pop_back();
 		}
@@ -185,7 +206,13 @@ mod tests {
 		let mut g = GraphGnn::default();
 		let root_id = g.root.id.clone();
 		let mut k = Kern::new(kern_id, &root_id);
-		k.entities.insert(entity_id.into(), Entity { id: entity_id.into(), ..Default::default() });
+		k.entities.insert(
+			entity_id.into(),
+			Entity {
+				id: entity_id.into(),
+				..Default::default()
+			},
+		);
 		g.register(k);
 		g
 	}
@@ -194,7 +221,10 @@ mod tests {
 		QueryResult {
 			answer: answer.into(),
 			entities: vec![ScoredEntity {
-				entity: Entity { id: entity_id.into(), ..Default::default() },
+				entity: Entity {
+					id: entity_id.into(),
+					..Default::default()
+				},
 				score: 1.0,
 			}],
 			path_chains: Vec::new(),
@@ -207,9 +237,17 @@ mod tests {
 	fn exact_query_hits() {
 		let g = graph_with_entity("k1", "e1");
 		let mut cache = QueryCache::new(8, 0.95);
-		cache.insert(g.mutation_epoch(), 0, vec![1.0, 0.0, 0.0], TAG, result_with("e1", "cached answer"));
+		cache.insert(
+			g.mutation_epoch(),
+			0,
+			vec![1.0, 0.0, 0.0],
+			TAG,
+			result_with("e1", "cached answer"),
+		);
 
-		let hit = cache.lookup(&g, &[1.0, 0.0, 0.0], TAG).expect("exact query hits");
+		let hit = cache
+			.lookup(&g, &[1.0, 0.0, 0.0], TAG)
+			.expect("exact query hits");
 		assert_eq!(hit.answer, "cached answer");
 	}
 
@@ -217,7 +255,13 @@ mod tests {
 	fn semantically_close_query_hits() {
 		let g = graph_with_entity("k1", "e1");
 		let mut cache = QueryCache::new(8, 0.95);
-		cache.insert(g.mutation_epoch(), 0, vec![1.0, 0.0, 0.0], TAG, result_with("e1", "ans"));
+		cache.insert(
+			g.mutation_epoch(),
+			0,
+			vec![1.0, 0.0, 0.0],
+			TAG,
+			result_with("e1", "ans"),
+		);
 
 		// Nearly the same direction → cosine well above 0.95.
 		let hit = cache.lookup(&g, &[0.99, 0.01, 0.0], TAG);
@@ -228,10 +272,19 @@ mod tests {
 	fn distant_query_misses() {
 		let g = graph_with_entity("k1", "e1");
 		let mut cache = QueryCache::new(8, 0.95);
-		cache.insert(g.mutation_epoch(), 0, vec![1.0, 0.0, 0.0], TAG, result_with("e1", "ans"));
+		cache.insert(
+			g.mutation_epoch(),
+			0,
+			vec![1.0, 0.0, 0.0],
+			TAG,
+			result_with("e1", "ans"),
+		);
 
 		// Orthogonal → cosine 0 < theta.
-		assert!(cache.lookup(&g, &[0.0, 1.0, 0.0], TAG).is_none(), "distant query misses");
+		assert!(
+			cache.lookup(&g, &[0.0, 1.0, 0.0], TAG).is_none(),
+			"distant query misses"
+		);
 	}
 
 	#[test]
@@ -239,12 +292,26 @@ mod tests {
 		let g = graph_with_entity("k1", "e1");
 		let mut cache = QueryCache::new(8, 0.95);
 		let th = hash_text("what is kern");
-		cache.insert(g.mutation_epoch(), th, vec![1.0, 0.0, 0.0], TAG, result_with("e1", "ans"));
+		cache.insert(
+			g.mutation_epoch(),
+			th,
+			vec![1.0, 0.0, 0.0],
+			TAG,
+			result_with("e1", "ans"),
+		);
 
 		// Same text → hit without ever touching a query vector.
-		assert!(cache.lookup_text(&g, th, TAG).is_some(), "verbatim re-ask hits pre-embed");
+		assert!(
+			cache.lookup_text(&g, th, TAG).is_some(),
+			"verbatim re-ask hits pre-embed"
+		);
 		// Different text → miss (caller falls through to embed + semantic lookup).
-		assert!(cache.lookup_text(&g, hash_text("something else"), TAG).is_none(), "different text misses");
+		assert!(
+			cache
+				.lookup_text(&g, hash_text("something else"), TAG)
+				.is_none(),
+			"different text misses"
+		);
 	}
 
 	#[test]
@@ -252,32 +319,65 @@ mod tests {
 		let mut g = graph_with_entity("k1", "e1");
 		let mut cache = QueryCache::new(8, 0.95);
 		let th = hash_text("what is kern");
-		cache.insert(g.mutation_epoch(), th, vec![1.0, 0.0, 0.0], TAG, result_with("e1", "ans"));
+		cache.insert(
+			g.mutation_epoch(),
+			th,
+			vec![1.0, 0.0, 0.0],
+			TAG,
+			result_with("e1", "ans"),
+		);
 		assert!(cache.lookup_text(&g, th, TAG).is_some());
 		let _ = g.get_mut("k1");
-		assert!(cache.lookup_text(&g, th, TAG).is_none(), "exact-text path also honors epoch invalidation");
+		assert!(
+			cache.lookup_text(&g, th, TAG).is_none(),
+			"exact-text path also honors epoch invalidation"
+		);
 	}
 
 	#[test]
 	fn different_tag_misses() {
 		let g = graph_with_entity("k1", "e1");
 		let mut cache = QueryCache::new(8, 0.95);
-		cache.insert(g.mutation_epoch(), 0, vec![1.0, 0.0, 0.0], 1, result_with("e1", "ans"));
+		cache.insert(
+			g.mutation_epoch(),
+			0,
+			vec![1.0, 0.0, 0.0],
+			1,
+			result_with("e1", "ans"),
+		);
 		// Same vector, different tag (e.g. a filtered query) must not collide.
-		assert!(cache.lookup(&g, &[1.0, 0.0, 0.0], 2).is_none(), "tag mismatch misses");
-		assert!(cache.lookup(&g, &[1.0, 0.0, 0.0], 1).is_some(), "same tag hits");
+		assert!(
+			cache.lookup(&g, &[1.0, 0.0, 0.0], 2).is_none(),
+			"tag mismatch misses"
+		);
+		assert!(
+			cache.lookup(&g, &[1.0, 0.0, 0.0], 1).is_some(),
+			"same tag hits"
+		);
 	}
 
 	#[test]
 	fn any_mutation_invalidates() {
 		let mut g = graph_with_entity("k1", "e1");
 		let mut cache = QueryCache::new(8, 0.95);
-		cache.insert(g.mutation_epoch(), 0, vec![1.0, 0.0, 0.0], TAG, result_with("e1", "ans"));
-		assert!(cache.lookup(&g, &[1.0, 0.0, 0.0], TAG).is_some(), "valid before mutation");
+		cache.insert(
+			g.mutation_epoch(),
+			0,
+			vec![1.0, 0.0, 0.0],
+			TAG,
+			result_with("e1", "ans"),
+		);
+		assert!(
+			cache.lookup(&g, &[1.0, 0.0, 0.0], TAG).is_some(),
+			"valid before mutation"
+		);
 
 		// A mutation to the touched kern advances the global epoch.
 		let _ = g.get_mut("k1");
-		assert!(cache.lookup(&g, &[1.0, 0.0, 0.0], TAG).is_none(), "stale after mutation");
+		assert!(
+			cache.lookup(&g, &[1.0, 0.0, 0.0], TAG).is_none(),
+			"stale after mutation"
+		);
 	}
 
 	#[test]
@@ -289,19 +389,35 @@ mod tests {
 		let root_id = g.root.id.clone();
 		g.register(Kern::new("k2", &root_id));
 		let mut cache = QueryCache::new(8, 0.95);
-		cache.insert(g.mutation_epoch(), 0, vec![1.0, 0.0, 0.0], TAG, result_with("e1", "ans"));
-		assert!(cache.lookup(&g, &[1.0, 0.0, 0.0], TAG).is_some(), "valid before mutation");
+		cache.insert(
+			g.mutation_epoch(),
+			0,
+			vec![1.0, 0.0, 0.0],
+			TAG,
+			result_with("e1", "ans"),
+		);
+		assert!(
+			cache.lookup(&g, &[1.0, 0.0, 0.0], TAG).is_some(),
+			"valid before mutation"
+		);
 
 		// Mutate an unrelated kern → still invalidates (no stale result possible).
 		let _ = g.get_mut("k2");
-		assert!(cache.lookup(&g, &[1.0, 0.0, 0.0], TAG).is_none(), "unrelated mutation also invalidates");
+		assert!(
+			cache.lookup(&g, &[1.0, 0.0, 0.0], TAG).is_none(),
+			"unrelated mutation also invalidates"
+		);
 	}
 
 	#[test]
 	fn empty_result_not_cached() {
 		let g = graph_with_entity("k1", "e1");
 		let mut cache = QueryCache::new(8, 0.95);
-		let empty = QueryResult { answer: String::new(), entities: Vec::new(), path_chains: Vec::new() };
+		let empty = QueryResult {
+			answer: String::new(),
+			entities: Vec::new(),
+			path_chains: Vec::new(),
+		};
 		cache.insert(g.mutation_epoch(), 0, vec![1.0, 0.0, 0.0], TAG, empty);
 		assert_eq!(cache.len(), 0, "empty result is not stored");
 	}
@@ -310,31 +426,85 @@ mod tests {
 	fn lru_evicts_oldest() {
 		let g = graph_with_entity("k1", "e1");
 		let mut cache = QueryCache::new(2, 0.999);
-		cache.insert(g.mutation_epoch(), 0, vec![1.0, 0.0, 0.0], TAG, result_with("e1", "a"));
-		cache.insert(g.mutation_epoch(), 0, vec![0.0, 1.0, 0.0], TAG, result_with("e1", "b"));
-		cache.insert(g.mutation_epoch(), 0, vec![0.0, 0.0, 1.0], TAG, result_with("e1", "c")); // evicts "a"
+		cache.insert(
+			g.mutation_epoch(),
+			0,
+			vec![1.0, 0.0, 0.0],
+			TAG,
+			result_with("e1", "a"),
+		);
+		cache.insert(
+			g.mutation_epoch(),
+			0,
+			vec![0.0, 1.0, 0.0],
+			TAG,
+			result_with("e1", "b"),
+		);
+		cache.insert(
+			g.mutation_epoch(),
+			0,
+			vec![0.0, 0.0, 1.0],
+			TAG,
+			result_with("e1", "c"),
+		); // evicts "a"
 
 		assert_eq!(cache.len(), 2);
-		assert!(cache.lookup(&g, &[1.0, 0.0, 0.0], TAG).is_none(), "oldest evicted");
-		assert!(cache.lookup(&g, &[0.0, 0.0, 1.0], TAG).is_some(), "newest retained");
+		assert!(
+			cache.lookup(&g, &[1.0, 0.0, 0.0], TAG).is_none(),
+			"oldest evicted"
+		);
+		assert!(
+			cache.lookup(&g, &[0.0, 0.0, 1.0], TAG).is_some(),
+			"newest retained"
+		);
 	}
 
 	#[test]
 	fn lookup_promotes_an_entry_protecting_it_from_the_next_eviction() {
 		let g = graph_with_entity("k1", "e1");
 		let mut cache = QueryCache::new(2, 0.999); // theta high: each vec hits only itself
-		cache.insert(g.mutation_epoch(), 0, vec![1.0, 0.0, 0.0], TAG, result_with("e1", "a"));
-		cache.insert(g.mutation_epoch(), 0, vec![0.0, 1.0, 0.0], TAG, result_with("e1", "b"));
+		cache.insert(
+			g.mutation_epoch(),
+			0,
+			vec![1.0, 0.0, 0.0],
+			TAG,
+			result_with("e1", "a"),
+		);
+		cache.insert(
+			g.mutation_epoch(),
+			0,
+			vec![0.0, 1.0, 0.0],
+			TAG,
+			result_with("e1", "b"),
+		);
 
 		// Touch the OLDER entry (A) — it should jump to most-recently-used.
-		assert!(cache.lookup(&g, &[1.0, 0.0, 0.0], TAG).is_some(), "A hits and is promoted");
+		assert!(
+			cache.lookup(&g, &[1.0, 0.0, 0.0], TAG).is_some(),
+			"A hits and is promoted"
+		);
 
 		// Inserting C evicts the now-oldest, which is B (A was just promoted).
-		cache.insert(g.mutation_epoch(), 0, vec![0.0, 0.0, 1.0], TAG, result_with("e1", "c"));
+		cache.insert(
+			g.mutation_epoch(),
+			0,
+			vec![0.0, 0.0, 1.0],
+			TAG,
+			result_with("e1", "c"),
+		);
 
 		assert_eq!(cache.len(), 2);
-		assert!(cache.lookup(&g, &[1.0, 0.0, 0.0], TAG).is_some(), "promoted A survived eviction");
-		assert!(cache.lookup(&g, &[0.0, 1.0, 0.0], TAG).is_none(), "unpromoted B was evicted");
-		assert!(cache.lookup(&g, &[0.0, 0.0, 1.0], TAG).is_some(), "newest C present");
+		assert!(
+			cache.lookup(&g, &[1.0, 0.0, 0.0], TAG).is_some(),
+			"promoted A survived eviction"
+		);
+		assert!(
+			cache.lookup(&g, &[0.0, 1.0, 0.0], TAG).is_none(),
+			"unpromoted B was evicted"
+		);
+		assert!(
+			cache.lookup(&g, &[0.0, 0.0, 1.0], TAG).is_some(),
+			"newest C present"
+		);
 	}
 }

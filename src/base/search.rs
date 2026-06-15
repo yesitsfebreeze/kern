@@ -1,6 +1,6 @@
 use super::graph::GraphGnn;
 use super::hnsw::HnswHit;
-use super::types::{Reason, Entity};
+use super::types::{Entity, Reason};
 use super::util::cmp_rank;
 
 #[derive(Debug, Clone)]
@@ -192,11 +192,17 @@ mod tests {
 	}
 
 	fn even(id: &str) -> bool {
-		id.trim_start_matches('e').parse::<usize>().map(|n| n % 2 == 0).unwrap_or(false)
+		id.trim_start_matches('e')
+			.parse::<usize>()
+			.map(|n| n % 2 == 0)
+			.unwrap_or(false)
 	}
 
 	fn hh(id: &str, score: f64) -> HnswHit {
-		HnswHit { id: id.into(), score }
+		HnswHit {
+			id: id.into(),
+			score,
+		}
 	}
 
 	#[test]
@@ -210,18 +216,34 @@ mod tests {
 		let out = merge_hits(primary, gnn, 10);
 		let score_of = |id: &str| out.iter().find(|h| h.entity_id == id).map(|h| h.score);
 		// Blended, NOT overwritten by the raw 0.5 GNN score.
-		assert_eq!(score_of("z"), Some(CONTENT_BLEND * 0.0 + GNN_BLEND * 0.5), "zero-sim content still blends");
-		assert_eq!(score_of("n"), Some(CONTENT_BLEND * -0.4 + GNN_BLEND * 0.5), "negative-sim content still blends");
+		assert_eq!(
+			score_of("z"),
+			Some(CONTENT_BLEND * 0.0 + GNN_BLEND * 0.5),
+			"zero-sim content still blends"
+		);
+		assert_eq!(
+			score_of("n"),
+			Some(CONTENT_BLEND * -0.4 + GNN_BLEND * 0.5),
+			"negative-sim content still blends"
+		);
 	}
 
 	#[test]
 	fn merge_keeps_single_index_hits_and_blends_shared_positive() {
 		// content-only keeps content score; gnn-only keeps gnn score; shared blends.
-		let out = merge_hits(vec![hh("c", 0.9), hh("both", 0.8)], vec![hh("g", 0.7), hh("both", 0.6)], 10);
+		let out = merge_hits(
+			vec![hh("c", 0.9), hh("both", 0.8)],
+			vec![hh("g", 0.7), hh("both", 0.6)],
+			10,
+		);
 		let score_of = |id: &str| out.iter().find(|h| h.entity_id == id).map(|h| h.score);
 		assert_eq!(score_of("c"), Some(0.9), "content-only kept");
 		assert_eq!(score_of("g"), Some(0.7), "gnn-only kept");
-		assert_eq!(score_of("both"), Some(CONTENT_BLEND * 0.8 + GNN_BLEND * 0.6), "shared blends");
+		assert_eq!(
+			score_of("both"),
+			Some(CONTENT_BLEND * 0.8 + GNN_BLEND * 0.6),
+			"shared blends"
+		);
 	}
 
 	#[test]
@@ -264,15 +286,30 @@ mod tests {
 		// direct-entity paths and resolve via kern.refs -> ref_kern.entities.
 		let mut g = GraphGnn::new();
 		let mut kb = Kern::new("kb", "");
-		kb.entities.insert("real".into(), Entity { id: "real".into(), ..Default::default() });
+		kb.entities.insert(
+			"real".into(),
+			Entity {
+				id: "real".into(),
+				..Default::default()
+			},
+		);
 		let mut ka = Kern::new("ka", "");
-		ka.refs.insert("alias".into(), EntityRef { kern_id: "kb".into(), entity_id: "real".into() });
+		ka.refs.insert(
+			"alias".into(),
+			EntityRef {
+				kern_id: "kb".into(),
+				entity_id: "real".into(),
+			},
+		);
 		g.kerns.insert("kb".into(), kb);
 		g.kerns.insert("ka".into(), ka);
 
 		let (ent, kern_id) = find_entity(&g, "alias").expect("resolved via ref path");
 		assert_eq!(ent.id, "real", "ref resolves to the target entity");
-		assert_eq!(kern_id, "kb", "returns the entity's home kern, not the ref's");
+		assert_eq!(
+			kern_id, "kb",
+			"returns the entity's home kern, not the ref's"
+		);
 		// A bogus id hits none of the three paths -> None.
 		assert!(find_entity(&g, "nope").is_none());
 	}
@@ -283,10 +320,14 @@ mod tests {
 		// as the plain search, confirming the filtered path is a faithful superset.
 		let g = populated();
 		let q = vec![0.5, 0.5, 0.2];
-		let plain: std::collections::HashSet<String> =
-			search_all_unlocked(&g, &q, 10).into_iter().map(|h| h.entity_id).collect();
-		let filt: std::collections::HashSet<String> =
-			search_all_filtered(&g, &q, 10, &|_| true).into_iter().map(|h| h.entity_id).collect();
+		let plain: std::collections::HashSet<String> = search_all_unlocked(&g, &q, 10)
+			.into_iter()
+			.map(|h| h.entity_id)
+			.collect();
+		let filt: std::collections::HashSet<String> = search_all_filtered(&g, &q, 10, &|_| true)
+			.into_iter()
+			.map(|h| h.entity_id)
+			.collect();
 		assert_eq!(plain, filt, "always-true filter == unfiltered search");
 	}
 }

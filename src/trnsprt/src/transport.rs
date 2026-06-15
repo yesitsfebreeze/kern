@@ -48,10 +48,7 @@ impl ChildStdio {
 
 fn child_log_source(program: &str) -> String {
 	let path = std::path::Path::new(program);
-	let stem = path
-		.file_stem()
-		.and_then(|s| s.to_str())
-		.unwrap_or(program);
+	let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(program);
 	stem.to_string()
 }
 
@@ -107,14 +104,35 @@ mod tests {
 
 	#[test]
 	fn classify_child_log_level_is_case_insensitive_with_error_priority() {
-		assert!(matches!(classify_child_log_level("ERROR: boom"), Level::Error));
-		assert!(matches!(classify_child_log_level("Error happened"), Level::Error));
-		assert!(matches!(classify_child_log_level("an error: detail"), Level::Error));
-		assert!(matches!(classify_child_log_level("WARN: heads up"), Level::Warn));
-		assert!(matches!(classify_child_log_level("a Warning: x"), Level::Warn));
-		assert!(matches!(classify_child_log_level("just some info"), Level::Info));
+		assert!(matches!(
+			classify_child_log_level("ERROR: boom"),
+			Level::Error
+		));
+		assert!(matches!(
+			classify_child_log_level("Error happened"),
+			Level::Error
+		));
+		assert!(matches!(
+			classify_child_log_level("an error: detail"),
+			Level::Error
+		));
+		assert!(matches!(
+			classify_child_log_level("WARN: heads up"),
+			Level::Warn
+		));
+		assert!(matches!(
+			classify_child_log_level("a Warning: x"),
+			Level::Warn
+		));
+		assert!(matches!(
+			classify_child_log_level("just some info"),
+			Level::Info
+		));
 		// Error wins over warn when both appear.
-		assert!(matches!(classify_child_log_level("WARN then ERROR"), Level::Error));
+		assert!(matches!(
+			classify_child_log_level("WARN then ERROR"),
+			Level::Error
+		));
 	}
 
 	#[test]
@@ -134,7 +152,11 @@ mod tests {
 		#[cfg(windows)]
 		let mut t = ChildStdio::spawn(
 			"powershell",
-			&["-NoProfile", "-Command", "$l = [Console]::In.ReadLine(); [Console]::Out.WriteLine($l)"],
+			&[
+				"-NoProfile",
+				"-Command",
+				"$l = [Console]::In.ReadLine(); [Console]::Out.WriteLine($l)",
+			],
 		)
 		.expect("spawn powershell echo");
 
@@ -143,7 +165,11 @@ mod tests {
 
 		let mut line = String::new();
 		BufRead::read_line(&mut BufReader::new(t.reader()), &mut line).unwrap();
-		assert_eq!(line.trim_end(), "hello world", "stdin line echoed back on stdout");
+		assert_eq!(
+			line.trim_end(),
+			"hello world",
+			"stdin line echoed back on stdout"
+		);
 
 		t.kill().unwrap();
 	}

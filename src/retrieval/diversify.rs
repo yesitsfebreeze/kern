@@ -155,7 +155,10 @@ mod tests {
 		dedup_by_section(&cfg, &mut results);
 		let ids: Vec<&str> = results.iter().map(|r| r.entity.id.as_str()).collect();
 		assert!(ids.contains(&"b"), "highest in section kept: {ids:?}");
-		assert!(!ids.contains(&"a"), "lower in same section dropped: {ids:?}");
+		assert!(
+			!ids.contains(&"a"),
+			"lower in same section dropped: {ids:?}"
+		);
 		assert!(ids.contains(&"c"), "distinct section kept: {ids:?}");
 		assert_eq!(results.len(), 2);
 	}
@@ -165,7 +168,11 @@ mod tests {
 		let cfg = RetrievalConfig::default();
 		let mut results = vec![sect("a", "", 0.1), sect("b", "", 0.2)];
 		dedup_by_section(&cfg, &mut results);
-		assert_eq!(results.len(), 2, "empty-section entries are never collapsed");
+		assert_eq!(
+			results.len(),
+			2,
+			"empty-section entries are never collapsed"
+		);
 	}
 
 	#[test]
@@ -182,7 +189,11 @@ mod tests {
 		];
 		dedup_by_section(&cfg, &mut results);
 		let ids: Vec<&str> = results.iter().map(|r| r.entity.id.as_str()).collect();
-		assert_eq!(ids, vec!["first", "second", "third"], "survivors keep original order");
+		assert_eq!(
+			ids,
+			vec!["first", "second", "third"],
+			"survivors keep original order"
+		);
 	}
 
 	#[test]
@@ -230,8 +241,14 @@ mod tests {
 
 		assert_eq!(results.len(), 3, "MMR must shrink to max_deliver_results");
 		let ids: Vec<&str> = results.iter().map(|r| r.entity.id.as_str()).collect();
-		assert!(ids.contains(&"distinctB"), "diverse item B selected: {ids:?}");
-		assert!(ids.contains(&"distinctC"), "diverse item C selected: {ids:?}");
+		assert!(
+			ids.contains(&"distinctB"),
+			"diverse item B selected: {ids:?}"
+		);
+		assert!(
+			ids.contains(&"distinctC"),
+			"diverse item C selected: {ids:?}"
+		);
 		let dups = ids.iter().filter(|id| id.starts_with("dup")).count();
 		assert_eq!(dups, 1, "only one near-duplicate should survive: {ids:?}");
 	}
@@ -259,7 +276,11 @@ mod tests {
 		};
 		mmr(&cfg, &q, &mut results);
 		let ids: Vec<&str> = results.iter().map(|r| r.entity.id.as_str()).collect();
-		assert_eq!(ids, vec!["a", "e", "c"], "pure-relevance order, top 3 by cosine");
+		assert_eq!(
+			ids,
+			vec!["a", "e", "c"],
+			"pure-relevance order, top 3 by cosine"
+		);
 	}
 
 	/// The pre-optimization MMR body, kept verbatim as a reference oracle. It
@@ -332,7 +353,7 @@ mod tests {
 
 		for trial in 0..200u32 {
 			let dim = 2 + (next() % 4) as usize; // 2..=5
-            let n = 1 + (next() % 40) as usize; // 1..=40
+			let n = 1 + (next() % 40) as usize; // 1..=40
 			let q: Vec<f64> = if next() % 11 == 0 {
 				Vec::new() // exercise the empty-query score-fallback path
 			} else {
@@ -361,7 +382,10 @@ mod tests {
 			mmr_reference(&cfg, &q, &mut b);
 			let ga: Vec<&str> = a.iter().map(|r| r.entity.id.as_str()).collect();
 			let gb: Vec<&str> = b.iter().map(|r| r.entity.id.as_str()).collect();
-			assert_eq!(ga, gb, "trial {trial}: optimized mmr diverged from reference");
+			assert_eq!(
+				ga, gb,
+				"trial {trial}: optimized mmr diverged from reference"
+			);
 		}
 	}
 

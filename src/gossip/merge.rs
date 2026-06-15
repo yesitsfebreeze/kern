@@ -95,7 +95,10 @@ pub fn trimmed_mean_merge_hits(
 	let mut acc: HashMap<String, Vec<f64>> = HashMap::new();
 	for list in per_peer {
 		for hit in list.iter() {
-			acc.entry(hit.entity_id.clone()).or_default().push(hit.score);
+			acc
+				.entry(hit.entity_id.clone())
+				.or_default()
+				.push(hit.score);
 		}
 	}
 	let mut out: Vec<EntityHit> = acc
@@ -109,7 +112,10 @@ pub fn trimmed_mean_merge_hits(
 					Some(finite.iter().sum::<f64>() / finite.len() as f64)
 				}
 			})?;
-			Some(EntityHit { entity_id: id, score: merged })
+			Some(EntityHit {
+				entity_id: id,
+				score: merged,
+			})
 		})
 		.collect();
 	out.sort_by(|a, b| {
@@ -129,7 +135,10 @@ mod tests {
 	use super::*;
 
 	fn hit(id: &str, score: f64) -> EntityHit {
-		EntityHit { entity_id: id.into(), score }
+		EntityHit {
+			entity_id: id.into(),
+			score,
+		}
 	}
 
 	#[test]
@@ -163,7 +172,10 @@ mod tests {
 		let per: Vec<&[EntityHit]> = vec![&a, &b];
 		let out = trimmed_mean_merge_hits(&per, 0.0, 10);
 		assert_eq!(out.len(), 1);
-		assert!((out[0].score - 0.5).abs() < 1e-9, "trim 0 -> plain mean of 0.4, 0.6");
+		assert!(
+			(out[0].score - 0.5).abs() < 1e-9,
+			"trim 0 -> plain mean of 0.4, 0.6"
+		);
 	}
 
 	// ---- online_softmax_merge_hits ------------------------------------------
@@ -183,7 +195,11 @@ mod tests {
 		let lists: Vec<&[EntityHit]> = vec![&a];
 		let out = online_softmax_merge_hits(&lists, 10);
 		let ids: Vec<&str> = out.iter().map(|h| h.entity_id.as_str()).collect();
-		assert_eq!(ids, vec!["y", "z", "x"], "single observation scores unchanged, sorted desc");
+		assert_eq!(
+			ids,
+			vec!["y", "z", "x"],
+			"single observation scores unchanged, sorted desc"
+		);
 	}
 
 	#[test]
@@ -196,7 +212,10 @@ mod tests {
 		let out = online_softmax_merge_hits(&lists, 10);
 		assert_eq!(out[0].entity_id, "x", "corroborated hit ranks first");
 		assert!((out[0].score - (0.5 + std::f64::consts::LN_2)).abs() < 1e-9);
-		assert!((out[1].score - 0.5).abs() < 1e-9, "y seen once is unchanged");
+		assert!(
+			(out[1].score - 0.5).abs() < 1e-9,
+			"y seen once is unchanged"
+		);
 	}
 
 	#[test]

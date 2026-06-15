@@ -469,7 +469,7 @@ impl Store {
 		}
 		// Over cap: decode all to read created_at, keep the newest `max`.
 		let mut rows: Vec<(String, Entity)> = self.scan(self.cold)?;
-		rows.sort_by(|a, b| b.1.created_at.cmp(&a.1.created_at));
+		rows.sort_by_key(|r| std::cmp::Reverse(r.1.created_at));
 		let drop_ids: Vec<String> = rows.into_iter().skip(max).map(|(id, _)| id).collect();
 		let mut wtxn = self.env.write_txn()?;
 		for id in &drop_ids {
@@ -695,9 +695,15 @@ mod tests {
 		let be = &back.entities["e1"];
 		assert_eq!(be.vector.len(), 4, "vector recovered");
 		for (got, want) in be.vector.iter().zip([0.1, -0.2, 0.3, 0.4]) {
-			assert!((got - want).abs() < 0.02, "int8 within tolerance: {got} vs {want}");
+			assert!(
+				(got - want).abs() < 0.02,
+				"int8 within tolerance: {got} vs {want}"
+			);
 		}
-		assert!(be.gnn_vector.is_empty(), "gnn_vector is dropped, not persisted");
+		assert!(
+			be.gnn_vector.is_empty(),
+			"gnn_vector is dropped, not persisted"
+		);
 		assert_eq!(be.heat, 1.0, "non-vector fields survive");
 		assert_eq!(be.text(), "a fact");
 	}
@@ -710,7 +716,10 @@ mod tests {
 		e.vector = Vec::new();
 		let k = kern_with("k", e);
 		let sk = StoredKern::from_kern(&k);
-		assert!(sk.entity_vecs.is_empty(), "no side-map entry for an empty vector");
+		assert!(
+			sk.entity_vecs.is_empty(),
+			"no side-map entry for an empty vector"
+		);
 		let back = sk.into_kern();
 		assert!(!back.entities["e1"].has_vector());
 	}
@@ -727,7 +736,8 @@ mod tests {
 		kerns.insert("root".to_string(), Kern::new("root", ""));
 		kerns.insert("k".to_string(), kern_with("k", e));
 
-		s.save_all_kerns(&kerns, "net-123", QuantizationMode::Int8).unwrap();
+		s.save_all_kerns(&kerns, "net-123", QuantizationMode::Int8)
+			.unwrap();
 		let (loaded, net, qm) = s.load_all_kerns().unwrap();
 
 		assert_eq!(net, "net-123");
@@ -745,10 +755,12 @@ mod tests {
 		let mut kerns = HashMap::new();
 		kerns.insert("a".to_string(), Kern::new("a", ""));
 		kerns.insert("b".to_string(), Kern::new("b", ""));
-		s.save_all_kerns(&kerns, "n", QuantizationMode::None).unwrap();
+		s.save_all_kerns(&kerns, "n", QuantizationMode::None)
+			.unwrap();
 
 		kerns.remove("b");
-		s.save_all_kerns(&kerns, "n", QuantizationMode::None).unwrap();
+		s.save_all_kerns(&kerns, "n", QuantizationMode::None)
+			.unwrap();
 
 		let (loaded, _, _) = s.load_all_kerns().unwrap();
 		assert!(loaded.contains_key("a"));
@@ -770,14 +782,16 @@ mod tests {
 				e.vector = (0..256).map(|j| ((i + j) as f64).sin()).collect();
 				kerns.insert(format!("k{i}"), kern_with(&format!("k{i}"), e));
 			}
-			s.save_all_kerns(&kerns, "n", QuantizationMode::Int8).unwrap();
+			s.save_all_kerns(&kerns, "n", QuantizationMode::Int8)
+				.unwrap();
 			let bloated = s.data_file_len();
 
 			// Reap down to just root + one survivor and persist the deletion.
 			let mut small = HashMap::new();
 			small.insert("root".to_string(), Kern::new("root", ""));
 			small.insert("k0".to_string(), kerns.remove("k0").unwrap());
-			s.save_all_kerns(&small, "n", QuantizationMode::Int8).unwrap();
+			s.save_all_kerns(&small, "n", QuantizationMode::Int8)
+				.unwrap();
 			// The delete frees pages INSIDE the file but does not return them to the
 			// OS, so the file stays at (essentially) its high-water mark — that is the
 			// whole bug. It must remain far larger than the handful of live rows need.
@@ -789,14 +803,21 @@ mod tests {
 		} // env dropped so the offline compactor can swap the file
 
 		let (old_len, new_len) = compact_dir(&dir).unwrap();
-		assert!(new_len < old_len, "compaction shrinks the file: {old_len} -> {new_len}");
+		assert!(
+			new_len < old_len,
+			"compaction shrinks the file: {old_len} -> {new_len}"
+		);
 
 		// Live data survives the rewrite.
 		let s2 = Store::open(&dir).unwrap();
 		let (loaded, _, _) = s2.load_all_kerns().unwrap();
 		assert!(loaded.contains_key("root"), "root survives compaction");
 		assert!(loaded.contains_key("k0"), "survivor survives compaction");
-		assert_eq!(loaded.len(), 2, "only the live rows remain after compaction");
+		assert_eq!(
+			loaded.len(),
+			2,
+			"only the live rows remain after compaction"
+		);
 	}
 
 	#[test]
@@ -816,17 +837,25 @@ mod tests {
 	fn corrupt_kern_value_is_skipped() {
 		let d = tmp();
 		let s = Store::open(&dir_of(&d)).unwrap();
-		s.save_one_kern(&kern_with("good", mk_entity("e", "ok", 0.0, EntityKind::Claim)))
-			.unwrap();
+		s.save_one_kern(&kern_with(
+			"good",
+			mk_entity("e", "ok", 0.0, EntityKind::Claim),
+		))
+		.unwrap();
 		// Inject a corrupt raw value under a sibling key.
 		{
 			let mut wtxn = s.env.write_txn().unwrap();
-			s.kern.put(&mut wtxn, "bad", b"not a valid value".as_slice()).unwrap();
+			s.kern
+				.put(&mut wtxn, "bad", b"not a valid value".as_slice())
+				.unwrap();
 			wtxn.commit().unwrap();
 		}
 		let (loaded, _, _) = s.load_all_kerns().unwrap();
 		assert!(loaded.contains_key("good"), "valid kern loads");
-		assert!(!loaded.contains_key("bad"), "corrupt kern skipped, not fatal");
+		assert!(
+			!loaded.contains_key("bad"),
+			"corrupt kern skipped, not fatal"
+		);
 	}
 
 	// ---- cold tier ----
@@ -845,8 +874,10 @@ mod tests {
 	fn cold_latest_wins() {
 		let d = tmp();
 		let s = Store::open(&dir_of(&d)).unwrap();
-		s.cold_spill(&mk_entity("x", "v1", 1.0, EntityKind::Claim)).unwrap();
-		s.cold_spill(&mk_entity("x", "v2", 5.0, EntityKind::Claim)).unwrap();
+		s.cold_spill(&mk_entity("x", "v1", 1.0, EntityKind::Claim))
+			.unwrap();
+		s.cold_spill(&mk_entity("x", "v2", 5.0, EntityKind::Claim))
+			.unwrap();
 		let got = s.cold_get("x").unwrap().unwrap();
 		assert_eq!(got.heat, 5.0, "a put overwrites — latest wins, no dup rows");
 	}
@@ -904,6 +935,9 @@ mod tests {
 
 		let hits = s.cold_search(&[1.0, 0.0], 1).unwrap();
 		assert_eq!(hits.len(), 1);
-		assert_eq!(hits[0].0.id, "a", "equal-cosine tie resolved to id-ascending winner");
+		assert_eq!(
+			hits[0].0.id, "a",
+			"equal-cosine tie resolved to id-ascending winner"
+		);
 	}
 }

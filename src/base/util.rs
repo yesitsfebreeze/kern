@@ -54,7 +54,12 @@ pub fn cmp_partial<T: PartialOrd>(a: &T, b: &T) -> std::cmp::Ordering {
 /// `fuse::rrf`, `pagerank`, `search::merge_hits`, `LexicalIndex::search`, and
 /// `Store::cold_search`. Adding the tiebreak here once stops new ranking sites
 /// from silently regressing to nondeterministic source-order ties.
-pub fn cmp_rank<S: PartialOrd>(a_score: S, a_id: &str, b_score: S, b_id: &str) -> std::cmp::Ordering {
+pub fn cmp_rank<S: PartialOrd>(
+	a_score: S,
+	a_id: &str,
+	b_score: S,
+	b_id: &str,
+) -> std::cmp::Ordering {
 	cmp_partial(&b_score, &a_score).then_with(|| a_id.cmp(b_id))
 }
 
@@ -133,7 +138,11 @@ mod tests {
 		let xs: Vec<f64> = (1..=10).map(|i| i as f64).collect();
 		assert_eq!(percentile_sorted(&xs, 0.0), Some(1.0), "p<=0 -> first");
 		assert_eq!(percentile_sorted(&xs, 1.0), Some(10.0), "p>=1 -> last");
-		assert_eq!(percentile_sorted(&xs, 0.5), Some(5.0), "ceil(0.5*10)=5 -> xs[4]");
+		assert_eq!(
+			percentile_sorted(&xs, 0.5),
+			Some(5.0),
+			"ceil(0.5*10)=5 -> xs[4]"
+		);
 		assert_eq!(percentile_sorted(&xs, 0.95), Some(10.0));
 		assert_eq!(percentile_sorted::<f64>(&[], 0.5), None, "empty -> None");
 		// Generic over the element type (u128 nanos, the locomo latency case).
@@ -163,7 +172,9 @@ mod tests {
 	fn content_hash_is_deterministic_64_char_lowercase_hex() {
 		let h = content_hash("kern");
 		assert_eq!(h.len(), 64, "sha256 -> 32 bytes -> 64 hex chars");
-		assert!(h.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+		assert!(h
+			.bytes()
+			.all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
 		assert_eq!(h, content_hash("kern"), "deterministic");
 		assert_ne!(h, content_hash("kern2"), "distinct inputs differ");
 	}
@@ -173,7 +184,7 @@ mod tests {
 		assert_eq!(short_id("0123456789abcdef"), "0123456789ab"); // 16 -> first 12
 		assert_eq!(short_id("abc"), "abc"); // shorter than 12 -> whole
 		assert_eq!(short_id("0123456789ab"), "0123456789ab"); // exactly 12 -> whole
-		// Multibyte: slicing must land on a char boundary, never panic.
+																												// Multibyte: slicing must land on a char boundary, never panic.
 		let s = short_id("ααααααααααααββ"); // each α is 2 bytes
 		assert_eq!(s.chars().count(), 12);
 	}
@@ -181,7 +192,11 @@ mod tests {
 	#[test]
 	fn truncate_appends_ellipsis_only_when_cut() {
 		assert_eq!(truncate("hello", 10), "hello", "under max -> unchanged");
-		assert_eq!(truncate("hello world", 5), "hello...", "over max -> cut + ellipsis");
+		assert_eq!(
+			truncate("hello world", 5),
+			"hello...",
+			"over max -> cut + ellipsis"
+		);
 		// Char-boundary safe on multibyte input.
 		assert_eq!(truncate("αβγδε", 3), "αβγ...");
 	}
@@ -192,7 +207,11 @@ mod tests {
 		assert_eq!(cmp_partial(&1.0, &2.0), Ordering::Less);
 		assert_eq!(cmp_partial(&2.0, &1.0), Ordering::Greater);
 		assert_eq!(cmp_partial(&1.0, &1.0), Ordering::Equal);
-		assert_eq!(cmp_partial(&f64::NAN, &1.0), Ordering::Equal, "NaN is incomparable -> Equal");
+		assert_eq!(
+			cmp_partial(&f64::NAN, &1.0),
+			Ordering::Equal,
+			"NaN is incomparable -> Equal"
+		);
 	}
 
 	#[test]
@@ -208,7 +227,10 @@ mod tests {
 		// Version nibble: first char of the 3rd group is '4'.
 		assert_eq!(&groups[2][0..1], "4", "RFC4122 version 4");
 		// Variant: first char of the 4th group is one of 8/9/a/b.
-		assert!(matches!(&groups[3][0..1], "8" | "9" | "a" | "b"), "RFC4122 variant bits");
+		assert!(
+			matches!(&groups[3][0..1], "8" | "9" | "a" | "b"),
+			"RFC4122 variant bits"
+		);
 		assert_ne!(uuid_v4(), uuid_v4(), "two mints differ (random)");
 	}
 

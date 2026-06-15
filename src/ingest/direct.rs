@@ -99,7 +99,14 @@ pub async fn drain_direct_once(
 			}
 		};
 		let outcome = worker
-			.run(job.text, job.source, job.kind, job.descriptor, job.confidence, cfg.clone())
+			.run(
+				job.text,
+				job.source,
+				job.kind,
+				job.descriptor,
+				job.confidence,
+				cfg.clone(),
+			)
 			.await;
 		if matches!(outcome.status, OutcomeStatus::Failed) {
 			tracing::warn!(
@@ -127,7 +134,10 @@ mod tests {
 	fn job(text: &str) -> DirectJob {
 		DirectJob {
 			text: text.to_string(),
-			source: Source::Inline { hash: "obj-1".into(), section: String::new() },
+			source: Source::Inline {
+				hash: "obj-1".into(),
+				section: String::new(),
+			},
 			kind: EntityKind::Claim,
 			descriptor: "audit-finding".into(),
 			confidence: 0.7,
@@ -141,7 +151,11 @@ mod tests {
 
 		let id1 = spool_direct(&direct, &job("a durable fact")).expect("spooled");
 		let id2 = spool_direct(&direct, &job("a durable fact")).expect("re-spool ok");
-		assert_eq!(id1, util::content_hash("a durable fact"), "doc id is the content hash");
+		assert_eq!(
+			id1,
+			util::content_hash("a durable fact"),
+			"doc id is the content hash"
+		);
 		assert_eq!(id1, id2, "same text -> same file, idempotent");
 
 		let files: Vec<_> = std::fs::read_dir(&direct)
@@ -182,7 +196,10 @@ mod tests {
 		let direct = dir.path().join("direct");
 		let doc_id = spool_direct(&direct, &job("the spawn gate shipped today")).expect("spooled");
 
-		let cfg = crate::ingest::Config { dedup_threshold: 0.95, ..Default::default() };
+		let cfg = crate::ingest::Config {
+			dedup_threshold: 0.95,
+			..Default::default()
+		};
 		let archived = drain_direct_once(&direct, &worker, &cfg).await;
 
 		assert_eq!(archived, 1, "the job committed -> archived");
@@ -192,7 +209,10 @@ mod tests {
 		);
 		let g = crate::base::locks::read_recovered(&graph);
 		let total: usize = g.all().iter().map(|k| k.entities.len()).sum();
-		assert!(total > 0, "the payload flowed through the worker into the graph");
+		assert!(
+			total > 0,
+			"the payload flowed through the worker into the graph"
+		);
 
 		server.abort();
 	}
@@ -210,7 +230,10 @@ mod tests {
 		let direct = dir.path().join("direct");
 		let doc_id = spool_direct(&direct, &job("must survive the outage")).expect("spooled");
 
-		let cfg = crate::ingest::Config { dedup_threshold: 0.95, ..Default::default() };
+		let cfg = crate::ingest::Config {
+			dedup_threshold: 0.95,
+			..Default::default()
+		};
 		let archived = tokio::time::timeout(
 			Duration::from_secs(30),
 			drain_direct_once(&direct, &worker, &cfg),

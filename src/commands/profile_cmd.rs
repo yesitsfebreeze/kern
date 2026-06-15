@@ -125,7 +125,10 @@ pub(super) async fn cmd_profile(cfg: &crate::config::Config, text: &str, no_llm:
 		cfg.capture.digest_min_trust,
 		cfg.capture.digest_token_budget,
 	);
-	profiles.push(flat(&format!("digest build ({} bytes)", digest.len()), ms(t)));
+	profiles.push(flat(
+		&format!("digest build ({} bytes)", digest.len()),
+		ms(t),
+	));
 
 	println!("kern profile — {kerns} kerns, {entities} entities, query: {text:?}");
 	println!();

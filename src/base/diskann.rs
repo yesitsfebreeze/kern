@@ -402,7 +402,8 @@ impl DiskIndex {
 		let neighbors = |i: u32| self.neighbors_at(i);
 		let (mut beam, _) = greedy(self.entry, beam_l, &mut dist, &neighbors);
 		beam.truncate(k);
-		beam.into_iter()
+		beam
+			.into_iter()
 			.map(|(d, i)| (self.ids[i as usize].clone(), d))
 			.collect()
 	}
@@ -413,7 +414,8 @@ impl DiskIndex {
 	/// in-RAM hits fuse in one ranking (see `base::search::merge_hits`). Nearest
 	/// first. The `f32` on-disk distance is widened to `f64` to match `HnswHit`.
 	pub fn search_hits(&self, query: &[f32], k: usize, search_l: usize) -> Vec<HnswHit> {
-		self.search(query, k, search_l)
+		self
+			.search(query, k, search_l)
 			.into_iter()
 			.map(|(id, dist)| HnswHit {
 				id,
@@ -439,7 +441,8 @@ impl DiskIndex {
 			return Vec::new();
 		}
 		let want = search_l.max(k);
-		self.search(query, want, want)
+		self
+			.search(query, want, want)
 			.into_iter()
 			.filter(|(id, _)| keep(id))
 			.take(k)
@@ -543,7 +546,11 @@ mod tests {
 		let hits = idx.search_hits(&items[0].1, 5, 64);
 		assert_eq!(hits.len(), 5);
 		assert_eq!(hits[0].id, "e0", "indexed point finds itself first");
-		assert!(hits[0].score > 0.99, "self-similarity ~1.0, got {}", hits[0].score);
+		assert!(
+			hits[0].score > 0.99,
+			"self-similarity ~1.0, got {}",
+			hits[0].score
+		);
 		// Scores are non-increasing (distances were non-decreasing).
 		for w in hits.windows(2) {
 			assert!(w[0].score >= w[1].score, "scores must descend: {:?}", hits);
@@ -568,11 +575,17 @@ mod tests {
 		let q = &items[0].1;
 		let filt = idx.search_hits_filtered(q, 10, 128, &even);
 		assert!(!filt.is_empty(), "filtered search finds matches");
-		assert!(filt.iter().all(|h| even(&h.id)), "every id passes the predicate");
+		assert!(
+			filt.iter().all(|h| even(&h.id)),
+			"every id passes the predicate"
+		);
 
 		// Filtered ids are a subset of a wide unfiltered candidate set.
-		let wide: HashSet<String> =
-			idx.search_hits(q, 128, 128).into_iter().map(|h| h.id).collect();
+		let wide: HashSet<String> = idx
+			.search_hits(q, 128, 128)
+			.into_iter()
+			.map(|h| h.id)
+			.collect();
 		assert!(
 			filt.iter().all(|h| wide.contains(&h.id)),
 			"filtered hits are drawn from the unfiltered candidate pool"

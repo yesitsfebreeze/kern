@@ -115,7 +115,13 @@ mod tests {
 		assert_eq!(o.status, OutcomeStatus::Failed);
 		assert!(o.doc_id.is_empty(), "no document committed");
 		assert_eq!(
-			(o.total_chunks, o.embedded_chunks, o.failed_chunks, o.transient_failures, o.permanent_failures),
+			(
+				o.total_chunks,
+				o.embedded_chunks,
+				o.failed_chunks,
+				o.transient_failures,
+				o.permanent_failures
+			),
 			(0, 0, 0, 0, 0),
 			"all counters zero on a wholly-failed outcome"
 		);

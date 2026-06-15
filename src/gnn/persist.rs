@@ -1,5 +1,3 @@
-
-
 use crate::gnn::model::Model;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -114,7 +112,10 @@ pub fn save_weights(model: &Model, path: impl AsRef<std::path::Path>) -> Result<
 	Ok(())
 }
 
-pub fn load_weights(model: &mut Model, path: impl AsRef<std::path::Path>) -> Result<(), PersistError> {
+pub fn load_weights(
+	model: &mut Model,
+	path: impl AsRef<std::path::Path>,
+) -> Result<(), PersistError> {
 	let data = std::fs::read(path)?;
 	unmarshal_weights(model, &data)
 }
@@ -129,7 +130,9 @@ mod tests {
 	fn small_model(seed: u64) -> Model {
 		let mut rng = StdRng::seed_from_u64(seed);
 		Model::new(
-			vec![Box::new(GCNLayer::with_rng(4, 3, None, false, 0.0, &mut rng))],
+			vec![Box::new(GCNLayer::with_rng(
+				4, 3, None, false, 0.0, &mut rng,
+			))],
 			None,
 		)
 	}
@@ -147,10 +150,16 @@ mod tests {
 		let sp = src.parameters();
 		let dp = dst.parameters();
 		assert_eq!(sp.len(), dp.len(), "parameter count preserved");
-		assert!(!sp.is_empty(), "the model actually has parameters to compare");
+		assert!(
+			!sp.is_empty(),
+			"the model actually has parameters to compare"
+		);
 		for (a, b) in sp.iter().zip(&dp) {
 			assert_eq!((a.rows, a.cols), (b.rows, b.cols), "shape preserved");
-			assert_eq!(a.data, b.data, "every value is byte-identical after the round trip");
+			assert_eq!(
+				a.data, b.data,
+				"every value is byte-identical after the round trip"
+			);
 		}
 	}
 
@@ -158,7 +167,10 @@ mod tests {
 	fn unmarshal_rejects_a_future_version_before_checking_params() {
 		// Empty params would also be a count mismatch — but the version guard runs
 		// first, so this surfaces as VersionMismatch.
-		let wf = WeightFile { version: WEIGHT_FILE_VERSION + 1, params: Vec::new() };
+		let wf = WeightFile {
+			version: WEIGHT_FILE_VERSION + 1,
+			params: Vec::new(),
+		};
 		let bytes = bincode::serde::encode_to_vec(&wf, bincode_cfg()).unwrap();
 		let mut model = small_model(1);
 		let err = unmarshal_weights(&mut model, &bytes).unwrap_err();
@@ -191,7 +203,10 @@ mod tests {
 				},
 			})
 			.collect();
-		let wf = WeightFile { version: WEIGHT_FILE_VERSION, params: records };
+		let wf = WeightFile {
+			version: WEIGHT_FILE_VERSION,
+			params: records,
+		};
 		let bytes = bincode::serde::encode_to_vec(&wf, bincode_cfg()).unwrap();
 
 		let mut dst = small_model(2);
@@ -204,10 +219,16 @@ mod tests {
 
 	#[test]
 	fn unmarshal_rejects_a_param_count_mismatch() {
-		let wf = WeightFile { version: WEIGHT_FILE_VERSION, params: Vec::new() };
+		let wf = WeightFile {
+			version: WEIGHT_FILE_VERSION,
+			params: Vec::new(),
+		};
 		let bytes = bincode::serde::encode_to_vec(&wf, bincode_cfg()).unwrap();
 		let mut model = small_model(1);
 		let err = unmarshal_weights(&mut model, &bytes).unwrap_err();
-		assert!(matches!(err, PersistError::CountMismatch { .. }), "got {err:?}");
+		assert!(
+			matches!(err, PersistError::CountMismatch { .. }),
+			"got {err:?}"
+		);
 	}
 }

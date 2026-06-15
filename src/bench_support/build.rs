@@ -79,8 +79,18 @@ fn seed_similarity_edges(g: &mut GraphGnn, root_id: &str, trace: &Trace) {
 			let from = ids[i].clone();
 			let to = ids[j].clone();
 			let kern = g.kerns.get(root_id).expect("root kern exists");
-			let from_vec = kern.entities.get(&from).expect("inserted above").vector.clone();
-			let to_vec = kern.entities.get(&to).expect("inserted above").vector.clone();
+			let from_vec = kern
+				.entities
+				.get(&from)
+				.expect("inserted above")
+				.vector
+				.clone();
+			let to_vec = kern
+				.entities
+				.get(&to)
+				.expect("inserted above")
+				.vector
+				.clone();
 			let score = cosine(&from_vec, &to_vec);
 			if score < SIMILARITY_EDGE_FLOOR {
 				continue;
@@ -115,15 +125,26 @@ mod tests {
 		let trace = Trace {
 			name: "t".into(),
 			docs: vec![
-				TraceDoc { id: "go_concurrency".into(), text: "Go goroutines channels select concurrency primitives".into(), kind: None },
-				TraceDoc { id: "rust_ownership".into(), text: "Rust ownership borrow checker memory safety".into(), kind: None },
+				TraceDoc {
+					id: "go_concurrency".into(),
+					text: "Go goroutines channels select concurrency primitives".into(),
+					kind: None,
+				},
+				TraceDoc {
+					id: "rust_ownership".into(),
+					text: "Rust ownership borrow checker memory safety".into(),
+					kind: None,
+				},
 			],
 			queries: vec![],
 		};
 		let g = build_graph(&trace);
 		let lex = g.lexical().expect("graph carries a lexical index");
 		let hits = lex.search("go goroutines channels", 5);
-		assert!(!hits.is_empty(), "the lexical index is populated, not empty");
+		assert!(
+			!hits.is_empty(),
+			"the lexical index is populated, not empty"
+		);
 		assert_eq!(
 			hits[0].entity_id, "go_concurrency",
 			"strong token overlap must rank first, got {hits:?}"

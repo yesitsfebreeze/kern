@@ -111,7 +111,10 @@ pub(crate) fn build_day_inputs(
 	let events = gather_day_journal(history, day)?;
 	let sessions = session_ids(&events);
 	let entities = resolve_entities(graph, &touched_entity_ids(&events));
-	let tool_calls = events.iter().filter(|e| matches!(e.kind, Kind::ToolCall)).count();
+	let tool_calls = events
+		.iter()
+		.filter(|e| matches!(e.kind, Kind::ToolCall))
+		.count();
 	Ok(DayInputs {
 		day: day.to_string(),
 		sessions,
@@ -181,31 +184,70 @@ mod tests {
 		let h = History::open_in_memory().unwrap();
 		h.bulk_insert(&[
 			Entry::new(
-				Kind::ForkOpen { fork_id: "f".into(), parent: None },
+				Kind::ForkOpen {
+					fork_id: "f".into(),
+					parent: None,
+				},
 				"f",
 				serde_json::json!({ "fork_id": "f" }),
 			),
 			Entry::new(Kind::Log, "noise", serde_json::Value::Null),
-			Entry::new(Kind::Milestone, "m", serde_json::json!({ "text": "shipped" })),
+			Entry::new(
+				Kind::Milestone,
+				"m",
+				serde_json::json!({ "text": "shipped" }),
+			),
 		])
 		.unwrap();
 		// Entries are stamped now() -> stored under today's archive day.
 		let events = gather_day_journal(&h, &journal::today()).unwrap();
-		assert!(events.iter().all(|e| !matches!(e.kind, Kind::Log)), "Log excluded");
+		assert!(
+			events.iter().all(|e| !matches!(e.kind, Kind::Log)),
+			"Log excluded"
+		);
 		assert_eq!(events.len(), 2, "ForkOpen + Milestone kept");
 	}
 
 	#[test]
 	fn touched_and_session_ids_dedupe_first_seen() {
 		let evs = vec![
-			Entry::new(Kind::ForkOpen { fork_id: "a".into(), parent: None }, "a", serde_json::json!({})),
-			Entry::new(Kind::ForkOpen { fork_id: "a".into(), parent: None }, "a", serde_json::json!({})),
-			Entry::new(Kind::EntityTouched, "e1", serde_json::json!({ "entity_id": "e1" })),
-			Entry::new(Kind::EntityTouched, "e1", serde_json::json!({ "entity_id": "e1" })),
-			Entry::new(Kind::EntityTouched, "e2", serde_json::json!({ "entity_id": "e2" })),
+			Entry::new(
+				Kind::ForkOpen {
+					fork_id: "a".into(),
+					parent: None,
+				},
+				"a",
+				serde_json::json!({}),
+			),
+			Entry::new(
+				Kind::ForkOpen {
+					fork_id: "a".into(),
+					parent: None,
+				},
+				"a",
+				serde_json::json!({}),
+			),
+			Entry::new(
+				Kind::EntityTouched,
+				"e1",
+				serde_json::json!({ "entity_id": "e1" }),
+			),
+			Entry::new(
+				Kind::EntityTouched,
+				"e1",
+				serde_json::json!({ "entity_id": "e1" }),
+			),
+			Entry::new(
+				Kind::EntityTouched,
+				"e2",
+				serde_json::json!({ "entity_id": "e2" }),
+			),
 		];
 		assert_eq!(session_ids(&evs), vec!["a".to_string()]);
-		assert_eq!(touched_entity_ids(&evs), vec!["e1".to_string(), "e2".to_string()]);
+		assert_eq!(
+			touched_entity_ids(&evs),
+			vec!["e1".to_string(), "e2".to_string()]
+		);
 	}
 
 	#[test]
@@ -218,12 +260,20 @@ mod tests {
 			statements: vec!["kern is standalone".into()],
 			..Default::default()
 		};
-		g.kerns.get_mut(&root_id).unwrap().entities.insert("e1".into(), ent);
+		g.kerns
+			.get_mut(&root_id)
+			.unwrap()
+			.entities
+			.insert("e1".into(), ent);
 
 		let resolved = resolve_entities(&g, &["e1".to_string(), "missing".to_string()]);
 		assert_eq!(
 			resolved,
-			vec![("e1".to_string(), "fact".to_string(), "kern is standalone".to_string())],
+			vec![(
+				"e1".to_string(),
+				"fact".to_string(),
+				"kern is standalone".to_string()
+			)],
 			"resolves present id; skips missing",
 		);
 	}
@@ -236,9 +286,15 @@ mod tests {
 			entities: vec![("e1".into(), "fact".into(), "kern is standalone".into())],
 			tool_calls: 3,
 		};
-		let md = render_markdown(&inputs, &|_p: &str| "Big day: shipped the compactor.".to_string()).unwrap();
+		let md = render_markdown(&inputs, &|_p: &str| {
+			"Big day: shipped the compactor.".to_string()
+		})
+		.unwrap();
 		assert!(md.starts_with("# 2026-06-12"), "dated H1");
-		assert!(md.contains("Big day: shipped the compactor."), "LLM highlight");
+		assert!(
+			md.contains("Big day: shipped the compactor."),
+			"LLM highlight"
+		);
 		assert!(md.contains("[[kern is standalone]]"), "entity wikilink");
 		assert!(md.contains("- fork-a"), "session listed");
 		assert!(md.contains("tool calls: 3"));
@@ -246,15 +302,29 @@ mod tests {
 
 	#[test]
 	fn render_markdown_defers_when_llm_empty() {
-		let inputs = DayInputs { day: "2026-06-12".into(), sessions: vec![], entities: vec![], tool_calls: 0 };
-		assert!(render_markdown(&inputs, &|_p: &str| "   ".to_string()).is_none(), "empty LLM -> defer");
+		let inputs = DayInputs {
+			day: "2026-06-12".into(),
+			sessions: vec![],
+			entities: vec![],
+			tool_calls: 0,
+		};
+		assert!(
+			render_markdown(&inputs, &|_p: &str| "   ".to_string()).is_none(),
+			"empty LLM -> defer"
+		);
 	}
 
 	#[test]
 	fn writes_note_to_year_month_day_path() {
 		let dir = tempfile::tempdir().unwrap();
 		let path = write_day_note(dir.path(), "2026-06-12", "# 2026-06-12\n\nhi\n").unwrap();
-		assert_eq!(path, dir.path().join("2026").join("06").join("2026-06-12.md"));
-		assert_eq!(std::fs::read_to_string(&path).unwrap(), "# 2026-06-12\n\nhi\n");
+		assert_eq!(
+			path,
+			dir.path().join("2026").join("06").join("2026-06-12.md")
+		);
+		assert_eq!(
+			std::fs::read_to_string(&path).unwrap(),
+			"# 2026-06-12\n\nhi\n"
+		);
 	}
 }

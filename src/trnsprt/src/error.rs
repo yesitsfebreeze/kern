@@ -59,11 +59,18 @@ mod tests {
 		assert!(McpError::NotRunning.is_transient());
 
 		assert!(!McpError::Protocol("missing tools".into()).is_transient());
-		assert!(!McpError::Rpc { code: -32601, message: "no method".into() }.is_transient());
+		assert!(!McpError::Rpc {
+			code: -32601,
+			message: "no method".into()
+		}
+		.is_transient());
 		assert!(!McpError::UnknownServer("s".into()).is_transient());
 		assert!(!McpError::DuplicateServer("s".into()).is_transient());
 
 		let json_err = serde_json::from_str::<serde_json::Value>("{ not json").unwrap_err();
-		assert!(!McpError::Json(json_err).is_transient(), "a parse failure is deterministic");
+		assert!(
+			!McpError::Json(json_err).is_transient(),
+			"a parse failure is deterministic"
+		);
 	}
 }

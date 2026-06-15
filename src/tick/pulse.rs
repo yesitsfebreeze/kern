@@ -21,7 +21,13 @@ use super::queue::{task, Queue, TaskKind};
 static LAST_GC_AT_SECS: AtomicU64 = AtomicU64::new(0);
 
 pub fn pulse(q: &Queue, g: &mut GraphGnn, kern_id: &str, strength: f64) {
-	pulse_with_half_life(q, g, kern_id, strength, HeatConfig::default().half_life_secs);
+	pulse_with_half_life(
+		q,
+		g,
+		kern_id,
+		strength,
+		HeatConfig::default().half_life_secs,
+	);
 	emit_stigmergy_snapshot(g, kern_id);
 	// Below-threshold pulses are no-ops by contract; don't enqueue GC work
 	// either. The next above-threshold pulse will trigger the sweep.
@@ -98,7 +104,13 @@ fn maybe_enqueue_disk_consolidate(q: &Queue, g: &GraphGnn) {
 		.map(|d| d.as_secs())
 		.unwrap_or(0);
 	let last = LAST_CONSOLIDATE_AT_SECS.load(Ordering::Relaxed);
-	if !should_consolidate(now_secs, last, DISK_CONSOLIDATE_INTERVAL, delta, DISK_CONSOLIDATE_MIN_DELTA) {
+	if !should_consolidate(
+		now_secs,
+		last,
+		DISK_CONSOLIDATE_INTERVAL,
+		delta,
+		DISK_CONSOLIDATE_MIN_DELTA,
+	) {
 		return;
 	}
 	if LAST_CONSOLIDATE_AT_SECS
@@ -196,9 +208,11 @@ mod tests {
 		let mut g = GraphGnn::new();
 		let mut p = Kern::new("p", "");
 		p.children = vec!["c".into()];
-		p.entities.insert("ep".into(), mk_entity("ep", "x", 0.0, EntityKind::Claim));
+		p.entities
+			.insert("ep".into(), mk_entity("ep", "x", 0.0, EntityKind::Claim));
 		let mut c = Kern::new("c", "p");
-		c.entities.insert("ec".into(), mk_entity("ec", "y", 0.0, EntityKind::Claim));
+		c.entities
+			.insert("ec".into(), mk_entity("ec", "y", 0.0, EntityKind::Claim));
 		g.kerns.insert("p".into(), p);
 		g.kerns.insert("c".into(), c);
 
@@ -218,10 +232,22 @@ mod tests {
 	#[test]
 	fn should_run_gc_gates_on_clock_validity_and_elapsed_interval() {
 		let iv = Duration::from_secs(100);
-		assert!(!should_run_gc(0, 0, iv), "unreadable clock (now=0) never sweeps");
-		assert!(!should_run_gc(50, 100, iv), "clock skew (last>now) never sweeps");
-		assert!(!should_run_gc(100, 50, iv), "50s elapsed < 100s interval -> no");
-		assert!(should_run_gc(150, 50, iv), "exactly the interval -> yes (>=)");
+		assert!(
+			!should_run_gc(0, 0, iv),
+			"unreadable clock (now=0) never sweeps"
+		);
+		assert!(
+			!should_run_gc(50, 100, iv),
+			"clock skew (last>now) never sweeps"
+		);
+		assert!(
+			!should_run_gc(100, 50, iv),
+			"50s elapsed < 100s interval -> no"
+		);
+		assert!(
+			should_run_gc(150, 50, iv),
+			"exactly the interval -> yes (>=)"
+		);
 		assert!(should_run_gc(200, 50, iv), "well past the interval -> yes");
 	}
 
@@ -229,13 +255,25 @@ mod tests {
 	fn should_consolidate_gates_on_both_delta_size_and_interval() {
 		let iv = Duration::from_secs(100);
 		// Interval elapsed but delta below the floor -> no (not worth a rebuild).
-		assert!(!should_consolidate(200, 50, iv, 9, 10), "delta < min_delta -> no");
+		assert!(
+			!should_consolidate(200, 50, iv, 9, 10),
+			"delta < min_delta -> no"
+		);
 		// Delta big enough but interval not elapsed -> no (don't thrash rebuilds).
-		assert!(!should_consolidate(100, 50, iv, 100, 10), "interval not elapsed -> no");
+		assert!(
+			!should_consolidate(100, 50, iv, 100, 10),
+			"interval not elapsed -> no"
+		);
 		// Both conditions met -> yes.
-		assert!(should_consolidate(150, 50, iv, 10, 10), "delta>=min and interval elapsed -> yes");
+		assert!(
+			should_consolidate(150, 50, iv, 10, 10),
+			"delta>=min and interval elapsed -> yes"
+		);
 		// Shares should_run_gc's clock guards.
-		assert!(!should_consolidate(0, 0, iv, 1000, 10), "unreadable clock never consolidates");
+		assert!(
+			!should_consolidate(0, 0, iv, 1000, 10),
+			"unreadable clock never consolidates"
+		);
 	}
 
 	#[test]
@@ -244,14 +282,20 @@ mod tests {
 		// drops the child below it, so no child Cluster task is enqueued.
 		let kerns = cluster_kerns_after_pulse(PULSE_THRESHOLD);
 		assert!(kerns.contains(&"p".to_string()), "parent clusters");
-		assert!(!kerns.contains(&"c".to_string()), "child is below threshold after one decay");
+		assert!(
+			!kerns.contains(&"c".to_string()),
+			"child is below threshold after one decay"
+		);
 	}
 
 	#[test]
 	fn pulse_reaches_the_child_when_strength_survives_one_decay() {
 		// Strong enough that strength*PULSE_DECAY still clears the threshold.
 		let kerns = cluster_kerns_after_pulse(PULSE_THRESHOLD / PULSE_DECAY + 0.01);
-		assert!(kerns.contains(&"c".to_string()), "child clusters when decay keeps it above threshold");
+		assert!(
+			kerns.contains(&"c".to_string()),
+			"child clusters when decay keeps it above threshold"
+		);
 	}
 
 	#[test]
@@ -262,7 +306,9 @@ mod tests {
 		e.dirty = true;
 		dirty.entities.insert("e".into(), e);
 		let mut clean = Kern::new("c", "");
-		clean.entities.insert("e2".into(), mk_entity("e2", "y", 0.0, EntityKind::Claim));
+		clean
+			.entities
+			.insert("e2".into(), mk_entity("e2", "y", 0.0, EntityKind::Claim));
 		g.kerns.insert("d".into(), dirty);
 		g.kerns.insert("c".into(), clean);
 
@@ -276,6 +322,10 @@ mod tests {
 				reembed_kerns.push(t.kern_id.clone());
 			}
 		}
-		assert_eq!(reembed_kerns, vec!["d".to_string()], "only the kern with a dirty thought reembeds");
+		assert_eq!(
+			reembed_kerns,
+			vec!["d".to_string()],
+			"only the kern with a dirty thought reembeds"
+		);
 	}
 }

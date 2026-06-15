@@ -1,5 +1,3 @@
-
-
 use crate::gnn::activation::Activation;
 use crate::gnn::backward::{
 	act_deriv_mul, l2_norm_backward, l2_normalize_rows, BackwardGraphLayer, GraphLayer,
@@ -226,7 +224,11 @@ mod tests {
 
 	fn tiny_graph() -> (Graph, Tensor) {
 		let mut g = Graph::new();
-		let feats = [[0.5, -0.2, 0.1, 0.3], [-0.4, 0.6, 0.2, -0.1], [0.2, 0.1, -0.5, 0.4]];
+		let feats = [
+			[0.5, -0.2, 0.1, 0.3],
+			[-0.4, 0.6, 0.2, -0.1],
+			[0.2, 0.1, -0.5, 0.4],
+		];
 		for (i, f) in feats.iter().enumerate() {
 			g.add_node(&format!("n{i}"), f.to_vec()).unwrap();
 		}
@@ -245,12 +247,23 @@ mod tests {
 		let out = l.forward_graph(&g, &x);
 		assert_eq!(out.rows, g.num_nodes(), "one output row per node");
 		assert_eq!(out.cols, 3, "output width equals out_features");
-		assert!(out.data.iter().all(|v| v.is_finite()), "no NaN/inf in output");
+		assert!(
+			out.data.iter().all(|v| v.is_finite()),
+			"no NaN/inf in output"
+		);
 	}
 
 	#[test]
 	fn describe_reports_enabled_stages() {
-		let l = SAGELayer::new(4, 3, mean_aggregate, Some(Activation::Relu), true, true, 0.5);
+		let l = SAGELayer::new(
+			4,
+			3,
+			mean_aggregate,
+			Some(Activation::Relu),
+			true,
+			true,
+			0.5,
+		);
 		let s = l.describe();
 		assert!(s.contains("in_features: 4"), "{s}");
 		assert!(s.contains("concat_in: 8"), "{s}");

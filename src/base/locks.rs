@@ -105,14 +105,21 @@ mod tests {
 			panic!("intentional poison");
 		});
 		assert!(h.join().is_err(), "spawned thread panicked");
-		assert!(lock.is_poisoned(), "lock is poisoned after a panic-in-write");
+		assert!(
+			lock.is_poisoned(),
+			"lock is poisoned after a panic-in-write"
+		);
 		lock
 	}
 
 	#[test]
 	fn read_recovered_sees_committed_value_through_poison() {
 		let lock = poison_rwlock(42);
-		assert_eq!(*read_recovered(&lock), 42, "recovered read returns the pre-panic write");
+		assert_eq!(
+			*read_recovered(&lock),
+			42,
+			"recovered read returns the pre-panic write"
+		);
 	}
 
 	#[test]

@@ -1,5 +1,3 @@
-
-
 use crate::gnn::activation::Activation;
 use crate::gnn::tensor::Tensor;
 
@@ -141,7 +139,11 @@ mod tests {
 
 	#[test]
 	fn reductions_are_elementwise() {
-		let m = vec![row(vec![1.0, 5.0]), row(vec![3.0, 2.0]), row(vec![-1.0, 4.0])];
+		let m = vec![
+			row(vec![1.0, 5.0]),
+			row(vec![3.0, 2.0]),
+			row(vec![-1.0, 4.0]),
+		];
 		assert_eq!(sum_aggregate(&m).unwrap().data, vec![3.0, 11.0]);
 		assert_eq!(mean_aggregate(&m).unwrap().data, vec![1.0, 11.0 / 3.0]);
 		assert_eq!(max_aggregate(&m).unwrap().data, vec![3.0, 5.0]);

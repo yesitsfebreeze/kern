@@ -251,9 +251,19 @@ mod tests {
 
 		merge_entity(&mut local, &poisoned);
 
-		assert_eq!(local.conf_alpha, local_alpha, "remote alpha must not be imported");
-		assert_eq!(local.conf_beta, local_beta, "remote beta must not be imported");
-		assert_eq!(local.conf_mean(), local_mean, "confidence stays replica-local");
+		assert_eq!(
+			local.conf_alpha, local_alpha,
+			"remote alpha must not be imported"
+		);
+		assert_eq!(
+			local.conf_beta, local_beta,
+			"remote beta must not be imported"
+		);
+		assert_eq!(
+			local.conf_mean(),
+			local_mean,
+			"confidence stays replica-local"
+		);
 	}
 
 	#[test]
@@ -322,7 +332,13 @@ mod tests {
 			.count();
 		assert_eq!(total, 1);
 		assert_eq!(
-			g.kerns.get(&fallback).unwrap().entities.get("eX").unwrap().heat,
+			g.kerns
+				.get(&fallback)
+				.unwrap()
+				.entities
+				.get("eX")
+				.unwrap()
+				.heat,
 			9.0
 		);
 	}
@@ -339,21 +355,34 @@ mod tests {
 		local.vector = vec![1.0, 0.0];
 		local.status = EntityStatus::Active;
 		g.entity_idx.insert("eX".into(), vec![1.0, 0.0]);
-		g.kerns.get_mut(&kid).unwrap().entities.insert("eX".into(), local);
+		g.kerns
+			.get_mut(&kid)
+			.unwrap()
+			.entities
+			.insert("eX".into(), local);
 		g.index_entity("eX", &kid);
 
 		let before: Vec<String> = crate::base::search::search_all_unlocked(&g, &[1.0, 0.0], 5)
 			.into_iter()
 			.map(|h| h.entity_id)
 			.collect();
-		assert!(before.contains(&"eX".to_string()), "active entity indexed before merge");
+		assert!(
+			before.contains(&"eX".to_string()),
+			"active entity indexed before merge"
+		);
 
 		let mut remote = mk_entity("eX", "x", 1.0, EntityKind::Fact);
 		remote.status = EntityStatus::Superseded;
 		merge_remote_entity(&mut g, &kid, remote);
 
 		assert_eq!(
-			g.kerns.get(&kid).unwrap().entities.get("eX").unwrap().status,
+			g.kerns
+				.get(&kid)
+				.unwrap()
+				.entities
+				.get("eX")
+				.unwrap()
+				.status,
 			EntityStatus::Superseded,
 			"CRDT join propagated Superseded",
 		);
@@ -361,7 +390,10 @@ mod tests {
 			.into_iter()
 			.map(|h| h.entity_id)
 			.collect();
-		assert!(!after.contains(&"eX".to_string()), "merge-superseded entity removed from search index");
+		assert!(
+			!after.contains(&"eX".to_string()),
+			"merge-superseded entity removed from search index"
+		);
 	}
 
 	#[test]
@@ -388,7 +420,13 @@ mod tests {
 		let changed = merge_remote_entity(&mut g, phantom, forged);
 
 		assert!(!changed, "hijack must be rejected");
-		let local = g.kerns.get(&local_kern).unwrap().entities.get("eX").unwrap();
+		let local = g
+			.kerns
+			.get(&local_kern)
+			.unwrap()
+			.entities
+			.get("eX")
+			.unwrap();
 		assert_eq!(local.status, EntityStatus::Active, "local status untouched");
 		assert_eq!(local.heat, 1.0, "local heat untouched");
 		assert!(
@@ -415,23 +453,40 @@ mod tests {
 			}
 		}
 		// A brand-new remote id is dropped at the cap.
-		let changed =
-			merge_remote_entity(&mut g, phantom, mk_entity("newid", "x", 1.0, EntityKind::Fact));
+		let changed = merge_remote_entity(
+			&mut g,
+			phantom,
+			mk_entity("newid", "x", 1.0, EntityKind::Fact),
+		);
 		assert!(!changed, "new id past cap must be dropped");
 		assert!(!g.kerns.get(phantom).unwrap().entities.contains_key("newid"));
 
 		// An update to an EXISTING id still merges (not subject to the cap).
-		let changed =
-			merge_remote_entity(&mut g, phantom, mk_entity("f0", "x", 7.0, EntityKind::Fact));
+		let changed = merge_remote_entity(&mut g, phantom, mk_entity("f0", "x", 7.0, EntityKind::Fact));
 		assert!(changed, "known id must still merge at cap");
-		assert_eq!(g.kerns.get(phantom).unwrap().entities.get("f0").unwrap().heat, 7.0);
+		assert_eq!(
+			g.kerns
+				.get(phantom)
+				.unwrap()
+				.entities
+				.get("f0")
+				.unwrap()
+				.heat,
+			7.0
+		);
 	}
 
 	#[test]
 	fn merge_reason_maxes_score_and_joins_traversal_idempotently() {
-		let mut local = Reason { score: 0.3, ..Default::default() };
+		let mut local = Reason {
+			score: 0.3,
+			..Default::default()
+		};
 		local.traversal_count.increment("a", 1);
-		let mut remote = Reason { score: 0.7, ..Default::default() };
+		let mut remote = Reason {
+			score: 0.7,
+			..Default::default()
+		};
 		remote.traversal_count.increment("b", 2);
 
 		assert!(merge_reason(&mut local, &remote));
@@ -444,7 +499,10 @@ mod tests {
 		assert_eq!(local.traversal_count.value(), 3);
 
 		// Monotone: a lower-score remote never lowers the score.
-		let lower = Reason { score: 0.1, ..Default::default() };
+		let lower = Reason {
+			score: 0.1,
+			..Default::default()
+		};
 		assert!(!merge_reason(&mut local, &lower));
 		assert_eq!(local.score, 0.7);
 	}
@@ -481,8 +539,14 @@ mod tests {
 
 		merge_entity(&mut local, &remote);
 
-		assert_eq!(local.conf_alpha, snap_alpha, "conf_alpha stays replica-local");
+		assert_eq!(
+			local.conf_alpha, snap_alpha,
+			"conf_alpha stays replica-local"
+		);
 		assert_eq!(local.conf_beta, snap_beta, "conf_beta stays replica-local");
-		assert_eq!(local.unlinked_count, snap_unlinked, "unlinked_count is local bookkeeping");
+		assert_eq!(
+			local.unlinked_count, snap_unlinked,
+			"unlinked_count is local bookkeeping"
+		);
 	}
 }

@@ -54,9 +54,17 @@ impl Corpus {
 		let docs: Vec<Doc> = (0..n_docs)
 			.map(|i| {
 				let toks: Vec<usize> = (0..8).map(|_| (next() as usize) % vocab.len()).collect();
-				let text = toks.iter().map(|&t| vocab[t].as_str()).collect::<Vec<_>>().join(" ");
+				let text = toks
+					.iter()
+					.map(|&t| vocab[t].as_str())
+					.collect::<Vec<_>>()
+					.join(" ");
 				doc_tokens.push(toks);
-				Doc { id: format!("doc{i}"), vector: embed::embed(&text), kind: Some(EntityKind::Claim) }
+				Doc {
+					id: format!("doc{i}"),
+					vector: embed::embed(&text),
+					kind: Some(EntityKind::Claim),
+				}
 			})
 			.collect();
 
@@ -132,7 +140,11 @@ mod tests {
 	use crate::bench_support::backend::{BruteForceBackend, KernBackend};
 
 	fn doc(id: &str, v: Vec<f64>, kind: EntityKind) -> Doc {
-		Doc { id: id.into(), vector: v, kind: Some(kind) }
+		Doc {
+			id: id.into(),
+			vector: v,
+			kind: Some(kind),
+		}
 	}
 
 	fn corpus() -> Corpus {
@@ -144,8 +156,18 @@ mod tests {
 				doc("d", vec![1.0, 1.0, 0.0], EntityKind::Claim),
 			],
 			queries: vec![
-				CompareQuery { id: "qa".into(), vector: vec![1.0, 0.0, 0.0], expected_ids: vec!["a".into()], kind_filter: None },
-				CompareQuery { id: "qb".into(), vector: vec![0.0, 1.0, 0.0], expected_ids: vec!["b".into()], kind_filter: None },
+				CompareQuery {
+					id: "qa".into(),
+					vector: vec![1.0, 0.0, 0.0],
+					expected_ids: vec!["a".into()],
+					kind_filter: None,
+				},
+				CompareQuery {
+					id: "qb".into(),
+					vector: vec![0.0, 1.0, 0.0],
+					expected_ids: vec!["b".into()],
+					kind_filter: None,
+				},
 			],
 		}
 	}
@@ -156,7 +178,10 @@ mod tests {
 		let reports = compare(&mut backends, &corpus());
 		assert_eq!(reports.len(), 1);
 		assert_eq!(reports[0].name, "kern");
-		assert_eq!(reports[0].mean_recall10, 1.0, "each query's expected doc is its nearest");
+		assert_eq!(
+			reports[0].mean_recall10, 1.0,
+			"each query's expected doc is its nearest"
+		);
 		assert!(reports[0].mean_ndcg10 > 0.0);
 		assert!(reports[0].mean_latency_ms >= 0.0);
 		assert!(reports[0].vector_bytes > 0);
@@ -191,7 +216,10 @@ mod tests {
 		let mut brute: Vec<Box<dyn VectorBackend>> = vec![Box::new(BruteForceBackend::new())];
 		let kr = compare(&mut kern, &corpus)[0].clone();
 		let br = compare(&mut brute, &corpus)[0].clone();
-		assert!(br.mean_recall10 > 0.0, "exact search finds the expected docs");
+		assert!(
+			br.mean_recall10 > 0.0,
+			"exact search finds the expected docs"
+		);
 		assert!(
 			kr.mean_recall10 >= 0.8 * br.mean_recall10,
 			"kern HNSW recall@10 {} should track exact {} (>=80%)",
@@ -256,13 +284,20 @@ mod tests {
 		let mut kern = KernBackend::new();
 		kern.index(&corpus.docs);
 		let ram_recall = mean_target_recall_10(&corpus.queries, |q| {
-			kern.query(&q.vector, 10, None).into_iter().map(|h| h.id).collect()
+			kern
+				.query(&q.vector, 10, None)
+				.into_iter()
+				.map(|h| h.id)
+				.collect()
 		});
 
 		let dir = tempfile::tempdir().unwrap();
 		let g = disk_backed_graph(&corpus.docs, dir.path());
 		assert!(
-			matches!(g.entity_idx, crate::base::vector_backend::VectorBackend::Disk { .. }),
+			matches!(
+				g.entity_idx,
+				crate::base::vector_backend::VectorBackend::Disk { .. }
+			),
 			"corpus spilled to the disk backend"
 		);
 		let disk_recall = mean_target_recall_10(&corpus.queries, |q| {
@@ -272,7 +307,10 @@ mod tests {
 				.collect()
 		});
 
-		assert!(disk_recall > 0.3, "disk recall@10 should be substantial, got {disk_recall}");
+		assert!(
+			disk_recall > 0.3,
+			"disk recall@10 should be substantial, got {disk_recall}"
+		);
 		assert!(
 			disk_recall >= 0.8 * ram_recall,
 			"disk recall@10 {disk_recall} should track in-RAM {ram_recall} (>=80%)"
@@ -283,8 +321,14 @@ mod tests {
 	fn synthetic_corpus_is_deterministic_for_a_seed() {
 		let a = Corpus::synthetic(20, 5, 7);
 		let b = Corpus::synthetic(20, 5, 7);
-		assert_eq!(a.docs[0].vector, b.docs[0].vector, "same seed -> identical doc vectors");
-		assert_eq!(a.queries[0].expected_ids, b.queries[0].expected_ids, "same query targets");
+		assert_eq!(
+			a.docs[0].vector, b.docs[0].vector,
+			"same seed -> identical doc vectors"
+		);
+		assert_eq!(
+			a.queries[0].expected_ids, b.queries[0].expected_ids,
+			"same query targets"
+		);
 	}
 
 	#[test]
@@ -295,8 +339,17 @@ mod tests {
 		let mut backends: Vec<Box<dyn VectorBackend>> =
 			vec![Box::new(KernBackend::new()), Box::new(KernBackend::new())];
 		let r = compare(&mut backends, &corpus());
-		assert_eq!(r[0].mean_recall10, r[1].mean_recall10, "recall is harness-deterministic");
-		assert_eq!(r[0].mean_ndcg10, r[1].mean_ndcg10, "ndcg is harness-deterministic");
-		assert_eq!(r[0].vector_bytes, r[1].vector_bytes, "memory is harness-deterministic");
+		assert_eq!(
+			r[0].mean_recall10, r[1].mean_recall10,
+			"recall is harness-deterministic"
+		);
+		assert_eq!(
+			r[0].mean_ndcg10, r[1].mean_ndcg10,
+			"ndcg is harness-deterministic"
+		);
+		assert_eq!(
+			r[0].vector_bytes, r[1].vector_bytes,
+			"memory is harness-deterministic"
+		);
 	}
 }

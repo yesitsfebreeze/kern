@@ -213,7 +213,10 @@ mod tests {
 	fn gelu_basic_properties_and_exact_derivative() {
 		// gelu(0)=0; large positive ~ identity; large negative ~ 0.
 		assert!((Activation::Gelu.forward(0.0)).abs() < 1e-12);
-		assert!((Activation::Gelu.forward(5.0) - 5.0).abs() < 0.01, "gelu(5) ~ 5");
+		assert!(
+			(Activation::Gelu.forward(5.0) - 5.0).abs() < 0.01,
+			"gelu(5) ~ 5"
+		);
 		assert!(Activation::Gelu.forward(-5.0).abs() < 0.01, "gelu(-5) ~ 0");
 		// Its analytic deriv matches a central finite difference (the deriv is the
 		// exact derivative of the tanh-approx forward, so they agree tightly).
@@ -232,15 +235,22 @@ mod tests {
 	fn softmax_multirow_each_row_sums_to_one_and_is_row_independent() {
 		// Three rows with different scales; the row-loop must normalize each row
 		// independently (a bug in the bounds would leak across rows).
-		let t = Tensor::new(3, 3, vec![
-			1.0, 2.0, 3.0,
-			10.0, 10.0, 10.0, // uniform row -> 1/3 each
-			-5.0, 0.0, 5.0,
-		]).unwrap();
+		let t = Tensor::new(
+			3,
+			3,
+			vec![
+				1.0, 2.0, 3.0, 10.0, 10.0, 10.0, // uniform row -> 1/3 each
+				-5.0, 0.0, 5.0,
+			],
+		)
+		.unwrap();
 		let s = softmax(&t);
 		for i in 0..3 {
 			let row_sum: f64 = (0..3).map(|j| s.at(i, j)).sum();
-			assert!((row_sum - 1.0).abs() < 1e-12, "row {i} sums to 1, got {row_sum}");
+			assert!(
+				(row_sum - 1.0).abs() < 1e-12,
+				"row {i} sums to 1, got {row_sum}"
+			);
 		}
 		// Uniform row -> exactly 1/3 each.
 		for j in 0..3 {
@@ -257,7 +267,10 @@ mod tests {
 		let s = softmax(&t);
 		for i in 0..2 {
 			for j in 0..3 {
-				assert!((ls.at(i, j) - s.at(i, j).ln()).abs() < 1e-9, "log_softmax == ln(softmax)");
+				assert!(
+					(ls.at(i, j) - s.at(i, j).ln()).abs() < 1e-9,
+					"log_softmax == ln(softmax)"
+				);
 			}
 		}
 	}

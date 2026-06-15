@@ -168,7 +168,6 @@ pub fn score_neighbor(
 	w.content * content_score + w.reason * reason_score + w.edge * edge_score
 }
 
-
 /// Resolve an entity and its owning kern, returning both by reference (no clone
 /// on the hot retrieval path). Two-pass by design: first the O(1) hot path via
 /// the `kern_of_entity` index when the entity lives in a loaded kern; then a full
@@ -201,7 +200,11 @@ mod tests {
 	use crate::base::reason::add_reason;
 
 	fn ent(id: &str, vector: Vec<f64>) -> Entity {
-		Entity { id: id.into(), vector, ..Default::default() }
+		Entity {
+			id: id.into(),
+			vector,
+			..Default::default()
+		}
 	}
 	fn edge(from: &str, to: &str, score: f64) -> Reason {
 		Reason {
@@ -218,18 +221,34 @@ mod tests {
 	fn score_neighbor_pure_content_weight_is_cosine() {
 		let neighbor = ent("n", vec![1.0, 0.0]);
 		let r = edge("a", "n", 0.5); // no reason vector -> reason component 0
-		let w = Weights { content: 1.0, reason: 0.0, edge: 0.0, lexical: 0.0 };
+		let w = Weights {
+			content: 1.0,
+			reason: 0.0,
+			edge: 0.0,
+			lexical: 0.0,
+		};
 		let s = score_neighbor(&[1.0, 0.0], &neighbor, &r, w, 0.1, 0.3);
-		assert!((s - 1.0).abs() < 1e-9, "query aligned with neighbour -> 1.0");
+		assert!(
+			(s - 1.0).abs() < 1e-9,
+			"query aligned with neighbour -> 1.0"
+		);
 	}
 
 	#[test]
 	fn score_neighbor_pure_edge_weight_uses_clamped_reason_score() {
 		let neighbor = ent("n", vec![]); // no vector -> content 0
 		let r = edge("a", "n", 0.4); // traversal_count 0 -> ln(1)*tw = 0 boost
-		let w = Weights { content: 0.0, reason: 0.0, edge: 1.0, lexical: 0.0 };
+		let w = Weights {
+			content: 0.0,
+			reason: 0.0,
+			edge: 1.0,
+			lexical: 0.0,
+		};
 		let s = score_neighbor(&[1.0, 0.0], &neighbor, &r, w, 0.1, 0.3);
-		assert!((s - 0.4).abs() < 1e-9, "edge component is the clamped reason score");
+		assert!(
+			(s - 0.4).abs() < 1e-9,
+			"edge component is the clamped reason score"
+		);
 	}
 
 	#[test]
@@ -244,17 +263,27 @@ mod tests {
 		g.kerns.insert("kx".into(), k);
 
 		let cfg = RetrievalConfig::default();
-		let seeds = [EntityHit { entity_id: "a".into(), score: 1.0 }];
-		let w = Weights { content: 1.0, reason: 0.0, edge: 0.0, lexical: 0.0 };
+		let seeds = [EntityHit {
+			entity_id: "a".into(),
+			score: 1.0,
+		}];
+		let w = Weights {
+			content: 1.0,
+			reason: 0.0,
+			edge: 0.0,
+			lexical: 0.0,
+		};
 		let res = expand(&g, &cfg, &[1.0, 0.0], &seeds, w);
 
 		let ids: HashSet<&str> = res.scored.iter().map(|s| s.entity.id.as_str()).collect();
 		assert!(ids.contains("a"), "the seed is scored");
-		assert!(ids.contains("b"), "the 1-hop neighbour is reached via the edge");
+		assert!(
+			ids.contains("b"),
+			"the 1-hop neighbour is reached via the edge"
+		);
 		assert!(
 			res.chains.iter().any(|c| c.nodes.len() >= 3),
 			"a multi-hop chain (entity, reason, entity) is recorded"
 		);
 	}
 }
-

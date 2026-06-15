@@ -1,6 +1,6 @@
 use crate::base::heat::{self, HeatConfig};
-use crate::base::util::cmp_partial;
 use crate::base::types::{Entity, EntityKind, EntityStatus};
+use crate::base::util::cmp_partial;
 use crate::config::RetrievalConfig;
 use crate::retrieval::expand::ScoredEntity;
 use std::time::{Duration, SystemTime};
@@ -79,11 +79,7 @@ pub fn qbst(cfg: &RetrievalConfig, access_count: i32, accessed_at: Option<System
 pub fn apply_boosts(cfg: &RetrievalConfig, results: &mut [ScoredEntity]) {
 	for r in results.iter_mut() {
 		let confidence = r.entity.score;
-		let boost = qbst(
-			cfg,
-			r.entity.access_count.value_i32(),
-			r.entity.accessed_at,
-		);
+		let boost = qbst(cfg, r.entity.access_count.value_i32(), r.entity.accessed_at);
 		let fact_bonus = if r.entity.kind == EntityKind::Fact {
 			cfg.fact_score_boost
 		} else {
@@ -172,7 +168,12 @@ pub fn apply_query_options(results: &mut Vec<ScoredEntity>, opts: &QueryOptions)
 		}
 		SortField::Access => {
 			results.sort_by(|a, b| {
-				dir(a.entity.access_count.value().cmp(&b.entity.access_count.value()))
+				dir(
+					a.entity
+						.access_count
+						.value()
+						.cmp(&b.entity.access_count.value()),
+				)
 			});
 		}
 		SortField::Confidence => {
@@ -283,21 +284,60 @@ mod query_filter_tests {
 		// Default (no filter) matches anything.
 		assert!(matches_filter(&fact_file, &QueryOptions::default()));
 		// Kind filter.
-		assert!(matches_filter(&fact_file, &QueryOptions { kind: Some(EntityKind::Fact), ..Default::default() }));
-		assert!(!matches_filter(&fact_file, &QueryOptions { kind: Some(EntityKind::Claim), ..Default::default() }));
+		assert!(matches_filter(
+			&fact_file,
+			&QueryOptions {
+				kind: Some(EntityKind::Fact),
+				..Default::default()
+			}
+		));
+		assert!(!matches_filter(
+			&fact_file,
+			&QueryOptions {
+				kind: Some(EntityKind::Claim),
+				..Default::default()
+			}
+		));
 		// Scheme filter.
-		assert!(matches_filter(&fact_file, &QueryOptions { scheme: Some("file".into()), ..Default::default() }));
-		assert!(!matches_filter(&fact_file, &QueryOptions { scheme: Some("ticket".into()), ..Default::default() }));
+		assert!(matches_filter(
+			&fact_file,
+			&QueryOptions {
+				scheme: Some("file".into()),
+				..Default::default()
+			}
+		));
+		assert!(!matches_filter(
+			&fact_file,
+			&QueryOptions {
+				scheme: Some("ticket".into()),
+				..Default::default()
+			}
+		));
 		// Confidence floor (entity.score is 0.5 from the `ent` helper).
-		assert!(matches_filter(&fact_file, &QueryOptions { min_conf: 0.4, ..Default::default() }));
-		assert!(!matches_filter(&fact_file, &QueryOptions { min_conf: 0.6, ..Default::default() }));
+		assert!(matches_filter(
+			&fact_file,
+			&QueryOptions {
+				min_conf: 0.4,
+				..Default::default()
+			}
+		));
+		assert!(!matches_filter(
+			&fact_file,
+			&QueryOptions {
+				min_conf: 0.6,
+				..Default::default()
+			}
+		));
 		// Combined filters must all pass.
-		assert!(matches_filter(&fact_file, &QueryOptions {
-			kind: Some(EntityKind::Fact),
-			scheme: Some("file".into()),
-			min_conf: 0.5,
-			..Default::default()
-		}));
+		assert!(matches_filter(
+			&fact_file,
+			&QueryOptions {
+				kind: Some(EntityKind::Fact),
+				scheme: Some("file".into()),
+				min_conf: 0.5,
+				..Default::default()
+			}
+		));
 	}
 
 	#[test]
@@ -358,7 +398,10 @@ mod query_filter_tests {
 		};
 		// age ~0 -> exp(0) ~ 1 -> ~ full recency weight.
 		let got = qbst(&cfg, 0, Some(SystemTime::now()));
-		assert!((got - 3.0).abs() < 0.05, "near-zero age -> ~full weight, got {got}");
+		assert!(
+			(got - 3.0).abs() < 0.05,
+			"near-zero age -> ~full weight, got {got}"
+		);
 	}
 
 	#[test]
@@ -369,7 +412,11 @@ mod query_filter_tests {
 			qbst_cap: 2.0,
 			..Default::default()
 		};
-		assert_eq!(qbst(&cfg, 1000, Some(SystemTime::now())), 2.0, "clamped to qbst_cap");
+		assert_eq!(
+			qbst(&cfg, 1000, Some(SystemTime::now())),
+			2.0,
+			"clamped to qbst_cap"
+		);
 	}
 
 	#[test]
@@ -389,10 +436,16 @@ mod query_filter_tests {
 		let mut results = vec![fact, claim];
 		apply_boosts(&cfg, &mut results);
 		// fact: 2.0*0.5 + 0(boost) + 0.5(fact bonus) = 1.5
-		assert!((results[0].score - 1.5).abs() < 1e-9, "fact got {}", results[0].score);
+		assert!(
+			(results[0].score - 1.5).abs() < 1e-9,
+			"fact got {}",
+			results[0].score
+		);
 		// claim: 2.0*0.5 + 0 + 0 = 1.0 (no fact bonus)
-		assert!((results[1].score - 1.0).abs() < 1e-9, "claim got {}", results[1].score);
+		assert!(
+			(results[1].score - 1.0).abs() < 1e-9,
+			"claim got {}",
+			results[1].score
+		);
 	}
-
 }
-

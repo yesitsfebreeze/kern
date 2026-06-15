@@ -9,12 +9,7 @@ use crate::gnn::propagate::{self, GnnConfig, GnnSnapshot};
 
 use super::queue::{task, Queue, TaskKind};
 
-pub fn do_gnn_propagate(
-	q: &Queue,
-	g: &Arc<RwLock<GraphGnn>>,
-	kern_id: &str,
-	cfg: &GnnConfig,
-) {
+pub fn do_gnn_propagate(q: &Queue, g: &Arc<RwLock<GraphGnn>>, kern_id: &str, cfg: &GnnConfig) {
 	let snap = {
 		let graph = read_recovered(g);
 		let kern = match graph.loaded(kern_id) {
@@ -256,7 +251,10 @@ mod tests {
 		let mut cfg = GnnConfig::defaults();
 		cfg.min_thoughts = 2;
 		let snap = build_gnn_snapshot(&k, &cfg).expect("active e0..e2 still build a snapshot");
-		assert!(!snap.ids.contains(&"e3".to_string()), "superseded leaf excluded from GNN membership");
+		assert!(
+			!snap.ids.contains(&"e3".to_string()),
+			"superseded leaf excluded from GNN membership"
+		);
 		for id in ["e0", "e1", "e2"] {
 			assert!(snap.ids.contains(&id.to_string()), "active {id} included");
 		}
@@ -264,20 +262,40 @@ mod tests {
 
 	#[test]
 	fn cosine_align_maps_similarity_into_zero_one() {
-		assert_eq!(cosine_align(&[1.0, 0.0], &[1.0, 0.0]), 1.0, "identical -> 1.0");
-		assert_eq!(cosine_align(&[1.0, 0.0], &[-1.0, 0.0]), 0.0, "opposite -> 0.0");
-		assert!((cosine_align(&[1.0, 0.0], &[0.0, 1.0]) - 0.5).abs() < 1e-9, "orthogonal -> 0.5");
+		assert_eq!(
+			cosine_align(&[1.0, 0.0], &[1.0, 0.0]),
+			1.0,
+			"identical -> 1.0"
+		);
+		assert_eq!(
+			cosine_align(&[1.0, 0.0], &[-1.0, 0.0]),
+			0.0,
+			"opposite -> 0.0"
+		);
+		assert!(
+			(cosine_align(&[1.0, 0.0], &[0.0, 1.0]) - 0.5).abs() < 1e-9,
+			"orthogonal -> 0.5"
+		);
 		// Degenerate inputs are neutral (0.5), not a panic or partial zip.
 		assert_eq!(cosine_align(&[], &[]), 0.5, "empty -> 0.5");
-		assert_eq!(cosine_align(&[1.0, 2.0], &[1.0]), 0.5, "length mismatch -> 0.5");
-		assert_eq!(cosine_align(&[0.0, 0.0], &[1.0, 1.0]), 0.5, "zero-norm -> 0.5");
+		assert_eq!(
+			cosine_align(&[1.0, 2.0], &[1.0]),
+			0.5,
+			"length mismatch -> 0.5"
+		);
+		assert_eq!(
+			cosine_align(&[0.0, 0.0], &[1.0, 1.0]),
+			0.5,
+			"zero-norm -> 0.5"
+		);
 	}
 
 	#[test]
 	fn apply_gnn_updates_writes_gnn_vector_weights_and_enqueues_persist() {
 		let mut g = GraphGnn::new();
 		let mut k = Kern::new("k", "");
-		k.entities.insert("e0".into(), mk_entity("e0", "e0", 0.0, EntityKind::Claim));
+		k.entities
+			.insert("e0".into(), mk_entity("e0", "e0", 0.0, EntityKind::Claim));
 		g.kerns.insert("k".into(), k);
 		let g = Arc::new(RwLock::new(g));
 
@@ -291,7 +309,10 @@ mod tests {
 		{
 			let gg = read_recovered(&g);
 			let kern = gg.kerns.get("k").unwrap();
-			assert_eq!(kern.entities["e0"].gnn_vector, new_vec, "gnn_vector overwritten");
+			assert_eq!(
+				kern.entities["e0"].gnn_vector, new_vec,
+				"gnn_vector overwritten"
+			);
 			assert_eq!(kern.gnn_weights, vec![9, 9], "kern gnn_weights stored");
 		}
 
@@ -309,7 +330,8 @@ mod tests {
 	fn apply_gnn_updates_skips_empty_update_vectors() {
 		let mut g = GraphGnn::new();
 		let mut k = Kern::new("k", "");
-		k.entities.insert("e0".into(), mk_entity("e0", "e0", 0.0, EntityKind::Claim));
+		k.entities
+			.insert("e0".into(), mk_entity("e0", "e0", 0.0, EntityKind::Claim));
 		g.kerns.insert("k".into(), k);
 		let g = Arc::new(RwLock::new(g));
 
@@ -319,6 +341,9 @@ mod tests {
 		apply_gnn_updates(&q, &g, "k", updates, Vec::new());
 
 		let gg = read_recovered(&g);
-		assert!(gg.kerns["k"].entities["e0"].gnn_vector.is_empty(), "empty update doesn't write");
+		assert!(
+			gg.kerns["k"].entities["e0"].gnn_vector.is_empty(),
+			"empty update doesn't write"
+		);
 	}
 }

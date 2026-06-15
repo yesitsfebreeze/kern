@@ -1,5 +1,3 @@
-
-
 use std::collections::HashMap;
 
 use crate::gnn::tensor::Tensor;
@@ -236,9 +234,19 @@ mod tests {
 		g.add_self_loops();
 		let after_first = g.num_edges();
 		g.add_self_loops(); // re-running must add nothing
-		assert_eq!(g.num_edges(), after_first, "self-loops are not duplicated on re-run");
-		assert!(g.neighbors("a").contains(&"a".to_string()), "a has its self-loop");
-		assert!(g.neighbors("b").contains(&"b".to_string()), "b has its self-loop");
+		assert_eq!(
+			g.num_edges(),
+			after_first,
+			"self-loops are not duplicated on re-run"
+		);
+		assert!(
+			g.neighbors("a").contains(&"a".to_string()),
+			"a has its self-loop"
+		);
+		assert!(
+			g.neighbors("b").contains(&"b".to_string()),
+			"b has its self-loop"
+		);
 	}
 
 	#[test]
@@ -248,7 +256,14 @@ mod tests {
 			g.add_node(id, vec![1.0]).unwrap();
 		}
 		// Fully bidirectional triangle so every node has the same degree.
-		for (s, t) in [("a", "b"), ("b", "a"), ("b", "c"), ("c", "b"), ("c", "a"), ("a", "c")] {
+		for (s, t) in [
+			("a", "b"),
+			("b", "a"),
+			("b", "c"),
+			("c", "b"),
+			("c", "a"),
+			("a", "c"),
+		] {
 			g.add_edge(s, t, vec![]).unwrap();
 		}
 		g.add_self_loops(); // each node now has degree 3 (two neighbours + self)
@@ -257,7 +272,10 @@ mod tests {
 		let n = g.num_nodes();
 		for i in 0..n {
 			let row_sum: f64 = (0..n).map(|j| na.at(i, j)).sum();
-			assert!((row_sum - 1.0).abs() < 1e-9, "row {i} sums to {row_sum}, want 1.0");
+			assert!(
+				(row_sum - 1.0).abs() < 1e-9,
+				"row {i} sums to {row_sum}, want 1.0"
+			);
 		}
 	}
 }

@@ -120,7 +120,11 @@ mod tests {
 	struct EchoServer;
 	impl McpServer for EchoServer {
 		fn tools_list(&self) -> Vec<crate::ToolSchema> {
-			vec![crate::ToolSchema { name: "echo".into(), description: None, input_schema: None }]
+			vec![crate::ToolSchema {
+				name: "echo".into(),
+				description: None,
+				input_schema: None,
+			}]
 		}
 		fn call_tool(&self, name: &str, args: &Value) -> Result<crate::ToolResult, crate::McpError> {
 			Ok(crate::ToolResult {
@@ -140,7 +144,10 @@ mod tests {
 	#[test]
 	fn request_round_trips_to_a_newline_terminated_response() {
 		let mut t = InProcTransport::new(Box::new(EchoServer));
-		write_line(&mut t, &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }));
+		write_line(
+			&mut t,
+			&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+		);
 
 		let mut buf = [0u8; 256];
 		let n = t.read(&mut buf).unwrap();
@@ -158,7 +165,10 @@ mod tests {
 		// A 4-byte buffer forces many reads, exercising the bulk-copy path and any
 		// wrap in the response ring buffer.
 		let mut t = InProcTransport::new(Box::new(EchoServer));
-		write_line(&mut t, &json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/list" }));
+		write_line(
+			&mut t,
+			&json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/list" }),
+		);
 		let mut out = Vec::new();
 		let mut chunk = [0u8; 4];
 		loop {
@@ -175,10 +185,17 @@ mod tests {
 	#[test]
 	fn read_returns_eof_after_kill() {
 		let mut t = InProcTransport::new(Box::new(EchoServer));
-		write_line(&mut t, &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }));
+		write_line(
+			&mut t,
+			&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+		);
 		t.kill().unwrap();
 		let mut buf = [0u8; 16];
-		assert_eq!(t.read(&mut buf).unwrap(), 0, "a killed transport reads as EOF");
+		assert_eq!(
+			t.read(&mut buf).unwrap(),
+			0,
+			"a killed transport reads as EOF"
+		);
 	}
 
 	#[test]

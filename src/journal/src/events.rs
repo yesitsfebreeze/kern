@@ -146,12 +146,17 @@ pub struct TurnStartEvent {
 	pub ts: SystemTime,
 }
 
-impl_from_entry!(TurnStartEvent, TurnStartPayload, super::Kind::TurnStart, |p| Self {
-	turn_id: p.turn_id,
-	fork_id: p.fork_id,
-	phase: p.phase,
-	ts: system_time_from_ms(p.ts_ms),
-});
+impl_from_entry!(
+	TurnStartEvent,
+	TurnStartPayload,
+	super::Kind::TurnStart,
+	|p| Self {
+		turn_id: p.turn_id,
+		fork_id: p.fork_id,
+		phase: p.phase,
+		ts: system_time_from_ms(p.ts_ms),
+	}
+);
 
 /// Typed view of a `turn_end` journal entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,11 +167,13 @@ pub struct TurnEndEvent {
 	pub ts: SystemTime,
 }
 
-impl_from_entry!(TurnEndEvent, TurnEndPayload, super::Kind::TurnEnd, |p| Self {
-	turn_id: p.turn_id,
-	fork_id: p.fork_id,
-	outcome: p.outcome,
-	ts: system_time_from_ms(p.ts_ms),
+impl_from_entry!(TurnEndEvent, TurnEndPayload, super::Kind::TurnEnd, |p| {
+	Self {
+		turn_id: p.turn_id,
+		fork_id: p.fork_id,
+		outcome: p.outcome,
+		ts: system_time_from_ms(p.ts_ms),
+	}
 });
 
 /// Typed view of a `final` journal entry.
@@ -197,14 +204,16 @@ pub struct ToolCallEvent {
 	pub ts: SystemTime,
 }
 
-impl_from_entry!(ToolCallEvent, ToolCallPayload, super::Kind::ToolCall, |p| Self {
-	turn_id: p.turn_id,
-	fork_id: p.fork_id,
-	name: p.name,
-	args_json: p.args_json,
-	result: p.result,
-	phase: p.phase,
-	ts: system_time_from_ms(p.ts_ms),
+impl_from_entry!(ToolCallEvent, ToolCallPayload, super::Kind::ToolCall, |p| {
+	Self {
+		turn_id: p.turn_id,
+		fork_id: p.fork_id,
+		name: p.name,
+		args_json: p.args_json,
+		result: p.result,
+		phase: p.phase,
+		ts: system_time_from_ms(p.ts_ms),
+	}
 });
 
 /// Discrete touch op recorded against an entity (slice I). A client
@@ -320,7 +329,9 @@ mod tests {
 		let entry = Entry::new(Kind::PlanStep, "plan", v);
 		let ev = PlanEvent::from_entry(&entry).unwrap();
 		match ev {
-			PlanEvent::Step { id, status, body, .. } => {
+			PlanEvent::Step {
+				id, status, body, ..
+			} => {
 				assert_eq!(id, "s1");
 				assert_eq!(status, PlanStatus::Active);
 				assert_eq!(body, "audit token expiry");
@@ -341,7 +352,9 @@ mod tests {
 		let entry = Entry::new(Kind::PlanProposal, "plan", v);
 		let ev = PlanEvent::from_entry(&entry).unwrap();
 		match ev {
-			PlanEvent::Proposal { id, source_fork, .. } => {
+			PlanEvent::Proposal {
+				id, source_fork, ..
+			} => {
 				assert_eq!(id, "p1");
 				assert_eq!(source_fork.as_deref(), Some("audit"));
 			}
@@ -459,9 +472,16 @@ mod tests {
 		// must decline them rather than mis-claim a fork entry. (The Kind tag
 		// round-trip for these variants is covered in history.rs.)
 		for kind in [
-			Kind::ForkOpen { fork_id: "f".into(), parent: Some("p".into()) },
-			Kind::ForkResume { fork_id: "f".into() },
-			Kind::ForkClose { fork_id: "f".into() },
+			Kind::ForkOpen {
+				fork_id: "f".into(),
+				parent: Some("p".into()),
+			},
+			Kind::ForkResume {
+				fork_id: "f".into(),
+			},
+			Kind::ForkClose {
+				fork_id: "f".into(),
+			},
 		] {
 			let entry = Entry::new(kind, "f", serde_json::Value::Null);
 			assert!(TurnStartEvent::from_entry(&entry).is_none());

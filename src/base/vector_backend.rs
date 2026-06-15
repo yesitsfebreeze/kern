@@ -62,8 +62,16 @@ impl VectorBackend {
 	pub fn len(&self) -> usize {
 		match self {
 			Self::Resident(h) => h.len(),
-			Self::Disk { snapshot, delta, tombstones } => {
-				let live_snapshot = snapshot.ids().iter().filter(|id| !tombstones.contains(*id)).count();
+			Self::Disk {
+				snapshot,
+				delta,
+				tombstones,
+			} => {
+				let live_snapshot = snapshot
+					.ids()
+					.iter()
+					.filter(|id| !tombstones.contains(*id))
+					.count();
 				live_snapshot + delta.len()
 			}
 		}
@@ -86,7 +94,9 @@ impl VectorBackend {
 	pub fn is_empty(&self) -> bool {
 		match self {
 			Self::Resident(h) => h.is_empty(),
-			Self::Disk { snapshot, delta, .. } => snapshot.is_empty() && delta.is_empty(),
+			Self::Disk {
+				snapshot, delta, ..
+			} => snapshot.is_empty() && delta.is_empty(),
 		}
 	}
 
@@ -94,7 +104,9 @@ impl VectorBackend {
 	pub fn insert(&mut self, id: String, vec: Vec<f64>) {
 		match self {
 			Self::Resident(h) => h.insert(id, vec),
-			Self::Disk { delta, tombstones, .. } => {
+			Self::Disk {
+				delta, tombstones, ..
+			} => {
 				// Tombstone shadows any stale snapshot copy; delta holds the live one.
 				tombstones.insert(id.clone());
 				delta.insert(id, vec);
@@ -106,7 +118,9 @@ impl VectorBackend {
 	pub fn delete(&mut self, id: &str) {
 		match self {
 			Self::Resident(h) => h.delete(id),
-			Self::Disk { delta, tombstones, .. } => {
+			Self::Disk {
+				delta, tombstones, ..
+			} => {
 				delta.delete(id);
 				tombstones.insert(id.to_string());
 			}
@@ -118,7 +132,11 @@ impl VectorBackend {
 	pub fn search(&self, vec: &[f64], k: usize, ef: usize) -> Vec<HnswHit> {
 		match self {
 			Self::Resident(h) => h.search(vec, k, ef),
-			Self::Disk { snapshot, delta, tombstones } => {
+			Self::Disk {
+				snapshot,
+				delta,
+				tombstones,
+			} => {
 				let q32: Vec<f32> = vec.iter().map(|&x| x as f32).collect();
 				let snap = snapshot.search_hits_filtered(&q32, k, ef, &|id| !tombstones.contains(id));
 				let live = delta.search(vec, k, ef);
@@ -138,10 +156,14 @@ impl VectorBackend {
 	) -> Vec<HnswHit> {
 		match self {
 			Self::Resident(h) => h.search_filtered(vec, k, ef, keep),
-			Self::Disk { snapshot, delta, tombstones } => {
+			Self::Disk {
+				snapshot,
+				delta,
+				tombstones,
+			} => {
 				let q32: Vec<f32> = vec.iter().map(|&x| x as f32).collect();
-				let snap = snapshot
-					.search_hits_filtered(&q32, k, ef, &|id| keep(id) && !tombstones.contains(id));
+				let snap =
+					snapshot.search_hits_filtered(&q32, k, ef, &|id| keep(id) && !tombstones.contains(id));
 				let live = delta.search_filtered(vec, k, ef, keep);
 				union_rank(snap, live, k)
 			}
@@ -169,7 +191,10 @@ fn union_rank(a: Vec<HnswHit>, b: Vec<HnswHit>, k: usize) -> Vec<HnswHit> {
 			}
 		}
 	}
-	let mut ranked: Vec<HnswHit> = by_id.into_iter().map(|(id, score)| HnswHit { id, score }).collect();
+	let mut ranked: Vec<HnswHit> = by_id
+		.into_iter()
+		.map(|(id, score)| HnswHit { id, score })
+		.collect();
 	ranked.sort_by(|x, y| cmp_rank(x.score, &x.id, y.score, &y.id));
 	ranked.truncate(k);
 	ranked
@@ -182,14 +207,21 @@ mod tests {
 
 	// Deterministic, well-separated vectors (distinct per-dim frequencies).
 	fn vec_of(i: usize) -> Vec<f64> {
-		(0..8).map(|j| ((i as f64) * (0.13 + 0.07 * j as f64)).sin()).collect()
+		(0..8)
+			.map(|j| ((i as f64) * (0.13 + 0.07 * j as f64)).sin())
+			.collect()
 	}
 
 	// Returns the index plus the TempDir that backs its mmap'd files; the caller
 	// must keep the TempDir alive for the index's lifetime (dropping it cleans up).
 	fn snapshot_over(ids: impl Iterator<Item = usize>) -> (DiskIndex, tempfile::TempDir) {
 		let items: Vec<(String, Vec<f32>)> = ids
-			.map(|i| (format!("e{i}"), vec_of(i).iter().map(|&x| x as f32).collect()))
+			.map(|i| {
+				(
+					format!("e{i}"),
+					vec_of(i).iter().map(|&x| x as f32).collect(),
+				)
+			})
 			.collect();
 		let dir = tempfile::tempdir().unwrap();
 		build_and_save(dir.path(), &items, Params::default()).unwrap();
@@ -205,7 +237,11 @@ mod tests {
 		let mut be = VectorBackend::disk(snap, QuantizationMode::None);
 		be.insert("e999".into(), vec_of(999));
 		let hits = be.search(&vec_of(999), 5, 96);
-		assert_eq!(hits.first().map(|h| h.id.as_str()), Some("e999"), "post-snapshot insert is found first");
+		assert_eq!(
+			hits.first().map(|h| h.id.as_str()),
+			Some("e999"),
+			"post-snapshot insert is found first"
+		);
 	}
 
 	#[test]
@@ -216,7 +252,10 @@ mod tests {
 		let mut be = VectorBackend::disk(snap, QuantizationMode::None);
 		be.delete("e10");
 		let hits = be.search(&vec_of(10), 10, 128);
-		assert!(!hits.iter().any(|h| h.id == "e10"), "tombstoned id absent from results: {hits:?}");
+		assert!(
+			!hits.iter().any(|h| h.id == "e10"),
+			"tombstoned id absent from results: {hits:?}"
+		);
 	}
 
 	#[test]
@@ -230,8 +269,14 @@ mod tests {
 			be.insert(format!("e{i}"), vec_of(i));
 		}
 		// Query a delta point and a snapshot point; each should rank itself first.
-		assert_eq!(be.search(&vec_of(63), 5, 128).first().map(|h| h.id.clone()), Some("e63".into()));
-		assert_eq!(be.search(&vec_of(7), 5, 128).first().map(|h| h.id.clone()), Some("e7".into()));
+		assert_eq!(
+			be.search(&vec_of(63), 5, 128).first().map(|h| h.id.clone()),
+			Some("e63".into())
+		);
+		assert_eq!(
+			be.search(&vec_of(7), 5, 128).first().map(|h| h.id.clone()),
+			Some("e7".into())
+		);
 	}
 
 	#[test]

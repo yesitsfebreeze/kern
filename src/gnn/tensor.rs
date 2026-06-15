@@ -1,5 +1,3 @@
-
-
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -331,7 +329,10 @@ mod tests {
 		for &m in &[t - 1, t] {
 			let out = Tensor::ones(m, 2).matmul(&Tensor::ones(2, 2)).unwrap();
 			assert_eq!(out.shape(), (m, 2));
-			assert!(out.data.iter().all(|v| (*v - 2.0).abs() < 1e-12), "m={m} entries all 2.0");
+			assert!(
+				out.data.iter().all(|v| (*v - 2.0).abs() < 1e-12),
+				"m={m} entries all 2.0"
+			);
 		}
 	}
 
@@ -339,7 +340,10 @@ mod tests {
 	fn matmul_inner_dimension_mismatch_errors() {
 		let a = Tensor::zeros(2, 3);
 		let b = Tensor::zeros(2, 2); // inner 3 vs 2
-		assert!(matches!(a.matmul(&b), Err(TensorError::InnerMismatch { lhs: 3, rhs: 2 })));
+		assert!(matches!(
+			a.matmul(&b),
+			Err(TensorError::InnerMismatch { lhs: 3, rhs: 2 })
+		));
 	}
 
 	#[test]
@@ -360,7 +364,10 @@ mod tests {
 		assert_eq!(out.data, vec![11.0, 22.0, 13.0, 24.0]);
 		// Wrong-width row is rejected.
 		let bad = Tensor::new(1, 3, vec![0.0, 0.0, 0.0]).unwrap();
-		assert!(matches!(m.add_row_vec(&bad), Err(TensorError::ShapeMismatch { .. })));
+		assert!(matches!(
+			m.add_row_vec(&bad),
+			Err(TensorError::ShapeMismatch { .. })
+		));
 	}
 
 	#[test]

@@ -64,8 +64,8 @@ pub struct Trace {
 pub fn load<P: AsRef<Path>>(path: P) -> Result<Trace, TraceError> {
 	let data = std::fs::read_to_string(path.as_ref())
 		.map_err(|e| TraceError::Io(path.as_ref().to_path_buf(), e))?;
-	let trace: Trace = serde_json::from_str(&data)
-		.map_err(|e| TraceError::Parse(path.as_ref().to_path_buf(), e))?;
+	let trace: Trace =
+		serde_json::from_str(&data).map_err(|e| TraceError::Parse(path.as_ref().to_path_buf(), e))?;
 	Ok(trace)
 }
 
@@ -97,13 +97,19 @@ mod tests {
 		assert_eq!(t.docs.len(), 1);
 		assert_eq!(t.docs[0].id, "d1");
 		assert_eq!(t.queries[0].mode, "content", "explicit mode is preserved");
-		assert_eq!(t.queries[1].mode, "hybrid", "omitted mode defaults to hybrid");
+		assert_eq!(
+			t.queries[1].mode, "hybrid",
+			"omitted mode defaults to hybrid"
+		);
 
 		// Serialize → parse again yields the same structure (round-trip stable).
 		let round = serde_json::to_string(&t).expect("serialize");
 		let t2: Trace = serde_json::from_str(&round).expect("re-parse");
 		assert_eq!(t2.queries[1].expected_ids, vec!["d1".to_string()]);
-		assert_eq!(t2.queries[1].mode, "hybrid", "default survives a round-trip");
+		assert_eq!(
+			t2.queries[1].mode, "hybrid",
+			"default survives a round-trip"
+		);
 	}
 
 	#[test]

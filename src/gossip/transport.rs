@@ -37,7 +37,9 @@ pub(super) async fn decode_msg(stream: &mut TcpStream) -> Option<GossipMessage> 
 	}
 	let mut buf = vec![0u8; len];
 	stream.read_exact(&mut buf).await.ok()?;
-	bincode::serde::decode_from_slice(&buf, bincode::config::standard()).ok().map(|(v, _)| v)
+	bincode::serde::decode_from_slice(&buf, bincode::config::standard())
+		.ok()
+		.map(|(v, _)| v)
 }
 
 /// Dial `addr` (with `GOSSIP_DIAL_TIMEOUT`) and send one framed message.
@@ -91,7 +93,10 @@ mod tests {
 		let mut client = TcpStream::connect(&addr).await.unwrap();
 		encode_msg(&mut client, &msg).await.unwrap();
 
-		let got = server.await.unwrap().expect("a message decodes on the server side");
+		let got = server
+			.await
+			.unwrap()
+			.expect("a message decodes on the server side");
 		assert_eq!(got.kind, msg.kind);
 		assert_eq!(got.id, msg.id);
 		assert_eq!(got.origin, msg.origin);
@@ -120,6 +125,9 @@ mod tests {
 		client.write_all(&oversized).await.unwrap();
 		client.flush().await.unwrap();
 
-		assert!(server.await.unwrap().is_none(), "an oversized frame is rejected");
+		assert!(
+			server.await.unwrap().is_none(),
+			"an oversized frame is rejected"
+		);
 	}
 }

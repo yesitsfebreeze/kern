@@ -53,10 +53,9 @@ pub fn validate_wire_conf(conf: f64) -> Result<f64, WireError> {
 pub fn validate_wire_kind(kind: EntityKind) -> Result<EntityKind, WireError> {
 	match kind {
 		EntityKind::Claim | EntityKind::Fact => Ok(kind),
-		EntityKind::Document
-		| EntityKind::Question
-		| EntityKind::Answer
-		| EntityKind::Conclusion => Err(WireError::InternalKindOnWire(kind)),
+		EntityKind::Document | EntityKind::Question | EntityKind::Answer | EntityKind::Conclusion => {
+			Err(WireError::InternalKindOnWire(kind))
+		}
 	}
 }
 

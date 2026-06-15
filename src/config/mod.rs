@@ -12,7 +12,6 @@ mod gossip;
 mod graph;
 mod ingest;
 mod journal;
-mod mux;
 mod reason;
 mod retrieval;
 mod serve;
@@ -21,14 +20,13 @@ mod watcher;
 
 pub use answer::{AnswerConfig, DEFAULT_ANSWER_MODEL};
 pub use capture::CaptureConfig;
-pub use embed::{DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL, EmbedConfig};
+pub use embed::{EmbedConfig, DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL};
 pub use gnn::GnnConfig;
 pub use gossip::GossipConfig;
 pub use graph::GraphConfig;
 pub use ingest::IngestConfig;
-pub use journal::{DEFAULT_MAX_TODAY_BYTES, DEFAULT_RETAIN_DAYS, JournalConfig};
-pub use mux::{KeyMap, MuxConfig, parse_key_event};
-pub use reason::{DEFAULT_REASON_MODEL, ReasonConfig};
+pub use journal::{JournalConfig, DEFAULT_MAX_TODAY_BYTES, DEFAULT_RETAIN_DAYS};
+pub use reason::{ReasonConfig, DEFAULT_REASON_MODEL};
 pub use retrieval::{ModeWeights, RetrievalConfig};
 pub use serve::ServeConfig;
 pub use tick::TickConfig;
@@ -59,7 +57,6 @@ pub struct Config {
 	pub capture: CaptureConfig,
 	pub graph: GraphConfig,
 	pub journal: JournalConfig,
-	pub mux: MuxConfig,
 }
 
 impl Default for Config {
@@ -107,7 +104,6 @@ impl Config {
 			capture: CaptureConfig::default(),
 			graph: GraphConfig::default(),
 			journal: JournalConfig::default(),
-			mux: MuxConfig::default(),
 		}
 	}
 
@@ -124,12 +120,29 @@ impl Config {
 		Ok(cfg)
 	}
 
-	/// Nearest ancestor of `start` (inclusive) that contains a `.kern`
-	/// directory, else `start` itself. A kern instance launched from a
-	/// subdirectory of a project still anchors to the project root, so it never
-	/// boots an empty graph against a `.kern` that does not exist beside its
-	/// accidental cwd.
+	/// Resolve the directory this instance should anchor to (cwd, `data_dir`,
+	/// capture spool), walking up from `start` (inclusive) and returning the first
+	/// match in three tiers:
+	///
+	/// 1. Nearest ancestor containing a `.git` entry — the git repository root is
+	///    the canonical anchor, so every subdirectory of a repo shares one `.kern`
+	///    store instead of spawning a fresh one per launch cwd.
+	/// 2. Else nearest ancestor containing a `.kern` directory — a non-git project
+	///    tree that already carries a store.
+	/// 3. Else `start` itself.
+	///
+	/// `.git` is a directory in a normal clone but a *file* in a worktree or
+	/// submodule, so this tests for existence rather than `is_dir()` to catch every
+	/// repo-root shape without shelling out to `git`. The first (innermost) `.git`
+	/// wins: a project under a git-managed home directory still anchors to the
+	/// project root, not to `~`. Anchoring this way keeps the daemon from booting an
+	/// empty graph against a `.kern` that does not exist beside its accidental cwd.
 	pub fn resolve_root(start: &Path) -> PathBuf {
+		for anc in start.ancestors() {
+			if anc.join(".git").exists() {
+				return anc.to_path_buf();
+			}
+		}
 		for anc in start.ancestors() {
 			if anc.join(".kern").is_dir() {
 				return anc.to_path_buf();
@@ -148,7 +161,10 @@ impl Config {
 		// Section invariants: each sub-config validates its own ranges. Prefix the
 		// section name so a bad value reports where it lives.
 		self.ingest.validate().map_err(|e| format!("ingest: {e}"))?;
-		self.capture.validate().map_err(|e| format!("capture: {e}"))?;
+		self
+			.capture
+			.validate()
+			.map_err(|e| format!("capture: {e}"))?;
 		self.serve.validate().map_err(|e| format!("serve: {e}"))?;
 		// RetrievalConfig::validate accumulates issues into a Vec rather than
 		// short-circuiting; surface them all under the section prefix.
@@ -239,11 +255,70 @@ mod tests {
 	}
 
 	#[test]
+	fn resolve_root_anchors_at_git_root_when_no_kern() {
+		// A repo with a `.git` directory and no `.kern` anchors to the git root,
+		// so every subdir launch shares one store instead of creating its own.
+		let dir = tempfile::tempdir().unwrap();
+		let root = dir.path().canonicalize().unwrap();
+		std::fs::create_dir_all(root.join(".git")).unwrap();
+		let deep = root.join("a").join("b");
+		std::fs::create_dir_all(&deep).unwrap();
+
+		assert_eq!(Config::resolve_root(&deep), root);
+	}
+
+	#[test]
+	fn resolve_root_detects_git_as_a_file() {
+		// Worktrees and submodules store `.git` as a file, not a directory; the
+		// repo root must still be detected (existence check, not is_dir()).
+		let dir = tempfile::tempdir().unwrap();
+		let root = dir.path().canonicalize().unwrap();
+		std::fs::write(root.join(".git"), "gitdir: /elsewhere/.git/worktrees/x\n").unwrap();
+		let deep = root.join("a");
+		std::fs::create_dir_all(&deep).unwrap();
+
+		assert_eq!(Config::resolve_root(&deep), root);
+	}
+
+	#[test]
+	fn resolve_root_innermost_git_wins() {
+		// Nested repos (e.g. a project under a git-managed home dir): the nearest
+		// `.git` wins, so projects never collapse into the outer repo's store.
+		let dir = tempfile::tempdir().unwrap();
+		let outer = dir.path().canonicalize().unwrap();
+		std::fs::create_dir_all(outer.join(".git")).unwrap();
+		let inner = outer.join("project");
+		std::fs::create_dir_all(inner.join(".git")).unwrap();
+		let deep = inner.join("src");
+		std::fs::create_dir_all(&deep).unwrap();
+
+		assert_eq!(Config::resolve_root(&deep), inner);
+	}
+
+	#[test]
+	fn resolve_root_prefers_git_root_over_deeper_kern() {
+		// Tier 1 (git root) beats tier 2 (a `.kern` deeper than the git root):
+		// the deeper store is bypassed in favour of the canonical repo anchor.
+		let dir = tempfile::tempdir().unwrap();
+		let root = dir.path().canonicalize().unwrap();
+		std::fs::create_dir_all(root.join(".git")).unwrap();
+		let sub = root.join("sub");
+		std::fs::create_dir_all(sub.join(".kern")).unwrap();
+		let deep = sub.join("deep");
+		std::fs::create_dir_all(&deep).unwrap();
+
+		assert_eq!(Config::resolve_root(&deep), root);
+	}
+
+	#[test]
 	fn default_in_pins_data_dir_to_the_given_cwd_deterministically() {
 		let cwd = Path::new("some_project_root");
 		let cfg = Config::default_in(cwd);
 		assert_eq!(cfg.data_dir, cwd.join(".kern").to_string_lossy());
-		assert_eq!(cfg.log_level, "info", "baseline fields are independent of cwd");
+		assert_eq!(
+			cfg.log_level, "info",
+			"baseline fields are independent of cwd"
+		);
 		// No process state read → two calls with the same cwd are identical.
 		assert_eq!(Config::default_in(cwd).data_dir, cfg.data_dir);
 	}
@@ -263,14 +338,20 @@ mod tests {
 		bad_ingest.ingest.rephrase_lower = 0.9;
 		bad_ingest.ingest.rephrase_upper = 0.8;
 		let err = bad_ingest.validate().unwrap_err();
-		assert!(err.contains("ingest"), "sub-config error is surfaced + tagged: {err}");
+		assert!(
+			err.contains("ingest"),
+			"sub-config error is surfaced + tagged: {err}"
+		);
 
 		// Retrieval invariants are now aggregated too (previously orphaned): a
 		// retrieval-breaking value must surface through the top-level validate.
 		let mut bad_retr = Config::default_in(Path::new("x"));
 		bad_retr.retrieval.seed_k = 0;
 		let err = bad_retr.validate().unwrap_err();
-		assert!(err.contains("retrieval"), "retrieval error surfaced + tagged: {err}");
+		assert!(
+			err.contains("retrieval"),
+			"retrieval error surfaced + tagged: {err}"
+		);
 		assert!(err.contains("seed_k"), "the specific issue is named: {err}");
 	}
 }

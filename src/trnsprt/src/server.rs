@@ -159,8 +159,8 @@ pub(crate) fn error_response(id: Value, code: i64, message: &str) -> Value {
 }
 
 pub(crate) fn write_frame<W: Write>(w: &mut W, value: &Value) -> io::Result<()> {
-	let mut line = serde_json::to_string(value)
-		.map_err(|e| io::Error::other(format!("serialise frame: {e}")))?;
+	let mut line =
+		serde_json::to_string(value).map_err(|e| io::Error::other(format!("serialise frame: {e}")))?;
 	if line.contains('\n') {
 		return Err(io::Error::other("frame contained newline"));
 	}
@@ -180,13 +180,24 @@ mod tests {
 	struct Mock;
 	impl McpServer for Mock {
 		fn tools_list(&self) -> Vec<ToolSchema> {
-			vec![ToolSchema { name: "echo".into(), description: None, input_schema: None }]
+			vec![ToolSchema {
+				name: "echo".into(),
+				description: None,
+				input_schema: None,
+			}]
 		}
 		fn call_tool(&self, name: &str, args: &Value) -> Result<ToolResult, McpError> {
 			if name == "echo" {
-				Ok(ToolResult { content: vec![args.clone()], is_error: false, structured_content: None })
+				Ok(ToolResult {
+					content: vec![args.clone()],
+					is_error: false,
+					structured_content: None,
+				})
 			} else {
-				Err(McpError::Rpc { code: -32601, message: format!("unknown tool: {name}") })
+				Err(McpError::Rpc {
+					code: -32601,
+					message: format!("unknown tool: {name}"),
+				})
 			}
 		}
 	}
@@ -244,6 +255,9 @@ mod tests {
 	fn serve_rw_returns_method_not_found_for_unknown_method() {
 		let frames = run(&[r#"{"jsonrpc":"2.0","id":1,"method":"bogus"}"#]);
 		assert_eq!(frames[0]["error"]["code"], -32601);
-		assert!(frames[0]["error"]["message"].as_str().unwrap().contains("method not found"));
+		assert!(frames[0]["error"]["message"]
+			.as_str()
+			.unwrap()
+			.contains("method not found"));
 	}
 }

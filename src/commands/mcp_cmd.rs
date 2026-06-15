@@ -82,8 +82,7 @@ async fn run_proxy(client: KernRpcClient<JsonEnvelopeCodec>) {
 	// Each `call_tool` invocation crosses back into async via
 	// `block_in_place` + `Handle::current().block_on`, which is
 	// supported on the multi-thread runtime kern uses.
-	if let Err(e) = tokio::task::spawn_blocking(move || trnsprt::serve_stdio(&proxy)).await
-	{
+	if let Err(e) = tokio::task::spawn_blocking(move || trnsprt::serve_stdio(&proxy)).await {
 		tracing::warn!(target: "kern.mcp_proxy", error = %e, "stdio loop");
 	}
 }
@@ -157,10 +156,9 @@ impl McpServer for ProxyServer {
 	}
 
 	fn tools_list(&self) -> Vec<ToolSchema> {
-		// Forward the daemon's LIVE tool list over kern_rpc so a pane sees
-		// whatever the daemon actually exposes (e.g. the mux comms tools when
-		// attached to a mux), not a static snapshot. Falls back to the static
-		// catalogue if the list_tools RPC fails.
+		// Forward the daemon's LIVE tool list over kern_rpc so a client sees
+		// whatever the daemon actually exposes, not a static snapshot. Falls back
+		// to the static catalogue if the list_tools RPC fails.
 		let client = self.client.clone();
 		let res = tokio::task::block_in_place(|| {
 			tokio::runtime::Handle::current().block_on(async move {
@@ -181,11 +179,7 @@ impl McpServer for ProxyServer {
 		}
 	}
 
-	fn call_tool(
-		&self,
-		name: &str,
-		args: &serde_json::Value,
-	) -> Result<ToolResult, McpError> {
+	fn call_tool(&self, name: &str, args: &serde_json::Value) -> Result<ToolResult, McpError> {
 		let client = self.client.clone();
 		let req = CallToolReq {
 			name: name.to_string(),
@@ -260,7 +254,10 @@ mod tests {
 	#[test]
 	fn envelope_non_array_content_falls_back_to_empty() {
 		let r = tool_result_from_envelope(&json!({ "content": "oops", "isError": false }));
-		assert!(r.content.is_empty(), "a non-array content is ignored, not panicked on");
+		assert!(
+			r.content.is_empty(),
+			"a non-array content is ignored, not panicked on"
+		);
 	}
 }
 
@@ -274,19 +271,26 @@ async fn run_standalone(cfg: &crate::config::Config) {
 		let g = read_recovered(&save_g);
 		save_graph(&g);
 	});
-	let llm_fn: Option<crate::ingest::LlmFunc> = if !cfg.reason_url().is_empty() {
-		Some(Arc::new(llm_client.complete_func()))
-	} else {
-		None
+	let q = Arc::new(crate::tick::queue::Queue::new(512));
+	// Defer question seeding to the tick — same wiring as the registry path:
+	// the worker carries no reason-LLM and stays embed-bound.
+	let defer: crate::ingest::worker::DeferQuestionsFn = {
+		let defer_q = q.clone();
+		Arc::new(move |entity_id: &str| {
+			let _ = defer_q.enqueue(crate::tick::queue::task_extra(
+				crate::tick::queue::TaskKind::SeedQuestions,
+				"",
+				entity_id,
+			));
+		})
 	};
 	let worker = Arc::new(crate::ingest::Worker::new(
 		g.clone(),
 		llm_client.clone(),
-		llm_fn,
+		Some(defer),
 		Some(save_fn.clone()),
 	));
 
-	let q = Arc::new(crate::tick::queue::Queue::new(512));
 	let tick_llm: crate::tick::tasks::LlmFunc = Arc::new(llm_client.complete_func());
 	let tick_embed: crate::tick::tasks::EmbedFunc = {
 		let c = llm_client.clone();
@@ -325,7 +329,6 @@ async fn run_standalone(cfg: &crate::config::Config) {
 			cfg.retrieval.query_cache_cap,
 			cfg.retrieval.query_cache_theta,
 		),
-		mux: None,
 	};
 	server.run_stdio();
 }
@@ -335,112 +338,113 @@ async fn run_standalone(cfg: &crate::config::Config) {
 /// Ensure the kern MCP server is registered in the project's `.mcp.json`.
 ///
 /// `.mcp.json` is Claude Code's project-level MCP config file (sits at the
-/// project root alongside `CLAUDE.md`). Called at daemon/mux startup so any
+/// project root alongside `CLAUDE.md`). Called at daemon startup so any
 /// project directory that runs kern automatically gains `mcp__kern__*` tools
 /// in the Claude Code session without manual setup. Idempotent — only inserts
 /// entries that are absent. Does not touch any key that is already present.
 pub(crate) fn ensure_mcp_registered(cwd: &std::path::Path) {
-    let mcp_path = cwd.join(".mcp.json");
+	let mcp_path = cwd.join(".mcp.json");
 
-    // Read existing JSON or start from an empty object.
-    let raw = std::fs::read_to_string(&mcp_path).unwrap_or_else(|_| "{}".to_string());
-    let mut root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
+	// Read existing JSON or start from an empty object.
+	let raw = std::fs::read_to_string(&mcp_path).unwrap_or_else(|_| "{}".to_string());
+	let mut root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
 
-    // Entries we want present; skip any that already exist.
-    let wanted: &[(&str, serde_json::Value)] = &[
-        ("kern", serde_json::json!({"command": "kern", "args": ["mcp"]})),
-    ];
+	// Entries we want present; skip any that already exist.
+	let wanted: &[(&str, serde_json::Value)] = &[(
+		"kern",
+		serde_json::json!({"command": "kern", "args": ["mcp"]}),
+	)];
 
-    let servers = root
-        .as_object_mut()
-        .map(|obj| {
-            obj.entry("mcpServers")
-                .or_insert_with(|| serde_json::json!({}))
-        });
+	let servers = root.as_object_mut().map(|obj| {
+		obj
+			.entry("mcpServers")
+			.or_insert_with(|| serde_json::json!({}))
+	});
 
-    let Some(servers) = servers.and_then(|s| s.as_object_mut()) else {
-        tracing::warn!(target: "kern.mcp", "ensure_mcp_registered: mcpServers is not an object");
-        return;
-    };
+	let Some(servers) = servers.and_then(|s| s.as_object_mut()) else {
+		tracing::warn!(target: "kern.mcp", "ensure_mcp_registered: mcpServers is not an object");
+		return;
+	};
 
-    let mut changed = false;
-    for (name, entry) in wanted {
-        if !servers.contains_key(*name) {
-            servers.insert(name.to_string(), entry.clone());
-            changed = true;
-        }
-    }
+	let mut changed = false;
+	for (name, entry) in wanted {
+		if !servers.contains_key(*name) {
+			servers.insert(name.to_string(), entry.clone());
+			changed = true;
+		}
+	}
 
-    if !changed {
-        return;
-    }
+	if !changed {
+		return;
+	}
 
-    match serde_json::to_string_pretty(&root) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&mcp_path, json) {
-                tracing::warn!(target: "kern.mcp", error = %e, "ensure_mcp_registered: write failed");
-            } else {
-                tracing::info!(
-                    target: "kern.mcp",
-                    path = %mcp_path.display(),
-                    "registered kern MCP server in .mcp.json"
-                );
-            }
-        }
-        Err(e) => tracing::warn!(target: "kern.mcp", error = %e, "ensure_mcp_registered: serialize failed"),
-    }
+	match serde_json::to_string_pretty(&root) {
+		Ok(json) => {
+			if let Err(e) = std::fs::write(&mcp_path, json) {
+				tracing::warn!(target: "kern.mcp", error = %e, "ensure_mcp_registered: write failed");
+			} else {
+				tracing::info!(
+						target: "kern.mcp",
+						path = %mcp_path.display(),
+						"registered kern MCP server in .mcp.json"
+				);
+			}
+		}
+		Err(e) => {
+			tracing::warn!(target: "kern.mcp", error = %e, "ensure_mcp_registered: serialize failed")
+		}
+	}
 }
 
 #[cfg(test)]
 mod ensure_mcp_tests {
-    use super::*;
+	use super::*;
 
-    #[test]
-    fn writes_kern_entry_when_file_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        ensure_mcp_registered(dir.path());
-        let raw = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(v["mcpServers"]["kern"]["command"], "kern");
-        assert_eq!(v["mcpServers"]["kern"]["args"][0], "mcp");
-    }
+	#[test]
+	fn writes_kern_entry_when_file_absent() {
+		let dir = tempfile::tempdir().unwrap();
+		ensure_mcp_registered(dir.path());
+		let raw = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
+		let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+		assert_eq!(v["mcpServers"]["kern"]["command"], "kern");
+		assert_eq!(v["mcpServers"]["kern"]["args"][0], "mcp");
+	}
 
-    #[test]
-    fn preserves_existing_keys_and_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
-        let mcp = dir.path().join(".mcp.json");
-        // Seed with an unrelated mcpServer.
-        std::fs::write(&mcp, r#"{"mcpServers":{"other":{"command":"other"}}}"#).unwrap();
+	#[test]
+	fn preserves_existing_keys_and_is_idempotent() {
+		let dir = tempfile::tempdir().unwrap();
+		let mcp = dir.path().join(".mcp.json");
+		// Seed with an unrelated mcpServer.
+		std::fs::write(&mcp, r#"{"mcpServers":{"other":{"command":"other"}}}"#).unwrap();
 
-        ensure_mcp_registered(dir.path());
+		ensure_mcp_registered(dir.path());
 
-        let raw = std::fs::read_to_string(&mcp).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(v["mcpServers"]["other"]["command"], "other");
-        assert_eq!(v["mcpServers"]["kern"]["command"], "kern");
+		let raw = std::fs::read_to_string(&mcp).unwrap();
+		let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+		assert_eq!(v["mcpServers"]["other"]["command"], "other");
+		assert_eq!(v["mcpServers"]["kern"]["command"], "kern");
 
-        // Second call is idempotent — file unchanged.
-        let before = std::fs::read_to_string(&mcp).unwrap();
-        ensure_mcp_registered(dir.path());
-        let after = std::fs::read_to_string(&mcp).unwrap();
-        assert_eq!(before, after, "idempotent: file unchanged on second call");
-    }
+		// Second call is idempotent — file unchanged.
+		let before = std::fs::read_to_string(&mcp).unwrap();
+		ensure_mcp_registered(dir.path());
+		let after = std::fs::read_to_string(&mcp).unwrap();
+		assert_eq!(before, after, "idempotent: file unchanged on second call");
+	}
 
-    #[test]
-    fn does_not_overwrite_existing_custom_entries() {
-        let dir = tempfile::tempdir().unwrap();
-        let mcp = dir.path().join(".mcp.json");
-        std::fs::write(
-            &mcp,
-            r#"{"mcpServers":{"kern":{"command":"custom","args":["x"]}}}"#,
-        )
-        .unwrap();
+	#[test]
+	fn does_not_overwrite_existing_custom_entries() {
+		let dir = tempfile::tempdir().unwrap();
+		let mcp = dir.path().join(".mcp.json");
+		std::fs::write(
+			&mcp,
+			r#"{"mcpServers":{"kern":{"command":"custom","args":["x"]}}}"#,
+		)
+		.unwrap();
 
-        ensure_mcp_registered(dir.path());
+		ensure_mcp_registered(dir.path());
 
-        let raw = std::fs::read_to_string(&mcp).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(v["mcpServers"]["kern"]["command"], "custom");
-    }
-
+		let raw = std::fs::read_to_string(&mcp).unwrap();
+		let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+		assert_eq!(v["mcpServers"]["kern"]["command"], "custom");
+	}
 }

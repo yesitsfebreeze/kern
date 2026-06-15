@@ -68,7 +68,10 @@ mod tests {
 		// announce itself without an explicit opt-in.
 		assert!(!c.enabled, "gossip is disabled by default");
 		assert_eq!(c.addr, "0.0.0.0:7400");
-		assert!(c.discovery, "discovery defaults on (only matters once enabled)");
+		assert!(
+			c.discovery,
+			"discovery defaults on (only matters once enabled)"
+		);
 		assert_eq!(c.discovery_port, 7475);
 		assert!(c.peers.is_empty(), "no seed peers by default");
 		// Security-sensitive defenses default OFF but carry sane bounds.

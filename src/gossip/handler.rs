@@ -475,13 +475,20 @@ mod tests {
 		let g = Arc::new(RwLock::new(GraphGnn::new()));
 		let d = mk_deps(g.clone());
 
-		let msg = esync_msg("othernet", "rootK", vec![mk_entity("eR", "remote thought", 3.0)]);
+		let msg = esync_msg(
+			"othernet",
+			"rootK",
+			vec![mk_entity("eR", "remote thought", 3.0)],
+		);
 		handle_entity_sync(&d, msg);
 
 		let guard = g.read().unwrap();
 		let phantom = "remote-othernet-rootK";
 		let kern = guard.kerns.get(phantom).expect("phantom kern created");
-		assert!(kern.entities.contains_key("eR"), "remote entity merged into phantom");
+		assert!(
+			kern.entities.contains_key("eR"),
+			"remote entity merged into phantom"
+		);
 		assert_eq!(guard.kern_of_entity("eR"), Some(phantom));
 	}
 
@@ -495,7 +502,10 @@ mod tests {
 		handle_entity_sync(&d, msg);
 
 		let guard = g.read().unwrap();
-		assert!(guard.kern_of_entity("eR").is_none(), "own-network echo ignored");
+		assert!(
+			guard.kern_of_entity("eR").is_none(),
+			"own-network echo ignored"
+		);
 		assert!(
 			!guard.kerns.keys().any(|k| k.starts_with("remote-")),
 			"no phantom kern created for own data"
@@ -594,9 +604,14 @@ mod tests {
 		let calls = Arc::new(AtomicUsize::new(0));
 		let d = mk_deps_with_save(g.clone(), calls.clone());
 
-		handle_crdt_delta(&d, delta_msg(CrdtTarget::ThoughtAccessCount, "e", "peerR", 7));
+		handle_crdt_delta(
+			&d,
+			delta_msg(CrdtTarget::ThoughtAccessCount, "e", "peerR", 7),
+		);
 
-		let merged = g.read().unwrap().kerns["k"].entities["e"].access_count.value();
+		let merged = g.read().unwrap().kerns["k"].entities["e"]
+			.access_count
+			.value();
 		assert_eq!(merged, 7, "the remote replica's count is merged in");
 		assert_eq!(
 			calls.load(Ordering::SeqCst),
@@ -614,9 +629,19 @@ mod tests {
 
 		// Same replica + value twice: the second max-join is a no-op, so only the
 		// first (changing) merge persists — no needless fsync on idempotent redelta.
-		handle_crdt_delta(&d, delta_msg(CrdtTarget::ThoughtAccessCount, "e", "peerR", 5));
-		handle_crdt_delta(&d, delta_msg(CrdtTarget::ThoughtAccessCount, "e", "peerR", 5));
-		assert_eq!(calls.load(Ordering::SeqCst), 1, "only the changing merge persists");
+		handle_crdt_delta(
+			&d,
+			delta_msg(CrdtTarget::ThoughtAccessCount, "e", "peerR", 5),
+		);
+		handle_crdt_delta(
+			&d,
+			delta_msg(CrdtTarget::ThoughtAccessCount, "e", "peerR", 5),
+		);
+		assert_eq!(
+			calls.load(Ordering::SeqCst),
+			1,
+			"only the changing merge persists"
+		);
 	}
 
 	/// A graph holding one OPEN question reason ("r1", to empty) in kern "kq".
@@ -659,7 +684,10 @@ mod tests {
 		let guard = g.read().unwrap();
 		let r = guard.kerns["kq"].reasons.get("r1").expect("reason present");
 		assert_eq!(r.to, "ans", "answer endpoint filled in");
-		assert!(matches!(r.kind, ReasonKind::Similarity), "open question promoted to similarity");
+		assert!(
+			matches!(r.kind, ReasonKind::Similarity),
+			"open question promoted to similarity"
+		);
 	}
 
 	#[test]

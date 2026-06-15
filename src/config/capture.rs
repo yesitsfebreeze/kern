@@ -109,19 +109,44 @@ mod tests {
 
 	#[test]
 	fn validate_rejects_zero_intervals_only_when_enabled() {
-		assert!(CaptureConfig::default().validate().is_ok(), "default (enabled, non-zero intervals) is valid");
+		assert!(
+			CaptureConfig::default().validate().is_ok(),
+			"default (enabled, non-zero intervals) is valid"
+		);
 
-		let enabled = CaptureConfig { enabled: true, ..Default::default() };
-		assert!(enabled.validate().is_ok(), "enabled default intervals are non-zero");
+		let enabled = CaptureConfig {
+			enabled: true,
+			..Default::default()
+		};
+		assert!(
+			enabled.validate().is_ok(),
+			"enabled default intervals are non-zero"
+		);
 
-		let zero_poll = CaptureConfig { enabled: true, poll_secs: 0, ..Default::default() };
+		let zero_poll = CaptureConfig {
+			enabled: true,
+			poll_secs: 0,
+			..Default::default()
+		};
 		assert!(zero_poll.validate().unwrap_err().contains("poll_secs"));
 
-		let zero_digest = CaptureConfig { enabled: true, digest_secs: 0, ..Default::default() };
+		let zero_digest = CaptureConfig {
+			enabled: true,
+			digest_secs: 0,
+			..Default::default()
+		};
 		assert!(zero_digest.validate().unwrap_err().contains("digest_secs"));
 
 		// Disabled with zero intervals is accepted — the loops never start.
-		let disabled_zero = CaptureConfig { enabled: false, poll_secs: 0, digest_secs: 0, ..Default::default() };
-		assert!(disabled_zero.validate().is_ok(), "disabled capture ignores its intervals");
+		let disabled_zero = CaptureConfig {
+			enabled: false,
+			poll_secs: 0,
+			digest_secs: 0,
+			..Default::default()
+		};
+		assert!(
+			disabled_zero.validate().is_ok(),
+			"disabled capture ignores its intervals"
+		);
 	}
 }

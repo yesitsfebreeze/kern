@@ -172,7 +172,11 @@ fn day_prefix(p: &Path) -> Option<String> {
 	let ok = y.len() == 4
 		&& m.len() == 2
 		&& d.len() == 2
-		&& y.bytes().chain(m.bytes()).chain(d.bytes()).all(|b| b.is_ascii_digit());
+		&& y
+			.bytes()
+			.chain(m.bytes())
+			.chain(d.bytes())
+			.all(|b| b.is_ascii_digit());
 	ok.then(|| format!("{y}-{m}-{d}"))
 }
 
@@ -186,7 +190,10 @@ mod tests {
 	fn one_segment(dir: &Path) -> PathBuf {
 		let dj = DayJournal::open(dir).unwrap();
 		dj.emit(Entry::new(
-			Kind::ForkOpen { fork_id: "f".into(), parent: None },
+			Kind::ForkOpen {
+				fork_id: "f".into(),
+				parent: None,
+			},
 			"mux",
 			serde_json::json!({ "fork_id": "f" }),
 		));
@@ -221,7 +228,10 @@ mod tests {
 		let n1 = compact_segment(&hist, &seg).unwrap();
 		let n2 = compact_segment(&hist, &seg).unwrap();
 		assert!(n1 >= 1, "first compaction inserts the fork row");
-		assert_eq!(n2, 0, "second compaction is a no-op (segment already marked)");
+		assert_eq!(
+			n2, 0,
+			"second compaction is a no-op (segment already marked)"
+		);
 	}
 
 	#[test]

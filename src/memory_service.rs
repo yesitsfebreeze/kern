@@ -66,9 +66,21 @@ mod tests {
 	#[test]
 	fn truncate_drops_newer_only() {
 		let s = MemoryService::new();
-		s.insert(MemoryEntry { ts_ms: 10, key: "a".into(), text: "x".into() });
-		s.insert(MemoryEntry { ts_ms: 20, key: "b".into(), text: "y".into() });
-		s.insert(MemoryEntry { ts_ms: 30, key: "c".into(), text: "z".into() });
+		s.insert(MemoryEntry {
+			ts_ms: 10,
+			key: "a".into(),
+			text: "x".into(),
+		});
+		s.insert(MemoryEntry {
+			ts_ms: 20,
+			key: "b".into(),
+			text: "y".into(),
+		});
+		s.insert(MemoryEntry {
+			ts_ms: 30,
+			key: "c".into(),
+			text: "z".into(),
+		});
 		assert_eq!(s.truncate_after(20), 1);
 		assert_eq!(s.len(), 2);
 	}
@@ -77,8 +89,16 @@ mod tests {
 	fn insert_same_key_upserts_in_place() {
 		// HashMap upsert is intentional: re-inserting a key REPLACES, never appends.
 		let s = MemoryService::new();
-		s.insert(MemoryEntry { ts_ms: 10, key: "k".into(), text: "old".into() });
-		s.insert(MemoryEntry { ts_ms: 20, key: "k".into(), text: "new".into() });
+		s.insert(MemoryEntry {
+			ts_ms: 10,
+			key: "k".into(),
+			text: "old".into(),
+		});
+		s.insert(MemoryEntry {
+			ts_ms: 20,
+			key: "k".into(),
+			text: "new".into(),
+		});
 
 		assert_eq!(s.len(), 1, "same key overwrites rather than duplicating");
 		let snap = s.snapshot();
@@ -90,8 +110,16 @@ mod tests {
 	#[test]
 	fn snapshot_returns_every_entry() {
 		let s = MemoryService::new();
-		s.insert(MemoryEntry { ts_ms: 1, key: "a".into(), text: "x".into() });
-		s.insert(MemoryEntry { ts_ms: 2, key: "b".into(), text: "y".into() });
+		s.insert(MemoryEntry {
+			ts_ms: 1,
+			key: "a".into(),
+			text: "x".into(),
+		});
+		s.insert(MemoryEntry {
+			ts_ms: 2,
+			key: "b".into(),
+			text: "y".into(),
+		});
 		let mut keys: Vec<String> = s.snapshot().into_iter().map(|e| e.key).collect();
 		keys.sort();
 		assert_eq!(keys, vec!["a".to_string(), "b".to_string()]);

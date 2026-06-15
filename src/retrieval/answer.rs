@@ -1,6 +1,6 @@
 use crate::base::constants::{ANSWER_MAX_CHAINS, ANSWER_MAX_THOUGHTS, REFINE_INTERVAL};
 use crate::base::graph::GraphGnn;
-use crate::base::search::{find_reason, find_entity};
+use crate::base::search::{find_entity, find_reason};
 use crate::base::util;
 use crate::config::RetrievalConfig;
 use crate::profile::Profiler;
@@ -27,7 +27,8 @@ pub fn query(
 	embedder_fn: Option<&crate::retrieval::EmbedFunc>,
 	opts: Option<QueryOptions>,
 ) -> QueryResult {
-	let (result, profile) = query_profiled(g, cfg, query_vec, query_text, mode, llm, embedder_fn, opts);
+	let (result, profile) =
+		query_profiled(g, cfg, query_vec, query_text, mode, llm, embedder_fn, opts);
 	tracing::debug!(target: "kern.profile", "{}", profile);
 	result
 }
@@ -52,8 +53,11 @@ pub fn query_profiled(
 	let fused_qvec = hyde::expand_query(cfg, llm, embedder_fn, query_vec, query_text);
 	prof.checkpoint("hyde");
 
-	let Retrieved { mut results, chains, chain_text } =
-		retrieve(g, cfg, &fused_qvec, query_text, mode, opts.as_ref(), w);
+	let Retrieved {
+		mut results,
+		chains,
+		chain_text,
+	} = retrieve(g, cfg, &fused_qvec, query_text, mode, opts.as_ref(), w);
 	prof.checkpoint("retrieve");
 
 	rerank::llm_rerank(cfg, llm, query_text, &mut results);
@@ -65,7 +69,11 @@ pub fn query_profiled(
 	prof.checkpoint("answer");
 
 	(
-		QueryResult { answer, entities: results, path_chains: chains },
+		QueryResult {
+			answer,
+			entities: results,
+			path_chains: chains,
+		},
 		prof.finish(),
 	)
 }
@@ -146,7 +154,11 @@ pub fn retrieve(
 	};
 
 	if seeds.is_empty() {
-		return Retrieved { results: Vec::new(), chains: Vec::new(), chain_text: String::new() };
+		return Retrieved {
+			results: Vec::new(),
+			chains: Vec::new(),
+			chain_text: String::new(),
+		};
 	}
 
 	let expanded = expand::expand(g, cfg, qvec, &seeds, w);
@@ -177,7 +189,11 @@ pub fn retrieve(
 	diversify::mmr(cfg, qvec, &mut results);
 
 	let chain_text = format_chains(g, &chains);
-	Retrieved { results, chains, chain_text }
+	Retrieved {
+		results,
+		chains,
+		chain_text,
+	}
 }
 
 /// Build the answer prompt and run the LLM. Takes the pre-rendered `chain_text`
@@ -261,11 +277,7 @@ pub fn build_answer_prompt(
 /// Assemble the answer prompt from a pre-rendered `chain_text` and the scored
 /// results' own entity copies — no graph access, so it runs after the lock is
 /// released. [`build_answer_prompt`] is the graph-taking convenience wrapper.
-pub fn answer_prompt_from(
-	chain_text: &str,
-	scored: &[ScoredEntity],
-	query_text: &str,
-) -> String {
+pub fn answer_prompt_from(chain_text: &str, scored: &[ScoredEntity], query_text: &str) -> String {
 	let mut prompt = String::from("Context from knowledge graph:\n\n");
 	if !chain_text.is_empty() {
 		prompt.push_str(chain_text);
@@ -301,7 +313,7 @@ pub fn format_chains(g: &GraphGnn, chains: &[PathChain]) -> String {
 				} else if let Some(lbl) = r.kind.fallback_label() {
 					lbl.to_string()
 				} else {
-					continue
+					continue;
 				};
 				out.push_str(&format!("  --{label}-->\n"));
 			}
@@ -365,14 +377,23 @@ mod tests {
 	use std::sync::Arc;
 
 	fn scored(id: &str, text: &str, score: f64) -> ScoredEntity {
-		ScoredEntity { entity: mk_entity(id, text, 0.0, EntityKind::Claim), score }
+		ScoredEntity {
+			entity: mk_entity(id, text, 0.0, EntityKind::Claim),
+			score,
+		}
 	}
 
 	#[test]
 	fn synthesize_is_empty_without_a_query_or_an_llm() {
 		let s = [scored("a", "fact", 1.0)];
-		assert!(synthesize("ctx", &s, "", None).is_empty(), "empty query -> empty answer");
-		assert!(synthesize("ctx", &s, "q?", None).is_empty(), "no llm -> empty answer");
+		assert!(
+			synthesize("ctx", &s, "", None).is_empty(),
+			"empty query -> empty answer"
+		);
+		assert!(
+			synthesize("ctx", &s, "q?", None).is_empty(),
+			"no llm -> empty answer"
+		);
 	}
 
 	#[test]
@@ -394,7 +415,10 @@ mod tests {
 
 	#[test]
 	fn answer_prompt_from_numbers_facts_and_appends_the_question() {
-		let s = [scored("a", "first fact", 1.0), scored("b", "second fact", 0.9)];
+		let s = [
+			scored("a", "first fact", 1.0),
+			scored("b", "second fact", 0.9),
+		];
 		let p = answer_prompt_from("", &s, "why?");
 		assert!(p.starts_with("Context from knowledge graph:"));
 		assert!(p.contains("1. first fact"));
@@ -405,15 +429,22 @@ mod tests {
 	#[test]
 	fn answer_prompt_from_inlines_chain_text_when_present() {
 		let p = answer_prompt_from("Chain 1:\n  [Entity] x\n", &[], "q");
-		assert!(p.contains("Chain 1:"), "chain text inlined ahead of the facts");
+		assert!(
+			p.contains("Chain 1:"),
+			"chain text inlined ahead of the facts"
+		);
 	}
 
 	#[test]
 	fn format_chains_renders_entities_and_reason_labels() {
 		let mut g = GraphGnn::new();
 		let mut k = Kern::new("k", "");
-		k.entities.insert("e1".into(), mk_entity("e1", "alpha", 0.0, EntityKind::Claim));
-		k.entities.insert("e2".into(), mk_entity("e2", "beta", 0.0, EntityKind::Claim));
+		k.entities.insert(
+			"e1".into(),
+			mk_entity("e1", "alpha", 0.0, EntityKind::Claim),
+		);
+		k.entities
+			.insert("e2".into(), mk_entity("e2", "beta", 0.0, EntityKind::Claim));
 		add_reason(
 			&mut k,
 			Reason {
@@ -427,12 +458,18 @@ mod tests {
 		);
 		g.kerns.insert("k".into(), k);
 
-		let chains = [PathChain { nodes: vec!["e1".into(), "r1".into(), "e2".into()], score: 1.0 }];
+		let chains = [PathChain {
+			nodes: vec!["e1".into(), "r1".into(), "e2".into()],
+			score: 1.0,
+		}];
 		let out = format_chains(&g, &chains);
 		assert!(out.contains("Chain 1:"));
 		assert!(out.contains("[Entity] alpha"));
 		assert!(out.contains("[Entity] beta"));
-		assert!(out.contains("--supports-->"), "reason text used as the edge label: {out}");
+		assert!(
+			out.contains("--supports-->"),
+			"reason text used as the edge label: {out}"
+		);
 	}
 
 	#[test]

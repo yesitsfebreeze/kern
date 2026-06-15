@@ -1,7 +1,7 @@
 use crate::base::search::{find_entity, search_all_unlocked};
 use crate::base::util::{short_id, truncate};
 
-use super::{Client, Endpoint, load_graph};
+use super::{load_graph, Client, Endpoint};
 
 /// Borrowed arguments for [`cmd_query`]. Groups the query text, retrieval mode,
 /// answer flag, and the four embed/reason endpoint overrides so the entry point
@@ -18,7 +18,15 @@ pub(super) struct QueryParams<'a> {
 }
 
 pub(super) async fn cmd_query(cfg: &crate::config::Config, params: QueryParams<'_>) {
-	let QueryParams { text, mode, answer, embed_url, embed_model, reason_url, reason_model } = params;
+	let QueryParams {
+		text,
+		mode,
+		answer,
+		embed_url,
+		embed_model,
+		reason_url,
+		reason_model,
+	} = params;
 	let g = load_graph(cfg);
 	let llm_client = Client::new(
 		Endpoint::new(reason_url, reason_model, cfg.reason_key()),
@@ -36,16 +44,8 @@ pub(super) async fn cmd_query(cfg: &crate::config::Config, params: QueryParams<'
 
 	let mode = crate::retrieval::seed::Mode::parse(mode);
 
-	let result = crate::retrieval::answer::query(
-		&g,
-		&cfg.retrieval,
-		&vec,
-		text,
-		mode,
-		None,
-		None,
-		None,
-	);
+	let result =
+		crate::retrieval::answer::query(&g, &cfg.retrieval, &vec, text, mode, None, None, None);
 	// No save: cmd_query is read-only — access/heat bumps land on the cloned
 	// result entities, not on `g`. Persisting here would only risk clobbering
 	// a running daemon's newer on-disk state with this CLI snapshot.

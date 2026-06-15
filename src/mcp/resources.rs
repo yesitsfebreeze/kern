@@ -1,7 +1,7 @@
 use serde_json::value::RawValue;
 
 use crate::base::locks::read_recovered;
-use crate::base::search::{find_reason, find_entity};
+use crate::base::search::{find_entity, find_reason};
 use crate::base::util::truncate;
 
 use super::{err_resp, ok, Response, Server, ERR_INVALID_REQ, ERR_NOT_FOUND};
@@ -218,7 +218,12 @@ mod tests {
 	fn make_server() -> Server {
 		let graph = Arc::new(RwLock::new(GraphGnn::new()));
 		let embedder = llm::Client::new_embed_only("http://127.0.0.1:1", "test");
-		let worker = Arc::new(crate::ingest::Worker::new(graph.clone(), embedder, None, None));
+		let worker = Arc::new(crate::ingest::Worker::new(
+			graph.clone(),
+			embedder,
+			None,
+			None,
+		));
 		Server {
 			graph,
 			worker,
@@ -227,7 +232,6 @@ mod tests {
 			task_q: None,
 			cfg: Arc::new(Config::default()),
 			cache: crate::retrieval::cache::QueryCache::default_shared(),
-			mux: None,
 		}
 	}
 
@@ -236,10 +240,21 @@ mod tests {
 	fn seed(server: &Server) {
 		let mut g = write_recovered(&server.graph);
 		let mut k = Kern::new("kx", "");
-		k.entities.insert("e1".into(), Entity { id: "e1".into(), ..Default::default() });
+		k.entities.insert(
+			"e1".into(),
+			Entity {
+				id: "e1".into(),
+				..Default::default()
+			},
+		);
 		add_reason(
 			&mut k,
-			Reason { from: "e1".into(), to: "e2".into(), id: "r1".into(), ..Default::default() },
+			Reason {
+				from: "e1".into(),
+				to: "e2".into(),
+				id: "r1".into(),
+				..Default::default()
+			},
 		);
 		g.kerns.insert("kx".into(), k);
 	}
@@ -252,7 +267,11 @@ mod tests {
 			serde_json::from_str(&resource_thought(&srv, "e1")).expect("valid json");
 		assert_eq!(v["id"], "e1");
 		assert_eq!(v["kern"], "kx");
-		assert_eq!(v["edges"].as_array().map(|a| a.len()), Some(1), "the one incident edge");
+		assert_eq!(
+			v["edges"].as_array().map(|a| a.len()),
+			Some(1),
+			"the one incident edge"
+		);
 		assert_eq!(v["edges"][0]["id"], "r1");
 	}
 

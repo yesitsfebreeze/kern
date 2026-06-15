@@ -47,7 +47,11 @@ mod tests {
 		// Guards the sentinel: a future refactor must not silently re-enable a
 		// finite cap while the evict/persist consistency bug is unfixed.
 		assert_eq!(GraphConfig::default().max_kerns, KERN_CAP_DISABLED);
-		assert_eq!(KERN_CAP_DISABLED, usize::MAX, "sentinel value is the uncapped marker");
+		assert_eq!(
+			KERN_CAP_DISABLED,
+			usize::MAX,
+			"sentinel value is the uncapped marker"
+		);
 	}
 
 	#[test]

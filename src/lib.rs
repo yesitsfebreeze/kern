@@ -33,12 +33,10 @@ pub mod mcp;
 pub mod memory_service;
 /// Runtime metrics collection and reporting.
 pub mod metrics;
-/// Model quantisation utilities for reducing LLM memory footprint.
-pub mod quant;
 /// Query profiling and performance measurement.
 pub mod profile;
-/// Interactive REPL for direct kern exploration.
-pub mod repl;
+/// Model quantisation utilities for reducing LLM memory footprint.
+pub mod quant;
 /// Hybrid vector + BM25 search over the ingested content index.
 pub mod retrieval;
 /// Typed RPC service layer consumed by external MCP clients.
@@ -51,7 +49,5 @@ pub mod tick;
 pub mod types;
 /// Live read-only HTTP graph viewer (force-directed web UI).
 pub mod viewer;
-/// PTY-multiplexer TUI mode — the default `kern` launch mode.
-pub mod mux;
 /// Serialisation helpers for wire-format encoding and decoding.
 pub mod wire;

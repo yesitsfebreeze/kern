@@ -1,12 +1,12 @@
 use crate::base::constants::{DEGRADE_DECAY_BASE, DEGRADE_DECAY_POW, DEGRADE_MIN_THRESHOLD};
 use crate::base::graph::GraphGnn;
 use crate::base::math::{average_vec, cosine, reason_id};
-use crate::base::reason::{add_reason, remove_reason, remove_entity};
+use crate::base::reason::{add_reason, remove_entity, remove_reason};
 use crate::base::search::find_entity;
 use crate::base::types::{Entity, Kern, Reason, ReasonKind};
 use crate::base::util::{explain_relationship_prompt, short_id, truncate};
 
-use super::{Client, Endpoint, load_graph, save_graph, with_graph};
+use super::{load_graph, save_graph, with_graph, Client, Endpoint};
 
 /// Resolve a thought by exact id, then fall back to a unique id-prefix scan over
 /// every kern. Display/lookup helper for `cmd_get` — lives here, not in the
@@ -42,7 +42,12 @@ fn print_kern(kern: &Kern, g: &GraphGnn, depth: usize) {
 		kern.reasons.len(),
 	);
 	for t in kern.entities.values() {
-		println!("{}  [{}] {}", indent, short_id(&t.id), truncate(&t.text(), 72));
+		println!(
+			"{}  [{}] {}",
+			indent,
+			short_id(&t.id),
+			truncate(&t.text(), 72)
+		);
 	}
 	for child_id in &kern.children {
 		if let Some(child) = g.kerns.get(child_id) {
@@ -205,7 +210,10 @@ pub(super) async fn cmd_link(
 	// the previous silent path that saved an unchanged graph yet still printed
 	// "linked", reporting a success that never happened.
 	let Some(kern) = g.kerns.get_mut(&from_kern_id) else {
-		eprintln!("link failed: kern {} no longer present", short_id(&from_kern_id));
+		eprintln!(
+			"link failed: kern {} no longer present",
+			short_id(&from_kern_id)
+		);
 		return;
 	};
 	add_reason(kern, r);
@@ -320,8 +328,14 @@ mod tests {
 		let kern = g.kerns.get("kx").expect("kern present");
 		assert_eq!(kern.reasons.len(), 1, "only the healthy edge remains");
 		let survivor = kern.reasons.get("a->b").expect("a->b survives");
-		assert!(survivor.score < 1.0, "survivor was decayed, not left untouched");
-		assert!(survivor.score >= DEGRADE_MIN_THRESHOLD, "survivor stays above the floor");
+		assert!(
+			survivor.score < 1.0,
+			"survivor was decayed, not left untouched"
+		);
+		assert!(
+			survivor.score >= DEGRADE_MIN_THRESHOLD,
+			"survivor stays above the floor"
+		);
 	}
 
 	#[test]
@@ -333,20 +347,36 @@ mod tests {
 
 	#[test]
 	fn link_vector_prefers_the_reason_embedding() {
-		let v = link_vector(Some(vec![1.0, 2.0, 3.0]), &[0.0, 0.0, 0.0], &[9.0, 9.0, 9.0]);
-		assert_eq!(v, vec![1.0, 2.0, 3.0], "an embedded reason wins over the midpoint");
+		let v = link_vector(
+			Some(vec![1.0, 2.0, 3.0]),
+			&[0.0, 0.0, 0.0],
+			&[9.0, 9.0, 9.0],
+		);
+		assert_eq!(
+			v,
+			vec![1.0, 2.0, 3.0],
+			"an embedded reason wins over the midpoint"
+		);
 	}
 
 	#[test]
 	fn link_vector_falls_back_to_endpoint_midpoint() {
 		let v = link_vector(None, &[0.0, 2.0], &[4.0, 6.0]);
-		assert_eq!(v, vec![2.0, 4.0], "no embedding -> midpoint of the two endpoints");
+		assert_eq!(
+			v,
+			vec![2.0, 4.0],
+			"no embedding -> midpoint of the two endpoints"
+		);
 	}
 
 	use crate::base::types::EntityKind;
 
 	fn ent(id: &str, kind: EntityKind) -> Entity {
-		Entity { id: id.into(), kind, ..Default::default() }
+		Entity {
+			id: id.into(),
+			kind,
+			..Default::default()
+		}
 	}
 
 	fn graph_with(entities: &[(&str, EntityKind)], edges: &[(&str, &str)]) -> GraphGnn {
@@ -366,7 +396,11 @@ mod tests {
 	fn forget_removes_thought_and_reports_edge_delta() {
 		// a is linked to b and c; forgetting a must drop a and its two incident edges.
 		let mut g = graph_with(
-			&[("a", EntityKind::Claim), ("b", EntityKind::Claim), ("c", EntityKind::Claim)],
+			&[
+				("a", EntityKind::Claim),
+				("b", EntityKind::Claim),
+				("c", EntityKind::Claim),
+			],
 			&[("a", "b"), ("a", "c")],
 		);
 		let removed = forget_entity(&mut g, "a").expect("non-fact forget succeeds");

@@ -1,5 +1,3 @@
-
-
 use crate::gnn::activation::Activation;
 use crate::gnn::backward::{act_deriv_mul, BackwardGraphLayer, GraphLayer};
 use crate::gnn::dropout::Dropout;
@@ -193,9 +191,19 @@ mod tests {
 
 		let out = layer.forward_graph(&g, &feats);
 		assert_eq!((out.rows, out.cols), (2, 3), "num_nodes x out_features");
-		let adj = layer.last_norm_adj.as_ref().expect("normalized adjacency cached");
-		assert_eq!((adj.rows, adj.cols), (2, 2), "adjacency is num_nodes x num_nodes");
-		assert!(layer.last_pre_act.is_some(), "pre-activation cached for backward");
+		let adj = layer
+			.last_norm_adj
+			.as_ref()
+			.expect("normalized adjacency cached");
+		assert_eq!(
+			(adj.rows, adj.cols),
+			(2, 2),
+			"adjacency is num_nodes x num_nodes"
+		);
+		assert!(
+			layer.last_pre_act.is_some(),
+			"pre-activation cached for backward"
+		);
 	}
 
 	#[test]
@@ -212,7 +220,11 @@ mod tests {
 		));
 		// Infallible delegate degrades to a zero gradient of input shape (n x in).
 		let z = layer.backward_graph(&g, &d_out);
-		assert_eq!((z.rows, z.cols), (2, 2), "fallback dInput is num_nodes x in_features");
+		assert_eq!(
+			(z.rows, z.cols),
+			(2, 2),
+			"fallback dInput is num_nodes x in_features"
+		);
 		assert!(z.data.iter().all(|&v| v == 0.0));
 	}
 }

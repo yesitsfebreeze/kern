@@ -72,7 +72,11 @@ pub struct Endpoint {
 
 impl Endpoint {
 	pub fn new(url: &str, model: &str, key: &str) -> Self {
-		Self { url: url.to_string(), model: model.to_string(), key: key.to_string() }
+		Self {
+			url: url.to_string(),
+			model: model.to_string(),
+			key: key.to_string(),
+		}
 	}
 }
 
@@ -101,7 +105,11 @@ impl Client {
 	/// differs. An empty answer model would 400 on `/ask`, so it falls back too.
 	pub fn new(reason: Endpoint, answer: Endpoint, embed: Endpoint) -> Self {
 		fn or<'a>(v: &'a str, fallback: &'a str) -> &'a str {
-			if v.is_empty() { fallback } else { v }
+			if v.is_empty() {
+				fallback
+			} else {
+				v
+			}
 		}
 		let embed_url = or(&embed.url, &reason.url);
 		let embed_key = or(&embed.key, &reason.key);
@@ -133,7 +141,11 @@ impl Client {
 	}
 
 	pub fn new_embed_only(embed_url: &str, embed_model: &str) -> Self {
-		Self::new(Endpoint::default(), Endpoint::default(), Endpoint::new(embed_url, embed_model, ""))
+		Self::new(
+			Endpoint::default(),
+			Endpoint::default(),
+			Endpoint::new(embed_url, embed_model, ""),
+		)
 	}
 
 	pub async fn embed(&self, text: &str) -> Result<Vec<f64>, LlmError> {
@@ -186,7 +198,12 @@ impl Client {
 		body: &T,
 		timeout: Option<Duration>,
 	) -> Result<reqwest::Response, LlmError> {
-		let mut req = self.inner.http.post(url).headers(headers.clone()).json(body);
+		let mut req = self
+			.inner
+			.http
+			.post(url)
+			.headers(headers.clone())
+			.json(body);
 		if let Some(t) = timeout {
 			req = req.timeout(t);
 		}
@@ -196,7 +213,9 @@ impl Client {
 	pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f64>>, LlmError> {
 		let url = format!("{}/api/embed", self.inner.embed_url);
 		let body = self.embed_body(serde_json::json!(texts));
-		let resp = self.post_checked(&url, &self.inner.embed_headers, &body, None).await?;
+		let resp = self
+			.post_checked(&url, &self.inner.embed_headers, &body, None)
+			.await?;
 		// /api/embed preserves input order in `embeddings`, so no index sort needed.
 		let parsed: NativeEmbedResponse = resp.json().await?;
 		if parsed.embeddings.is_empty() {
@@ -208,7 +227,9 @@ impl Client {
 	async fn embed_single(&self, text: &str) -> Result<Vec<f64>, LlmError> {
 		let url = format!("{}/api/embed", self.inner.embed_url);
 		let body = self.embed_body(serde_json::json!(text));
-		let resp = self.post_checked(&url, &self.inner.embed_headers, &body, None).await?;
+		let resp = self
+			.post_checked(&url, &self.inner.embed_headers, &body, None)
+			.await?;
 		let parsed: NativeEmbedResponse = resp.json().await?;
 		parsed
 			.embeddings
@@ -259,7 +280,9 @@ impl Client {
 				content: prompt,
 			}],
 		};
-		let resp = self.post_checked(&url, &self.inner.reason_headers, &body, None).await?;
+		let resp = self
+			.post_checked(&url, &self.inner.reason_headers, &body, None)
+			.await?;
 		let parsed: ChatResponse = resp.json().await?;
 		parsed
 			.choices
@@ -372,7 +395,9 @@ impl Client {
 			let prompt = prompt.to_string();
 			// No runtime or a completion error both collapse to "" — the distill /
 			// edge-label callers treat that as "no output".
-			block_on_in_place(client.complete(&prompt)).and_then(Result::ok).unwrap_or_default()
+			block_on_in_place(client.complete(&prompt))
+				.and_then(Result::ok)
+				.unwrap_or_default()
 		}
 	}
 }
@@ -532,24 +557,36 @@ mod tests {
 		// Streaming token chunk: content present, not done.
 		assert_eq!(
 			parse_chat_line(r#"{"message":{"role":"assistant","content":"He"},"done":false}"#),
-			Some(ChatLine { content: Some("He".to_string()), done: false })
+			Some(ChatLine {
+				content: Some("He".to_string()),
+				done: false
+			})
 		);
 		// Streaming terminal chunk: empty content, done.
 		assert_eq!(
 			parse_chat_line(r#"{"message":{"content":""},"done":true,"done_reason":"stop"}"#),
-			Some(ChatLine { content: Some(String::new()), done: true })
+			Some(ChatLine {
+				content: Some(String::new()),
+				done: true
+			})
 		);
 		// `stream:false` single object: full content AND done in one line — both
 		// must survive so the caller emits the answer before stopping.
 		assert_eq!(
 			parse_chat_line(r#"{"message":{"content":"Full answer."},"done":true}"#),
-			Some(ChatLine { content: Some("Full answer.".to_string()), done: true })
+			Some(ChatLine {
+				content: Some("Full answer.".to_string()),
+				done: true
+			})
 		);
 		assert_eq!(parse_chat_line(""), None);
 		assert_eq!(parse_chat_line("not json"), None);
 		assert_eq!(
 			parse_chat_line(r#"{"message":{},"done":false}"#),
-			Some(ChatLine { content: None, done: false })
+			Some(ChatLine {
+				content: None,
+				done: false
+			})
 		);
 	}
 
@@ -609,15 +646,24 @@ mod tests {
 			"/api/embed",
 			axum::routing::post(|body: axum::Json<Value>| async move {
 				if body.0["input"].is_array() {
-					(StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({ "error": "busy" })))
+					(
+						StatusCode::SERVICE_UNAVAILABLE,
+						axum::Json(serde_json::json!({ "error": "busy" })),
+					)
 				} else {
-					(StatusCode::OK, axum::Json(serde_json::json!({ "embeddings": [[1.0, 2.0, 3.0]] })))
+					(
+						StatusCode::OK,
+						axum::Json(serde_json::json!({ "embeddings": [[1.0, 2.0, 3.0]] })),
+					)
 				}
 			}),
 		);
 		let url = serve(app).await;
 		let client = Client::new_embed_only(&url, "m");
-		let v = client.embed("hello").await.expect("transient batch -> single retry succeeds");
+		let v = client
+			.embed("hello")
+			.await
+			.expect("transient batch -> single retry succeeds");
 		assert_eq!(v, vec![1.0, 2.0, 3.0]);
 	}
 
@@ -637,7 +683,10 @@ mod tests {
 		);
 		let url = serve(app).await;
 		let client = Client::new_embed_only(&url, "m");
-		let v = client.embed("x").await.expect("empty batch -> single retry succeeds");
+		let v = client
+			.embed("x")
+			.await
+			.expect("empty batch -> single retry succeeds");
 		assert_eq!(v, vec![9.0]);
 	}
 
@@ -656,14 +705,24 @@ mod tests {
 				let h = h.clone();
 				async move {
 					h.fetch_add(1, Ordering::SeqCst);
-					(StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": "bad model" })))
+					(
+						StatusCode::BAD_REQUEST,
+						axum::Json(serde_json::json!({ "error": "bad model" })),
+					)
 				}
 			}),
 		);
 		let url = serve(app).await;
 		let client = Client::new_embed_only(&url, "m");
 		let err = client.embed("hello").await.unwrap_err();
-		assert!(matches!(err, LlmError::Api { status: 400, .. }), "permanent error propagates, got {err:?}");
-		assert_eq!(hits.load(Ordering::SeqCst), 1, "no wasted single retry on a permanent error");
+		assert!(
+			matches!(err, LlmError::Api { status: 400, .. }),
+			"permanent error propagates, got {err:?}"
+		);
+		assert_eq!(
+			hits.load(Ordering::SeqCst),
+			1,
+			"no wasted single retry on a permanent error"
+		);
 	}
 }

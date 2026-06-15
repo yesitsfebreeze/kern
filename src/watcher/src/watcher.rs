@@ -43,11 +43,10 @@ impl FileWatcher {
 	/// matching `ignore` are dropped before debouncing.
 	pub fn new(roots: Vec<PathBuf>, ignore: IgnoreRules) -> Result<Self, WatcherError> {
 		let (raw_tx, raw_rx) = std_mpsc::channel::<notify::Result<Event>>();
-		let mut notify_watcher =
-			notify::recommended_watcher(move |res| {
-				// Best-effort: if the receiver is gone we're shutting down.
-				let _ = raw_tx.send(res);
-			})?;
+		let mut notify_watcher = notify::recommended_watcher(move |res| {
+			// Best-effort: if the receiver is gone we're shutting down.
+			let _ = raw_tx.send(res);
+		})?;
 
 		for root in &roots {
 			notify_watcher.watch(root, RecursiveMode::Recursive)?;
@@ -56,7 +55,11 @@ impl FileWatcher {
 		let (out_tx, out_rx) = mpsc::unbounded_channel::<WatchEvent>();
 		let task = spawn_coalescer(raw_rx, out_tx, ignore);
 
-		Ok(Self { rx: out_rx, _notify: notify_watcher, _task: task })
+		Ok(Self {
+			rx: out_rx,
+			_notify: notify_watcher,
+			_task: task,
+		})
 	}
 
 	/// Receive the next coalesced event. Returns `None` once the watcher is
@@ -111,7 +114,10 @@ fn coalesce_loop(
 					let key = we.path.clone();
 					pending.insert(
 						key,
-						Pending { event: we, deadline: Instant::now() + DEBOUNCE },
+						Pending {
+							event: we,
+							deadline: Instant::now() + DEBOUNCE,
+						},
 					);
 				}
 			}
@@ -140,10 +146,7 @@ fn next_timeout(pending: &HashMap<PathBuf, Pending>) -> Option<Duration> {
 	Some(earliest.saturating_duration_since(now))
 }
 
-fn flush_due(
-	pending: &mut HashMap<PathBuf, Pending>,
-	out_tx: &mpsc::UnboundedSender<WatchEvent>,
-) {
+fn flush_due(pending: &mut HashMap<PathBuf, Pending>, out_tx: &mpsc::UnboundedSender<WatchEvent>) {
 	let now = Instant::now();
 	// Collect only the due keys (the borrow checker forbids removing from
 	// `pending` while iterating it). Just the `PathBuf` keys are cloned — never
@@ -160,10 +163,7 @@ fn flush_due(
 	}
 }
 
-fn flush_all(
-	pending: &mut HashMap<PathBuf, Pending>,
-	out_tx: &mpsc::UnboundedSender<WatchEvent>,
-) {
+fn flush_all(pending: &mut HashMap<PathBuf, Pending>, out_tx: &mpsc::UnboundedSender<WatchEvent>) {
 	for (_, p) in pending.drain() {
 		let _ = out_tx.send(p.event);
 	}
@@ -187,9 +187,12 @@ fn translate(ev: Event, ignore: &IgnoreRules) -> Vec<WatchEvent> {
 	};
 
 	match ev.kind {
-		EventKind::Create(CreateKind::File | CreateKind::Folder | CreateKind::Any | CreateKind::Other) => {
-			paths.into_iter().filter_map(|p| mk(p, WatchKind::Created)).collect()
-		}
+		EventKind::Create(
+			CreateKind::File | CreateKind::Folder | CreateKind::Any | CreateKind::Other,
+		) => paths
+			.into_iter()
+			.filter_map(|p| mk(p, WatchKind::Created))
+			.collect(),
 		EventKind::Modify(ModifyKind::Name(RenameMode::Both)) if paths.len() == 2 => {
 			let mut iter = paths.into_iter();
 			let from = iter.next().unwrap();
@@ -198,20 +201,30 @@ fn translate(ev: Event, ignore: &IgnoreRules) -> Vec<WatchEvent> {
 				return Vec::new();
 			}
 			// `new` pins path == to for Renamed (the path arg is overridden).
-			vec![WatchEvent::new(to.clone(), WatchKind::Renamed { from, to }, ts)]
+			vec![WatchEvent::new(
+				to.clone(),
+				WatchKind::Renamed { from, to },
+				ts,
+			)]
 		}
-		EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
-			paths.into_iter().filter_map(|p| mk(p, WatchKind::Deleted)).collect()
-		}
-		EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
-			paths.into_iter().filter_map(|p| mk(p, WatchKind::Created)).collect()
-		}
-		EventKind::Modify(_) => {
-			paths.into_iter().filter_map(|p| mk(p, WatchKind::Modified)).collect()
-		}
-		EventKind::Remove(RemoveKind::File | RemoveKind::Folder | RemoveKind::Any | RemoveKind::Other) => {
-			paths.into_iter().filter_map(|p| mk(p, WatchKind::Deleted)).collect()
-		}
+		EventKind::Modify(ModifyKind::Name(RenameMode::From)) => paths
+			.into_iter()
+			.filter_map(|p| mk(p, WatchKind::Deleted))
+			.collect(),
+		EventKind::Modify(ModifyKind::Name(RenameMode::To)) => paths
+			.into_iter()
+			.filter_map(|p| mk(p, WatchKind::Created))
+			.collect(),
+		EventKind::Modify(_) => paths
+			.into_iter()
+			.filter_map(|p| mk(p, WatchKind::Modified))
+			.collect(),
+		EventKind::Remove(
+			RemoveKind::File | RemoveKind::Folder | RemoveKind::Any | RemoveKind::Other,
+		) => paths
+			.into_iter()
+			.filter_map(|p| mk(p, WatchKind::Deleted))
+			.collect(),
 		// Access / Any / Other: not actionable for ingest.
 		_ => Vec::new(),
 	}
@@ -269,12 +282,18 @@ mod tests {
 	#[test]
 	fn translate_rename_half_events_split_to_delete_and_create() {
 		let from = translate(
-			ev(EventKind::Modify(ModifyKind::Name(RenameMode::From)), &["/g.txt"]),
+			ev(
+				EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+				&["/g.txt"],
+			),
 			&IgnoreRules::empty(),
 		);
 		assert_eq!(from[0].kind, WatchKind::Deleted, "From half -> Deleted");
 		let to = translate(
-			ev(EventKind::Modify(ModifyKind::Name(RenameMode::To)), &["/h.txt"]),
+			ev(
+				EventKind::Modify(ModifyKind::Name(RenameMode::To)),
+				&["/h.txt"],
+			),
 			&IgnoreRules::empty(),
 		);
 		assert_eq!(to[0].kind, WatchKind::Created, "To half -> Created");
@@ -297,7 +316,10 @@ mod tests {
 	#[test]
 	fn translate_non_actionable_access_events_are_dropped() {
 		let out = translate(
-			ev(EventKind::Access(notify::event::AccessKind::Any), &["/a.txt"]),
+			ev(
+				EventKind::Access(notify::event::AccessKind::Any),
+				&["/a.txt"],
+			),
 			&IgnoreRules::empty(),
 		);
 		assert!(out.is_empty(), "Access events produce no WatchEvent");

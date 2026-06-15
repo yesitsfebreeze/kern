@@ -4,10 +4,10 @@ use std::time::SystemTime;
 
 use super::constants::KERN_CAP_DISABLED;
 use super::lexical::LexicalIndex;
-use super::vector_backend::VectorBackend;
 use super::store::{Store, StoreError};
 use super::types::{EntityStatus, Kern};
 use super::util;
+use super::vector_backend::VectorBackend;
 use crate::quant::QuantizationMode;
 
 /// Insert every entity/reason/source of `kern` into the cross-kern lookup
@@ -238,7 +238,8 @@ impl GraphGnn {
 	/// vector clones); drives the [`rebuild_index`](Self::rebuild_index) spill
 	/// decision.
 	fn resident_searchable_entity_count(&self) -> usize {
-		self.kerns
+		self
+			.kerns
 			.values()
 			.flat_map(|k| k.entities.values())
 			.filter(|t| t.status != EntityStatus::Superseded && t.has_vector())
@@ -250,8 +251,7 @@ impl GraphGnn {
 	/// reproducible. Mirrors `entity_idx` membership exactly. `f64 -> f32` narrowing
 	/// matches the int8-on-disk posture; ANN recall is unaffected in practice.
 	fn collect_entity_items(&self) -> Vec<(String, Vec<f32>)> {
-		let mut items: std::collections::BTreeMap<String, Vec<f32>> =
-			std::collections::BTreeMap::new();
+		let mut items: std::collections::BTreeMap<String, Vec<f32>> = std::collections::BTreeMap::new();
 		for kern in self.kerns.values() {
 			for t in kern.entities.values() {
 				if t.status != EntityStatus::Superseded && t.has_vector() {
@@ -267,14 +267,20 @@ impl GraphGnn {
 	/// Returns the number of vectors written. The build half of the DiskANN
 	/// integration; used by [`rebuild_index`](Self::rebuild_index) when spilling.
 	pub fn build_entity_disk_index(&self, dir: &std::path::Path) -> std::io::Result<usize> {
-		super::diskann::build_and_save(dir, &self.collect_entity_items(), super::diskann::Params::default())
+		super::diskann::build_and_save(
+			dir,
+			&self.collect_entity_items(),
+			super::diskann::Params::default(),
+		)
 	}
 
 	/// Build the entity snapshot under `<data_dir>/diskann/entity` and open it.
 	/// Returns `None` (logging a warning) on any build/open failure so the caller
 	/// can fall back to the in-RAM index rather than break the graph.
 	fn build_entity_disk_snapshot(&self) -> Option<super::diskann::DiskIndex> {
-		let dir = std::path::Path::new(&self.data_dir).join("diskann").join("entity");
+		let dir = std::path::Path::new(&self.data_dir)
+			.join("diskann")
+			.join("entity");
 		if let Err(e) = self.build_entity_disk_index(&dir) {
 			tracing::warn!(target: "kern.diskann", error = %e, "entity snapshot build failed; using in-RAM index");
 			return None;
@@ -337,7 +343,10 @@ impl GraphGnn {
 			return self.kerns.get(id);
 		}
 		if self.unloaded.contains(id) {
-			let loaded = self.store.clone().and_then(|s| s.load_one_kern(id).ok().flatten());
+			let loaded = self
+				.store
+				.clone()
+				.and_then(|s| s.load_one_kern(id).ok().flatten());
 			if let Some(mut k) = loaded {
 				migrate_root_id(&mut k, &self.network_id);
 				k.last_access = Some(SystemTime::now());
@@ -666,11 +675,21 @@ mod tests {
 		if let Some(k) = g.get_mut(&kid) {
 			k.entities.insert(
 				"active".into(),
-				Entity { id: "active".into(), vector: vec![1.0, 0.0], status: EntityStatus::Active, ..Default::default() },
+				Entity {
+					id: "active".into(),
+					vector: vec![1.0, 0.0],
+					status: EntityStatus::Active,
+					..Default::default()
+				},
 			);
 			k.entities.insert(
 				"dead".into(),
-				Entity { id: "dead".into(), vector: vec![1.0, 0.0], status: EntityStatus::Superseded, ..Default::default() },
+				Entity {
+					id: "dead".into(),
+					vector: vec![1.0, 0.0],
+					status: EntityStatus::Superseded,
+					..Default::default()
+				},
 			);
 		}
 		g.rebuild_index();
@@ -678,8 +697,14 @@ mod tests {
 			.into_iter()
 			.map(|h| h.entity_id)
 			.collect();
-		assert!(hits.contains(&"active".to_string()), "active entity is indexed");
-		assert!(!hits.contains(&"dead".to_string()), "superseded entity excluded from rebuilt index");
+		assert!(
+			hits.contains(&"active".to_string()),
+			"active entity is indexed"
+		);
+		assert!(
+			!hits.contains(&"dead".to_string()),
+			"superseded entity excluded from rebuilt index"
+		);
 	}
 
 	#[test]
@@ -695,46 +720,83 @@ mod tests {
 		let mut g = GraphGnn::new();
 		let kid = g.root.id.clone();
 		let vec_of = |i: usize| -> Vec<f64> {
-			(0..8).map(|j| ((i as f64) * (0.13 + 0.07 * j as f64)).sin()).collect()
+			(0..8)
+				.map(|j| ((i as f64) * (0.13 + 0.07 * j as f64)).sin())
+				.collect()
 		};
 		if let Some(k) = g.get_mut(&kid) {
 			for i in 0..80 {
 				k.entities.insert(
 					format!("e{i}"),
-					Entity { id: format!("e{i}"), vector: vec_of(i), status: EntityStatus::Active, ..Default::default() },
+					Entity {
+						id: format!("e{i}"),
+						vector: vec_of(i),
+						status: EntityStatus::Active,
+						..Default::default()
+					},
 				);
 			}
 			// Superseded entity must never enter the snapshot.
 			k.entities.insert(
 				"dead".into(),
-				Entity { id: "dead".into(), vector: vec_of(3), status: EntityStatus::Superseded, ..Default::default() },
+				Entity {
+					id: "dead".into(),
+					vector: vec_of(3),
+					status: EntityStatus::Superseded,
+					..Default::default()
+				},
 			);
 		}
 		g.rebuild_index();
 
 		let dir = tempfile::tempdir().unwrap();
 		let written = g.build_entity_disk_index(dir.path()).unwrap();
-		assert_eq!(written, 80, "snapshot holds all 80 active entities; superseded excluded");
+		assert_eq!(
+			written, 80,
+			"snapshot holds all 80 active entities; superseded excluded"
+		);
 
 		let disk = DiskIndex::open(dir.path()).unwrap();
 		let q64 = vec_of(40);
 		let q32: Vec<f32> = q64.iter().map(|&x| x as f32).collect();
 
 		let ram: Vec<String> = crate::base::search::search_all_unlocked(&g, &q64, 10)
-			.into_iter().map(|h| h.entity_id).collect();
-		let disk_hits: Vec<String> = disk.search_hits(&q32, 10, 96).into_iter().map(|h| h.id).collect();
+			.into_iter()
+			.map(|h| h.entity_id)
+			.collect();
+		let disk_hits: Vec<String> = disk
+			.search_hits(&q32, 10, 96)
+			.into_iter()
+			.map(|h| h.id)
+			.collect();
 
-		assert_eq!(disk_hits.first().map(String::as_str), Some("e40"), "indexed query point ranks first on disk");
-		assert_eq!(ram.first().map(String::as_str), Some("e40"), "indexed query point ranks first in RAM");
-		assert!(!disk_hits.contains(&"dead".to_string()), "superseded entity absent from disk snapshot");
+		assert_eq!(
+			disk_hits.first().map(String::as_str),
+			Some("e40"),
+			"indexed query point ranks first on disk"
+		);
+		assert_eq!(
+			ram.first().map(String::as_str),
+			Some("e40"),
+			"indexed query point ranks first in RAM"
+		);
+		assert!(
+			!disk_hits.contains(&"dead".to_string()),
+			"superseded entity absent from disk snapshot"
+		);
 
 		let ram_set: std::collections::HashSet<&String> = ram.iter().collect();
 		let overlap = disk_hits.iter().filter(|id| ram_set.contains(id)).count();
-		assert!(overlap >= 6, "disk vs in-RAM top-10 overlap too low: {overlap}/10 (ram={ram:?} disk={disk_hits:?})");
+		assert!(
+			overlap >= 6,
+			"disk vs in-RAM top-10 overlap too low: {overlap}/10 (ram={ram:?} disk={disk_hits:?})"
+		);
 	}
 
 	fn vec8(i: usize) -> Vec<f64> {
-		(0..8).map(|j| ((i as f64) * (0.13 + 0.07 * j as f64)).sin()).collect()
+		(0..8)
+			.map(|j| ((i as f64) * (0.13 + 0.07 * j as f64)).sin())
+			.collect()
 	}
 
 	#[test]
@@ -750,21 +812,37 @@ mod tests {
 			for i in 0..40 {
 				k.entities.insert(
 					format!("e{i}"),
-					Entity { id: format!("e{i}"), vector: vec8(i), status: EntityStatus::Active, ..Default::default() },
+					Entity {
+						id: format!("e{i}"),
+						vector: vec8(i),
+						status: EntityStatus::Active,
+						..Default::default()
+					},
 				);
 			}
 		}
 
 		// Default threshold (disabled): in-RAM index.
 		g.rebuild_index();
-		assert!(matches!(g.entity_idx, VectorBackend::Resident(_)), "default threshold keeps the in-RAM index");
+		assert!(
+			matches!(g.entity_idx, VectorBackend::Resident(_)),
+			"default threshold keeps the in-RAM index"
+		);
 
 		// Above threshold: spill to disk, and the snapshot files must exist.
 		g.set_disk_threshold(10);
 		g.rebuild_index();
-		assert!(matches!(g.entity_idx, VectorBackend::Disk { .. }), "entity index spilled to disk above threshold");
 		assert!(
-			dir.path().join("diskann").join("entity").join("meta.bin").exists(),
+			matches!(g.entity_idx, VectorBackend::Disk { .. }),
+			"entity index spilled to disk above threshold"
+		);
+		assert!(
+			dir
+				.path()
+				.join("diskann")
+				.join("entity")
+				.join("meta.bin")
+				.exists(),
 			"on-disk snapshot written"
 		);
 		// gnn/reason remain resident in this increment.
@@ -774,8 +852,15 @@ mod tests {
 		// Parity across the boundary: an indexed query point ranks itself first via
 		// the disk-backed path, and the reverse entity_kern map is still populated.
 		let hits = crate::base::search::search_all_unlocked(&g, &vec8(7), 5);
-		assert_eq!(hits.first().map(|h| h.entity_id.clone()), Some("e7".into()), "disk-backed search returns the query point first");
-		assert!(g.kern_of_entity("e7").is_some(), "reverse map populated despite skipped entity insert");
+		assert_eq!(
+			hits.first().map(|h| h.entity_id.clone()),
+			Some("e7".into()),
+			"disk-backed search returns the query point first"
+		);
+		assert!(
+			g.kern_of_entity("e7").is_some(),
+			"reverse map populated despite skipped entity insert"
+		);
 	}
 
 	#[test]
@@ -788,13 +873,21 @@ mod tests {
 			for i in 0..20 {
 				k.entities.insert(
 					format!("e{i}"),
-					Entity { id: format!("e{i}"), vector: vec8(i), status: EntityStatus::Active, ..Default::default() },
+					Entity {
+						id: format!("e{i}"),
+						vector: vec8(i),
+						status: EntityStatus::Active,
+						..Default::default()
+					},
 				);
 			}
 		}
 		g.set_disk_threshold(1);
 		g.rebuild_index();
-		assert!(matches!(g.entity_idx, VectorBackend::Resident(_)), "no data_dir -> never spill (nowhere to write)");
+		assert!(
+			matches!(g.entity_idx, VectorBackend::Resident(_)),
+			"no data_dir -> never spill (nowhere to write)"
+		);
 	}
 
 	#[test]
@@ -809,14 +902,26 @@ mod tests {
 			for i in 0..30 {
 				k.entities.insert(
 					format!("e{i}"),
-					Entity { id: format!("e{i}"), vector: vec8(i), status: EntityStatus::Active, ..Default::default() },
+					Entity {
+						id: format!("e{i}"),
+						vector: vec8(i),
+						status: EntityStatus::Active,
+						..Default::default()
+					},
 				);
 			}
 		}
 		g.set_disk_threshold(10);
 		g.rebuild_index();
-		assert!(matches!(g.entity_idx, VectorBackend::Disk { .. }), "spilled to disk");
-		assert_eq!(g.pending_disk_delta_len(), 0, "fresh snapshot has an empty delta");
+		assert!(
+			matches!(g.entity_idx, VectorBackend::Disk { .. }),
+			"spilled to disk"
+		);
+		assert_eq!(
+			g.pending_disk_delta_len(),
+			0,
+			"fresh snapshot has an empty delta"
+		);
 
 		// Add entities AFTER the snapshot, mirroring the live path (source of truth
 		// AND the index/delta both get the write).
@@ -824,24 +929,48 @@ mod tests {
 			for i in 100..115 {
 				k.entities.insert(
 					format!("e{i}"),
-					Entity { id: format!("e{i}"), vector: vec8(i), status: EntityStatus::Active, ..Default::default() },
+					Entity {
+						id: format!("e{i}"),
+						vector: vec8(i),
+						status: EntityStatus::Active,
+						..Default::default()
+					},
 				);
 			}
 		}
 		for i in 100..115 {
 			g.entity_idx.insert(format!("e{i}"), vec8(i));
 		}
-		assert_eq!(g.pending_disk_delta_len(), 15, "post-snapshot inserts buffered in the delta");
+		assert_eq!(
+			g.pending_disk_delta_len(),
+			15,
+			"post-snapshot inserts buffered in the delta"
+		);
 
 		g.consolidate_disk_index();
-		assert!(matches!(g.entity_idx, VectorBackend::Disk { .. }), "still disk-backed after consolidate");
-		assert_eq!(g.pending_disk_delta_len(), 0, "delta folded into the rebuilt snapshot");
+		assert!(
+			matches!(g.entity_idx, VectorBackend::Disk { .. }),
+			"still disk-backed after consolidate"
+		);
+		assert_eq!(
+			g.pending_disk_delta_len(),
+			0,
+			"delta folded into the rebuilt snapshot"
+		);
 
 		// Both pre- and post-snapshot entities are searchable from the new snapshot.
 		let new_hit = crate::base::search::search_all_unlocked(&g, &vec8(108), 5);
-		assert_eq!(new_hit.first().map(|h| h.entity_id.clone()), Some("e108".into()), "folded-in entity searchable");
+		assert_eq!(
+			new_hit.first().map(|h| h.entity_id.clone()),
+			Some("e108".into()),
+			"folded-in entity searchable"
+		);
 		let old_hit = crate::base::search::search_all_unlocked(&g, &vec8(5), 5);
-		assert_eq!(old_hit.first().map(|h| h.entity_id.clone()), Some("e5".into()), "original entity still searchable");
+		assert_eq!(
+			old_hit.first().map(|h| h.entity_id.clone()),
+			Some("e5".into()),
+			"original entity still searchable"
+		);
 	}
 
 	#[test]
@@ -852,12 +981,20 @@ mod tests {
 		if let Some(k) = g.get_mut(&kid) {
 			k.entities.insert(
 				"a".into(),
-				Entity { id: "a".into(), vector: vec8(1), status: EntityStatus::Active, ..Default::default() },
+				Entity {
+					id: "a".into(),
+					vector: vec8(1),
+					status: EntityStatus::Active,
+					..Default::default()
+				},
 			);
 		}
 		g.rebuild_index();
 		g.consolidate_disk_index();
-		assert!(matches!(g.entity_idx, VectorBackend::Resident(_)), "resident index untouched");
+		assert!(
+			matches!(g.entity_idx, VectorBackend::Resident(_)),
+			"resident index untouched"
+		);
 		assert_eq!(g.pending_disk_delta_len(), 0);
 	}
 
@@ -879,7 +1016,13 @@ mod tests {
 		g.register(named);
 
 		let mut withent = Kern::new("E", &root_id);
-		withent.entities.insert("e1".into(), Entity { id: "e1".into(), ..Default::default() });
+		withent.entities.insert(
+			"e1".into(),
+			Entity {
+				id: "e1".into(),
+				..Default::default()
+			},
+		);
 		g.register(withent);
 
 		// Root references all four children (mirrors the real on-disk root).
@@ -890,7 +1033,10 @@ mod tests {
 		let before = g.kerns.len();
 		let reaped = g.gc_empty_kerns();
 
-		assert_eq!(reaped, 2, "both cyclic empty kerns reaped despite having children");
+		assert_eq!(
+			reaped, 2,
+			"both cyclic empty kerns reaped despite having children"
+		);
 		assert!(g.loaded("A").is_none(), "A reaped");
 		assert!(g.loaded("B").is_none(), "B reaped");
 		assert!(g.loaded("N").is_some(), "named anchor kept");
@@ -900,8 +1046,14 @@ mod tests {
 
 		// Root's child list no longer references the reaped kerns.
 		let root_children = &g.kerns.get(&root_id).unwrap().children;
-		assert!(!root_children.contains(&"A".to_string()), "dead ref A scrubbed");
-		assert!(!root_children.contains(&"B".to_string()), "dead ref B scrubbed");
+		assert!(
+			!root_children.contains(&"A".to_string()),
+			"dead ref A scrubbed"
+		);
+		assert!(
+			!root_children.contains(&"B".to_string()),
+			"dead ref B scrubbed"
+		);
 		assert!(root_children.contains(&"N".to_string()) && root_children.contains(&"E".to_string()));
 	}
 
@@ -914,7 +1066,13 @@ mod tests {
 
 		g.register(empty_unnamed("mid", &root_id, &["leaf"]));
 		let mut leaf = Kern::new("leaf", "mid");
-		leaf.entities.insert("e1".into(), Entity { id: "e1".into(), ..Default::default() });
+		leaf.entities.insert(
+			"e1".into(),
+			Entity {
+				id: "e1".into(),
+				..Default::default()
+			},
+		);
 		g.register(leaf);
 		if let Some(r) = g.kerns.get_mut(&root_id) {
 			r.children = vec!["mid".into()];

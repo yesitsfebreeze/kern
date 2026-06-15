@@ -8,7 +8,6 @@ pub mod sse;
 pub mod tools;
 mod tools_admin;
 mod tools_mutate;
-mod tools_mux;
 mod tools_query;
 
 use std::io::{BufReader, Read, Write};
@@ -55,11 +54,6 @@ pub struct Server {
 	/// `Mutex`; lookups/inserts are brief (a linear scan of a small bounded
 	/// ring). See [`crate::retrieval::cache`].
 	pub cache: Arc<Mutex<QueryCache>>,
-	/// Present only when this engine is hosted inside the mux TUI process.
-	/// `Some` → the comms tools (`delegate`/`collect`/`spawn`/`send`/`panes`/
-	/// `status`) are advertised and dispatched against this live pane registry.
-	/// `None` → headless daemon; comms tools are absent.
-	pub mux: Option<Arc<Mutex<crate::mux::registry::PaneRegistry>>>,
 }
 
 impl Server {
@@ -89,82 +83,103 @@ impl Server {
 }
 
 impl trnsprt::McpServer for Server {
-	fn server_name(&self) -> &str { "kern" }
-	fn server_version(&self) -> &str { env!("CARGO_PKG_VERSION") }
+	fn server_name(&self) -> &str {
+		"kern"
+	}
+	fn server_version(&self) -> &str {
+		env!("CARGO_PKG_VERSION")
+	}
 
 	fn extra_capabilities(&self) -> serde_json::Value {
 		serde_json::json!({"resources": {}, "prompts": {}})
 	}
 
 	fn tools_list(&self) -> Vec<trnsprt::ToolSchema> {
-		let mut defs = tools::tool_definitions();
-		// Comms tools are advertised only when this engine hosts a pane registry
-		// (mux mode). Headless daemons keep the canonical kern tool set.
-		if self.mux.is_some() {
-			defs.extend(tools_mux::tool_schemas());
-		}
-		defs.into_iter()
+		tools::tool_definitions()
+			.into_iter()
 			.filter_map(|v| serde_json::from_value(v).ok())
 			.collect()
 	}
 
-	fn call_tool(&self, name: &str, args: &serde_json::Value) -> Result<trnsprt::ToolResult, trnsprt::McpError> {
+	fn call_tool(
+		&self,
+		name: &str,
+		args: &serde_json::Value,
+	) -> Result<trnsprt::ToolResult, trnsprt::McpError> {
 		let result = match name {
-			"query"      => self.tool_query(args),
-			"ingest"     => self.tool_ingest(args),
-			"link"       => self.tool_link(args),
-			"forget"     => self.tool_forget(args),
-			"degrade"    => self.tool_degrade(args),
-			"health"     => self.tool_health(),
-			"anchor"     => self.tool_anchor(args),
+			"query" => self.tool_query(args),
+			"ingest" => self.tool_ingest(args),
+			"link" => self.tool_link(args),
+			"forget" => self.tool_forget(args),
+			"degrade" => self.tool_degrade(args),
+			"health" => self.tool_health(),
+			"anchor" => self.tool_anchor(args),
 			"descriptor" => self.tool_descriptor(args),
-			"pulse"      => self.tool_pulse(args),
-			"gc"         => self.tool_gc(),
-			// Comms tools — return a clear error when not hosted in a mux.
-			"delegate"   => self.tool_delegate(args),
-			"collect"    => self.tool_collect(args),
-			"spawn"      => self.tool_spawn(args),
-			"send"       => self.tool_send(args),
-			"panes"      => self.tool_panes(args),
-			"status"     => self.tool_status(args),
-			"raise_question" => self.tool_raise_question(args),
-			_ => return Ok(trnsprt::ToolResult {
-				content: vec![serde_json::json!({"type": "text", "text": format!("unknown tool: {name}")})],
-				is_error: true,
-				structured_content: None,
-			}),
+			"pulse" => self.tool_pulse(args),
+			"gc" => self.tool_gc(),
+			_ => {
+				return Ok(trnsprt::ToolResult {
+					content: vec![
+						serde_json::json!({"type": "text", "text": format!("unknown tool: {name}")}),
+					],
+					is_error: true,
+					structured_content: None,
+				})
+			}
 		};
 		Ok(value_to_tool_result(result))
 	}
 
-	fn handle_method(&self, method: &str, params: serde_json::Value) -> Option<Result<serde_json::Value, trnsprt::McpError>> {
+	fn handle_method(
+		&self,
+		method: &str,
+		params: serde_json::Value,
+	) -> Option<Result<serde_json::Value, trnsprt::McpError>> {
 		let raw = serde_json::value::RawValue::from_string(
 			serde_json::to_string(&params).unwrap_or_else(|_| "null".to_string()),
-		).ok();
+		)
+		.ok();
 		match method {
-			"resources/list" => Some(Ok(serde_json::json!({"resources": resources::resource_definitions()}))),
-			"resources/read" => Some(response_to_result(resources::handle_resource_read(self, None, raw))),
-			"prompts/list"   => Some(Ok(serde_json::json!({"prompts": prompt::prompt_definitions()}))),
-			"prompts/get"    => Some(response_to_result(prompt::handle_prompt_get(None, raw))),
-			"ping"           => Some(Ok(serde_json::json!({}))),
-			_                => None,
+			"resources/list" => Some(Ok(
+				serde_json::json!({"resources": resources::resource_definitions()}),
+			)),
+			"resources/read" => Some(response_to_result(resources::handle_resource_read(
+				self, None, raw,
+			))),
+			"prompts/list" => Some(Ok(
+				serde_json::json!({"prompts": prompt::prompt_definitions()}),
+			)),
+			"prompts/get" => Some(response_to_result(prompt::handle_prompt_get(None, raw))),
+			"ping" => Some(Ok(serde_json::json!({}))),
+			_ => None,
 		}
 	}
 }
 
 fn value_to_tool_result(v: serde_json::Value) -> trnsprt::ToolResult {
-	let is_error = v.get("isError").and_then(serde_json::Value::as_bool).unwrap_or(false);
-	let content = v.get("content")
+	let is_error = v
+		.get("isError")
+		.and_then(serde_json::Value::as_bool)
+		.unwrap_or(false);
+	let content = v
+		.get("content")
 		.and_then(serde_json::Value::as_array)
 		.cloned()
 		.unwrap_or_default();
-	trnsprt::ToolResult { content, is_error, structured_content: None }
+	trnsprt::ToolResult {
+		content,
+		is_error,
+		structured_content: None,
+	}
 }
 
 fn response_to_result(resp: Response) -> Result<serde_json::Value, trnsprt::McpError> {
 	match (resp.result, resp.error) {
 		(Some(v), _) => Ok(v),
-		(None, Some(e)) => Err(trnsprt::McpError::Rpc { code: e.code as i64, message: e.message }),
+		(None, Some(e)) => Err(trnsprt::McpError::Rpc {
+			code: e.code as i64,
+			message: e.message,
+		}),
 		(None, None) => Ok(serde_json::Value::Null),
 	}
 }
@@ -207,4 +222,3 @@ pub(crate) fn tool_error(msg: &str) -> serde_json::Value {
 		"content": [{"type": "text", "text": msg}],
 	})
 }
-

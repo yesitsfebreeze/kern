@@ -63,7 +63,10 @@ mod tests {
 		// the map (the AGENT_SOURCE/SOURCE_AGENT duplicate regression).
 		let d = default_descriptors();
 		assert_eq!(d.len(), 15, "every descriptor key must be unique");
-		assert!(d.contains_key(AGENT_SOURCE), "agent source descriptor present");
+		assert!(
+			d.contains_key(AGENT_SOURCE),
+			"agent source descriptor present"
+		);
 	}
 
 	#[test]

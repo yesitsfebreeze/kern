@@ -62,8 +62,7 @@ pub fn load(path: &str) -> Result<Vec<Sample>, String> {
 
 /// Parse the LoCoMo JSON corpus into ordered samples.
 pub fn parse_dataset(json: &str) -> Result<Vec<Sample>, String> {
-	let raw: Vec<RawSample> =
-		serde_json::from_str(json).map_err(|e| format!("locomo json: {e}"))?;
+	let raw: Vec<RawSample> = serde_json::from_str(json).map_err(|e| format!("locomo json: {e}"))?;
 	raw.into_iter().map(convert_sample).collect()
 }
 
@@ -95,11 +94,21 @@ pub fn normalize_answer(s: &str) -> String {
 
 /// Token-level F1 between predicted and gold answer (normalized).
 pub fn token_f1(pred: &str, gold: &str) -> f64 {
-	let p: Vec<String> = normalize_answer(pred).split_whitespace().map(String::from).collect();
-	let g: Vec<String> = normalize_answer(gold).split_whitespace().map(String::from).collect();
+	let p: Vec<String> = normalize_answer(pred)
+		.split_whitespace()
+		.map(String::from)
+		.collect();
+	let g: Vec<String> = normalize_answer(gold)
+		.split_whitespace()
+		.map(String::from)
+		.collect();
 	if p.is_empty() || g.is_empty() {
 		// Both empty → vacuous match; exactly one empty → no overlap.
-		return if p.is_empty() && g.is_empty() { 1.0 } else { 0.0 };
+		return if p.is_empty() && g.is_empty() {
+			1.0
+		} else {
+			0.0
+		};
 	}
 	let mut gold_counts: HashMap<&str, usize> = HashMap::new();
 	for t in &g {
@@ -124,10 +133,20 @@ pub fn token_f1(pred: &str, gold: &str) -> f64 {
 
 /// ROUGE-L F1 (longest-common-subsequence based) over normalized tokens.
 pub fn rouge_l(pred: &str, gold: &str) -> f64 {
-	let p: Vec<String> = normalize_answer(pred).split_whitespace().map(String::from).collect();
-	let g: Vec<String> = normalize_answer(gold).split_whitespace().map(String::from).collect();
+	let p: Vec<String> = normalize_answer(pred)
+		.split_whitespace()
+		.map(String::from)
+		.collect();
+	let g: Vec<String> = normalize_answer(gold)
+		.split_whitespace()
+		.map(String::from)
+		.collect();
 	if p.is_empty() || g.is_empty() {
-		return if p.is_empty() && g.is_empty() { 1.0 } else { 0.0 };
+		return if p.is_empty() && g.is_empty() {
+			1.0
+		} else {
+			0.0
+		};
 	}
 	let lcs = lcs_len(&p, &g) as f64;
 	if lcs == 0.0 {
@@ -143,9 +162,22 @@ pub fn rouge_l(pred: &str, gold: &str) -> f64 {
 pub fn is_abstention(pred: &str) -> bool {
 	let p = pred.to_lowercase();
 	const MARKERS: [&str; 16] = [
-		"don't have", "do not have", "not mentioned", "no mention", "no information",
-		"not specified", "not stated", "not provided", "not available", "don't know",
-		"do not know", "cannot", "can't", "unanswerable", "no answer", "not enough information",
+		"don't have",
+		"do not have",
+		"not mentioned",
+		"no mention",
+		"no information",
+		"not specified",
+		"not stated",
+		"not provided",
+		"not available",
+		"don't know",
+		"do not know",
+		"cannot",
+		"can't",
+		"unanswerable",
+		"no answer",
+		"not enough information",
 	];
 	MARKERS.iter().any(|m| p.contains(m))
 }
@@ -189,7 +221,11 @@ fn lcs_len(a: &[String], b: &[String]) -> usize {
 		let mut prev = 0usize;
 		for (j, bj) in b.iter().enumerate() {
 			let cur = dp[j + 1];
-			dp[j + 1] = if ai == bj { prev + 1 } else { dp[j + 1].max(dp[j]) };
+			dp[j + 1] = if ai == bj {
+				prev + 1
+			} else {
+				dp[j + 1].max(dp[j])
+			};
 			prev = cur;
 		}
 	}
@@ -233,14 +269,16 @@ fn convert_sample(raw: RawSample) -> Result<Sample, String> {
 	let mut dates: HashMap<u32, String> = HashMap::new();
 	let mut turn_sets: HashMap<u32, Vec<Turn>> = HashMap::new();
 	for (key, val) in &raw.conversation {
-		let Some(rest) = key.strip_prefix("session_") else { continue };
+		let Some(rest) = key.strip_prefix("session_") else {
+			continue;
+		};
 		if let Some(idx) = rest.strip_suffix("_date_time") {
 			if let Ok(n) = idx.parse::<u32>() {
 				dates.insert(n, val.as_str().unwrap_or_default().to_string());
 			}
 		} else if let Ok(n) = rest.parse::<u32>() {
-			let turns: Vec<RawTurn> = serde_json::from_value(val.clone())
-				.map_err(|e| format!("session_{n} turns: {e}"))?;
+			let turns: Vec<RawTurn> =
+				serde_json::from_value(val.clone()).map_err(|e| format!("session_{n} turns: {e}"))?;
 			turn_sets.insert(n, turns.into_iter().map(convert_turn).collect());
 		}
 	}
@@ -255,7 +293,11 @@ fn convert_sample(raw: RawSample) -> Result<Sample, String> {
 	sessions.sort_by_key(|s| s.index);
 
 	let qa = raw.qa.into_iter().map(convert_qa).collect();
-	Ok(Sample { sample_id: raw.sample_id, sessions, qa })
+	Ok(Sample {
+		sample_id: raw.sample_id,
+		sessions,
+		qa,
+	})
 }
 
 fn convert_turn(t: RawTurn) -> Turn {
@@ -266,7 +308,11 @@ fn convert_turn(t: RawTurn) -> Turn {
 		Some(cap) if !cap.is_empty() => format!("[shared image: {cap}]"),
 		_ => t.text,
 	};
-	Turn { speaker: t.speaker, dia_id: t.dia_id, text }
+	Turn {
+		speaker: t.speaker,
+		dia_id: t.dia_id,
+		text,
+	}
 }
 
 fn convert_qa(q: RawQa) -> QaItem {
@@ -348,7 +394,10 @@ mod tests {
 		// adversarial: no answer, has distractor
 		assert!(qa[2].answer.is_none());
 		assert!(qa[2].is_adversarial());
-		assert_eq!(qa[2].adversarial_answer.as_deref(), Some("self-care matters"));
+		assert_eq!(
+			qa[2].adversarial_answer.as_deref(),
+			Some("self-care matters")
+		);
 	}
 
 	#[test]
@@ -422,10 +471,19 @@ mod tests {
 	#[test]
 	fn abstention_is_case_insensitive_and_position_independent() {
 		// pred is lowercased before matching, so casing of the marker is irrelevant.
-		assert!(is_abstention("Cannot determine that from the context"), "mixed-case 'Cannot'");
+		assert!(
+			is_abstention("Cannot determine that from the context"),
+			"mixed-case 'Cannot'"
+		);
 		assert!(is_abstention("CANNOT"), "all-caps marker");
-		assert!(is_abstention("unanswerable given the dialogue"), "marker at the very start");
-		assert!(is_abstention("...ultimately this is unanswerable"), "marker at the end");
+		assert!(
+			is_abstention("unanswerable given the dialogue"),
+			"marker at the very start"
+		);
+		assert!(
+			is_abstention("...ultimately this is unanswerable"),
+			"marker at the end"
+		);
 		// Unicode around a marker doesn't break detection (lowercasing is char-wise).
 		assert!(is_abstention("Désolé — I don't know. 不知道"));
 		// Unicode content that simply answers is not a false positive.

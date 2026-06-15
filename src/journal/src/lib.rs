@@ -11,9 +11,9 @@ pub mod history;
 pub mod state;
 pub mod tracing_layer;
 pub use events::{
-	EntityTouchedEvent, EntityTouchedPayload, FinalEvent, FinalPayload, PlanEvent,
-	PlanProposalPayload, PlanStatus, PlanStepPayload, ToolCallEvent, ToolCallPayload, TouchOp,
-	TurnEndEvent, TurnEndPayload, TurnStartEvent, TurnStartPayload, system_time_from_ms,
+	system_time_from_ms, EntityTouchedEvent, EntityTouchedPayload, FinalEvent, FinalPayload,
+	PlanEvent, PlanProposalPayload, PlanStatus, PlanStepPayload, ToolCallEvent, ToolCallPayload,
+	TouchOp, TurnEndEvent, TurnEndPayload, TurnStartEvent, TurnStartPayload,
 };
 pub use tracing_layer::{FieldRecorder, JournalTracingLayer};
 
@@ -58,9 +58,9 @@ pub fn global() -> Option<&'static DayJournal> {
 /// Convenience: emit a single entry via the global journal. No-op on open
 /// failure.
 pub fn emit(entry: Entry) {
-		if let Some(j) = global() {
-			j.emit(entry);
-		}
+	if let Some(j) = global() {
+		j.emit(entry);
+	}
 }
 
 /// `Sink` that forwards every emit to `global()`. Plug into anything that
@@ -72,9 +72,9 @@ impl Sink for GlobalSink {
 		if let Some(j) = global() {
 			j.emit(entry);
 		}
+	}
 }
-}
-pub use entry::{Entry, Kind, NullSink, Sink, SCHEMA_VERSION, now_ms};
+pub use entry::{now_ms, Entry, Kind, NullSink, Sink, SCHEMA_VERSION};
 pub use history::{Filter, History};
 pub use state::{State, StateHandle};
 

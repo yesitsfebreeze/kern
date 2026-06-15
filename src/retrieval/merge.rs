@@ -68,13 +68,22 @@ mod tests {
 	use crate::base::types::{Entity, Kern};
 
 	fn ent(id: &str) -> Entity {
-		Entity { id: id.into(), ..Default::default() }
+		Entity {
+			id: id.into(),
+			..Default::default()
+		}
 	}
 	fn hit(id: &str, score: f64) -> EntityHit {
-		EntityHit { entity_id: id.into(), score }
+		EntityHit {
+			entity_id: id.into(),
+			score,
+		}
 	}
 	fn scored(id: &str, score: f64) -> ScoredEntity {
-		ScoredEntity { entity: ent(id), score }
+		ScoredEntity {
+			entity: ent(id),
+			score,
+		}
 	}
 	fn find<'a>(rs: &'a [ScoredEntity], id: &str) -> Option<&'a ScoredEntity> {
 		rs.iter().find(|s| s.entity.id == id)
@@ -92,7 +101,12 @@ mod tests {
 
 		let a = find(&out, "a").expect("a present");
 		let b = find(&out, "b").expect("b present");
-		assert!(a.score > b.score, "corroborated a ({}) > lone b ({})", a.score, b.score);
+		assert!(
+			a.score > b.score,
+			"corroborated a ({}) > lone b ({})",
+			a.score,
+			b.score
+		);
 		// finalize(0.5, 0.5) = 0.5 + ln 2; finalize(0.5) = 0.5.
 		assert!((a.score - (0.5 + std::f64::consts::LN_2)).abs() < 1e-9);
 		assert!((b.score - 0.5).abs() < 1e-9);

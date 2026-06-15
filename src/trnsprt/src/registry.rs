@@ -98,7 +98,8 @@ impl Registry {
 	}
 
 	pub fn list_tools(&self, id: &ServerId) -> Result<&[ToolSchema], McpError> {
-		self.servers
+		self
+			.servers
 			.get(id)
 			.map(|s| s.tools.as_slice())
 			.ok_or_else(|| McpError::UnknownServer(id.0.clone()))
@@ -155,7 +156,8 @@ mod tests {
 	fn register_inproc_seeds_tools_and_routes_calls() {
 		let mut reg = Registry::new();
 		let id = ServerId("mock".to_string());
-		reg.register_inproc(id.clone(), Box::new(MockServer))
+		reg
+			.register_inproc(id.clone(), Box::new(MockServer))
 			.expect("registration performs the initialize handshake");
 
 		// The schema snapshot taken at connect time is served without a round-trip.
@@ -175,7 +177,9 @@ mod tests {
 	fn duplicate_server_id_is_rejected() {
 		let mut reg = Registry::new();
 		let id = ServerId("dup".to_string());
-		reg.register_inproc(id.clone(), Box::new(MockServer)).unwrap();
+		reg
+			.register_inproc(id.clone(), Box::new(MockServer))
+			.unwrap();
 		let again = reg.register_inproc(id.clone(), Box::new(MockServer));
 		assert!(matches!(again, Err(McpError::DuplicateServer(_))));
 	}

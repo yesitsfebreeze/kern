@@ -38,7 +38,9 @@ pub(super) async fn aggregate(State(st): State<HubState>) -> Json<Value> {
 			Ok(r) => r,
 			Err(_) => continue, // unreachable peer (race with shutdown) — skip
 		};
-		let Ok(v) = resp.json::<Value>().await else { continue };
+		let Ok(v) = resp.json::<Value>().await else {
+			continue;
+		};
 		// Namespace by peer address so identical ids in different daemons (e.g.
 		// the same Fact text hashing alike across projects) never merge or
 		// shadow. Links stay valid because endpoints share the peer's tag.
@@ -56,33 +58,77 @@ pub(super) async fn aggregate(State(st): State<HubState>) -> Json<Value> {
 }
 
 /// Re-key one peer's payload under `tag` and append to the merged arrays.
-fn merge_peer(tag: &str, v: &Value, nodes: &mut Vec<Value>, links: &mut Vec<Value>, kerns: &mut Vec<Value>) {
+fn merge_peer(
+	tag: &str,
+	v: &Value,
+	nodes: &mut Vec<Value>,
+	links: &mut Vec<Value>,
+	kerns: &mut Vec<Value>,
+) {
 	let pre = |id: &Value| -> Value {
-		id.as_str().map(|s| Value::String(format!("{tag}{s}"))).unwrap_or(Value::Null)
+		id.as_str()
+			.map(|s| Value::String(format!("{tag}{s}")))
+			.unwrap_or(Value::Null)
 	};
-	for n in v.get("nodes").and_then(Value::as_array).into_iter().flatten() {
+	for n in v
+		.get("nodes")
+		.and_then(Value::as_array)
+		.into_iter()
+		.flatten()
+	{
 		let mut n = n.clone();
 		if let Some(o) = n.as_object_mut() {
-			if let Some(id) = o.get("id") { let p = pre(id); o.insert("id".into(), p); }
-			if let Some(k) = o.get("kern") { let p = pre(k); o.insert("kern".into(), p); }
+			if let Some(id) = o.get("id") {
+				let p = pre(id);
+				o.insert("id".into(), p);
+			}
+			if let Some(k) = o.get("kern") {
+				let p = pre(k);
+				o.insert("kern".into(), p);
+			}
 		}
 		nodes.push(n);
 	}
-	for l in v.get("links").and_then(Value::as_array).into_iter().flatten() {
+	for l in v
+		.get("links")
+		.and_then(Value::as_array)
+		.into_iter()
+		.flatten()
+	{
 		let mut l = l.clone();
 		if let Some(o) = l.as_object_mut() {
-			if let Some(id) = o.get("id") { let p = pre(id); o.insert("id".into(), p); }
-			if let Some(s) = o.get("source") { let p = pre(s); o.insert("source".into(), p); }
-			if let Some(t) = o.get("target") { let p = pre(t); o.insert("target".into(), p); }
+			if let Some(id) = o.get("id") {
+				let p = pre(id);
+				o.insert("id".into(), p);
+			}
+			if let Some(s) = o.get("source") {
+				let p = pre(s);
+				o.insert("source".into(), p);
+			}
+			if let Some(t) = o.get("target") {
+				let p = pre(t);
+				o.insert("target".into(), p);
+			}
 		}
 		links.push(l);
 	}
-	for k in v.get("kerns").and_then(Value::as_array).into_iter().flatten() {
+	for k in v
+		.get("kerns")
+		.and_then(Value::as_array)
+		.into_iter()
+		.flatten()
+	{
 		let mut k = k.clone();
 		if let Some(o) = k.as_object_mut() {
-			if let Some(id) = o.get("id") { let p = pre(id); o.insert("id".into(), p); }
+			if let Some(id) = o.get("id") {
+				let p = pre(id);
+				o.insert("id".into(), p);
+			}
 			match o.get("parent") {
-				Some(p) if p.is_string() => { let np = pre(p); o.insert("parent".into(), np); }
+				Some(p) if p.is_string() => {
+					let np = pre(p);
+					o.insert("parent".into(), np);
+				}
 				_ => {}
 			}
 			if let Some(ch) = o.get("children").and_then(Value::as_array) {
@@ -99,14 +145,22 @@ fn merge_peer(tag: &str, v: &Value, nodes: &mut Vec<Value>, links: &mut Vec<Valu
 /// already shipped to the browser. Both arrays are pooled into one list.
 fn merge_search_hits(tag: &str, v: &Value, out: &mut Vec<Value>) {
 	let pre = |id: &Value| -> Value {
-		id.as_str().map(|s| Value::String(format!("{tag}{s}"))).unwrap_or(Value::Null)
+		id.as_str()
+			.map(|s| Value::String(format!("{tag}{s}")))
+			.unwrap_or(Value::Null)
 	};
 	for arr in ["hits", "reasons"] {
 		for h in v.get(arr).and_then(Value::as_array).into_iter().flatten() {
 			let mut h = h.clone();
 			if let Some(o) = h.as_object_mut() {
-				if let Some(id) = o.get("id") { let p = pre(id); o.insert("id".into(), p); }
-				if let Some(k) = o.get("kern") { let p = pre(k); o.insert("kern".into(), p); }
+				if let Some(id) = o.get("id") {
+					let p = pre(id);
+					o.insert("id".into(), p);
+				}
+				if let Some(k) = o.get("kern") {
+					let p = pre(k);
+					o.insert("kern".into(), p);
+				}
 			}
 			out.push(h);
 		}
@@ -120,8 +174,14 @@ fn rank_peers(peers: &[(String, Value)], k: usize) -> Vec<Value> {
 		merge_search_hits(tag, v, &mut out);
 	}
 	out.sort_by(|a, b| {
-		let sa = a.get("score").and_then(Value::as_f64).unwrap_or(f64::NEG_INFINITY);
-		let sb = b.get("score").and_then(Value::as_f64).unwrap_or(f64::NEG_INFINITY);
+		let sa = a
+			.get("score")
+			.and_then(Value::as_f64)
+			.unwrap_or(f64::NEG_INFINITY);
+		let sb = b
+			.get("score")
+			.and_then(Value::as_f64)
+			.unwrap_or(f64::NEG_INFINITY);
 		sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
 	});
 	out.truncate(k);
@@ -143,18 +203,23 @@ pub(super) struct AskBody {
 	k: usize,
 }
 
-fn default_ask_k() -> usize { 8 }
+fn default_ask_k() -> usize {
+	8
+}
 
 static AGENT_SYSTEM_PROMPT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 fn build_agent_system_prompt() -> &'static str {
 	AGENT_SYSTEM_PROMPT.get_or_init(|| {
 		let defs = crate::mcp::tools::tool_definitions();
-		let tools: Vec<String> = defs.iter().map(|d| {
-			let name = d.get("name").and_then(Value::as_str).unwrap_or("");
-			let desc = d.get("description").and_then(Value::as_str).unwrap_or("");
-			format!("- {name}: {desc}")
-		}).collect();
+		let tools: Vec<String> = defs
+			.iter()
+			.map(|d| {
+				let name = d.get("name").and_then(Value::as_str).unwrap_or("");
+				let desc = d.get("description").and_then(Value::as_str).unwrap_or("");
+				format!("- {name}: {desc}")
+			})
+			.collect();
 		format!(
 			"You are kern's assistant. Answer questions using the provided memory context.\n\
 			 You can call tools when the user asks to modify the knowledge graph (add/remove memories, \
@@ -185,8 +250,14 @@ fn extract_tool_calls(text: &str) -> (String, Vec<ToolCall>) {
 			rest = &rest[close + "</tool_call>".len()..];
 			if let Ok(v) = serde_json::from_str::<Value>(json_str) {
 				if let Some(name) = v.get("name").and_then(Value::as_str) {
-					let args = v.get("args").cloned().unwrap_or(Value::Object(Default::default()));
-					calls.push(ToolCall { name: name.to_string(), args });
+					let args = v
+						.get("args")
+						.cloned()
+						.unwrap_or(Value::Object(Default::default()));
+					calls.push(ToolCall {
+						name: name.to_string(),
+						args,
+					});
 				}
 			}
 		}
@@ -196,14 +267,29 @@ fn extract_tool_calls(text: &str) -> (String, Vec<ToolCall>) {
 }
 
 /// Execute one tool on the first available peer. Returns (ok, result_text).
-async fn exec_tool(client: &reqwest::Client, peers: &[String], name: &str, args: &Value) -> (bool, String) {
+async fn exec_tool(
+	client: &reqwest::Client,
+	peers: &[String],
+	name: &str,
+	args: &Value,
+) -> (bool, String) {
 	let body = json!({ "name": name, "args": args });
 	for addr in peers {
 		let url = format!("http://{addr}/tool");
-		if let Ok(r) = client.post(&url).timeout(FANOUT_TIMEOUT).json(&body).send().await {
+		if let Ok(r) = client
+			.post(&url)
+			.timeout(FANOUT_TIMEOUT)
+			.json(&body)
+			.send()
+			.await
+		{
 			if let Ok(v) = r.json::<Value>().await {
 				let ok = v.get("ok").and_then(Value::as_bool).unwrap_or(false);
-				let result = v.get("result").and_then(Value::as_str).unwrap_or("done").to_string();
+				let result = v
+					.get("result")
+					.and_then(Value::as_str)
+					.unwrap_or("done")
+					.to_string();
 				return (ok, result);
 			}
 		}
@@ -216,7 +302,10 @@ async fn exec_tool(client: &reqwest::Client, peers: &[String], name: &str, args:
 /// tool loop. The LLM can call kern tools (ingest, anchor, forget, etc.) by
 /// emitting <tool_call>…</tool_call> blocks; each is executed and the result
 /// fed back before the final answer is streamed as `token` events.
-pub(super) async fn ask(State(st): State<HubState>, Json(body): Json<AskBody>) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
+pub(super) async fn ask(
+	State(st): State<HubState>,
+	Json(body): Json<AskBody>,
+) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
 	let stream = async_stream::stream! {
 		let q = body.question.trim().to_string();
 		if q.is_empty() {
@@ -375,13 +464,25 @@ pub(super) async fn hub_tool(State(st): State<HubState>, Json(body): Json<Value>
 	let mut errors: Vec<String> = Vec::new();
 	for addr in &peers {
 		let url = format!("http://{addr}/tool");
-		match st.client.post(&url).timeout(FANOUT_TIMEOUT).json(&body).send().await {
+		match st
+			.client
+			.post(&url)
+			.timeout(FANOUT_TIMEOUT)
+			.json(&body)
+			.send()
+			.await
+		{
 			Ok(r) => match r.json::<Value>().await {
 				Ok(v) => {
 					if v.get("ok").and_then(Value::as_bool).unwrap_or(false) {
 						last_ok = Some(v);
 					} else {
-						errors.push(v.get("error").and_then(Value::as_str).unwrap_or("error").to_string());
+						errors.push(
+							v.get("error")
+								.and_then(Value::as_str)
+								.unwrap_or("error")
+								.to_string(),
+						);
 					}
 				}
 				Err(e) => errors.push(e.to_string()),
@@ -389,12 +490,21 @@ pub(super) async fn hub_tool(State(st): State<HubState>, Json(body): Json<Value>
 			Err(e) => errors.push(e.to_string()),
 		}
 	}
-	last_ok.map(Json).unwrap_or_else(|| Json(json!({ "ok": false, "error": errors.join("; ") })))
+	last_ok
+		.map(Json)
+		.unwrap_or_else(|| Json(json!({ "ok": false, "error": errors.join("; ") })))
 }
 
 /// Hub endpoint: forward an edit to the peer that owns the namespaced id.
-pub(super) async fn hub_edit(State(st): State<HubState>, Json(mut body): Json<Value>) -> Json<Value> {
-	let id = body.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+pub(super) async fn hub_edit(
+	State(st): State<HubState>,
+	Json(mut body): Json<Value>,
+) -> Json<Value> {
+	let id = body
+		.get("id")
+		.and_then(Value::as_str)
+		.unwrap_or("")
+		.to_string();
 	let Some((addr, real)) = id.split_once('|') else {
 		return Json(json!({ "ok": false, "error": "bad id" }));
 	};
@@ -427,7 +537,11 @@ fn build_ask_prompt(sources: &[Value], chains: &[String], question: &str) -> Str
 		.collect::<Vec<_>>()
 		.join("\n");
 	if !joined.is_empty() {
-		let cap = joined.char_indices().nth(800).map(|(i, _)| i).unwrap_or(joined.len());
+		let cap = joined
+			.char_indices()
+			.nth(800)
+			.map(|(i, _)| i)
+			.unwrap_or(joined.len());
 		p.push_str(&joined[..cap]);
 		p.push('\n');
 	}
@@ -505,10 +619,7 @@ mod tests {
 			"hits":    [{ "id": "e2", "kern": "k2", "label": "b", "score": 0.70 }],
 			"reasons": [],
 		});
-		let tagged = vec![
-			("A|".to_string(), peer_a),
-			("B|".to_string(), peer_b),
-		];
+		let tagged = vec![("A|".to_string(), peer_a), ("B|".to_string(), peer_b)];
 		let out = rank_peers(&tagged, 2);
 
 		// Truncated to k=2, sorted by score desc across BOTH peers and BOTH arrays.

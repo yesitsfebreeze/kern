@@ -7,12 +7,7 @@ use std::collections::HashMap;
 /// plain unweighted RRF. Down-weighting query-INDEPENDENT lists (global
 /// importance / PageRank) keeps a popular-but-irrelevant entity from getting
 /// the same boost as a query-relevant dense/lexical hit.
-pub fn rrf(
-	lists: &[&[EntityHit]],
-	weights: &[f64],
-	k_rrf: f64,
-	top_k: usize,
-) -> Vec<EntityHit> {
+pub fn rrf(lists: &[&[EntityHit]], weights: &[f64], k_rrf: f64, top_k: usize) -> Vec<EntityHit> {
 	let mut agg: HashMap<String, f64> = HashMap::new();
 	for (li, list) in lists.iter().enumerate() {
 		let w = weights.get(li).copied().unwrap_or(1.0);
@@ -111,7 +106,10 @@ mod tests {
 		let lists: Vec<&[EntityHit]> = vec![&la, &lb];
 		let out = rrf(&lists, &[1.0, 1.0], 60.0, 1);
 		assert_eq!(out.len(), 1, "top_k=1 keeps a single hit");
-		assert_eq!(out[0].entity_id, "a", "tie resolved to id-ascending winner under truncation");
+		assert_eq!(
+			out[0].entity_id, "a",
+			"tie resolved to id-ascending winner under truncation"
+		);
 	}
 
 	#[test]
@@ -120,7 +118,10 @@ mod tests {
 		let lists: Vec<&[EntityHit]> = vec![&a];
 
 		// top_k = 0 -> empty vec, no panic (truncate(0)).
-		assert!(rrf(&lists, &[], 60.0, 0).is_empty(), "top_k=0 yields an empty result");
+		assert!(
+			rrf(&lists, &[], 60.0, 0).is_empty(),
+			"top_k=0 yields an empty result"
+		);
 		// top_k below the result count truncates to the top entries.
 		assert_eq!(rrf(&lists, &[], 60.0, 2).len(), 2);
 		// top_k above the result count returns all, no padding/panic.

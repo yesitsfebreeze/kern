@@ -3,8 +3,8 @@ use crate::base::constants::{
 	KERN_NAMING_MIN_CLUSTER_SIZE,
 };
 use crate::base::math::cosine;
-use crate::base::util::cmp_partial;
 use crate::base::types::Entity;
+use crate::base::util::cmp_partial;
 use rayon::prelude::*;
 
 pub struct Cluster {
@@ -186,21 +186,36 @@ mod tests {
 	use super::*;
 
 	fn ent(id: &str, vector: Vec<f64>) -> Entity {
-		Entity { id: id.into(), vector, ..Default::default() }
+		Entity {
+			id: id.into(),
+			vector,
+			..Default::default()
+		}
 	}
 
 	#[test]
 	fn anchor_prompt_keeps_header_then_one_bullet_per_member() {
 		let c = Cluster {
-			members: vec![ent("a", vec![1.0]), ent("b", vec![1.0]), ent("c", vec![1.0])],
+			members: vec![
+				ent("a", vec![1.0]),
+				ent("b", vec![1.0]),
+				ent("c", vec![1.0]),
+			],
 		};
 		let p = anchor_prompt(&c);
 		assert!(
 			p.starts_with("Summarize the core theme of these related thoughts"),
 			"instruction header is preserved verbatim",
 		);
-		assert!(p.contains(":\n\n"), "blank line separates the header from the list");
-		assert_eq!(p.matches("\n- ").count(), 3, "exactly one `- ` bullet per member");
+		assert!(
+			p.contains(":\n\n"),
+			"blank line separates the header from the list"
+		);
+		assert_eq!(
+			p.matches("\n- ").count(),
+			3,
+			"exactly one `- ` bullet per member"
+		);
 		assert!(p.ends_with('\n'), "each bullet line is newline-terminated");
 	}
 
@@ -246,7 +261,9 @@ mod tests {
 
 	#[test]
 	fn vector_cluster_respects_max_sample() {
-		let m: Vec<Entity> = (0..5).map(|i| ent(&format!("e{i}"), vec![1.0, 0.0])).collect();
+		let m: Vec<Entity> = (0..5)
+			.map(|i| ent(&format!("e{i}"), vec![1.0, 0.0]))
+			.collect();
 		let refs: Vec<&Entity> = m.iter().collect();
 		let clusters = vector_cluster(&refs, 2);
 		let total: usize = clusters.iter().map(|c| c.members.len()).sum();
@@ -264,7 +281,10 @@ mod tests {
 			],
 		};
 		let rep = centroid_thought(&c).expect("non-empty cluster has a representative");
-		assert!(rep.vector[0] > rep.vector[1], "representative aligns with the dominant direction");
+		assert!(
+			rep.vector[0] > rep.vector[1],
+			"representative aligns with the dominant direction"
+		);
 	}
 
 	#[test]
@@ -274,14 +294,18 @@ mod tests {
 
 	#[test]
 	fn is_core_cluster_false_when_anchor_empty() {
-		let c = Cluster { members: vec![ent("a", vec![1.0, 0.0])] };
+		let c = Cluster {
+			members: vec![ent("a", vec![1.0, 0.0])],
+		};
 		assert!(!is_core_cluster(&c, &[]));
 	}
 
 	#[test]
 	fn best_cluster_prefers_larger_cohesive_cluster() {
 		// Both clusters are internally cohesive (identical members); the larger wins.
-		let small = Cluster { members: vec![ent("a", vec![1.0, 0.0]), ent("b", vec![1.0, 0.0])] };
+		let small = Cluster {
+			members: vec![ent("a", vec![1.0, 0.0]), ent("b", vec![1.0, 0.0])],
+		};
 		let large = Cluster {
 			members: vec![
 				ent("c", vec![0.0, 1.0]),
@@ -296,7 +320,9 @@ mod tests {
 
 	#[test]
 	fn best_cluster_none_below_min_size() {
-		let clusters = vec![Cluster { members: vec![ent("a", vec![1.0, 0.0])] }];
+		let clusters = vec![Cluster {
+			members: vec![ent("a", vec![1.0, 0.0])],
+		}];
 		assert_eq!(best_cluster(&clusters, 2, 0.5), None);
 	}
 }

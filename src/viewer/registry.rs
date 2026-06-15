@@ -16,7 +16,10 @@ const HEARTBEAT: Duration = Duration::from_secs(5);
 const STALE: Duration = Duration::from_secs(20);
 
 fn now_secs() -> u64 {
-	SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+	SystemTime::now()
+		.duration_since(UNIX_EPOCH)
+		.map(|d| d.as_secs())
+		.unwrap_or(0)
 }
 
 fn registry_dir() -> PathBuf {
@@ -54,8 +57,12 @@ pub(super) fn live_peers() -> Vec<String> {
 	let mut peers = Vec::new();
 	for entry in entries.flatten() {
 		let path = entry.path();
-		let Ok(text) = std::fs::read_to_string(&path) else { continue };
-		let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
+		let Ok(text) = std::fs::read_to_string(&path) else {
+			continue;
+		};
+		let Ok(v) = serde_json::from_str::<Value>(&text) else {
+			continue;
+		};
 		let ts = v.get("ts").and_then(Value::as_u64).unwrap_or(0);
 		if now.saturating_sub(ts) > STALE.as_secs() {
 			let _ = std::fs::remove_file(&path); // sweep dead daemons

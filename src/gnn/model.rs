@@ -1,5 +1,3 @@
-
-
 use crate::gnn::backward::{BackwardGraphLayer, GraphLayer};
 use crate::gnn::graph::Graph;
 use crate::gnn::layer::{Backward, Layer, LinearLayer};
@@ -148,7 +146,11 @@ mod tests {
 
 	fn tiny_graph() -> (Graph, Tensor) {
 		let mut g = Graph::new();
-		let feats = [[0.5, -0.2, 0.1, 0.3], [-0.4, 0.6, 0.2, -0.1], [0.2, 0.1, -0.5, 0.4]];
+		let feats = [
+			[0.5, -0.2, 0.1, 0.3],
+			[-0.4, 0.6, 0.2, -0.1],
+			[0.2, 0.1, -0.5, 0.4],
+		];
 		for (i, f) in feats.iter().enumerate() {
 			g.add_node(&format!("n{i}"), f.to_vec()).unwrap();
 		}
@@ -165,7 +167,9 @@ mod tests {
 		let (g, x) = tiny_graph();
 		let mut rng = StdRng::seed_from_u64(3);
 		let mut model = Model::new(
-			vec![Box::new(GCNLayer::with_rng(4, 3, None, false, 0.0, &mut rng))],
+			vec![Box::new(GCNLayer::with_rng(
+				4, 3, None, false, 0.0, &mut rng,
+			))],
 			None,
 		);
 		let out = model.forward(&g, &x);
@@ -181,11 +185,17 @@ mod tests {
 		// Residual model: a shape-preserving 4->4 layer, so the skip add fires.
 		let mut rng = StdRng::seed_from_u64(7);
 		let mut model = Model::new_residual(
-			vec![Box::new(GCNLayer::with_rng(4, 4, None, false, 0.0, &mut rng))],
+			vec![Box::new(GCNLayer::with_rng(
+				4, 4, None, false, 0.0, &mut rng,
+			))],
 			None,
 		);
 		let out = model.forward(&g, &x);
-		assert_eq!(out.shape(), x.shape(), "residual preserves the feature shape");
+		assert_eq!(
+			out.shape(),
+			x.shape(),
+			"residual preserves the feature shape"
+		);
 
 		// Recompute the bare layer output with the same seed; residual output must
 		// equal layer_out + input element-wise.

@@ -108,24 +108,47 @@ mod tests {
 	fn rephrase_band_is_ordered_and_dedup_caps_it() {
 		let c = Config::default();
 		assert!(c.rephrase_lower < c.rephrase_upper, "band lower < upper");
-		assert!(c.dedup_threshold >= c.rephrase_upper, "dedup floor caps the rephrase band");
+		assert!(
+			c.dedup_threshold >= c.rephrase_upper,
+			"dedup floor caps the rephrase band"
+		);
 		assert!(c.hnsw_ef >= c.hnsw_k, "ef beam must be at least k");
 	}
 
 	#[test]
 	fn validate_accepts_the_default_and_rejects_bad_knobs() {
-		assert!(Config::default().validate().is_ok(), "default config is valid");
+		assert!(
+			Config::default().validate().is_ok(),
+			"default config is valid"
+		);
 
-		let out_of_range = Config { dedup_threshold: 1.5, ..Default::default() };
-		assert!(out_of_range.validate().unwrap_err().contains("dedup_threshold"));
+		let out_of_range = Config {
+			dedup_threshold: 1.5,
+			..Default::default()
+		};
+		assert!(out_of_range
+			.validate()
+			.unwrap_err()
+			.contains("dedup_threshold"));
 
-		let inverted = Config { rephrase_lower: 0.9, rephrase_upper: 0.8, ..Default::default() };
+		let inverted = Config {
+			rephrase_lower: 0.9,
+			rephrase_upper: 0.8,
+			..Default::default()
+		};
 		assert!(inverted.validate().unwrap_err().contains("rephrase_lower"));
 
-		let zero_k = Config { hnsw_k: 0, ..Default::default() };
+		let zero_k = Config {
+			hnsw_k: 0,
+			..Default::default()
+		};
 		assert!(zero_k.validate().unwrap_err().contains("hnsw_k"));
 
-		let narrow_beam = Config { hnsw_k: 16, hnsw_ef: 8, ..Default::default() };
+		let narrow_beam = Config {
+			hnsw_k: 16,
+			hnsw_ef: 8,
+			..Default::default()
+		};
 		assert!(narrow_beam.validate().unwrap_err().contains("hnsw_ef"));
 	}
 }

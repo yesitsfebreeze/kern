@@ -129,7 +129,14 @@ async fn drain_entry(
 			title: format!("claude://{}", c.descriptor),
 		};
 		let outcome = worker
-			.run(c.text, src, EntityKind::Claim, c.descriptor, 0.6, cfg.clone())
+			.run(
+				c.text,
+				src,
+				EntityKind::Claim,
+				c.descriptor,
+				0.6,
+				cfg.clone(),
+			)
 			.await;
 		let ok = !matches!(outcome.status, OutcomeStatus::Failed);
 		if !ok {
@@ -200,7 +207,16 @@ pub async fn run(
 	// Drain first, sleep after — a delta dropped before the daemon started is
 	// processed on the first cycle instead of waiting a full `interval`.
 	loop {
-		drain_once(&spool_dir, &done, &worker, &llm, &cfg, done_retention, SystemTime::now()).await;
+		drain_once(
+			&spool_dir,
+			&done,
+			&worker,
+			&llm,
+			&cfg,
+			done_retention,
+			SystemTime::now(),
+		)
+		.await;
 		tokio::time::sleep(interval).await;
 	}
 }
@@ -239,12 +255,14 @@ mod tests {
 	fn prune_done_missing_dir_is_noop() {
 		let dir = tempdir().unwrap();
 		let missing = dir.path().join("nope");
-		assert_eq!(prune_done(&missing, Duration::from_secs(1), SystemTime::now()), 0);
+		assert_eq!(
+			prune_done(&missing, Duration::from_secs(1), SystemTime::now()),
+			0
+		);
 	}
 
 	fn stub_two(_q: &str) -> String {
-		r#"[{"text":"fact one","kind":"fact"},{"text":"a preference","kind":"preference"}]"#
-			.to_string()
+		r#"[{"text":"fact one","kind":"fact"},{"text":"a preference","kind":"preference"}]"#.to_string()
 	}
 
 	#[test]
@@ -347,11 +365,10 @@ mod tests {
 		let embedder = crate::llm::Client::new_embed_only(&format!("http://{addr}"), "m");
 		// Mock LLM: returns a one-claim array. distill parses it; the chunk splitter
 		// receives the same string and falls back to heuristic splitting.
-		let llm: LlmFunc = Arc::new(|_p: &str| {
-			r#"[{"text":"the API key lives in vault X","kind":"fact"}]"#.to_string()
-		});
+		let llm: LlmFunc =
+			Arc::new(|_p: &str| r#"[{"text":"the API key lives in vault X","kind":"fact"}]"#.to_string());
 		let graph = Arc::new(RwLock::new(GraphGnn::new()));
-		let worker = Arc::new(Worker::new(graph.clone(), embedder, Some(llm.clone()), None));
+		let worker = Arc::new(Worker::new(graph.clone(), embedder, None, None));
 
 		let dir = tempdir().unwrap();
 		let spool = dir.path().to_path_buf();
@@ -359,7 +376,10 @@ mod tests {
 		let delta = spool.join("sess-42.txt");
 		std::fs::write(&delta, "user: where is my key\nassistant: vault X").unwrap();
 
-		let cfg = crate::ingest::Config { dedup_threshold: 0.95, ..Default::default() };
+		let cfg = crate::ingest::Config {
+			dedup_threshold: 0.95,
+			..Default::default()
+		};
 		let archived = drain_once(
 			&spool,
 			&done,
@@ -371,12 +391,18 @@ mod tests {
 		)
 		.await;
 
-		assert_eq!(archived, 1, "the delta's single claim committed -> archived");
+		assert_eq!(
+			archived, 1,
+			"the delta's single claim committed -> archived"
+		);
 		assert!(!delta.exists(), "consumed delta left the spool");
 		assert!(done.join("sess-42.txt").exists(), "delta moved into done/");
 		let g = crate::base::locks::read_recovered(&graph);
 		let entities: usize = g.all().iter().map(|k| k.entities.len()).sum();
-		assert!(entities > 0, "the claim flowed through the worker into the graph");
+		assert!(
+			entities > 0,
+			"the claim flowed through the worker into the graph"
+		);
 
 		server.abort();
 	}

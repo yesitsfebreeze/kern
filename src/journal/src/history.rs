@@ -20,14 +20,14 @@ pub struct Filter {
 impl Filter {
 	pub fn all() -> Self {
 		Self::default()
-}
+	}
 
 	pub fn kind(k: Kind) -> Self {
 		Self {
 			kind: Some(k),
 			..Self::default()
 		}
-}
+	}
 }
 
 pub struct History {
@@ -46,7 +46,7 @@ impl History {
 		Ok(Self {
 			conn: Mutex::new(conn),
 		})
-}
+	}
 
 	pub fn open_in_memory() -> rusqlite::Result<Self> {
 		let conn = Connection::open_in_memory()?;
@@ -54,7 +54,7 @@ impl History {
 		Ok(Self {
 			conn: Mutex::new(conn),
 		})
-}
+	}
 
 	fn init(conn: &Connection) -> rusqlite::Result<()> {
 		conn.pragma_update(None, "journal_mode", "WAL").ok();
@@ -80,7 +80,7 @@ impl History {
 					ts_ms INTEGER NOT NULL
 				);",
 		)
-}
+	}
 
 	/// Whether a daily digest has already been rendered for `day` (YYYY-MM-DD),
 	/// so the compactor renders each day's note (and its one LLM call) once.
@@ -92,7 +92,7 @@ impl History {
 			|r| r.get(0),
 		)?;
 		Ok(n > 0)
-}
+	}
 
 	/// Record that a day's digest has been rendered (idempotent).
 	pub fn mark_digest(&self, day: &str) -> rusqlite::Result<()> {
@@ -102,7 +102,7 @@ impl History {
 			params![day, crate::entry::now_ms() as i64],
 		)?;
 		Ok(())
-}
+	}
 
 	/// Whether the named rollover segment was already compacted into the archive.
 	/// The compactor checks this before inserting so a crash between insert and
@@ -134,9 +134,8 @@ impl History {
 		let mut conn = self.conn.lock().expect("history mutex poisoned");
 		let tx = conn.transaction()?;
 		{
-			let mut stmt = tx.prepare(
-				"INSERT INTO entries (ts_ms, day, kind, key, payload) VALUES (?, ?, ?, ?, ?)",
-			)?;
+			let mut stmt =
+				tx.prepare("INSERT INTO entries (ts_ms, day, kind, key, payload) VALUES (?, ?, ?, ?, ?)")?;
 			for e in entries {
 				let kind_s = kind_tag(&e.kind);
 				let day = day_for(e.ts_ms);
@@ -191,11 +190,7 @@ impl History {
 			let key: String = row.get(2)?;
 			let payload_s: String = row.get(3)?;
 			let payload: serde_json::Value = serde_json::from_str(&payload_s).map_err(|e| {
-				rusqlite::Error::FromSqlConversionFailure(
-					3,
-					rusqlite::types::Type::Text,
-					Box::new(e),
-				)
+				rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
 			})?;
 			let kind = kind_from_tag(&kind_s, &payload).ok_or_else(|| {
 				rusqlite::Error::FromSqlConversionFailure(
@@ -218,7 +213,7 @@ impl History {
 			out.push(r?);
 		}
 		Ok(out)
-}
+	}
 
 	pub fn count_by_key(
 		&self,
@@ -243,7 +238,7 @@ impl History {
 			})?
 			.collect();
 		Ok(rows?.into_iter().map(|(k, n)| (k, n as u64)).collect())
-}
+	}
 
 	pub fn prune_before(&self, day: &str) -> rusqlite::Result<usize> {
 		let conn = self.conn.lock().expect("history mutex poisoned");
@@ -252,14 +247,14 @@ impl History {
 			let _ = conn.execute_batch("VACUUM");
 		}
 		Ok(n)
-}
+	}
 
 	pub fn retain_days(&self, retain_days: u32) -> rusqlite::Result<usize> {
 		let now_ms = crate::entry::now_ms();
 		let cutoff_ms = now_ms.saturating_sub((retain_days as u64) * 86_400_000);
 		let cutoff_day = day_for(cutoff_ms);
 		self.prune_before(&cutoff_day)
-}
+	}
 
 	pub fn len(&self) -> rusqlite::Result<u64> {
 		let conn = self.conn.lock().expect("history mutex poisoned");
@@ -268,7 +263,7 @@ impl History {
 			.optional()?
 			.unwrap_or(0);
 		Ok(n as u64)
-}
+	}
 
 	/// Whether the history holds no entries.
 	pub fn is_empty(&self) -> rusqlite::Result<bool> {
@@ -330,12 +325,26 @@ fn kind_from_tag(s: &str, payload: &serde_json::Value) -> Option<Kind> {
 		// out at decode time. Missing fields surface as zero/empty so the
 		// query still returns rather than fail-hard on legacy rows.
 		"edit" => Kind::Edit {
-			target_ts_ms: payload.get("target_ts_ms").and_then(|v| v.as_u64()).unwrap_or(0),
-			new_text: payload.get("new_text").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+			target_ts_ms: payload
+				.get("target_ts_ms")
+				.and_then(|v| v.as_u64())
+				.unwrap_or(0),
+			new_text: payload
+				.get("new_text")
+				.and_then(|v| v.as_str())
+				.unwrap_or("")
+				.to_string(),
 		},
 		"fork" => Kind::Fork {
-			from_ts_ms: payload.get("from_ts_ms").and_then(|v| v.as_u64()).unwrap_or(0),
-			new_fork_id: payload.get("new_fork_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+			from_ts_ms: payload
+				.get("from_ts_ms")
+				.and_then(|v| v.as_u64())
+				.unwrap_or(0),
+			new_fork_id: payload
+				.get("new_fork_id")
+				.and_then(|v| v.as_str())
+				.unwrap_or("")
+				.to_string(),
 		},
 		"rpc_send" => Kind::RpcSend,
 		"rpc_recv" => Kind::RpcRecv,
@@ -348,17 +357,29 @@ fn kind_from_tag(s: &str, payload: &serde_json::Value) -> Option<Kind> {
 		// live in the payload column. Default to empty strings / None when a
 		// row predates the schema bump so old journals still replay.
 		"fork_open" => Kind::ForkOpen {
-			fork_id: payload.get("fork_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+			fork_id: payload
+				.get("fork_id")
+				.and_then(|v| v.as_str())
+				.unwrap_or("")
+				.to_string(),
 			parent: payload
 				.get("parent")
 				.and_then(|v| v.as_str())
 				.map(|s| s.to_string()),
 		},
 		"fork_resume" => Kind::ForkResume {
-			fork_id: payload.get("fork_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+			fork_id: payload
+				.get("fork_id")
+				.and_then(|v| v.as_str())
+				.unwrap_or("")
+				.to_string(),
 		},
 		"fork_close" => Kind::ForkClose {
-			fork_id: payload.get("fork_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+			fork_id: payload
+				.get("fork_id")
+				.and_then(|v| v.as_str())
+				.unwrap_or("")
+				.to_string(),
 		},
 		_ => return None,
 	})
@@ -381,7 +402,13 @@ mod tests {
 	use super::*;
 
 	fn entry(ts_ms: u64, kind: Kind, key: &str, payload: serde_json::Value) -> Entry {
-		Entry { v: SCHEMA_VERSION, ts_ms, kind, key: key.into(), payload }
+		Entry {
+			v: SCHEMA_VERSION,
+			ts_ms,
+			kind,
+			key: key.into(),
+			payload,
+		}
 	}
 
 	#[test]
@@ -430,7 +457,10 @@ mod tests {
 		assert_eq!(counts[0], ("a".to_string(), 2), "highest count first");
 		assert_eq!(counts[1], ("b".to_string(), 1));
 		// since filter drops the two ts=100/150 'a' rows.
-		assert_eq!(h.count_by_key(&Kind::User, Some(200)).unwrap(), vec![("b".to_string(), 1)]);
+		assert_eq!(
+			h.count_by_key(&Kind::User, Some(200)).unwrap(),
+			vec![("b".to_string(), 1)]
+		);
 	}
 
 	#[test]
@@ -439,13 +469,19 @@ mod tests {
 		h.bulk_insert(&[
 			entry(
 				100,
-				Kind::Edit { target_ts_ms: 42, new_text: "x".into() },
+				Kind::Edit {
+					target_ts_ms: 42,
+					new_text: "x".into(),
+				},
 				"e",
 				serde_json::json!({"target_ts_ms": 42, "new_text": "x"}),
 			),
 			entry(
 				200,
-				Kind::ForkOpen { fork_id: "f1".into(), parent: Some("p".into()) },
+				Kind::ForkOpen {
+					fork_id: "f1".into(),
+					parent: Some("p".into()),
+				},
 				"f",
 				serde_json::json!({"fork_id": "f1", "parent": "p"}),
 			),
@@ -453,17 +489,25 @@ mod tests {
 		.unwrap();
 		let all = h.query(Filter::all()).unwrap();
 		assert!(matches!(&all[0].kind, Kind::Edit { target_ts_ms: 42, new_text } if new_text == "x"));
-		assert!(matches!(&all[1].kind, Kind::ForkOpen { fork_id, parent: Some(p) } if fork_id == "f1" && p == "p"));
+		assert!(
+			matches!(&all[1].kind, Kind::ForkOpen { fork_id, parent: Some(p) } if fork_id == "f1" && p == "p")
+		);
 	}
 
 	/// A payload carrying the inner fields the decoder needs for payload-bearing
 	/// kinds (Edit/Fork/Fork*); other kinds ignore it.
 	fn payload_for(k: &Kind) -> serde_json::Value {
 		match k {
-			Kind::Edit { target_ts_ms, new_text } => {
+			Kind::Edit {
+				target_ts_ms,
+				new_text,
+			} => {
 				serde_json::json!({ "target_ts_ms": target_ts_ms, "new_text": new_text })
 			}
-			Kind::Fork { from_ts_ms, new_fork_id } => {
+			Kind::Fork {
+				from_ts_ms,
+				new_fork_id,
+			} => {
 				serde_json::json!({ "from_ts_ms": from_ts_ms, "new_fork_id": new_fork_id })
 			}
 			Kind::ForkOpen { fork_id, parent } => {
@@ -483,12 +527,32 @@ mod tests {
 		// added to kind_tag but missing its kind_from_tag decode arm).
 		fn _exhaustive(k: &Kind) {
 			match k {
-				Kind::User | Kind::Assistant | Kind::Final | Kind::TurnStart | Kind::TurnEnd
-				| Kind::Usage | Kind::ToolCall | Kind::RecipeInvoke | Kind::PluginCall | Kind::Error
-				| Kind::Ask | Kind::Answer | Kind::Goal | Kind::GoalSnapshot | Kind::Milestone
-				| Kind::Edit { .. } | Kind::Fork { .. } | Kind::RpcSend | Kind::RpcRecv
-				| Kind::RpcError | Kind::Log | Kind::PlanStep | Kind::PlanProposal
-				| Kind::EntityTouched | Kind::ForkOpen { .. } | Kind::ForkResume { .. }
+				Kind::User
+				| Kind::Assistant
+				| Kind::Final
+				| Kind::TurnStart
+				| Kind::TurnEnd
+				| Kind::Usage
+				| Kind::ToolCall
+				| Kind::RecipeInvoke
+				| Kind::PluginCall
+				| Kind::Error
+				| Kind::Ask
+				| Kind::Answer
+				| Kind::Goal
+				| Kind::GoalSnapshot
+				| Kind::Milestone
+				| Kind::Edit { .. }
+				| Kind::Fork { .. }
+				| Kind::RpcSend
+				| Kind::RpcRecv
+				| Kind::RpcError
+				| Kind::Log
+				| Kind::PlanStep
+				| Kind::PlanProposal
+				| Kind::EntityTouched
+				| Kind::ForkOpen { .. }
+				| Kind::ForkResume { .. }
 				| Kind::ForkClose { .. } => {}
 			}
 		}
@@ -509,8 +573,14 @@ mod tests {
 			Kind::Goal,
 			Kind::GoalSnapshot,
 			Kind::Milestone,
-			Kind::Edit { target_ts_ms: 1, new_text: "t".into() },
-			Kind::Fork { from_ts_ms: 2, new_fork_id: "f".into() },
+			Kind::Edit {
+				target_ts_ms: 1,
+				new_text: "t".into(),
+			},
+			Kind::Fork {
+				from_ts_ms: 2,
+				new_fork_id: "f".into(),
+			},
 			Kind::RpcSend,
 			Kind::RpcRecv,
 			Kind::RpcError,
@@ -518,11 +588,22 @@ mod tests {
 			Kind::PlanStep,
 			Kind::PlanProposal,
 			Kind::EntityTouched,
-			Kind::ForkOpen { fork_id: "fo".into(), parent: Some("p".into()) },
-			Kind::ForkResume { fork_id: "fr".into() },
-			Kind::ForkClose { fork_id: "fc".into() },
+			Kind::ForkOpen {
+				fork_id: "fo".into(),
+				parent: Some("p".into()),
+			},
+			Kind::ForkResume {
+				fork_id: "fr".into(),
+			},
+			Kind::ForkClose {
+				fork_id: "fc".into(),
+			},
 		];
-		assert_eq!(all.len(), 27, "list every Kind variant exactly once (see _exhaustive)");
+		assert_eq!(
+			all.len(),
+			27,
+			"list every Kind variant exactly once (see _exhaustive)"
+		);
 
 		for k in &all {
 			let tag = kind_tag(k);
@@ -531,7 +612,11 @@ mod tests {
 			});
 			// No PartialEq on Kind needed: re-tag the decoded value and require the
 			// tag to be stable, proving the decoder maps the tag back to its variant.
-			assert_eq!(kind_tag(&decoded), tag, "tag not stable across decode for {tag:?}");
+			assert_eq!(
+				kind_tag(&decoded),
+				tag,
+				"tag not stable across decode for {tag:?}"
+			);
 		}
 	}
 
@@ -540,7 +625,12 @@ mod tests {
 		let h = History::open_in_memory().unwrap();
 		h.bulk_insert(&[
 			entry(0, Kind::User, "old", serde_json::json!({})), // 1970-01-01
-			entry(crate::entry::now_ms(), Kind::User, "new", serde_json::json!({})),
+			entry(
+				crate::entry::now_ms(),
+				Kind::User,
+				"new",
+				serde_json::json!({}),
+			),
 		])
 		.unwrap();
 		let removed = h.prune_before("2000-01-01").unwrap();

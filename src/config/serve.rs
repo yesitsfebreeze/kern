@@ -55,7 +55,9 @@ impl ServeConfig {
 				continue; // ephemeral port, never a real clash
 			}
 			if let Some(prev) = seen.insert(port, name) {
-				return Err(format!("duplicate TCP bind port {port} on `{prev}` and `{name}`"));
+				return Err(format!(
+					"duplicate TCP bind port {port} on `{prev}` and `{name}`"
+				));
 			}
 		}
 		Ok(())
@@ -73,7 +75,11 @@ mod tests {
 
 	#[test]
 	fn duplicate_tcp_port_is_rejected() {
-		let cfg = ServeConfig { addr: ":9000".into(), mcp_sse: ":9000".into(), ..Default::default() };
+		let cfg = ServeConfig {
+			addr: ":9000".into(),
+			mcp_sse: ":9000".into(),
+			..Default::default()
+		};
 		let err = cfg.validate().unwrap_err();
 		assert!(err.contains("9000"), "names the clashing port: {err}");
 	}
@@ -81,7 +87,11 @@ mod tests {
 	#[test]
 	fn udp_gossip_sharing_a_tcp_port_is_allowed() {
 		// gossip is UDP; reusing a TCP port number is not a real conflict.
-		let cfg = ServeConfig { addr: ":8080".into(), gossip: ":8080".into(), ..Default::default() };
+		let cfg = ServeConfig {
+			addr: ":8080".into(),
+			gossip: ":8080".into(),
+			..Default::default()
+		};
 		assert!(cfg.validate().is_ok());
 	}
 

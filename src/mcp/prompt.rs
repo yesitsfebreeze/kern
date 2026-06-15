@@ -28,7 +28,10 @@ pub fn prompt_definitions() -> Vec<serde_json::Value> {
 	})]
 }
 
-pub(crate) fn handle_prompt_get(id: Option<Box<RawValue>>, params: Option<Box<RawValue>>) -> Response {
+pub(crate) fn handle_prompt_get(
+	id: Option<Box<RawValue>>,
+	params: Option<Box<RawValue>>,
+) -> Response {
 	#[derive(serde::Deserialize)]
 	struct Params {
 		name: String,
@@ -139,8 +142,14 @@ mod tests {
 			"arguments": { "topic": "graphs" },
 		}));
 		let text = message_text(&handle_prompt_get(None, Some(params)));
-		assert!(text.contains(QUERY_TOOL), "prompt should reference the query tool");
-		assert!(text.contains(INGEST_TOOL), "prompt should reference the ingest tool");
+		assert!(
+			text.contains(QUERY_TOOL),
+			"prompt should reference the query tool"
+		);
+		assert!(
+			text.contains(INGEST_TOOL),
+			"prompt should reference the ingest tool"
+		);
 	}
 
 	/// Guard against silent drift: the tool names the `research` prompt tells the

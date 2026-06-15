@@ -127,9 +127,10 @@ impl HnswIndex {
 		}
 		let level = self.random_level();
 		let (stored_vec, qvec) = match self.quant_mode {
-			QuantizationMode::Int8 | QuantizationMode::Binary => {
-				(Vec::new(), Some(QuantizedVec::encode(&vec, self.quant_mode)))
-			}
+			QuantizationMode::Int8 | QuantizationMode::Binary => (
+				Vec::new(),
+				Some(QuantizedVec::encode(&vec, self.quant_mode)),
+			),
 			_ => (vec.clone(), None),
 		};
 		let node = HnswNode {
@@ -653,7 +654,9 @@ mod tests {
 
 	fn random_corpus(seed: u64, n: usize, dim: usize) -> Vec<(String, Vec<f64>)> {
 		let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-		(0..n).map(|i| (format!("v{i}"), rand_vec(&mut rng, dim))).collect()
+		(0..n)
+			.map(|i| (format!("v{i}"), rand_vec(&mut rng, dim)))
+			.collect()
 	}
 
 	#[test]
@@ -701,8 +704,7 @@ mod tests {
 		for _ in 0..queries {
 			let q = rand_vec(&mut qrng, dim);
 			let truth = brute_force_topk(&corpus, &q, k);
-			let got: HashSet<String> =
-				idx.search(&q, k, 128).into_iter().map(|h| h.id).collect();
+			let got: HashSet<String> = idx.search(&q, k, 128).into_iter().map(|h| h.id).collect();
 			total += truth.intersection(&got).count() as f64 / k as f64;
 		}
 		let recall = total / queries as f64;
@@ -738,7 +740,11 @@ mod tests {
 			let q = rand_vec(&mut qrng, dim);
 			let truth = brute_force_topk(&subset, &q, k);
 			let hits = idx.search_filtered(&q, k, 128, &keep);
-			assert_eq!(hits.len(), k, "filtered search returned fewer than k matches");
+			assert_eq!(
+				hits.len(),
+				k,
+				"filtered search returned fewer than k matches"
+			);
 			let got: HashSet<String> = hits.into_iter().map(|h| h.id).collect();
 			assert!(
 				got.iter().all(|id| keep(id)),
@@ -755,7 +761,9 @@ mod tests {
 		let mut idx = HnswIndex::new(8, 64);
 		idx.insert("a".into(), vec![1.0, 0.0]);
 		idx.insert("b".into(), vec![0.0, 1.0]);
-		assert!(idx.search_filtered(&[1.0, 0.0], 5, 32, &|_| false).is_empty());
+		assert!(idx
+			.search_filtered(&[1.0, 0.0], 5, 32, &|_| false)
+			.is_empty());
 	}
 
 	#[test]
@@ -769,7 +777,11 @@ mod tests {
 			idx.insert(id.clone(), v.clone());
 		}
 		let target = "v137";
-		let qv = corpus.iter().find(|(id, _)| id == target).map(|(_, v)| v.clone()).unwrap();
+		let qv = corpus
+			.iter()
+			.find(|(id, _)| id == target)
+			.map(|(_, v)| v.clone())
+			.unwrap();
 		let hits = idx.search_filtered(&qv, 5, 128, &|id| id == target);
 		assert_eq!(hits.len(), 1, "the one matching node is found");
 		assert_eq!(hits[0].id, target);
@@ -795,14 +807,23 @@ mod tests {
 		let mut total = 0.0;
 		for _ in 0..queries {
 			let q = rand_vec(&mut qrng, dim);
-			let f: HashSet<String> =
-				f64_idx.search(&q, k, 128).into_iter().map(|h| h.id).collect();
-			let i: HashSet<String> =
-				i8_idx.search(&q, k, 128).into_iter().map(|h| h.id).collect();
+			let f: HashSet<String> = f64_idx
+				.search(&q, k, 128)
+				.into_iter()
+				.map(|h| h.id)
+				.collect();
+			let i: HashSet<String> = i8_idx
+				.search(&q, k, 128)
+				.into_iter()
+				.map(|h| h.id)
+				.collect();
 			total += f.intersection(&i).count() as f64 / k as f64;
 		}
 		let agreement = total / queries as f64;
-		assert!(agreement >= 0.75, "int8 vs f64 top-{k} agreement too low: {agreement:.3}");
+		assert!(
+			agreement >= 0.75,
+			"int8 vs f64 top-{k} agreement too low: {agreement:.3}"
+		);
 	}
 
 	#[test]
@@ -826,10 +847,16 @@ mod tests {
 		let mut total = 0.0;
 		for _ in 0..queries {
 			let q = rand_vec(&mut qrng, dim);
-			let f: HashSet<String> =
-				f64_idx.search(&q, k, 128).into_iter().map(|h| h.id).collect();
-			let b: HashSet<String> =
-				bin_idx.search(&q, k, 128).into_iter().map(|h| h.id).collect();
+			let f: HashSet<String> = f64_idx
+				.search(&q, k, 128)
+				.into_iter()
+				.map(|h| h.id)
+				.collect();
+			let b: HashSet<String> = bin_idx
+				.search(&q, k, 128)
+				.into_iter()
+				.map(|h| h.id)
+				.collect();
 			total += f.intersection(&b).count() as f64 / k as f64;
 		}
 		let agreement = total / queries as f64;
@@ -839,18 +866,33 @@ mod tests {
 		// mode (hence it stays out of `QuantizationMode::parse`). The floor locks
 		// the measured behaviour; the rescore phase must raise both, then this
 		// asserts the lifted floor.
-		assert!(agreement >= 0.30, "binary vs f64 top-{k} agreement below floor: {agreement:.3}");
+		assert!(
+			agreement >= 0.30,
+			"binary vs f64 top-{k} agreement below floor: {agreement:.3}"
+		);
 	}
 
 	#[test]
 	fn is_ambiguous_flags_short_results_and_tight_spreads() {
-		let c = |dist: f64| Candidate { id: "x".into(), dist };
+		let c = |dist: f64| Candidate {
+			id: "x".into(),
+			dist,
+		};
 		// Fewer than k candidates -> ambiguous (must widen to look harder).
-		assert!(is_ambiguous(&[c(0.1)], 3, 0.05), "short result set is ambiguous");
+		assert!(
+			is_ambiguous(&[c(0.1)], 3, 0.05),
+			"short result set is ambiguous"
+		);
 		// Top-k spread below epsilon -> ambiguous (results too close to trust).
-		assert!(is_ambiguous(&[c(0.10), c(0.11), c(0.12)], 3, 0.05), "tight spread is ambiguous");
+		assert!(
+			is_ambiguous(&[c(0.10), c(0.11), c(0.12)], 3, 0.05),
+			"tight spread is ambiguous"
+		);
 		// Spread at/above epsilon -> NOT ambiguous (clear winners, stop widening).
-		assert!(!is_ambiguous(&[c(0.10), c(0.30), c(0.50)], 3, 0.05), "wide spread is decisive");
+		assert!(
+			!is_ambiguous(&[c(0.10), c(0.30), c(0.50)], 3, 0.05),
+			"wide spread is decisive"
+		);
 	}
 
 	#[test]
@@ -864,10 +906,18 @@ mod tests {
 		}
 		idx.insert("exact".into(), vec![1.0, 0.0, 0.0]);
 
-		let cfg = AdaptiveEfConfig { ef_start: 2, ef_max: 64, ef_step: 8, spread_epsilon: 0.05 };
+		let cfg = AdaptiveEfConfig {
+			ef_start: 2,
+			ef_max: 64,
+			ef_step: 8,
+			spread_epsilon: 0.05,
+		};
 		let hits = idx.search_adaptive(&[1.0, 0.0, 0.0], 3, cfg);
 		assert_eq!(hits.len(), 3, "returns k results");
-		assert!(hits.iter().any(|h| h.id == "exact"), "widening recovers the exact match: {hits:?}");
+		assert!(
+			hits.iter().any(|h| h.id == "exact"),
+			"widening recovers the exact match: {hits:?}"
+		);
 		assert!(
 			hits.windows(2).all(|w| w[0].score >= w[1].score),
 			"hits are ranked by score descending"
@@ -877,7 +927,12 @@ mod tests {
 	#[test]
 	fn search_adaptive_handles_empty_index_zero_k_and_empty_query() {
 		let cfg = AdaptiveEfConfig::default();
-		assert!(HnswIndex::new(8, 64).search_adaptive(&[1.0, 0.0], 5, cfg).is_empty(), "empty index");
+		assert!(
+			HnswIndex::new(8, 64)
+				.search_adaptive(&[1.0, 0.0], 5, cfg)
+				.is_empty(),
+			"empty index"
+		);
 		let mut idx = HnswIndex::new(8, 64);
 		idx.insert("x".into(), vec![1.0, 0.0]);
 		assert!(idx.search_adaptive(&[1.0, 0.0], 0, cfg).is_empty(), "k=0");

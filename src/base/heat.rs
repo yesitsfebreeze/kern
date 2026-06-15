@@ -65,7 +65,11 @@ mod tests {
 	fn decayed_zero_or_negative_heat_is_zero() {
 		let now = SystemTime::now();
 		assert_eq!(decayed(0.0, Some(now), now, HL), 0.0);
-		assert_eq!(decayed(-5.0, Some(now), now, HL), 0.0, "guard clamps non-positive heat");
+		assert_eq!(
+			decayed(-5.0, Some(now), now, HL),
+			0.0,
+			"guard clamps non-positive heat"
+		);
 	}
 
 	#[test]
@@ -88,11 +92,17 @@ mod tests {
 		let since = SystemTime::UNIX_EPOCH;
 		let now = since + Duration::from_secs(HL); // exactly one half-life elapsed
 		let got = decayed(8.0, Some(since), now, HL);
-		assert!((got - 4.0).abs() < 1e-4, "one half-life halves 8 -> ~4, got {got}");
+		assert!(
+			(got - 4.0).abs() < 1e-4,
+			"one half-life halves 8 -> ~4, got {got}"
+		);
 		// Two half-lives -> a quarter.
 		let now2 = since + Duration::from_secs(2 * HL);
 		let got2 = decayed(8.0, Some(since), now2, HL);
-		assert!((got2 - 2.0).abs() < 1e-4, "two half-lives -> ~2, got {got2}");
+		assert!(
+			(got2 - 2.0).abs() < 1e-4,
+			"two half-lives -> ~2, got {got2}"
+		);
 	}
 
 	#[test]
@@ -102,8 +112,14 @@ mod tests {
 		let since = SystemTime::UNIX_EPOCH;
 		let now = since + Duration::from_secs(10);
 		let got = decayed(8.0, Some(since), now, 0);
-		assert!(got.is_finite() && got >= 0.0, "no NaN/inf for zero half-life, got {got}");
-		assert!(got < 0.01, "10s over a clamped 1s half-life decays heavily, got {got}");
+		assert!(
+			got.is_finite() && got >= 0.0,
+			"no NaN/inf for zero half-life, got {got}"
+		);
+		assert!(
+			got < 0.01,
+			"10s over a clamped 1s half-life decays heavily, got {got}"
+		);
 	}
 
 	#[test]
@@ -111,7 +127,10 @@ mod tests {
 		let since = SystemTime::UNIX_EPOCH;
 		let now = since + Duration::from_secs(HL); // 8 -> ~4 after decay
 		let got = deposit(8.0, Some(since), now, HL, 1.5);
-		assert!((got - 5.5).abs() < 1e-4, "decayed (~4) + deposit (1.5) = ~5.5, got {got}");
+		assert!(
+			(got - 5.5).abs() < 1e-4,
+			"decayed (~4) + deposit (1.5) = ~5.5, got {got}"
+		);
 	}
 
 	#[test]

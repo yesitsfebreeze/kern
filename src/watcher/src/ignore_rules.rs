@@ -28,7 +28,11 @@ impl IgnoreRules {
 				let root = r.clone();
 				let gitignore = build(&root, ".gitignore");
 				let kernignore = build(&root, ".kernignore");
-				RootRules { root, gitignore, kernignore }
+				RootRules {
+					root,
+					gitignore,
+					kernignore,
+				}
 			})
 			.collect();
 		Self { per_root }
@@ -36,7 +40,9 @@ impl IgnoreRules {
 
 	/// Empty matcher — nothing is ignored. Useful for tests.
 	pub fn empty() -> Self {
-		Self { per_root: Vec::new() }
+		Self {
+			per_root: Vec::new(),
+		}
 	}
 
 	/// Returns true if `path` should be skipped.
@@ -54,7 +60,9 @@ impl IgnoreRules {
 			return true;
 		}
 		for rules in &self.per_root {
-			let Ok(rel) = path.strip_prefix(&rules.root) else { continue };
+			let Ok(rel) = path.strip_prefix(&rules.root) else {
+				continue;
+			};
 			// `is_dir = false` — see the function doc; notify events are file-shaped.
 			if let Some(g) = &rules.gitignore {
 				if g.matched(rel, false).is_ignore() {
@@ -103,13 +111,22 @@ mod tests {
 		let dir = tempdir().unwrap();
 		std::fs::write(dir.path().join(".gitignore"), "*.log\ntarget\n").unwrap();
 		let rules = IgnoreRules::from_roots(&[dir.path().to_path_buf()]);
-		assert!(rules.is_ignored(&dir.path().join("server.log")), "*.log ignored");
+		assert!(
+			rules.is_ignored(&dir.path().join("server.log")),
+			"*.log ignored"
+		);
 		// A name pattern (`target`) matches that exact path. (The code matches the
 		// event path itself via `Gitignore::matched`, which does not walk parents,
 		// so a trailing-slash dir pattern would not catch nested files — `.git` is
 		// the one recursive prune, handled separately above.)
-		assert!(rules.is_ignored(&dir.path().join("target")), "named path ignored");
-		assert!(!rules.is_ignored(&dir.path().join("src/main.rs")), "source kept");
+		assert!(
+			rules.is_ignored(&dir.path().join("target")),
+			"named path ignored"
+		);
+		assert!(
+			!rules.is_ignored(&dir.path().join("src/main.rs")),
+			"source kept"
+		);
 	}
 
 	#[test]
@@ -117,7 +134,10 @@ mod tests {
 		let dir = tempdir().unwrap();
 		std::fs::write(dir.path().join(".kernignore"), "secret*\n").unwrap();
 		let rules = IgnoreRules::from_roots(&[dir.path().to_path_buf()]);
-		assert!(rules.is_ignored(&dir.path().join("secret.txt")), ".kernignore pattern matches");
+		assert!(
+			rules.is_ignored(&dir.path().join("secret.txt")),
+			".kernignore pattern matches"
+		);
 		assert!(!rules.is_ignored(&dir.path().join("public.txt")));
 	}
 

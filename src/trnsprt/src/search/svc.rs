@@ -12,22 +12,22 @@
 //! how this surface maps onto the palette's search/drill/preview panes.
 
 use super::dto::{
-    EntityKindLite, NeighborsReq, NeighborsRes, PreviewReq, PreviewRes, SearchReq, SearchRes,
+	EntityKindLite, NeighborsReq, NeighborsRes, PreviewReq, PreviewRes, SearchReq, SearchRes,
 };
 
 crate::service! {
-    /// Search palette RPC surface
-    /// (Transport section).
-    pub trait SearchSvc {
-        /// Incremental ranked search across the connected index.
-        async fn search(req: SearchReq) -> SearchRes;
-        /// Drill: typed neighbors of an entity (depth clamped server-side to 3).
-        async fn neighbors(req: NeighborsReq) -> NeighborsRes;
-        /// Right-pane preview payload for the selected entity.
-        async fn preview(req: PreviewReq) -> PreviewRes;
-        /// Canonical entity-kind enumeration. Used by the facet parser
-        /// to validate `!fact`, `?question`, ... sigils against the
-        /// fixed kern surface.
-        async fn kinds() -> Vec<EntityKindLite>;
-    }
+		/// Search palette RPC surface
+		/// (Transport section).
+		pub trait SearchSvc {
+				/// Incremental ranked search across the connected index.
+				async fn search(req: SearchReq) -> SearchRes;
+				/// Drill: typed neighbors of an entity (depth clamped server-side to 3).
+				async fn neighbors(req: NeighborsReq) -> NeighborsRes;
+				/// Right-pane preview payload for the selected entity.
+				async fn preview(req: PreviewReq) -> PreviewRes;
+				/// Canonical entity-kind enumeration. Used by the facet parser
+				/// to validate `!fact`, `?question`, ... sigils against the
+				/// fixed kern surface.
+				async fn kinds() -> Vec<EntityKindLite>;
+		}
 }

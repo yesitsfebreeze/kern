@@ -115,8 +115,7 @@ fn commit_entity(
 	let external_id = thought.external_id.clone();
 
 	if thought.has_vector() {
-		g.entity_idx
-			.insert(entity_id.clone(), thought_vec.clone());
+		g.entity_idx.insert(entity_id.clone(), thought_vec.clone());
 	}
 
 	if let Some(kern) = g.get_mut(kern_id) {
@@ -564,11 +563,13 @@ pub(crate) fn promote_to_root_if_generic(g: &mut GraphGnn, kern_id: &str) -> boo
 pub(crate) fn remove_anchor(g: &mut GraphGnn, name: &str) -> bool {
 	let root = g.root.id.clone();
 	let generic = get_or_spawn_generic_child(g, &root);
-	let target = root_anchor_ids(g)
-		.into_iter()
-		.find(|cid| {
-			*cid != generic && g.loaded(cid).map(|c| c.anchor_text == name).unwrap_or(false)
-		});
+	let target = root_anchor_ids(g).into_iter().find(|cid| {
+		*cid != generic
+			&& g
+				.loaded(cid)
+				.map(|c| c.anchor_text == name)
+				.unwrap_or(false)
+	});
 	let Some(tid) = target else {
 		return false;
 	};
@@ -676,7 +677,11 @@ mod tests {
 			let id = get_or_spawn_generic_child(&mut g, &root);
 			assert_eq!(id, first, "must reuse the evicted generic child");
 		}
-		assert_eq!(g.count(), 2, "exactly one generic child created, no runaway");
+		assert_eq!(
+			g.count(),
+			2,
+			"exactly one generic child created, no runaway"
+		);
 	}
 
 	#[test]
@@ -715,10 +720,17 @@ mod tests {
 		let first = get_or_spawn_unnamed_child(&mut g, &parent);
 		for _ in 0..20 {
 			let id = get_or_spawn_unnamed_child(&mut g, &parent);
-			assert_eq!(id, first, "reuse the unnamed child even when the non-root parent evicted");
+			assert_eq!(
+				id, first,
+				"reuse the unnamed child even when the non-root parent evicted"
+			);
 		}
 		// root + parent + exactly one unnamed child. No per-call runaway.
-		assert_eq!(g.count(), 3, "no runaway: root + parent + one unnamed child");
+		assert_eq!(
+			g.count(),
+			3,
+			"no runaway: root + parent + one unnamed child"
+		);
 	}
 
 	#[test]
@@ -745,20 +757,37 @@ mod tests {
 		g.set_source_entry("ext1".into(), kid.clone());
 
 		// Searchable before supersede.
-		let before: Vec<String> =
-			search_all_unlocked(&g, &[1.0, 0.0], 5).into_iter().map(|h| h.entity_id).collect();
-		assert!(before.contains(&"old".to_string()), "old is indexed before supersede");
+		let before: Vec<String> = search_all_unlocked(&g, &[1.0, 0.0], 5)
+			.into_iter()
+			.map(|h| h.entity_id)
+			.collect();
+		assert!(
+			before.contains(&"old".to_string()),
+			"old is indexed before supersede"
+		);
 
 		supersede(&mut g, &kid, "new", &[1.0, 0.0], "ext1");
 
 		// Gone from the ANN index...
-		let after: Vec<String> =
-			search_all_unlocked(&g, &[1.0, 0.0], 5).into_iter().map(|h| h.entity_id).collect();
-		assert!(!after.contains(&"old".to_string()), "superseded entity removed from search index");
+		let after: Vec<String> = search_all_unlocked(&g, &[1.0, 0.0], 5)
+			.into_iter()
+			.map(|h| h.entity_id)
+			.collect();
+		assert!(
+			!after.contains(&"old".to_string()),
+			"superseded entity removed from search index"
+		);
 		// ...but retained as Superseded history for the chain.
 		let kern = g.loaded(&kid).unwrap();
-		let old_e = kern.entities.get("old").expect("superseded entity still stored");
-		assert_eq!(old_e.status, EntityStatus::Superseded, "kept as Superseded history");
+		let old_e = kern
+			.entities
+			.get("old")
+			.expect("superseded entity still stored");
+		assert_eq!(
+			old_e.status,
+			EntityStatus::Superseded,
+			"kept as Superseded history"
+		);
 		assert_eq!(old_e.superseded_by, "new", "supersede chain preserved");
 	}
 
@@ -832,10 +861,19 @@ mod tests {
 		let (mut g, root, anchor_id) = graph_with_anchor();
 		// Orthogonal to the anchor -> p = 0 < ACCEPT_FLOOR -> falls through.
 		let r = accept(&mut g, &root, ent("e", vec![0.0, 1.0, 0.0]), "");
-		assert_ne!(r.placed_in, root, "must not commit onto the root dispatcher");
-		assert_ne!(r.placed_in, anchor_id, "non-matching entity must not enter the anchor");
+		assert_ne!(
+			r.placed_in, root,
+			"must not commit onto the root dispatcher"
+		);
+		assert_ne!(
+			r.placed_in, anchor_id,
+			"non-matching entity must not enter the anchor"
+		);
 		let placed = g.loaded(&r.placed_in).expect("placed kern is loaded");
-		assert_eq!(placed.anchor_text, GENERIC_ANCHOR, "fell through to generic");
+		assert_eq!(
+			placed.anchor_text, GENERIC_ANCHOR,
+			"fell through to generic"
+		);
 	}
 
 	#[test]
@@ -894,8 +932,12 @@ mod tests {
 		add_anchor(&mut g, "sessions with no parent", vec![1.0, 0.0, 0.0]);
 		let generic = get_or_spawn_generic_child(&mut g, &root);
 		let root_net = g.root.root_id.clone();
-		let child =
-			Kern::new_named_child(&generic, &root_net, " Sessions With No Parent ", vec![0.0, 1.0, 0.0]);
+		let child = Kern::new_named_child(
+			&generic,
+			&root_net,
+			" Sessions With No Parent ",
+			vec![0.0, 1.0, 0.0],
+		);
 		let cid = child.id.clone();
 		g.register(child);
 		g.get_mut(&generic).unwrap().children.push(cid.clone());
@@ -904,8 +946,15 @@ mod tests {
 			!promote_to_root_if_generic(&mut g, &cid),
 			"name-equivalent anchor exists -> no promotion"
 		);
-		assert!(!root_anchor_ids(&g).contains(&cid), "not minted as a root anchor");
-		assert_eq!(g.loaded(&cid).unwrap().parent, generic, "stays under generic");
+		assert!(
+			!root_anchor_ids(&g).contains(&cid),
+			"not minted as a root anchor"
+		);
+		assert_eq!(
+			g.loaded(&cid).unwrap().parent,
+			generic,
+			"stays under generic"
+		);
 	}
 
 	#[test]
@@ -920,7 +969,12 @@ mod tests {
 		let root_net = g.root.root_id.clone();
 
 		// Near-duplicate direction (cosine ~0.995 to the existing anchor).
-		let near = Kern::new_named_child(&generic, &root_net, "sessions without parents", vec![1.0, 0.1, 0.0]);
+		let near = Kern::new_named_child(
+			&generic,
+			&root_net,
+			"sessions without parents",
+			vec![1.0, 0.1, 0.0],
+		);
 		let near_id = near.id.clone();
 		g.register(near);
 		g.get_mut(&generic).unwrap().children.push(near_id.clone());
@@ -950,11 +1004,19 @@ mod tests {
 
 		let ids: Vec<String> = root_anchor_ids(&g)
 			.into_iter()
-			.filter(|cid| g.loaded(cid).map(|c| c.anchor_text == "work").unwrap_or(false))
+			.filter(|cid| {
+				g.loaded(cid)
+					.map(|c| c.anchor_text == "work")
+					.unwrap_or(false)
+			})
 			.collect();
 		assert_eq!(ids.len(), 1, "one anchor per name, not one per call");
 		let vec = g.loaded(&ids[0]).unwrap().anchor_vec.clone();
-		assert_eq!(vec, vec![0.0, 1.0, 0.0], "second call updates the routing vector in place");
+		assert_eq!(
+			vec,
+			vec![0.0, 1.0, 0.0],
+			"second call updates the routing vector in place"
+		);
 	}
 
 	#[test]
@@ -969,9 +1031,19 @@ mod tests {
 		g.register(child);
 		g.get_mut(&generic).unwrap().children.push(cid.clone());
 
-		assert!(promote_to_root_if_generic(&mut g, &cid), "promoted out of generic");
-		assert!(root_anchor_ids(&g).contains(&cid), "now a root-level anchor");
-		assert_eq!(g.loaded(&cid).unwrap().parent, root, "parent rewired to root");
+		assert!(
+			promote_to_root_if_generic(&mut g, &cid),
+			"promoted out of generic"
+		);
+		assert!(
+			root_anchor_ids(&g).contains(&cid),
+			"now a root-level anchor"
+		);
+		assert_eq!(
+			g.loaded(&cid).unwrap().parent,
+			root,
+			"parent rewired to root"
+		);
 		assert!(
 			!g.loaded(&generic).unwrap().children.contains(&cid),
 			"detached from generic"

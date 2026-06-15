@@ -34,7 +34,9 @@ impl BeamHeap {
 	/// Pre-allocate room for `n` items. Use when the seed/beam width is known up
 	/// front to avoid reallocations as the heap fills.
 	pub fn with_capacity(n: usize) -> Self {
-		Self { items: Vec::with_capacity(n) }
+		Self {
+			items: Vec::with_capacity(n),
+		}
 	}
 
 	pub fn push(&mut self, item: HeapItem) {
@@ -91,7 +93,11 @@ mod tests {
 	use super::*;
 
 	fn item(id: &str, score: f64) -> HeapItem {
-		HeapItem { entity_id: id.into(), score, chain: vec![id.into()] }
+		HeapItem {
+			entity_id: id.into(),
+			score,
+			chain: vec![id.into()],
+		}
 	}
 
 	#[test]
@@ -134,7 +140,11 @@ mod tests {
 		while let Some(it) = h.pop() {
 			scores.push(it.score);
 		}
-		assert_eq!(scores, vec![0.9, 0.7, 0.3, 0.2, 0.1], "max-heap pops in descending score");
+		assert_eq!(
+			scores,
+			vec![0.9, 0.7, 0.3, 0.2, 0.1],
+			"max-heap pops in descending score"
+		);
 		assert!(h.is_empty());
 	}
 
@@ -157,7 +167,11 @@ mod tests {
 		assert!(h.is_empty());
 		h.push(item("a", 0.4));
 		h.push(item("b", 0.8));
-		assert_eq!(h.pop().unwrap().entity_id, "b", "preallocation doesn't change ordering");
+		assert_eq!(
+			h.pop().unwrap().entity_id,
+			"b",
+			"preallocation doesn't change ordering"
+		);
 		assert_eq!(h.pop().unwrap().entity_id, "a");
 	}
 }

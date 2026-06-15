@@ -17,7 +17,7 @@ pub struct JournalTracingLayer {
 impl JournalTracingLayer {
 	pub fn new(source: &'static str) -> Self {
 		Self { source }
-}
+	}
 }
 
 impl<S: Subscriber> Layer<S> for JournalTracingLayer {
@@ -69,19 +69,22 @@ impl Visit for FieldRecorder {
 			// not trim_matches('"') which would also eat a quote that is legitimately
 			// the first/last character of the message.
 			let raw = format!("{value:?}");
-			let msg = raw.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(&raw);
+			let msg = raw
+				.strip_prefix('"')
+				.and_then(|s| s.strip_suffix('"'))
+				.unwrap_or(&raw);
 			self.message = Some(msg.to_string());
 		} else if self.fallback.is_none() {
 			self.fallback = Some(format!("{}={:?}", field.name(), value));
 		}
-}
+	}
 	fn record_str(&mut self, field: &Field, value: &str) {
 		if field.name() == "message" {
 			self.message = Some(value.to_string());
 		} else if self.fallback.is_none() {
 			self.fallback = Some(format!("{}={}", field.name(), value));
 		}
-}
+	}
 }
 
 #[cfg(test)]
@@ -97,7 +100,11 @@ mod tests {
 	struct CaptureLayer(Arc<Mutex<Vec<Entry>>>);
 	impl<S: Subscriber> Layer<S> for CaptureLayer {
 		fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-			self.0.lock().unwrap().push(event_to_entry("test-src", event));
+			self
+				.0
+				.lock()
+				.unwrap()
+				.push(event_to_entry("test-src", event));
 		}
 	}
 
@@ -114,7 +121,10 @@ mod tests {
 		let entries = capture(|| tracing::info!("hello world"));
 		assert_eq!(entries.len(), 1);
 		let e = &entries[0];
-		assert!(matches!(e.kind, Kind::Log), "a tracing event maps to Kind::Log");
+		assert!(
+			matches!(e.kind, Kind::Log),
+			"a tracing event maps to Kind::Log"
+		);
 		assert_eq!(e.payload["msg"], "hello world", "message recorded unquoted");
 		assert_eq!(e.payload["level"], "INFO");
 		assert_eq!(e.payload["src"], "test-src");
@@ -123,7 +133,10 @@ mod tests {
 	#[test]
 	fn message_field_wins_over_other_fields() {
 		let entries = capture(|| tracing::warn!(user = "kern", "did {}", 3));
-		assert_eq!(entries[0].payload["msg"], "did 3", "message beats the user field");
+		assert_eq!(
+			entries[0].payload["msg"], "did 3",
+			"message beats the user field"
+		);
 		assert_eq!(entries[0].payload["level"], "WARN");
 	}
 
@@ -137,13 +150,20 @@ mod tests {
 
 	#[test]
 	fn finish_prefers_message_then_fallback_then_empty() {
-		assert_eq!(FieldRecorder::default().finish(), "", "empty -> empty string");
+		assert_eq!(
+			FieldRecorder::default().finish(),
+			"",
+			"empty -> empty string"
+		);
 
 		let mut only_fallback = FieldRecorder::default();
 		only_fallback.fallback = Some("k=v".into());
 		assert_eq!(only_fallback.finish(), "k=v", "no message -> fallback");
 
-		let both = FieldRecorder { message: Some("m".into()), fallback: Some("k=v".into()) };
+		let both = FieldRecorder {
+			message: Some("m".into()),
+			fallback: Some("k=v".into()),
+		};
 		assert_eq!(both.finish(), "m", "message beats fallback");
 	}
 }

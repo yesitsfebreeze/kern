@@ -1,5 +1,3 @@
-
-
 use crate::gnn::activation::Activation;
 use crate::gnn::graph::Graph;
 use crate::gnn::tensor::Tensor;
@@ -125,8 +123,16 @@ mod tests {
 		// backward must match a central finite-difference of the loss w.r.t. each
 		// input element (the projection `(I - x̂x̂ᵀ)/‖x‖` is easy to get subtly
 		// wrong, so pin it against numerics).
-		let x = Tensor { data: vec![0.5, -0.2, 0.1, -0.4, 0.6, 0.2], rows: 2, cols: 3 };
-		let d_out = Tensor { data: vec![1.0; 6], rows: 2, cols: 3 };
+		let x = Tensor {
+			data: vec![0.5, -0.2, 0.1, -0.4, 0.6, 0.2],
+			rows: 2,
+			cols: 3,
+		};
+		let d_out = Tensor {
+			data: vec![1.0; 6],
+			rows: 2,
+			cols: 3,
+		};
 		let analytic = l2_norm_backward(&x, &d_out);
 		let loss = |t: &Tensor| -> f64 { l2_normalize_rows(t).data.iter().sum() };
 		const H: f64 = 1e-6;
@@ -149,11 +155,22 @@ mod tests {
 	fn l2_norm_backward_zero_row_yields_zero_grad() {
 		// A zero row has no defined direction; forward and backward both skip it,
 		// so its gradient stays zero (no NaN from a 1/0 norm).
-		let x = Tensor { data: vec![0.0, 0.0, 3.0, 4.0], rows: 2, cols: 2 };
-		let d_out = Tensor { data: vec![1.0; 4], rows: 2, cols: 2 };
+		let x = Tensor {
+			data: vec![0.0, 0.0, 3.0, 4.0],
+			rows: 2,
+			cols: 2,
+		};
+		let d_out = Tensor {
+			data: vec![1.0; 4],
+			rows: 2,
+			cols: 2,
+		};
 		let g = l2_norm_backward(&x, &d_out);
 		assert_eq!(&g.data[0..2], &[0.0, 0.0], "zero row -> zero grad, no NaN");
-		assert!(g.data[2..].iter().all(|v| v.is_finite()), "non-zero row grad is finite");
+		assert!(
+			g.data[2..].iter().all(|v| v.is_finite()),
+			"non-zero row grad is finite"
+		);
 	}
 }
 
@@ -200,7 +217,11 @@ mod gnn_math_tests {
 		let d_out = Tensor::ones(out.rows, out.cols);
 		layer.zero_grads();
 		layer.backward_graph(g, &d_out);
-		let analytic: Vec<f64> = layer.param_grads().iter().flat_map(|t| t.data.clone()).collect();
+		let analytic: Vec<f64> = layer
+			.param_grads()
+			.iter()
+			.flat_map(|t| t.data.clone())
+			.collect();
 
 		let lens: Vec<usize> = layer.parameters().iter().map(|t| t.data.len()).collect();
 		let mut numeric = Vec::with_capacity(analytic.len());
@@ -238,7 +259,11 @@ mod gnn_math_tests {
 		let d_out = Tensor::ones(out.rows, out.cols);
 		layer.zero_grads();
 		let analytic = layer.backward_graph(g, &d_out);
-		assert_eq!(analytic.shape(), x.shape(), "d_input shape must match features");
+		assert_eq!(
+			analytic.shape(),
+			x.shape(),
+			"d_input shape must match features"
+		);
 
 		let mut numeric = Vec::with_capacity(x.data.len());
 		for ei in 0..x.data.len() {

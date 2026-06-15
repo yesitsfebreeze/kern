@@ -31,9 +31,9 @@ mod types;
 
 pub use client::Client;
 pub use error::McpError;
+pub use http::serve_http;
 pub use inproc::InProcTransport;
 pub use registry::{LiveServer, Registry};
-pub use http::serve_http;
 pub use server::{serve_rw, serve_stdio, McpServer};
 pub use transport::{ChildStdio, Transport};
 pub use types::{ServerId, ToolResult, ToolSchema};

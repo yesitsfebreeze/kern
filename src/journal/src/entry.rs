@@ -41,8 +41,14 @@ pub enum Kind {
 	// Adjust mode: rewrite of a prior message and conversation forks
 	// taken from a chosen point in history. Carry payload data inline
 	// so consumers can replay journal slices without joining `payload`.
-	Edit { target_ts_ms: u64, new_text: String },
-	Fork { from_ts_ms: u64, new_fork_id: String },
+	Edit {
+		target_ts_ms: u64,
+		new_text: String,
+	},
+	Fork {
+		from_ts_ms: u64,
+		new_fork_id: String,
+	},
 	// Cross-process plumbing. Emitted by the tarpc client/server middleware
 	// and ad-hoc by any binary that wants to surface activity in the
 	// shared journal.
@@ -69,9 +75,16 @@ pub enum Kind {
 	// searchable via the `:session` facet. Distinct
 	// from the existing `Fork` variant (which records a branch-from-history
 	// point during `Edit`/adjust-mode rewrites and carries a `from_ts_ms`).
-	ForkOpen { fork_id: String, parent: Option<String> },
-	ForkResume { fork_id: String },
-	ForkClose { fork_id: String },
+	ForkOpen {
+		fork_id: String,
+		parent: Option<String>,
+	},
+	ForkResume {
+		fork_id: String,
+	},
+	ForkClose {
+		fork_id: String,
+	},
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -133,21 +146,45 @@ mod tests {
 		// The inline-data variants carry their fields in the enum, so a serde
 		// regression (e.g. a renamed field) would silently corrupt replay.
 		assert_eq!(
-			roundtrip_kind(Kind::Edit { target_ts_ms: 42, new_text: "fixed".into() }),
-			Kind::Edit { target_ts_ms: 42, new_text: "fixed".into() }
+			roundtrip_kind(Kind::Edit {
+				target_ts_ms: 42,
+				new_text: "fixed".into()
+			}),
+			Kind::Edit {
+				target_ts_ms: 42,
+				new_text: "fixed".into()
+			}
 		);
 		assert_eq!(
-			roundtrip_kind(Kind::Fork { from_ts_ms: 7, new_fork_id: "nf".into() }),
-			Kind::Fork { from_ts_ms: 7, new_fork_id: "nf".into() }
+			roundtrip_kind(Kind::Fork {
+				from_ts_ms: 7,
+				new_fork_id: "nf".into()
+			}),
+			Kind::Fork {
+				from_ts_ms: 7,
+				new_fork_id: "nf".into()
+			}
 		);
 		assert_eq!(
-			roundtrip_kind(Kind::ForkOpen { fork_id: "f1".into(), parent: Some("p".into()) }),
-			Kind::ForkOpen { fork_id: "f1".into(), parent: Some("p".into()) }
+			roundtrip_kind(Kind::ForkOpen {
+				fork_id: "f1".into(),
+				parent: Some("p".into())
+			}),
+			Kind::ForkOpen {
+				fork_id: "f1".into(),
+				parent: Some("p".into())
+			}
 		);
 		// `parent: None` is a distinct serde shape worth covering too.
 		assert_eq!(
-			roundtrip_kind(Kind::ForkOpen { fork_id: "f2".into(), parent: None }),
-			Kind::ForkOpen { fork_id: "f2".into(), parent: None }
+			roundtrip_kind(Kind::ForkOpen {
+				fork_id: "f2".into(),
+				parent: None
+			}),
+			Kind::ForkOpen {
+				fork_id: "f2".into(),
+				parent: None
+			}
 		);
 	}
 

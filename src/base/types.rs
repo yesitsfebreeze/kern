@@ -91,13 +91,16 @@ impl ReasonKind {
 	pub fn fallback_label(self) -> Option<&'static str> {
 		match self {
 			ReasonKind::Supersedes => Some("superseded by a newer version"),
-			ReasonKind::Rephrase   => Some("rephrased as"),
+			ReasonKind::Rephrase => Some("rephrased as"),
 			_ => None,
 		}
 	}
 
 	pub fn is_semantic(self) -> bool {
-		matches!(self, ReasonKind::Similarity | ReasonKind::Provenance | ReasonKind::Ratification)
+		matches!(
+			self,
+			ReasonKind::Similarity | ReasonKind::Provenance | ReasonKind::Ratification
+		)
 	}
 }
 
@@ -512,12 +515,7 @@ impl Kern {
 	/// exactly this: a named kern directly under the root. `vec` may be empty
 	/// (the `generic` catch-all), in which case similarity routing never matches
 	/// it. Default radii come from the kern routing constants.
-	pub fn new_named_child(
-		parent_id: &str,
-		root_id: &str,
-		name: &str,
-		vec: Vec<f64>,
-	) -> Self {
+	pub fn new_named_child(parent_id: &str, root_id: &str, name: &str, vec: Vec<f64>) -> Self {
 		let mut k = Self::new(named_child_kern_id(parent_id, name, now_nanos()), parent_id);
 		k.root_id = root_id.to_string();
 		k.anchor_text = name.to_string();
@@ -626,7 +624,11 @@ mod tests {
 	fn entity_set_text_replaces_text_and_marks_dirty() {
 		let mut e = Entity {
 			statements: vec!["old statement".into()],
-			chunks: vec![ChunkPart { kind: ChunkPartKind::StatementRef, text: String::new(), index: 0 }],
+			chunks: vec![ChunkPart {
+				kind: ChunkPartKind::StatementRef,
+				text: String::new(),
+				index: 0,
+			}],
 			..Default::default()
 		};
 		assert_eq!(e.text(), "old statement");
@@ -636,13 +638,19 @@ mod tests {
 
 		assert_eq!(e.text(), "brand new text");
 		assert!(e.dirty, "edit must mark the entity dirty for reevaluation");
-		assert!(e.statements.is_empty(), "statement refs are dropped on edit");
+		assert!(
+			e.statements.is_empty(),
+			"statement refs are dropped on edit"
+		);
 		assert!(e.updated_at.is_some());
 	}
 
 	#[test]
 	fn reason_set_text_replaces_text_and_marks_dirty() {
-		let mut r = Reason { text: "old edge".into(), ..Default::default() };
+		let mut r = Reason {
+			text: "old edge".into(),
+			..Default::default()
+		};
 		assert!(!r.dirty);
 		r.set_text("new edge".into());
 		assert_eq!(r.text, "new edge");
@@ -652,7 +660,11 @@ mod tests {
 	#[test]
 	fn conf_mean_and_variance_handle_a_zero_total_prior() {
 		// alpha = beta = 0 is a degenerate prior: mean falls back to 0.5, var to 0.
-		let e = Entity { conf_alpha: 0.0, conf_beta: 0.0, ..Default::default() };
+		let e = Entity {
+			conf_alpha: 0.0,
+			conf_beta: 0.0,
+			..Default::default()
+		};
 		assert_eq!(e.conf_mean(), 0.5);
 		assert_eq!(e.conf_variance(), 0.0);
 	}
@@ -660,7 +672,11 @@ mod tests {
 	#[test]
 	fn conf_mean_and_variance_for_a_beta_prior() {
 		// Beta(2,1): mean = a/(a+b) = 2/3; var = ab / ((a+b)^2 (a+b+1)) = 2/36.
-		let e = Entity { conf_alpha: 2.0, conf_beta: 1.0, ..Default::default() };
+		let e = Entity {
+			conf_alpha: 2.0,
+			conf_beta: 1.0,
+			..Default::default()
+		};
 		assert!((e.conf_mean() - 2.0 / 3.0).abs() < 1e-12);
 		assert!((e.conf_variance() - 2.0 / 36.0).abs() < 1e-12);
 	}
@@ -675,8 +691,17 @@ mod tests {
 		assert!(!named.is_dead(), "a name keeps an empty kern alive");
 
 		let mut with_thought = Kern::new("k3", "");
-		with_thought.entities.insert("e".into(), Entity { id: "e".into(), ..Default::default() });
-		assert!(!with_thought.is_dead(), "an entity keeps an unnamed kern alive");
+		with_thought.entities.insert(
+			"e".into(),
+			Entity {
+				id: "e".into(),
+				..Default::default()
+			},
+		);
+		assert!(
+			!with_thought.is_dead(),
+			"an entity keeps an unnamed kern alive"
+		);
 	}
 
 	#[test]
@@ -684,7 +709,10 @@ mod tests {
 		let mut k = Kern::new("k", "");
 		assert!(!k.has_anchor(), "fresh kern has no anchor");
 		k.anchor_text = "topic".into();
-		assert!(!k.has_anchor(), "text without a vector is not a full anchor");
+		assert!(
+			!k.has_anchor(),
+			"text without a vector is not a full anchor"
+		);
 		k.anchor_vec = vec![0.1, 0.2];
 		assert!(k.has_anchor(), "text + vector -> anchored");
 	}
@@ -705,12 +733,18 @@ mod tests {
 		// Deterministic for a fixed (parent, nonce) — the property that the bare
 		// SystemTime::now() call previously made un-testable.
 		assert_eq!(unnamed_kern_id("p", 42), unnamed_kern_id("p", 42));
-		assert_eq!(named_child_kern_id("p", "code", 9), named_child_kern_id("p", "code", 9));
+		assert_eq!(
+			named_child_kern_id("p", "code", 9),
+			named_child_kern_id("p", "code", 9)
+		);
 		// The nonce disambiguates rapid successive creations under one parent.
 		assert_ne!(unnamed_kern_id("p", 1), unnamed_kern_id("p", 2));
 		// Parent and anchor name both feed the hash.
 		assert_ne!(unnamed_kern_id("a", 7), unnamed_kern_id("b", 7));
-		assert_ne!(named_child_kern_id("p", "code", 9), named_child_kern_id("p", "docs", 9));
+		assert_ne!(
+			named_child_kern_id("p", "code", 9),
+			named_child_kern_id("p", "docs", 9)
+		);
 		// Ids are non-empty content hashes.
 		assert!(!unnamed_kern_id("p", 0).is_empty());
 		assert!(!named_child_kern_id("p", "x", 0).is_empty());

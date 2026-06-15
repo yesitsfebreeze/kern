@@ -91,8 +91,9 @@ async fn create_modify_delete_cycle_emits_expected_events() {
 	// whether the second write becomes a separate Modified or is folded
 	// into the first event by debouncing. Early-exit once both are seen.
 	let want = |evs: &[WatchEvent]| {
-		has_kind(evs, &file, |k| matches!(k, WatchKind::Created | WatchKind::Modified))
-			&& has_kind(evs, &file, |k| matches!(k, WatchKind::Deleted))
+		has_kind(evs, &file, |k| {
+			matches!(k, WatchKind::Created | WatchKind::Modified)
+		}) && has_kind(evs, &file, |k| matches!(k, WatchKind::Deleted))
 	};
 	let events = collect_until(&mut w, POLL_BUDGET, want).await;
 
@@ -104,7 +105,10 @@ async fn create_modify_delete_cycle_emits_expected_events() {
 		created_or_modified,
 		"expected create/modify event for {file:?}, saw {events:?}"
 	);
-	assert!(deleted, "expected delete event for {file:?}, saw {events:?}");
+	assert!(
+		deleted,
+		"expected delete event for {file:?}, saw {events:?}"
+	);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -146,10 +150,15 @@ async fn debounce_collapses_rapid_modifies_to_one_event() {
 async fn gitignore_is_respected() {
 	let tmp = TempDir::new().unwrap();
 	let root = tmp.path().to_path_buf();
-	tokio::fs::write(root.join(".gitignore"), b"ignored.txt\n").await.unwrap();
+	tokio::fs::write(root.join(".gitignore"), b"ignored.txt\n")
+		.await
+		.unwrap();
 
-	let mut w =
-		FileWatcher::new(vec![root.clone()], IgnoreRules::from_roots(std::slice::from_ref(&root))).unwrap();
+	let mut w = FileWatcher::new(
+		vec![root.clone()],
+		IgnoreRules::from_roots(std::slice::from_ref(&root)),
+	)
+	.unwrap();
 	tokio::time::sleep(Duration::from_millis(100)).await;
 
 	let ignored = root.join("ignored.txt");
@@ -188,9 +197,9 @@ async fn rename_within_root_emits_renamed_or_delete_create_pair() {
 	// platform reports `Modify(Name(Both))`, or a `Deleted(src)` + `Created(dst)`
 	// pair when it splits the rename into From/To halves. Accept either.
 	let saw_rename = |evs: &[WatchEvent]| {
-		let renamed = evs.iter().any(|e| {
-			matches!(&e.kind, WatchKind::Renamed { from, to } if from == &src && to == &dst)
-		});
+		let renamed = evs
+			.iter()
+			.any(|e| matches!(&e.kind, WatchKind::Renamed { from, to } if from == &src && to == &dst));
 		let deleted_old = has_kind(evs, &src, |k| matches!(k, WatchKind::Deleted));
 		let created_new = has_kind(evs, &dst, |k| matches!(k, WatchKind::Created));
 		renamed || (deleted_old && created_new)
@@ -210,8 +219,7 @@ async fn watches_multiple_roots_simultaneously() {
 	let tmp_b = TempDir::new().unwrap();
 	let root_a = tmp_a.path().to_path_buf();
 	let root_b = tmp_b.path().to_path_buf();
-	let mut w =
-		FileWatcher::new(vec![root_a.clone(), root_b.clone()], IgnoreRules::empty()).unwrap();
+	let mut w = FileWatcher::new(vec![root_a.clone(), root_b.clone()], IgnoreRules::empty()).unwrap();
 	tokio::time::sleep(Duration::from_millis(100)).await;
 
 	let file_a = root_a.join("a.txt");
@@ -220,8 +228,12 @@ async fn watches_multiple_roots_simultaneously() {
 	tokio::fs::write(&file_b, b"b").await.unwrap();
 
 	let both = |evs: &[WatchEvent]| {
-		let a = has_kind(evs, &file_a, |k| matches!(k, WatchKind::Created | WatchKind::Modified));
-		let b = has_kind(evs, &file_b, |k| matches!(k, WatchKind::Created | WatchKind::Modified));
+		let a = has_kind(evs, &file_a, |k| {
+			matches!(k, WatchKind::Created | WatchKind::Modified)
+		});
+		let b = has_kind(evs, &file_b, |k| {
+			matches!(k, WatchKind::Created | WatchKind::Modified)
+		});
 		a && b
 	};
 	let events = collect_until(&mut w, POLL_BUDGET, both).await;
@@ -276,7 +288,11 @@ async fn pipeline_skips_files_over_one_megabyte() {
 		.await;
 
 	let recs = sink.records.lock().await.clone();
-	assert_eq!(recs.len(), 1, "only the small file should ingest, got {recs:?}");
+	assert_eq!(
+		recs.len(),
+		1,
+		"only the small file should ingest, got {recs:?}"
+	);
 	assert!(recs[0].source_uri.starts_with("file://"));
 	assert_eq!(recs[0].content, "hi");
 	assert_eq!(recs[0].language_hint.as_deref(), Some("txt"));
@@ -290,7 +306,11 @@ async fn pipeline_drops_delete_events() {
 	let sink = CapturingSink::default();
 	let pipeline = IngestPipeline::new(sink.clone());
 	pipeline
-		.handle(WatchEvent { path, kind: WatchKind::Deleted, ts: SystemTime::now() })
+		.handle(WatchEvent {
+			path,
+			kind: WatchKind::Deleted,
+			ts: SystemTime::now(),
+		})
 		.await;
 
 	assert!(sink.records.lock().await.is_empty());

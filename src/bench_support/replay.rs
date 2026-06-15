@@ -64,7 +64,11 @@ fn run_one(g: &GraphGnn, cfg: &RetrievalConfig, q: &TraceQuery) -> QueryReport {
 			..Default::default()
 		});
 	let result = crate::retrieval::answer::query(g, cfg, &qvec, &q.query, mode, None, None, opts);
-	let ranked: Vec<String> = result.entities.iter().map(|st| st.entity.id.clone()).collect();
+	let ranked: Vec<String> = result
+		.entities
+		.iter()
+		.map(|st| st.entity.id.clone())
+		.collect();
 	let ndcg10 = ndcg::ndcg_at_k(&ranked, &q.expected_ids, 10);
 	let recall10 = ndcg::recall_at_k(&ranked, &q.expected_ids, 10);
 	QueryReport {
@@ -79,16 +83,24 @@ fn run_one(g: &GraphGnn, cfg: &RetrievalConfig, q: &TraceQuery) -> QueryReport {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
 	use super::super::build::build_graph;
 	use super::super::trace::{TraceDoc, TraceQuery};
+	use super::*;
 
 	fn doc(id: &str, text: &str) -> TraceDoc {
-		TraceDoc { id: id.into(), text: text.into(), kind: None }
+		TraceDoc {
+			id: id.into(),
+			text: text.into(),
+			kind: None,
+		}
 	}
 
 	fn doc_kind(id: &str, text: &str, kind: &str) -> TraceDoc {
-		TraceDoc { id: id.into(), text: text.into(), kind: Some(kind.into()) }
+		TraceDoc {
+			id: id.into(),
+			text: text.into(),
+			kind: Some(kind.into()),
+		}
 	}
 
 	/// End-to-end: build a graph from a tiny trace, replay a query whose text
@@ -134,7 +146,10 @@ mod tests {
 			report.mean_recall10, 1.0,
 			"the single expected doc is retrieved within k -> recall@10 = 1.0"
 		);
-		assert_eq!(report.per_query[0].recall10, 1.0, "per-query recall is populated");
+		assert_eq!(
+			report.per_query[0].recall10, 1.0,
+			"per-query recall is populated"
+		);
 	}
 
 	#[test]
@@ -162,7 +177,11 @@ mod tests {
 		let g = build_graph(&mk(None));
 		let cfg = RetrievalConfig::default();
 
-		assert_eq!(replay(&g, &cfg, &mk(None)).mean_recall10, 1.0, "unfiltered finds the doc");
+		assert_eq!(
+			replay(&g, &cfg, &mk(None)).mean_recall10,
+			1.0,
+			"unfiltered finds the doc"
+		);
 		assert_eq!(
 			replay(&g, &cfg, &mk(Some("fact"))).mean_recall10,
 			0.0,
@@ -238,12 +257,19 @@ mod tests {
 		};
 		let g = build_graph(&trace);
 		let recall = replay(&g, &RetrievalConfig::default(), &trace).mean_recall10;
-		assert_eq!(recall, 1.0, "Facts must survive pool truncation under an active filter");
+		assert_eq!(
+			recall, 1.0,
+			"Facts must survive pool truncation under an active filter"
+		);
 	}
 
 	#[test]
 	fn replay_of_empty_trace_is_zero_mean() {
-		let trace = Trace { name: "empty".into(), docs: vec![], queries: vec![] };
+		let trace = Trace {
+			name: "empty".into(),
+			docs: vec![],
+			queries: vec![],
+		};
 		let g = build_graph(&trace);
 		let report = replay(&g, &RetrievalConfig::default(), &trace);
 		assert_eq!(report.mean_ndcg10, 0.0, "no queries -> zero mean, not NaN");

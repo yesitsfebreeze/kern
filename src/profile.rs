@@ -19,7 +19,11 @@ pub struct Profile {
 
 impl Profile {
 	pub fn checkpoint(&self, label: &str) -> Option<f64> {
-		self.checkpoints.iter().find(|c| c.label == label).map(|c| c.elapsed_ms)
+		self
+			.checkpoints
+			.iter()
+			.find(|c| c.label == label)
+			.map(|c| c.elapsed_ms)
 	}
 }
 
@@ -31,7 +35,11 @@ pub struct Profiler {
 
 impl Profiler {
 	pub fn new(name: impl Into<String>) -> Self {
-		Self { name: name.into(), start: Instant::now(), checkpoints: vec![] }
+		Self {
+			name: name.into(),
+			start: Instant::now(),
+			checkpoints: vec![],
+		}
 	}
 
 	pub fn checkpoint(&mut self, label: impl Into<String>) {
@@ -45,11 +53,18 @@ impl Profiler {
 		let mut prev = self.start;
 		for (label, t) in self.checkpoints {
 			let elapsed = t.duration_since(prev).as_secs_f64() * 1000.0;
-			checkpoints.push(Checkpoint { label, elapsed_ms: elapsed });
+			checkpoints.push(Checkpoint {
+				label,
+				elapsed_ms: elapsed,
+			});
 			prev = t;
 		}
 
-		Profile { name: self.name, checkpoints, total_ms: total }
+		Profile {
+			name: self.name,
+			checkpoints,
+			total_ms: total,
+		}
 	}
 }
 
@@ -61,7 +76,11 @@ impl std::fmt::Display for Profile {
 			.map(|c| format!("{}={:.1}ms", c.label, c.elapsed_ms))
 			.collect::<Vec<_>>()
 			.join(" ");
-		write!(f, "{}: {} [total {:.1}ms]", self.name, stages, self.total_ms)
+		write!(
+			f,
+			"{}: {} [total {:.1}ms]",
+			self.name, stages, self.total_ms
+		)
 	}
 }
 
@@ -74,7 +93,11 @@ pub fn render_timeline(profiles: &[Profile], width: usize) -> String {
 	if max <= 0.0 || profiles.is_empty() {
 		return String::new();
 	}
-	let name_w = profiles.iter().map(|p| p.name.chars().count()).max().unwrap_or(0);
+	let name_w = profiles
+		.iter()
+		.map(|p| p.name.chars().count())
+		.max()
+		.unwrap_or(0);
 
 	let mut out = String::new();
 	for p in profiles {
@@ -98,7 +121,10 @@ pub fn render_timeline(profiles: &[Profile], width: usize) -> String {
 				bar.push('█');
 			}
 		}
-		out.push_str(&format!("{:<name_w$}  {:>9.1}ms  {}", p.name, p.total_ms, bar));
+		out.push_str(&format!(
+			"{:<name_w$}  {:>9.1}ms  {}",
+			p.name, p.total_ms, bar
+		));
 		if !p.checkpoints.is_empty() {
 			let stages = p
 				.checkpoints
@@ -153,8 +179,16 @@ mod tests {
 		assert_eq!(profile.checkpoints[1].label, "stage2");
 
 		// Each checkpoint should have elapsed time >= its sleep duration (within reason)
-		assert!(profile.checkpoints[0].elapsed_ms >= 8.0, "stage1 took {}", profile.checkpoints[0].elapsed_ms);
-		assert!(profile.checkpoints[1].elapsed_ms >= 3.0, "stage2 took {}", profile.checkpoints[1].elapsed_ms);
+		assert!(
+			profile.checkpoints[0].elapsed_ms >= 8.0,
+			"stage1 took {}",
+			profile.checkpoints[0].elapsed_ms
+		);
+		assert!(
+			profile.checkpoints[1].elapsed_ms >= 3.0,
+			"stage2 took {}",
+			profile.checkpoints[1].elapsed_ms
+		);
 		assert!(profile.total_ms >= 20.0, "total took {}", profile.total_ms);
 	}
 
@@ -163,17 +197,32 @@ mod tests {
 		let prof = Profile {
 			name: "test".to_string(),
 			checkpoints: vec![
-				Checkpoint { label: "stage1".to_string(), elapsed_ms: 1.5 },
-				Checkpoint { label: "stage2".to_string(), elapsed_ms: 2.3 },
+				Checkpoint {
+					label: "stage1".to_string(),
+					elapsed_ms: 1.5,
+				},
+				Checkpoint {
+					label: "stage2".to_string(),
+					elapsed_ms: 2.3,
+				},
 			],
 			total_ms: 3.8,
 		};
 
 		let output = prof.to_string();
 		assert!(output.contains("test:"), "output should contain name");
-		assert!(output.contains("stage1=1.5ms"), "output should contain stage1");
-		assert!(output.contains("stage2=2.3ms"), "output should contain stage2");
-		assert!(output.contains("total 3.8ms"), "output should contain total");
+		assert!(
+			output.contains("stage1=1.5ms"),
+			"output should contain stage1"
+		);
+		assert!(
+			output.contains("stage2=2.3ms"),
+			"output should contain stage2"
+		);
+		assert!(
+			output.contains("total 3.8ms"),
+			"output should contain total"
+		);
 	}
 
 	#[test]
@@ -187,8 +236,14 @@ mod tests {
 			Profile {
 				name: "slow".to_string(),
 				checkpoints: vec![
-					Checkpoint { label: "a".to_string(), elapsed_ms: 60.0 },
-					Checkpoint { label: "b".to_string(), elapsed_ms: 40.0 },
+					Checkpoint {
+						label: "a".to_string(),
+						elapsed_ms: 60.0,
+					},
+					Checkpoint {
+						label: "b".to_string(),
+						elapsed_ms: 40.0,
+					},
 				],
 				total_ms: 100.0,
 			},
@@ -198,7 +253,10 @@ mod tests {
 		let lines: Vec<&str> = out.lines().collect();
 		assert_eq!(lines.len(), 2);
 		assert!(lines[0].contains("fast"), "first row names fast op");
-		assert!(lines[1].contains("a=60.0ms b=40.0ms"), "stages listed: {out}");
+		assert!(
+			lines[1].contains("a=60.0ms b=40.0ms"),
+			"stages listed: {out}"
+		);
 		// slow bar fills the full width, fast bar is ~2 cells
 		let slow_bar: usize = lines[1].chars().filter(|c| "█▓▒░".contains(*c)).count();
 		let fast_bar: usize = lines[0].chars().filter(|c| *c == '█').count();
@@ -209,7 +267,11 @@ mod tests {
 	#[test]
 	fn render_timeline_empty_and_zero() {
 		assert_eq!(render_timeline(&[], 20), "");
-		let zero = vec![Profile { name: "z".to_string(), checkpoints: vec![], total_ms: 0.0 }];
+		let zero = vec![Profile {
+			name: "z".to_string(),
+			checkpoints: vec![],
+			total_ms: 0.0,
+		}];
 		assert_eq!(render_timeline(&zero, 20), "");
 	}
 
@@ -220,13 +282,22 @@ mod tests {
 		let profiles = vec![Profile {
 			name: "p".to_string(),
 			checkpoints: vec![
-				Checkpoint { label: "big".to_string(), elapsed_ms: 99.0 },
-				Checkpoint { label: "tiny".to_string(), elapsed_ms: 0.4 },
+				Checkpoint {
+					label: "big".to_string(),
+					elapsed_ms: 99.0,
+				},
+				Checkpoint {
+					label: "tiny".to_string(),
+					elapsed_ms: 0.4,
+				},
 			],
 			total_ms: 100.0,
 		}];
 		let out = render_timeline(&profiles, 20);
-		assert!(out.contains('▓'), "tiny non-zero stage must render >=1 cell: {out}");
+		assert!(
+			out.contains('▓'),
+			"tiny non-zero stage must render >=1 cell: {out}"
+		);
 	}
 
 	#[test]

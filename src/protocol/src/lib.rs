@@ -9,6 +9,6 @@ pub mod agent;
 // the crate root, so consumers write `protocol::ForkSnapshot` /
 // `protocol::AgntRpcClient` instead of reaching through `protocol::agent::`.
 pub use agent::{
-    AgentLifecycle, AgntRpc, AgntRpcClient, ForkKind, ForkSnapshot, ForkStateLite, OutputEvent,
-    PluginSummary, SlashOutcome, TurnResult, UsageSummary, serve_agnt_rpc,
+	serve_agnt_rpc, AgentLifecycle, AgntRpc, AgntRpcClient, ForkKind, ForkSnapshot, ForkStateLite,
+	OutputEvent, PluginSummary, SlashOutcome, TurnResult, UsageSummary,
 };

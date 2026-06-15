@@ -12,7 +12,9 @@ pub fn find_duplicate(
 	threshold: f64,
 ) -> Option<String> {
 	let g = graph.read().ok()?;
-	let hits = g.entity_idx.search(vec, 1, crate::base::constants::DEDUP_EF);
+	let hits = g
+		.entity_idx
+		.search(vec, 1, crate::base::constants::DEDUP_EF);
 	hits
 		.into_iter()
 		.find(|h| h.score >= threshold)
@@ -118,14 +120,20 @@ mod tests {
 	fn find_duplicate_matches_above_threshold_and_skips_below() {
 		let graph = graph_with_vec_entity("e1", vec![1.0, 0.0, 0.0]);
 		// Identical vector -> cosine 1.0 >= threshold -> the existing id.
-		assert_eq!(find_duplicate(&graph, &[1.0, 0.0, 0.0], 0.9).as_deref(), Some("e1"));
+		assert_eq!(
+			find_duplicate(&graph, &[1.0, 0.0, 0.0], 0.9).as_deref(),
+			Some("e1")
+		);
 		// Orthogonal vector -> cosine 0 < threshold -> not a duplicate.
 		assert_eq!(find_duplicate(&graph, &[0.0, 1.0, 0.0], 0.9), None);
 		// Near but below the bar: cos([0.9,0.1,0],[1,0,0]) ~= 0.994 — a 0.999
 		// threshold rejects it, guarding the `score >= threshold` ordering.
 		assert_eq!(find_duplicate(&graph, &[0.9, 0.1, 0.0], 0.999), None);
 		// ...and the same near vector clears a 0.9 threshold.
-		assert_eq!(find_duplicate(&graph, &[0.9, 0.1, 0.0], 0.9).as_deref(), Some("e1"));
+		assert_eq!(
+			find_duplicate(&graph, &[0.9, 0.1, 0.0], 0.9).as_deref(),
+			Some("e1")
+		);
 	}
 
 	#[test]
@@ -142,7 +150,10 @@ mod tests {
 		update_existing_entity(&graph, "e1", "the original claim", 1.0);
 
 		let after = entity(&graph, "e1");
-		assert!(after.conf_alpha > before.conf_alpha, "confidence reinforced");
+		assert!(
+			after.conf_alpha > before.conf_alpha,
+			"confidence reinforced"
+		);
 		assert_eq!(after.text(), "the original claim", "text untouched");
 		assert!(after.updated_at.is_some(), "updated_at bumped");
 		// No Rephrase edge for identical text.
@@ -171,9 +182,16 @@ mod tests {
 
 		let after = entity(&graph, "e1");
 		assert_eq!(after.id, "e1", "id unchanged");
-		assert_eq!(after.text(), "the original claim", "stored text NOT overwritten");
+		assert_eq!(
+			after.text(),
+			"the original claim",
+			"stored text NOT overwritten"
+		);
 		assert_eq!(after.vector, before.vector, "vector NOT overwritten");
-		assert!(after.conf_alpha > before.conf_alpha, "confidence reinforced");
+		assert!(
+			after.conf_alpha > before.conf_alpha,
+			"confidence reinforced"
+		);
 
 		let g = graph.read().unwrap();
 		let kid = g.kern_of_entity("e1").unwrap();
@@ -208,6 +226,9 @@ mod tests {
 			.values()
 			.filter(|r| r.kind == ReasonKind::Rephrase)
 			.count();
-		assert_eq!(count, 1, "duplicate rephrase observations collapse to one edge");
+		assert_eq!(
+			count, 1,
+			"duplicate rephrase observations collapse to one edge"
+		);
 	}
 }

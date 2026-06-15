@@ -22,7 +22,9 @@ pub enum Error {
 }
 
 pub fn user_dir() -> Result<PathBuf, Error> {
-	dirs::config_dir().ok_or(Error::NoConfigDir).map(|p| p.join("kern"))
+	dirs::config_dir()
+		.ok_or(Error::NoConfigDir)
+		.map(|p| p.join("kern"))
 }
 
 pub fn project_dir(cwd: &Path) -> PathBuf {
@@ -45,11 +47,16 @@ pub fn save<T: Serialize>(path: &Path, value: &T) -> Result<(), Error> {
 	std::fs::write(path, text).map_err(|e| Error::Io(e.to_string()))
 }
 
-pub fn load_layered<T: DeserializeOwned + Default>(user: &Path, project: &Path) -> Result<T, Error> {
+pub fn load_layered<T: DeserializeOwned + Default>(
+	user: &Path,
+	project: &Path,
+) -> Result<T, Error> {
 	let user_v = read_value(user)?;
 	let project_v = read_value(project)?;
 	let merged = merge_sections(user_v, project_v);
-	merged.try_into().map_err(|e: toml::de::Error| Error::Parse(e.to_string()))
+	merged
+		.try_into()
+		.map_err(|e: toml::de::Error| Error::Parse(e.to_string()))
 }
 
 fn read_value(path: &Path) -> Result<toml::Value, Error> {
@@ -63,7 +70,9 @@ fn read_value(path: &Path) -> Result<toml::Value, Error> {
 			.parse::<toml::Table>()
 			.map(toml::Value::Table)
 			.map_err(|e| Error::Parse(e.to_string())),
-		Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(toml::Value::Table(toml::value::Table::new())),
+		Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+			Ok(toml::Value::Table(toml::value::Table::new()))
+		}
 		Err(e) => Err(Error::Io(e.to_string())),
 	}
 }
@@ -140,9 +149,19 @@ mod tests {
 		std::fs::write(&project, "[embed]\nurl = \"proj-url\"\n").unwrap();
 
 		let merged: toml::Table = load_layered(&user, &project).expect("load_layered");
-		let embed = merged.get("embed").and_then(|v| v.as_table()).expect("embed table");
-		assert_eq!(embed.get("url").and_then(|v| v.as_str()), Some("proj-url"), "project section wins");
-		assert!(embed.get("key").is_none(), "user `key` is NOT inherited — section wholly replaced");
+		let embed = merged
+			.get("embed")
+			.and_then(|v| v.as_table())
+			.expect("embed table");
+		assert_eq!(
+			embed.get("url").and_then(|v| v.as_str()),
+			Some("proj-url"),
+			"project section wins"
+		);
+		assert!(
+			embed.get("key").is_none(),
+			"user `key` is NOT inherited — section wholly replaced"
+		);
 		let _ = std::fs::remove_dir_all(&dir);
 	}
 
@@ -159,11 +178,17 @@ mod tests {
 
 		let merged: toml::Table = load_layered(&user, &project).expect("load");
 		assert_eq!(
-			merged.get("reason").and_then(|s| s.get("model")).and_then(|v| v.as_str()),
+			merged
+				.get("reason")
+				.and_then(|s| s.get("model"))
+				.and_then(|v| v.as_str()),
 			Some("qwen"),
 			"user-only [reason] survives",
 		);
-		assert!(merged.get("embed").is_some(), "project-only [embed] is present too");
+		assert!(
+			merged.get("embed").is_some(),
+			"project-only [embed] is present too"
+		);
 		let _ = std::fs::remove_dir_all(&dir);
 	}
 
@@ -179,7 +204,11 @@ mod tests {
 		let dir = std::env::temp_dir().join(format!("cfgio_rt_{}", std::process::id()));
 		// Nested path that does not exist yet — save() must create the parents.
 		let p = dir.join("nested").join("demo.toml");
-		let original = Demo { name: "kern".into(), count: 7, on: true };
+		let original = Demo {
+			name: "kern".into(),
+			count: 7,
+			on: true,
+		};
 		save(&p, &original).expect("save");
 		assert!(p.exists(), "save created the file (and its parent dirs)");
 

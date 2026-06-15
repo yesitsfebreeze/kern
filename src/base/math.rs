@@ -1,5 +1,5 @@
 use super::constants::*;
-use super::types::{Kern, ReasonKind, EntityKind};
+use super::types::{EntityKind, Kern, ReasonKind};
 use super::util;
 
 pub fn cosine(a: &[f64], b: &[f64]) -> f64 {
@@ -250,7 +250,10 @@ mod cosine_tests {
 	#[test]
 	fn identical_vectors_are_one_orthogonal_are_zero() {
 		assert!((cosine(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0]) - 1.0).abs() < 1e-9);
-		assert!(cosine(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-9, "orthogonal -> 0");
+		assert!(
+			cosine(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-9,
+			"orthogonal -> 0"
+		);
 	}
 
 	#[test]
@@ -265,7 +268,10 @@ mod cosine_tests {
 	fn mismatched_lengths_compare_the_shared_prefix() {
 		// n = min(len) = 2; the extra dim on the longer vector is ignored.
 		let c = cosine(&[1.0, 0.0, 9.0], &[1.0, 0.0]);
-		assert!((c - 1.0).abs() < 1e-9, "shared prefix is identical -> 1.0, got {c}");
+		assert!(
+			(c - 1.0).abs() < 1e-9,
+			"shared prefix is identical -> 1.0, got {c}"
+		);
 		// Empty slice -> n = 0 -> both norms 0 -> 0.0 (no panic).
 		assert_eq!(cosine(&[], &[1.0, 2.0]), 0.0);
 	}
@@ -284,7 +290,10 @@ mod cosine_tests {
 		let scalar = cosine_scalar(&a, &b);
 		// SAFETY: guarded by the runtime avx2+fma feature check above.
 		let simd = unsafe { cosine_avx2(&a, &b) };
-		assert!((scalar - simd).abs() < 1e-9, "avx2 {simd} vs scalar {scalar}");
+		assert!(
+			(scalar - simd).abs() < 1e-9,
+			"avx2 {simd} vs scalar {scalar}"
+		);
 	}
 }
 

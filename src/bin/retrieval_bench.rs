@@ -20,7 +20,10 @@ use kern::bench_support::trace;
 use kern::config::RetrievalConfig;
 
 #[derive(Parser, Debug)]
-#[command(name = "retrieval_bench", about = "Replay retrieval traces and compute NDCG@10.")]
+#[command(
+	name = "retrieval_bench",
+	about = "Replay retrieval traces and compute NDCG@10."
+)]
 struct Args {
 	#[arg(long)]
 	trace: String,
@@ -65,14 +68,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 		let total = t.queries.len();
 		t.queries.retain(|q| q.mode.to_lowercase() == want);
 		if t.queries.is_empty() {
-			return Err(format!("--mode {mode}: no queries with that mode (of {total} in the trace)").into());
+			return Err(
+				format!("--mode {mode}: no queries with that mode (of {total} in the trace)").into(),
+			);
 		}
 	}
 
 	let g = build_graph(&t);
 
 	if args.latency {
-		let r = kern::bench_support::latency::measure_latency(&g, &RetrievalConfig::default(), &t, 3, 50);
+		let r =
+			kern::bench_support::latency::measure_latency(&g, &RetrievalConfig::default(), &t, 3, 50);
 		println!("trace: {}   samples: {}", r.trace_name, r.samples);
 		println!(
 			"retrieval latency (ms):  mean={:.3}  p50={:.3}  p95={:.3}  p99={:.3}",
@@ -87,20 +93,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 		let rep = replay(&g, &RetrievalConfig::default(), &t);
 		let lat = latency::measure_latency(&g, &RetrievalConfig::default(), &t, 3, 50);
 		let threads = args.threads.unwrap_or_else(|| {
-			std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
+			std::thread::available_parallelism()
+				.map(|n| n.get())
+				.unwrap_or(4)
 		});
 		let tput = latency::measure_throughput(&g, &RetrievalConfig::default(), &t, threads, 100);
 		println!("=== Tier-0 snapshot: {} ===", t.name);
-		println!("corpus:      {} entities, {} vectors x dim {}", mem.entities, mem.vectors, mem.dim);
+		println!(
+			"corpus:      {} entities, {} vectors x dim {}",
+			mem.entities, mem.vectors, mem.dim
+		);
 		println!(
 			"quality:     recall@10={:.4}  NDCG@10={:.4}   ({} queries)",
-			rep.mean_recall10, rep.mean_ndcg10, rep.per_query.len()
+			rep.mean_recall10,
+			rep.mean_ndcg10,
+			rep.per_query.len()
 		);
 		println!(
 			"latency ms:  mean={:.3}  p50={:.3}  p95={:.3}  p99={:.3}",
 			lat.mean_ms, lat.p50_ms, lat.p95_ms, lat.p99_ms
 		);
-		println!("throughput:  {:.0} qps  ({} threads)", tput.qps, tput.threads);
+		println!(
+			"throughput:  {:.0} qps  ({} threads)",
+			tput.qps, tput.threads
+		);
 		println!(
 			"memory:      vectors f64={:.1} KiB  int8={:.1} KiB  ({:.1}x)",
 			mem.f64_vector_bytes as f64 / 1024.0,
@@ -112,7 +128,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 	if args.memory {
 		let m = kern::bench_support::memory::estimate_memory(&g);
-		println!("trace: {}   entities: {}   vectors: {}   dim: {}", t.name, m.entities, m.vectors, m.dim);
+		println!(
+			"trace: {}   entities: {}   vectors: {}   dim: {}",
+			t.name, m.entities, m.vectors, m.dim
+		);
 		println!(
 			"vector storage:  f64={:.1} KiB   int8={:.1} KiB   ratio={:.1}x",
 			m.f64_vector_bytes as f64 / 1024.0,
@@ -124,7 +143,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 	if args.throughput {
 		let threads = args.threads.unwrap_or_else(|| {
-			std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
+			std::thread::available_parallelism()
+				.map(|n| n.get())
+				.unwrap_or(4)
 		});
 		let r = kern::bench_support::latency::measure_throughput(
 			&g,
@@ -133,8 +154,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			threads,
 			100,
 		);
-		println!("trace: {}   threads: {}   queries: {}", r.trace_name, r.threads, r.total_queries);
-		println!("retrieval throughput: {:.0} qps  ({:.3}s elapsed)", r.qps, r.elapsed_secs);
+		println!(
+			"trace: {}   threads: {}   queries: {}",
+			r.trace_name, r.threads, r.total_queries
+		);
+		println!(
+			"retrieval throughput: {:.0} qps  ({:.3}s elapsed)",
+			r.qps, r.elapsed_secs
+		);
 		return Ok(());
 	}
 
@@ -157,11 +184,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			// parse result or a bare "required" after the fact.
 			if args.values.trim().is_empty() {
 				return Err(
-					"--values is required for a sweep (comma-separated numbers, e.g. --values 10,20,40)".into(),
+					"--values is required for a sweep (comma-separated numbers, e.g. --values 10,20,40)"
+						.into(),
 				);
 			}
-			let param = SweepParam::parse(&name)
-				.ok_or_else(|| format!("unknown sweep param: {name}"))?;
+			let param = SweepParam::parse(&name).ok_or_else(|| format!("unknown sweep param: {name}"))?;
 			let values: Vec<f64> = args
 				.values
 				.split(',')

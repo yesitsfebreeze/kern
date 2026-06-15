@@ -99,7 +99,13 @@ impl QuantizedVec {
 			// rescores with the retained f64 vector, so this is only a fallback
 			// (e.g. the `_` arm of `quantized_cosine_distance`).
 			QuantizationMode::Binary => (0..self.dim_bits)
-				.map(|i| if self.b[i / 8] & (1 << (i % 8)) != 0 { 1.0 } else { -1.0 })
+				.map(|i| {
+					if self.b[i / 8] & (1 << (i % 8)) != 0 {
+						1.0
+					} else {
+						-1.0
+					}
+				})
 				.collect(),
 		}
 	}
@@ -177,16 +183,19 @@ fn binary_cosine_distance(a: &QuantizedVec, b: &QuantizedVec) -> f64 {
 	if dim == 0 || a.b.len() != b.b.len() {
 		return 1.0;
 	}
-	let hamming: u32 = a.b.iter().zip(&b.b).map(|(x, y)| (x ^ y).count_ones()).sum();
+	let hamming: u32 = a
+		.b
+		.iter()
+		.zip(&b.b)
+		.map(|(x, y)| (x ^ y).count_ones())
+		.sum();
 	let theta = std::f64::consts::PI * (hamming as f64) / (dim as f64);
 	1.0 - theta.cos()
 }
 
 pub fn quantized_cosine_distance(a: &QuantizedVec, b: &QuantizedVec) -> f64 {
 	match (a.mode, b.mode) {
-		(QuantizationMode::Int8, QuantizationMode::Int8) => {
-			int8_cosine_distance(&a.q, &b.q) as f64
-		}
+		(QuantizationMode::Int8, QuantizationMode::Int8) => int8_cosine_distance(&a.q, &b.q) as f64,
 		(QuantizationMode::Binary, QuantizationMode::Binary) => binary_cosine_distance(a, b),
 		_ => {
 			let av = a.decode();
@@ -310,8 +319,16 @@ mod tests {
 		let none = QuantizedVec::encode(&[1.0, -2.0, 3.0, 0.5], QuantizationMode::None);
 		let expected = f64_cosine_distance(&int8.decode(), &none.decode());
 
-		assert_eq!(quantized_cosine_distance(&int8, &none), expected, "int8 vs none == decoded f64");
-		assert_eq!(quantized_cosine_distance(&none, &int8), expected, "none vs int8 is symmetric");
+		assert_eq!(
+			quantized_cosine_distance(&int8, &none),
+			expected,
+			"int8 vs none == decoded f64"
+		);
+		assert_eq!(
+			quantized_cosine_distance(&none, &int8),
+			expected,
+			"none vs int8 is symmetric"
+		);
 	}
 
 	#[test]
@@ -324,13 +341,23 @@ mod tests {
 
 	#[test]
 	fn mode_parse_round_trip() {
-		assert_eq!(QuantizationMode::parse("int8"), Some(QuantizationMode::Int8));
-		assert_eq!(QuantizationMode::parse(" NONE "), Some(QuantizationMode::None));
+		assert_eq!(
+			QuantizationMode::parse("int8"),
+			Some(QuantizationMode::Int8)
+		);
+		assert_eq!(
+			QuantizationMode::parse(" NONE "),
+			Some(QuantizationMode::None)
+		);
 		assert_eq!(QuantizationMode::parse("bogus"), None);
 		assert_eq!(QuantizationMode::Int8.as_str(), "int8");
 		// Binary is intentionally NOT parseable from config yet (pure 1-bit recall
 		// ~0.33 < int8 0.75), but its display + size accounting are defined.
-		assert_eq!(QuantizationMode::parse("binary"), None, "not config-exposed until rescore");
+		assert_eq!(
+			QuantizationMode::parse("binary"),
+			None,
+			"not config-exposed until rescore"
+		);
 		assert_eq!(QuantizationMode::Binary.as_str(), "binary");
 		assert_eq!(QuantizationMode::Binary.bytes_per_dim(), 0.125);
 	}
@@ -340,7 +367,11 @@ mod tests {
 		// >=0 -> 1, <0 -> 0. 10 dims -> 2 bytes (ceil(10/8)), dim_bits records 10.
 		let v = vec![1.0, -1.0, 0.0, -0.5, 2.0, -3.0, 0.1, -0.1, 5.0, -5.0];
 		let qv = QuantizedVec::encode(&v, QuantizationMode::Binary);
-		assert_eq!(qv.dim(), 10, "dim_bits is the true dimension, not b.len()*8");
+		assert_eq!(
+			qv.dim(),
+			10,
+			"dim_bits is the true dimension, not b.len()*8"
+		);
 		assert_eq!(qv.b.len(), 2, "10 dims pack into ceil(10/8)=2 bytes");
 		// bit i set iff v[i] >= 0: indices 0,2,4,6,8 set in byte 0/1.
 		// byte0 bits {0,2,4,6} = 0b01010101 = 0x55; byte1 bit {8->bit0} = 0b01 = 0x01.
@@ -352,7 +383,11 @@ mod tests {
 	fn binary_decode_reconstructs_signs() {
 		let v = vec![3.0, -2.0, 0.0, -7.0];
 		let qv = QuantizedVec::encode(&v, QuantizationMode::Binary);
-		assert_eq!(qv.decode(), vec![1.0, -1.0, 1.0, -1.0], "0.0 counts as + (>=0)");
+		assert_eq!(
+			qv.decode(),
+			vec![1.0, -1.0, 1.0, -1.0],
+			"0.0 counts as + (>=0)"
+		);
 	}
 
 	#[test]
@@ -360,15 +395,24 @@ mod tests {
 		// Identical sign patterns -> Hamming 0 -> distance 0.
 		let a = QuantizedVec::encode(&[1.0, 1.0, 1.0, 1.0], QuantizationMode::Binary);
 		let b = QuantizedVec::encode(&[1.0, 1.0, 1.0, 1.0], QuantizationMode::Binary);
-		assert!(quantized_cosine_distance(&a, &b).abs() < 1e-12, "identical signs -> 0");
+		assert!(
+			quantized_cosine_distance(&a, &b).abs() < 1e-12,
+			"identical signs -> 0"
+		);
 
 		// Opposed sign patterns -> Hamming = dim -> cos(pi) = -1 -> distance 2.
 		let c = QuantizedVec::encode(&[-1.0, -1.0, -1.0, -1.0], QuantizationMode::Binary);
-		assert!((quantized_cosine_distance(&a, &c) - 2.0).abs() < 1e-12, "all bits differ -> 2");
+		assert!(
+			(quantized_cosine_distance(&a, &c) - 2.0).abs() < 1e-12,
+			"all bits differ -> 2"
+		);
 
 		// Half the bits differ -> Hamming/dim = 0.5 -> cos(pi/2)=0 -> distance 1.
 		let d = QuantizedVec::encode(&[1.0, 1.0, -1.0, -1.0], QuantizationMode::Binary);
-		assert!((quantized_cosine_distance(&a, &d) - 1.0).abs() < 1e-12, "half differ -> 1");
+		assert!(
+			(quantized_cosine_distance(&a, &d) - 1.0).abs() < 1e-12,
+			"half differ -> 1"
+		);
 	}
 
 	#[test]

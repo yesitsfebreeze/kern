@@ -4,8 +4,8 @@ use crate::base::math::cosine;
 use crate::base::search::{
 	search_all_filtered, search_all_unlocked, search_reasons_all_unlocked, EntityHit,
 };
-use crate::retrieval::score::{matches_filter, QueryOptions};
 use crate::config::RetrievalConfig;
+use crate::retrieval::score::{matches_filter, QueryOptions};
 use rayon::prelude::*;
 use std::collections::HashMap;
 
@@ -117,7 +117,8 @@ pub fn seed_lexical(
 		Some(o) if o.is_active() => lex.search_filtered(query_text, k, &matches_keep(g, o)),
 		_ => lex.search(query_text, k),
 	};
-	raw.into_iter()
+	raw
+		.into_iter()
 		.map(|h| EntityHit {
 			entity_id: h.entity_id,
 			score: h.score as f64,
@@ -201,9 +202,8 @@ pub fn seed_important(
 }
 
 pub fn merge_seeds(a: Vec<EntityHit>, b: Vec<EntityHit>) -> Vec<EntityHit> {
-	let scored = crate::base::math::softmax_merge_scores(
-		a.into_iter().chain(b).map(|h| (h.entity_id, h.score)),
-	);
+	let scored =
+		crate::base::math::softmax_merge_scores(a.into_iter().chain(b).map(|h| (h.entity_id, h.score)));
 	let mut out: Vec<EntityHit> = scored.into_iter().map(EntityHit::from).collect();
 	out.sort_by(|a, b| {
 		b.score
@@ -222,7 +222,11 @@ mod tests {
 		let mut e = Entity {
 			id: id.into(),
 			vector,
-			kind: if fact { EntityKind::Fact } else { EntityKind::Claim },
+			kind: if fact {
+				EntityKind::Fact
+			} else {
+				EntityKind::Claim
+			},
 			..Default::default()
 		};
 		if access > 0 {
@@ -242,7 +246,11 @@ mod tests {
 	}
 
 	fn cfg() -> RetrievalConfig {
-		RetrievalConfig { important_min_cosine: 0.5, important_access_threshold: 5, ..Default::default() }
+		RetrievalConfig {
+			important_min_cosine: 0.5,
+			important_access_threshold: 5,
+			..Default::default()
+		}
 	}
 
 	#[test]
@@ -256,9 +264,15 @@ mod tests {
 		let hits = seed_important(&g, &cfg(), &[1.0, 0.0], None);
 		let ids: std::collections::HashSet<&str> = hits.iter().map(|h| h.entity_id.as_str()).collect();
 		assert!(ids.contains("hot"), "accessed + aligned is important");
-		assert!(ids.contains("fact"), "a Fact is important regardless of access count");
+		assert!(
+			ids.contains("fact"),
+			"a Fact is important regardless of access count"
+		);
 		assert!(!ids.contains("cold"), "low-access non-fact is dominated");
-		assert!(!ids.contains("off"), "below the cosine threshold is excluded");
+		assert!(
+			!ids.contains("off"),
+			"below the cosine threshold is excluded"
+		);
 	}
 
 	#[test]
@@ -267,16 +281,23 @@ mod tests {
 		// A kind=Fact filter must drop the Claim at the source (not leave it to be
 		// post-filtered), so only the Fact survives. A None filter keeps both.
 		let g = graph_with(vec![
-			ent("the_fact", vec![1.0, 0.0], 0, true),     // Fact, aligned -> in
-			ent("the_claim", vec![1.0, 0.0], 10, false),  // accessed Claim, aligned -> in (unfiltered)
+			ent("the_fact", vec![1.0, 0.0], 0, true), // Fact, aligned -> in
+			ent("the_claim", vec![1.0, 0.0], 10, false), // accessed Claim, aligned -> in (unfiltered)
 		]);
 		let both = seed_important(&g, &cfg(), &[1.0, 0.0], None);
 		assert_eq!(both.len(), 2, "no filter keeps both important entities");
 
-		let opts = QueryOptions { kind: Some(EntityKind::Fact), ..Default::default() };
+		let opts = QueryOptions {
+			kind: Some(EntityKind::Fact),
+			..Default::default()
+		};
 		let facts_only = seed_important(&g, &cfg(), &[1.0, 0.0], Some(&opts));
 		let ids: Vec<&str> = facts_only.iter().map(|h| h.entity_id.as_str()).collect();
-		assert_eq!(ids, vec!["the_fact"], "kind=Fact filter drops the Claim at the source");
+		assert_eq!(
+			ids,
+			vec!["the_fact"],
+			"kind=Fact filter drops the Claim at the source"
+		);
 	}
 
 	#[test]
@@ -299,7 +320,11 @@ mod tests {
 		g.kerns.insert("kx".into(), k);
 		g.rebuild_index();
 
-		let cfg = RetrievalConfig { important_min_cosine: 1.5, seed_k: 5, ..Default::default() };
+		let cfg = RetrievalConfig {
+			important_min_cosine: 1.5,
+			seed_k: 5,
+			..Default::default()
+		};
 		let q = [1.0, 0.0];
 
 		// Unfiltered: the dense top-k is dominated by the closer Claims; no Facts.
@@ -311,7 +336,10 @@ mod tests {
 		);
 
 		// kind=Fact: filtered traversal surfaces the Facts the post-filter would miss.
-		let opts = QueryOptions { kind: Some(EntityKind::Fact), ..Default::default() };
+		let opts = QueryOptions {
+			kind: Some(EntityKind::Fact),
+			..Default::default()
+		};
 		let filtered = seed(&g, &cfg, &q, 5, Mode::Content, Some(&opts));
 		assert!(
 			!filtered.is_empty() && filtered.iter().all(|h| h.entity_id.starts_with("fact")),
@@ -332,25 +360,52 @@ mod tests {
 		}
 		g.kerns.insert("kx".into(), k);
 		g.rebuild_index();
-		let cfg = RetrievalConfig { important_min_cosine: 1.5, seed_k: 4, ..Default::default() };
+		let cfg = RetrievalConfig {
+			important_min_cosine: 1.5,
+			seed_k: 4,
+			..Default::default()
+		};
 		let q = [1.0, 0.0];
 
 		let none = seed(&g, &cfg, &q, 4, Mode::Content, None);
-		let empty = seed(&g, &cfg, &q, 4, Mode::Content, Some(&QueryOptions::default()));
+		let empty = seed(
+			&g,
+			&cfg,
+			&q,
+			4,
+			Mode::Content,
+			Some(&QueryOptions::default()),
+		);
 		let ids = |v: &[EntityHit]| v.iter().map(|h| h.entity_id.clone()).collect::<Vec<_>>();
-		assert_eq!(ids(&none), ids(&empty), "inactive filter == unfiltered path");
+		assert_eq!(
+			ids(&none),
+			ids(&empty),
+			"inactive filter == unfiltered path"
+		);
 	}
 
 	#[test]
 	fn merge_seeds_pools_by_entity_and_sorts_descending() {
-		let a = vec![EntityHit { entity_id: "x".into(), score: 0.6 }];
+		let a = vec![EntityHit {
+			entity_id: "x".into(),
+			score: 0.6,
+		}];
 		let b = vec![
-			EntityHit { entity_id: "x".into(), score: 0.8 }, // same id -> pooled into one
-			EntityHit { entity_id: "y".into(), score: 0.3 },
+			EntityHit {
+				entity_id: "x".into(),
+				score: 0.8,
+			}, // same id -> pooled into one
+			EntityHit {
+				entity_id: "y".into(),
+				score: 0.3,
+			},
 		];
 		let out = merge_seeds(a, b);
 		assert_eq!(out.len(), 2, "duplicate id x collapses to a single hit");
-		assert_eq!(out[0].entity_id, "x", "the higher-scoring entity sorts first");
+		assert_eq!(
+			out[0].entity_id, "x",
+			"the higher-scoring entity sorts first"
+		);
 		assert!(out[0].score >= out[1].score, "descending by score");
 	}
 }
