@@ -25,6 +25,67 @@ pub struct ExpandResult {
 	pub chains: Vec<PathChain>,
 }
 
+/// The inputs that stay constant across one [`expand`] run while scoring each
+/// candidate neighbour, bundled so the per-reason step needs only the few inputs
+/// that actually vary (the current item, edge, threshold, and visited set).
+struct ExpandCtx<'a> {
+	g: &'a GraphGnn,
+	query_vec: &'a [f64],
+	w: Weights,
+	refine_tw: f64,
+	refine_cap: f64,
+}
+
+impl ExpandCtx<'_> {
+	/// Evaluate the neighbour reached from `item` along reason `rid`. Returns the
+	/// [`HeapItem`] to enqueue, or `None` when the edge is remote, a non-empty
+	/// Spawn edge, points at an empty/visited/missing entity, or scores below
+	/// `threshold`.
+	fn neighbor_step(
+		&self,
+		item: &HeapItem,
+		rid: &str,
+		reason: &Reason,
+		threshold: f64,
+		visited: &HashSet<String>,
+	) -> Option<HeapItem> {
+		if reason.is_remote() {
+			return None;
+		}
+		if reason.kind == ReasonKind::Spawn && !reason.to.is_empty() {
+			return None;
+		}
+		let neighbor_id = if reason.from == item.entity_id {
+			&reason.to
+		} else {
+			&reason.from
+		};
+		if neighbor_id.is_empty() || visited.contains(neighbor_id) {
+			return None;
+		}
+		let neighbor = find_entity_in_graph(self.g, neighbor_id)?;
+		let score = score_neighbor(
+			self.query_vec,
+			&neighbor,
+			reason,
+			self.w,
+			self.refine_tw,
+			self.refine_cap,
+		);
+		if score < threshold {
+			return None;
+		}
+		let mut chain = item.chain.clone();
+		chain.push(rid.to_string());
+		chain.push(neighbor_id.clone());
+		Some(HeapItem {
+			entity_id: neighbor_id.clone(),
+			score,
+			chain,
+		})
+	}
+}
+
 pub fn expand(
 	g: &GraphGnn,
 	cfg: &RetrievalConfig,
@@ -48,8 +109,13 @@ pub fn expand(
 
 	let max_expansions = cfg.max_expansions;
 	let decay = cfg.decay;
-	let refine_tw = cfg.refine_traversal_weight;
-	let refine_cap = cfg.refine_boost_cap;
+	let ctx = ExpandCtx {
+		g,
+		query_vec,
+		w,
+		refine_tw: cfg.refine_traversal_weight,
+		refine_cap: cfg.refine_boost_cap,
+	};
 	let mut expansions = 0;
 
 	while let Some(item) = heap.pop() {
@@ -87,48 +153,12 @@ pub fn expand(
 		let reason_ids = collect_reason_ids(kern, &item.entity_id);
 
 		for rid in &reason_ids {
-			let reason = match kern.reasons.get(rid) {
-				Some(r) => r,
-				None => continue,
+			let Some(reason) = kern.reasons.get(rid) else {
+				continue;
 			};
-
-			if reason.is_remote() {
-				continue;
+			if let Some(next) = ctx.neighbor_step(&item, rid, reason, threshold, &visited) {
+				heap.push(next);
 			}
-
-			if reason.kind == ReasonKind::Spawn && !reason.to.is_empty() {
-				continue;
-			}
-
-			let neighbor_id = if reason.from == item.entity_id {
-				&reason.to
-			} else {
-				&reason.from
-			};
-
-			if neighbor_id.is_empty() || visited.contains(neighbor_id) {
-				continue;
-			}
-
-			let neighbor = match find_entity_in_graph(g, neighbor_id) {
-				Some(t) => t,
-				None => continue,
-			};
-
-			let score = score_neighbor(query_vec, &neighbor, reason, w, refine_tw, refine_cap);
-			if score < threshold {
-				continue;
-			}
-
-			let mut chain = item.chain.clone();
-			chain.push(rid.clone());
-			chain.push(neighbor_id.clone());
-
-			heap.push(HeapItem {
-				entity_id: neighbor_id.clone(),
-				score,
-				chain,
-			});
 		}
 	}
 
