@@ -153,6 +153,43 @@ fn commit_entity(
 	}
 }
 
+/// Mint a reason edge `from -> to` of `kind`, attach it to `kern_id`, and index
+/// it (vector into `reason_idx` when non-empty, id into the reason index).
+/// Returns the new reason id. Shared commit tail of every `add_*_reason`.
+fn commit_reason(
+	g: &mut GraphGnn,
+	kern_id: &str,
+	from: &str,
+	to: &str,
+	kind: ReasonKind,
+	score: f64,
+	vec: Vec<f64>,
+) -> String {
+	let rid = reason_id(from, to, kind, "", "");
+	let reason = Reason {
+		id: rid.clone(),
+		from: from.to_string(),
+		to: to.to_string(),
+		to_kern_id: String::new(),
+		to_net_id: String::new(),
+		kind,
+		dirty: false,
+		text: String::new(),
+		vector: vec.clone(),
+		score,
+		traversal_count: GCounter::new(),
+		producer_id: String::new(),
+	};
+	if !vec.is_empty() {
+		g.reason_idx.insert(rid.clone(), vec);
+	}
+	if let Some(kern) = g.get_mut(kern_id) {
+		add_reason(kern, reason);
+	}
+	g.index_reason(&rid, kern_id);
+	rid
+}
+
 fn add_similarity_reason(
 	g: &mut GraphGnn,
 	kern_id: &str,
@@ -177,29 +214,15 @@ fn add_similarity_reason(
 			Vec::new()
 		};
 
-		let rid = reason_id(entity_id, &h.entity_id, ReasonKind::Similarity, "", "");
-		let reason = Reason {
-			id: rid.clone(),
-			from: entity_id.to_string(),
-			to: h.entity_id.clone(),
-			to_kern_id: String::new(),
-			to_net_id: String::new(),
-			kind: ReasonKind::Similarity,
-			dirty: false,
-			text: String::new(),
-			vector: vec.clone(),
-			score: h.score,
-			traversal_count: GCounter::new(),
-			producer_id: String::new(),
-		};
-
-		if !vec.is_empty() {
-			g.reason_idx.insert(rid.clone(), vec);
-		}
-		if let Some(kern) = g.get_mut(kern_id) {
-			add_reason(kern, reason);
-		}
-		g.index_reason(&rid, kern_id);
+		let rid = commit_reason(
+			g,
+			kern_id,
+			entity_id,
+			&h.entity_id,
+			ReasonKind::Similarity,
+			h.score,
+			vec,
+		);
 		return vec![rid];
 	}
 	Vec::new()
@@ -226,29 +249,15 @@ fn add_provenance_reason(
 		_ => Vec::new(),
 	};
 
-	let rid = reason_id(entity_id, doc_id, ReasonKind::Provenance, "", "");
-	let reason = Reason {
-		id: rid.clone(),
-		from: entity_id.to_string(),
-		to: doc_id.to_string(),
-		to_kern_id: String::new(),
-		to_net_id: String::new(),
-		kind: ReasonKind::Provenance,
-		dirty: false,
-		text: String::new(),
-		vector: vec.clone(),
-		score: PROVENANCE_SCORE,
-		traversal_count: GCounter::new(),
-		producer_id: String::new(),
-	};
-
-	if !vec.is_empty() {
-		g.reason_idx.insert(rid.clone(), vec);
-	}
-	if let Some(kern) = g.get_mut(kern_id) {
-		add_reason(kern, reason);
-	}
-	g.index_reason(&rid, kern_id);
+	let rid = commit_reason(
+		g,
+		kern_id,
+		entity_id,
+		doc_id,
+		ReasonKind::Provenance,
+		PROVENANCE_SCORE,
+		vec,
+	);
 	vec![rid]
 }
 
