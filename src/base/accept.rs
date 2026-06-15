@@ -347,31 +347,15 @@ fn supersede(
 		Vec::new()
 	};
 
-	let rid = reason_id(entity_id, &old_id, ReasonKind::Supersedes, "", "");
-	let reason = Reason {
-		id: rid.clone(),
-		from: entity_id.to_string(),
-		to: old_id.clone(),
-		to_kern_id: String::new(),
-		to_net_id: String::new(),
-		kind: ReasonKind::Supersedes,
-		dirty: false,
-		text: String::new(),
-		vector: vec.clone(),
-		score: 1.0,
-		traversal_count: GCounter::new(),
-		producer_id: String::new(),
-	};
-
-	if !vec.is_empty() {
-		g.reason_idx.insert(rid.clone(), vec);
-	}
-	if let Some(kern) = g.get_mut(placed_kern_id) {
-		add_reason(kern, reason);
-	}
-	g.index_reason(&rid, placed_kern_id);
-
-	vec![rid]
+	vec![commit_reason(
+		g,
+		placed_kern_id,
+		entity_id,
+		&old_id,
+		ReasonKind::Supersedes,
+		1.0,
+		vec,
+	)]
 }
 
 pub fn get_or_spawn_unnamed_child(g: &mut GraphGnn, kern_id: &str) -> String {
