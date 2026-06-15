@@ -1,4 +1,5 @@
 use crate::gnn::activation::Activation;
+use crate::gnn::dropout::Dropout;
 use crate::gnn::graph::Graph;
 use crate::gnn::tensor::Tensor;
 
@@ -68,7 +69,17 @@ pub trait GraphLayer {
 	fn forward_graph(&mut self, g: &Graph, features: &Tensor) -> Tensor;
 	fn parameters(&self) -> Vec<&Tensor>;
 	fn parameters_mut(&mut self) -> Vec<&mut Tensor>;
-	fn set_training(&mut self, training: bool);
+
+	/// The layer's dropout, if it has one. Backs the default `set_training`.
+	fn dropout_mut(&mut self) -> Option<&mut Dropout>;
+
+	/// Switch train/eval mode. Default: flip the layer's dropout (if any) —
+	/// the only train-mode-sensitive component these layers carry.
+	fn set_training(&mut self, training: bool) {
+		if let Some(d) = self.dropout_mut() {
+			d.set_training(training);
+		}
+	}
 }
 
 pub trait BackwardGraphLayer: GraphLayer {

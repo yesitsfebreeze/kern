@@ -275,10 +275,8 @@ impl GraphLayer for GATLayer {
 		p
 	}
 
-	fn set_training(&mut self, training: bool) {
-		if let Some(ref mut d) = self.drop {
-			d.set_training(training);
-		}
+	fn dropout_mut(&mut self) -> Option<&mut Dropout> {
+		self.drop.as_mut()
 	}
 }
 
