@@ -59,34 +59,6 @@ pub fn sum_mean_pool(features: &Tensor) -> Tensor {
 	}
 }
 
-pub struct ReadoutLayer {
-	pub pool: PoolFunc,
-	pub linear: Option<crate::gnn::layer::LinearLayer>,
-}
-
-impl ReadoutLayer {
-	pub fn new(pool: PoolFunc, in_features: usize, out_features: usize) -> Self {
-		let linear = if out_features > 0 {
-			Some(crate::gnn::layer::LinearLayer::new(
-				in_features,
-				out_features,
-			))
-		} else {
-			None
-		};
-		Self { pool, linear }
-	}
-
-	pub fn forward(&mut self, input: &Tensor) -> Tensor {
-		let mut pooled = (self.pool)(input);
-		if let Some(ref mut l) = self.linear {
-			use crate::gnn::layer::Layer;
-			pooled = l.forward(&pooled);
-		}
-		pooled
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;

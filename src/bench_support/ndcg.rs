@@ -34,23 +34,6 @@ pub fn ndcg_at_k(ranked_ids: &[String], expected_ids: &[String], k: usize) -> f6
 	dcg / idcg
 }
 
-pub fn mean_ndcg<I>(results: I, k: usize) -> f64
-where
-	I: IntoIterator<Item = (Vec<String>, Vec<String>)>,
-{
-	let mut sum = 0.0;
-	let mut n = 0;
-	for (ranked, expected) in results {
-		sum += ndcg_at_k(&ranked, &expected, k);
-		n += 1;
-	}
-	if n == 0 {
-		0.0
-	} else {
-		sum / n as f64
-	}
-}
-
 /// Recall@k: the fraction of the expected (relevant) ids that appear *anywhere*
 /// in the top-`k` retrieved — `|expected ∩ ranked[..k]| / |expected|` ∈ [0, 1].
 /// Unlike NDCG this ignores order within the top-k: it measures coverage (did we
@@ -65,25 +48,6 @@ pub fn recall_at_k(ranked_ids: &[String], expected_ids: &[String], k: usize) -> 
 	let expected: HashSet<&str> = expected_ids.iter().map(String::as_str).collect();
 	let top: HashSet<&str> = ranked_ids.iter().take(k).map(String::as_str).collect();
 	expected.intersection(&top).count() as f64 / expected.len() as f64
-}
-
-/// Mean recall@k over `(ranked, expected)` query pairs. Empty input is `0.0`
-/// (no divide-by-zero). Mirrors [`mean_ndcg`].
-pub fn mean_recall<I>(results: I, k: usize) -> f64
-where
-	I: IntoIterator<Item = (Vec<String>, Vec<String>)>,
-{
-	let mut sum = 0.0;
-	let mut n = 0;
-	for (ranked, expected) in results {
-		sum += recall_at_k(&ranked, &expected, k);
-		n += 1;
-	}
-	if n == 0 {
-		0.0
-	} else {
-		sum / n as f64
-	}
 }
 
 #[cfg(test)]
@@ -177,24 +141,5 @@ mod tests {
 	fn recall_empty_expected_or_zero_k_is_zero() {
 		assert_eq!(recall_at_k(&ids(&["a"]), &[], 5), 0.0);
 		assert_eq!(recall_at_k(&ids(&["a"]), &ids(&["a"]), 0), 0.0);
-	}
-
-	#[test]
-	fn mean_recall_averages_per_query_and_handles_empty() {
-		// Perfect (1.0) + zero-overlap (0.0) -> 0.5.
-		let results = vec![(ids(&["a"]), ids(&["a"])), (ids(&["x"]), ids(&["a"]))];
-		assert!((mean_recall(results, 3) - 0.5).abs() < 1e-9);
-		let empty: Vec<(Vec<String>, Vec<String>)> = Vec::new();
-		assert_eq!(mean_recall(empty, 3), 0.0);
-	}
-
-	#[test]
-	fn mean_ndcg_averages_per_query_scores() {
-		// One perfect query (1.0) + one zero-overlap query (0.0) -> mean 0.5.
-		let results = vec![(ids(&["a"]), ids(&["a"])), (ids(&["x"]), ids(&["a"]))];
-		assert!((mean_ndcg(results, 3) - 0.5).abs() < 1e-9);
-		// Empty input -> 0.0, no divide-by-zero.
-		let empty: Vec<(Vec<String>, Vec<String>)> = Vec::new();
-		assert_eq!(mean_ndcg(empty, 3), 0.0);
 	}
 }

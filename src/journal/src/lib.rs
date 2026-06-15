@@ -8,7 +8,6 @@ pub mod day_journal;
 pub mod entry;
 pub mod events;
 pub mod history;
-pub mod state;
 pub mod tracing_layer;
 pub use events::{
 	system_time_from_ms, EntityTouchedEvent, EntityTouchedPayload, FinalEvent, FinalPayload,
@@ -76,7 +75,6 @@ impl Sink for GlobalSink {
 }
 pub use entry::{now_ms, Entry, Kind, NullSink, Sink, SCHEMA_VERSION};
 pub use history::{Filter, History};
-pub use state::{State, StateHandle};
 
 #[cfg(test)]
 mod tests {
