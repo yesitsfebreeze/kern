@@ -373,7 +373,7 @@ impl Store {
 
 	/// Persist a single kern (the tick worker's per-kern `do_persist` path).
 	pub fn save_one_kern(&self, kern: &Kern) -> Result<(), StoreError> {
-		self.put(self.kern, &kern.id.clone(), &StoredKern::from_kern(kern))
+		self.put(self.kern, &kern.id, &StoredKern::from_kern(kern))
 	}
 
 	/// Load a single kern by id (the lazy-load path for an unloaded kern).
@@ -396,7 +396,7 @@ impl Store {
 	/// put overwrites any prior row for the same id (latest-wins), so the cold
 	/// tier never accumulates duplicate rows the way the JSONL append log did.
 	pub fn cold_spill(&self, entity: &Entity) -> Result<(), StoreError> {
-		self.put(self.cold, &entity.id.clone(), entity)?;
+		self.put(self.cold, &entity.id, entity)?;
 		self.cold_cap(crate::base::constants::COLD_MAX_ENTRIES)?;
 		Ok(())
 	}
