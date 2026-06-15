@@ -88,6 +88,52 @@ pub struct Retrieved {
 	pub chain_text: String,
 }
 
+/// Hybrid seed fusion: blend `dense_seeds` with lexical, importance, and
+/// (optional) personalized-PageRank hits via weighted RRF. Query-relevant lists
+/// (dense, lexical) get weight 1.0; query-independent priors (importance,
+/// PageRank) get `cfg.rrf_global_weight` so they bias without diluting relevance.
+/// Falls back to `dense_seeds` when the fusion comes back empty.
+fn fuse_hybrid_seeds(
+	g: &GraphGnn,
+	cfg: &RetrievalConfig,
+	qvec: &[f64],
+	opts: Option<&QueryOptions>,
+	lex: &crate::base::lexical::LexicalIndex,
+	dense_seeds: Vec<crate::base::search::EntityHit>,
+	query_text: &str,
+) -> Vec<crate::base::search::EntityHit> {
+	let lex_hits = seed::seed_lexical(lex, g, query_text, cfg.seed_k * 4, opts);
+	let imp_hits = seed::seed_important(g, cfg, qvec, opts);
+	let pr_hits = if cfg.pagerank_enabled {
+		// Personalize the teleport at the query's seed entities (dense + lexical) —
+		// query-independent importance is excluded so PageRank stays query-aware.
+		let ppr_seeds: Vec<crate::base::search::EntityHit> =
+			dense_seeds.iter().chain(lex_hits.iter()).cloned().collect();
+		pagerank::pagerank(
+			g,
+			&ppr_seeds,
+			cfg.pagerank_damping,
+			cfg.pagerank_iters,
+			cfg.pagerank_top_k,
+		)
+	} else {
+		Vec::new()
+	};
+	let gw = cfg.rrf_global_weight;
+	let mut lists: Vec<&[crate::base::search::EntityHit]> = vec![&dense_seeds, &lex_hits, &imp_hits];
+	let mut weights: Vec<f64> = vec![1.0, 1.0, gw];
+	if !pr_hits.is_empty() {
+		lists.push(&pr_hits);
+		weights.push(gw);
+	}
+	let fused = fuse::rrf(&lists, &weights, cfg.rrf_k, cfg.seed_k.max(1) * 2);
+	if fused.is_empty() {
+		dense_seeds
+	} else {
+		fused
+	}
+}
+
 /// The graph-only half of retrieval: seed → expand → merge → score → diversify,
 /// plus rendering the path chains to text. **No LLM, no answer synthesis** — so a
 /// caller can hold the graph lock for exactly this (sub-millisecond) phase and run
@@ -110,44 +156,9 @@ pub fn retrieve(
 	let dense_seeds = seed::seed(g, cfg, qvec, cfg.seed_k, mode, opts);
 
 	let seeds = if mode == Mode::Hybrid && cfg.lexical_enabled && !query_text.is_empty() {
-		if let Some(lex) = lex_ref {
-			let lex_hits = seed::seed_lexical(lex, g, query_text, cfg.seed_k * 4, opts);
-			let imp_hits = seed::seed_important(g, cfg, qvec, opts);
-			let pr_hits = if cfg.pagerank_enabled {
-				// Personalize the teleport at the query's seed entities
-				// (dense + lexical hits) — query-independent importance is
-				// deliberately excluded so PageRank stays query-aware.
-				let ppr_seeds: Vec<crate::base::search::EntityHit> =
-					dense_seeds.iter().chain(lex_hits.iter()).cloned().collect();
-				pagerank::pagerank(
-					g,
-					&ppr_seeds,
-					cfg.pagerank_damping,
-					cfg.pagerank_iters,
-					cfg.pagerank_top_k,
-				)
-			} else {
-				Vec::new()
-			};
-			// Weighted RRF: dense + lexical are query-relevant (weight 1.0);
-			// importance (and PageRank) are query-independent global priors, so
-			// they carry a smaller fusion weight to avoid diluting relevance.
-			let gw = cfg.rrf_global_weight;
-			let mut lists: Vec<&[crate::base::search::EntityHit]> =
-				vec![&dense_seeds, &lex_hits, &imp_hits];
-			let mut weights: Vec<f64> = vec![1.0, 1.0, gw];
-			if !pr_hits.is_empty() {
-				lists.push(&pr_hits);
-				weights.push(gw);
-			}
-			let fused = fuse::rrf(&lists, &weights, cfg.rrf_k, cfg.seed_k.max(1) * 2);
-			if fused.is_empty() {
-				dense_seeds
-			} else {
-				fused
-			}
-		} else {
-			dense_seeds
+		match lex_ref {
+			Some(lex) => fuse_hybrid_seeds(g, cfg, qvec, opts, lex, dense_seeds, query_text),
+			None => dense_seeds,
 		}
 	} else {
 		dense_seeds
