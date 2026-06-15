@@ -105,6 +105,29 @@ pub fn do_seed_questions(g: &Arc<RwLock<GraphGnn>>, entity_id: &str, llm: Option
 	}
 }
 
+/// Under a read lock, decide how to name an unnamed kern: cluster its entities,
+/// pick the largest cohesive cluster, and return its anchor `(prompt, centroid
+/// id, parent id)`. `None` when the kern is gone, already named, or has no
+/// cohesive cluster worth naming.
+fn naming_prompt(
+	g: &Arc<RwLock<GraphGnn>>,
+	kern_id: &str,
+	cfg: &TickConfig,
+) -> Option<(String, Option<String>, String)> {
+	let graph = read_recovered(g);
+	let kern = graph.loaded(kern_id)?;
+	if kern.is_named() {
+		return None;
+	}
+	let entities: Vec<_> = kern.entities.values().collect();
+	let clusters = vector_cluster(&entities, cfg.max_cluster_sample);
+	let idx = largest_cohesive_cluster_for_naming(&clusters)?;
+	let prompt = anchor_prompt(&clusters[idx]);
+	let centroid_id = centroid_thought(&clusters[idx]).map(|t| t.id.clone());
+	let parent_id = kern.parent.clone();
+	Some((prompt, centroid_id, parent_id))
+}
+
 pub fn do_name(
 	q: &Queue,
 	g: &Arc<RwLock<GraphGnn>>,
@@ -118,29 +141,9 @@ pub fn do_name(
 		None => return,
 	};
 
-	let (prompt, centroid_id, parent_id) = {
-		let graph = read_recovered(g);
-		let kern = match graph.loaded(kern_id) {
-			Some(k) => k,
-			None => return,
-		};
-		if kern.is_named() {
-			return;
-		}
-		let entity_count = kern.entities.len();
-		let entities: Vec<_> = kern.entities.values().collect();
-		let clusters = vector_cluster(&entities, cfg.max_cluster_sample);
-		let idx = match largest_cohesive_cluster_for_naming(&clusters) {
-			Some(i) => i,
-			None => {
-				let _ = entity_count;
-				return;
-			}
-		};
-		let prompt = anchor_prompt(&clusters[idx]);
-		let centroid_id = centroid_thought(&clusters[idx]).map(|t| t.id.clone());
-		let parent_id = kern.parent.clone();
-		(prompt, centroid_id, parent_id)
+	let (prompt, centroid_id, parent_id) = match naming_prompt(g, kern_id, cfg) {
+		Some(t) => t,
+		None => return,
 	};
 
 	let raw = llm(&prompt);
