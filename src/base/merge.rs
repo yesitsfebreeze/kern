@@ -12,14 +12,21 @@ use crate::base::constants;
 use crate::base::graph::GraphGnn;
 use crate::base::types::{Entity, EntityStatus, Reason};
 
-fn join_max_time(local: &mut Option<SystemTime>, remote: Option<SystemTime>) -> bool {
+/// CRDT join of a timestamp: overwrite `local` with `remote` when `remote` is
+/// present and `take(remote, local)` holds (a missing local always loses to a
+/// present remote). Returns whether `local` changed.
+fn join_time(
+	local: &mut Option<SystemTime>,
+	remote: Option<SystemTime>,
+	take: impl Fn(SystemTime, SystemTime) -> bool,
+) -> bool {
 	match (*local, remote) {
 		(_, None) => false,
 		(None, Some(r)) => {
 			*local = Some(r);
 			true
 		}
-		(Some(l), Some(r)) if r > l => {
+		(Some(l), Some(r)) if take(r, l) => {
 			*local = Some(r);
 			true
 		}
@@ -27,19 +34,14 @@ fn join_max_time(local: &mut Option<SystemTime>, remote: Option<SystemTime>) -> 
 	}
 }
 
+/// Keep the later of the two instants.
+fn join_max_time(local: &mut Option<SystemTime>, remote: Option<SystemTime>) -> bool {
+	join_time(local, remote, |r, l| r > l)
+}
+
+/// Keep the earlier of the two instants.
 fn join_min_time(local: &mut Option<SystemTime>, remote: Option<SystemTime>) -> bool {
-	match (*local, remote) {
-		(_, None) => false,
-		(None, Some(r)) => {
-			*local = Some(r);
-			true
-		}
-		(Some(l), Some(r)) if r < l => {
-			*local = Some(r);
-			true
-		}
-		_ => false,
-	}
+	join_time(local, remote, |r, l| r < l)
 }
 
 /// CRDT join for the `superseded_by` pointer: a non-empty remote id that sorts
