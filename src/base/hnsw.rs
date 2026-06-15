@@ -4,6 +4,7 @@ use crate::quant::{quantized_cosine_distance, QuantizationMode, QuantizedVec};
 use rand::RngExt;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::marker::PhantomData;
 
 #[derive(Debug, Clone)]
 pub struct HnswHit {
@@ -522,63 +523,39 @@ fn is_ambiguous(candidates: &[Candidate], k: usize, epsilon: f64) -> bool {
 	(worst.dist - best.dist) < epsilon
 }
 
-struct MinHeap {
+/// Sift order for [`Heap`]: `prefer(a, b)` is true when a node at distance `a`
+/// belongs ABOVE one at distance `b` (nearer the root). `Min` keeps the smallest
+/// distance on top, `Max` the largest. A zero-sized type parameter, so the
+/// comparison monomorphizes with no per-operation branch.
+trait HeapOrder {
+	fn prefer(a: f64, b: f64) -> bool;
+}
+struct Min;
+struct Max;
+impl HeapOrder for Min {
+	fn prefer(a: f64, b: f64) -> bool {
+		a < b
+	}
+}
+impl HeapOrder for Max {
+	fn prefer(a: f64, b: f64) -> bool {
+		a > b
+	}
+}
+
+/// Binary heap of [`Candidate`]s ordered by `O`. Hand-rolled rather than std
+/// `BinaryHeap` because the sort key is an `f64` distance, which is not `Ord`.
+struct Heap<O: HeapOrder> {
 	items: Vec<Candidate>,
+	_order: PhantomData<O>,
 }
 
-impl MinHeap {
+impl<O: HeapOrder> Heap<O> {
 	fn new() -> Self {
-		Self { items: Vec::new() }
-	}
-
-	fn push(&mut self, c: Candidate) {
-		self.items.push(c);
-		let mut i = self.items.len() - 1;
-		while i > 0 {
-			let p = (i - 1) / 2;
-			if self.items[i].dist >= self.items[p].dist {
-				break;
-			}
-			self.items.swap(i, p);
-			i = p;
+		Self {
+			items: Vec::new(),
+			_order: PhantomData,
 		}
-	}
-
-	fn pop(&mut self) -> Option<Candidate> {
-		if self.items.is_empty() {
-			return None;
-		}
-		let n = self.items.len() - 1;
-		self.items.swap(0, n);
-		let top = self.items.pop().expect("non-empty checked above");
-		let mut i = 0;
-		let sz = self.items.len();
-		loop {
-			let (l, r) = (2 * i + 1, 2 * i + 2);
-			let mut s = i;
-			if l < sz && self.items[l].dist < self.items[s].dist {
-				s = l;
-			}
-			if r < sz && self.items[r].dist < self.items[s].dist {
-				s = r;
-			}
-			if s == i {
-				break;
-			}
-			self.items.swap(i, s);
-			i = s;
-		}
-		Some(top)
-	}
-}
-
-struct MaxHeap {
-	items: Vec<Candidate>,
-}
-
-impl MaxHeap {
-	fn new() -> Self {
-		Self { items: Vec::new() }
 	}
 
 	fn len(&self) -> usize {
@@ -594,7 +571,7 @@ impl MaxHeap {
 		let mut i = self.items.len() - 1;
 		while i > 0 {
 			let p = (i - 1) / 2;
-			if self.items[i].dist <= self.items[p].dist {
+			if !O::prefer(self.items[i].dist, self.items[p].dist) {
 				break;
 			}
 			self.items.swap(i, p);
@@ -614,10 +591,10 @@ impl MaxHeap {
 		loop {
 			let (l, r) = (2 * i + 1, 2 * i + 2);
 			let mut s = i;
-			if l < sz && self.items[l].dist > self.items[s].dist {
+			if l < sz && O::prefer(self.items[l].dist, self.items[s].dist) {
 				s = l;
 			}
-			if r < sz && self.items[r].dist > self.items[s].dist {
+			if r < sz && O::prefer(self.items[r].dist, self.items[s].dist) {
 				s = r;
 			}
 			if s == i {
@@ -629,6 +606,9 @@ impl MaxHeap {
 		Some(top)
 	}
 }
+
+type MinHeap = Heap<Min>;
+type MaxHeap = Heap<Max>;
 
 #[cfg(test)]
 mod tests {
