@@ -12,6 +12,7 @@
 /// Foundational types and daemon initialisation.
 pub mod base;
 /// Helpers for writing and running benchmarks.
+#[cfg(feature = "bench")]
 pub mod bench_support;
 /// CLI command handlers for the kern binary.
 pub mod commands;
