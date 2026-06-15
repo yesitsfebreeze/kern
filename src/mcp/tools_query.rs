@@ -55,6 +55,30 @@ fn parse_time_filter(field: &str, value: &str) -> Result<Option<std::time::Syste
 		.map_err(|()| format!("invalid `{field}` timestamp: {value}"))
 }
 
+/// Translate the filter/sort fields of a parsed [`QueryArgs`] into a
+/// [`retrieval::score::QueryOptions`]. Returns the tool-error message (`Err`)
+/// for an unknown scheme or an unparseable `since`/`before`/`valid_at` filter.
+fn build_query_options(p: &QueryArgs) -> Result<retrieval::score::QueryOptions, String> {
+	let mut opts = retrieval::score::QueryOptions {
+		sort: retrieval::score::SortField::parse(&p.sort),
+		ascending: p.ascending,
+		source: p.source.clone(),
+		kind: p.kind,
+		min_conf: p.min_conf,
+		since: parse_time_filter("since", &p.since)?,
+		before: parse_time_filter("before", &p.before)?,
+		valid_at: parse_time_filter("valid_at", &p.valid_at)?,
+		..Default::default()
+	};
+	if let Some(ref s) = p.scheme {
+		match crate::base::types::Source::parse_scheme(s) {
+			Some(tag) => opts.scheme = Some(tag.to_string()),
+			None => return Err(format!("unknown source scheme: {s}")),
+		}
+	}
+	Ok(opts)
+}
+
 #[derive(Deserialize, Default)]
 struct QueryArgs {
 	#[serde(default)]
@@ -174,30 +198,10 @@ impl Server {
 					},
 				);
 
-			let mut opts = retrieval::score::QueryOptions::default();
-			opts.sort = retrieval::score::SortField::parse(&p.sort);
-			opts.ascending = p.ascending;
-			opts.source = p.source;
-			opts.kind = p.kind;
-			if let Some(ref s) = p.scheme {
-				match crate::base::types::Source::parse_scheme(s) {
-					Some(tag) => opts.scheme = Some(tag.to_string()),
-					None => return tool_error(&format!("unknown source scheme: {s}")),
-				}
-			}
-			opts.min_conf = p.min_conf;
-			match parse_time_filter("since", &p.since) {
-				Ok(v) => opts.since = v,
+			let opts = match build_query_options(&p) {
+				Ok(o) => o,
 				Err(e) => return tool_error(&e),
-			}
-			match parse_time_filter("before", &p.before) {
-				Ok(v) => opts.before = v,
-				Err(e) => return tool_error(&e),
-			}
-			match parse_time_filter("valid_at", &p.valid_at) {
-				Ok(v) => opts.valid_at = v,
-				Err(e) => return tool_error(&e),
-			}
+			};
 
 			let (llm_arg, embed_arg) = answer_llm_args(answer_on, &llm_fn, &embed_fn);
 
