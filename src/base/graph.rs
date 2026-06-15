@@ -554,24 +554,16 @@ impl GraphGnn {
 			return 0;
 		}
 
-		// Detach victims from EVERY surviving kern's children in one linear pass —
-		// not per-victim, which is O(victims × children) and explodes when the
-		// root holds hundreds of thousands of dead child refs (the exact bloat
-		// this reaps). HashSet membership keeps it O(total children).
-		for k in self.kerns.values_mut() {
-			if !k.children.is_empty() {
-				k.children.retain(|c| !victims.contains(c));
-			}
-		}
-		let mut removed = 0usize;
+		let removed = victims.len();
 		for id in &victims {
 			self.deregister(id);
-			removed += 1;
 		}
 
-		// Final hygiene: drop any child ref pointing at a kern that no longer
-		// exists in the graph. Covers victims removed above AND files deleted
-		// out-of-band, which otherwise leaves a surviving kern carrying dead refs.
+		// Drop every child ref pointing at a kern that no longer exists — the
+		// reaped victims AND any file deleted out-of-band. One linear pass over
+		// surviving children, keyed on a membership set: O(total children), not
+		// O(victims × children), which would explode when the root holds hundreds
+		// of thousands of dead child refs (the exact bloat this reaps).
 		let existing: std::collections::HashSet<String> = self.kerns.keys().cloned().collect();
 		for k in self.kerns.values_mut() {
 			if !k.children.is_empty() {
