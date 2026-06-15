@@ -55,6 +55,24 @@ pub struct Cli {
 	pub reason_model: String,
 }
 
+impl Cli {
+	/// Headless daemon invocation: no subcommand, `--daemon`, every network/model
+	/// field at its clap default. Used by the `Daemon` and `Hunt` arms, which run
+	/// the server with no CLI flags.
+	fn daemon() -> Self {
+		Cli {
+			command: None,
+			daemon: true,
+			mcp_addr: String::new(),
+			mcp_stdio: false,
+			embed_url: crate::config::DEFAULT_EMBED_URL.to_string(),
+			embed_model: crate::config::DEFAULT_EMBED_MODEL.to_string(),
+			reason_url: String::new(),
+			reason_model: String::new(),
+		}
+	}
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
 	/// Add text (or a --file) to the graph; distills into typed claims.
@@ -488,16 +506,7 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 			// `secs`. cmd_mcp is stdio-driven and would EOF immediately
 			// when launched without an interactive parent.
 			let cfg = cfg.clone();
-			let cli = Cli {
-				command: None,
-				daemon: true,
-				mcp_addr: String::new(),
-				mcp_stdio: false,
-				embed_url: crate::config::DEFAULT_EMBED_URL.to_string(),
-				embed_model: crate::config::DEFAULT_EMBED_MODEL.to_string(),
-				reason_url: String::new(),
-				reason_model: String::new(),
-			};
+			let cli = Cli::daemon();
 			tokio::select! {
 				_ = run_server(&cli, &cfg) => {}
 				_ = tokio::time::sleep(std::time::Duration::from_secs(secs)) => {
@@ -509,17 +518,7 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 			// Fallback: `main.rs` handles this arm first (before calling dispatch),
 			// but keeping it here ensures `dispatch` handles all Commands variants,
 			// so future call sites don't need to special-case Daemon.
-			let default_cli = Cli {
-				command: None,
-				daemon: true,
-				mcp_addr: String::new(),
-				mcp_stdio: false,
-				embed_url: crate::config::DEFAULT_EMBED_URL.to_string(),
-				embed_model: crate::config::DEFAULT_EMBED_MODEL.to_string(),
-				reason_url: String::new(),
-				reason_model: String::new(),
-			};
-			run_server(&default_cli, cfg).await;
+			run_server(&Cli::daemon(), cfg).await;
 		}
 	}
 }
