@@ -1,9 +1,8 @@
 //! Provider-agnostic LLM dispatch. Three legs: `embed` (embeddings), `reason`
-//! (distillation/edge-proposal — local Ollama runs it CPU-only via `num_gpu:0`
-//! so the 8 GB GPU stays free for embed+answer; cloud reason endpoints use the
-//! OpenAI-compat `/v1` path), and `answer` (the streamed `/ask` completion over
-//! native `/api/chat`). Each leg caps `num_ctx`, keeps the model warm via
-//! `keep_alive`, and retries transient (timeout/connect) errors.
+//! (distillation/edge-proposal), and `answer` (the streamed `/ask` completion).
+//! Each leg has two code paths: local Ollama (native `/api/*`, supports
+//! `num_ctx`/`keep_alive`/`num_gpu`) and cloud (OpenAI-compat `/v1/*`).
+//! The `is_local_ollama` heuristic picks the path at call time.
 
 use futures_util::StreamExt as _;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
@@ -211,30 +210,59 @@ impl Client {
 	}
 
 	pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f64>>, LlmError> {
-		let url = format!("{}/api/embed", self.inner.embed_url);
-		let body = self.embed_body(serde_json::json!(texts));
+		if is_local_ollama(&self.inner.embed_url) {
+			let url = format!("{}/api/embed", self.inner.embed_url);
+			let body = self.embed_body(serde_json::json!(texts));
+			let resp = self
+				.post_checked(&url, &self.inner.embed_headers, &body, None)
+				.await?;
+			// /api/embed preserves input order in `embeddings`, so no index sort needed.
+			let parsed: NativeEmbedResponse = resp.json().await?;
+			if parsed.embeddings.is_empty() {
+				return Err(LlmError::EmptyEmbedding);
+			}
+			return Ok(parsed.embeddings);
+		}
+		let url = format!("{}/v1/embeddings", self.inner.embed_url);
+		let body =
+			serde_json::json!({ "model": self.inner.embed_model, "input": texts });
 		let resp = self
 			.post_checked(&url, &self.inner.embed_headers, &body, None)
 			.await?;
-		// /api/embed preserves input order in `embeddings`, so no index sort needed.
-		let parsed: NativeEmbedResponse = resp.json().await?;
-		if parsed.embeddings.is_empty() {
+		let mut parsed: OpenAiEmbedResponse = resp.json().await?;
+		if parsed.data.is_empty() {
 			return Err(LlmError::EmptyEmbedding);
 		}
-		Ok(parsed.embeddings)
+		// OpenAI does not guarantee order — sort by index before returning.
+		parsed.data.sort_by_key(|i| i.index);
+		Ok(parsed.data.into_iter().map(|i| i.embedding).collect())
 	}
 
 	async fn embed_single(&self, text: &str) -> Result<Vec<f64>, LlmError> {
-		let url = format!("{}/api/embed", self.inner.embed_url);
-		let body = self.embed_body(serde_json::json!(text));
+		if is_local_ollama(&self.inner.embed_url) {
+			let url = format!("{}/api/embed", self.inner.embed_url);
+			let body = self.embed_body(serde_json::json!(text));
+			let resp = self
+				.post_checked(&url, &self.inner.embed_headers, &body, None)
+				.await?;
+			let parsed: NativeEmbedResponse = resp.json().await?;
+			return parsed
+				.embeddings
+				.into_iter()
+				.next()
+				.ok_or(LlmError::EmptyEmbedding);
+		}
+		let url = format!("{}/v1/embeddings", self.inner.embed_url);
+		let body = serde_json::json!({ "model": self.inner.embed_model, "input": text });
 		let resp = self
 			.post_checked(&url, &self.inner.embed_headers, &body, None)
 			.await?;
-		let parsed: NativeEmbedResponse = resp.json().await?;
+		let parsed: OpenAiEmbedResponse = resp.json().await?;
 		parsed
-			.embeddings
+			.data
 			.into_iter()
 			.next()
+			.map(|i| i.embedding)
 			.ok_or(LlmError::EmptyEmbedding)
 	}
 
@@ -292,96 +320,146 @@ impl Client {
 			.ok_or(LlmError::EmptyCompletion)
 	}
 
-	/// The single answer-model entry point. Streams a completion over Ollama's
-	/// NATIVE `/api/chat` — used by the `/ask` UI (consumed incrementally), the CLI
-	/// `query --answer` (collected into a string), and the keep-alive warm ping
-	/// (drained, `num_predict: 1`). All three share one request shape and one
-	/// response parser; there is no second answer path.
+	/// Answer-model entry point — used by the `/ask` UI, `query --answer`, and the
+	/// warm ping. Two paths share the same stream interface:
 	///
-	/// `/api/chat` (not the OpenAI-compat `/v1`) is the only endpoint that honors
-	/// `options.num_ctx` and `keep_alive`, both of which the answer path needs to
-	/// stay GPU-resident: `/v1` would cold-load every call and let Ollama's default
-	/// 32k KV cache spill a 4b model onto CPU (~2x slower, and it evicts the
-	/// embedder). `think:false` skips qwen3.5's hidden reasoning phase — pure
-	/// latency for a path that only glues retrieved nodes into prose (ignored by
-	/// non-reasoning models).
+	/// - **Local Ollama** (`localhost`/`:11434`): native `/api/chat` with
+	///   `options.num_ctx`, `keep_alive`, and `think:false`. These Ollama-specific
+	///   options keep the model GPU-resident and skip hidden reasoning.
+	/// - **Cloud** (any other URL): OpenAI-compat `/v1/chat/completions`. Non-
+	///   streaming returns one JSON object; streaming uses SSE (`data: {...}`).
+	///   `num_predict` maps to `max_tokens`.
 	///
-	/// Yields each non-empty content delta in order; ends when the server reports
-	/// `done`. Errors (HTTP, network, 4xx/5xx) surface as a single `Err` item.
-	/// `params.stream` toggles wire streaming — `true` delivers tokens as they
-	/// arrive, `false` returns one object — but either way the content is yielded
-	/// through this same stream, so callers handle both identically.
+	/// Yields each non-empty content delta in order. Errors surface as a single
+	/// `Err` item. `params.stream` works the same on both paths.
 	pub fn answer(
 		&self,
 		params: AnswerParams,
 	) -> impl futures_core::Stream<Item = Result<String, LlmError>> + Send {
 		let client = self.clone();
 		async_stream::stream! {
-			let url = format!("{}/api/chat", client.inner.answer_url);
 			let msgs: Vec<Value> = params
 				.messages
 				.iter()
 				.map(|(r, c)| serde_json::json!({"role": r, "content": c}))
 				.collect();
-			let mut options = serde_json::json!({ "num_ctx": ANSWER_NUM_CTX });
-			if let Some(n) = params.num_predict {
-				options["num_predict"] = n.into();
-			}
-			let body = serde_json::json!({
-				"model": client.inner.answer_model,
-				"messages": msgs,
-				"stream": params.stream,
-				"think": false,
-				"keep_alive": ANSWER_KEEP_ALIVE,
-				"options": options,
-			});
-			// Override the client's 120s TOTAL timeout: a generation can take far
-			// longer than 120s (big RAG prompt + CPU inference), and a total-response
-			// timeout would abort it mid-stream as "error decoding response body".
-			// 600s is a generous ceiling; tokens still stream as they arrive.
-			let resp = match client.inner.http.post(&url)
-				.headers(client.inner.answer_headers.clone())
-				.timeout(Duration::from_secs(600))
-				.json(&body)
-				.send()
-				.await
-			{
-				Ok(r) => r,
-				Err(e) => { yield Err(LlmError::from(e)); return; }
-			};
-			let resp = match check_status(resp).await {
-				Ok(r) => r,
-				Err(e) => { yield Err(e); return; }
-			};
-			let mut stream = resp.bytes_stream();
-			let mut buf: Vec<u8> = Vec::new();
-			while let Some(chunk) = stream.next().await {
-				let chunk = match chunk {
-					Ok(b) => b,
+
+			if is_local_ollama(&client.inner.answer_url) {
+				// --- local Ollama: native /api/chat ---
+				let url = format!("{}/api/chat", client.inner.answer_url);
+				let mut options = serde_json::json!({ "num_ctx": ANSWER_NUM_CTX });
+				if let Some(n) = params.num_predict {
+					options["num_predict"] = n.into();
+				}
+				let body = serde_json::json!({
+					"model": client.inner.answer_model,
+					"messages": msgs,
+					"stream": params.stream,
+					"think": false,
+					"keep_alive": ANSWER_KEEP_ALIVE,
+					"options": options,
+				});
+				let resp = match client.inner.http.post(&url)
+					.headers(client.inner.answer_headers.clone())
+					.timeout(Duration::from_secs(600))
+					.json(&body)
+					.send()
+					.await
+				{
+					Ok(r) => r,
 					Err(e) => { yield Err(LlmError::from(e)); return; }
 				};
-				buf.extend_from_slice(&chunk);
-				// Decode only COMPLETE lines, so a multibyte char split across chunks
-				// is never lossily decoded mid-sequence. Each full line is valid UTF-8.
-				while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-					let raw: Vec<u8> = buf.drain(..=pos).collect();
-					let line = String::from_utf8_lossy(&raw);
+				let resp = match check_status(resp).await {
+					Ok(r) => r,
+					Err(e) => { yield Err(e); return; }
+				};
+				let mut stream = resp.bytes_stream();
+				let mut buf: Vec<u8> = Vec::new();
+				while let Some(chunk) = stream.next().await {
+					let chunk = match chunk {
+						Ok(b) => b,
+						Err(e) => { yield Err(LlmError::from(e)); return; }
+					};
+					buf.extend_from_slice(&chunk);
+					// Decode only COMPLETE lines — a multibyte char split across chunks
+					// is never lossily decoded mid-sequence.
+					while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+						let raw: Vec<u8> = buf.drain(..=pos).collect();
+						let line = String::from_utf8_lossy(&raw);
+						if let Some(cl) = parse_chat_line(line.trim_end()) {
+							if let Some(t) = cl.content {
+								if !t.is_empty() { yield Ok(t); }
+							}
+							if cl.done { return; }
+						}
+					}
+				}
+				// `stream:false` is one JSON object with no trailing newline — flush.
+				if !buf.is_empty() {
+					let line = String::from_utf8_lossy(&buf);
 					if let Some(cl) = parse_chat_line(line.trim_end()) {
 						if let Some(t) = cl.content {
 							if !t.is_empty() { yield Ok(t); }
 						}
-						if cl.done { return; }
 					}
 				}
-			}
-			// A `stream:false` response is one JSON object with no trailing newline,
-			// so the line-split loop never fires — flush the buffered remainder. It
-			// carries both the full content and `done:true`; emit content first.
-			if !buf.is_empty() {
-				let line = String::from_utf8_lossy(&buf);
-				if let Some(cl) = parse_chat_line(line.trim_end()) {
-					if let Some(t) = cl.content {
-						if !t.is_empty() { yield Ok(t); }
+			} else {
+				// --- cloud: OpenAI-compat /v1/chat/completions ---
+				let url = format!("{}/v1/chat/completions", client.inner.answer_url);
+				let mut body = serde_json::json!({
+					"model": client.inner.answer_model,
+					"messages": msgs,
+					"stream": params.stream,
+				});
+				if let Some(n) = params.num_predict {
+					body["max_tokens"] = n.into();
+				}
+				let resp = match client.inner.http.post(&url)
+					.headers(client.inner.answer_headers.clone())
+					.timeout(Duration::from_secs(600))
+					.json(&body)
+					.send()
+					.await
+				{
+					Ok(r) => r,
+					Err(e) => { yield Err(LlmError::from(e)); return; }
+				};
+				let resp = match check_status(resp).await {
+					Ok(r) => r,
+					Err(e) => { yield Err(e); return; }
+				};
+				if !params.stream {
+					match resp.json::<ChatResponse>().await {
+						Ok(parsed) => {
+							if let Some(c) = parsed.choices.into_iter().next() {
+								let t = c.message.content;
+								if !t.is_empty() { yield Ok(t); }
+							} else {
+								yield Err(LlmError::EmptyCompletion);
+							}
+						}
+						Err(e) => { yield Err(LlmError::from(e)); }
+					}
+					return;
+				}
+				// SSE streaming: `data: <json>\n\n` lines, terminated by `data: [DONE]`.
+				let mut stream = resp.bytes_stream();
+				let mut buf: Vec<u8> = Vec::new();
+				while let Some(chunk) = stream.next().await {
+					let chunk = match chunk {
+						Ok(b) => b,
+						Err(e) => { yield Err(LlmError::from(e)); return; }
+					};
+					buf.extend_from_slice(&chunk);
+					while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+						let raw: Vec<u8> = buf.drain(..=pos).collect();
+						let line = String::from_utf8_lossy(&raw);
+						if let Some(delta) = parse_sse_delta(line.trim_end()) {
+							if let Some(t) = delta.content {
+								if !t.is_empty() { yield Ok(t); }
+							}
+							if delta.done { return; }
+						}
 					}
 				}
 			}
@@ -441,6 +519,19 @@ fn make_headers(key: &str) -> HeaderMap {
 #[derive(Deserialize)]
 struct NativeEmbedResponse {
 	embeddings: Vec<Vec<f64>>,
+}
+
+/// Response from OpenAI-compat `/v1/embeddings`. Order is NOT guaranteed —
+/// callers must sort by `index` before returning.
+#[derive(Deserialize)]
+struct OpenAiEmbedResponse {
+	data: Vec<OpenAiEmbedItem>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiEmbedItem {
+	embedding: Vec<f64>,
+	index: usize,
 }
 
 #[derive(Serialize)]
@@ -529,6 +620,31 @@ fn is_local_ollama(url: &str) -> bool {
 struct ChatLine {
 	content: Option<String>,
 	done: bool,
+}
+
+/// One delta from an OpenAI-compat SSE stream. `done` is true on `[DONE]` or
+/// when `finish_reason` is non-empty.
+struct SseDelta {
+	content: Option<String>,
+	done: bool,
+}
+
+/// Parse one SSE line (`data: <json>` or `data: [DONE]`). Non-`data:` lines
+/// (comments, blank lines) → `None`.
+fn parse_sse_delta(line: &str) -> Option<SseDelta> {
+	let data = line.strip_prefix("data: ")?;
+	if data == "[DONE]" {
+		return Some(SseDelta { content: None, done: true });
+	}
+	let v: Value = serde_json::from_str(data).ok()?;
+	let content = v["choices"][0]["delta"]["content"]
+		.as_str()
+		.map(str::to_string);
+	let done = v["choices"][0]["finish_reason"]
+		.as_str()
+		.map(|r| !r.is_empty())
+		.unwrap_or(false);
+	Some(SseDelta { content, done })
 }
 
 /// Parse one line of an Ollama `/api/chat` response — NDJSON when streaming, a

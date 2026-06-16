@@ -92,7 +92,6 @@ pub struct Retrieved {
 /// (optional) personalized-PageRank hits via weighted RRF. Query-relevant lists
 /// (dense, lexical) get weight 1.0; query-independent priors (importance,
 /// PageRank) get `cfg.rrf_global_weight` so they bias without diluting relevance.
-/// Falls back to `dense_seeds` when the fusion comes back empty.
 fn fuse_hybrid_seeds(
 	g: &GraphGnn,
 	cfg: &RetrievalConfig,
@@ -126,12 +125,7 @@ fn fuse_hybrid_seeds(
 		lists.push(&pr_hits);
 		weights.push(gw);
 	}
-	let fused = fuse::rrf(&lists, &weights, cfg.rrf_k, cfg.seed_k.max(1) * 2);
-	if fused.is_empty() {
-		dense_seeds
-	} else {
-		fused
-	}
+	fuse::rrf(&lists, &weights, cfg.rrf_k, cfg.seed_k.max(1) * 2)
 }
 
 /// The graph-only half of retrieval: seed → expand → merge → score → diversify,

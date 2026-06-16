@@ -42,8 +42,20 @@ install: release
 uninstall:
     -cargo uninstall kern
 
+[unix]
 clean:
     cargo clean
+    rm -rf .relay .mesh .git-fs .machine
+    rm -rf .kern/bin .kern/capture .kern/data .kern/journal .kern/digest.md .kern/*.log
+    rm -rf docs/book/book
+
+[windows]
+clean:
+    cargo clean
+    -Remove-Item -Recurse -Force .relay, .mesh, .git-fs, .machine
+    -Remove-Item -Recurse -Force ".kern\bin", ".kern\capture", ".kern\data", ".kern\journal", ".kern\digest.md"
+    -Remove-Item -Force ".kern\*.log"
+    -Remove-Item -Recurse -Force "docs\book\book"
 
 [windows]
 kill:
