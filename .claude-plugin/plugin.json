@@ -1,7 +1,7 @@
 {
   "$schema": "https://code.claude.com/schemas/plugin.json",
   "name": "kern",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Self-organizing knowledge graph as agent memory. Auto-captures each turn, recalls relevant thoughts on demand per prompt, and exposes the kern MCP tools. Requires the `kern` CLI on PATH.",
   "author": {
     "name": "sayhe",
@@ -15,6 +15,7 @@
     "demand-driven",
     "embeddings"
   ],
+  "hooks": "./hooks/hooks.json",
   "mcpServers": {
     "kern": {
       "command": "kern",
