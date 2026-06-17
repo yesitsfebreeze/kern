@@ -11,7 +11,6 @@ mod gnn;
 mod gossip;
 mod graph;
 mod ingest;
-mod journal;
 mod reason;
 mod retrieval;
 mod serve;
@@ -25,7 +24,6 @@ pub use gnn::GnnConfig;
 pub use gossip::GossipConfig;
 pub use graph::GraphConfig;
 pub use ingest::IngestConfig;
-pub use journal::{JournalConfig, DEFAULT_MAX_TODAY_BYTES, DEFAULT_RETAIN_DAYS};
 pub use reason::{ReasonConfig, DEFAULT_REASON_MODEL};
 pub use retrieval::{ModeWeights, RetrievalConfig};
 pub use serve::ServeConfig;
@@ -56,7 +54,6 @@ pub struct Config {
 	pub watcher: WatcherConfig,
 	pub capture: CaptureConfig,
 	pub graph: GraphConfig,
-	pub journal: JournalConfig,
 }
 
 impl Default for Config {
@@ -103,7 +100,6 @@ impl Config {
 			watcher: WatcherConfig::default(),
 			capture: CaptureConfig::default(),
 			graph: GraphConfig::default(),
-			journal: JournalConfig::default(),
 		}
 	}
 

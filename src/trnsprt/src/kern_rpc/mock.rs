@@ -7,8 +7,7 @@
 //! The mock keeps a tiny in-memory store of `EntityRef`s plus a list of
 //! `Reason` edges. `query` does a substring scan over labels, `ingest`
 //! appends a fresh row, `link` records an edge, `neighbors` returns
-//! every other entity in the corpus filtered by edge kind, and
-//! `truncate_after` clears entries newer than the supplied timestamp.
+//! every other entity in the corpus filtered by edge kind.
 //!
 //! Honours `cancel_token` semantics on `query`: only the highest token
 //! seen yields `fresh: true`. Older in-flight requests come back with
@@ -21,14 +20,13 @@ use super::dto::{
 	AnchorReq, AnchorRes, CallToolReq, CallToolRes, DegradeReq, DegradeRes, DescriptorReq,
 	DescriptorRes, EdgeKind, EntityKindLite, EntityRef, EntityStatusLite, ForgetReq, ForgetRes,
 	HealthRes, IngestReq, IngestRes, LinkReq, LinkRes, ListToolsReq, ListToolsRes, NeighborsReq,
-	NeighborsRes, PulseReq, PulseRes, QueryReq, QueryRes, TruncateAfterReq, TruncateAfterRes,
+	NeighborsRes, PulseReq, PulseRes, QueryReq, QueryRes,
 };
 use super::svc::KernRpc;
 
 #[derive(Clone, Debug)]
 struct MockEntity {
 	pub r#ref: EntityRef,
-	pub ts_ms: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -77,7 +75,6 @@ impl MockKernServer {
 				score: 1.0,
 				edges: vec![],
 			},
-			ts_ms: 0,
 		});
 		id
 	}
@@ -150,7 +147,6 @@ impl KernRpc for MockKernServer {
 					score: 1.0,
 					edges: vec![],
 				},
-				ts_ms: now_ms(),
 			};
 			// Touch `req.descriptor`/`req.conf`/`req.source` to silence
 			// unused warnings when DTO fields don't drive the mock.
@@ -223,21 +219,6 @@ impl KernRpc for MockKernServer {
 		}
 	}
 
-	fn truncate_after(
-		&self,
-		req: TruncateAfterReq,
-	) -> impl ::core::future::Future<Output = TruncateAfterRes> + Send {
-		let state = self.inner.clone();
-		async move {
-			state
-				.entities
-				.lock()
-				.unwrap()
-				.retain(|e| e.ts_ms <= req.ts_ms);
-			TruncateAfterRes {}
-		}
-	}
-
 	fn forget(&self, _req: ForgetReq) -> impl ::core::future::Future<Output = ForgetRes> + Send {
 		async move { ForgetRes::default() }
 	}
@@ -278,14 +259,6 @@ impl KernRpc for MockKernServer {
 	) -> impl ::core::future::Future<Output = ListToolsRes> + Send {
 		async move { ListToolsRes::default() }
 	}
-}
-
-fn now_ms() -> u64 {
-	use std::time::{SystemTime, UNIX_EPOCH};
-	SystemTime::now()
-		.duration_since(UNIX_EPOCH)
-		.map(|d| d.as_millis() as u64)
-		.unwrap_or(0)
 }
 
 #[cfg(test)]

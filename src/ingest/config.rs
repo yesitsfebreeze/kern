@@ -6,8 +6,8 @@ use crate::base::constants::{
 /// Runtime ingest knobs threaded through the [`Worker`](crate::ingest::Worker)
 /// pipeline. Distinct from the serde-deserialized
 /// [`IngestConfig`](crate::config::IngestConfig): this runtime form carries
-/// `ttl_secs` and drops the serde-only `session_mirror_max_seen`. Both share the
-/// same default values via the `INGEST_*` constants in `base::constants`.
+/// `ttl_secs`. Both share the same default values via the `INGEST_*`
+/// constants in `base::constants`.
 #[derive(Debug, Clone)]
 pub struct Config {
 	/// Cosine-similarity floor in `[0.0, 1.0]`: a new vector whose nearest

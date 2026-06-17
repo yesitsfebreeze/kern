@@ -12,13 +12,11 @@
 //!    neighbours. [`outcome`] reports per-document success / partial / failure.
 //!
 //! Ambient document sources that feed the Worker: [`capture_spool`] (the
-//! Claude-Code Stop-hook spool) and [`file_watcher`]; [`session_mirror`] dedups
-//! forked sessions; [`distill`] extracts durable claims from conversation text.
+//! Claude-Code Stop-hook spool) and [`file_watcher`]; [`distill`] extracts
+//! durable claims from conversation text.
 
 pub mod capture_spool;
-pub mod compactor;
 pub mod config;
-pub mod day_digest;
 pub mod dedup;
 pub mod direct;
 pub mod distill;
@@ -26,7 +24,6 @@ pub mod embed;
 pub mod file_watcher;
 pub mod outcome;
 pub mod place;
-pub mod session_mirror;
 pub mod split;
 pub mod synthesis;
 pub mod worker;

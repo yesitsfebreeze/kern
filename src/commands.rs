@@ -57,7 +57,7 @@ pub struct Cli {
 
 impl Cli {
 	/// Headless daemon invocation: no subcommand, `--daemon`, every network/model
-	/// field at its clap default. Used by the `Daemon` and `Hunt` arms, which run
+	/// field at its clap default. Used by the `Daemon` arm, which runs
 	/// the server with no CLI flags.
 	fn daemon() -> Self {
 		Cli {
@@ -201,12 +201,6 @@ pub enum Commands {
 	Migrate {
 		/// Data dir to migrate; defaults to the configured data_dir.
 		path: Option<String>,
-	},
-	/// Run a timed self-improvement hunt (feature-gated).
-	#[cfg(feature = "hunt")]
-	Hunt {
-		#[arg(long, default_value = "60")]
-		secs: u64,
 	},
 	/// Start the long-lived daemon (same as `--daemon`). Convenience alias.
 	Daemon,
@@ -500,20 +494,6 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 				Err(e) => eprintln!("migrate: {e}"),
 			}
 		}
-		#[cfg(feature = "hunt")]
-		Commands::Hunt { secs } => {
-			// Run the full daemon (TCP MCP + tick worker) and bail after
-			// `secs`. cmd_mcp is stdio-driven and would EOF immediately
-			// when launched without an interactive parent.
-			let cfg = cfg.clone();
-			let cli = Cli::daemon();
-			tokio::select! {
-				_ = run_server(&cli, &cfg) => {}
-				_ = tokio::time::sleep(std::time::Duration::from_secs(secs)) => {
-					eprintln!("kern hunt: {secs}s elapsed, exiting");
-				}
-			}
-		}
 		Commands::Daemon => {
 			// Fallback: `main.rs` handles this arm first (before calling dispatch),
 			// but keeping it here ensures `dispatch` handles all Commands variants,
@@ -532,15 +512,11 @@ pub(crate) struct EngineHandle {
 }
 
 /// Build the engine stack (graph + worker + tick + MCP server) and spawn every
-/// background service: watchdog, keepalive, viewer, session-mirror, file-watcher,
+/// background service: watchdog, keepalive, viewer, file-watcher,
 /// capture, gossip, maintenance tick. Used by `run_server`. Does NOT register
 /// `.mcp.json`, does NOT bind `kern.sock`, and does NOT block — the caller owns
 /// the serve/park loop.
 pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineHandle {
-	if let Some(j) = journal::global() {
-		j.set_max_bytes(cfg.journal.max_today_bytes);
-	}
-
 	// Self-heal a bloated store BEFORE the serving env opens. LMDB never returns
 	// freed pages to the OS, so a graph that was once fragmented to a runaway of
 	// empty unnamed kerns leaves a multi-GB `data.mdb` that every load must mmap
@@ -661,9 +637,6 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 
 	spawn_viewer(cfg, &g, &llm_client, &q, &mcp_server);
 
-	spawn_session_mirror(cfg, &worker);
-	spawn_compactor(cfg, &g, std::sync::Arc::new(llm_client.complete_func()));
-
 	spawn_file_watcher(cfg, &worker);
 
 	spawn_capture(cfg, &worker, &llm_fn, &g);
@@ -703,10 +676,7 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	// other daemon scaffolding spins up. The accept loop runs in a
 	// detached task; this function returns when ctrl-c arrives.
 	{
-		let mem = Arc::new(std::sync::Mutex::new(
-			crate::memory_service::MemoryService::new(),
-		));
-		let handler = crate::rpc::KernRpcHandler::new(mcp_server.clone(), mem);
+		let handler = crate::rpc::KernRpcHandler::new(mcp_server.clone());
 		let endpoint = trnsprt::typed::Endpoint::kern();
 		match trnsprt::typed::bind_kern_listener(&endpoint).await {
 			Ok(trnsprt::typed::BindOutcome::Bound(listener)) => {
@@ -865,64 +835,6 @@ fn spawn_viewer(
 			tracing::warn!(target: "kern.viewer", error = %e, "graph viewer failed to start");
 		}
 	});
-}
-
-/// Slice K — session mirror. Tails the shared journal `fork_*` lifecycle events
-/// and ingests each new fork as a `Document` entity with `Source::Session`.
-/// The live mirror tails `today.jsonl`; the SQLite archive is only pruned here
-/// (a missing history.db does not disable mirroring).
-fn spawn_session_mirror(cfg: &crate::config::Config, worker: &Arc<crate::ingest::Worker>) {
-	use crate::ingest::session_mirror::{run, SessionMirror, WorkerSink};
-	let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-
-	// Archive maintenance (independent of live mirroring): prune the SQLite
-	// history of days older than the retention window. Best-effort — a missing
-	// history.db must NOT disable the live mirror, which reads today.jsonl.
-	if cfg.journal.retain_days > 0 {
-		match journal::History::open(&cwd) {
-			Ok(history) => match history.retain_days(cfg.journal.retain_days) {
-				Ok(n) if n > 0 => tracing::info!(
-					target: "kern.journal",
-					pruned = n,
-					retain_days = cfg.journal.retain_days,
-					"history.db pruned"
-				),
-				Ok(_) => {}
-				Err(e) => tracing::warn!(
-					target: "kern.journal",
-					error = %e,
-					"history.db prune failed"
-				),
-			},
-			Err(e) => tracing::warn!(
-				target: "kern.journal",
-				error = %e,
-				"history.db open failed; archive prune skipped"
-			),
-		}
-	}
-
-	// Live mirror: tail today.jsonl for fork lifecycle events. This is the file
-	// `journal::emit` writes, so agent sessions are mirrored as they open.
-	let sink = WorkerSink::new(worker.clone());
-	let mut sm = SessionMirror::new(sink);
-	sm.set_max_seen(cfg.ingest.session_mirror_max_seen);
-	let mirror = Arc::new(tokio::sync::Mutex::new(sm));
-	let journal_path = cwd.join(".kern").join("journal").join("today.jsonl");
-	tokio::spawn(run(journal_path, mirror, std::time::Duration::from_secs(2)));
-}
-
-/// Out-of-band journal compactor. Drains the dated segments produced by
-/// `DayJournal` rollover into `history.db` (the machine-queryable archive),
-/// deleting each segment after a successful insert. The optional Obsidian
-/// "memory of the day" digest is rendered here too when enabled.
-fn spawn_compactor(cfg: &crate::config::Config, graph: &SharedGraph, llm: crate::types::LlmFunc) {
-	use crate::ingest::compactor::run;
-	let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-	let interval = std::time::Duration::from_secs(cfg.journal.compactor_interval_secs.max(1));
-	let export = cfg.journal.obsidian_export;
-	let vault = cfg.journal.obsidian_vault.clone();
-	tokio::spawn(run(cwd, interval, export, vault, graph.clone(), llm));
 }
 
 /// Slice O — kern-side filesystem watcher. Off unless `[watcher] enabled = true`.

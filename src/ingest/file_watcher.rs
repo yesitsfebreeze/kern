@@ -15,32 +15,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use journal::{now_ms, EntityTouchedPayload, Entry, Kind, Sink, TouchOp};
 use watcher::{FileWatcher, IgnoreRules, IngestPipeline, IngestRecord, IngestSink, WatcherError};
 
 use crate::base::types::{EntityKind, Source};
 use crate::ingest::{Config as IngestRunConfig, Worker};
-
-/// Build a `Kind::EntityTouched` journal entry for a slice-R `FsWrite`
-/// touch. Factored out so tests can drive a `Sink` they control without
-/// touching the process-global journal.
-pub(crate) fn build_fs_write_entry(entity_id: &str) -> Entry {
-	let payload = EntityTouchedPayload {
-		entity_id: entity_id.to_string(),
-		op: TouchOp::FsWrite,
-		fork_id: None,
-		ts_ms: now_ms(),
-	};
-	let v = serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null);
-	Entry::new(Kind::EntityTouched, entity_id, v)
-}
-
-/// Emit an `FsWrite` touch into the supplied `Sink`. Production wires
-/// `journal::GlobalSink`; tests substitute a `CountingSink` to inspect
-/// the entries without booting a `DayJournal`.
-pub(crate) fn emit_fs_write_touch(entity_id: &str, sink: &dyn Sink) {
-	sink.emit(build_fs_write_entry(entity_id));
-}
 
 /// Strip the `file://` (or `file:///`) prefix produced by
 /// `watcher::pipeline::file_uri`. Returns the input unchanged when no
@@ -104,17 +82,6 @@ impl IngestSink for KernFileWatcherSink {
 
 		let descriptor = language_hint.unwrap_or_default();
 
-		// Slice R: log an `FsWrite` touch into the shared journal so the
-		// a client-side `Recents` ring picks the file up via replay even
-		// though the file watcher runs in the kern process. Use the
-		// path as the entity_id — the actual kern entity_id is only
-		// known after `place_document` runs, but Recents matches by
-		// EntityRef.id which today is the source path / external id.
-		let touch_id = match &source {
-			Source::File { path, .. } => path.clone(),
-			_ => String::new(),
-		};
-
 		// Fire-and-forget; `place_document`'s vector-similarity dedup keeps
 		// the entity count stable when the same file is re-ingested.
 		self.worker.enqueue(
@@ -125,10 +92,6 @@ impl IngestSink for KernFileWatcherSink {
 			1.0,
 			IngestRunConfig::default(),
 		);
-
-		if !touch_id.is_empty() {
-			emit_fs_write_touch(&touch_id, &journal::GlobalSink);
-		}
 	}
 }
 
@@ -165,8 +128,7 @@ mod tests {
 	use crate::crdt::GCounter;
 
 	/// Test sink that bypasses the embed-backed `Worker` and writes directly
-	/// into a graph. Mirrors the `DirectSink` shape used by slice K's
-	/// session_mirror tests so kern tests stay hermetic.
+	/// into a graph so kern tests stay hermetic.
 	#[derive(Clone)]
 	struct DirectFileSink {
 		graph: Arc<RwLock<GraphGnn>>,
@@ -342,35 +304,6 @@ mod tests {
 				.any(|p| target_str.ends_with(p) || p.ends_with("note.md")),
 			"expected stored path to reference note.md; got {paths:?}"
 		);
-	}
-
-	/// Slice R: a single FsWrite touch produces an `EntityTouched`
-	/// journal entry whose payload deserialises back to `op = FsWrite`
-	/// for the supplied path, and `Recents::replay_journal` walks that
-	/// entry into a ring entry.
-	#[test]
-	fn fs_write_touch_emits_entity_touched_and_replays_into_recents() {
-		use std::sync::Mutex;
-
-		#[derive(Default)]
-		struct CapturingSink {
-			entries: Mutex<Vec<journal::Entry>>,
-		}
-		impl journal::Sink for CapturingSink {
-			fn emit(&self, e: journal::Entry) {
-				self.entries.lock().unwrap().push(e);
-			}
-		}
-
-		let sink = CapturingSink::default();
-		emit_fs_write_touch("file:///tmp/note.md", &sink);
-
-		let entries = sink.entries.lock().unwrap().clone();
-		assert_eq!(entries.len(), 1);
-		assert!(matches!(entries[0].kind, journal::Kind::EntityTouched));
-		let ev = journal::EntityTouchedEvent::from_entry(&entries[0]).expect("parse");
-		assert_eq!(ev.entity_id, "file:///tmp/note.md");
-		assert_eq!(ev.op, journal::TouchOp::FsWrite);
 	}
 
 	/// Idempotency: feeding the same `IngestRecord` twice keeps the entity

@@ -1,7 +1,6 @@
 set windows-shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
 
 compose    := "docker compose -f docker/docker-compose.yml"
-hunt_outdir := justfile_directory() / "docker" / "out"
 
 default:
     @just --list
@@ -46,14 +45,14 @@ uninstall:
 clean:
     cargo clean
     rm -rf .relay .mesh .git-fs .machine
-    rm -rf .kern/bin .kern/capture .kern/data .kern/journal .kern/digest.md .kern/*.log
+    rm -rf .kern/bin .kern/capture .kern/data .kern/digest.md .kern/*.log
     rm -rf docs/book/book
 
 [windows]
 clean:
     cargo clean
     -Remove-Item -Recurse -Force .relay, .mesh, .git-fs, .machine
-    -Remove-Item -Recurse -Force ".kern\bin", ".kern\capture", ".kern\data", ".kern\journal", ".kern\digest.md"
+    -Remove-Item -Recurse -Force ".kern\bin", ".kern\capture", ".kern\data", ".kern\digest.md"
     -Remove-Item -Force ".kern\*.log"
     -Remove-Item -Recurse -Force "docs\book\book"
 
@@ -84,19 +83,3 @@ docker-build:
 docker:
     {{compose}} run --rm --remove-orphans dev
 
-hunt-run SECS="300":
-    HUNT_SECS={{SECS}} {{compose}} run --rm dev bash docker/hunt.sh
-
-hunt-print:
-    {{compose}} run --rm dev bash -c 'heaptrack_print $(ls -t docker/out/heaptrack.kern.*.gz | head -1) | less -R'
-
-hunt-leaks:
-    {{compose}} run --rm dev bash -c 'heaptrack_print --print-leaks $(ls -t docker/out/heaptrack.kern.*.gz | head -1) | head -60'
-
-[windows]
-hunt-clean:
-    -Remove-Item -Recurse -Force "{{hunt_outdir}}"
-
-[unix]
-hunt-clean:
-    rm -rf "{{hunt_outdir}}"

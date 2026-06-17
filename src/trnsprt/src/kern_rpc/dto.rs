@@ -245,20 +245,6 @@ pub struct Anchor {
 	pub selection: Option<String>,
 }
 
-// ---- truncate -------------------------------------------------------------
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct TruncateAfterReq {
-	pub ts_ms: u64,
-}
-
-/// Ack-only response: `truncate_after` returns no data, so this is intentionally
-/// an empty struct — receiving it IS the acknowledgement that the truncation ran.
-/// Kept as a named type (rather than `()`) so the typed-RPC return shape stays
-/// uniform and the method can grow fields later without a wire break.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct TruncateAfterRes {}
-
 // ---- forget --------------------------------------------------------------
 
 /// Hard-delete an entity by id. The id is matched by prefix server-side

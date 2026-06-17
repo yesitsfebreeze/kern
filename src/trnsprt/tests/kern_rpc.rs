@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use trnsprt::kern_rpc::{
 	EdgeKind, EntityKindLite, IngestReq, KernRpcClient, LinkReq, MockKernServer, NeighborsReq,
-	QueryReq, SourceLite, TruncateAfterReq,
+	QueryReq, SourceLite,
 };
 use trnsprt::typed::JsonEnvelopeCodec;
 
@@ -130,35 +130,6 @@ async fn link_then_neighbors_walks_the_edge() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn truncate_after_drops_newer_entities() {
-	let (client, handle, _mock) = spawn_mock_server();
-
-	let _ = client
-		.ingest(IngestReq {
-			text: "older".into(),
-			source: SourceLite::default(),
-			kind: EntityKindLite::Claim,
-			descriptor: None,
-			conf: 0.5,
-			sync: true,
-		})
-		.await
-		.expect("ingest");
-
-	// Truncate at "now"; freshly-ingested rows have ts > 0 so they are
-	// dropped. Subsequent query should come back empty.
-	let _ = client
-		.truncate_after(TruncateAfterReq { ts_ms: 0 })
-		.await
-		.expect("truncate");
-
-	let q = client.query(query_req("", 10, None)).await.expect("query");
-	assert!(q.hits.is_empty(), "truncate should have cleared the store");
-
-	handle.abort();
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn ingest_with_descriptor_succeeds() {
 	// Exercises the non-None `descriptor` branch on IngestReq through the wire:
 	// the field must serialize, deserialize, and be accepted by the server.
@@ -180,36 +151,6 @@ async fn ingest_with_descriptor_succeeds() {
 		.expect("ingest with descriptor");
 	assert!(!res.entity_id.is_empty());
 	assert_eq!(res.status, "ingested");
-
-	handle.abort();
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn truncate_after_u64_max_is_a_noop() {
-	// Boundary guard: truncate keeps rows with ts_ms <= cutoff. A cutoff of
-	// u64::MAX is >= every possible timestamp, so nothing is dropped — the
-	// freshly-ingested entity survives.
-	let (client, handle, _mock) = spawn_mock_server();
-
-	let _ = client
-		.ingest(IngestReq {
-			text: "survivor".into(),
-			source: SourceLite::default(),
-			kind: EntityKindLite::Claim,
-			descriptor: None,
-			conf: 0.5,
-			sync: true,
-		})
-		.await
-		.expect("ingest");
-
-	let _ = client
-		.truncate_after(TruncateAfterReq { ts_ms: u64::MAX })
-		.await
-		.expect("truncate");
-
-	let q = client.query(query_req("", 10, None)).await.expect("query");
-	assert!(!q.hits.is_empty(), "u64::MAX cutoff must drop nothing");
 
 	handle.abort();
 }

@@ -1,9 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "test_utils",
     "src/config-io",
-    "src/journal",
     "src/log",
     "src/protocol",
     "src/trnsprt",
@@ -50,7 +48,6 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-hunt = []
 bench = []
 
 [lib]
@@ -99,7 +96,6 @@ axum.workspace = true
 async-stream = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
-journal = { path = "src/journal" }
 tracing-subscriber.workspace = true
 tracing.workspace = true
 protocol = { path = "src/protocol" }
@@ -112,7 +108,6 @@ zstd = "0.13"
 
 [dev-dependencies]
 proptest = "1"
-kern-test-utils = { path = "test_utils" }
 criterion = "0.5"
 tempfile = "3"
 

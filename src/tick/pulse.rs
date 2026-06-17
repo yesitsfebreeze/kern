@@ -28,7 +28,6 @@ pub fn pulse(q: &Queue, g: &mut GraphGnn, kern_id: &str, strength: f64) {
 		strength,
 		HeatConfig::default().half_life_secs,
 	);
-	emit_stigmergy_snapshot(g, kern_id);
 	// Below-threshold pulses are no-ops by contract; don't enqueue GC work
 	// either. The next above-threshold pulse will trigger the sweep.
 	if strength >= PULSE_THRESHOLD {
@@ -132,26 +131,6 @@ fn maybe_enqueue_reembed(q: &Queue, g: &GraphGnn) {
 		if dirty {
 			q.enqueue(task(TaskKind::Reembed, kern_id));
 		}
-	}
-}
-
-/// Emit one `kern::metrics` tracing event summarising heat distribution at the
-/// pulsed kern. Called from the public `pulse` entrypoint only — never from
-/// recursive `pulse_with_half_life` frames — so each pulse tree yields exactly
-/// one snapshot.
-fn emit_stigmergy_snapshot(g: &GraphGnn, kern_id: &str) {
-	let Some(k) = g.kerns.get(kern_id) else {
-		return;
-	};
-	let snap = crate::metrics::snapshot_heat(k.entities.values());
-	if snap.n > 0 {
-		tracing::info!(
-			target: "kern::metrics",
-			gini = snap.gini,
-			max_heat = snap.max_heat,
-			n = snap.n,
-			"stigmergy_snapshot"
-		);
 	}
 }
 

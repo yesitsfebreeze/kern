@@ -116,12 +116,11 @@ async fn run_loop(
 ) {
 	while let Some(job) = rx.recv().await {
 		let outcome = process(&graph, &embedder, &defer_questions, &job).await;
-		// Every job's outcome is journaled (the tracing layer feeds the
-		// journal), fire-and-forget jobs included. Before this, an `enqueue`d
-		// job that failed vanished without a trace: result_tx is None on that
-		// path, so the Outcome — including its FailureReports — was dropped
-		// unread. Observed live: 8/8 MCP ingests acked "queued" with nothing
-		// in the graph and nothing in the journal to say why.
+		// Log every job's outcome, fire-and-forget jobs included. Before this, an
+		// `enqueue`d job that failed vanished without a trace: result_tx is None
+		// on that path, so the Outcome — including its FailureReports — was
+		// dropped unread. Observed live: 8/8 MCP ingests acked "queued" with
+		// nothing in the graph and no log to say why.
 		log_outcome(&outcome);
 		if let Some(sf) = &save_fn {
 			sf();
@@ -142,8 +141,8 @@ fn outcome_log_severity(o: &Outcome) -> &'static str {
 	}
 }
 
-/// Journal one processed job. The first failure's class+error is inlined so a
-/// single journal line answers "what happened to doc X" without a debugger.
+/// Log one processed job. The first failure's class+error is inlined so a
+/// single log line answers "what happened to doc X" without a debugger.
 fn log_outcome(o: &Outcome) {
 	let first_failure = o
 		.failures

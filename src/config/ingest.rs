@@ -29,10 +29,6 @@ pub struct IngestConfig {
 	/// near-duplicate (handled by dedup). Only candidates STRICTLY between
 	/// `rephrase_lower` and `rephrase_upper` are rephrased/merged.
 	pub rephrase_upper: f64,
-	/// Max number of `fork_id`s remembered in the session-mirror dedup set
-	/// before FIFO eviction kicks in. Bounds memory under long-running
-	/// daemons that accumulate many forks.
-	pub session_mirror_max_seen: usize,
 }
 
 impl Default for IngestConfig {
@@ -43,7 +39,6 @@ impl Default for IngestConfig {
 			hnsw_ef: INGEST_HNSW_EF,
 			rephrase_lower: INGEST_REPHRASE_LOWER,
 			rephrase_upper: INGEST_REPHRASE_UPPER,
-			session_mirror_max_seen: 4096,
 		}
 	}
 }

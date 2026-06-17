@@ -14,16 +14,13 @@
 //! Session/fork orchestration is intentionally **not** part of
 //! `KernRpc` — kern stays unaware of any client's session model.
 //!
-//! Design rationale for this surface (the read/write split, the shared DTOs, and
-//! Adjust-mode's truncate/re-ingest flow) lives in `docs/relay-orchestrator-tui.md`;
-//! consult it to trace why individual methods exist. The macro-generated client +
-//! server plumbing is exercised end-to-end by `tests/kern_rpc.rs`.
+//! The macro-generated client + server plumbing is exercised end-to-end by
+//! `tests/kern_rpc.rs`.
 
 use super::dto::{
 	AnchorReq, AnchorRes, CallToolReq, CallToolRes, DegradeReq, DegradeRes, DescriptorReq,
 	DescriptorRes, ForgetReq, ForgetRes, HealthRes, IngestReq, IngestRes, LinkReq, LinkRes,
 	ListToolsReq, ListToolsRes, NeighborsReq, NeighborsRes, PulseReq, PulseRes, QueryReq, QueryRes,
-	TruncateAfterReq, TruncateAfterRes,
 };
 
 crate::service! {
@@ -40,15 +37,6 @@ crate::service! {
 				/// Depth-1 (clamped to 3) typed graph walk. Reuses the same
 				/// `NeighborsReq`/`Res` types as `SearchSvc::neighbors`.
 				async fn neighbors(req: NeighborsReq) -> NeighborsRes;
-				/// Drop in-memory entries with `ts_ms > input` and any
-				/// persistent rows after that timestamp. Used by Adjust mode
-				/// to roll the memory store back to a chosen point before
-				/// re-ingesting a rewritten turn.
-				///
-				/// Boundary is **inclusive-keep**: a row whose `ts_ms` exactly equals
-				/// `input` is RETAINED; only strictly-newer rows (`ts_ms > input`) are
-				/// removed (matches `MemoryService::truncate_after`'s `retain(ts_ms <= input)`).
-				async fn truncate_after(req: TruncateAfterReq) -> TruncateAfterRes;
 				/// Hard-delete an entity by id (prefix-matched).
 				async fn forget(req: ForgetReq) -> ForgetRes;
 				/// Decay confidence on an entity by id (prefix-matched).

@@ -14,7 +14,6 @@ fn worker_thread_count(available: Option<usize>) -> usize {
 fn main() {
 	use tracing_subscriber::prelude::*;
 	let _ = tracing_subscriber::registry()
-		.with(journal::JournalTracingLayer::new("kern"))
 		.try_init();
 
 	// Floor the worker-thread count. The daemon runs several blocking bridges

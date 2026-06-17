@@ -30,10 +30,6 @@ pub mod ingest;
 pub mod llm;
 /// MCP server implementation exposing kern capabilities over stdio/HTTP.
 pub mod mcp;
-/// Knowledge graph service for storing and querying memories.
-pub mod memory_service;
-/// Runtime metrics collection and reporting.
-pub mod metrics;
 /// Query profiling and performance measurement.
 pub mod profile;
 /// Model quantisation utilities for reducing LLM memory footprint.
