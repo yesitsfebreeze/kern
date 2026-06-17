@@ -14,8 +14,6 @@ pub struct ServeConfig {
 	pub gossip: String,
 	/// MCP Server-Sent-Events streaming endpoint (push transport for MCP clients).
 	pub mcp_sse: String,
-	/// Live graph viewer bind address. Localhost-only by default; empty = off.
-	pub viewer: String,
 }
 
 impl Default for ServeConfig {
@@ -25,7 +23,6 @@ impl Default for ServeConfig {
 			core_addr: ":2666".into(),
 			gossip: ":7946".into(),
 			mcp_sse: ":3000".into(),
-			viewer: "127.0.0.1:7700".into(),
 		}
 	}
 }
@@ -43,7 +40,6 @@ impl ServeConfig {
 			("addr", &self.addr),
 			("core_addr", &self.core_addr),
 			("mcp_sse", &self.mcp_sse),
-			("viewer", &self.viewer),
 		] {
 			if addr.is_empty() {
 				continue;
@@ -101,7 +97,6 @@ mod tests {
 			addr: String::new(),    // disabled
 			core_addr: ":0".into(), // ephemeral
 			mcp_sse: ":0".into(),   // ephemeral — two :0 must NOT collide
-			viewer: String::new(),
 			..Default::default()
 		};
 		assert!(cfg.validate().is_ok());

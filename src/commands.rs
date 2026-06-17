@@ -512,7 +512,7 @@ pub(crate) struct EngineHandle {
 }
 
 /// Build the engine stack (graph + worker + tick + MCP server) and spawn every
-/// background service: watchdog, keepalive, viewer, file-watcher,
+/// background service: watchdog, keepalive, file-watcher,
 /// capture, gossip, maintenance tick. Used by `run_server`. Does NOT register
 /// `.mcp.json`, does NOT bind `kern.sock`, and does NOT block — the caller owns
 /// the serve/park loop.
@@ -527,14 +527,11 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 	maybe_self_heal_store(cfg);
 
 	// Runtime watchdog. A wedged daemon — deadlock on the graph lock, a panic
-	// loop, or every worker thread pinned in a blocking LLM call — keeps holding
-	// the hub TCP socket, so no peer can bind it and the viewer stays dead until
-	// the process is killed by hand (observed: a daemon stopped serving `/graph`
-	// AND heartbeating yet held `:7700` for 8+ minutes). An async task bumps
-	// `beat` every second; a DEDICATED OS thread — immune to runtime starvation,
-	// unlike any tokio task — force-exits the process if `beat` stops advancing.
-	// Exiting frees the socket so a healthy peer takes over the hub within
-	// `viewer::FAILOVER_RETRY`. The threshold (30s) is far above any single LLM
+	// loop, or every worker thread pinned in a blocking LLM call — keeps
+	// holding the kern.sock endpoint and stops serving with no visible failure.
+	// An async task bumps `beat` every second; a DEDICATED OS thread — immune to
+	// runtime starvation, unlike any tokio task — force-exits the process if
+	// `beat` stops advancing. The threshold (30s) is far above any single LLM
 	// call: normal blocking work pins one worker, never the time driver, so the
 	// beat keeps advancing — only a TOTAL stall trips the watchdog.
 	spawn_watchdog();
@@ -602,7 +599,7 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 
 	// Self-heal the unnamed-kern fragmentation on startup. The historical spawn
 	// runaway (now fixed) left graphs with tens of thousands of empty kerns
-	// persisted to disk; since retrieval, tick, and the viewer are all O(loaded
+	// persisted to disk; since retrieval and tick are both O(loaded
 	// kerns), that bloat taxes every request. Reap them once here so every
 	// restart converges to a clean graph, then persist the compacted form.
 	{
@@ -620,8 +617,8 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 		}
 	}
 
-	// Build the MCP server early — shared by the viewer (tool endpoints) and
-	// the RPC surface below. Created here so both can reference the same Arc.
+	// Build the MCP server — shared by the RPC surface (kern_rpc handler), the
+	// SSE/HTTP transport, and stdio. One Arc so all three reference the same.
 	let mcp_server = std::sync::Arc::new(crate::mcp::Server {
 		graph: g.clone(),
 		worker: worker.clone(),
@@ -634,8 +631,6 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 			cfg.retrieval.query_cache_theta,
 		),
 	});
-
-	spawn_viewer(cfg, &g, &llm_client, &q, &mcp_server);
 
 	spawn_file_watcher(cfg, &worker);
 
@@ -799,40 +794,6 @@ fn spawn_keepalive(llm_client: &Client) {
 				while gen.next().await.is_some() {}
 			};
 			let (_, _) = tokio::join!(embed, answer);
-		}
-	});
-}
-
-/// Live graph viewer — a read-only web UI over the current graph. Localhost by
-/// default (`cfg.serve.viewer`); empty disables it.
-fn spawn_viewer(
-	cfg: &crate::config::Config,
-	g: &SharedGraph,
-	llm_client: &Client,
-	q: &Arc<crate::tick::queue::Queue>,
-	mcp_server: &Arc<crate::mcp::Server>,
-) {
-	if cfg.serve.viewer.is_empty() {
-		return;
-	}
-	let vg = g.clone();
-	let vaddr = cfg.serve.viewer.clone();
-	let viewer_llm = llm_client.clone();
-	let viewer_retrieval = cfg.retrieval.clone();
-	let viewer_q = q.clone();
-	let viewer_mcp = mcp_server.clone();
-	tokio::spawn(async move {
-		if let Err(e) = crate::viewer::run(
-			vg,
-			viewer_llm,
-			viewer_retrieval,
-			viewer_q,
-			viewer_mcp,
-			&vaddr,
-		)
-		.await
-		{
-			tracing::warn!(target: "kern.viewer", error = %e, "graph viewer failed to start");
 		}
 	});
 }

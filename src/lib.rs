@@ -44,8 +44,6 @@ pub mod store;
 pub mod tick;
 /// Shared domain types used across kern modules.
 pub mod types;
-/// Live read-only HTTP graph viewer (force-directed web UI).
-pub mod viewer;
 /// Serialisation helpers for wire-format encoding and decoding.
 pub mod wire;
 

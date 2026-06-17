@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// Model for the user-facing `/ask` oracle (streamed answer in the viewer).
+/// Model for the user-facing `/ask` oracle (streamed answer over MCP).
 ///
 /// Split from [`crate::config::ReasonConfig`] on purpose: the two have OPPOSITE
 /// optimization targets. Distillation/edge-proposal ([reason]) runs in the

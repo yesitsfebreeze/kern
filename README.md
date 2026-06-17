@@ -186,7 +186,7 @@ url = "http://localhost:11434"
 model = "qwen3-embedding:0.6b"  # default; dimension locks the graph (use `kern reembed` to switch)
 
 [answer]
-# User-facing /ask oracle (streamed answer in the viewer). Latency-critical, only
+# User-facing /ask oracle (streamed answer over MCP). Latency-critical, only
 # glues retrieved nodes into prose → smallest model that grounds. Uses Ollama's
 # native /api/chat (capped context, kept GPU-resident). url/key blank → fall back
 # to [reason]'s endpoint, so a single local Ollama needs no extra wiring.

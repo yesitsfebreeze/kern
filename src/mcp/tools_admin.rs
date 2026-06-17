@@ -78,7 +78,7 @@ pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 		}),
 		serde_json::json!({
 			"name": "gc",
-			"description": "Reap empty/orphan kerns from THIS running daemon's graph (the cwd it serves) and persist, live — no need to stop the daemon. Removes the residue of unnamed-kern churn so load, retrieval, and the viewer stop paying for dead shards. Returns before/after kern counts and the data.mdb file size. (Deleting rows frees pages inside the file but LMDB only returns that disk to the OS on a compaction; the file shrinks on the next restart, which auto-compacts, or via offline `kern compact`.)",
+			"description": "Reap empty/orphan kerns from THIS running daemon's graph (the cwd it serves) and persist, live — no need to stop the daemon. Removes the residue of unnamed-kern churn so load and retrieval stop paying for dead shards. Returns before/after kern counts and the data.mdb file size. (Deleting rows frees pages inside the file but LMDB only returns that disk to the OS on a compaction; the file shrinks on the next restart, which auto-compacts, or via offline `kern compact`.)",
 			"inputSchema": {"type": "object", "properties": {}},
 		}),
 	]
