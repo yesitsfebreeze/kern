@@ -61,7 +61,7 @@ before quoting it (measure, don't assume).
 ### Interface, security, ops
 | Category | Now | Target |
 |---|---|---|
-| REST + gRPC API + multi-language SDKs | ❌ (MCP + viewer-internal axum HTTP + `kern_rpc`; no *public* REST/gRPC/SDK) | ✅ |
+| REST + gRPC API + multi-language SDKs | ❌ (MCP + `trnsprt::http` axum serve + `kern_rpc`; no *public* REST/gRPC/SDK) | ✅ |
 | API key / JWT-RBAC / TLS / audit logging | ❌ | ✅ |
 | Multitenancy (tenant payload index) | ❌ | ✅ |
 | Production-scale maturity / proven at scale | ❌ | ✅ |
@@ -108,7 +108,7 @@ snapshots — since that is the largest, most-blocking cluster of ❌.
 - [ ] **On-disk / memmap tiering** + segment optimizer (background compaction).
 
 ### Tier 2 — interface, security, ops
-- [ ] **REST + gRPC API** + multi-language SDKs — no *public* REST/gRPC/SDK yet (viewer-internal axum HTTP + `kern_rpc` already exist; see D1). Build over the shared `tools::dispatch`.
+- [ ] **REST + gRPC API** + multi-language SDKs — no *public* REST/gRPC/SDK yet (`trnsprt::http` axum serve + `kern_rpc` already exist; see D1). Build over the shared `tools::dispatch`.
 - [ ] **Auth**: API key / JWT-RBAC / TLS / audit logging.
 - [ ] **Multitenancy** via tenant payload index.
 
@@ -187,12 +187,11 @@ C3. **Memmap tiering + segment optimizer** — `diskann.rs` memmap + `cold.rs`/
     startup and RAM scale sub-linearly with corpus size.
 
 ### Stage D — Surface & access (reach parity on interface)
-D1. **REST API (axum already serving)** — the viewer runs an axum server today
-    (`viewer/mod.rs`: local `/graph` `/ask_retrieve` `/edit` `/tool`; hub `/ask`
-    `/tool`). The task is a first-class REST surface over the full
-    `tools::dispatch`, not viewer-scoped handlers. ⚠️ duplication watch: local +
-    hub already each carry a `/tool` route alongside MCP dispatch — REST + MCP
-    MUST share one `tools::dispatch` core (don't add a third copy).
+D1. **REST API (axum already serving)** — `trnsprt::http` runs an axum server
+    today (MCP-over-HTTP + `kern_rpc` on the serve addr). The task is a
+    first-class REST surface over the full `tools::dispatch`. ⚠️ duplication
+    watch: REST + MCP MUST share one `tools::dispatch` core (don't add a second
+    copy).
 D2. **Auth** — API key / JWT-RBAC / TLS on the REST surface.
 D3. **gRPC + SDKs**, then **multitenancy** (per-tenant graph mux / tenant filter).
 
@@ -232,7 +231,7 @@ Status markers below were checked against the **working tree atop `9683c5c`**
 | `search_all_filtered` WIRED (dense+importance+lexical) | `seed.rs` filters all three seed sources on `is_active`; e2e recall@10 A/B `9386de0` (was: unwired atop `9683c5c`) |
 | Snapshots / WAL / restore = ❌ | no backup/restore/WAL fns in `persist.rs` |
 | Recommend/Discover/distance-matrix = ❌ | no such fns repo-wide |
-| REST surface qualifier | viewer axum routes (`viewer/mod.rs`) + `kern_rpc`; no public REST/gRPC/SDK |
+| REST surface qualifier | `trnsprt::http` axum serve + `kern_rpc`; no public REST/gRPC/SDK |
 | Test surface | **799 lib + 1 integration tests PASS** (verified `cargo test` 2026-06-12 atop `84ba856`); ~962 `#[test]`/`#[tokio::test]` attrs across 170 src files |
 
 *Unverified (needs a run, not a grep):* actual recall@k / p50-p99 latency vs

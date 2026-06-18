@@ -7,31 +7,26 @@ graph TB
     %% ===== external callers =====
     CLI["CLI kern &lt;cmd&gt;"]
     MCPC["MCP client (Claude Code)"]
-    BROWSER["Browser"]
     PEER["Peer daemons (forest)"]
-    FS["Filesystem / journal"]
+    FS["Filesystem"]
 
     %% ===== interfaces =====
     subgraph IFACE["Interfaces"]
         DISPATCH["commands::dispatch"]
         MCP["mcp::Server (stdio+SSE)"]
         RPC["kern_rpc socket (kern.sock)"]
-        VIEWER["viewer.rs — hub :7700<br/>/graph /ask /edit"]
-        REPL["repl.rs"]
     end
 
     CLI --> DISPATCH
     MCPC -->|stdio/proxy| MCP
     MCPC -.->|attach| RPC
-    BROWSER --> VIEWER
     MCP --> RPC
     DISPATCH --> RPC
-    REPL --> CORE
 
     %% ===== daemon lifecycle =====
     subgraph LIFE["Daemon lifecycle (main → run_server)"]
         MAIN["main.rs — multi-thread rt, workers=max(cores,4)"]
-        WD["watchdog OS thread<br/>exit(101) on 30s stall → frees :7700"]
+        WD["watchdog OS thread<br/>exit(101) on 30s stall → frees :8080"]
         WARM["warm loop /240s<br/>join!(embed, answer)"]
         MAIN --> WD --> WARM
     end
@@ -41,10 +36,8 @@ graph TB
     subgraph SRC["Ingest sources (fire-and-forget)"]
         CS["capture_spool::run<br/>spool/*.txt /poll_secs"]
         FWs["file_watcher::run"]
-        SMs["session_mirror::run<br/>journal fork events"]
     end
     FS --> FWs
-    FS --> SMs
 
     %% ===== ingest pipeline =====
     subgraph INGEST["Ingest pipeline (ingest::Worker)"]
@@ -60,7 +53,6 @@ graph TB
     end
     CS -->|extract_claims→distill| Q
     FWs -->|IngestRecord| Q
-    SMs -->|ingest_session| Q
     Q --> SPLIT --> PDOC --> DDOC
     DDOC -->|yes| UPD
     DDOC -->|no| ACCEPT
@@ -116,7 +108,6 @@ graph TB
         HYDE --> SEED --> FUSE --> PR --> EXP --> MRG --> BST --> FLT --> MMR --> RRK --> CMA --> BAP
     end
     RPC --> HYDE
-    VIEWER --> HYDE
     SEED -->|search 0.4·entity+0.6·gnn| EIDX
     SEED -->|search| GIDX
     SEED -->|BM25| LEXI
@@ -208,7 +199,7 @@ graph TB
     WARM --> ANS_M
 
     %% ===== config =====
-    CFG["Config (.kern): [embed][reason][answer][serve]<br/>[retrieval][ingest][gossip][tick][gnn][graph][watcher][capture][journal]"]
+    CFG["Config (.kern): [embed][reason][answer][serve]<br/>[retrieval][ingest][gossip][tick][gnn][graph][watcher][capture]"]
     CFG -.tunes.-> RETR
     CFG -.tunes.-> INGEST
     CFG -.tunes.-> TICK
@@ -223,7 +214,7 @@ graph TB
 - **Reason hosting** — edge lives in its `from` kern; `to_kern_id`/`to_net_id` stamp cross-kern / cross-network targets.
 - **Hybrid score** — `0.4·entity_idx + 0.6·gnn_entity_idx` wherever search runs.
 - **Heat → GC** — exp decay (~36h half-life); reaped when `heat<0.01 AND age>7d AND kind∉{Fact,Document}`.
-- **Watchdog** — OS thread force-exits on 30s async stall so a peer seizes `:7700`.
+- **Watchdog** — OS thread force-exits on 30s async stall so a peer seizes `:8080`.
 
 Notes: `diskann.rs` is built+tested but **not wired** into live search (hnsw is).
 `[graph] max_kerns` defaults to `usize::MAX` (cap off) — empty-kern GC keeps it from bloating.

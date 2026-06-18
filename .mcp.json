@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "kern": {
+      "args": [
+        "mcp"
+      ],
+      "command": "kern"
+    }
+  }
+}
