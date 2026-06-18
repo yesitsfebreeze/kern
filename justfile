@@ -1,6 +1,9 @@
 set windows-shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
 
-compose    := "docker compose -f docker/docker-compose.yml"
+# Shared debug/test image — sibling repo: https://github.com/yesitsfebreeze/rustest
+rustest_repo := "https://github.com/yesitsfebreeze/rustest"
+rustest_dir  := justfile_directory() / ".." / "rustest"
+image        := "rustest:latest"
 
 default:
     @just --list
@@ -77,9 +80,22 @@ docs-serve:
 docs-check:
     mdbook test docs/book
 
+# Build the shared rustest image (clone the sibling repo if it's missing).
+[unix]
 docker-build:
-    {{compose}} build
+    test -d "{{rustest_dir}}" || git clone {{rustest_repo}} "{{rustest_dir}}"
+    cd "{{rustest_dir}}" && just build
 
+[windows]
+docker-build:
+    if (-not (Test-Path "{{rustest_dir}}")) { git clone {{rustest_repo}} "{{rustest_dir}}" }
+    cd "{{rustest_dir}}"; just build
+
+# Interactive shell in the debug/test container (this repo mounted at /work).
 docker:
-    {{compose}} run --rm --remove-orphans dev
+    docker run --rm -it --cap-add SYS_PTRACE --security-opt seccomp=unconfined -v "{{justfile_directory()}}":/work -w /work {{image}} /bin/bash
+
+# Run the full test suite inside the container.
+docker-test:
+    docker run --rm --cap-add SYS_PTRACE --security-opt seccomp=unconfined -v "{{justfile_directory()}}":/work -w /work {{image}} cargo test --workspace
 
