@@ -13,10 +13,9 @@
 //! - [`client_local`] — convenience constructor that dials the per-user
 //!   `kern.sock` endpoint and builds a `KernRpcClient`.
 //!
-//! `fork_at` is **not** part of `KernRpc`. Forks are agnt's concern —
-//! routing them through kern would force kern to know about agnt
-//! sessions, which it deliberately doesn't. Slice L will introduce a
-//! `fork_at` method on `AgntRpc` (see `protocol::agent`).
+//! Forks are deliberately **not** part of `KernRpc` — routing agent
+//! session forks through kern would force it to know about agent
+//! sessions, which it doesn't.
 
 pub mod client_local;
 pub mod dto;

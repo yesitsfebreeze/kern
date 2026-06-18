@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "src/config-io",
     "src/log",
-    "src/protocol",
     "src/trnsprt",
     "src/trnsprt/macros",
     "src/watcher",
@@ -98,7 +97,6 @@ futures-core = "0.3"
 futures-util = "0.3"
 tracing-subscriber.workspace = true
 tracing.workspace = true
-protocol = { path = "src/protocol" }
 trnsprt = { path = "src/trnsprt" }
 watcher = { path = "src/watcher" }
 async-trait = "0.1"

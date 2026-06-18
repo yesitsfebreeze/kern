@@ -1290,7 +1290,6 @@ dependencies = [
  "heed",
  "memmap2",
  "proptest",
- "protocol",
  "rand 0.10.1",
  "rayon",
  "reqwest",
@@ -1692,16 +1691,6 @@ dependencies = [
  "rusty-fork",
  "tempfile",
  "unarray",
-]
-
-[[package]]
-name = "protocol"
-version = "1.0.0"
-dependencies = [
- "serde",
- "serde_json",
- "tokio",
- "trnsprt",
 ]
 
 [[package]]
