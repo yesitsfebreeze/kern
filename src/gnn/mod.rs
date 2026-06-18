@@ -6,9 +6,9 @@
 //! tick loop trains it on the live graph and writes back per-node `gnn_vector`s,
 //! which retrieval fuses with content similarity (see `base::search::merge_hits`).
 //!
-//! Layers ([`gat`], [`gcn`], [`sage`]) implement the [`GraphLayer`] /
-//! [`BackwardGraphLayer`] traits; [`loss`], [`optim`], and [`train`] drive the
-//! training step; [`tensor`] is the minimal dense-matrix backbone (no external
+//! The [`gcn`] layer implements the [`GraphLayer`] / [`BackwardGraphLayer`]
+//! traits; [`loss`] and [`optim`] drive the training step (run inline by
+//! [`propagate`]); [`tensor`] is the minimal dense-matrix backbone (no external
 //! BLAS). Operation errors surface as [`GnnError`].
 
 pub mod activation;
@@ -19,8 +19,8 @@ pub use backward::{BackwardGraphLayer, GraphLayer};
 
 /// Errors raised by GNN layer operations.
 ///
-/// Reused across gnn submodules (currently `gat`); extend this enum rather
-/// than introducing per-site error types.
+/// Reused across gnn submodules; extend this enum rather than introducing
+/// per-site error types.
 #[derive(Debug, thiserror::Error)]
 pub enum GnnError {
 	/// `backward_graph` / inference invoked before a successful `forward_graph`,
@@ -34,18 +34,13 @@ pub enum GnnError {
 }
 
 pub mod dropout;
-pub mod gat;
 pub mod gcn;
 pub mod graph;
 pub mod layer;
 pub mod loss;
-pub mod message;
 pub mod model;
 pub mod norm;
 pub mod optim;
 pub mod persist;
-pub mod pool;
 pub mod propagate;
-pub mod sage;
 pub mod tensor;
-pub mod train;

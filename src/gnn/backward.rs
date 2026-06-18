@@ -186,17 +186,14 @@ mod tests {
 }
 
 /// Numeric gradient checks for the GNN math-critical paths: layer backward
-/// passes (vs central finite differences), softmax/log_softmax stability, and
-/// core tensor ops. Purely additive coverage — no production behaviour change.
+/// passes (vs central finite differences) and core tensor ops. Purely additive
+/// coverage — no production behaviour change.
 #[cfg(test)]
 mod gnn_math_tests {
-	use crate::gnn::activation::{log_softmax, softmax, Activation};
-	use crate::gnn::backward::{BackwardGraphLayer, GraphLayer};
-	use crate::gnn::gat::GATLayer;
+	use crate::gnn::activation::Activation;
+	use crate::gnn::backward::BackwardGraphLayer;
 	use crate::gnn::gcn::GCNLayer;
 	use crate::gnn::graph::Graph;
-	use crate::gnn::message::mean_aggregate;
-	use crate::gnn::sage::SAGELayer;
 	use crate::gnn::tensor::Tensor;
 	use rand::SeedableRng;
 
@@ -328,76 +325,6 @@ mod gnn_math_tests {
 		let mut rng = rand::rngs::StdRng::seed_from_u64(11);
 		let mut l = GCNLayer::with_rng(4, 3, Some(Activation::Relu), false, 0.0, &mut rng);
 		assert_grad_matches_numeric(&mut l, &g, &x);
-	}
-
-	#[test]
-	fn sage_backward_matches_numeric() {
-		let (g, x) = tiny_graph();
-		let mut l = SAGELayer::new(4, 3, mean_aggregate, None, false, false, 0.0);
-		assert_grad_matches_numeric(&mut l, &g, &x);
-	}
-
-	#[test]
-	fn sage_input_grad_matches_numeric() {
-		// SAGE's d_input splits the concat([self, mean-aggregated neighbours])
-		// gradient back across both halves and scatters the neighbour half along
-		// the (mean-normalized) adjacency — the most error-prone d_input path.
-		let (g, x) = tiny_graph();
-		let mut l = SAGELayer::new(4, 3, mean_aggregate, None, false, false, 0.0);
-		assert_input_grad_matches_numeric(&mut l, &g, &x);
-	}
-
-	#[test]
-	fn gat_backward_produces_finite_grads() {
-		// A full numeric grad-check on GAT is flaky (leaky-relu kink in the
-		// attention scores), so assert the backward path yields finite,
-		// correctly-shaped gradients without NaN/inf. Seeded ctor keeps the
-		// weight init reproducible across runs.
-		let (g, x) = tiny_graph();
-		let mut rng = rand::rngs::StdRng::seed_from_u64(13);
-		let mut l = GATLayer::with_rng(4, 3, 1, true, None, false, 0.0, &mut rng);
-		let out = l.forward_graph(&g, &x);
-		assert_eq!(out.rows, g.num_nodes());
-		l.zero_grads();
-		let d_out = Tensor::ones(out.rows, out.cols);
-		let d_in = l.backward_graph(&g, &d_out);
-		assert_eq!(d_in.shape(), x.shape(), "d_input must match feature shape");
-		for t in l.param_grads() {
-			assert!(
-				t.data.iter().all(|v| v.is_finite()),
-				"GAT param grads must be finite"
-			);
-		}
-		assert!(d_in.data.iter().all(|v| v.is_finite()));
-	}
-
-	#[test]
-	fn softmax_is_stable_for_large_inputs() {
-		// Max-subtraction must keep exp() from overflowing.
-		let t = Tensor::new(1, 3, vec![1000.0, 1001.0, 1002.0]).unwrap();
-		let s = softmax(&t);
-		assert!(s.data.iter().all(|v| v.is_finite()));
-		assert!((s.data.iter().sum::<f64>() - 1.0).abs() < 1e-12);
-		assert!(s.at(0, 2) > s.at(0, 1) && s.at(0, 1) > s.at(0, 0));
-	}
-
-	#[test]
-	fn softmax_uniform_for_equal_row() {
-		let t = Tensor::new(1, 3, vec![5.0, 5.0, 5.0]).unwrap();
-		let s = softmax(&t);
-		for v in &s.data {
-			assert!((v - 1.0 / 3.0).abs() < 1e-12);
-		}
-	}
-
-	#[test]
-	fn log_softmax_is_stable_and_normalized() {
-		let t = Tensor::new(1, 3, vec![1000.0, 1001.0, 1002.0]).unwrap();
-		let ls = log_softmax(&t);
-		assert!(ls.data.iter().all(|v| v.is_finite()));
-		// exp(log_softmax) must sum to 1.
-		let sum: f64 = ls.data.iter().map(|v| v.exp()).sum();
-		assert!((sum - 1.0).abs() < 1e-12);
 	}
 
 	#[test]

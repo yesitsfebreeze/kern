@@ -7,9 +7,8 @@
 //! 2. [`embed`] — vectorize the document and each chunk via the embed endpoint.
 //! 3. [`place`] — insert each piece into the owning kern, consulting [`dedup`]
 //!    first so a near-duplicate vector merges into the existing entity instead of
-//!    spawning a divergent one.
-//! 4. [`synthesis`] — opportunistic rephrase/merge of near-but-not-duplicate
-//!    neighbours. [`outcome`] reports per-document success / partial / failure.
+//!    spawning a divergent one. [`outcome`] reports per-document success /
+//!    partial / failure.
 //!
 //! Ambient document sources that feed the Worker: [`capture_spool`] (the
 //! Claude-Code Stop-hook spool) and [`file_watcher`]; [`distill`] extracts
@@ -25,7 +24,6 @@ pub mod file_watcher;
 pub mod outcome;
 pub mod place;
 pub mod split;
-pub mod synthesis;
 pub mod worker;
 
 pub use crate::types::LlmFunc;

@@ -1,5 +1,3 @@
-use crate::gnn::tensor::Tensor;
-
 #[inline]
 pub fn relu(x: f64) -> f64 {
 	x.max(0.0)
@@ -114,52 +112,6 @@ impl Activation {
 	}
 }
 
-/// Maximum value in a tensor row — the numerically-stable shift subtracted
-/// before exponentiating in `softmax` / `log_softmax`.
-fn row_max(t: &Tensor, row: usize) -> f64 {
-	let mut max_val = f64::NEG_INFINITY;
-	for j in 0..t.cols {
-		let v = t.at(row, j);
-		if v > max_val {
-			max_val = v;
-		}
-	}
-	max_val
-}
-
-pub fn softmax(t: &Tensor) -> Tensor {
-	let mut out = Tensor::zeros(t.rows, t.cols);
-	for i in 0..t.rows {
-		let max_val = row_max(t, i);
-		let mut sum = 0.0;
-		for j in 0..t.cols {
-			let e = (t.at(i, j) - max_val).exp();
-			out.set(i, j, e);
-			sum += e;
-		}
-		for j in 0..t.cols {
-			out.set(i, j, out.at(i, j) / sum);
-		}
-	}
-	out
-}
-
-pub fn log_softmax(t: &Tensor) -> Tensor {
-	let mut out = Tensor::zeros(t.rows, t.cols);
-	for i in 0..t.rows {
-		let max_val = row_max(t, i);
-		let mut log_sum = 0.0;
-		for j in 0..t.cols {
-			log_sum += (t.at(i, j) - max_val).exp();
-		}
-		let log_sum = max_val + log_sum.ln();
-		for j in 0..t.cols {
-			out.set(i, j, t.at(i, j) - log_sum);
-		}
-	}
-	out
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -228,50 +180,6 @@ mod tests {
 				"gelu at {x}: analytic {} vs numeric {numeric}",
 				Activation::Gelu.deriv(x)
 			);
-		}
-	}
-
-	#[test]
-	fn softmax_multirow_each_row_sums_to_one_and_is_row_independent() {
-		// Three rows with different scales; the row-loop must normalize each row
-		// independently (a bug in the bounds would leak across rows).
-		let t = Tensor::new(
-			3,
-			3,
-			vec![
-				1.0, 2.0, 3.0, 10.0, 10.0, 10.0, // uniform row -> 1/3 each
-				-5.0, 0.0, 5.0,
-			],
-		)
-		.unwrap();
-		let s = softmax(&t);
-		for i in 0..3 {
-			let row_sum: f64 = (0..3).map(|j| s.at(i, j)).sum();
-			assert!(
-				(row_sum - 1.0).abs() < 1e-12,
-				"row {i} sums to 1, got {row_sum}"
-			);
-		}
-		// Uniform row -> exactly 1/3 each.
-		for j in 0..3 {
-			assert!((s.at(1, j) - 1.0 / 3.0).abs() < 1e-12);
-		}
-		// Row 0 is monotonic in the logits (3 > 2 > 1).
-		assert!(s.at(0, 2) > s.at(0, 1) && s.at(0, 1) > s.at(0, 0));
-	}
-
-	#[test]
-	fn log_softmax_multirow_equals_log_of_softmax() {
-		let t = Tensor::new(2, 3, vec![0.1, 0.2, 0.7, -1.0, 0.0, 1.0]).unwrap();
-		let ls = log_softmax(&t);
-		let s = softmax(&t);
-		for i in 0..2 {
-			for j in 0..3 {
-				assert!(
-					(ls.at(i, j) - s.at(i, j).ln()).abs() < 1e-9,
-					"log_softmax == ln(softmax)"
-				);
-			}
 		}
 	}
 }

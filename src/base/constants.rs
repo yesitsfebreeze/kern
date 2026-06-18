@@ -44,17 +44,6 @@ pub const DEDUP_EF: usize = 64;
 /// inserted. Higher than the anchor-path [`DEFAULT_DEDUP_THRESHOLD`] (0.92):
 /// ingest dedup wants near-exact matches before collapsing two thoughts.
 pub const INGEST_DEDUP_THRESHOLD: f64 = 0.95;
-/// Nearest-neighbour count (`k`) for the ingest synthesis/rephrase HNSW probe.
-pub const INGEST_HNSW_K: usize = 8;
-/// HNSW search beam width (`ef`) for that probe; wider = better recall, more work.
-pub const INGEST_HNSW_EF: usize = 32;
-/// Lower edge of the rephrase similarity band: a candidate at or below this is
-/// too dissimilar to merge, so it stays a distinct entity.
-pub const INGEST_REPHRASE_LOWER: f64 = 0.85;
-/// Upper edge of the rephrase band: at or above this the candidate is a
-/// near-duplicate (dedup territory). Only entities STRICTLY between the two
-/// bounds are rephrase/merge candidates.
-pub const INGEST_REPHRASE_UPPER: f64 = 0.95;
 
 // ── Default autonomous-maintenance tick knobs (config::TickConfig) ────────────
 /// Max entities sampled when clustering a kern for auto-naming / child-spawn.
@@ -161,12 +150,6 @@ pub const GOSSIP_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 /// is reached, brand-new remote ids are dropped while existing ids still
 /// CRDT-merge (so legitimate updates to known entities are never lost).
 pub const GOSSIP_REMOTE_KERN_ENTITY_CAP: usize = 50_000;
-/// Soft cap on the number of per-peer rate-limit buckets the sybil `RateClipper`
-/// tracks. The bucket map keys on the (attacker-controlled) message origin, so a
-/// flood of distinct forged peer ids would otherwise grow it without bound. When
-/// the map reaches this size, buckets whose rate-limit window has fully elapsed
-/// (and so hold no live state — they reset on next contact) are reclaimed.
-pub const GOSSIP_SYBIL_PEER_CAP: usize = 100_000;
 /// Upper bound on an inbound CRDT delta's per-replica value. The value is the
 /// sender's absolute slot total, max-merged into the local GCounter; rejecting
 /// values above this coarsely bounds a peer pinning a slot toward `u64::MAX`.

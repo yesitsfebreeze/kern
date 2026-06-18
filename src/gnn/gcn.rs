@@ -57,8 +57,8 @@ impl GCNLayer {
 		}
 	}
 
-	/// Fallible backward pass. Mirrors [`GATLayer::try_backward_graph`](crate::gnn::gat::GATLayer):
-	/// returns [`GnnError::MissingForwardState`] when invoked before a successful
+	/// Fallible backward pass. Returns [`GnnError::MissingForwardState`] when
+	/// invoked before a successful
 	/// `forward_graph` (instead of panicking) and bubbles tensor shape errors as
 	/// [`GnnError::Tensor`]. The infallible [`BackwardGraphLayer::backward_graph`]
 	/// delegates here.

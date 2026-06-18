@@ -48,8 +48,7 @@ impl LinearLayer {
 
 	/// Fallible backward pass. Returns [`GnnError::MissingForwardState`] when
 	/// invoked before a successful `forward` (or after reset) instead of
-	/// panicking, and bubbles tensor shape errors as [`GnnError::Tensor`].
-	/// Mirrors [`GATLayer::try_backward_graph`](crate::gnn::gat::GATLayer); the
+	/// panicking, and bubbles tensor shape errors as [`GnnError::Tensor`]. The
 	/// infallible [`Backward::backward`] delegates here.
 	pub fn try_backward(&mut self, d_out: &Tensor) -> Result<Tensor, GnnError> {
 		let input = self

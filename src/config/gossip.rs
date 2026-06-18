@@ -2,8 +2,7 @@
 //! with same-network peers over TCP + LAN multicast discovery. OFF by default —
 //! a lone daemon never opens a gossip socket or announces itself. Enable it per
 //! project only when you want several daemons (sharing one `network_id`) to pool
-//! memory; the `ingest_clip_*` and `trimmed_mean_*` knobs are the Sybil-flood and
-//! outlier defenses for that shared, peer-writable surface.
+//! memory.
 
 use serde::{Deserialize, Serialize};
 
@@ -24,20 +23,6 @@ pub struct GossipConfig {
 	pub discovery_port: u16,
 	/// Seed peers (host:port) to dial on startup, in addition to discovery.
 	pub peers: Vec<String>,
-	/// Rate-limit inbound gossip ingests per peer (Sybil-flood defense). When off,
-	/// a peer can push unbounded entities into this node's phantom kerns.
-	pub ingest_clip_enabled: bool,
-	/// Max accepted gossip ingests from one peer per `ingest_clip_window_secs`
-	/// before further ingests in that window are dropped.
-	pub ingest_clip_max_per_window: u64,
-	/// Length of the per-peer rate-limit window, in seconds.
-	pub ingest_clip_window_secs: u64,
-	/// Use a trimmed mean (drop the extreme tails) when fusing the same entity's
-	/// scores reported by multiple peers, so one outlier peer can't skew the merge.
-	pub trimmed_mean_enabled: bool,
-	/// Fraction trimmed from EACH end before averaging peer-reported scores
-	/// (e.g. 0.10 drops the top and bottom 10%).
-	pub trimmed_mean_trim_pct: f64,
 }
 
 impl Default for GossipConfig {
@@ -48,11 +33,6 @@ impl Default for GossipConfig {
 			discovery: true,
 			discovery_port: 7475,
 			peers: Vec::new(),
-			ingest_clip_enabled: false,
-			ingest_clip_max_per_window: 1000,
-			ingest_clip_window_secs: 1,
-			trimmed_mean_enabled: false,
-			trimmed_mean_trim_pct: 0.10,
 		}
 	}
 }
@@ -74,11 +54,5 @@ mod tests {
 		);
 		assert_eq!(c.discovery_port, 7475);
 		assert!(c.peers.is_empty(), "no seed peers by default");
-		// Security-sensitive defenses default OFF but carry sane bounds.
-		assert!(!c.ingest_clip_enabled);
-		assert_eq!(c.ingest_clip_max_per_window, 1000);
-		assert_eq!(c.ingest_clip_window_secs, 1);
-		assert!(!c.trimmed_mean_enabled);
-		assert!((c.trimmed_mean_trim_pct - 0.10).abs() < 1e-12);
 	}
 }

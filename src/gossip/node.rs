@@ -9,7 +9,6 @@ use crate::base::locks::{read_recovered, write_recovered};
 
 use super::ledger::Ledger;
 use super::seen::SeenSet;
-use super::sybil::RateClipper;
 use super::transport::{decode_msg, encode_msg, send_and_receive, send_msg};
 use super::types::*;
 
@@ -25,7 +24,6 @@ pub struct Node {
 	pub ledger: Ledger,
 	handler: RwLock<Option<Handler>>,
 	fetch_handler: RwLock<Option<FetchHandler>>,
-	clipper: RwLock<Option<Arc<RateClipper>>>,
 	stop_tx: watch::Sender<bool>,
 	pub stop_rx: watch::Receiver<bool>,
 }
@@ -41,7 +39,6 @@ impl Node {
 			ledger: Ledger::new(),
 			handler: RwLock::new(None),
 			fetch_handler: RwLock::new(None),
-			clipper: RwLock::new(None),
 			stop_tx,
 			stop_rx,
 		})
@@ -53,14 +50,6 @@ impl Node {
 
 	pub fn set_fetch_handler(&self, h: FetchHandler) {
 		*write_recovered(&self.fetch_handler) = Some(h);
-	}
-
-	pub fn set_clipper(&self, c: Option<Arc<RateClipper>>) {
-		*write_recovered(&self.clipper) = c;
-	}
-
-	pub fn clipper(&self) -> Option<Arc<RateClipper>> {
-		read_recovered(&self.clipper).clone()
 	}
 
 	pub fn addr(&self) -> String {
@@ -187,14 +176,6 @@ impl Node {
 		if msg.kind == GossipKind::Fetch {
 			self.handle_fetch(stream, msg).await;
 			return;
-		}
-
-		if !msg.origin.is_empty() {
-			if let Some(c) = read_recovered(&self.clipper).as_ref() {
-				if !c.admit(&msg.origin) {
-					return;
-				}
-			}
 		}
 
 		if self.seen.add_and_check(&msg.id) {

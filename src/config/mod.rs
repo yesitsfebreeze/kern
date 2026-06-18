@@ -331,8 +331,7 @@ mod tests {
 		// A bad ingest knob now propagates through the top-level validate, tagged
 		// with its section.
 		let mut bad_ingest = Config::default_in(Path::new("x"));
-		bad_ingest.ingest.rephrase_lower = 0.9;
-		bad_ingest.ingest.rephrase_upper = 0.8;
+		bad_ingest.ingest.dedup_threshold = 2.0;
 		let err = bad_ingest.validate().unwrap_err();
 		assert!(
 			err.contains("ingest"),
