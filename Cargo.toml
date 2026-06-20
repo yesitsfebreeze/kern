@@ -66,17 +66,6 @@ name = "locomo_eval"
 path = "src/bin/locomo_eval.rs"
 required-features = ["bench"]
 
-[[bench]]
-name = "bench"
-path = "benches/bench.rs"
-harness = false
-
-[[bench]]
-name = "retrieval_trace_bench"
-path = "benches/retrieval_trace_bench.rs"
-harness = false
-required-features = ["bench"]
-
 [dependencies]
 config-io = { path = "src/config-io" }
 dirs = "6"
