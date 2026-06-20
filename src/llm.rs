@@ -121,6 +121,12 @@ impl Client {
 		};
 		let http = reqwest::Client::builder()
 			.timeout(Duration::from_secs(120))
+			// Connect phase gets its own short bound: an unreachable embedder must
+			// fail fast (transient -> job left for retry) instead of burning the
+			// full 120s request timeout on a dead TCP connect. A healthy local/LAN
+			// Ollama handshakes in well under this; WSL passthrough to a closed port
+			// otherwise hangs rather than refusing.
+			.connect_timeout(Duration::from_secs(3))
 			.build()
 			.expect("failed to build HTTP client");
 		Self {
