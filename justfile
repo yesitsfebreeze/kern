@@ -27,7 +27,8 @@ daemon:
     cargo run --bin kern -- --daemon
 
 test:
-    cargo test --workspace
+    cargo nextest run --workspace
+    cargo test --doc --workspace
 
 fmt:
     cargo fmt --all -- --check
@@ -95,7 +96,20 @@ docker-build:
 docker:
     docker run --rm -it --cap-add SYS_PTRACE --security-opt seccomp=unconfined -v "{{justfile_directory()}}":/work -w /work {{image}} /bin/bash
 
-# Run the full test suite inside the container.
+# Run the full test suite inside the container (installs nextest into the image's PATH if missing).
 docker-test:
-    docker run --rm --cap-add SYS_PTRACE --security-opt seccomp=unconfined -v "{{justfile_directory()}}":/work -w /work {{image}} cargo test --workspace
+    docker run --rm --cap-add SYS_PTRACE --security-opt seccomp=unconfined -v "{{justfile_directory()}}":/work -w /work {{image}} sh -c 'command -v cargo-nextest >/dev/null || curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C /usr/local/bin; cargo nextest run --workspace && cargo test --doc --workspace'
 
+
+# Tier-0 workload retrieval snapshot on the generated trace (recall@10, NDCG@10,
+# latency p50/p95/p99, throughput, vector memory). Deterministic stub embedder —
+# no Ollama needed. Quality numbers are reproducible; compare against
+# docs/kern/bench-retrieval.md baselines before merging retrieval changes.
+bench-workload: trace
+    cargo run --release --features bench --bin retrieval_bench -- --trace traces/workload.json --all
+
+# Regenerate the bench trace. Byte-identical for the same args, so it is
+# generated rather than committed.
+trace:
+    @mkdir -p traces
+    @test -f traces/workload.json || python3 scripts/gen_trace.py --docs 200 --queries 50 --name kern-ranking-fusion-v1 --out traces/workload.json
