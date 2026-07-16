@@ -9,8 +9,10 @@ pub mod queue;
 pub mod stigmergy;
 pub mod tasks;
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Instant;
+
+use parking_lot::RwLock;
 
 use crate::base::constants::{KERN_COHESION_THRESHOLD, KERN_MIN_CLUSTER_SIZE};
 use crate::base::graph::GraphGnn;
@@ -22,8 +24,8 @@ use cluster::{cohesion, is_core_cluster, vector_cluster, Cluster};
 use gnn_propagate::do_gnn_propagate;
 use queue::{task, task_extra, Queue, Task, TaskKind};
 use tasks::{
-	do_disk_consolidate, do_enrich, do_name, do_persist, do_reembed, do_resolve, do_seed_questions,
-	BroadcastQuestionFunc, EmbedFunc, LlmFunc,
+	do_classify_contradiction, do_commit_access, do_disk_consolidate, do_enrich, do_name,
+	do_persist, do_reembed, do_resolve, do_seed_questions, BroadcastQuestionFunc, EmbedFunc, LlmFunc,
 };
 
 /// Long-lived dependencies the tick worker carries across every task it
@@ -61,6 +63,7 @@ fn process_task(q: &Queue, g: &Arc<RwLock<GraphGnn>>, t: &Task, ctx: &TickContex
 	match t.kind {
 		TaskKind::Cluster => do_cluster(q, g, &t.kern_id, &ctx.tick_cfg, llm, embed),
 		TaskKind::SeedQuestions => do_seed_questions(g, &t.extra, llm),
+		TaskKind::ClassifyContradiction => do_classify_contradiction(q, g, &t.kern_id, &t.extra, llm, embed),
 		TaskKind::Name => do_name(q, g, &t.kern_id, &ctx.tick_cfg, llm, embed),
 		TaskKind::Enrich => do_enrich(q, g, &t.kern_id, &t.extra, llm, embed),
 		TaskKind::ResolveQuestion => do_resolve(q, g, &t.kern_id, &t.extra, ctx.broadcast_q.as_ref()),
@@ -69,6 +72,7 @@ fn process_task(q: &Queue, g: &Arc<RwLock<GraphGnn>>, t: &Task, ctx: &TickContex
 		TaskKind::StigmergyGc => stigmergy::run_gc(g, &t.kern_id),
 		TaskKind::Reembed => do_reembed(g, &t.kern_id, embed),
 		TaskKind::DiskConsolidate => do_disk_consolidate(g),
+		TaskKind::CommitAccess => do_commit_access(g, &t.extra),
 	}
 }
 

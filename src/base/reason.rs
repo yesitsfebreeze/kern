@@ -1,5 +1,6 @@
 use super::graph::GraphGnn;
-use super::types::{Kern, Reason};
+use super::types::{Kern, Reason, ReasonKind};
+use std::collections::HashSet;
 
 /// All reason (edge) ids incident to `entity_id` in this kern — outgoing
 /// (`by_from`) followed by incoming (`by_to`). Single source for the
@@ -13,6 +14,38 @@ pub(crate) fn collect_reason_ids(kern: &Kern, entity_id: &str) -> Vec<String> {
 		ids.extend(to_ids.iter().cloned());
 	}
 	ids
+}
+
+/// Walk `Supersedes` chains BACKWARD from `entity_id` (an active head), returning
+/// every superseded ancestor revision's id. A `Supersedes` edge points
+/// new -> old, so following the outgoing edges of a head reaches the revision it
+/// replaced, transitively. This is how a bi-temporal `include_history` query
+/// reaches the Superseded revisions the ANN deliberately no longer holds. The
+/// `seen` set makes a cyclic/self-referential chain terminate.
+pub fn superseded_ancestors(g: &GraphGnn, entity_id: &str) -> Vec<String> {
+	let mut out = Vec::new();
+	let mut seen: HashSet<String> = HashSet::new();
+	let mut frontier = vec![entity_id.to_string()];
+	while let Some(cur) = frontier.pop() {
+		let Some(kid) = g.kern_of_entity(&cur).map(str::to_string) else {
+			continue;
+		};
+		let Some(kern) = g.loaded(&kid) else {
+			continue;
+		};
+		let Some(edges) = kern.by_from.get(&cur) else {
+			continue;
+		};
+		for rid in edges {
+			if let Some(r) = kern.reasons.get(rid) {
+				if r.kind == ReasonKind::Supersedes && !r.to.is_empty() && seen.insert(r.to.clone()) {
+					out.push(r.to.clone());
+					frontier.push(r.to.clone());
+				}
+			}
+		}
+	}
+	out
 }
 
 pub fn add_reason(kern: &mut Kern, reason: Reason) {
@@ -180,7 +213,10 @@ pub fn remove_entity(g: &mut GraphGnn, kern_id: &str, id: &str) {
 	};
 
 	if let Some(t) = kern.entities.get(id) {
-		if t.is_fact() {
+		// Active Facts are immune to removal (durable knowledge). A SUPERSEDED fact
+		// is invalidated history, not live knowledge, so it loses immunity — the
+		// bi-temporal GC spills it to the cold tier and drops it here.
+		if t.is_fact() && !t.is_superseded() {
 			return;
 		}
 	}
@@ -251,6 +287,51 @@ mod tests {
 	use crate::base::types::{Entity, EntityKind, Kern};
 
 	use crate::test_support::{edge, entity_vec as ent};
+
+	#[test]
+	fn superseded_ancestors_walks_the_supersedes_chain_backward() {
+		// Chain: newest -> mid -> old (each Supersedes edge points new->old). Walking
+		// back from the active head must reach every superseded revision.
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		for id in ["newest", "mid", "old"] {
+			g.get_mut(&root).unwrap().entities.insert(
+				id.into(),
+				Entity {
+					id: id.into(),
+					..Default::default()
+				},
+			);
+			g.index_entity(id, &root);
+		}
+		let k = g.get_mut(&root).unwrap();
+		add_reason(
+			k,
+			Reason {
+				id: "s1".into(),
+				from: "newest".into(),
+				to: "mid".into(),
+				kind: ReasonKind::Supersedes,
+				..Default::default()
+			},
+		);
+		add_reason(
+			k,
+			Reason {
+				id: "s2".into(),
+				from: "mid".into(),
+				to: "old".into(),
+				kind: ReasonKind::Supersedes,
+				..Default::default()
+			},
+		);
+
+		let mut anc = superseded_ancestors(&g, "newest");
+		anc.sort();
+		assert_eq!(anc, vec!["mid".to_string(), "old".to_string()]);
+		// A head with no Supersedes edges yields nothing.
+		assert!(superseded_ancestors(&g, "old").is_empty());
+	}
 
 	#[test]
 	fn add_reason_is_idempotent_on_adjacency() {

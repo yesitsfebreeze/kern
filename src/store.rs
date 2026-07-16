@@ -5,7 +5,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
+
+use parking_lot::{Mutex, RwLock};
 use std::time::Instant;
 
 use crate::base::graph::GraphGnn;
@@ -105,11 +107,13 @@ impl Registry {
 		// The ONE persist closure for this store's graph. The Worker gets a clone
 		// and the StoreEntry holds another (StoreEntry.save_fn), so every consumer
 		// — mcp::Server, gossip handlers — persists through this same closure
-		// rather than building a duplicate over the same graph.
+		// rather than building a duplicate over the same graph. The guarded flush
+		// refuses to overwrite a graph another writer grew on disk (see
+		// `save_graph_guarded`), the safety net under the single-writer invariant.
 		let save_g = graph.clone();
+		let save_cfg = store_cfg.clone();
 		let save_fn: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-			let g = read_recovered(&save_g);
-			crate::commands::save_graph(&g);
+			crate::commands::save_graph_guarded(&save_g, &save_cfg);
 		});
 
 		let tick_q = Arc::new(Queue::new(cfg.tick.queue_capacity.max(1)));
@@ -127,10 +131,25 @@ impl Registry {
 			));
 		});
 
+		// Dedup hook: a same-kind, different-text near-dup becomes a
+		// `ClassifyContradiction` tick task (kern + rephrase reason id) instead of a
+		// blocking classify-LLM call in the worker — the commit path stays
+		// embed-bound; the tick decides UPDATE/CONTRADICTION vs RELATED and supersedes.
+		let contra_q = tick_q.clone();
+		let defer_contradiction: crate::ingest::worker::DeferContradictionFn =
+			Arc::new(move |kern_id: &str, reason_id: &str| {
+				let _ = contra_q.enqueue(crate::tick::queue::task_extra(
+					crate::tick::queue::TaskKind::ClassifyContradiction,
+					kern_id,
+					reason_id,
+				));
+			});
+
 		let worker = Arc::new(Worker::new(
 			graph.clone(),
 			llm_client,
 			Some(defer),
+			Some(defer_contradiction),
 			Some(save_fn.clone()),
 		));
 

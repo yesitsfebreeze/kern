@@ -157,17 +157,41 @@ pub fn load_dir(dir: &str) -> Result<GraphGnn, crate::base::store::StoreError> {
 	use crate::base::store::Store;
 	use std::sync::Arc;
 
-	let store = Store::open(dir)?;
+	let store = Arc::new(Store::open(dir)?);
+	graph_from_store(store, dir)
+}
+
+/// Rebuild a graph from an ALREADY-OPEN store handle, reusing its LMDB env. This is
+/// how a live graph reloads after another writer advanced the store: opening a
+/// second `Store` on the same dir would be a same-process double-open of the LMDB
+/// env (forbidden — it corrupts the lock and can SIGSEGV), so reload paths must
+/// thread the existing handle through here, NOT call [`load_dir`] again. Returns
+/// `None` for an in-memory graph (no store bound).
+pub fn reload_from_disk(old: &GraphGnn) -> Option<GraphGnn> {
+	let store = old.store()?;
+	let dir = old.data_dir.clone();
+	graph_from_store(store, &dir).ok()
+}
+
+/// Shared body of [`load_dir`] / [`reload_from_disk`]: scan every kern from the
+/// (already-open) store, rebuild the graph, rebind the SAME store handle, and stamp
+/// the loaded epoch so the stale-flush guard knows what generation this graph is
+/// consistent with.
+fn graph_from_store(
+	store: std::sync::Arc<crate::base::store::Store>,
+	dir: &str,
+) -> Result<GraphGnn, crate::base::store::StoreError> {
 	let (mut kerns, mut network_id, quant_mode) = store.load_all_kerns()?;
 	if network_id.is_empty() {
 		network_id = util::uuid_v4();
 	}
-	let store = Arc::new(store);
 
+	let loaded_epoch = store.read_epoch();
 	if !kerns.contains_key("root") {
 		let mut g = GraphGnn::new();
 		g.data_dir = dir.to_string();
 		g.set_store(store);
+		g.set_flushed_epoch(loaded_epoch);
 		return Ok(g);
 	}
 
@@ -188,6 +212,7 @@ pub fn load_dir(dir: &str) -> Result<GraphGnn, crate::base::store::StoreError> {
 		quant_mode,
 	);
 	g.set_store(store);
+	g.set_flushed_epoch(loaded_epoch);
 	Ok(g)
 }
 
@@ -310,7 +335,77 @@ pub fn save_graph_into(
 ) -> Result<(), crate::base::store::StoreError> {
 	let mut kerns = g.map().clone();
 	kerns.insert(g.root.id.clone(), merged_root(g));
-	store.save_all_kerns(&kerns, &g.network_id, g.quant_mode)
+	store.save_all_kerns(&kerns, &g.network_id, g.quant_mode)?;
+	Ok(())
+}
+
+/// The store's current write epoch, or 0 for an in-memory graph. A flusher reads
+/// this once after a load/flush and passes it back as `expected` to
+/// [`flush_guarded`] so it can tell whether anyone else has written since.
+pub fn current_epoch(g: &GraphGnn) -> u64 {
+	g.store().map(|s| s.read_epoch()).unwrap_or(0)
+}
+
+/// Stale-safe full flush of `g` to its own store (see [`crate::base::store::Store::flush_guarded`]).
+/// `expected` is the epoch the caller last observed; the flush is refused (no
+/// write) if the on-disk epoch has moved past it, so a stale daemon can never
+/// overwrite a graph the CLI grew underneath it. An in-memory graph (no store)
+/// reports a no-op `Flushed` at the same epoch.
+pub fn flush_guarded(
+	g: &GraphGnn,
+	expected: u64,
+) -> Result<crate::base::store::FlushOutcome, crate::base::store::StoreError> {
+	match g.store() {
+		Some(store) => {
+			let mut kerns = g.map().clone();
+			kerns.insert(g.root.id.clone(), merged_root(g));
+			store.flush_guarded(&kerns, &g.network_id, g.quant_mode, expected)
+		}
+		None => Ok(crate::base::store::FlushOutcome::Flushed { epoch: expected }),
+	}
+}
+
+/// A persist-ready snapshot captured under the caller's read guard: the open store
+/// handle plus the cloned kern map (root overlay already applied) and the metadata
+/// the LMDB write needs. Cloning the map HERE — while the read lock is held for only
+/// as long as the clone takes — lets the caller DROP the graph lock before the LMDB
+/// transaction runs, so a multi-second flush no longer pins the read lock against
+/// writers (the whole point of [`snapshot_for_flush`] + [`flush_snapshot`]).
+pub struct FlushSnapshot {
+	store: std::sync::Arc<crate::base::store::Store>,
+	kerns: HashMap<String, Kern>,
+	network_id: String,
+	quant_mode: QuantizationMode,
+}
+
+/// Clone the flush snapshot out of `g`. Call this while holding the read guard; the
+/// returned snapshot owns everything the flush needs, so the guard can be dropped
+/// before [`flush_snapshot`] runs the LMDB transaction. `None` for an in-memory
+/// graph (no store bound — nothing to flush).
+pub fn snapshot_for_flush(g: &GraphGnn) -> Option<FlushSnapshot> {
+	let store = g.store()?;
+	let mut kerns = g.map().clone();
+	kerns.insert(g.root.id.clone(), merged_root(g));
+	Some(FlushSnapshot {
+		store,
+		kerns,
+		network_id: g.network_id.clone(),
+		quant_mode: g.quant_mode,
+	})
+}
+
+/// Run the guarded LMDB flush of a previously captured [`FlushSnapshot`] with NO
+/// graph lock held. The disk-epoch comparison stays INSIDE the store's write txn
+/// (`Store::flush_guarded`), so `expected` (the graph's `flushed_epoch` at capture
+/// time) still detects another writer that advanced the store since — the
+/// multi-writer safety net is unchanged; only the graph lock is released earlier.
+pub fn flush_snapshot(
+	snap: &FlushSnapshot,
+	expected: u64,
+) -> Result<crate::base::store::FlushOutcome, crate::base::store::StoreError> {
+	snap
+		.store
+		.flush_guarded(&snap.kerns, &snap.network_id, snap.quant_mode, expected)
 }
 
 /// Persist the whole graph to its own store in one atomic transaction. No-op for

@@ -28,7 +28,7 @@ pub fn accept(g: &mut GraphGnn, kern_id: &str, thought: Entity, doc_id: &str) ->
 }
 
 /// Whether `vector` is within the dedup threshold of an existing entity.
-fn is_duplicate(g: &GraphGnn, vector: &[f64]) -> bool {
+fn is_duplicate(g: &GraphGnn, vector: &[f32]) -> bool {
 	let hits = search_all_unlocked(g, vector, 1);
 	!hits.is_empty() && hits[0].score > DEFAULT_DEDUP_THRESHOLD
 }
@@ -163,7 +163,7 @@ fn commit_reason(
 	to: &str,
 	kind: ReasonKind,
 	score: f64,
-	vec: Vec<f64>,
+	vec: Vec<f32>,
 ) -> String {
 	let rid = reason_id(from, to, kind, "", "");
 	let reason = Reason {
@@ -194,7 +194,7 @@ fn add_similarity_reason(
 	g: &mut GraphGnn,
 	kern_id: &str,
 	entity_id: &str,
-	thought_vec: &[f64],
+	thought_vec: &[f32],
 ) -> Vec<String> {
 	let hits = search_all_unlocked(g, thought_vec, 2);
 	for h in &hits {
@@ -232,7 +232,7 @@ fn add_provenance_reason(
 	g: &mut GraphGnn,
 	kern_id: &str,
 	entity_id: &str,
-	thought_vec: &[f64],
+	thought_vec: &[f32],
 	doc_id: &str,
 ) -> Vec<String> {
 	if doc_id.is_empty() {
@@ -265,7 +265,7 @@ fn supersede(
 	g: &mut GraphGnn,
 	placed_kern_id: &str,
 	entity_id: &str,
-	thought_vec: &[f64],
+	thought_vec: &[f32],
 	external_id: &str,
 ) -> Vec<String> {
 	let index_kern_id = g.kern_of_source(external_id).map(|s| s.to_string());
@@ -324,10 +324,19 @@ fn supersede(
 		}
 	};
 
+	// Bi-temporal stamp: the new revision's world-time start closes the old one's
+	// window, and `now` records WHEN kern learned of the supersedence.
+	let now = std::time::SystemTime::now();
+	let new_valid_from = g
+		.loaded(placed_kern_id)
+		.and_then(|k| k.entities.get(entity_id))
+		.and_then(|e| e.valid_from_or_created())
+		.unwrap_or(now);
 	if let Some(kern) = g.get_mut(&old_kern_id) {
 		if let Some(old) = kern.entities.get_mut(&old_id) {
 			old.status = EntityStatus::Superseded;
 			old.superseded_by = entity_id.to_string();
+			old.stamp_invalidated(now, new_valid_from);
 		}
 	}
 
@@ -352,6 +361,120 @@ fn supersede(
 		placed_kern_id,
 		entity_id,
 		&old_id,
+		ReasonKind::Supersedes,
+		1.0,
+		vec,
+	)]
+}
+
+/// Outcome of the background contradiction classifier: does the incoming
+/// near-duplicate REPLACE the stored claim (an update or a contradiction), or is
+/// it merely RELATED (keep today's rephrase behavior)?
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContradictionClass {
+	Supersede,
+	Related,
+}
+
+/// Prompt the reason-LLM to decide whether `new_text` supersedes `old_text`.
+/// Single-word answer so the parse stays trivial and robust.
+pub fn classify_prompt(old_text: &str, new_text: &str) -> String {
+	format!(
+		"Two statements are near-duplicates about the same subject. Decide whether \
+the NEW statement UPDATES or CONTRADICTS the OLD one (so the new should replace \
+the old), or is merely RELATED (both can coexist). Answer with exactly ONE word: \
+UPDATE, CONTRADICTION, or RELATED.\n\nOLD: {old_text}\nNEW: {new_text}\n"
+	)
+}
+
+/// Parse the classifier's reply. `UPDATE`/`CONTRADICTION` map to
+/// [`ContradictionClass::Supersede`]; anything else — `RELATED`, an empty reply,
+/// or garbage — maps to [`ContradictionClass::Related`], so an ambiguous or
+/// failed classification fails OPEN to today's rephrase behavior. When the reply
+/// mentions `RELATED` at all, it is treated as Related (the conservative choice).
+pub fn parse_contradiction(raw: &str) -> ContradictionClass {
+	let up = raw.trim().to_uppercase();
+	let supersede = up.contains("CONTRADICT") || up.contains("UPDATE");
+	if supersede && !up.contains("RELATED") {
+		ContradictionClass::Supersede
+	} else {
+		ContradictionClass::Related
+	}
+}
+
+/// Contradiction-driven supersedence for near-duplicate claims that do NOT share
+/// an `external_id` (so the same-source [`supersede`] never fires). The incoming
+/// revision was WITHHELD at dedup (only a `Rephrase` edge recorded it), so this
+/// materializes `new_thought` as Active, then marks `old_id` Superseded with the
+/// bi-temporal stamps and evicts it from the ANN indices — the mirror of
+/// [`supersede`] for the no-shared-id case. Returns the `Supersedes` reason id(s);
+/// a no-op (empty vec) if the old entity is gone or already superseded.
+pub fn supersede_by_contradiction(
+	g: &mut GraphGnn,
+	kern_id: &str,
+	old_id: &str,
+	new_thought: Entity,
+) -> Vec<String> {
+	let new_id = new_thought.id.clone();
+	if new_id == old_id {
+		return Vec::new();
+	}
+	let old_kern_id = match g.kern_of_entity(old_id).map(str::to_string) {
+		Some(k) => k,
+		None => return Vec::new(),
+	};
+	let (old_vec, already_superseded) =
+		match g.loaded(&old_kern_id).and_then(|k| k.entities.get(old_id)) {
+			Some(o) => (o.vector.clone(), o.is_superseded()),
+			None => return Vec::new(),
+		};
+	if already_superseded {
+		return Vec::new();
+	}
+
+	let new_vec = new_thought.vector.clone();
+	let new_valid_from = new_thought
+		.valid_from_or_created()
+		.unwrap_or_else(std::time::SystemTime::now);
+	let root_id = g
+		.loaded(kern_id)
+		.map(|k| k.root_id.clone())
+		.unwrap_or_default();
+
+	// Materialize the new revision as Active (dedup had withheld it).
+	let mut new_thought = new_thought;
+	new_thought.root_id = root_id;
+	if new_thought.has_vector() {
+		g.entity_idx.insert(new_id.clone(), new_vec.clone());
+	}
+	if let Some(kern) = g.get_mut(kern_id) {
+		kern.entities.insert(new_id.clone(), new_thought);
+	}
+	g.index_entity(&new_id, kern_id);
+
+	// Flip + stamp the old revision, then evict it from the search indices (it can
+	// never be a valid hit again) while keeping it as Superseded history.
+	let now = std::time::SystemTime::now();
+	if let Some(kern) = g.get_mut(&old_kern_id) {
+		if let Some(old) = kern.entities.get_mut(old_id) {
+			old.status = EntityStatus::Superseded;
+			old.superseded_by = new_id.clone();
+			old.stamp_invalidated(now, new_valid_from);
+		}
+	}
+	g.entity_idx.delete(old_id);
+	g.gnn_entity_idx.delete(old_id);
+
+	let vec = if !new_vec.is_empty() && !old_vec.is_empty() {
+		average_vec(&new_vec, &old_vec)
+	} else {
+		Vec::new()
+	};
+	vec![commit_reason(
+		g,
+		kern_id,
+		&new_id,
+		old_id,
 		ReasonKind::Supersedes,
 		1.0,
 		vec,
@@ -435,7 +558,7 @@ pub(crate) fn get_or_spawn_generic_child(g: &mut GraphGnn, parent_id: &str) -> S
 /// case-insensitive) name already exists, its routing vector is updated in
 /// place instead of minting a sibling — the live root carried the same anchor
 /// string twice before this guard.
-pub(crate) fn add_anchor(g: &mut GraphGnn, name: &str, vec: Vec<f64>) {
+pub(crate) fn add_anchor(g: &mut GraphGnn, name: &str, vec: Vec<f32>) {
 	if let Some(existing) = find_anchor_by_name(g, name) {
 		if let Some(k) = g.get_mut(&existing) {
 			k.anchor_vec = vec;
@@ -469,7 +592,7 @@ fn find_anchor_by_name(g: &GraphGnn, name: &str) -> Option<String> {
 /// (cosine ≥ `ANCHOR_DEDUP_THRESHOLD`). The duplicate-anchor guard for
 /// promotion: the naming LLM rephrases one concept many ways, and every
 /// rephrasing used to mint a fresh root anchor.
-fn equivalent_anchor_exists(g: &GraphGnn, name: &str, vec: &[f64]) -> bool {
+fn equivalent_anchor_exists(g: &GraphGnn, name: &str, vec: &[f32]) -> bool {
 	if find_anchor_by_name(g, name).is_some() {
 		return true;
 	}
@@ -580,7 +703,7 @@ pub(crate) fn remove_anchor(g: &mut GraphGnn, name: &str) -> bool {
 	true
 }
 
-fn route_to_child_id(children: &[String], g: &GraphGnn, vec: &[f64]) -> Option<String> {
+fn route_to_child_id(children: &[String], g: &GraphGnn, vec: &[f32]) -> Option<String> {
 	let mut best_id = None;
 	let mut best_p = 0.0;
 	for id in children {
@@ -619,7 +742,7 @@ mod tests {
 	use super::*;
 	use crate::base::graph::GraphGnn;
 
-	fn ent(id: &str, vector: Vec<f64>) -> Entity {
+	fn ent(id: &str, vector: Vec<f32>) -> Entity {
 		Entity {
 			id: id.into(),
 			vector,
@@ -813,6 +936,137 @@ mod tests {
 		assert!(
 			empties.is_empty(),
 			"accept left empty unnamed kern(s) behind: {empties:?}"
+		);
+	}
+
+	#[test]
+	fn supersede_stamps_both_temporal_clocks() {
+		// The same-source supersede path must record WHEN kern learned of the
+		// supersedence (invalidated_at) and close the old world-time window
+		// (valid_to = the successor's valid_from).
+		let mut g = GraphGnn::new();
+		let kid = g.root.id.clone();
+		let old = Entity {
+			id: "old".into(),
+			external_id: "ext1".into(),
+			vector: vec![1.0, 0.0],
+			status: EntityStatus::Active,
+			created_at: Some(std::time::SystemTime::now()),
+			..Default::default()
+		};
+		g.entity_idx.insert("old".into(), vec![1.0, 0.0]);
+		let new_from = std::time::SystemTime::now();
+		let new = Entity {
+			id: "new".into(),
+			external_id: "ext1".into(),
+			vector: vec![1.0, 0.0],
+			status: EntityStatus::Active,
+			valid_from: Some(new_from),
+			..Default::default()
+		};
+		if let Some(k) = g.get_mut(&kid) {
+			k.entities.insert("old".into(), old);
+			k.entities.insert("new".into(), new);
+			k.source_index.insert("ext1".into(), "old".into());
+		}
+		g.index_entity("old", &kid);
+		g.index_entity("new", &kid);
+		g.set_source_entry("ext1".into(), kid.clone());
+
+		supersede(&mut g, &kid, "new", &[1.0, 0.0], "ext1");
+
+		let kern = g.loaded(&kid).unwrap();
+		let old_e = kern.entities.get("old").unwrap();
+		assert_eq!(old_e.status, EntityStatus::Superseded);
+		assert!(
+			old_e.invalidated_at.is_some(),
+			"transaction-time stamp recorded"
+		);
+		assert_eq!(
+			old_e.valid_to,
+			Some(new_from),
+			"old window closes at the successor's valid_from"
+		);
+		assert!(
+			!old_e.is_valid_at(new_from),
+			"old is no longer valid at the successor's start instant"
+		);
+	}
+
+	#[test]
+	fn contradiction_supersede_materializes_new_and_invalidates_old() {
+		// The no-shared-external_id path: the incoming revision was withheld at
+		// dedup, so supersede_by_contradiction must INSERT it as Active, flip the
+		// old one to Superseded (stamped + evicted from ANN), and link them.
+		let mut g = GraphGnn::new();
+		let kid = g.root.id.clone();
+		let old = Entity {
+			id: "old".into(),
+			vector: vec![1.0, 0.0],
+			status: EntityStatus::Active,
+			created_at: Some(std::time::SystemTime::now()),
+			..Default::default()
+		};
+		g.entity_idx.insert("old".into(), vec![1.0, 0.0]);
+		if let Some(k) = g.get_mut(&kid) {
+			k.entities.insert("old".into(), old);
+		}
+		g.index_entity("old", &kid);
+
+		let new = Entity {
+			id: "new".into(),
+			vector: vec![0.99, 0.01],
+			status: EntityStatus::Active,
+			created_at: Some(std::time::SystemTime::now()),
+			..Default::default()
+		};
+		let rids = supersede_by_contradiction(&mut g, &kid, "old", new);
+		assert_eq!(rids.len(), 1, "one Supersedes edge minted");
+
+		let kern = g.loaded(&kid).unwrap();
+		assert!(kern.entities.contains_key("new"), "new revision materialized");
+		let old_e = kern.entities.get("old").unwrap();
+		assert_eq!(old_e.status, EntityStatus::Superseded);
+		assert_eq!(old_e.superseded_by, "new");
+		assert!(old_e.invalidated_at.is_some(), "old stamped invalidated");
+
+		// Old is gone from the ANN, new is searchable.
+		let hits: Vec<String> = search_all_unlocked(&g, &[1.0, 0.0], 5)
+			.into_iter()
+			.map(|h| h.entity_id)
+			.collect();
+		assert!(!hits.contains(&"old".to_string()), "old evicted from ANN");
+		assert!(hits.contains(&"new".to_string()), "new revision indexed");
+	}
+
+	#[test]
+	fn contradiction_supersede_is_a_noop_on_missing_or_already_superseded() {
+		let mut g = GraphGnn::new();
+		let kid = g.root.id.clone();
+		// Missing old -> no-op.
+		let new = Entity {
+			id: "new".into(),
+			vector: vec![1.0, 0.0],
+			..Default::default()
+		};
+		assert!(supersede_by_contradiction(&mut g, &kid, "ghost", new).is_empty());
+	}
+
+	#[test]
+	fn parse_contradiction_fails_open_to_related() {
+		assert_eq!(parse_contradiction("UPDATE"), ContradictionClass::Supersede);
+		assert_eq!(
+			parse_contradiction("  contradiction \n"),
+			ContradictionClass::Supersede
+		);
+		assert_eq!(parse_contradiction("RELATED"), ContradictionClass::Related);
+		// Ambiguous / empty / garbage all fail open to Related.
+		assert_eq!(parse_contradiction(""), ContradictionClass::Related);
+		assert_eq!(parse_contradiction("I'm not sure"), ContradictionClass::Related);
+		assert_eq!(
+			parse_contradiction("this is an update but they are RELATED"),
+			ContradictionClass::Related,
+			"a RELATED mention wins — conservative"
 		);
 	}
 
