@@ -36,6 +36,7 @@ ghpages.zip
 /.cchome/
 /.voit/
 /.worktrees/
+/.pi-subagents/
 /.voitbus.json
 /.voitbus.json.tmp
 /.voitbus.sock
