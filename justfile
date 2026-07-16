@@ -108,6 +108,11 @@ docker-test:
 bench-workload: trace
     cargo run --release --features bench --bin retrieval_bench -- --trace traces/workload.json --all
 
+# Measured repository snapshot: build, tests, code shape, oracle state.
+# Every number comes from a run. --json for CI diffing, --skip-tests when cold.
+insight *args:
+    python3 scripts/insight.py {{args}}
+
 # Regenerate the bench trace. Byte-identical for the same args, so it is
 # generated rather than committed.
 trace:
