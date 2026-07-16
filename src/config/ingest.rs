@@ -32,6 +32,7 @@ impl IngestConfig {
 		crate::ingest::Config {
 			dedup_threshold: self.dedup_threshold,
 			ttl_secs: None,
+			valid_from: None,
 		}
 		.validate()
 	}

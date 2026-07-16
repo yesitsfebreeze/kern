@@ -88,8 +88,8 @@ async fn embed_all(
 	client: &crate::llm::Client,
 	ids: &[String],
 	texts: &[String],
-) -> Result<HashMap<String, Vec<f64>>, String> {
-	let mut out: HashMap<String, Vec<f64>> = HashMap::with_capacity(ids.len());
+) -> Result<HashMap<String, Vec<f32>>, String> {
+	let mut out: HashMap<String, Vec<f32>> = HashMap::with_capacity(ids.len());
 	let mut done = 0usize;
 	for chunk in texts.chunks(BATCH) {
 		let vs = client.embed_batch(chunk).await.map_err(|e| e.to_string())?;

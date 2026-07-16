@@ -193,19 +193,26 @@ fn translate(ev: Event, ignore: &IgnoreRules) -> Vec<WatchEvent> {
 			.into_iter()
 			.filter_map(|p| mk(p, WatchKind::Created))
 			.collect(),
-		EventKind::Modify(ModifyKind::Name(RenameMode::Both)) if paths.len() == 2 => {
-			let mut iter = paths.into_iter();
-			let from = iter.next().unwrap();
-			let to = iter.next().unwrap();
-			if ignore.is_ignored(&to) && ignore.is_ignored(&from) {
-				return Vec::new();
+		EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
+			match <[PathBuf; 2]>::try_from(paths) {
+				Ok([from, to]) => {
+					if ignore.is_ignored(&to) && ignore.is_ignored(&from) {
+						return Vec::new();
+					}
+					// `new` pins path == to for Renamed (the path arg is overridden).
+					vec![WatchEvent::new(
+						to.clone(),
+						WatchKind::Renamed { from, to },
+						ts,
+					)]
+				}
+				// Some backends deliver `Both` with a single endpoint (or none);
+				// degrade to Modified like the generic Modify arm.
+				Err(paths) => paths
+					.into_iter()
+					.filter_map(|p| mk(p, WatchKind::Modified))
+					.collect(),
 			}
-			// `new` pins path == to for Renamed (the path arg is overridden).
-			vec![WatchEvent::new(
-				to.clone(),
-				WatchKind::Renamed { from, to },
-				ts,
-			)]
 		}
 		EventKind::Modify(ModifyKind::Name(RenameMode::From)) => paths
 			.into_iter()
@@ -271,12 +278,22 @@ mod tests {
 
 	#[test]
 	fn translate_rename_both_with_wrong_arity_is_not_a_rename() {
-		// The `paths.len() == 2` guard: a Both event with a single path falls
-		// through to the generic Modify arm (Modified), never a Renamed.
+		// Real filesystems can deliver a Both event with fewer than 2 paths;
+		// it must degrade to Modified (never a Renamed, never a panic).
 		let kind = EventKind::Modify(ModifyKind::Name(RenameMode::Both));
 		let out = translate(ev(kind, &["/only.txt"]), &IgnoreRules::empty());
 		assert_eq!(out.len(), 1);
 		assert_eq!(out[0].kind, WatchKind::Modified);
+
+		let none = translate(ev(kind, &[]), &IgnoreRules::empty());
+		assert!(none.is_empty(), "pathless Both event produces nothing");
+
+		let three = translate(
+			ev(kind, &["/a.txt", "/b.txt", "/c.txt"]),
+			&IgnoreRules::empty(),
+		);
+		assert_eq!(three.len(), 3);
+		assert!(three.iter().all(|e| e.kind == WatchKind::Modified));
 	}
 
 	#[test]

@@ -8,7 +8,9 @@ use crate::ingest::embed::embed_with_retry;
 use crate::ingest::outcome::FailureReport;
 use crate::ingest::Job;
 use crate::llm::Client as LlmClient;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 use std::time::{Duration, SystemTime};
 
 /// Beta-Bernoulli prior params from a clamped `[0,1]` confidence:
@@ -30,7 +32,7 @@ fn beta_params_from_confidence(conf: f32) -> (f32, f32) {
 fn new_statement_entity(
 	id: String,
 	text: &str,
-	vector: Vec<f64>,
+	vector: Vec<f32>,
 	kind: EntityKind,
 	source: Source,
 	external_id: String,
@@ -70,6 +72,11 @@ fn new_statement_entity(
 		producer_id: String::new(),
 		unlinked_count,
 		dirty: false,
+		// Fresh ingest: world-time validity opens now (falls back to created_at
+		// via `valid_from_or_created`), open-ended, never invalidated.
+		valid_from: None,
+		valid_to: None,
+		invalidated_at: None,
 	};
 	t.refresh_score();
 	t
@@ -81,18 +88,27 @@ pub(crate) async fn place_document(
 	job: &Job,
 	doc_id: &str,
 	dedup_threshold: f64,
+	defer_contradiction: Option<&crate::ingest::worker::DeferContradictionFn>,
 ) -> (Option<String>, Option<FailureReport>) {
 	let vec = match embed_with_retry(embedder, &job.text, "document", 0).await {
 		Ok(v) => v,
 		Err(fail) => return (None, Some(fail)),
 	};
 
+	let (kind, unlinked) = document_kind(job);
+
 	if let Some(existing_id) = find_duplicate(graph, &vec, dedup_threshold) {
-		update_existing_entity(graph, &existing_id, &job.text, job.confidence);
+		update_existing_entity(
+			graph,
+			&existing_id,
+			&job.text,
+			job.confidence,
+			kind,
+			defer_contradiction,
+		);
 		return (Some(existing_id), None);
 	}
 
-	let (kind, unlinked) = document_kind(job);
 
 	let external_id = job.source.source_id().unwrap_or_default();
 	let valid_until = job
@@ -100,7 +116,7 @@ pub(crate) async fn place_document(
 		.ttl_secs
 		.map(|s| SystemTime::now() + Duration::from_secs(s));
 
-	let thought = new_statement_entity(
+	let mut thought = new_statement_entity(
 		doc_id.to_string(),
 		&job.text,
 		vec,
@@ -111,32 +127,16 @@ pub(crate) async fn place_document(
 		valid_until,
 		unlinked,
 	);
+	// Distilled world-time hint ("since March"), if any — else falls back to
+	// created_at via `valid_from_or_created`.
+	thought.valid_from = job.config.valid_from;
 
-	let root_id = match graph.read() {
-		Ok(g) => g.root.id.clone(),
-		Err(e) => {
-			return (
-				None,
-				Some(FailureReport::document_permanent(format!(
-					"graph lock poisoned: {e}"
-				))),
-			)
-		}
-	};
+	let root_id = graph.read().root.id.clone();
 
-	let lex = match graph.write() {
-		Ok(mut g) => {
-			accept::accept(&mut g, &root_id, thought.clone(), "");
-			g.lexical()
-		}
-		Err(e) => {
-			return (
-				None,
-				Some(FailureReport::document_permanent(format!(
-					"graph lock poisoned: {e}"
-				))),
-			)
-		}
+	let lex = {
+		let mut g = graph.write();
+		accept::accept(&mut g, &root_id, thought.clone(), "");
+		g.lexical()
 	};
 	if let Some(lex) = lex {
 		lex.insert(&thought.id, &thought.statements.join(" "));
@@ -152,19 +152,18 @@ pub(crate) fn document_kind(job: &Job) -> (EntityKind, i32) {
 	}
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn place_chunks(
 	graph: &Arc<RwLock<GraphGnn>>,
 	defer_questions: Option<&crate::ingest::worker::DeferQuestionsFn>,
+	defer_contradiction: Option<&crate::ingest::worker::DeferContradictionFn>,
 	job: &Job,
 	chunks: &[String],
-	chunk_vecs: &[Vec<f64>],
+	chunk_vecs: &[Vec<f32>],
 	doc_id: &str,
 	dedup_threshold: f64,
 ) -> usize {
-	let root_id = match graph.read() {
-		Ok(g) => g.root.id.clone(),
-		Err(_) => return 0,
-	};
+	let root_id = graph.read().root.id.clone();
 
 	let mut placed = 0;
 	for (i, (chunk, vec)) in chunks.iter().zip(chunk_vecs.iter()).enumerate() {
@@ -173,7 +172,14 @@ pub(crate) fn place_chunks(
 		}
 
 		if let Some(existing_id) = find_duplicate(graph, vec, dedup_threshold) {
-			update_existing_entity(graph, &existing_id, chunk, job.confidence);
+			update_existing_entity(
+				graph,
+				&existing_id,
+				chunk,
+				job.confidence,
+				job.kind,
+				defer_contradiction,
+			);
 			placed += 1;
 			continue;
 		}
@@ -183,7 +189,7 @@ pub(crate) fn place_chunks(
 			.config
 			.ttl_secs
 			.map(|s| SystemTime::now() + Duration::from_secs(s));
-		let thought = build_chunk_entity(
+		let mut thought = build_chunk_entity(
 			chunk,
 			vec,
 			job.kind,
@@ -192,16 +198,15 @@ pub(crate) fn place_chunks(
 			job.confidence,
 			chunk_valid_until,
 		);
+		thought.valid_from = job.config.valid_from;
 		let tid = thought.id.clone();
 		let joined = thought.statements.join(" ");
 
-		let (result, lex) = match graph.write() {
-			Ok(mut g) => {
-				let r = accept::accept(&mut g, &root_id, thought, doc_id);
-				let l = g.lexical();
-				(r, l)
-			}
-			Err(_) => continue,
+		let (result, lex) = {
+			let mut g = graph.write();
+			let r = accept::accept(&mut g, &root_id, thought, doc_id);
+			let l = g.lexical();
+			(r, l)
 		};
 		if let Some(lex) = lex {
 			lex.insert(&tid, &joined);
@@ -224,7 +229,7 @@ pub(crate) fn place_chunks(
 
 pub fn build_chunk_entity(
 	text: &str,
-	vec: &[f64],
+	vec: &[f32],
 	kind: EntityKind,
 	source: &Source,
 	external_id: &str,
@@ -285,7 +290,7 @@ mod tests {
 	/// root dispatcher into a spawned generic child, so a root-only count would
 	/// miss them — count graph-wide.
 	fn total_entity_count(g: &Arc<RwLock<GraphGnn>>) -> usize {
-		let gg = g.read().unwrap();
+		let gg = g.read();
 		gg.all().iter().map(|k| k.entities.len()).sum()
 	}
 
@@ -359,7 +364,7 @@ mod tests {
 		let chunks = vec!["alpha beta".to_string(), "gamma delta".to_string()];
 		// Orthogonal vectors so neither chunk dedups against the other.
 		let vecs = vec![vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]];
-		let placed = place_chunks(&g, None, &job("doc", 1.0), &chunks, &vecs, "doc1", 0.95);
+		let placed = place_chunks(&g, None, None, &job("doc", 1.0), &chunks, &vecs, "doc1", 0.95);
 		assert_eq!(placed, 2, "both distinct chunks placed");
 		assert_eq!(
 			total_entity_count(&g),
@@ -374,7 +379,7 @@ mod tests {
 		let chunks = vec!["a".to_string(), "b".to_string()];
 		// First chunk failed to embed (empty vec) — it must be skipped, not placed.
 		let vecs = vec![Vec::new(), vec![1.0, 0.0]];
-		let placed = place_chunks(&g, None, &job("doc", 1.0), &chunks, &vecs, "doc1", 0.95);
+		let placed = place_chunks(&g, None, None, &job("doc", 1.0), &chunks, &vecs, "doc1", 0.95);
 		assert_eq!(placed, 1, "only the chunk with a real vector is placed");
 		assert_eq!(total_entity_count(&g), 1);
 	}
@@ -397,6 +402,7 @@ mod tests {
 		let placed = place_chunks(
 			&g,
 			Some(&defer),
+			None,
 			&job("doc", 1.0),
 			&chunks,
 			&vecs,
@@ -416,7 +422,7 @@ mod tests {
 		// Dead loopback endpoint: every embed attempt fails, so place_document must
 		// bail with a FailureReport before mutating the graph.
 		let embedder = LlmClient::new_embed_only("http://127.0.0.1:1", "test");
-		let (id, fail) = place_document(&g, &embedder, &job("a document", 1.0), "doc1", 0.95).await;
+		let (id, fail) = place_document(&g, &embedder, &job("a document", 1.0), "doc1", 0.95, None).await;
 		assert!(
 			id.is_none(),
 			"no entity id is returned when embedding fails"

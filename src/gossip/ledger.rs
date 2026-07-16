@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::RwLock;
+use parking_lot::RwLock;
 use std::time::Instant;
 
 use crate::base::constants::{LEDGER_ROUTING_TTL, LEDGER_THOUGHT_TTL};

@@ -14,6 +14,10 @@ pub struct Config {
 	/// Optional time-to-live, in seconds, applied to ingested entities. `None`
 	/// means no expiry (the default).
 	pub ttl_secs: Option<u64>,
+	/// Optional bi-temporal world-time start, set from a distilled `valid_from`
+	/// hint ("since March"). Stamped onto the ingested entity's `valid_from`;
+	/// `None` falls back to the ingestion time.
+	pub valid_from: Option<std::time::SystemTime>,
 }
 
 impl Default for Config {
@@ -21,6 +25,7 @@ impl Default for Config {
 		Self {
 			dedup_threshold: INGEST_DEDUP_THRESHOLD,
 			ttl_secs: None,
+			valid_from: None,
 		}
 	}
 }

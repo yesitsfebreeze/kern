@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 use crate::base::graph::GraphGnn;
 use crate::base::locks::{read_recovered, write_recovered};
@@ -74,7 +76,9 @@ pub fn build_gnn_snapshot(kern: &Kern, cfg: &GnnConfig) -> Option<GnnSnapshot> {
 		let t = &kern.entities[id];
 		// The feature matrix is materialized once below via gg.feature_matrix();
 		// node vectors are stored on the Graph, so no separate feat_data buffer.
-		let _ = gg.add_node(id, t.vector.clone());
+		// GNN tensor core stays f64 internally; widen once at the boundary.
+		let feat: Vec<f64> = t.vector.iter().map(|&x| x as f64).collect();
+		let _ = gg.add_node(id, feat);
 	}
 
 	let mut pair_seen = HashSet::new();
@@ -140,21 +144,24 @@ fn apply_gnn_updates(
 		return;
 	}
 	let mut graph = write_recovered(g);
-	let mut changed: Vec<(String, Vec<f64>)> = Vec::new();
+	let mut changed: Vec<(String, Vec<f32>)> = Vec::new();
 	if let Some(kern) = graph.kerns.get_mut(kern_id) {
 		for (entity_id, vec) in &updates {
 			if vec.is_empty() {
 				continue;
 			}
 			if let Some(t) = kern.entities.get_mut(entity_id) {
-				let w = cosine_align(&t.vector, vec);
+				// Narrow the f64 GNN output to the f32 entity representation once,
+				// here at the boundary.
+				let vec32: Vec<f32> = vec.iter().map(|&x| x as f32).collect();
+				let w = cosine_align(&t.vector, &vec32);
 				if w >= 0.5 {
 					t.observe_support(w);
 				} else {
 					t.observe_contradict(1.0 - w);
 				}
-				t.gnn_vector = vec.clone();
-				changed.push((entity_id.clone(), vec.clone()));
+				t.gnn_vector = vec32.clone();
+				changed.push((entity_id.clone(), vec32));
 			}
 		}
 		if !weights.is_empty() {
@@ -178,7 +185,7 @@ fn apply_gnn_updates(
 /// hand-rolled copy; a zero-norm there returns 0.0, which maps to the same 0.5
 /// neutral. The length guard stays here so a dimension mismatch is neutral rather
 /// than a partial zip.
-fn cosine_align(a: &[f64], b: &[f64]) -> f64 {
+fn cosine_align(a: &[f32], b: &[f32]) -> f64 {
 	if a.is_empty() || b.is_empty() || a.len() != b.len() {
 		return 0.5;
 	}
@@ -273,7 +280,7 @@ mod tests {
 			"opposite -> 0.0"
 		);
 		assert!(
-			(cosine_align(&[1.0, 0.0], &[0.0, 1.0]) - 0.5).abs() < 1e-9,
+			(cosine_align(&[1.0, 0.0], &[0.0, 1.0]) - 0.5).abs() < 1e-6,
 			"orthogonal -> 0.5"
 		);
 		// Degenerate inputs are neutral (0.5), not a panic or partial zip.
@@ -299,7 +306,7 @@ mod tests {
 		g.kerns.insert("k".into(), k);
 		let g = Arc::new(RwLock::new(g));
 
-		let new_vec = vec![0.25, 0.5, 0.75];
+		let new_vec = vec![0.25f64, 0.5, 0.75];
 		let mut updates = HashMap::new();
 		updates.insert("e0".to_string(), new_vec.clone());
 		let q = Queue::new(16);
@@ -310,8 +317,9 @@ mod tests {
 			let gg = read_recovered(&g);
 			let kern = gg.kerns.get("k").unwrap();
 			assert_eq!(
-				kern.entities["e0"].gnn_vector, new_vec,
-				"gnn_vector overwritten"
+				kern.entities["e0"].gnn_vector,
+				vec![0.25f32, 0.5, 0.75],
+				"gnn_vector overwritten (narrowed at the boundary)"
 			);
 			assert_eq!(kern.gnn_weights, vec![9, 9], "kern gnn_weights stored");
 		}

@@ -115,7 +115,7 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use std::sync::RwLock;
+	use parking_lot::RwLock;
 	use std::time::{Duration, SystemTime};
 
 	use tempfile::tempdir;
@@ -172,6 +172,9 @@ mod tests {
 				producer_id: String::new(),
 				unlinked_count: 0,
 				dirty: false,
+				valid_from: None,
+				valid_to: None,
+				invalidated_at: None,
 			};
 			t.refresh_score();
 			t
@@ -195,13 +198,8 @@ mod tests {
 				url: record.source_uri,
 			};
 			let entity = self.build_entity(source, record.content);
-			let root_id = match self.graph.read() {
-				Ok(g) => g.root.id.clone(),
-				Err(_) => return,
-			};
-			if let Ok(mut g) = self.graph.write() {
-				accept::accept(&mut g, &root_id, entity, "");
-			}
+			let root_id = self.graph.read().root.id.clone();
+			accept::accept(&mut self.graph.write(), &root_id, entity, "");
 		}
 	}
 
@@ -249,7 +247,7 @@ mod tests {
 		};
 		sink.ingest(rec).await;
 
-		let g = g.read().expect("graph lock");
+		let g = g.read();
 		let paths = collect_file_paths(&g);
 		assert_eq!(paths.len(), 1);
 		assert_eq!(paths[0], "tmp/hello.rs");
@@ -285,13 +283,13 @@ mod tests {
 				Ok(None) => break,
 				Err(_) => {}
 			}
-			let g_read = g.read().expect("graph lock");
+			let g_read = g.read();
 			if count_file_documents(&g_read) >= 1 {
 				break;
 			}
 		}
 
-		let g_read = g.read().expect("graph lock");
+		let g_read = g.read();
 		let paths = collect_file_paths(&g_read);
 		assert!(
 			!paths.is_empty(),
@@ -323,7 +321,7 @@ mod tests {
 		sink.ingest(rec.clone()).await;
 		sink.ingest(rec).await;
 
-		let g = g.read().expect("graph lock");
+		let g = g.read();
 		assert_eq!(count_file_documents(&g), 1);
 	}
 }

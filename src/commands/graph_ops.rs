@@ -231,7 +231,7 @@ pub(super) async fn cmd_link(
 /// Choose the vector stored on a new link edge: the embedded reason text when an
 /// embedding was produced, otherwise the midpoint of the two endpoint vectors.
 /// Pure — no IO — so the fallback policy is unit-testable apart from `cmd_link`.
-fn link_vector(reason_embed: Option<Vec<f64>>, from_vec: &[f64], to_vec: &[f64]) -> Vec<f64> {
+fn link_vector(reason_embed: Option<Vec<f32>>, from_vec: &[f32], to_vec: &[f32]) -> Vec<f32> {
 	reason_embed.unwrap_or_else(|| average_vec(from_vec, to_vec))
 }
 

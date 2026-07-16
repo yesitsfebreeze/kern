@@ -1,17 +1,23 @@
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 use crate::base::constants::{
 	DEFAULT_SEED_K, KERN_INNER_RADIUS, KERN_OUTER_RADIUS, PROVENANCE_SCORE,
 	QUESTION_RESOLVE_THRESHOLD,
 };
+use crate::base::accept::{
+	classify_prompt, parse_contradiction, supersede_by_contradiction, ContradictionClass,
+};
 use crate::base::graph::GraphGnn;
 use crate::base::locks::{read_recovered, write_recovered};
 use crate::base::math::reason_id;
-use crate::base::reason::add_reason;
+use crate::base::reason::{add_reason, remove_reason};
 use crate::base::search::search_all_unlocked;
 use crate::base::types::{Reason, ReasonKind};
 use crate::base::util;
 use crate::config::TickConfig;
+use crate::ingest::place::build_chunk_entity;
 
 use super::cluster::{
 	anchor_prompt, centroid_thought, largest_cohesive_cluster_for_naming, vector_cluster,
@@ -19,7 +25,7 @@ use super::cluster::{
 use super::queue::{task, task_extra, Queue, TaskKind};
 
 pub use crate::types::{EmbedFunc, LlmFunc};
-pub type BroadcastQuestionFunc = Arc<dyn Fn(&str, &str, &[f64], &str) + Send + Sync>;
+pub type BroadcastQuestionFunc = Arc<dyn Fn(&str, &str, &[f32], &str) + Send + Sync>;
 
 /// Strip a leading `Theme:`/`Name:`/`Label:` label (a few case variants) that the
 /// naming LLM sometimes prepends, returning the trimmed remainder. Only the first
@@ -103,6 +109,114 @@ pub fn do_seed_questions(g: &Arc<RwLock<GraphGnn>>, entity_id: &str, llm: Option
 			add_reason(kern, reason);
 		}
 	}
+}
+
+/// Classify a recorded `Rephrase` near-duplicate as UPDATE/CONTRADICTION vs
+/// merely RELATED, and on the former run bi-temporal supersedence.
+///
+/// This is the background half of contradiction-driven invalidation: the ingest
+/// worker (which carries no reason-LLM) records a same-kind, different-text
+/// near-dup as a `Rephrase` edge and defers HERE via its dedup hook. The classify
+/// LLM runs UNLOCKED (do_enrich discipline); on `Supersede` the new phrasing is
+/// embedded, materialized as a fresh Active revision, and the stored claim is
+/// invalidated (status/superseded_by/valid_to/invalidated_at + ANN eviction +
+/// `Supersedes` edge). Fail open at every step — no LLM, no embedder, an
+/// ambiguous reply, or an already-superseded/edited target all leave the
+/// `Rephrase` edge exactly as the worker recorded it (today's behavior).
+pub fn do_classify_contradiction(
+	q: &Queue,
+	g: &Arc<RwLock<GraphGnn>>,
+	kern_id: &str,
+	rid: &str,
+	llm: Option<&LlmFunc>,
+	embed: Option<&EmbedFunc>,
+) {
+	let (llm, embed) = match (llm, embed) {
+		(Some(l), Some(e)) => (l, e),
+		_ => return,
+	};
+
+	// Snapshot the rephrase pair under a read guard.
+	let (old_id, old_text, new_text, old_kind, old_source, confidence) = {
+		let graph = read_recovered(g);
+		let kern = match graph.loaded(kern_id) {
+			Some(k) => k,
+			None => return,
+		};
+		let r = match kern.reasons.get(rid) {
+			Some(r) => r,
+			None => return,
+		};
+		if r.kind != ReasonKind::Rephrase || !r.to.is_empty() {
+			return;
+		}
+		let old = match kern.entities.get(&r.from) {
+			Some(e) if !e.is_superseded() => e,
+			_ => return,
+		};
+		(
+			r.from.clone(),
+			old.text(),
+			r.text.clone(),
+			old.kind,
+			old.source.clone(),
+			old.conf_mean(),
+		)
+	};
+	if new_text.trim().is_empty() || new_text == old_text {
+		return;
+	}
+
+	// Reason-LLM classification (unlocked). Fail open to Related.
+	if parse_contradiction(&llm(&classify_prompt(&old_text, &new_text)))
+		!= ContradictionClass::Supersede
+	{
+		return;
+	}
+
+	// Embed the new revision (unlocked network I/O).
+	let vec = match embed(&new_text) {
+		Ok(v) if !v.is_empty() => v,
+		_ => return,
+	};
+	let new_id = util::content_hash(&new_text);
+	if new_id == old_id {
+		return;
+	}
+	// Same single-source Entity builder as the ingest path (kind carried from the
+	// stored claim; no external_id — this is a contradiction, not a re-ingest).
+	let new_thought = build_chunk_entity(&new_text, &vec, old_kind, &old_source, "", confidence, None);
+
+	// Re-validate under the write guard (another tick may have superseded or
+	// removed this pair in between), then run supersedence and retire the now-stale
+	// Rephrase edge (it became a Supersedes edge).
+	{
+		let mut graph = write_recovered(g);
+		let still_pending = graph
+			.loaded(kern_id)
+			.map(|k| {
+				k.reasons.get(rid).is_some_and(|r| r.kind == ReasonKind::Rephrase)
+					&& k.entities.get(&old_id).is_some_and(|e| !e.is_superseded())
+			})
+			.unwrap_or(false);
+		if !still_pending {
+			return;
+		}
+		let rids = supersede_by_contradiction(&mut graph, kern_id, &old_id, new_thought);
+		if !rids.is_empty() {
+			if let Some(k) = graph.get_mut(kern_id) {
+				remove_reason(k, rid);
+			}
+			// Index the materialized revision for lexical/hybrid recall, like the
+			// ingest commit path does after `accept`.
+			if let Some(lex) = graph.lexical() {
+				lex.insert(&new_id, &new_text);
+			}
+		}
+	}
+
+	q.enqueue(task(TaskKind::Persist, kern_id));
+	q.enqueue(task(TaskKind::GnnPropagate, kern_id));
 }
 
 /// Under a read lock, decide how to name an unnamed kern: cluster its entities,
@@ -256,7 +370,7 @@ pub fn do_enrich(
 
 	{
 		let mut graph = write_recovered(g);
-		let mut new_vec: Option<(String, Vec<f64>)> = None;
+		let mut new_vec: Option<(String, Vec<f32>)> = None;
 		if let Some(kern) = graph.kerns.get_mut(kern_id) {
 			if let Some(r) = kern.reasons.get_mut(rid) {
 				if !r.is_enriched() {
@@ -364,12 +478,45 @@ pub fn do_disk_consolidate(g: &Arc<RwLock<GraphGnn>>) {
 	write_recovered(g).consolidate_disk_index();
 }
 
+/// Deferred live-graph access write-back for a completed query. `extra` is the
+/// newline-joined entity ids the query returned (see `queue::task_commit_access`);
+/// the MCP query path enqueues this instead of taking a write lock inline, so the
+/// interactive query path stays read-only. Takes ONE write guard and stamps each
+/// live entity (accessed_at/access_count/heat) WITHOUT bumping the mutation epoch,
+/// so the query cache is not invalidated (see `score::commit_access_ids`).
+pub fn do_commit_access(g: &Arc<RwLock<GraphGnn>>, extra: &str) {
+	let ids: Vec<String> = extra
+		.lines()
+		.filter(|l| !l.is_empty())
+		.map(str::to_string)
+		.collect();
+	if ids.is_empty() {
+		return;
+	}
+	crate::retrieval::score::commit_access_ids(&mut write_recovered(g), &ids);
+}
+
 pub fn do_persist(g: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
 	let graph = read_recovered(g);
 	let store = match graph.store() {
 		Some(s) => s,
 		None => return,
 	};
+	// Stale-write guard: if another writer (a CLI direct-write, a second daemon)
+	// advanced the store past what this graph last reconciled to, our in-RAM kern
+	// may be older than the committed on-disk one — a per-kern overwrite here would
+	// silently drop the newer rows. Skip; the daemon's maintenance tick reloads
+	// from disk (reconcile_if_stale) and re-persists from the reconciled graph.
+	if store.read_epoch() > graph.flushed_epoch() {
+		tracing::debug!(
+			target: "kern.persist",
+			kern = %kern_id,
+			disk_epoch = store.read_epoch(),
+			flushed_epoch = graph.flushed_epoch(),
+			"skipping per-kern persist of a stale graph (store advanced under us)"
+		);
+		return;
+	}
 	// The root carries authoritative fields (purpose/descriptors/radii) that
 	// live on `graph.root`, not the map entry — persist it through the same
 	// merge `save_all` uses so a root Persist task can't drop them.
@@ -404,7 +551,7 @@ pub fn do_reembed(g: &Arc<RwLock<GraphGnn>>, kern_id: &str, embed: Option<&Embed
 	};
 
 	// Embed outside the lock (network I/O).
-	let mut new_vecs: Vec<(String, Vec<f64>)> = Vec::new();
+	let mut new_vecs: Vec<(String, Vec<f32>)> = Vec::new();
 	for (id, text) in &dirty_ents {
 		if let Ok(v) = embed(text) {
 			if !v.is_empty() {
@@ -441,7 +588,7 @@ pub fn do_reembed(g: &Arc<RwLock<GraphGnn>>, kern_id: &str, embed: Option<&Embed
 		}
 		// Recompute dirty reason vectors as the mean of their (now-updated)
 		// endpoint vectors; clear the flag.
-		let endpoint = |k: &crate::base::types::Kern, id: &str| -> Option<Vec<f64>> {
+		let endpoint = |k: &crate::base::types::Kern, id: &str| -> Option<Vec<f32>> {
 			k.entities
 				.get(id)
 				.map(|e| e.vector.clone())
@@ -482,7 +629,8 @@ mod tests {
 	use super::*;
 	use crate::base::graph::GraphGnn;
 	use crate::base::types::{Entity, Kern};
-	use std::sync::{Arc, RwLock};
+	use parking_lot::RwLock;
+	use std::sync::Arc;
 
 	#[test]
 	fn do_seed_questions_adds_question_edges_for_the_entity() {
@@ -511,7 +659,7 @@ mod tests {
 			Arc::new(|_p: &str| "What shipped today?\nWhen did the gate ship?".to_string());
 		do_seed_questions(&g, "e1", Some(&llm));
 
-		let gg = g.read().unwrap();
+		let gg = g.read();
 		let qs: Vec<_> = gg
 			.kerns
 			.get(&root)
@@ -523,6 +671,99 @@ mod tests {
 		assert_eq!(qs.len(), 2, "one dangling Question edge per LLM line");
 	}
 
+	/// Build a graph carrying one entity `old` and a pending Rephrase edge from it
+	/// to `new_text` (as the ingest dedup path records). Returns `(graph, root_id,
+	/// rephrase_reason_id)`.
+	fn graph_with_rephrase(
+		old_text: &str,
+		new_text: &str,
+	) -> (Arc<RwLock<GraphGnn>>, String, String) {
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		let mut old = Entity {
+			id: "old".into(),
+			kind: crate::base::types::EntityKind::Claim,
+			vector: vec![1.0, 0.0],
+			..Default::default()
+		};
+		old.set_text(old_text.into());
+		old.dirty = false;
+		g.get_mut(&root).unwrap().entities.insert("old".into(), old);
+		g.index_entity("old", &root);
+		g.entity_idx.insert("old".into(), vec![1.0, 0.0]);
+		let rid = reason_id("old", "", ReasonKind::Rephrase, new_text, "");
+		add_reason(
+			g.get_mut(&root).unwrap(),
+			Reason {
+				id: rid.clone(),
+				from: "old".into(),
+				to: String::new(),
+				kind: ReasonKind::Rephrase,
+				text: new_text.into(),
+				..Default::default()
+			},
+		);
+		(Arc::new(RwLock::new(g)), root, rid)
+	}
+
+	#[test]
+	fn classify_contradiction_supersedes_on_update_verdict() {
+		let (g, root, rid) = graph_with_rephrase("the deadline is March", "the deadline is April");
+		let llm: LlmFunc = Arc::new(|_p: &str| "CONTRADICTION".to_string());
+		let embed: EmbedFunc = Arc::new(|_t: &str| Ok(vec![0.9, 0.1]));
+		let q = Queue::new(16);
+		do_classify_contradiction(&q, &g, &root, &rid, Some(&llm), Some(&embed));
+
+		let gg = g.read();
+		let kern = gg.kerns.get(&root).unwrap();
+		let old = kern.entities.get("old").unwrap();
+		assert!(old.is_superseded(), "old is superseded on a CONTRADICTION verdict");
+		assert!(old.invalidated_at.is_some(), "old stamped invalidated");
+		let new_id = util::content_hash("the deadline is April");
+		assert!(kern.entities.contains_key(&new_id), "new revision materialized");
+		assert_eq!(old.superseded_by, new_id);
+		assert!(
+			!kern.reasons.contains_key(&rid),
+			"the Rephrase edge is retired once it becomes a Supersedes edge"
+		);
+		assert!(
+			kern.reasons.values().any(|r| r.kind == ReasonKind::Supersedes),
+			"a Supersedes edge now links the revisions"
+		);
+	}
+
+	#[test]
+	fn classify_contradiction_keeps_rephrase_on_related_verdict() {
+		let (g, root, rid) = graph_with_rephrase("cats are mammals", "cats are feline mammals");
+		let llm: LlmFunc = Arc::new(|_p: &str| "RELATED".to_string());
+		let embed: EmbedFunc = Arc::new(|_t: &str| Ok(vec![0.9, 0.1]));
+		let q = Queue::new(16);
+		do_classify_contradiction(&q, &g, &root, &rid, Some(&llm), Some(&embed));
+
+		let gg = g.read();
+		let kern = gg.kerns.get(&root).unwrap();
+		assert!(
+			!kern.entities.get("old").unwrap().is_superseded(),
+			"a RELATED verdict leaves the stored claim active"
+		);
+		assert!(
+			kern.reasons.contains_key(&rid),
+			"the Rephrase edge stands unchanged on RELATED"
+		);
+	}
+
+	#[test]
+	fn classify_contradiction_is_a_noop_without_llm() {
+		// Fail open: no reason-LLM configured must mean no behavior change.
+		let (g, root, rid) = graph_with_rephrase("a", "b");
+		let q = Queue::new(16);
+		do_classify_contradiction(&q, &g, &root, &rid, None, None);
+		let gg = g.read();
+		let kern = gg.kerns.get(&root).unwrap();
+		assert!(!kern.entities.get("old").unwrap().is_superseded());
+		assert!(kern.reasons.contains_key(&rid), "rephrase edge preserved");
+	}
+
 	#[test]
 	fn do_seed_questions_is_a_noop_without_llm_or_entity() {
 		let g = Arc::new(RwLock::new(GraphGnn::new()));
@@ -531,11 +772,44 @@ mod tests {
 		// LLM but unknown entity -> noop (no panic, no edges).
 		let llm: LlmFunc = Arc::new(|_p: &str| "Q?".to_string());
 		do_seed_questions(&g, "missing", Some(&llm));
-		let gg = g.read().unwrap();
+		let gg = g.read();
 		let root = gg.root.id.clone();
 		assert!(
 			gg.kerns.get(&root).unwrap().reasons.is_empty(),
 			"no edges minted"
+		);
+	}
+
+	#[test]
+	fn do_commit_access_stamps_the_live_entities_from_the_id_list() {
+		// The deferred access write-back: query_locked no longer stamps inline, it
+		// hands the retrieved ids to this task, which stamps the LIVE graph under one
+		// write guard without bumping the mutation epoch.
+		let mut g = GraphGnn::new();
+		let kid = "k1".to_string();
+		let mut kern = Kern::new(kid.clone(), "");
+		kern.entities.insert(
+			"a".into(),
+			Entity {
+				id: "a".into(),
+				..Default::default()
+			},
+		);
+		g.kerns.insert(kid.clone(), kern);
+		g.index_entity("a", &kid);
+		let epoch_before = g.mutation_epoch();
+		let g = Arc::new(RwLock::new(g));
+
+		do_commit_access(&g, "a");
+
+		let gg = g.read();
+		let live = gg.kerns.get(&kid).unwrap().entities.get("a").unwrap();
+		assert!(live.accessed_at.is_some(), "the deferred stamp reached the live entity");
+		assert_eq!(live.access_count.value(), 1, "live access counter bumped by the tick");
+		assert_eq!(
+			gg.mutation_epoch(),
+			epoch_before,
+			"the access stamp must not invalidate the query cache"
 		);
 	}
 
@@ -555,7 +829,7 @@ mod tests {
 		let g = Arc::new(RwLock::new(g));
 		let embed: EmbedFunc = Arc::new(|_t: &str| Ok(vec![0.1, 0.2, 0.3]));
 		do_reembed(&g, &kid, Some(&embed));
-		let g = g.read().unwrap();
+		let g = g.read();
 		let e = g.kerns.get(&kid).unwrap().entities.get("e1").unwrap();
 		assert!(!e.dirty, "dirty must be cleared after reembed");
 		assert_eq!(e.vector, vec![0.1, 0.2, 0.3]);
@@ -600,7 +874,7 @@ mod tests {
 		let embed: EmbedFunc = Arc::new(|_t: &str| Ok(vec![9.0, 9.0]));
 		do_reembed(&g, &kid, Some(&embed));
 
-		let g = g.read().unwrap();
+		let g = g.read();
 		let r = g.kerns.get(&kid).unwrap().reasons.get("a->b").unwrap();
 		assert!(!r.dirty, "dirty reason cleared once recomputed");
 		assert_eq!(
@@ -653,7 +927,7 @@ mod tests {
 		let q = Queue::new(16);
 		do_resolve(&q, &g, &kid, "q1", None);
 
-		let g = g.read().unwrap();
+		let g = g.read();
 		let r = g.kerns.get(&kid).unwrap().reasons.get("q1").unwrap();
 		assert_eq!(
 			r.kind,
@@ -696,7 +970,7 @@ mod tests {
 		let q = Queue::new(16);
 		do_resolve(&q, &g, &kid, "linked", None);
 
-		let g = g.read().unwrap();
+		let g = g.read();
 		let r = g.kerns.get(&kid).unwrap().reasons.get("linked").unwrap();
 		assert_eq!(
 			r.kind,

@@ -205,7 +205,8 @@ fn resource_content(uri: &str, text: &str) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use std::sync::{Arc, RwLock};
+	use parking_lot::RwLock;
+	use std::sync::Arc;
 
 	use crate::base::graph::GraphGnn;
 	use crate::base::locks::write_recovered;
@@ -221,6 +222,7 @@ mod tests {
 		let worker = Arc::new(crate::ingest::Worker::new(
 			graph.clone(),
 			embedder,
+			None,
 			None,
 			None,
 		));

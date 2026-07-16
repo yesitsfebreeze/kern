@@ -40,7 +40,7 @@ pub(crate) use worker::Job;
 /// so cosine similarity is ~0 and `commit_entity`'s dedup check (similarity >
 /// threshold) is dodged. Production paths use real embeddings.
 #[cfg(test)]
-pub(crate) fn stub_one_hot(seed: &str) -> Vec<f64> {
+pub(crate) fn stub_one_hot(seed: &str) -> Vec<f32> {
 	let h = crate::base::util::content_hash(seed);
 	let bytes = h.as_bytes();
 	let slot = if bytes.is_empty() {
@@ -48,7 +48,7 @@ pub(crate) fn stub_one_hot(seed: &str) -> Vec<f64> {
 	} else {
 		bytes[0] as usize
 	};
-	let mut v = vec![0.0_f64; 256];
+	let mut v = vec![0.0_f32; 256];
 	v[slot] = 1.0;
 	v
 }

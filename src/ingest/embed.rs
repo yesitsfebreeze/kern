@@ -14,7 +14,7 @@ const RETRY_DELAYS_MS: [u64; 3] = [150, 300, 600];
 pub(crate) async fn embed_chunks(
 	embedder: &LlmClient,
 	chunks: &[String],
-) -> (Vec<Vec<f64>>, Vec<FailureReport>) {
+) -> (Vec<Vec<f32>>, Vec<FailureReport>) {
 	if chunks.is_empty() {
 		return (Vec::new(), Vec::new());
 	}
@@ -48,7 +48,7 @@ pub(crate) async fn embed_with_retry(
 	text: &str,
 	scope: &str,
 	chunk_index: usize,
-) -> Result<Vec<f64>, FailureReport> {
+) -> Result<Vec<f32>, FailureReport> {
 	let mut last_err = None;
 
 	for delay_ms in RETRY_DELAYS_MS.iter() {
@@ -94,7 +94,7 @@ mod tests {
 					.and_then(|v| v.as_array())
 					.map(|a| a.len())
 					.unwrap_or(1);
-				let embs: Vec<Vec<f64>> = (0..n).map(|_| vec![0.1, 0.2, 0.3]).collect();
+				let embs: Vec<Vec<f32>> = (0..n).map(|_| vec![0.1, 0.2, 0.3]).collect();
 				axum::Json(json!({ "embeddings": embs }))
 			}),
 		)

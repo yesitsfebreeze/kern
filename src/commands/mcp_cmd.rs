@@ -14,16 +14,14 @@
 //!   (Claude Desktop, etc.) keep working when no daemon is up.
 
 use std::sync::Arc;
-use std::sync::RwLock as StdRwLock;
+use parking_lot::RwLock as StdRwLock;
 
 use tokio::sync::Mutex as TokioMutex;
 use trnsprt::kern_rpc::{CallToolReq, KernRpcClient};
 use trnsprt::typed::{AdapterError, JsonEnvelopeCodec};
 use trnsprt::{McpError, McpServer, ToolResult, ToolSchema};
 
-use crate::base::locks::read_recovered;
-
-use super::{load_graph, save_graph};
+use super::load_graph;
 
 pub(super) async fn cmd_mcp(cfg: &crate::config::Config) {
 	// First attach attempt — short retry catches the "daemon up but
@@ -266,10 +264,13 @@ mod tests {
 async fn run_standalone(cfg: &crate::config::Config) {
 	let g = Arc::new(StdRwLock::new(load_graph(cfg)));
 	let llm_client = super::server_llm_client(cfg, cfg.reason_url(), &cfg.reason.model);
+	// Guarded persist: this standalone server is also a long-lived writer, so it
+	// uses the same stale-flush guard as the daemon — it must never overwrite a
+	// graph another process grew on disk with its own staler snapshot.
 	let save_g = g.clone();
+	let save_cfg = cfg.clone();
 	let save_fn: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-		let g = read_recovered(&save_g);
-		save_graph(&g);
+		super::save_graph_guarded(&save_g, &save_cfg);
 	});
 	let q = Arc::new(crate::tick::queue::Queue::new(512));
 	// Defer question seeding to the tick — same wiring as the registry path:
@@ -284,17 +285,30 @@ async fn run_standalone(cfg: &crate::config::Config) {
 			));
 		})
 	};
+	// Same deferral for contradiction classification: worker stays embed-bound, the
+	// tick runs the classify-LLM and any bi-temporal supersedence.
+	let defer_contradiction: crate::ingest::worker::DeferContradictionFn = {
+		let contra_q = q.clone();
+		Arc::new(move |kern_id: &str, reason_id: &str| {
+			let _ = contra_q.enqueue(crate::tick::queue::task_extra(
+				crate::tick::queue::TaskKind::ClassifyContradiction,
+				kern_id,
+				reason_id,
+			));
+		})
+	};
 	let worker = Arc::new(crate::ingest::Worker::new(
 		g.clone(),
 		llm_client.clone(),
 		Some(defer),
+		Some(defer_contradiction),
 		Some(save_fn.clone()),
 	));
 
 	let tick_llm: crate::tick::tasks::LlmFunc = Arc::new(llm_client.complete_func());
 	let tick_embed: crate::tick::tasks::EmbedFunc = {
 		let c = llm_client.clone();
-		Arc::new(move |text: &str| -> Result<Vec<f64>, String> {
+		Arc::new(move |text: &str| -> Result<Vec<f32>, String> {
 			let c = c.clone();
 			let text = text.to_string();
 			match tokio::runtime::Handle::try_current() {

@@ -128,6 +128,9 @@ async fn drain_entry(
 			section: String::new(),
 			title: format!("claude://{}", c.descriptor),
 		};
+		// Carry the distilled world-time hint onto this claim's ingest config.
+		let mut claim_cfg = cfg.clone();
+		claim_cfg.valid_from = c.valid_from;
 		let outcome = worker
 			.run(
 				c.text,
@@ -135,7 +138,7 @@ async fn drain_entry(
 				EntityKind::Claim,
 				c.descriptor,
 				0.6,
-				cfg.clone(),
+				claim_cfg,
 			)
 			.await;
 		let ok = !matches!(outcome.status, OutcomeStatus::Failed);
@@ -350,7 +353,7 @@ mod tests {
 	#[tokio::test]
 	async fn drain_once_ingests_a_delta_and_archives_it_end_to_end() {
 		use crate::base::graph::GraphGnn;
-		use std::sync::RwLock;
+		use parking_lot::RwLock;
 
 		let app = axum::Router::new().route(
 			"/api/embed",
@@ -368,7 +371,7 @@ mod tests {
 		let llm: LlmFunc =
 			Arc::new(|_p: &str| r#"[{"text":"the API key lives in vault X","kind":"fact"}]"#.to_string());
 		let graph = Arc::new(RwLock::new(GraphGnn::new()));
-		let worker = Arc::new(Worker::new(graph.clone(), embedder, None, None));
+		let worker = Arc::new(Worker::new(graph.clone(), embedder, None, None, None));
 
 		let dir = tempdir().unwrap();
 		let spool = dir.path().to_path_buf();

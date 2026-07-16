@@ -3,15 +3,17 @@ use crate::base::math;
 use crate::base::reason::add_reason;
 use crate::base::types::*;
 use crate::crdt::GCounter;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 use std::time::SystemTime;
 
 pub fn find_duplicate(
 	graph: &Arc<RwLock<GraphGnn>>,
-	vec: &[f64],
+	vec: &[f32],
 	threshold: f64,
 ) -> Option<String> {
-	let g = graph.read().ok()?;
+	let g = graph.read();
 	let hits = g
 		.entity_idx
 		.search(vec, 1, crate::base::constants::DEDUP_EF);
@@ -36,11 +38,10 @@ pub fn update_existing_entity(
 	entity_id: &str,
 	new_text: &str,
 	new_score: f64,
+	incoming_kind: EntityKind,
+	on_supersede_candidate: Option<&crate::ingest::worker::DeferContradictionFn>,
 ) {
-	let mut g = match graph.write() {
-		Ok(g) => g,
-		Err(_) => return,
-	};
+	let mut g = graph.write();
 	let kern_id = match g.kern_of_entity(entity_id) {
 		Some(kid) => kid.to_string(),
 		None => return,
@@ -50,19 +51,19 @@ pub fn update_existing_entity(
 		None => return,
 	};
 
-	let differs = {
+	let (differs, old_kind) = {
 		let Some(t) = kern.entities.get_mut(entity_id) else {
 			return;
 		};
 		t.observe_support(new_score);
 		t.updated_at = Some(SystemTime::now());
-		t.text() != new_text
+		(t.text() != new_text, t.kind)
 	};
 
 	if differs {
 		let rid = math::reason_id(entity_id, "", ReasonKind::Rephrase, new_text, "");
 		let reason = Reason {
-			id: rid,
+			id: rid.clone(),
 			from: entity_id.to_string(),
 			// A Rephrase is a LOCAL annotation on `from` itself — the alternate
 			// phrasing attaches to this one entity, there is no second endpoint to
@@ -81,6 +82,16 @@ pub fn update_existing_entity(
 			producer_id: String::new(),
 		};
 		add_reason(kern, reason);
+
+		// Defer the contradiction classification to the tick (the worker carries no
+		// reason-LLM). Kind guard: a preference must not supersede a fact, so only a
+		// SAME-KIND near-dup is a supersede candidate. Fail open — no hook wired means
+		// the Rephrase edge just stands, exactly as before.
+		if incoming_kind == old_kind {
+			if let Some(hook) = on_supersede_candidate {
+				hook(&kern_id, &rid);
+			}
+		}
 	}
 }
 
@@ -99,14 +110,14 @@ mod tests {
 	}
 
 	fn entity(graph: &Arc<RwLock<GraphGnn>>, id: &str) -> Entity {
-		let g = graph.read().unwrap();
+		let g = graph.read();
 		let kid = g.kern_of_entity(id).unwrap().to_string();
 		g.kerns.get(&kid).unwrap().entities.get(id).unwrap().clone()
 	}
 
 	/// Graph holding one entity with an explicit vector, indexed into the ANN
 	/// index so `find_duplicate`'s `entity_idx.search` can return it.
-	fn graph_with_vec_entity(id: &str, vec: Vec<f64>) -> Arc<RwLock<GraphGnn>> {
+	fn graph_with_vec_entity(id: &str, vec: Vec<f32>) -> Arc<RwLock<GraphGnn>> {
 		let mut g = GraphGnn::new();
 		let root = g.root.id.clone();
 		let mut e = mk_entity(id, "text", 1.0, EntityKind::Claim);
@@ -147,7 +158,7 @@ mod tests {
 		let graph = graph_with_entity("e1", "the original claim");
 		let before = entity(&graph, "e1");
 
-		update_existing_entity(&graph, "e1", "the original claim", 1.0);
+		update_existing_entity(&graph, "e1", "the original claim", 1.0, EntityKind::Claim, None);
 
 		let after = entity(&graph, "e1");
 		assert!(
@@ -157,7 +168,7 @@ mod tests {
 		assert_eq!(after.text(), "the original claim", "text untouched");
 		assert!(after.updated_at.is_some(), "updated_at bumped");
 		// No Rephrase edge for identical text.
-		let g = graph.read().unwrap();
+		let g = graph.read();
 		let kid = g.kern_of_entity("e1").unwrap();
 		let any_rephrase = g
 			.kerns
@@ -178,7 +189,7 @@ mod tests {
 		let graph = graph_with_entity("e1", "the original claim");
 		let before = entity(&graph, "e1");
 
-		update_existing_entity(&graph, "e1", "a reworded version of the claim", 1.0);
+		update_existing_entity(&graph, "e1", "a reworded version of the claim", 1.0, EntityKind::Claim, None);
 
 		let after = entity(&graph, "e1");
 		assert_eq!(after.id, "e1", "id unchanged");
@@ -193,7 +204,7 @@ mod tests {
 			"confidence reinforced"
 		);
 
-		let g = graph.read().unwrap();
+		let g = graph.read();
 		let kid = g.kern_of_entity("e1").unwrap();
 		let rephrase: Vec<_> = g
 			.kerns
@@ -213,10 +224,10 @@ mod tests {
 		// Re-observing the same alternate phrasing must not pile up duplicate
 		// edges — reason_id is content-addressed, so add_reason de-dupes.
 		let graph = graph_with_entity("e1", "the original claim");
-		update_existing_entity(&graph, "e1", "reworded claim", 1.0);
-		update_existing_entity(&graph, "e1", "reworded claim", 1.0);
+		update_existing_entity(&graph, "e1", "reworded claim", 1.0, EntityKind::Claim, None);
+		update_existing_entity(&graph, "e1", "reworded claim", 1.0, EntityKind::Claim, None);
 
-		let g = graph.read().unwrap();
+		let g = graph.read();
 		let kid = g.kern_of_entity("e1").unwrap();
 		let count = g
 			.kerns

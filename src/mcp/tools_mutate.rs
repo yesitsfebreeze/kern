@@ -423,7 +423,8 @@ impl Server {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use std::sync::{Arc, RwLock};
+	use parking_lot::RwLock;
+	use std::sync::Arc;
 
 	use crate::base::graph::GraphGnn;
 	use crate::base::types::{Entity, Kern};
@@ -437,6 +438,7 @@ mod tests {
 		let worker = Arc::new(crate::ingest::Worker::new(
 			graph.clone(),
 			embedder,
+			None,
 			None,
 			None,
 		));

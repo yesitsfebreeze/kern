@@ -239,8 +239,10 @@ impl Server {
 mod descriptor_tests {
 	use std::sync::{
 		atomic::{AtomicUsize, Ordering},
-		Arc, RwLock,
+		Arc,
 	};
+
+	use parking_lot::RwLock;
 
 	use crate::base::graph::GraphGnn;
 	use crate::base::locks::read_recovered;
@@ -256,6 +258,7 @@ mod descriptor_tests {
 		let worker = Arc::new(crate::ingest::Worker::new(
 			graph.clone(),
 			embedder,
+			None,
 			None,
 			None,
 		));

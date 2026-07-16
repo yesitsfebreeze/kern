@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::Instant;
 
 use crate::base::constants::{GOSSIP_SEEN_SET_CAP, GOSSIP_SEEN_TTL};
@@ -78,7 +78,7 @@ impl SeenSet {
 
 	#[cfg(test)]
 	fn len(&self) -> usize {
-		self.inner.lock().unwrap().live.len()
+		self.inner.lock().live.len()
 	}
 
 	/// Length of the insertion-order `VecDeque`. In a settled state it equals
@@ -87,7 +87,7 @@ impl SeenSet {
 	/// assert the two structures stay in lock-step.
 	#[cfg(test)]
 	fn len_order(&self) -> usize {
-		self.inner.lock().unwrap().order.len()
+		self.inner.lock().order.len()
 	}
 }
 

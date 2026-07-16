@@ -11,7 +11,9 @@ mod tools_mutate;
 mod tools_query;
 
 use std::io::{BufReader, Read, Write};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
+
+use parking_lot::RwLock;
 
 use serde::Serialize;
 use serde_json::value::RawValue;

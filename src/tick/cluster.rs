@@ -93,7 +93,7 @@ fn best_cluster(clusters: &[Cluster], min_size: usize, min_cohesion: f64) -> Opt
 	best
 }
 
-pub fn is_core_cluster(c: &Cluster, anchor_vec: &[f64]) -> bool {
+pub fn is_core_cluster(c: &Cluster, anchor_vec: &[f32]) -> bool {
 	if anchor_vec.is_empty() || c.members.is_empty() {
 		return false;
 	}
@@ -125,7 +125,7 @@ pub fn centroid_thought(c: &Cluster) -> Option<&Entity> {
 	})
 }
 
-pub fn compute_centroid(members: &[Entity]) -> Vec<f64> {
+pub fn compute_centroid(members: &[Entity]) -> Vec<f32> {
 	if members.is_empty() || members[0].vector.is_empty() {
 		return Vec::new();
 	}
@@ -138,7 +138,7 @@ pub fn compute_centroid(members: &[Entity]) -> Vec<f64> {
 			}
 		}
 	}
-	let n = members.len() as f64;
+	let n = members.len() as f32;
 	for v in centroid.iter_mut() {
 		*v /= n;
 	}

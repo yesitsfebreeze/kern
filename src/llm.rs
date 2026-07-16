@@ -153,7 +153,7 @@ impl Client {
 		)
 	}
 
-	pub async fn embed(&self, text: &str) -> Result<Vec<f64>, LlmError> {
+	pub async fn embed(&self, text: &str) -> Result<Vec<f32>, LlmError> {
 		match self.embed_batch(&[text.to_string()]).await {
 			Ok(mut vecs) => {
 				if vecs.is_empty() {
@@ -211,7 +211,7 @@ impl Client {
 		.await
 	}
 
-	pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f64>>, LlmError> {
+	pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, LlmError> {
 		if is_local_ollama(&self.inner.embed_url) {
 			let url = format!("{}/api/embed", self.inner.embed_url);
 			let body = self.embed_body(serde_json::json!(texts));
@@ -240,7 +240,7 @@ impl Client {
 		Ok(parsed.data.into_iter().map(|i| i.embedding).collect())
 	}
 
-	async fn embed_single(&self, text: &str) -> Result<Vec<f64>, LlmError> {
+	async fn embed_single(&self, text: &str) -> Result<Vec<f32>, LlmError> {
 		if is_local_ollama(&self.inner.embed_url) {
 			let url = format!("{}/api/embed", self.inner.embed_url);
 			let body = self.embed_body(serde_json::json!(text));
@@ -451,7 +451,7 @@ fn make_headers(key: &str) -> HeaderMap {
 /// of the request `input` (one row per input string).
 #[derive(Deserialize)]
 struct NativeEmbedResponse {
-	embeddings: Vec<Vec<f64>>,
+	embeddings: Vec<Vec<f32>>,
 }
 
 /// Response from OpenAI-compat `/v1/embeddings`. Order is NOT guaranteed —
@@ -463,7 +463,7 @@ struct OpenAiEmbedResponse {
 
 #[derive(Deserialize)]
 struct OpenAiEmbedItem {
-	embedding: Vec<f64>,
+	embedding: Vec<f32>,
 	index: usize,
 }
 

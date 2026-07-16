@@ -124,7 +124,12 @@ impl Default for RetrievalConfig {
 			rrf_global_weight: 0.5,
 			dedup_by_section: true,
 			mmr_enabled: true,
-			mmr_lambda: 0.45,
+			// Relevance-dominant (standard MMR region ~0.7). 0.45 over-diversified:
+			// on the workload trace it suppressed legitimate multi-relevant cluster
+			// hits below rank 10 (recall@10 0.925 -> 1.0, NDCG@10 0.928 -> 0.999 at
+			// 0.75; `just bench-workload`, sweep 2026-07-16). Ingest-time dedup
+			// (cosine 0.95) already handles true duplicates.
+			mmr_lambda: 0.75,
 			mmr_pool_size: 50,
 			rerank_enabled: true,
 			rerank_pool_size: 30,

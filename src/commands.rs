@@ -277,6 +277,109 @@ pub(crate) fn save_graph(g: &GraphGnn) {
 	}
 }
 
+/// Reload a live graph from disk REUSING its open store handle, then re-apply the
+/// runtime graph config (BM25 params, disk-spill threshold). Reload paths must use
+/// this rather than [`load_graph`]: load_graph opens a fresh LMDB env, and a second
+/// env on a dir already open in this process is a forbidden double-open that
+/// corrupts the lock and can SIGSEGV. Falls back to [`load_graph`] only for an
+/// in-memory graph that has no store to reuse (tests).
+pub(crate) fn reload_graph(cfg: &crate::config::Config, old: &GraphGnn) -> GraphGnn {
+	match crate::base::persist::reload_from_disk(old) {
+		Some(mut g) => {
+			apply_graph_config(&mut g, &cfg.graph);
+			if let Some(lex) = g.lexical() {
+				lex.set_bm25_params(cfg.retrieval.bm25_k1 as f32, cfg.retrieval.bm25_b as f32);
+			}
+			g
+		}
+		None => load_graph(cfg),
+	}
+}
+
+/// Stale-safe persist for a long-lived server's shared save closure. The flush is
+/// refused (and the graph reloaded from disk) when the on-disk store epoch has
+/// moved past the epoch this graph last reconciled to — i.e. another writer (a
+/// stray CLI direct-write, a second daemon) committed underneath us. That makes a
+/// server flush strictly additive: it can never overwrite a graph that grew on
+/// disk with its own staler, smaller snapshot — the root data-loss bug.
+///
+/// On a refusal we adopt the on-disk graph (the authoritative one) so reads stop
+/// lying and the next flush proceeds from the reconciled state instead of
+/// re-refusing forever. Called only with no graph lock held (every `save_fn` site
+/// drops its lock first), so taking the write lock to swap in the reload is safe.
+pub(crate) fn save_graph_guarded(
+	graph: &std::sync::Arc<parking_lot::RwLock<GraphGnn>>,
+	cfg: &crate::config::Config,
+) {
+	// Capture the flush snapshot under the read guard — the map clone is the ONLY
+	// work done with the lock held — then drop the guard so the LMDB transaction
+	// below runs lock-free. The epoch guard is unchanged: `flushed_epoch` is read at
+	// capture time and the disk-epoch comparison still happens inside the store's
+	// write txn, so another writer that advanced the store is still detected.
+	let (snapshot, expected) = {
+		let g = read_recovered(graph);
+		(crate::base::persist::snapshot_for_flush(&g), g.flushed_epoch())
+	};
+	let Some(snapshot) = snapshot else {
+		// In-memory graph (no store bound): nothing to flush.
+		return;
+	};
+	let outcome = crate::base::persist::flush_snapshot(&snapshot, expected);
+	match outcome {
+		Ok(crate::base::store::FlushOutcome::Flushed { epoch }) => {
+			crate::base::locks::write_recovered(graph).set_flushed_epoch(epoch);
+		}
+		Ok(crate::base::store::FlushOutcome::RefusedStale {
+			disk_epoch,
+			expected,
+		}) => {
+			tracing::warn!(
+				target: "kern.persist",
+				disk_epoch,
+				expected,
+				data_dir = %cfg.data_dir,
+				"refused to flush a stale snapshot — disk advanced under us (another writer); reloading from disk so live rows are not dropped"
+			);
+			// Adopt the on-disk graph as source of truth, reusing the open store
+			// handle (a second env on this dir would double-open LMDB). The reloaded
+			// graph re-stamps the loaded epoch, so it is no longer stale.
+			let mut w = crate::base::locks::write_recovered(graph);
+			let fresh = reload_graph(cfg, &w);
+			*w = fresh;
+		}
+		Err(e) => eprintln!("save: {e}"),
+	}
+}
+
+/// Reload the graph from disk when another writer has advanced the store past what
+/// this graph last reconciled to. Returns `true` if a reload happened. The daemon
+/// calls this on its maintenance tick so its in-RAM graph adopts CLI-committed
+/// rows promptly — before the tick clusters/persists, so the per-kern persist path
+/// never writes a stale kern over a newer on-disk one, and so `health` reflects
+/// committed state rather than a stale empty load.
+pub(crate) fn reconcile_if_stale(
+	graph: &std::sync::Arc<parking_lot::RwLock<GraphGnn>>,
+	cfg: &crate::config::Config,
+) -> bool {
+	let mut w = crate::base::locks::write_recovered(graph);
+	let stale = match w.store() {
+		Some(store) => store.read_epoch() > w.flushed_epoch(),
+		None => false,
+	};
+	if stale {
+		// Reload reusing the open store handle (never load_graph, which would
+		// double-open the LMDB env on a dir already open in this process).
+		let fresh = reload_graph(cfg, &w);
+		*w = fresh;
+		tracing::info!(
+			target: "kern.persist",
+			data_dir = %cfg.data_dir,
+			"store advanced under the daemon (external write); reloaded graph from disk"
+		);
+	}
+	stale
+}
+
 /// data.mdb size above which a startup self-heal (reap + compact) is worth its
 /// double-load cost. A clean graph is a few MB; this only fires on the runaway
 /// bloat (observed up to 4 GiB) the unnamed-kern fragmentation used to leave.
@@ -341,7 +444,7 @@ pub(crate) use crate::llm::{Client, Endpoint};
 /// runtime-handle variant and is intentionally not routed through this.)
 pub(crate) fn embed_fn(client: &Client) -> crate::types::EmbedFunc {
 	let c = client.clone();
-	std::sync::Arc::new(move |text: &str| -> Result<Vec<f64>, String> {
+	std::sync::Arc::new(move |text: &str| -> Result<Vec<f32>, String> {
 		let c = c.clone();
 		let text = text.to_string();
 		match crate::llm::block_on_in_place(c.embed(&text)) {
@@ -507,8 +610,10 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 /// caller's serve/park loop needs.
 pub(crate) struct EngineHandle {
 	pub server: std::sync::Arc<crate::mcp::Server>,
-	pub graph: SharedGraph,
 	pub task_q: std::sync::Arc<crate::tick::queue::Queue>,
+	/// The store's guarded persist closure, so the shutdown flush goes through the
+	/// same stale-safe path as every other save (never overwrites a grown disk).
+	pub save_fn: std::sync::Arc<dyn Fn() + Send + Sync>,
 }
 
 /// Build the engine stack (graph + worker + tick + MCP server) and spawn every
@@ -613,7 +718,11 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 				"reaped empty unnamed kerns"
 			);
 			eprintln!("kern: reaped {reaped} empty kerns ({before} -> {after})");
-			save_graph(&read_recovered(&g));
+			// Persist the reap through the store's guarded closure (not a bare
+			// save_graph) so its epoch bump stays tracked — otherwise the next flush
+			// would see disk ahead of the daemon's tracked epoch and spuriously
+			// refuse-and-reload its own reap.
+			save_fn();
 		}
 	}
 
@@ -642,8 +751,8 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 
 	EngineHandle {
 		server: mcp_server,
-		graph: g,
 		task_q: q,
+		save_fn,
 	}
 }
 
@@ -655,9 +764,9 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	}
 
 	let h = bootstrap(cli, cfg).await;
-	let g = h.graph.clone();
 	let q = h.task_q.clone();
 	let mcp_server = h.server.clone();
+	let save_fn = h.save_fn.clone();
 
 	let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 	tokio::spawn(async move {
@@ -716,15 +825,14 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	drop(q);
 
 	eprintln!("shutting down...");
-	{
-		let g = read_recovered(&g);
-		save_graph(&g);
-	}
+	// Shut down through the store's guarded closure so a stale daemon's final
+	// flush can't wipe a graph the CLI grew on disk (the SIGTERM data-loss path).
+	save_fn();
 	eprintln!("done");
 }
 
 /// Shared shape of the live graph handle the daemon subsystems read/write.
-type SharedGraph = Arc<std::sync::RwLock<GraphGnn>>;
+type SharedGraph = Arc<parking_lot::RwLock<GraphGnn>>;
 
 /// Dedicated OS-thread watchdog: force-exits the process if the async runtime
 /// stalls (graph deadlock or total worker starvation) so a healthy peer can take
@@ -887,6 +995,7 @@ async fn start_gossip(
 		let g = read_recovered(g);
 		g.network_id.clone()
 	};
+	let network_id = cfg.gossip.effective_network_id(&network_id);
 	let node =
 		crate::gossip::node::Node::new(&cfg.gossip.addr, &network_id, cfg.gossip.peers.clone());
 	// Wire the configured ledger cap. Without this `config.graph.max_ledger_entries`
@@ -930,10 +1039,17 @@ fn spawn_maintenance_tick(
 	}
 	let g_tick = g.clone();
 	let q_tick = q.clone();
+	let cfg_tick = cfg.clone();
 	let every = std::time::Duration::from_secs(cfg.tick.interval_secs);
 	tokio::spawn(async move {
 		loop {
 			tokio::time::sleep(every).await;
+			// Before the tick mutates and persists, adopt any rows a concurrent CLI
+			// write committed under us. Without this the tick would cluster/pulse a
+			// stale graph and the per-kern persist would write those stale kerns over
+			// the newer on-disk ones — the data-loss path. Reloading first keeps the
+			// daemon a faithful mirror of committed state.
+			reconcile_if_stale(&g_tick, &cfg_tick);
 			let root_id = {
 				let g = read_recovered(&g_tick);
 				g.root.id.clone()
@@ -957,6 +1073,158 @@ mod entry_point_tests {
 		let _ = Commands::Daemon;
 	}
 
+	// LMDB forbids opening one env twice per process, so a single-process test can
+	// not stand up two real Stores on one dir to play "daemon vs CLI". Instead the
+	// "external writer" commits THROUGH the daemon graph's own store handle (the
+	// same env), advancing the on-disk epoch while leaving the daemon graph's RAM
+	// and `flushed_epoch` stale — exactly the divergence a second process produces.
+	#[cfg(test)]
+	fn commit_extra_kern_via_store(
+		g: &std::sync::Arc<parking_lot::RwLock<super::GraphGnn>>,
+		kern: crate::base::types::Kern,
+	) {
+		use crate::base::locks::read_recovered;
+		let gg = read_recovered(g);
+		let store = gg.store().expect("graph has a bound store");
+		let mut kerns = std::collections::HashMap::new();
+		for k in gg.all() {
+			kerns.insert(k.id.clone(), k.clone());
+		}
+		kerns.insert(gg.root.id.clone(), gg.root.clone());
+		kerns.insert(kern.id.clone(), kern);
+		store
+			.save_all_kerns(&kerns, &gg.network_id, gg.quant_mode)
+			.expect("external commit through the shared store");
+	}
+
+	#[test]
+	fn save_graph_guarded_refuses_stale_flush_then_reloads_committed_data() {
+		// The reported data-loss path: a daemon loaded an ~empty store, the CLI grew
+		// it on disk, and the daemon's next flush wiped the CLI's rows. The guarded
+		// save must instead refuse to overwrite and reload the committed graph.
+		use parking_lot::RwLock;
+		use std::sync::Arc;
+
+		use crate::base::locks::read_recovered;
+		use crate::base::types::Kern;
+
+		let dir = tempfile::tempdir().unwrap();
+		let cfg = crate::config::Config {
+			data_dir: dir.path().to_string_lossy().into_owned(),
+			..Default::default()
+		};
+
+		// Daemon boots against the ~empty store; its graph records the loaded epoch.
+		let g = Arc::new(RwLock::new(super::load_graph(&cfg)));
+		assert_eq!(read_recovered(&g).flushed_epoch(), 0, "fresh load at epoch 0");
+
+		// A second writer (the CLI) commits a populated kern, advancing the epoch.
+		let root_id = read_recovered(&g).root.id.clone();
+		commit_extra_kern_via_store(&g, Kern::new("cli-kern", &root_id));
+
+		// The daemon flushes its stale, smaller snapshot. It must NOT drop cli-kern;
+		// instead it refuses, reloads, and adopts the committed graph.
+		super::save_graph_guarded(&g, &cfg);
+
+		assert!(
+			read_recovered(&g).loaded("cli-kern").is_some(),
+			"daemon reloaded the externally committed kern instead of wiping it"
+		);
+		assert!(
+			read_recovered(&g).flushed_epoch() >= 1,
+			"the daemon adopted the advanced on-disk epoch after reloading"
+		);
+		// Read disk back through the same store handle (no second env open).
+		let on_disk = read_recovered(&g)
+			.store()
+			.unwrap()
+			.load_one_kern("cli-kern")
+			.unwrap();
+		assert!(on_disk.is_some(), "the externally committed kern survives on disk");
+	}
+
+	#[test]
+	fn reconcile_if_stale_reloads_only_when_the_store_advanced() {
+		use parking_lot::RwLock;
+		use std::sync::Arc;
+
+		use crate::base::locks::read_recovered;
+		use crate::base::types::Kern;
+
+		let dir = tempfile::tempdir().unwrap();
+		let cfg = crate::config::Config {
+			data_dir: dir.path().to_string_lossy().into_owned(),
+			..Default::default()
+		};
+
+		let g = Arc::new(RwLock::new(super::load_graph(&cfg)));
+		assert!(
+			!super::reconcile_if_stale(&g, &cfg),
+			"nothing committed yet -> no reload"
+		);
+
+		// External writer grows the store through the shared handle.
+		let root_id = read_recovered(&g).root.id.clone();
+		commit_extra_kern_via_store(&g, Kern::new("late", &root_id));
+
+		assert!(
+			super::reconcile_if_stale(&g, &cfg),
+			"store advanced -> reload"
+		);
+		assert!(read_recovered(&g).loaded("late").is_some(), "adopted the new kern");
+		assert!(
+			!super::reconcile_if_stale(&g, &cfg),
+			"already reconciled -> no second reload"
+		);
+	}
+
+	#[test]
+	fn do_persist_skips_overwriting_a_kern_when_the_graph_is_stale() {
+		// The per-kern persist path is a second wipe vector: the daemon's stigmergy
+		// tick persists individual kerns. A stale daemon must NOT write its older
+		// copy of a kern over the newer on-disk one a CLI committed.
+		use parking_lot::RwLock;
+		use std::sync::Arc;
+
+		use crate::base::locks::{read_recovered, write_recovered};
+		use crate::base::types::{mk_entity, EntityKind, Kern};
+
+		let dir = tempfile::tempdir().unwrap();
+		let cfg = crate::config::Config {
+			data_dir: dir.path().to_string_lossy().into_owned(),
+			..Default::default()
+		};
+
+		// Daemon loads the empty store (flushed_epoch = 0).
+		let g = Arc::new(RwLock::new(super::load_graph(&cfg)));
+		let root_id = read_recovered(&g).root.id.clone();
+
+		// A CLI writer commits a populated kern "k", advancing the store epoch.
+		let mut k = Kern::new("k", &root_id);
+		k.entities
+			.insert("e".into(), mk_entity("e", "durable fact", 1.0, EntityKind::Claim));
+		commit_extra_kern_via_store(&g, k);
+
+		// The stale daemon holds its OWN, emptier copy of "k" and the tick tries to
+		// persist it. The guard must skip the write so disk keeps the CLI's entity.
+		write_recovered(&g)
+			.kerns
+			.insert("k".into(), Kern::new("k", &root_id));
+		crate::tick::tasks::do_persist(&g, "k");
+
+		// Read disk back through the same store handle.
+		let on_disk = read_recovered(&g)
+			.store()
+			.unwrap()
+			.load_one_kern("k")
+			.unwrap()
+			.expect("k still on disk");
+		assert!(
+			on_disk.entities.contains_key("e"),
+			"stale per-kern persist was skipped — the CLI's entity survives"
+		);
+	}
+
 	#[test]
 	fn apply_graph_config_spills_to_disk_when_threshold_enabled() {
 		// Regression: load_dir rebuilds with the DEFAULT threshold; apply_graph_config
@@ -973,8 +1241,8 @@ mod entry_point_tests {
 		g.data_dir = dir.path().to_string_lossy().into_owned();
 		let mut kern = Kern::new("k", "");
 		for i in 0..30 {
-			let v: Vec<f64> = (0..8)
-				.map(|j| ((i as f64) * (0.13 + 0.07 * j as f64)).sin())
+			let v: Vec<f32> = (0..8)
+				.map(|j| ((i as f64) * (0.13 + 0.07 * j as f64)).sin() as f32)
 				.collect();
 			kern.entities.insert(
 				format!("e{i}"),

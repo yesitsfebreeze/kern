@@ -50,8 +50,10 @@ pub struct SpherePayload {
 	pub kern_id: String,
 	/// The kern's anchor embedding — the centroid incoming thoughts are routed
 	/// against. Same dimensionality as entity vectors; empty for an un-centred
-	/// (unnamed) kern, which then matches nothing by similarity.
-	pub anchor_vec: Vec<f64>,
+	/// (unnamed) kern, which then matches nothing by similarity. Serialized as
+	/// `Vec<f64>` so the gossip wire format stays stable across peer versions.
+	#[serde(with = "crate::base::util::vec_f64_compat")]
+	pub anchor_vec: Vec<f32>,
 	/// Human-readable anchor label (the kern's name).
 	pub anchor_text: String,
 	/// A representative entity id for the sphere (provenance / dedup handle).
@@ -70,7 +72,8 @@ pub struct SpherePayload {
 pub struct QuestionPayload {
 	pub reason_id: String,
 	pub from_id: String,
-	pub reason_vec: Vec<f64>,
+	#[serde(with = "crate::base::util::vec_f64_compat")]
+	pub reason_vec: Vec<f32>,
 	pub question_text: String,
 }
 

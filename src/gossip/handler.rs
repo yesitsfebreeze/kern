@@ -1,4 +1,6 @@
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 use crate::base::constants::*;
 use crate::base::graph::GraphGnn;
@@ -482,7 +484,7 @@ mod tests {
 		);
 		handle_entity_sync(&d, msg);
 
-		let guard = g.read().unwrap();
+		let guard = g.read();
 		let phantom = "remote-othernet-rootK";
 		let kern = guard.kerns.get(phantom).expect("phantom kern created");
 		assert!(
@@ -495,13 +497,13 @@ mod tests {
 	#[test]
 	fn entity_sync_ignores_same_network() {
 		let g = Arc::new(RwLock::new(GraphGnn::new()));
-		let own_net = g.read().unwrap().network_id.clone();
+		let own_net = g.read().network_id.clone();
 		let d = mk_deps(g.clone());
 
 		let msg = esync_msg(&own_net, "rootK", vec![mk_entity("eR", "echo", 3.0)]);
 		handle_entity_sync(&d, msg);
 
-		let guard = g.read().unwrap();
+		let guard = g.read();
 		assert!(
 			guard.kern_of_entity("eR").is_none(),
 			"own-network echo ignored"
@@ -609,7 +611,7 @@ mod tests {
 			delta_msg(CrdtTarget::ThoughtAccessCount, "e", "peerR", 7),
 		);
 
-		let merged = g.read().unwrap().kerns["k"].entities["e"]
+		let merged = g.read().kerns["k"].entities["e"]
 			.access_count
 			.value();
 		assert_eq!(merged, 7, "the remote replica's count is merged in");
@@ -681,7 +683,7 @@ mod tests {
 		let (g, net) = graph_with_open_question();
 		let d = mk_deps(g.clone());
 		resolve_question_from_peer(&d, "r1", &answer_sphere(&net, "ans"), "127.0.0.1:9");
-		let guard = g.read().unwrap();
+		let guard = g.read();
 		let r = guard.kerns["kq"].reasons.get("r1").expect("reason present");
 		assert_eq!(r.to, "ans", "answer endpoint filled in");
 		assert!(
@@ -695,7 +697,7 @@ mod tests {
 		let (g, net) = graph_with_open_question();
 		let d = mk_deps(g.clone());
 		resolve_question_from_peer(&d, "r1", &answer_sphere(&net, ""), "o");
-		let guard = g.read().unwrap();
+		let guard = g.read();
 		let r = guard.kerns["kq"].reasons.get("r1").unwrap();
 		assert!(
 			r.to.is_empty() && matches!(r.kind, ReasonKind::Question),

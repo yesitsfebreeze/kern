@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::Duration;
 
 use crate::base::locks::lock_recovered;
@@ -17,6 +17,12 @@ pub enum TaskKind {
 	/// the reason-LLM never blocks the commit path; dispatched to
 	/// `tasks::do_seed_questions`. (Replaces the long-dead no-op `Split`.)
 	SeedQuestions,
+	/// Classify a recorded `Rephrase` near-dup (`kern_id` + `extra` = the rephrase
+	/// reason id) as UPDATE/CONTRADICTION vs RELATED, and on the former run
+	/// bi-temporal supersedence. Enqueued by the ingest worker's dedup defer hook
+	/// so the reason-LLM never blocks the commit path; dispatched to
+	/// `tasks::do_classify_contradiction`.
+	ClassifyContradiction,
 	Persist,
 	GnnPropagate,
 	/// Stigmergic cold-path garbage collection: drop thoughts whose pheromone
@@ -29,6 +35,11 @@ pub enum TaskKind {
 	/// snapshot and reset it. Graph-global (not per-kern); dispatched in
 	/// `tick::process_task` to `GraphGnn::consolidate_disk_index`.
 	DiskConsolidate,
+	/// Deferred live-graph access write-back for a completed query (`extra` =
+	/// newline-joined entity ids; `kern_id` empty). The MCP query path enqueues
+	/// this instead of taking a write lock inline, so queries stay read-only;
+	/// dispatched in `tick::process_task` to `score::commit_access_ids`.
+	CommitAccess,
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +161,17 @@ pub fn task_extra(kind: TaskKind, kern_id: &str, extra: &str) -> Task {
 		kind,
 		kern_id: kern_id.to_string(),
 		extra: extra.to_string(),
+	}
+}
+
+/// A `CommitAccess` task carrying the retrieved entity ids to stamp, newline-joined
+/// in `extra` (`kern_id` empty — the write-back is graph-global). Entity ids are
+/// content hashes / doc ids and never contain a newline, so the join round-trips.
+pub fn task_commit_access(ids: &[String]) -> Task {
+	Task {
+		kind: TaskKind::CommitAccess,
+		kern_id: String::new(),
+		extra: ids.join("\n"),
 	}
 }
 

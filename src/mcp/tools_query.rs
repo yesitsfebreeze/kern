@@ -35,6 +35,8 @@ pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 				"since":     {"type": "string", "description": "ISO8601 timestamp; only include thoughts at or after this time"},
 				"before":    {"type": "string", "description": "ISO8601 timestamp; only include thoughts before this time"},
 				"min_conf":  {"type": "number", "description": "minimum confidence 0.0-1.0"},
+				"as_of":     {"type": "string", "description": "ISO8601 timestamp; bi-temporal point query — return only the revision whose validity window [valid_from, valid_to) covered this instant"},
+				"include_history": {"type": "boolean", "description": "also return superseded (invalidated) revisions reachable from the active hits, flagged history:true"},
 			},
 		},
 	})]
@@ -68,6 +70,8 @@ fn build_query_options(p: &QueryArgs) -> Result<retrieval::score::QueryOptions, 
 		since: parse_time_filter("since", &p.since)?,
 		before: parse_time_filter("before", &p.before)?,
 		valid_at: parse_time_filter("valid_at", &p.valid_at)?,
+		as_of: parse_time_filter("as_of", &p.as_of)?,
+		include_history: p.include_history,
 		..Default::default()
 	};
 	if let Some(ref s) = p.scheme {
@@ -116,6 +120,13 @@ struct QueryArgs {
 	min_conf: f64,
 	#[serde(default)]
 	valid_at: String,
+	/// Bi-temporal point query (ISO8601): return the revision whose
+	/// `[valid_from, valid_to)` window covered this instant.
+	#[serde(default)]
+	as_of: String,
+	/// Also return Superseded revisions reachable from the active hits.
+	#[serde(default)]
+	include_history: bool,
 }
 
 impl Server {
@@ -127,10 +138,7 @@ impl Server {
 		};
 
 		if !p.id.is_empty() {
-			let g = match self.graph.read() {
-				Ok(g) => g,
-				Err(_) => return tool_error("graph lock poisoned"),
-			};
+			let g = crate::base::locks::read_recovered(&self.graph);
 			return match find_entity(&g, &p.id) {
 				Some((thought, kern_id)) => {
 					let detail = entity_detail(&thought, &kern_id, &g);
@@ -178,7 +186,7 @@ impl Server {
 			None
 		};
 
-		let (result, vec): (_, Option<Vec<f64>>) = if let Some(hit) = text_hit {
+		let (result, vec): (_, Option<Vec<f32>>) = if let Some(hit) = text_hit {
 			(hit, None)
 		} else {
 			let vec = match crate::llm::block_on_in_place(llm.embed(&p.text)) {
@@ -241,6 +249,18 @@ impl Server {
 							c.insert(epoch, text_hash, vec.clone(), tag, fresh.clone());
 						}
 					}
+					// Deferred access write-back: query_locked took ONLY a read lock, so
+					// the live-graph access stamp (accessed_at/heat/access_count) is done
+					// off the hot path by a CommitAccess tick task. No task queue
+					// (embedded/bench) simply skips it — the stamp is advisory recency
+					// data, not correctness.
+					if let Some(ref q) = self.task_q {
+						let ids: Vec<String> =
+							fresh.entities.iter().map(|s| s.entity.id.clone()).collect();
+						if !ids.is_empty() {
+							q.enqueue(crate::tick::queue::task_commit_access(&ids));
+						}
+					}
 					fresh
 				}
 			};
@@ -285,14 +305,53 @@ impl Server {
 			}
 		}
 
-		let entities: Vec<serde_json::Value> = {
-			let g = match self.graph.read() {
-				Ok(g) => g,
-				Err(_) => return tool_error("graph lock poisoned"),
+		// Bi-temporal history: walk Supersedes chains back from the active hits and
+		// append the reachable Superseded revisions (the ANN never holds them).
+		// They pass through the same `matches_filter`, so an `as_of`/kind/scheme
+		// constraint applies to history too, and are flagged `history:true`.
+		let mut history_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+		if p.include_history {
+			let opts = match build_query_options(&p) {
+				Ok(o) => o,
+				Err(e) => return tool_error(&e),
 			};
+			let g = crate::base::locks::read_recovered(&self.graph);
+			let heads: Vec<(String, f64)> =
+				scored.iter().map(|s| (s.entity.id.clone(), s.score)).collect();
+			let mut have: std::collections::HashSet<String> =
+				scored.iter().map(|s| s.entity.id.clone()).collect();
+			for (head_id, head_score) in heads {
+				for anc_id in crate::base::reason::superseded_ancestors(&g, &head_id) {
+					if !have.insert(anc_id.clone()) {
+						continue;
+					}
+					let ancestor = g
+						.kern_of_entity(&anc_id)
+						.and_then(|kid| g.kerns.get(kid))
+						.and_then(|k| k.entities.get(&anc_id))
+						.cloned()
+						.or_else(|| g.store().and_then(|s| s.cold_get(&anc_id).ok().flatten()));
+					if let Some(ent) = ancestor {
+						if retrieval::score::matches_filter(&ent, &opts) {
+							history_ids.insert(anc_id.clone());
+							scored.push(retrieval::expand::ScoredEntity {
+								entity: ent,
+								score: head_score,
+							});
+						}
+					}
+				}
+			}
+		}
+
+		// History rows ride ALONGSIDE the top-k active hits rather than displacing
+		// them, so raise the cut by the number added.
+		let take_n = k + history_ids.len();
+		let entities: Vec<serde_json::Value> = {
+			let g = crate::base::locks::read_recovered(&self.graph);
 			scored
 				.iter()
-				.take(k)
+				.take(take_n)
 				.map(|st| {
 					// Echo kind/scheme/status directly from the matched
 					// Entity so kern_rpc::query can build EntityRef without
@@ -326,6 +385,9 @@ impl Server {
 						.unwrap_or_default();
 					let mut v = base_entity_json(&st.entity, st.score);
 					v["cold"] = serde_json::Value::Bool(cold_ids.contains(&st.entity.id));
+					if history_ids.contains(&st.entity.id) {
+						v["history"] = serde_json::Value::Bool(true);
+					}
 					if !edges.is_empty() {
 						v["edges"] = serde_json::Value::Array(edges);
 					}
@@ -434,6 +496,8 @@ fn query_is_cacheable(answer: bool, cache_cap: usize, p: &QueryArgs) -> bool {
 		&& p.since.is_empty()
 		&& p.before.is_empty()
 		&& p.valid_at.is_empty()
+		&& p.as_of.is_empty()
+		&& !p.include_history
 		&& p.min_conf == 0.0
 		&& p.sort.is_empty()
 		&& !p.ascending

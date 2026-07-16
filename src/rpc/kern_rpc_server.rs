@@ -636,16 +636,7 @@ fn lookup_kind_scheme_status(
 	id: &str,
 ) -> (EntityKindLite, String, EntityStatusLite) {
 	use crate::base::search::find_entity;
-	let g = match server.graph.read() {
-		Ok(g) => g,
-		Err(_) => {
-			return (
-				EntityKindLite::Claim,
-				"inline".into(),
-				EntityStatusLite::Active,
-			);
-		}
-	};
+	let g = crate::base::locks::read_recovered(&server.graph);
 	match find_entity(&g, id) {
 		Some((ent, _)) => (
 			entity_kind_to_lite(ent.kind),

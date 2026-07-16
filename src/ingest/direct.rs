@@ -127,7 +127,8 @@ pub async fn drain_direct_once(
 mod tests {
 	use super::*;
 	use crate::base::graph::GraphGnn;
-	use std::sync::{Arc, RwLock};
+	use parking_lot::RwLock;
+	use std::sync::Arc;
 	use std::time::Duration;
 	use tempfile::tempdir;
 
@@ -190,7 +191,7 @@ mod tests {
 
 		let embedder = crate::llm::Client::new_embed_only(&format!("http://{addr}"), "m");
 		let graph = Arc::new(RwLock::new(GraphGnn::new()));
-		let worker = Worker::new(graph.clone(), embedder, None, None);
+		let worker = Worker::new(graph.clone(), embedder, None, None, None);
 
 		let dir = tempdir().unwrap();
 		let direct = dir.path().join("direct");
@@ -224,7 +225,7 @@ mod tests {
 	async fn drain_direct_once_leaves_failed_job_for_retry() {
 		let embedder = crate::llm::Client::new_embed_only("http://127.0.0.1:1", "m");
 		let graph = Arc::new(RwLock::new(GraphGnn::new()));
-		let worker = Worker::new(graph, embedder, None, None);
+		let worker = Worker::new(graph, embedder, None, None, None);
 
 		let dir = tempdir().unwrap();
 		let direct = dir.path().join("direct");

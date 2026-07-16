@@ -5,8 +5,10 @@
 //! via `forget()`". This module is the `forget()` half — the heat-decay half
 //! lives in `tick::pulse`.
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::SystemTime;
+
+use parking_lot::RwLock;
 
 use crate::base::constants::{COLD_GC_AGE, COLD_HEAT_THRESHOLD};
 use crate::base::graph::GraphGnn;
@@ -16,22 +18,29 @@ use crate::base::types::{Entity, EntityKind};
 
 /// Pure cold-GC predicate: `true` iff `entity` should be dropped — its pheromone
 /// has fully evaporated (`heat < COLD_HEAT_THRESHOLD`), it is genuinely abandoned
-/// (`now - accessed_at > COLD_GC_AGE`), and it is not a durable kind (`Fact` /
-/// `Document` are never auto-forgotten). An entity with no `accessed_at` is
-/// treated as freshly created and preserved; a future `accessed_at` (clock skew)
-/// is not stale. Split out from [`run_gc`]'s lock/store plumbing so the policy is
+/// (`now - last_touch > COLD_GC_AGE`), and it is not a durable kind (`Fact` /
+/// `Document` are never auto-forgotten). The staleness clock reads `accessed_at`,
+/// falling back to `created_at` for entities never queried since ingest — so
+/// old-but-never-accessed thoughts still become evictable. An entity with
+/// neither timestamp is preserved; a future timestamp (clock skew) is not
+/// stale. Split out from [`run_gc`]'s lock/store plumbing so the policy is
 /// unit-testable in isolation.
 fn is_cold_victim(entity: &Entity, now: SystemTime) -> bool {
-	if matches!(entity.kind, EntityKind::Fact | EntityKind::Document) {
+	// Durable kinds (Fact/Document) are immune to auto-forgetting — UNLESS they
+	// have been superseded. A bi-temporally invalidated fact is history, not live
+	// knowledge: it loses its immunity so it can migrate to the cold tier via the
+	// normal spill-before-drop path (invalidated ≠ deleted — the cold tier keeps
+	// it). An ACTIVE fact stays immune.
+	if !entity.is_superseded() && matches!(entity.kind, EntityKind::Fact | EntityKind::Document) {
 		return false;
 	}
 	if (entity.heat as f64) >= COLD_HEAT_THRESHOLD {
 		return false;
 	}
-	let Some(accessed_at) = entity.accessed_at else {
+	let Some(last_touch) = entity.accessed_at.or(entity.created_at) else {
 		return false;
 	};
-	match now.duration_since(accessed_at) {
+	match now.duration_since(last_touch) {
 		Ok(age) => age > COLD_GC_AGE,
 		Err(_) => false,
 	}
@@ -42,8 +51,8 @@ fn is_cold_victim(entity: &Entity, now: SystemTime) -> bool {
 /// Policy: a thought is dropped iff **all** of the following hold:
 ///
 /// 1. `heat < COLD_HEAT_THRESHOLD` (pheromone has fully evaporated).
-/// 2. `now - accessed_at > COLD_GC_AGE` (not just transiently quiet —
-///    actually abandoned).
+/// 2. `now - (accessed_at | created_at) > COLD_GC_AGE` (not just transiently
+///    quiet — actually abandoned).
 /// 3. `kind` is neither `Fact` nor `Document` (durable kinds per
 ///    `docs/kern/safety-architecture.md`; never auto-forgotten).
 ///
@@ -52,8 +61,9 @@ fn is_cold_victim(entity: &Entity, now: SystemTime) -> bool {
 /// cleanup. We acquire the write guard exactly once for the whole kern —
 /// no per-thought lock toggling.
 ///
-/// Thoughts with no `accessed_at` timestamp are treated as recently created
-/// (preserved); cold-but-untouched bookkeeping should not silently drop them.
+/// Thoughts never queried since ingest fall back to `created_at` for the
+/// staleness clock; only a thought with neither timestamp is preserved
+/// unconditionally.
 pub fn run_gc(graph: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
 	let mut g = write_recovered(graph);
 	let kern = match g.kerns.get(kern_id) {
@@ -214,6 +224,76 @@ mod tests {
 	}
 
 	#[test]
+	fn superseded_fact_loses_immunity_and_becomes_a_victim() {
+		use crate::base::types::EntityStatus;
+		let now = SystemTime::now();
+		let old = now - (COLD_GC_AGE + Duration::from_secs(1));
+		// An ACTIVE stale Fact stays immune.
+		assert!(
+			!is_cold_victim(&ent(EntityKind::Fact, 0.0, Some(old)), now),
+			"active Fact is immune even when stale"
+		);
+		// The SAME Fact, once superseded, loses immunity and is collectible.
+		let mut superseded = ent(EntityKind::Fact, 0.0, Some(old));
+		superseded.status = EntityStatus::Superseded;
+		assert!(
+			is_cold_victim(&superseded, now),
+			"a superseded (invalidated) Fact is no longer immune"
+		);
+		// But a superseded fact that is still hot/recent is preserved by the normal
+		// policy — losing immunity means "subject to GC", not "force-evicted".
+		let mut fresh_superseded = ent(EntityKind::Fact, 0.0, Some(now));
+		fresh_superseded.status = EntityStatus::Superseded;
+		assert!(
+			!is_cold_victim(&fresh_superseded, now),
+			"a recently-touched superseded fact is still spared"
+		);
+	}
+
+	#[test]
+	fn run_gc_spills_superseded_fact_to_cold_while_active_fact_stays_immune() {
+		use crate::base::store::Store;
+		use crate::base::types::EntityStatus;
+		use parking_lot::RwLock;
+		use std::sync::Arc;
+
+		let dir = tempfile::tempdir().unwrap();
+		let store = Arc::new(Store::open(&dir.path().to_string_lossy()).unwrap());
+
+		let old = SystemTime::now() - (COLD_GC_AGE + Duration::from_secs(1));
+		let mut invalidated = ent(EntityKind::Fact, 0.0, Some(old));
+		invalidated.id = "invalidated".into();
+		invalidated.status = EntityStatus::Superseded;
+		let mut active_fact = ent(EntityKind::Fact, 0.0, Some(old));
+		active_fact.id = "active".into();
+
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("k", "");
+		k.entities.insert("invalidated".into(), invalidated);
+		k.entities.insert("active".into(), active_fact);
+		g.kerns.insert("k".into(), k);
+		g.set_store(store.clone());
+
+		let graph = Arc::new(RwLock::new(g));
+		run_gc(&graph, "k");
+
+		let g = graph.read();
+		let entities = &g.kerns.get("k").unwrap().entities;
+		assert!(
+			!entities.contains_key("invalidated"),
+			"the superseded fact is evicted from the hot tier"
+		);
+		assert!(
+			entities.contains_key("active"),
+			"the active fact keeps its GC immunity"
+		);
+		assert!(
+			store.cold_get("invalidated").unwrap().is_some(),
+			"the invalidated fact was spilled to the cold tier (invalidated != deleted)"
+		);
+	}
+
+	#[test]
 	fn recent_untouched_or_clock_skewed_is_preserved() {
 		let now = SystemTime::now();
 		// Cold but just accessed -> not yet abandoned.
@@ -221,16 +301,86 @@ mod tests {
 			!is_cold_victim(&ent(EntityKind::Claim, 0.0, Some(now)), now),
 			"recently accessed"
 		);
-		// No accessed_at -> treated as freshly created.
+		// No accessed_at AND no created_at -> no staleness clock, preserved.
 		assert!(
 			!is_cold_victim(&ent(EntityKind::Claim, 0.0, None), now),
-			"never accessed"
+			"no timestamps at all"
 		);
 		// accessed_at in the future (clock skew) -> not stale.
 		let future = now + Duration::from_secs(3600);
 		assert!(
 			!is_cold_victim(&ent(EntityKind::Claim, 0.0, Some(future)), now),
 			"clock skew"
+		);
+	}
+
+	#[test]
+	fn created_at_seeds_the_staleness_clock_for_never_accessed_thoughts() {
+		let now = SystemTime::now();
+		let old = now - (COLD_GC_AGE + Duration::from_secs(1));
+		// Ingested long ago, never queried -> evictable.
+		let mut stale = ent(EntityKind::Claim, 0.0, None);
+		stale.created_at = Some(old);
+		assert!(
+			is_cold_victim(&stale, now),
+			"old-but-never-queried is a victim"
+		);
+		// Freshly ingested, never queried -> preserved.
+		let mut fresh = ent(EntityKind::Claim, 0.0, None);
+		fresh.created_at = Some(now);
+		assert!(!is_cold_victim(&fresh, now), "fresh ingest is preserved");
+		// A recent access overrides an old creation time.
+		let mut touched = ent(EntityKind::Claim, 0.0, Some(now));
+		touched.created_at = Some(old);
+		assert!(
+			!is_cold_victim(&touched, now),
+			"accessed_at takes precedence over created_at"
+		);
+	}
+
+	#[test]
+	fn run_gc_spills_stale_victim_to_cold_store_and_spares_facts() {
+		use crate::base::store::Store;
+		use parking_lot::RwLock;
+		use std::sync::Arc;
+
+		let dir = tempfile::tempdir().unwrap();
+		let store = Arc::new(Store::open(&dir.path().to_string_lossy()).unwrap());
+
+		let old = SystemTime::now() - (COLD_GC_AGE + Duration::from_secs(1));
+		let mut victim = ent(EntityKind::Claim, 0.0, Some(old));
+		victim.id = "victim".into();
+		let mut fact = ent(EntityKind::Fact, 0.0, Some(old));
+		fact.id = "fact".into();
+
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("k", "");
+		k.entities.insert("victim".into(), victim);
+		k.entities.insert("fact".into(), fact);
+		g.kerns.insert("k".into(), k);
+		g.set_store(store.clone());
+
+		let graph = Arc::new(RwLock::new(g));
+		run_gc(&graph, "k");
+
+		let g = graph.read();
+		let entities = &g.kerns.get("k").unwrap().entities;
+		assert!(
+			!entities.contains_key("victim"),
+			"stale cold claim is evicted from the hot tier"
+		);
+		assert!(
+			entities.contains_key("fact"),
+			"Facts are immune to cold GC even when stale"
+		);
+		let spilled = store.cold_get("victim").unwrap();
+		assert!(
+			spilled.is_some(),
+			"the victim was spilled to the cold tier before the hot drop"
+		);
+		assert!(
+			store.cold_get("fact").unwrap().is_none(),
+			"the immune fact was never spilled"
 		);
 	}
 }

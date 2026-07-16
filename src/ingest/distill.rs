@@ -10,6 +10,12 @@ pub struct Claim {
 	pub text: String,
 	/// Descriptor key (the typed-memory taxonomy). One of `DESCRIPTORS`.
 	pub descriptor: String,
+	/// OPTIONAL bi-temporal world-time hint: when the statement says the claim
+	/// became true ("since March", "as of v2"), the distiller may emit an ISO8601
+	/// date the ingest path stamps onto the entity's `valid_from`. Parsed
+	/// leniently — garbage or an absent field yields `None` (falls back to the
+	/// ingestion time).
+	pub valid_from: Option<std::time::SystemTime>,
 }
 
 /// The typed-memory taxonomy. Mirrors the descriptors seeded into the kern.
@@ -43,7 +49,10 @@ pub fn distill(conversation: &str, llm: &dyn Fn(&str) -> String) -> Option<Vec<C
 		"Extract durable, reusable knowledge from this conversation between a \
 user and an AI coding assistant. Output ONLY a JSON array. Each element must be \
 {{\"text\": \"<one self-contained statement>\", \"kind\": \"<one of: preference, \
-decision, project, fact, code-fact, reference, procedural>\"}}. Include only knowledge worth \
+decision, project, fact, code-fact, reference, procedural>\"}}. Optionally add \
+\"valid_from\": \"<ISO8601 date>\" ONLY when the statement itself says when it \
+became true (e.g. \"since March 2026\", \"as of v2\"); omit it otherwise. \
+Include only knowledge worth \
 remembering across future sessions: user preferences, decisions and their \
 rationale, ongoing project state, durable facts, structural code facts, \
 external references, and procedural knowledge (learned workflows, rules, and \
@@ -111,7 +120,20 @@ pub(crate) fn parse_claims(raw: &str) -> Vec<Claim> {
 		} else {
 			"fact".to_string()
 		};
-		out.push(Claim { text, descriptor });
+		// Lenient temporal hint: parse an ISO8601 `valid_from` if present and
+		// well-formed; ignore anything else (absent field, relative phrase the LLM
+		// failed to normalize, garbage) so a bad hint never blocks a good claim.
+		let valid_from = it
+			.get("valid_from")
+			.and_then(|v| v.as_str())
+			.map(str::trim)
+			.filter(|s| !s.is_empty())
+			.and_then(|s| crate::base::time::parse_rfc3339(s).ok());
+		out.push(Claim {
+			text,
+			descriptor,
+			valid_from,
+		});
 	}
 	out
 }
@@ -194,6 +216,32 @@ mod tests {
 		let claims = distill("c", &llm).expect("some");
 		assert_eq!(claims.len(), 1);
 		assert_eq!(claims[0].text, "a");
+	}
+
+	#[test]
+	fn valid_from_hint_is_parsed_when_present_and_ignored_when_garbage() {
+		// A well-formed ISO date is parsed onto the claim.
+		let good = stub(
+			r#"[{"text":"we moved to spaces","kind":"decision","valid_from":"2026-03-01T00:00:00Z"}]"#,
+		);
+		let claims = distill("c", &good).expect("some");
+		assert_eq!(claims.len(), 1);
+		assert!(
+			claims[0].valid_from.is_some(),
+			"a valid ISO valid_from is parsed"
+		);
+
+		// Garbage / relative phrase the LLM failed to normalize -> ignored, None.
+		let garbage = stub(r#"[{"text":"x","kind":"fact","valid_from":"since March"}]"#);
+		assert_eq!(
+			distill("c", &garbage).expect("some")[0].valid_from,
+			None,
+			"an unparseable valid_from is ignored, not fatal"
+		);
+
+		// Absent field -> None (the common case).
+		let absent = stub(r#"[{"text":"y","kind":"fact"}]"#);
+		assert_eq!(distill("c", &absent).expect("some")[0].valid_from, None);
 	}
 
 	#[test]

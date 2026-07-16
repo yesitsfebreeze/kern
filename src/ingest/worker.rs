@@ -7,7 +7,9 @@ use crate::ingest::outcome::{FailureReport, Outcome, OutcomeStatus};
 use crate::ingest::place::{place_chunks, place_document};
 use crate::ingest::split;
 use crate::llm::Client as LlmClient;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 use tokio::sync::{mpsc, oneshot};
 
 pub(crate) struct Job {
@@ -26,6 +28,14 @@ pub(crate) struct Job {
 /// enqueues a `SeedQuestions` task); the worker stays embed-bound.
 pub type DeferQuestionsFn = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// Dedup-time hook: called with `(kern_id, rephrase_reason_id)` when a near-dup
+/// with DIFFERENT text of the same kind was recorded as a `Rephrase` edge, so the
+/// contradiction classification (a reason-LLM call that decides UPDATE/CONTRADICT
+/// vs RELATED, and on the former runs bi-temporal supersedence) can be DEFERRED to
+/// the tick. Same discipline as [`DeferQuestionsFn`]: the worker stays embed-bound;
+/// no hook wired means today's rephrase behavior is unchanged (fail open).
+pub type DeferContradictionFn = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
 pub struct Worker {
 	tx: mpsc::Sender<Job>,
 }
@@ -41,10 +51,18 @@ impl Worker {
 		graph: Arc<RwLock<GraphGnn>>,
 		embedder: LlmClient,
 		defer_questions: Option<DeferQuestionsFn>,
+		defer_contradiction: Option<DeferContradictionFn>,
 		save_fn: Option<Arc<dyn Fn() + Send + Sync>>,
 	) -> Self {
 		let (tx, rx) = mpsc::channel(64);
-		tokio::spawn(run_loop(graph, embedder, defer_questions, save_fn, rx));
+		tokio::spawn(run_loop(
+			graph,
+			embedder,
+			defer_questions,
+			defer_contradiction,
+			save_fn,
+			rx,
+		));
 		Self { tx }
 	}
 
@@ -107,15 +125,17 @@ impl Worker {
 	}
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_loop(
 	graph: Arc<RwLock<GraphGnn>>,
 	embedder: LlmClient,
 	defer_questions: Option<DeferQuestionsFn>,
+	defer_contradiction: Option<DeferContradictionFn>,
 	save_fn: Option<Arc<dyn Fn() + Send + Sync>>,
 	mut rx: mpsc::Receiver<Job>,
 ) {
 	while let Some(job) = rx.recv().await {
-		let outcome = process(&graph, &embedder, &defer_questions, &job).await;
+		let outcome = process(&graph, &embedder, &defer_questions, &defer_contradiction, &job).await;
 		// Log every job's outcome, fire-and-forget jobs included. Before this, an
 		// `enqueue`d job that failed vanished without a trace: result_tx is None
 		// on that path, so the Outcome — including its FailureReports — was
@@ -205,6 +225,7 @@ async fn process(
 	graph: &Arc<RwLock<GraphGnn>>,
 	embedder: &LlmClient,
 	defer_questions: &Option<DeferQuestionsFn>,
+	defer_contradiction: &Option<DeferContradictionFn>,
 	job: &Job,
 ) -> Outcome {
 	let doc_id = util::content_hash(&job.text);
@@ -214,8 +235,15 @@ async fn process(
 	// common case (any LLM hiccup) and keeps the worker embed-bound.
 	let chunks = split::split(&job.text, &job.descriptor, None);
 
-	let (doc_thought, doc_fail) =
-		place_document(graph, embedder, job, &doc_id, job.config.dedup_threshold).await;
+	let (doc_thought, doc_fail) = place_document(
+		graph,
+		embedder,
+		job,
+		&doc_id,
+		job.config.dedup_threshold,
+		defer_contradiction.as_ref(),
+	)
+	.await;
 	let Some(surviving_id) = doc_thought else {
 		let fail = doc_fail.unwrap_or_else(|| FailureReport::document_permanent("unknown"));
 		return Outcome {
@@ -236,6 +264,7 @@ async fn process(
 	let placed = place_chunks(
 		graph,
 		defer_questions.as_ref(),
+		defer_contradiction.as_ref(),
 		job,
 		&chunks,
 		&chunk_vecs,
@@ -318,7 +347,7 @@ mod tests {
 		// Embed endpoint that always fails, so the ingest pipeline exercises its
 		// failure assembly without needing a live model.
 		let embedder = LlmClient::new_embed_only("http://127.0.0.1:1", "test");
-		Worker::new(graph, embedder, None, None)
+		Worker::new(graph, embedder, None, None, None)
 	}
 
 	#[tokio::test]
@@ -439,7 +468,7 @@ mod tests {
 		assert_eq!(outcome.message, "document embedding failed");
 
 		// The pipeline mutated nothing — no entity was placed on the failure path.
-		let g = graph.read().unwrap();
+		let g = graph.read();
 		assert_eq!(g.all().iter().map(|k| k.entities.len()).sum::<usize>(), 0);
 	}
 }
