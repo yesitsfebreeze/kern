@@ -39,18 +39,23 @@ exercised this run. To get the native path from WSL, either bind a
 
 ## The real blocker (not kern, not the routing)
 
-The host is running the **chat** models on CPU, not GPU:
+The host **cannot GPU-offload the chat models** — confirmed, not assumed:
 
 - `/api/ps` shows only the two embedding models resident in VRAM
-  (`size_vram == size`); `qwen3.5:4b` and `qwen2.5:7b` are absent.
-- A one-token `/v1/chat/completions` reply: `qwen3.5:4b` timed out at 120s on
-  the first call, then 48s; `qwen2.5:7b` 57s. GPU-resident would be <2s.
-  ≈50× too slow = **CPU inference**.
+  (`size_vram == size`); `qwen3.5:4b` and `qwen2.5:7b` never land in VRAM.
+- Forcing `num_gpu:99` on `qwen3.5:4b` via native `/api/chat` returns
+  **HTTP 500** (server error, empty reply) after ~35 s — GPU offload fails.
+- `/api/show` on all three models carries **no `num_gpu` pin**, so this is not a
+  kern/Modelfile config forcing CPU; it is the host's GPU stack refusing the
+  larger offload. The 0.6 b embedder offloads fine; the 4 b / 7 b do not — most
+  likely they exceed free VRAM, or a CUDA/driver fault on the larger offload.
+  A one-token `/v1/chat/completions` reply (CPU fallback) is 48–57 s vs <2 s on
+  GPU.
 
-Extrapolation at this latency: ~1990 probes × ~30s ≈ **11–27 h** for a full
-10-sample run — and it would be measuring CPU-bound generation, not the
-configured models' real quality. Fixing Windows-ollama GPU offload for the two
-chat models makes the same run ≈1.7 h and the numbers meaningful.
+Remediation is on the Windows host: free VRAM / check the ollama log behind
+the 500 / update the GPU driver — not a kern change. Once the chat models
+offload, the full ~1990-probe run drops from ≈11–27 h (CPU) to ≈1.7 h (GPU) and
+the numbers measure the configured models, not CPU-bound generation.
 
 ## What this unblocks / does not
 
