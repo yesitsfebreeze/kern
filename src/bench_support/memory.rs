@@ -1,6 +1,6 @@
 //! Vector-storage footprint estimate for a built graph — the dominant memory cost
 //! of a vector DB and the headline capacity number ("N vectors of D dims cost X").
-//! Reports the in-memory f64 cost and the int8-quantized equivalent, so the
+//! Reports the in-memory f32 cost and the int8-quantized equivalent, so the
 //! scalar-quantization saving (a kern moat) is a concrete ratio, not a claim.
 //!
 //! Scope: the vector PAYLOAD only. It excludes the HNSW graph structure, entity
@@ -16,23 +16,23 @@ pub struct MemoryReport {
 	pub vectors: usize,
 	/// Embedding dimension (the widest seen; 0 when there are no vectors).
 	pub dim: usize,
-	pub f64_vector_bytes: usize,
+	pub float_vector_bytes: usize,
 	pub int8_vector_bytes: usize,
 }
 
 impl MemoryReport {
-	/// f64 bytes / int8 bytes — the scalar-quantization compression ratio
-	/// (`size_of::<f64>()` = 8 when every entity shares one dim). 0 if no vectors.
+	/// float bytes / int8 bytes — the scalar-quantization compression ratio
+	/// (`size_of::<f32>()` = 4 when every entity shares one dim). 0 if no vectors.
 	pub fn quant_ratio(&self) -> f64 {
 		if self.int8_vector_bytes == 0 {
 			0.0
 		} else {
-			self.f64_vector_bytes as f64 / self.int8_vector_bytes as f64
+			self.float_vector_bytes as f64 / self.int8_vector_bytes as f64
 		}
 	}
 }
 
-/// Estimate the vector-payload memory of `g`: `vectors * dim * 8` for f64 and
+/// Estimate the vector-payload memory of `g`: `vectors * dim * 4` for f32 and
 /// `vectors * dim * 1` for the int8 scalar-quantized equivalent.
 pub fn estimate_memory(g: &GraphGnn) -> MemoryReport {
 	let mut entities = 0;
@@ -51,7 +51,7 @@ pub fn estimate_memory(g: &GraphGnn) -> MemoryReport {
 		entities,
 		vectors,
 		dim,
-		f64_vector_bytes: vectors * dim * std::mem::size_of::<f64>(),
+		float_vector_bytes: vectors * dim * std::mem::size_of::<f32>(),
 		int8_vector_bytes: vectors * dim,
 	}
 }
@@ -71,7 +71,7 @@ mod tests {
 	}
 
 	#[test]
-	fn estimate_counts_vectors_and_int8_is_8x_smaller() {
+	fn estimate_counts_vectors_and_int8_is_4x_smaller() {
 		let trace = Trace {
 			name: "mem".into(),
 			docs: vec![doc("d1"), doc("d2"), doc("d3")],
@@ -89,11 +89,11 @@ mod tests {
 		assert_eq!(m.entities, 3, "all docs are entities");
 		assert_eq!(m.vectors, 3, "all docs are embedded");
 		assert!(m.dim > 0, "a real embedding dimension");
-		assert_eq!(m.f64_vector_bytes, m.vectors * m.dim * 8);
+		assert_eq!(m.float_vector_bytes, m.vectors * m.dim * 4);
 		assert_eq!(m.int8_vector_bytes, m.vectors * m.dim);
 		assert!(
-			(m.quant_ratio() - 8.0).abs() < 1e-9,
-			"int8 is 8x smaller than f64"
+			(m.quant_ratio() - 4.0).abs() < 1e-9,
+			"int8 is 4x smaller than f32"
 		);
 	}
 

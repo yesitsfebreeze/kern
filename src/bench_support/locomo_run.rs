@@ -21,7 +21,9 @@ use crate::retrieval::answer;
 use crate::retrieval::seed::Mode;
 use crate::types::{EmbedFunc, LlmFunc};
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 use std::time::Instant;
 
 /// Knobs for a run. Models are ollama tags; `base_url` is the ollama endpoint.
@@ -183,7 +185,7 @@ pub async fn run_eval(cfg: &EvalConfig) -> Result<EvalReport, String> {
 		// Fresh graph per dialogue: LoCoMo dialogues are independent personas.
 		let graph: Arc<RwLock<GraphGnn>> = Arc::new(RwLock::new(GraphGnn::new()));
 		// Bench: no tick loop here, question seeding not measured — no defer hook.
-		let worker = Worker::new(graph.clone(), client.clone(), None, None);
+		let worker = Worker::new(graph.clone(), client.clone(), None, None, None);
 
 		let claims = ingest_sample(&worker, &llm, sample, &icfg).await;
 		eprintln!(
@@ -363,7 +365,7 @@ async fn eval_sample(
 
 /// Synchronously resolve an embed call from inside the multi-thread runtime via
 /// the shared [`crate::llm::block_on_in_place`] bridge.
-fn block_on_embed(client: &LlmClient, text: &str) -> Result<Vec<f64>, String> {
+fn block_on_embed(client: &LlmClient, text: &str) -> Result<Vec<f32>, String> {
 	let client = client.clone();
 	let text = text.to_string();
 	match crate::llm::block_on_in_place(client.embed(&text)) {
@@ -500,7 +502,7 @@ mod tests {
 		});
 
 		let graph: Arc<RwLock<GraphGnn>> = Arc::new(RwLock::new(GraphGnn::new()));
-		let worker = Worker::new(graph.clone(), embedder, None, None);
+		let worker = Worker::new(graph.clone(), embedder, None, None, None);
 
 		let sample = Sample {
 			sample_id: "t1".into(),

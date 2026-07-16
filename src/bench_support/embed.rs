@@ -18,8 +18,8 @@ use crate::base::util::content_hash;
 // artifact. Still bench-only; never a substitute for a real semantic model.
 pub const DIM: usize = 512;
 
-pub fn embed(text: &str) -> Vec<f64> {
-	let mut v = vec![0.0f64; DIM];
+pub fn embed(text: &str) -> Vec<f32> {
+	let mut v = vec![0.0f32; DIM];
 	for tok in tokenize(text) {
 		let h = content_hash(&tok);
 		let bytes = h.as_bytes();
@@ -70,7 +70,7 @@ mod tests {
 	fn output_is_unit_length() {
 		let v = embed("the quick brown fox");
 		assert_eq!(v.len(), DIM);
-		let norm: f64 = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+		let norm = v.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
 		assert!((norm - 1.0).abs() < 1e-9, "L2 norm ~1, got {norm}");
 	}
 

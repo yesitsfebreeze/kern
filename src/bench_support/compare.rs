@@ -20,7 +20,7 @@ use super::ndcg;
 #[derive(Debug, Clone)]
 pub struct CompareQuery {
 	pub id: String,
-	pub vector: Vec<f64>,
+	pub vector: Vec<f32>,
 	pub expected_ids: Vec<String>,
 	pub kind_filter: Option<EntityKind>,
 }
@@ -139,7 +139,7 @@ mod tests {
 	use super::*;
 	use crate::bench_support::backend::{BruteForceBackend, KernBackend};
 
-	fn doc(id: &str, v: Vec<f64>, kind: EntityKind) -> Doc {
+	fn doc(id: &str, v: Vec<f32>, kind: EntityKind) -> Doc {
 		Doc {
 			id: id.into(),
 			vector: v,

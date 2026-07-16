@@ -68,46 +68,50 @@ fn insert_docs(g: &mut GraphGnn, root_id: &str, trace: &Trace) {
 const SIMILARITY_EDGE_FLOOR: f64 = 0.5;
 
 /// Seed similarity edges between every pair of documents whose cosine clears
-/// [`SIMILARITY_EDGE_FLOOR`]. O(n^2) on purpose: benchmark traces are small (tens
-/// to low-hundreds of docs), so the full pairwise edge set is cheaper and more
-/// faithful than approximating it via the ANN index. If trace corpora ever grow
-/// large, replace this with a top-k batch index build.
+/// [`SIMILARITY_EDGE_FLOOR`]. O(n^2) on purpose: the full pairwise edge set is
+/// cheaper and more faithful than approximating it via the ANN index. The pair
+/// scan borrows each vector once and runs on all cores, so 10k-doc traces build
+/// in seconds instead of the former per-pair double-clone crawl.
 fn seed_similarity_edges(g: &mut GraphGnn, root_id: &str, trace: &Trace) {
-	let ids: Vec<String> = trace.docs.iter().map(|d| d.id.clone()).collect();
-	for i in 0..ids.len() {
-		for j in (i + 1)..ids.len() {
-			let from = ids[i].clone();
-			let to = ids[j].clone();
-			let kern = g.kerns.get(root_id).expect("root kern exists");
-			let from_vec = kern
-				.entities
-				.get(&from)
-				.expect("inserted above")
-				.vector
-				.clone();
-			let to_vec = kern
-				.entities
-				.get(&to)
-				.expect("inserted above")
-				.vector
-				.clone();
-			let score = cosine(&from_vec, &to_vec);
-			if score < SIMILARITY_EDGE_FLOOR {
-				continue;
-			}
-			let rid = reason_id(&from, &to, ReasonKind::Similarity, "", "");
-			let r = Reason {
-				id: rid,
-				from,
-				to,
-				kind: ReasonKind::Similarity,
-				vector: average_vec(&from_vec, &to_vec),
-				score,
-				..Default::default()
-			};
-			if let Some(kern) = g.kerns.get_mut(root_id) {
-				add_reason(kern, r);
-			}
+	use rayon::prelude::*;
+
+	let kern = g.kerns.get(root_id).expect("root kern exists");
+	let docs: Vec<(&str, &[f32])> = trace
+		.docs
+		.iter()
+		.map(|d| {
+			(
+				d.id.as_str(),
+				kern.entities.get(&d.id).expect("inserted above").vector.as_slice(),
+			)
+		})
+		.collect();
+
+	let reasons: Vec<Reason> = (0..docs.len())
+		.into_par_iter()
+		.flat_map_iter(|i| {
+			let (from, from_vec) = docs[i];
+			docs[i + 1..].iter().filter_map(move |&(to, to_vec)| {
+				let score = cosine(from_vec, to_vec);
+				if score < SIMILARITY_EDGE_FLOOR {
+					return None;
+				}
+				Some(Reason {
+					id: reason_id(from, to, ReasonKind::Similarity, "", ""),
+					from: from.to_string(),
+					to: to.to_string(),
+					kind: ReasonKind::Similarity,
+					vector: average_vec(from_vec, to_vec),
+					score,
+					..Default::default()
+				})
+			})
+		})
+		.collect();
+
+	if let Some(kern) = g.kerns.get_mut(root_id) {
+		for r in reasons {
+			add_reason(kern, r);
 		}
 	}
 }
@@ -115,7 +119,130 @@ fn seed_similarity_edges(g: &mut GraphGnn, root_id: &str, trace: &Trace) {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::base::util::content_hash;
 	use crate::bench_support::trace::{Trace, TraceDoc};
+	use std::collections::HashSet;
+
+	/// A 1000-doc synthetic trace: 40 clusters of 3 near-identical docs (8 shared
+	/// tokens + 1 unique each, so siblings sit at cosine ~0.89 > FLOOR) buried among
+	/// 880 unrelated singles (disjoint vocab, cosine ~0). The only >FLOOR pairs are
+	/// the 40*(3 choose 2)=120 intra-cluster edges.
+	fn thousand_doc_clustered_trace() -> Trace {
+		let mut docs = Vec::new();
+		for c in 0..40 {
+			let shared: String = (0..8).map(|t| format!("clus{c}tok{t} ")).collect();
+			for m in 0..3 {
+				docs.push(TraceDoc {
+					id: format!("clus{c}_m{m}"),
+					text: format!("{shared}clus{c}uniq{m}"),
+					kind: None,
+				});
+			}
+		}
+		for s in 0..880 {
+			let text: String = (0..6).map(|t| format!("solo{s}word{t} ")).collect();
+			docs.push(TraceDoc {
+				id: format!("solo{s}"),
+				text: text.trim_end().to_string(),
+				kind: None,
+			});
+		}
+		Trace {
+			name: "edge-seeding-equivalence-1k".into(),
+			docs,
+			queries: vec![],
+		}
+	}
+
+	/// The reason ids the pairwise seeder actually produced, read off the built graph.
+	fn pairwise_edge_ids(g: &GraphGnn) -> HashSet<String> {
+		let root = g.root.id.clone();
+		g.kerns
+			.get(&root)
+			.expect("root kern")
+			.reasons
+			.keys()
+			.cloned()
+			.collect()
+	}
+
+	/// The edge set an ANN top-k seeder WOULD produce from the same built graph:
+	/// probe each doc's neighbourhood in the entity index, then apply the exact
+	/// cosine + floor (identical decision and score to the pairwise scan). Mirrors
+	/// the rejected ANN approach so the two sets can be diffed.
+	fn ann_top_k_edge_ids(g: &GraphGnn, trace: &Trace) -> HashSet<String> {
+		const NEIGHBOR_K: usize = 64;
+		const NEIGHBOR_EF: usize = 256;
+		let root = g.root.id.clone();
+		let kern = g.kerns.get(&root).expect("root kern");
+		let vecs: Vec<(&str, &[f32])> = trace
+			.docs
+			.iter()
+			.map(|d| {
+				(
+					d.id.as_str(),
+					kern.entities.get(&d.id).expect("inserted").vector.as_slice(),
+				)
+			})
+			.collect();
+		let pos: std::collections::HashMap<&str, usize> =
+			vecs.iter().enumerate().map(|(i, (id, _))| (*id, i)).collect();
+		let mut ids = HashSet::new();
+		for (i, (_, vec)) in vecs.iter().enumerate() {
+			for h in g.entity_idx.search(vec, NEIGHBOR_K, NEIGHBOR_EF) {
+				let Some(&j) = pos.get(h.id.as_str()) else {
+					continue;
+				};
+				if j == i {
+					continue;
+				}
+				let (a, b) = if i < j { (i, j) } else { (j, i) };
+				let (from, from_vec) = vecs[a];
+				let (to, to_vec) = vecs[b];
+				if cosine(from_vec, to_vec) >= SIMILARITY_EDGE_FLOOR {
+					ids.insert(reason_id(from, to, ReasonKind::Similarity, "", ""));
+				}
+			}
+		}
+		ids
+	}
+
+	/// Durable decision record for closing the "ANN top-k edge seeding" task
+	/// no-change: at 1k docs the ANN top-k edge set is byte-identical to the
+	/// exhaustive pairwise set the bench actually uses. Prints the shared
+	/// fingerprint captured in `traces/edge-seeding-equivalence-1k.md`. See that
+	/// file for the timing numbers that make ANN a net regression despite the
+	/// equivalence.
+	#[test]
+	fn pairwise_seeding_matches_ann_top_k_1k() {
+		let trace = thousand_doc_clustered_trace();
+		let g = build_graph(&trace);
+
+		let pairwise = pairwise_edge_ids(&g);
+		let ann = ann_top_k_edge_ids(&g, &trace);
+
+		assert_eq!(pairwise.len(), 120, "40 clusters x (3 choose 2) = 120 edges");
+		assert_eq!(
+			pairwise, ann,
+			"ANN top-k must recover exactly the pairwise edge set at 1k \
+			 (pairwise {} vs ann {}, missing {:?}, extra {:?})",
+			pairwise.len(),
+			ann.len(),
+			pairwise.difference(&ann).collect::<Vec<_>>(),
+			ann.difference(&pairwise).collect::<Vec<_>>(),
+		);
+
+		let mut sorted: Vec<&String> = pairwise.iter().collect();
+		sorted.sort();
+		let fingerprint = content_hash(
+			&sorted
+				.iter()
+				.map(|s| s.as_str())
+				.collect::<Vec<_>>()
+				.join("\n"),
+		);
+		println!("EDGE-ARTIFACT docs=1000 edges={} fingerprint={fingerprint}", pairwise.len());
+	}
 
 	#[test]
 	fn build_graph_populates_a_searchable_lexical_index() {

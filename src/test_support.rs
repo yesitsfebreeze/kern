@@ -15,7 +15,7 @@ pub(crate) fn entity(id: &str) -> Entity {
 /// A default [`Entity`] with the given id and vector; all other fields
 /// `Default`. The fixture several `base`/`retrieval`/`tick` test modules each
 /// open-coded as a local `fn ent(id, vector)`.
-pub(crate) fn entity_vec(id: &str, vector: Vec<f64>) -> Entity {
+pub(crate) fn entity_vec(id: &str, vector: Vec<f32>) -> Entity {
 	Entity {
 		id: id.into(),
 		vector,

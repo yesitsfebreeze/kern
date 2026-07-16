@@ -47,10 +47,25 @@ struct Args {
 	/// Reader threads for --throughput (default: detected parallelism).
 	#[arg(long)]
 	threads: Option<usize>,
-	/// Report the graph's vector-storage footprint (f64 vs int8) instead of
+	/// Mixed read/write/persist contention run: N reader threads on the locked
+	/// query path + M writer threads doing accept() + one persist thread. Reports
+	/// read p50/p95/p99, read qps, write ops/s, and the worst single read stall.
+	#[arg(long)]
+	mixed: bool,
+	/// Writer threads for --mixed (default: 2).
+	#[arg(long)]
+	writers: Option<usize>,
+	/// Wall-clock seconds for the --mixed run (default: 10).
+	#[arg(long)]
+	secs: Option<f64>,
+	/// Report the graph's vector-storage footprint (f32 vs int8) instead of
 	/// scoring recall/NDCG.
 	#[arg(long)]
 	memory: bool,
+	/// Break the graph-retrieval path into per-stage timings (seed/fuse/expand/
+	/// merge/boosts/mmr/chains) with each stage's mean/p50/p95 and share. LLM-free.
+	#[arg(long)]
+	profile: bool,
 	/// One combined Tier-0 snapshot: corpus size, recall@10/NDCG@10, latency
 	/// p50/p95/p99, throughput, and vector memory — in a single run.
 	#[arg(long)]
@@ -118,11 +133,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			tput.qps, tput.threads
 		);
 		println!(
-			"memory:      vectors f64={:.1} KiB  int8={:.1} KiB  ({:.1}x)",
-			mem.f64_vector_bytes as f64 / 1024.0,
+			"memory:      vectors f32={:.1} KiB  int8={:.1} KiB  ({:.1}x)",
+			mem.float_vector_bytes as f64 / 1024.0,
 			mem.int8_vector_bytes as f64 / 1024.0,
 			mem.quant_ratio()
 		);
+		return Ok(());
+	}
+
+	if args.profile {
+		let r = kern::bench_support::stage_profile::measure_stage_profile(
+			&g,
+			&RetrievalConfig::default(),
+			&t,
+			3,
+			20,
+		);
+		print!("{r}");
 		return Ok(());
 	}
 
@@ -133,10 +160,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			t.name, m.entities, m.vectors, m.dim
 		);
 		println!(
-			"vector storage:  f64={:.1} KiB   int8={:.1} KiB   ratio={:.1}x",
-			m.f64_vector_bytes as f64 / 1024.0,
+			"vector storage:  f32={:.1} KiB   int8={:.1} KiB   ratio={:.1}x",
+			m.float_vector_bytes as f64 / 1024.0,
 			m.int8_vector_bytes as f64 / 1024.0,
 			m.quant_ratio()
+		);
+		return Ok(());
+	}
+
+	if args.mixed {
+		let readers = args.threads.unwrap_or_else(|| {
+			std::thread::available_parallelism()
+				.map(|n| n.get())
+				.unwrap_or(4)
+		});
+		let writers = args.writers.unwrap_or(2);
+		let secs = args.secs.unwrap_or(10.0);
+		let r = kern::bench_support::mixed::measure_mixed(
+			&t,
+			&RetrievalConfig::default(),
+			readers,
+			writers,
+			secs,
+		);
+		println!(
+			"trace: {}   readers: {}   writers: {}   ({:.1}s)",
+			r.trace_name, r.readers, r.writers, r.duration_secs
+		);
+		println!(
+			"reads: {}  ({:.0} qps)   writes: {}  ({:.0} ops/s)   persists: {}",
+			r.reads, r.read_qps, r.writes, r.write_ops, r.persists
+		);
+		println!(
+			"read latency (ms):  p50={:.3}  p95={:.3}  p99={:.3}  max={:.3}",
+			r.read_p50_ms, r.read_p95_ms, r.read_p99_ms, r.read_max_ms
 		);
 		return Ok(());
 	}

@@ -16,12 +16,12 @@ use crate::base::search::{search_all_filtered, search_all_unlocked};
 use crate::base::types::{Entity, EntityKind, Kern};
 use crate::base::util::cmp_rank;
 
-/// A pre-embedded corpus document. `vector` is kern-native `f64`; a future Qdrant
+/// A pre-embedded corpus document. `vector` is kern-native `f32`; a future Qdrant
 /// adapter converts to `f32` at its own boundary so both index the same values.
 #[derive(Debug, Clone)]
 pub struct Doc {
 	pub id: String,
-	pub vector: Vec<f64>,
+	pub vector: Vec<f32>,
 	pub kind: Option<EntityKind>,
 }
 
@@ -39,7 +39,7 @@ pub trait VectorBackend {
 	fn index(&mut self, docs: &[Doc]);
 	/// Top-`k` nearest ids. When `kind_filter` is set, only that kind is returned
 	/// (filtered DURING the search, not post-filtered — the fewer-than-k fix).
-	fn query(&self, vec: &[f64], k: usize, kind_filter: Option<EntityKind>) -> Vec<QueryHit>;
+	fn query(&self, vec: &[f32], k: usize, kind_filter: Option<EntityKind>) -> Vec<QueryHit>;
 	/// Vector-payload bytes (a lower bound on RSS) for the memory column.
 	fn vector_bytes(&self) -> usize;
 }
@@ -80,7 +80,7 @@ impl VectorBackend for KernBackend {
 		self.graph = g;
 	}
 
-	fn query(&self, vec: &[f64], k: usize, kind_filter: Option<EntityKind>) -> Vec<QueryHit> {
+	fn query(&self, vec: &[f32], k: usize, kind_filter: Option<EntityKind>) -> Vec<QueryHit> {
 		let hits = match kind_filter {
 			Some(kind) => {
 				let keep = |id: &str| {
@@ -105,7 +105,7 @@ impl VectorBackend for KernBackend {
 	}
 
 	fn vector_bytes(&self) -> usize {
-		crate::bench_support::memory::estimate_memory(&self.graph).f64_vector_bytes
+		crate::bench_support::memory::estimate_memory(&self.graph).float_vector_bytes
 	}
 }
 
@@ -133,7 +133,7 @@ impl VectorBackend for BruteForceBackend {
 		self.docs = docs.to_vec();
 	}
 
-	fn query(&self, vec: &[f64], k: usize, kind_filter: Option<EntityKind>) -> Vec<QueryHit> {
+	fn query(&self, vec: &[f32], k: usize, kind_filter: Option<EntityKind>) -> Vec<QueryHit> {
 		let mut hits: Vec<QueryHit> = self
 			.docs
 			.iter()
@@ -156,7 +156,7 @@ impl VectorBackend for BruteForceBackend {
 			.iter()
 			.find(|d| !d.vector.is_empty())
 			.map_or(0, |d| d.vector.len());
-		self.docs.iter().filter(|d| !d.vector.is_empty()).count() * dim * std::mem::size_of::<f64>()
+		self.docs.iter().filter(|d| !d.vector.is_empty()).count() * dim * std::mem::size_of::<f32>()
 	}
 }
 
@@ -164,7 +164,7 @@ impl VectorBackend for BruteForceBackend {
 mod tests {
 	use super::*;
 
-	fn doc(id: &str, v: Vec<f64>, kind: EntityKind) -> Doc {
+	fn doc(id: &str, v: Vec<f32>, kind: EntityKind) -> Doc {
 		Doc {
 			id: id.into(),
 			vector: v,
