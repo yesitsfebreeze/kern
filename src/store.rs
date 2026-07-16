@@ -197,6 +197,24 @@ mod tests {
 		);
 	}
 
+	#[tokio::test]
+	async fn distinct_dirs_get_isolated_stores() {
+		let dir_a = tempfile::tempdir().unwrap();
+		let dir_b = tempfile::tempdir().unwrap();
+		let reg = Registry::new();
+		let cfg = Config::default();
+
+		let a = reg.open(dir_a.path(), &cfg, dead_client(), None, None, None);
+		let b = reg.open(dir_b.path(), &cfg, dead_client(), None, None, None);
+
+		assert_eq!(reg.len(), 2, "one store per distinct dir");
+		assert!(
+			!Arc::ptr_eq(&a.graph, &b.graph),
+			"distinct dirs never share a graph"
+		);
+		assert_ne!(a.key, b.key, "distinct dirs get distinct keys");
+	}
+
 	#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 	async fn concurrent_open_of_same_dir_yields_one_store() {
 		let dir = tempfile::tempdir().unwrap();

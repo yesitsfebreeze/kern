@@ -1,26 +1,25 @@
-/target
 # Cargo.lock IS tracked: kern ships a binary daemon, so the lockfile is
 # committed for reproducible builds across machines.
+/target
 
 # kern runtime state (keep .kern/kern.toml tracked)
 /.kern/*
 !/.kern/kern.toml
+ghpages/.kern/
 
 # stray crate-local runtime journals from in-dir test runs (tests use tempdir;
 # this never belongs in the repo)
 /src/**/.kern/
 
-# relay daemon runtime state (capture, journal, graph, logs)
+# daemon runtime state — relay (capture, journal, graph, logs), mesh (LMDB +
+# history journal), git-fs
 /.relay/
-
-# mesh daemon runtime state (LMDB store + history journal)
 /.mesh/
+/.git-fs/
 
-# local tooling / vaults (not part of the product)
-/.claude
-/.obsidian
-/vicky
-NUL
+# generated bench traces — the generator is deterministic (same args produce a
+# byte-identical trace), so these are regenerated rather than committed
+/traces/
 
 # LoCoMo eval corpus — CC BY-NC 4.0, user-supplied, never redistributed in-repo (#36)
 /eval/
@@ -30,4 +29,18 @@ NUL
 
 # packaged landing-page artifact (ghpages/ is the source)
 ghpages.zip
-ghpages/.kern/
+
+# local tooling / vaults (not part of the product)
+/.claude
+/.obsidian
+/.jd/
+/.cchome/
+/.voit/
+/.worktrees/
+/.voitbus.json
+/.voitbus.json.tmp
+/.voitbus.sock
+/.voitbus.pid
+
+__pycache__/
+NUL
