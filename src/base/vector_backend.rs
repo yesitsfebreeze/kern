@@ -101,7 +101,7 @@ impl VectorBackend {
 	}
 
 	/// Insert or replace the vector for `id`.
-	pub fn insert(&mut self, id: String, vec: Vec<f64>) {
+	pub fn insert(&mut self, id: String, vec: Vec<f32>) {
 		match self {
 			Self::Resident(h) => h.insert(id, vec),
 			Self::Disk {
@@ -129,7 +129,7 @@ impl VectorBackend {
 
 	/// Approximate top-`k` nearest neighbours to `vec` (cosine-similarity
 	/// [`HnswHit`]s, nearest first). `ef` is the beam width.
-	pub fn search(&self, vec: &[f64], k: usize, ef: usize) -> Vec<HnswHit> {
+	pub fn search(&self, vec: &[f32], k: usize, ef: usize) -> Vec<HnswHit> {
 		match self {
 			Self::Resident(h) => h.search(vec, k, ef),
 			Self::Disk {
@@ -137,8 +137,7 @@ impl VectorBackend {
 				delta,
 				tombstones,
 			} => {
-				let q32: Vec<f32> = vec.iter().map(|&x| x as f32).collect();
-				let snap = snapshot.search_hits_filtered(&q32, k, ef, &|id| !tombstones.contains(id));
+				let snap = snapshot.search_hits_filtered(vec, k, ef, &|id| !tombstones.contains(id));
 				let live = delta.search(vec, k, ef);
 				union_rank(snap, live, k)
 			}
@@ -149,7 +148,7 @@ impl VectorBackend {
 	/// during traversal so sparse matches behind non-matches stay reachable.
 	pub fn search_filtered(
 		&self,
-		vec: &[f64],
+		vec: &[f32],
 		k: usize,
 		ef: usize,
 		keep: &dyn Fn(&str) -> bool,
@@ -161,9 +160,8 @@ impl VectorBackend {
 				delta,
 				tombstones,
 			} => {
-				let q32: Vec<f32> = vec.iter().map(|&x| x as f32).collect();
 				let snap =
-					snapshot.search_hits_filtered(&q32, k, ef, &|id| keep(id) && !tombstones.contains(id));
+					snapshot.search_hits_filtered(vec, k, ef, &|id| keep(id) && !tombstones.contains(id));
 				let live = delta.search_filtered(vec, k, ef, keep);
 				union_rank(snap, live, k)
 			}
@@ -206,23 +204,16 @@ mod tests {
 	use crate::base::diskann::{build_and_save, Params};
 
 	// Deterministic, well-separated vectors (distinct per-dim frequencies).
-	fn vec_of(i: usize) -> Vec<f64> {
+	fn vec_of(i: usize) -> Vec<f32> {
 		(0..8)
-			.map(|j| ((i as f64) * (0.13 + 0.07 * j as f64)).sin())
+			.map(|j| ((i as f64) * (0.13 + 0.07 * j as f64)).sin() as f32)
 			.collect()
 	}
 
 	// Returns the index plus the TempDir that backs its mmap'd files; the caller
 	// must keep the TempDir alive for the index's lifetime (dropping it cleans up).
 	fn snapshot_over(ids: impl Iterator<Item = usize>) -> (DiskIndex, tempfile::TempDir) {
-		let items: Vec<(String, Vec<f32>)> = ids
-			.map(|i| {
-				(
-					format!("e{i}"),
-					vec_of(i).iter().map(|&x| x as f32).collect(),
-				)
-			})
-			.collect();
+		let items: Vec<(String, Vec<f32>)> = ids.map(|i| (format!("e{i}"), vec_of(i))).collect();
 		let dir = tempfile::tempdir().unwrap();
 		build_and_save(dir.path(), &items, Params::default()).unwrap();
 		let idx = DiskIndex::open(dir.path()).unwrap();

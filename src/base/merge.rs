@@ -173,9 +173,26 @@ pub fn merge_remote_entity(g: &mut GraphGnn, target_kern_id: &str, remote: Entit
 				return false;
 			}
 			let id = remote.id.clone();
+			// Mirror the ingest path (`accept::commit_entity` / `graph::index_kern_into`):
+			// a newly inserted entity must enter the ANN search indices immediately or it
+			// stays invisible to vector search until the next full rebuild. Superseded
+			// entities are never valid results, so they are stored but not indexed.
+			let searchable = remote.status != EntityStatus::Superseded;
+			let vector = searchable
+				.then(|| remote.vector.clone())
+				.filter(|v| !v.is_empty());
+			let gnn_vector = searchable
+				.then(|| remote.gnn_vector.clone())
+				.filter(|v| !v.is_empty());
 			kern.entities.insert(id.clone(), remote);
 			// Borrow of `kern` ends here; index via &mut self below.
 			g.index_entity(&id, target_kern_id);
+			if let Some(v) = vector {
+				g.entity_idx.insert(id.clone(), v);
+			}
+			if let Some(v) = gnn_vector {
+				g.gnn_entity_idx.insert(id.clone(), v);
+			}
 			true
 		}
 	}
@@ -395,6 +412,54 @@ mod tests {
 		assert!(
 			!after.contains(&"eX".to_string()),
 			"merge-superseded entity removed from search index"
+		);
+	}
+
+	#[test]
+	fn merged_remote_entity_is_vector_searchable_without_rebuild() {
+		let mut g = GraphGnn::new();
+		let kid = g.root.id.clone();
+
+		let mut remote = mk_entity("eV", "remote thought", 1.0, EntityKind::Fact);
+		remote.vector = vec![0.0, 1.0];
+		remote.gnn_vector = vec![1.0, 0.0];
+		assert!(merge_remote_entity(&mut g, &kid, remote));
+
+		let hits: Vec<String> = crate::base::search::search_all_unlocked(&g, &[0.0, 1.0], 5)
+			.into_iter()
+			.map(|h| h.entity_id)
+			.collect();
+		assert!(
+			hits.contains(&"eV".to_string()),
+			"merged entity must be returned by vector search without rebuild_index"
+		);
+		assert!(
+			g.gnn_entity_idx
+				.search(&[1.0, 0.0], 5, 50)
+				.iter()
+				.any(|h| h.id == "eV"),
+			"merged entity's gnn vector indexed on receipt"
+		);
+	}
+
+	#[test]
+	fn merged_superseded_remote_entity_is_stored_but_not_indexed() {
+		let mut g = GraphGnn::new();
+		let kid = g.root.id.clone();
+
+		let mut remote = mk_entity("eS", "dead on arrival", 1.0, EntityKind::Fact);
+		remote.vector = vec![0.0, 1.0];
+		remote.status = EntityStatus::Superseded;
+		assert!(merge_remote_entity(&mut g, &kid, remote));
+
+		assert!(g.kerns.get(&kid).unwrap().entities.contains_key("eS"));
+		let hits: Vec<String> = crate::base::search::search_all_unlocked(&g, &[0.0, 1.0], 5)
+			.into_iter()
+			.map(|h| h.entity_id)
+			.collect();
+		assert!(
+			!hits.contains(&"eS".to_string()),
+			"a superseded entity never enters the search index"
 		);
 	}
 

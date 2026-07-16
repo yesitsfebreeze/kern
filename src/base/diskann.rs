@@ -28,6 +28,10 @@ use crate::base::hnsw::HnswHit;
 /// Adjacency padding marker: "no neighbour in this slot".
 const SENTINEL: u32 = u32::MAX;
 
+fn le_u32(c: &[u8]) -> u32 {
+	u32::from_le_bytes([c[0], c[1], c[2], c[3]])
+}
+
 /// Build/search parameters. Defaults follow common DiskANN guidance.
 #[derive(Debug, Clone, Copy)]
 pub struct Params {
@@ -335,18 +339,40 @@ impl DiskIndex {
 	/// Open an index previously written by [`build_and_save`]. The vector and
 	/// graph files are memory-mapped; only `meta` is read into memory.
 	pub fn open(dir: &Path) -> io::Result<Self> {
+		let corrupt = |msg: &str| io::Error::new(io::ErrorKind::InvalidData, format!("diskann: {msg}"));
 		let meta_bytes = std::fs::read(meta_path(dir))?;
 		let (meta, _): (Meta, _) =
 			bincode::serde::decode_from_slice(&meta_bytes, bincode::config::standard())
 				.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+		if meta.ids.len() != meta.count {
+			return Err(corrupt("id list length does not match meta count"));
+		}
+		if meta.count > 0 && meta.entry as usize >= meta.count {
+			return Err(corrupt("entry point out of range"));
+		}
+		let vec_bytes = meta
+			.count
+			.checked_mul(meta.dim)
+			.and_then(|n| n.checked_mul(4))
+			.ok_or_else(|| corrupt("meta sizes overflow"))?;
+		let graph_bytes = meta
+			.count
+			.checked_mul(meta.r)
+			.and_then(|n| n.checked_mul(4))
+			.ok_or_else(|| corrupt("meta sizes overflow"))?;
 		let vectors = unsafe { Mmap::map(&std::fs::File::open(vectors_path(dir))?)? };
 		let graph = unsafe { Mmap::map(&std::fs::File::open(graph_path(dir))?)? };
 		// Validate sizes so a truncated/corrupt index is rejected, not read OOB.
-		if vectors.len() != meta.count * meta.dim * 4 || graph.len() != meta.count * meta.r * 4 {
-			return Err(io::Error::new(
-				io::ErrorKind::InvalidData,
-				"diskann: file size does not match meta",
-			));
+		if vectors.len() != vec_bytes || graph.len() != graph_bytes {
+			return Err(corrupt("file size does not match meta"));
+		}
+		// Every adjacency slot must be SENTINEL or a valid node id; otherwise the
+		// beam walk would slice the vector mmap out of bounds mid-search.
+		for c in graph.chunks_exact(4) {
+			let id = le_u32(c);
+			if id != SENTINEL && id as usize >= meta.count {
+				return Err(corrupt("graph neighbor id out of range"));
+			}
 		}
 		Ok(Self {
 			dim: meta.dim,
@@ -377,7 +403,7 @@ impl DiskIndex {
 		let off = i as usize * self.dim * 4;
 		self.vectors[off..off + self.dim * 4]
 			.chunks_exact(4)
-			.map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+			.map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
 			.collect()
 	}
 
@@ -385,7 +411,7 @@ impl DiskIndex {
 		let off = i as usize * self.r * 4;
 		self.graph[off..off + self.r * 4]
 			.chunks_exact(4)
-			.map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+			.map(le_u32)
 			.filter(|&id| id != SENTINEL)
 			.collect()
 	}
@@ -604,5 +630,58 @@ mod tests {
 		// Truncate vectors.bin → open must fail, not read out of bounds.
 		std::fs::write(vectors_path(dir.path()), b"short").unwrap();
 		assert!(DiskIndex::open(dir.path()).is_err());
+	}
+
+	#[test]
+	fn truncated_graph_is_rejected() {
+		let dir = tempfile::tempdir().unwrap();
+		let items = rand_items(10, 8, 3);
+		build_and_save(dir.path(), &items, Params::default()).unwrap();
+		let full = std::fs::read(graph_path(dir.path())).unwrap();
+		std::fs::write(graph_path(dir.path()), &full[..full.len() - 3]).unwrap();
+		assert!(DiskIndex::open(dir.path()).is_err());
+	}
+
+	#[test]
+	fn out_of_range_neighbor_is_rejected() {
+		let dir = tempfile::tempdir().unwrap();
+		let items = rand_items(10, 8, 3);
+		build_and_save(dir.path(), &items, Params::default()).unwrap();
+		let mut graph = std::fs::read(graph_path(dir.path())).unwrap();
+		// Right size, bogus content: first slot points past the last node.
+		graph[..4].copy_from_slice(&(items.len() as u32 + 7).to_le_bytes());
+		std::fs::write(graph_path(dir.path()), &graph).unwrap();
+		assert!(DiskIndex::open(dir.path()).is_err());
+	}
+
+	fn rewrite_meta(dir: &Path, mutate: impl FnOnce(&mut Meta)) {
+		let bytes = std::fs::read(meta_path(dir)).unwrap();
+		let (mut meta, _): (Meta, _) =
+			bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
+		mutate(&mut meta);
+		let out = bincode::serde::encode_to_vec(&meta, bincode::config::standard()).unwrap();
+		std::fs::write(meta_path(dir), out).unwrap();
+	}
+
+	#[test]
+	fn corrupt_meta_is_rejected() {
+		let dir = tempfile::tempdir().unwrap();
+		let items = rand_items(10, 8, 3);
+		build_and_save(dir.path(), &items, Params::default()).unwrap();
+
+		rewrite_meta(dir.path(), |m| m.entry = 999);
+		assert!(
+			DiskIndex::open(dir.path()).is_err(),
+			"out-of-range entry point"
+		);
+
+		rewrite_meta(dir.path(), |m| {
+			m.entry = 0;
+			m.ids.pop();
+		});
+		assert!(
+			DiskIndex::open(dir.path()).is_err(),
+			"ids shorter than count"
+		);
 	}
 }

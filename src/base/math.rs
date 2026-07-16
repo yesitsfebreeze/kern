@@ -2,7 +2,7 @@ use super::constants::*;
 use super::types::{EntityKind, Kern, ReasonKind};
 use super::util;
 
-pub fn cosine(a: &[f64], b: &[f64]) -> f64 {
+pub fn cosine(a: &[f32], b: &[f32]) -> f64 {
 	#[cfg(target_arch = "x86_64")]
 	{
 		if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
@@ -12,8 +12,8 @@ pub fn cosine(a: &[f64], b: &[f64]) -> f64 {
 	cosine_scalar(a, b)
 }
 
-fn cosine_scalar(a: &[f64], b: &[f64]) -> f64 {
-	let (mut dot, mut na, mut nb) = (0.0, 0.0, 0.0);
+fn cosine_scalar(a: &[f32], b: &[f32]) -> f64 {
+	let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
 	for (ai, bi) in a.iter().zip(b.iter()) {
 		dot += ai * bi;
 		na += ai * ai;
@@ -22,48 +22,48 @@ fn cosine_scalar(a: &[f64], b: &[f64]) -> f64 {
 	if na == 0.0 || nb == 0.0 {
 		return 0.0;
 	}
-	dot / (na.sqrt() * nb.sqrt())
+	(dot as f64) / ((na as f64).sqrt() * (nb as f64).sqrt())
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn cosine_avx2(a: &[f64], b: &[f64]) -> f64 {
+unsafe fn cosine_avx2(a: &[f32], b: &[f32]) -> f64 {
 	use std::arch::x86_64::*;
 
 	// SAFETY INVARIANT for every unchecked access below: `n = min(a.len, b.len)`,
-	// `chunks = n / 4`, `rem = n % 4`, `tail = chunks * 4`. Therefore:
-	//  - the loaded chunks span offsets `0..tail` and each `loadu_pd` reads 4
-	//    lanes at `off = i*4` where `off + 4 <= chunks*4 = tail <= n`, so it stays
+	// `chunks = n / 8`, `rem = n % 8`, `tail = chunks * 8`. Therefore:
+	//  - the loaded chunks span offsets `0..tail` and each `loadu_ps` reads 8
+	//    lanes at `off = i*8` where `off + 8 <= chunks*8 = tail <= n`, so it stays
 	//    within both slices (`tail <= a.len()` and `tail <= b.len()`);
 	//  - the tail loop indexes `tail + i` for `i in 0..rem`, and
-	//    `tail + rem = chunks*4 + n%4 = n <= a.len()` (and `<= b.len()`),
+	//    `tail + rem = chunks*8 + n%8 = n <= a.len()` (and `<= b.len()`),
 	//    so `get_unchecked(tail + i)` is always in bounds.
 	let n = a.len().min(b.len());
-	let chunks = n / 4;
-	let rem = n % 4;
+	let chunks = n / 8;
+	let rem = n % 8;
 
-	let mut vdot = _mm256_setzero_pd();
-	let mut vna = _mm256_setzero_pd();
-	let mut vnb = _mm256_setzero_pd();
+	let mut vdot = _mm256_setzero_ps();
+	let mut vna = _mm256_setzero_ps();
+	let mut vnb = _mm256_setzero_ps();
 
 	let pa = a.as_ptr();
 	let pb = b.as_ptr();
 
 	for i in 0..chunks {
-		let off = i * 4;
-		// In bounds: off + 4 <= chunks*4 = tail <= n <= len of both slices.
-		let va = _mm256_loadu_pd(pa.add(off));
-		let vb = _mm256_loadu_pd(pb.add(off));
-		vdot = _mm256_fmadd_pd(va, vb, vdot);
-		vna = _mm256_fmadd_pd(va, va, vna);
-		vnb = _mm256_fmadd_pd(vb, vb, vnb);
+		let off = i * 8;
+		// In bounds: off + 8 <= chunks*8 = tail <= n <= len of both slices.
+		let va = _mm256_loadu_ps(pa.add(off));
+		let vb = _mm256_loadu_ps(pb.add(off));
+		vdot = _mm256_fmadd_ps(va, vb, vdot);
+		vna = _mm256_fmadd_ps(va, va, vna);
+		vnb = _mm256_fmadd_ps(vb, vb, vnb);
 	}
 
-	let mut dot = hsum_256_pd(vdot);
-	let mut na = hsum_256_pd(vna);
-	let mut nb = hsum_256_pd(vnb);
+	let mut dot = hsum_256_ps(vdot);
+	let mut na = hsum_256_ps(vna);
+	let mut nb = hsum_256_ps(vnb);
 
-	let tail = chunks * 4;
+	let tail = chunks * 8;
 	for i in 0..rem {
 		// In bounds: tail + i < tail + rem = n <= len of both slices.
 		let ai = *a.get_unchecked(tail + i);
@@ -76,26 +76,28 @@ unsafe fn cosine_avx2(a: &[f64], b: &[f64]) -> f64 {
 	if na == 0.0 || nb == 0.0 {
 		return 0.0;
 	}
-	dot / (na.sqrt() * nb.sqrt())
+	(dot as f64) / ((na as f64).sqrt() * (nb as f64).sqrt())
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn hsum_256_pd(v: std::arch::x86_64::__m256d) -> f64 {
+unsafe fn hsum_256_ps(v: std::arch::x86_64::__m256) -> f32 {
 	use std::arch::x86_64::*;
-	let high = _mm256_extractf128_pd(v, 1);
-	let low = _mm256_castpd256_pd128(v);
-	let sum128 = _mm_add_pd(low, high);
-	let hi64 = _mm_unpackhi_pd(sum128, sum128);
-	let total = _mm_add_sd(sum128, hi64);
-	_mm_cvtsd_f64(total)
+	let high = _mm256_extractf128_ps(v, 1);
+	let low = _mm256_castps256_ps128(v);
+	let sum128 = _mm_add_ps(low, high);
+	let hi64 = _mm_movehl_ps(sum128, sum128);
+	let sum64 = _mm_add_ps(sum128, hi64);
+	let hi32 = _mm_shuffle_ps(sum64, sum64, 0b01);
+	let total = _mm_add_ss(sum64, hi32);
+	_mm_cvtss_f32(total)
 }
 
-pub fn cosine_distance(a: &[f64], b: &[f64]) -> f64 {
+pub fn cosine_distance(a: &[f32], b: &[f32]) -> f64 {
 	1.0 - cosine(a, b)
 }
 
-pub fn average_vec(a: &[f64], b: &[f64]) -> Vec<f64> {
+pub fn average_vec(a: &[f32], b: &[f32]) -> Vec<f32> {
 	a.iter()
 		.zip(b.iter())
 		.map(|(ai, bi)| (ai + bi) / 2.0)
@@ -106,8 +108,8 @@ pub fn average_vec(a: &[f64], b: &[f64]) -> Vec<f64> {
 /// left unchanged rather than producing NaNs from a divide-by-zero. General
 /// vector utility — lives here beside the other `base::math` primitives so every
 /// retrieval/fusion path shares one implementation.
-pub fn l2_normalize(v: &mut [f64]) {
-	let norm: f64 = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+pub fn l2_normalize(v: &mut [f32]) {
+	let norm = v.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt() as f32;
 	if norm > 0.0 {
 		for x in v.iter_mut() {
 			*x /= norm;
@@ -249,9 +251,9 @@ mod cosine_tests {
 
 	#[test]
 	fn identical_vectors_are_one_orthogonal_are_zero() {
-		assert!((cosine(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0]) - 1.0).abs() < 1e-9);
+		assert!((cosine(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0]) - 1.0).abs() < 1e-6);
 		assert!(
-			cosine(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-9,
+			cosine(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6,
 			"orthogonal -> 0"
 		);
 	}
@@ -269,7 +271,7 @@ mod cosine_tests {
 		// n = min(len) = 2; the extra dim on the longer vector is ignored.
 		let c = cosine(&[1.0, 0.0, 9.0], &[1.0, 0.0]);
 		assert!(
-			(c - 1.0).abs() < 1e-9,
+			(c - 1.0).abs() < 1e-6,
 			"shared prefix is identical -> 1.0, got {c}"
 		);
 		// Empty slice -> n = 0 -> both norms 0 -> 0.0 (no panic).
@@ -277,23 +279,25 @@ mod cosine_tests {
 	}
 
 	/// On a machine with AVX2+FMA the public `cosine` takes the SIMD path; assert
-	/// it agrees with the scalar reference across a length that exercises BOTH the
-	/// 4-wide chunk loop and the unchecked tail (17 = 4*4 + 1).
+	/// it agrees with the scalar reference across lengths that exercise BOTH the
+	/// 8-wide chunk loop and the unchecked tail (e.g. 17 = 2*8 + 1).
 	#[cfg(target_arch = "x86_64")]
 	#[test]
 	fn avx2_path_matches_scalar_reference() {
 		if !(is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")) {
 			return; // no SIMD on this host; scalar already covered above
 		}
-		let a: Vec<f64> = (0..17).map(|i| i as f64 * 0.1 - 0.5).collect();
-		let b: Vec<f64> = (0..17).map(|i| (17 - i) as f64 * 0.2 + 0.3).collect();
-		let scalar = cosine_scalar(&a, &b);
-		// SAFETY: guarded by the runtime avx2+fma feature check above.
-		let simd = unsafe { cosine_avx2(&a, &b) };
-		assert!(
-			(scalar - simd).abs() < 1e-9,
-			"avx2 {simd} vs scalar {scalar}"
-		);
+		for len in [0usize, 1, 7, 8, 9, 15, 16, 17, 33, 100] {
+			let a: Vec<f32> = (0..len).map(|i| i as f32 * 0.1 - 0.5).collect();
+			let b: Vec<f32> = (0..len).map(|i| (len - i) as f32 * 0.2 + 0.3).collect();
+			let scalar = cosine_scalar(&a, &b);
+			// SAFETY: guarded by the runtime avx2+fma feature check above.
+			let simd = unsafe { cosine_avx2(&a, &b) };
+			assert!(
+				(scalar - simd).abs() < 1e-5,
+				"len {len}: avx2 {simd} vs scalar {scalar}"
+			);
+		}
 	}
 }
 
@@ -303,23 +307,23 @@ mod l2_normalize_tests {
 
 	#[test]
 	fn scales_to_unit_norm() {
-		let mut v = vec![3.0, 4.0]; // norm 5
+		let mut v = vec![3.0f32, 4.0]; // norm 5
 		l2_normalize(&mut v);
-		assert!((v[0] - 0.6).abs() < 1e-12 && (v[1] - 0.8).abs() < 1e-12);
-		let norm: f64 = v.iter().map(|x| x * x).sum::<f64>().sqrt();
-		assert!((norm - 1.0).abs() < 1e-12);
+		assert!((v[0] - 0.6).abs() < 1e-6 && (v[1] - 0.8).abs() < 1e-6);
+		let norm = v.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+		assert!((norm - 1.0).abs() < 1e-6);
 	}
 
 	#[test]
 	fn zero_vector_is_left_unchanged() {
-		let mut v = vec![0.0, 0.0, 0.0];
+		let mut v = vec![0.0f32, 0.0, 0.0];
 		l2_normalize(&mut v);
 		assert_eq!(v, vec![0.0, 0.0, 0.0], "no divide-by-zero / NaN");
 	}
 
 	#[test]
 	fn empty_slice_is_a_noop() {
-		let mut v: Vec<f64> = vec![];
+		let mut v: Vec<f32> = vec![];
 		l2_normalize(&mut v);
 		assert!(v.is_empty());
 	}

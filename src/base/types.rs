@@ -276,8 +276,10 @@ pub struct Entity {
 	pub status: EntityStatus,
 	pub statements: Vec<String>,
 	pub chunks: Vec<ChunkPart>,
-	pub vector: Vec<f64>,
-	pub gnn_vector: Vec<f64>,
+	#[serde(with = "util::vec_f64_compat")]
+	pub vector: Vec<f32>,
+	#[serde(with = "util::vec_f64_compat")]
+	pub gnn_vector: Vec<f32>,
 	pub score: f64,
 	#[serde(default)]
 	pub conf_alpha: f32,
@@ -306,6 +308,27 @@ pub struct Entity {
 	/// reevaluation resumes after restart.
 	#[serde(default)]
 	pub dirty: bool,
+	/// Bi-temporal WORLD-TIME window (Zep-style "supersede, don't delete").
+	///
+	/// `valid_from` is when the claim became true in the world; `None` falls back
+	/// to `created_at`. `valid_to` is when it stopped being true (the successor's
+	/// `valid_from`, or the supersede instant); `None` means still valid.
+	/// `invalidated_at` is the TRANSACTION-time stamp of when kern learned the
+	/// claim was superseded; `None` means it never was.
+	///
+	/// These are `#[serde(skip)]` on purpose: keeping them out of `Entity`'s
+	/// bincode stream leaves the embedded on-disk/gossip layout byte-identical to
+	/// pre-temporal snapshots (no wire break, no silent decode loss). The primary
+	/// store persists them out-of-band via `StoredKern`'s temporal side-map (same
+	/// pattern as the int8 vector side-map); the cold tier and gossip carry only
+	/// the always-serialized `status`/`superseded_by`, which is the essential
+	/// "this is superseded" signal — the timestamps are a node-local refinement.
+	#[serde(skip)]
+	pub valid_from: Option<SystemTime>,
+	#[serde(skip)]
+	pub valid_to: Option<SystemTime>,
+	#[serde(skip)]
+	pub invalidated_at: Option<SystemTime>,
 }
 
 impl Entity {
@@ -344,6 +367,40 @@ impl Entity {
 
 	pub fn is_superseded(&self) -> bool {
 		self.status == EntityStatus::Superseded
+	}
+
+	/// World-time lower bound of validity: the explicit `valid_from` hint if the
+	/// distiller extracted one ("since March"), otherwise the ingestion time.
+	pub fn valid_from_or_created(&self) -> Option<SystemTime> {
+		self.valid_from.or(self.created_at)
+	}
+
+	/// Whether this entity's bi-temporal window `[valid_from, valid_to)` covers
+	/// `instant` (half-open: `valid_from` inclusive, `valid_to` exclusive). An
+	/// unknown lower bound never excludes; an open `valid_to` means still valid.
+	pub fn is_valid_at(&self, instant: SystemTime) -> bool {
+		if let Some(from) = self.valid_from_or_created() {
+			if instant < from {
+				return false;
+			}
+		}
+		if let Some(to) = self.valid_to {
+			if instant >= to {
+				return false;
+			}
+		}
+		true
+	}
+
+	/// Stamp this entity as invalidated by a successor at `at`: record the
+	/// transaction-time (`invalidated_at`) and close the world-time window
+	/// (`valid_to`), unless already closed. The `status`/`superseded_by`
+	/// transition is the caller's (it also evicts from the ANN indices).
+	pub fn stamp_invalidated(&mut self, at: SystemTime, valid_to: SystemTime) {
+		self.invalidated_at = Some(at);
+		if self.valid_to.is_none() {
+			self.valid_to = Some(valid_to);
+		}
 	}
 
 	pub fn has_vector(&self) -> bool {
@@ -400,7 +457,8 @@ pub struct Reason {
 	pub to_net_id: String,
 	pub kind: ReasonKind,
 	pub text: String,
-	pub vector: Vec<f64>,
+	#[serde(with = "util::vec_f64_compat")]
+	pub vector: Vec<f32>,
 	pub score: f64,
 	#[serde(default)]
 	pub traversal_count: GCounter,
@@ -442,7 +500,8 @@ pub struct Kern {
 	pub id: String,
 	pub root_id: String,
 	pub anchor_text: String,
-	pub anchor_vec: Vec<f64>,
+	#[serde(with = "util::vec_f64_compat")]
+	pub anchor_vec: Vec<f32>,
 	pub inner_radius: f64,
 	pub outer_radius: f64,
 	pub spawn_reason_id: String,
@@ -515,7 +574,7 @@ impl Kern {
 	/// exactly this: a named kern directly under the root. `vec` may be empty
 	/// (the `generic` catch-all), in which case similarity routing never matches
 	/// it. Default radii come from the kern routing constants.
-	pub fn new_named_child(parent_id: &str, root_id: &str, name: &str, vec: Vec<f64>) -> Self {
+	pub fn new_named_child(parent_id: &str, root_id: &str, name: &str, vec: Vec<f32>) -> Self {
 		let mut k = Self::new(named_child_kern_id(parent_id, name, now_nanos()), parent_id);
 		k.root_id = root_id.to_string();
 		k.anchor_text = name.to_string();
@@ -611,6 +670,9 @@ pub(crate) fn mk_entity(id: &str, text: &str, heat: f64, kind: EntityKind) -> En
 		producer_id: String::new(),
 		unlinked_count: 0,
 		dirty: false,
+		valid_from: None,
+		valid_to: None,
+		invalidated_at: None,
 	};
 	e.refresh_score();
 	e

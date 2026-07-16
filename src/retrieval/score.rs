@@ -1,8 +1,9 @@
+use crate::base::graph::GraphGnn;
 use crate::base::heat::{self, HeatConfig};
 use crate::base::types::{Entity, EntityKind, EntityStatus};
 use crate::base::util::cmp_partial;
 use crate::config::RetrievalConfig;
-use crate::retrieval::expand::ScoredEntity;
+use crate::retrieval::expand::{Scored, ScoredEntity};
 use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -40,6 +41,15 @@ pub struct QueryOptions {
 	pub before: Option<SystemTime>,
 	pub min_conf: f64,
 	pub valid_at: Option<SystemTime>,
+	/// Bi-temporal WORLD-TIME point query: keep only entities whose
+	/// `[valid_from, valid_to)` window covers this instant. Distinct from
+	/// `valid_at` (which gates the TTL-expiry `valid_until`): `as_of` asks "what
+	/// was true at time T", surfacing the revision that held then.
+	pub as_of: Option<SystemTime>,
+	/// Include Superseded entities reachable by walking `Supersedes` chains back
+	/// from active hits. Not a per-entity filter (the ANN never holds superseded
+	/// entities); the retrieval/tool layer does the chain walk and flags them.
+	pub include_history: bool,
 }
 
 impl QueryOptions {
@@ -55,6 +65,7 @@ impl QueryOptions {
 			|| self.since.is_some()
 			|| self.before.is_some()
 			|| self.valid_at.is_some()
+			|| self.as_of.is_some()
 	}
 }
 
@@ -76,24 +87,25 @@ pub fn qbst(cfg: &RetrievalConfig, access_count: i32, accessed_at: Option<System
 	(access + recency).min(cfg.qbst_cap)
 }
 
-pub fn apply_boosts(cfg: &RetrievalConfig, results: &mut [ScoredEntity]) {
+pub fn apply_boosts<T: Scored>(cfg: &RetrievalConfig, results: &mut [T]) {
 	for r in results.iter_mut() {
-		let confidence = r.entity.score;
-		let boost = qbst(cfg, r.entity.access_count.value_i32(), r.entity.accessed_at);
-		let fact_bonus = if r.entity.kind == EntityKind::Fact {
+		let e = r.entity();
+		let confidence = e.score;
+		let boost = qbst(cfg, e.access_count.value_i32(), e.accessed_at);
+		let fact_bonus = if e.kind == EntityKind::Fact {
 			cfg.fact_score_boost
 		} else {
 			0.0
 		};
-		r.score = r.score * confidence + boost + fact_bonus;
+		r.set_score(r.score() * confidence + boost + fact_bonus);
 	}
 }
 
-pub fn filter_delivery(cfg: &RetrievalConfig, results: &mut Vec<ScoredEntity>) {
-	results.retain(|r| r.entity.status != EntityStatus::Superseded);
+pub fn filter_delivery<T: Scored>(cfg: &RetrievalConfig, results: &mut Vec<T>) {
+	results.retain(|r| r.entity().status != EntityStatus::Superseded);
 	let floor = cfg.min_deliver_score;
-	if results.iter().any(|r| r.score >= floor) {
-		results.retain(|r| r.score >= floor);
+	if results.iter().any(|r| r.score() >= floor) {
+		results.retain(|r| r.score() >= floor);
 	}
 	// When MMR is enabled it diversifies this pool and performs the final cut
 	// to `max_deliver_results` itself, so keep a larger candidate pool here —
@@ -149,11 +161,18 @@ pub fn matches_filter(entity: &Entity, opts: &QueryOptions) -> bool {
 			return false;
 		}
 	}
+	// `as_of`: bi-temporal point query — keep only entities whose world-time
+	// window `[valid_from, valid_to)` covers the instant.
+	if let Some(as_of) = opts.as_of {
+		if !entity.is_valid_at(as_of) {
+			return false;
+		}
+	}
 	true
 }
 
-pub fn apply_query_options(results: &mut Vec<ScoredEntity>, opts: &QueryOptions) {
-	results.retain(|r| matches_filter(&r.entity, opts));
+pub fn apply_query_options<T: Scored>(results: &mut Vec<T>, opts: &QueryOptions) {
+	results.retain(|r| matches_filter(r.entity(), opts));
 
 	// Sort each field ascending, then flip for descending. `dir` keeps the
 	// asc/desc branch in one place instead of per-field if/else.
@@ -161,23 +180,23 @@ pub fn apply_query_options(results: &mut Vec<ScoredEntity>, opts: &QueryOptions)
 	let dir = |ord: std::cmp::Ordering| if asc { ord } else { ord.reverse() };
 	match opts.sort {
 		SortField::Score => {
-			results.sort_by(|a, b| dir(cmp_partial(&a.score, &b.score)));
+			results.sort_by(|a, b| dir(cmp_partial(&a.score(), &b.score())));
 		}
 		SortField::Date => {
-			results.sort_by(|a, b| dir(a.entity.created_at.cmp(&b.entity.created_at)));
+			results.sort_by(|a, b| dir(a.entity().created_at.cmp(&b.entity().created_at)));
 		}
 		SortField::Access => {
 			results.sort_by(|a, b| {
 				dir(
-					a.entity
+					a.entity()
 						.access_count
 						.value()
-						.cmp(&b.entity.access_count.value()),
+						.cmp(&b.entity().access_count.value()),
 				)
 			});
 		}
 		SortField::Confidence => {
-			results.sort_by(|a, b| dir(cmp_partial(&a.entity.score, &b.entity.score)));
+			results.sort_by(|a, b| dir(cmp_partial(&a.entity().score, &b.entity().score)));
 		}
 	}
 }
@@ -189,21 +208,55 @@ pub fn commit_access(results: &mut [ScoredEntity]) {
 pub fn commit_access_with_half_life(results: &mut [ScoredEntity], half_life_secs: u64) {
 	let now = SystemTime::now();
 	for r in results.iter_mut() {
-		let replica = if r.entity.producer_id.is_empty() {
-			"local"
-		} else {
-			r.entity.producer_id.as_str()
+		stamp_access(&mut r.entity, now, half_life_secs);
+	}
+}
+
+/// The single access-stamp: bump the CRDT access counter, set `accessed_at`,
+/// and deposit query heat. Shared by [`commit_access`] (which stamps the
+/// ephemeral result copies handed back to the caller) and
+/// [`commit_access_ids`] (which stamps the live graph entities so the stamp
+/// actually persists).
+fn stamp_access(e: &mut Entity, now: SystemTime, half_life_secs: u64) {
+	let replica = if e.producer_id.is_empty() {
+		"local"
+	} else {
+		e.producer_id.as_str()
+	};
+	e.access_count.increment(replica, 1);
+	e.accessed_at = Some(now);
+	e.heat = heat::deposit(
+		e.heat,
+		e.heat_updated_at,
+		now,
+		half_life_secs,
+		HeatConfig::default().deposit_access,
+	);
+	e.heat_updated_at = Some(now);
+}
+
+pub fn commit_access_ids(g: &mut GraphGnn, ids: &[String]) {
+	commit_access_ids_with_half_life(g, ids, HeatConfig::default().half_life_secs);
+}
+
+/// Stamp the LIVE graph entities named by `ids` with an access. `commit_access`
+/// only mutates the cloned entities inside a query's result set, so without this
+/// the hot graph never records an access and the stigmergy GC's `accessed_at`
+/// staleness clock never advances (making self-compaction inert on a standalone
+/// node). The query path used to do this inline under a brief write lock; it now
+/// defers it to a `CommitAccess` tick task so queries take ONLY a read lock. Goes
+/// through `kerns` directly — NOT `get_mut` — because an access stamp must not bump
+/// the mutation epoch: it would invalidate the whole query cache on every query.
+/// Same convention as the heat deposits in `tick::pulse`.
+pub fn commit_access_ids_with_half_life(g: &mut GraphGnn, ids: &[String], half_life_secs: u64) {
+	let now = SystemTime::now();
+	for id in ids {
+		let Some(kern_id) = g.kern_of_entity(id).map(str::to_string) else {
+			continue;
 		};
-		r.entity.access_count.increment(replica, 1);
-		r.entity.accessed_at = Some(now);
-		r.entity.heat = heat::deposit(
-			r.entity.heat,
-			r.entity.heat_updated_at,
-			now,
-			half_life_secs,
-			HeatConfig::default().deposit_access,
-		);
-		r.entity.heat_updated_at = Some(now);
+		if let Some(e) = g.kerns.get_mut(&kern_id).and_then(|k| k.entities.get_mut(id)) {
+			stamp_access(e, now, half_life_secs);
+		}
 	}
 }
 
@@ -341,6 +394,76 @@ mod query_filter_tests {
 	}
 
 	#[test]
+	fn as_of_filters_across_open_and_closed_windows() {
+		use std::time::{Duration, UNIX_EPOCH};
+		let t = |s| UNIX_EPOCH + Duration::from_secs(s);
+
+		let mut e = ent("a", EntityKind::Fact, file_src("/a")).entity;
+		// Open window: valid_from = 100 (via created_at), valid_to = None.
+		e.created_at = Some(t(100));
+
+		// Before the window opens -> excluded.
+		assert!(!matches_filter(
+			&e,
+			&QueryOptions {
+				as_of: Some(t(50)),
+				..Default::default()
+			}
+		));
+		// At/after valid_from with an open upper bound -> included.
+		assert!(matches_filter(
+			&e,
+			&QueryOptions {
+				as_of: Some(t(100)),
+				..Default::default()
+			}
+		));
+		assert!(matches_filter(
+			&e,
+			&QueryOptions {
+				as_of: Some(t(10_000)),
+				..Default::default()
+			}
+		));
+
+		// Closed window [100, 200): the instant AT valid_to is excluded (half-open).
+		e.valid_to = Some(t(200));
+		assert!(matches_filter(
+			&e,
+			&QueryOptions {
+				as_of: Some(t(150)),
+				..Default::default()
+			}
+		));
+		assert!(
+			!matches_filter(
+				&e,
+				&QueryOptions {
+					as_of: Some(t(200)),
+					..Default::default()
+				}
+			),
+			"valid_to is exclusive"
+		);
+		assert!(!matches_filter(
+			&e,
+			&QueryOptions {
+				as_of: Some(t(500)),
+				..Default::default()
+			}
+		));
+		// An explicit valid_from hint overrides created_at as the lower bound.
+		e.valid_from = Some(t(120));
+		assert!(!matches_filter(
+			&e,
+			&QueryOptions {
+				as_of: Some(t(110)),
+				..Default::default()
+			}
+		));
+	}
+
+	#[test]
 	fn filter_delivery_keeps_mmr_pool_when_mmr_enabled() {
 		// Regression: previously truncated straight to max_deliver_results,
 		// which made MMR's len-guard a no-op. With MMR on, keep the pool so
@@ -364,6 +487,41 @@ mod query_filter_tests {
 			.collect();
 		filter_delivery(&cfg, &mut results);
 		assert_eq!(results.len(), cfg.max_deliver_results);
+	}
+
+	// ---- commit_access_ids ---------------------------------------------------
+
+	#[test]
+	fn commit_access_ids_stamps_the_live_entity_without_bumping_the_epoch() {
+		use crate::base::types::Kern;
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("k", "");
+		k.entities
+			.insert("a".into(), ent("a", EntityKind::Claim, file_src("/a")).entity);
+		g.kerns.insert("k".into(), k);
+		g.index_entity("a", "k");
+		let epoch_before = g.mutation_epoch();
+
+		commit_access_ids(&mut g, &["a".to_string()]);
+
+		let live = g.kerns.get("k").unwrap().entities.get("a").unwrap();
+		assert!(
+			live.accessed_at.is_some(),
+			"the LIVE entity gets a persisted accessed_at, not just the result copy"
+		);
+		assert_eq!(live.access_count.value(), 1, "live access counter bumped");
+		assert!(live.heat > 0.0, "query heat deposited on the live entity");
+		assert_eq!(
+			g.mutation_epoch(),
+			epoch_before,
+			"access stamps must not invalidate the query cache"
+		);
+	}
+
+	#[test]
+	fn commit_access_ids_skips_ids_unknown_to_the_graph() {
+		let mut g = GraphGnn::new();
+		commit_access_ids(&mut g, &["ghost".to_string()]);
 	}
 
 	// ---- qbst / apply_boosts -----------------------------------------------

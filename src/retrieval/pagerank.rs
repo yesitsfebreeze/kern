@@ -2,41 +2,6 @@ use crate::base::graph::GraphGnn;
 use crate::base::search::EntityHit;
 use std::collections::HashMap;
 
-/// Assign every distinct entity id in the graph a dense index. Returns the
-/// id->index map and the parallel index->id list.
-fn node_index(g: &GraphGnn) -> (HashMap<String, usize>, Vec<String>) {
-	let mut id_to_idx: HashMap<String, usize> = HashMap::new();
-	let mut ids: Vec<String> = Vec::new();
-	for kern in g.map().values() {
-		for t in kern.entities.values() {
-			if !id_to_idx.contains_key(&t.id) {
-				id_to_idx.insert(t.id.clone(), ids.len());
-				ids.push(t.id.clone());
-			}
-		}
-	}
-	(id_to_idx, ids)
-}
-
-/// Directed out-edge adjacency over the dense node indices: `out[i]` lists the
-/// indices entity `i` points at via its reasons. Self-loops and edges touching
-/// an entity outside the index are skipped.
-fn out_adjacency(g: &GraphGnn, id_to_idx: &HashMap<String, usize>) -> Vec<Vec<usize>> {
-	let mut out: Vec<Vec<usize>> = vec![Vec::new(); id_to_idx.len()];
-	for kern in g.map().values() {
-		for r in kern.reasons.values() {
-			if r.from == r.to {
-				continue;
-			}
-			let (Some(&fi), Some(&ti)) = (id_to_idx.get(&r.from), id_to_idx.get(&r.to)) else {
-				continue;
-			};
-			out[fi].push(ti);
-		}
-	}
-	out
-}
-
 /// Personalization/teleport distribution over the `n` nodes: seed scores
 /// (clamped non-negative) normalized to sum 1. With no usable seeds, falls back
 /// to uniform — i.e. global (non-personalized) PageRank.
@@ -78,14 +43,18 @@ pub fn pagerank(
 	iters: usize,
 	top_k: usize,
 ) -> Vec<EntityHit> {
-	let (id_to_idx, ids) = node_index(g);
+	// The dense node index + adjacency are epoch-cached on the graph: retrieval
+	// runs many queries between writes, so the rebuild (String clones for every
+	// entity and edge) happens once per mutation instead of once per query.
+	let adj = g.entity_adjacency();
+	let ids = &adj.ids;
 	let n = ids.len();
 	if n == 0 {
 		return Vec::new();
 	}
-	let out = out_adjacency(g, &id_to_idx);
+	let out = &adj.out;
 	let d = damping.clamp(0.0, 1.0);
-	let tele = teleport_vector(seeds, &id_to_idx, n);
+	let tele = teleport_vector(seeds, &adj.id_to_idx, n);
 
 	let mut rank = tele.clone();
 	let mut next = vec![0.0f64; n];

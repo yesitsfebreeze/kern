@@ -1,7 +1,7 @@
 use crate::base::graph::GraphGnn;
 use crate::base::math::OnlineSoftmax;
 use crate::base::search::EntityHit;
-use crate::retrieval::expand::{find_entity_in_graph, ScoredEntity};
+use crate::retrieval::expand::{find_entity_ref_in_graph, ScoredRef};
 use std::collections::HashMap;
 
 /// Fuse the seed list and the expansion beam into one ranked result set.
@@ -15,50 +15,45 @@ use std::collections::HashMap;
 /// scales by confidence and adjusts with additive boosts — it is never treated
 /// as a probability. Switch `finalize()` to `running_max()` only if
 /// best-score-wins (no corroboration) is explicitly wanted.
-pub fn merge(g: &GraphGnn, seeds: &[EntityHit], beam: Vec<ScoredEntity>) -> Vec<ScoredEntity> {
-	let mut scores: HashMap<String, OnlineSoftmax> = HashMap::new();
-	let mut thoughts: HashMap<String, ScoredEntity> = HashMap::new();
+pub fn merge<'a>(g: &'a GraphGnn, seeds: &[EntityHit], beam: Vec<ScoredRef<'a>>) -> Vec<ScoredRef<'a>> {
+	let mut scores: HashMap<&str, OnlineSoftmax> = HashMap::new();
+	let mut thoughts: HashMap<&str, ScoredRef<'a>> = HashMap::new();
 
 	for st in beam {
-		scores
-			.entry(st.entity.id.clone())
-			.or_default()
-			.update(st.score);
-		thoughts.entry(st.entity.id.clone()).or_insert(st);
+		scores.entry(&st.entity.id).or_default().update(st.score);
+		thoughts.entry(&st.entity.id).or_insert(st);
 	}
 
 	for s in seeds {
-		scores
-			.entry(s.entity_id.clone())
-			.or_default()
-			.update(s.score);
-		if !thoughts.contains_key(&s.entity_id) {
-			if let Some(t) = find_entity_in_graph(g, &s.entity_id) {
-				thoughts.insert(
-					s.entity_id.clone(),
-					ScoredEntity {
-						entity: t,
-						score: s.score,
-					},
-				);
-			}
+		if let Some(t) = thoughts.get(s.entity_id.as_str()) {
+			scores.entry(&t.entity.id).or_default().update(s.score);
+		} else if let Some(t) = find_entity_ref_in_graph(g, &s.entity_id) {
+			scores.entry(&t.id).or_default().update(s.score);
+			thoughts.insert(
+				&t.id,
+				ScoredRef {
+					entity: t,
+					score: s.score,
+				},
+			);
 		}
 	}
 
-	let mut results: Vec<ScoredEntity> = thoughts
+	let mut results: Vec<ScoredRef<'a>> = thoughts
 		.into_iter()
 		.filter_map(|(id, mut st)| {
-			let merged = scores.get(&id)?.finalize();
+			let merged = scores.get(id)?.finalize();
 			st.score = merged;
 			Some(st)
 		})
 		.collect();
 
-	results.sort_by(|a, b| {
-		b.score
-			.partial_cmp(&a.score)
-			.unwrap_or(std::cmp::Ordering::Equal)
-	});
+	// Score descending, then entity id ascending as a stable tie-break (shared
+	// `cmp_rank` convention, same as pagerank). Without the secondary key, entities
+	// tied on the merged score kept whatever order the `thoughts` HashMap iterated,
+	// which varies per process (RandomState) — enough to wobble a rank-boundary
+	// result run-to-run. The id key makes the final ranking deterministic.
+	results.sort_by(|a, b| crate::base::util::cmp_rank(a.score, &a.entity.id, b.score, &b.entity.id));
 	results
 }
 
@@ -67,6 +62,7 @@ mod tests {
 	use super::*;
 	use crate::base::types::Kern;
 
+	use crate::base::types::Entity;
 	use crate::test_support::entity as ent;
 	fn hit(id: &str, score: f64) -> EntityHit {
 		EntityHit {
@@ -74,13 +70,10 @@ mod tests {
 			score,
 		}
 	}
-	fn scored(id: &str, score: f64) -> ScoredEntity {
-		ScoredEntity {
-			entity: ent(id),
-			score,
-		}
+	fn scored(entity: &Entity, score: f64) -> ScoredRef<'_> {
+		ScoredRef { entity, score }
 	}
-	fn find<'a>(rs: &'a [ScoredEntity], id: &str) -> Option<&'a ScoredEntity> {
+	fn find<'a, 'g>(rs: &'a [ScoredRef<'g>], id: &str) -> Option<&'a ScoredRef<'g>> {
 		rs.iter().find(|s| s.entity.id == id)
 	}
 
@@ -90,7 +83,8 @@ mod tests {
 		// at the same raw score. Log-sum-exp gives `a` a +ln(2) corroboration
 		// boost, so it must score strictly higher and sort first.
 		let g = GraphGnn::new();
-		let beam = vec![scored("a", 0.5), scored("b", 0.5)];
+		let (ea, eb) = (ent("a"), ent("b"));
+		let beam = vec![scored(&ea, 0.5), scored(&eb, 0.5)];
 		let seeds = [hit("a", 0.5)];
 		let out = merge(&g, &seeds, beam);
 
@@ -110,11 +104,12 @@ mod tests {
 
 	#[test]
 	fn seed_absent_from_graph_and_beam_is_silently_skipped() {
-		// `ghost` is neither in the beam nor resolvable via find_entity_in_graph
-		// (empty graph), so it contributes a score entry but no thought — it must
-		// not appear in the results rather than panic or surface a bare id.
+		// `ghost` is neither in the beam nor resolvable via find_entity_ref_in_graph
+		// (empty graph), so it must not appear in the results rather than panic or
+		// surface a bare id.
 		let g = GraphGnn::new();
-		let beam = vec![scored("b", 0.5)];
+		let eb = ent("b");
+		let beam = vec![scored(&eb, 0.5)];
 		let seeds = [hit("ghost", 0.9)];
 		let out = merge(&g, &seeds, beam);
 
@@ -126,7 +121,7 @@ mod tests {
 	#[test]
 	fn seed_only_entity_is_pulled_from_the_graph() {
 		// A seed not in the beam but present in the graph is resolved via
-		// find_entity_in_graph and included (exercises the Some branch).
+		// find_entity_ref_in_graph and included (exercises the Some branch).
 		let mut g = GraphGnn::new();
 		let mut k = Kern::new("kx", "");
 		k.entities.insert("c".into(), ent("c"));

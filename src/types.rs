@@ -19,4 +19,4 @@ pub type LlmFunc = Arc<dyn Fn(&str) -> String + Send + Sync>;
 /// Text → embedding vector, or an error message. The `String` error is a known
 /// simplification (a structured error enum is a deferred follow-up; it would
 /// ripple through every embed producer and consumer).
-pub type EmbedFunc = Arc<dyn Fn(&str) -> Result<Vec<f64>, String> + Send + Sync>;
+pub type EmbedFunc = Arc<dyn Fn(&str) -> Result<Vec<f32>, String> + Send + Sync>;

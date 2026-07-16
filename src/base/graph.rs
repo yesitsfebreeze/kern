@@ -102,6 +102,54 @@ pub struct GraphGnn {
 	/// write conservatively flushes it. Runtime-only (never serialised); the read/
 	/// query path takes `&GraphGnn` and so can never bump it — only mutations do.
 	mutation_epoch: u64,
+	/// Store write-generation this graph is known consistent with — the on-disk
+	/// [`epoch`](crate::base::store) value at the last load or successful flush. The
+	/// persist paths compare it against the live on-disk epoch to detect that
+	/// ANOTHER writer (a stray CLI direct-write, a second daemon) committed since,
+	/// so a stale snapshot is never written over newer committed rows. The in-RAM
+	/// graph (no store) keeps this at 0. Runtime-only; never serialised.
+	flushed_epoch: u64,
+	/// Dense entity index + out-edge adjacency, built lazily by
+	/// [`entity_adjacency`](Self::entity_adjacency) and reused while the
+	/// `mutation_epoch` stamp matches. Runtime-only; never serialised.
+	adjacency_cache: parking_lot::RwLock<Option<(u64, Arc<EntityAdjacency>)>>,
+}
+
+/// Snapshot of the entity graph as dense indices: every distinct entity id gets
+/// an index into `ids`, and `out[i]` lists the indices entity `i` points at via
+/// its reasons (self-loops and edges touching unknown entities skipped).
+pub struct EntityAdjacency {
+	pub id_to_idx: HashMap<String, usize>,
+	pub ids: Vec<String>,
+	pub out: Vec<Vec<usize>>,
+}
+
+impl EntityAdjacency {
+	fn build(g: &GraphGnn) -> Self {
+		let mut id_to_idx: HashMap<String, usize> = HashMap::new();
+		let mut ids: Vec<String> = Vec::new();
+		for kern in g.map().values() {
+			for t in kern.entities.values() {
+				if !id_to_idx.contains_key(&t.id) {
+					id_to_idx.insert(t.id.clone(), ids.len());
+					ids.push(t.id.clone());
+				}
+			}
+		}
+		let mut out: Vec<Vec<usize>> = vec![Vec::new(); ids.len()];
+		for kern in g.map().values() {
+			for r in kern.reasons.values() {
+				if r.from == r.to {
+					continue;
+				}
+				let (Some(&fi), Some(&ti)) = (id_to_idx.get(&r.from), id_to_idx.get(&r.to)) else {
+					continue;
+				};
+				out[fi].push(ti);
+			}
+		}
+		Self { id_to_idx, ids, out }
+	}
 }
 
 impl Default for GraphGnn {
@@ -137,7 +185,23 @@ impl GraphGnn {
 			max_loaded_kerns: KERN_CAP_DISABLED,
 			disk_threshold: KERN_CAP_DISABLED,
 			mutation_epoch: 0,
+			flushed_epoch: 0,
+			adjacency_cache: parking_lot::RwLock::new(None),
 		}
+	}
+
+	/// The store write-generation this graph last loaded or flushed at. Persist
+	/// paths pass it to the stale-flush guard so they never overwrite rows a
+	/// concurrent writer committed after this graph's snapshot was taken.
+	pub fn flushed_epoch(&self) -> u64 {
+		self.flushed_epoch
+	}
+
+	/// Record the store epoch this graph is now consistent with (after a load or a
+	/// successful guarded flush). Not a content mutation, so it does NOT bump the
+	/// query-cache `mutation_epoch`.
+	pub fn set_flushed_epoch(&mut self, epoch: u64) {
+		self.flushed_epoch = epoch;
 	}
 
 	pub fn set_max_loaded_kerns(&mut self, cap: usize) {
@@ -248,14 +312,14 @@ impl GraphGnn {
 
 	/// Collect every searchable resident entity's content vector as `(id, f32)`,
 	/// deduped by id and id-sorted (via `BTreeMap`) so the seeded Vamana build is
-	/// reproducible. Mirrors `entity_idx` membership exactly. `f64 -> f32` narrowing
-	/// matches the int8-on-disk posture; ANN recall is unaffected in practice.
+	/// reproducible. Mirrors `entity_idx` membership exactly; entity vectors are
+	/// f32 end-to-end, so this is a plain clone.
 	fn collect_entity_items(&self) -> Vec<(String, Vec<f32>)> {
 		let mut items: std::collections::BTreeMap<String, Vec<f32>> = std::collections::BTreeMap::new();
 		for kern in self.kerns.values() {
 			for t in kern.entities.values() {
 				if t.status != EntityStatus::Superseded && t.has_vector() {
-					items.insert(t.id.clone(), t.vector.iter().map(|&x| x as f32).collect());
+					items.insert(t.id.clone(), t.vector.clone());
 				}
 			}
 		}
@@ -396,6 +460,24 @@ impl GraphGnn {
 	/// equals the epoch captured when the entry was stored.
 	pub fn mutation_epoch(&self) -> u64 {
 		self.mutation_epoch
+	}
+
+	/// The dense entity adjacency for this graph, cached across queries: rebuilt
+	/// only when the `mutation_epoch` has moved since the cached copy was built.
+	/// Reads take `&self`, so between writes concurrent readers share one Arc.
+	pub fn entity_adjacency(&self) -> Arc<EntityAdjacency> {
+		let epoch = self.mutation_epoch;
+		{
+			let cached = crate::base::locks::read_recovered(&self.adjacency_cache);
+			if let Some((e, adj)) = cached.as_ref() {
+				if *e == epoch {
+					return adj.clone();
+				}
+			}
+		}
+		let adj = Arc::new(EntityAdjacency::build(self));
+		*crate::base::locks::write_recovered(&self.adjacency_cache) = Some((epoch, adj.clone()));
+		adj
 	}
 
 	pub fn register(&mut self, kern: Kern) {
@@ -626,6 +708,8 @@ impl GraphGnn {
 			max_loaded_kerns: KERN_CAP_DISABLED,
 			disk_threshold: KERN_CAP_DISABLED,
 			mutation_epoch: 0,
+			flushed_epoch: 0,
+			adjacency_cache: parking_lot::RwLock::new(None),
 		};
 		g.rebuild_index();
 		if let Some(lex) = g.lexical.clone() {
@@ -711,9 +795,9 @@ mod tests {
 		use crate::base::diskann::DiskIndex;
 		let mut g = GraphGnn::new();
 		let kid = g.root.id.clone();
-		let vec_of = |i: usize| -> Vec<f64> {
+		let vec_of = |i: usize| -> Vec<f32> {
 			(0..8)
-				.map(|j| ((i as f64) * (0.13 + 0.07 * j as f64)).sin())
+				.map(|j| ((i as f64) * (0.13 + 0.07 * j as f64)).sin() as f32)
 				.collect()
 		};
 		if let Some(k) = g.get_mut(&kid) {
@@ -749,10 +833,9 @@ mod tests {
 		);
 
 		let disk = DiskIndex::open(dir.path()).unwrap();
-		let q64 = vec_of(40);
-		let q32: Vec<f32> = q64.iter().map(|&x| x as f32).collect();
+		let q32 = vec_of(40);
 
-		let ram: Vec<String> = crate::base::search::search_all_unlocked(&g, &q64, 10)
+		let ram: Vec<String> = crate::base::search::search_all_unlocked(&g, &q32, 10)
 			.into_iter()
 			.map(|h| h.entity_id)
 			.collect();
@@ -785,9 +868,9 @@ mod tests {
 		);
 	}
 
-	fn vec8(i: usize) -> Vec<f64> {
+	fn vec8(i: usize) -> Vec<f32> {
 		(0..8)
-			.map(|j| ((i as f64) * (0.13 + 0.07 * j as f64)).sin())
+			.map(|j| ((i as f64) * (0.13 + 0.07 * j as f64)).sin() as f32)
 			.collect()
 	}
 

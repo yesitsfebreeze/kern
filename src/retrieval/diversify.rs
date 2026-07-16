@@ -1,22 +1,22 @@
 use crate::base::math::cosine;
 use crate::config::RetrievalConfig;
-use crate::retrieval::expand::ScoredEntity;
+use crate::retrieval::expand::Scored;
 use std::collections::HashMap;
 
-pub fn dedup_by_section(cfg: &RetrievalConfig, results: &mut Vec<ScoredEntity>) {
+pub fn dedup_by_section<T: Scored>(cfg: &RetrievalConfig, results: &mut Vec<T>) {
 	if !cfg.dedup_by_section {
 		return;
 	}
 	let mut best: HashMap<String, usize> = HashMap::new();
 	let mut keep: Vec<bool> = vec![true; results.len()];
 	for (i, r) in results.iter().enumerate() {
-		let section = section_key(r.entity.source.section());
+		let section = section_key(r.entity().source.section());
 		if section.is_empty() {
 			continue;
 		}
 		match best.get(&section).copied() {
 			Some(j) => {
-				if results[j].score >= r.score {
+				if results[j].score() >= r.score() {
 					keep[i] = false;
 				} else {
 					keep[j] = false;
@@ -43,7 +43,7 @@ fn section_key(section: &str) -> String {
 	}
 }
 
-pub fn mmr(cfg: &RetrievalConfig, query_vec: &[f64], results: &mut Vec<ScoredEntity>) {
+pub fn mmr<T: Scored>(cfg: &RetrievalConfig, query_vec: &[f32], results: &mut Vec<T>) {
 	if !cfg.mmr_enabled || results.len() <= cfg.max_deliver_results {
 		return;
 	}
@@ -55,7 +55,7 @@ pub fn mmr(cfg: &RetrievalConfig, query_vec: &[f64], results: &mut Vec<ScoredEnt
 	let lambda = cfg.mmr_lambda;
 
 	let tail = results.split_off(pool_size);
-	let mut pool: Vec<ScoredEntity> = std::mem::take(results);
+	let mut pool: Vec<T> = std::mem::take(results);
 
 	// Relevance term sim(query, candidate) is fixed for the whole selection, so
 	// compute it once per candidate instead of every round. Fall back to the
@@ -65,10 +65,10 @@ pub fn mmr(cfg: &RetrievalConfig, query_vec: &[f64], results: &mut Vec<ScoredEnt
 	let mut sim_q: Vec<f64> = pool
 		.iter()
 		.map(|cand| {
-			if query_usable && !cand.entity.vector.is_empty() {
-				cosine(query_vec, &cand.entity.vector)
+			if query_usable && !cand.entity().vector.is_empty() {
+				cosine(query_vec, &cand.entity().vector)
 			} else {
-				cand.score
+				cand.score()
 			}
 		})
 		.collect();
@@ -82,7 +82,7 @@ pub fn mmr(cfg: &RetrievalConfig, query_vec: &[f64], results: &mut Vec<ScoredEnt
 	// the per-round argmax over (lambda*sim_q - (1-lambda)*max_sim) is unchanged.
 	let mut max_sim: Vec<f64> = vec![0.0; pool.len()];
 
-	let mut selected: Vec<ScoredEntity> = Vec::with_capacity(target);
+	let mut selected: Vec<T> = Vec::with_capacity(target);
 
 	while selected.len() < target && !pool.is_empty() {
 		let mut best_i = 0usize;
@@ -106,10 +106,10 @@ pub fn mmr(cfg: &RetrievalConfig, query_vec: &[f64], results: &mut Vec<ScoredEnt
 		// Fold the newly selected item into every remaining candidate's redundancy.
 		// An empty selected vector contributes 0.0 to all (the old code's empty
 		// branch) and can only lose the max, so the whole pass is skipped.
-		if !chosen.entity.vector.is_empty() {
+		if !chosen.entity().vector.is_empty() {
 			for (j, cand) in pool.iter().enumerate() {
-				if !cand.entity.vector.is_empty() {
-					let s = cosine(&chosen.entity.vector, &cand.entity.vector);
+				if !cand.entity().vector.is_empty() {
+					let s = cosine(&chosen.entity().vector, &cand.entity().vector);
 					if s > max_sim[j] {
 						max_sim[j] = s;
 					}
@@ -129,6 +129,7 @@ pub fn mmr(cfg: &RetrievalConfig, query_vec: &[f64], results: &mut Vec<ScoredEnt
 mod tests {
 	use super::*;
 	use crate::base::types::{Entity, Source};
+	use crate::retrieval::expand::ScoredEntity;
 
 	fn sect(id: &str, section: &str, score: f64) -> ScoredEntity {
 		ScoredEntity {
@@ -207,7 +208,7 @@ mod tests {
 		assert_eq!(results.len(), 2, "disabled -> no collapse");
 	}
 
-	fn ent(id: &str, vector: Vec<f64>, score: f64) -> ScoredEntity {
+	fn ent(id: &str, vector: Vec<f32>, score: f64) -> ScoredEntity {
 		ScoredEntity {
 			entity: Entity {
 				id: id.into(),
@@ -287,7 +288,7 @@ mod tests {
 	/// re-scans every selected item for every candidate each round (the O(P*T^2)
 	/// form). The randomized test below proves the optimized `mmr` is byte-for-byte
 	/// equivalent to this. Do NOT "simplify" it — its value is being the old code.
-	fn mmr_reference(cfg: &RetrievalConfig, query_vec: &[f64], results: &mut Vec<ScoredEntity>) {
+	fn mmr_reference(cfg: &RetrievalConfig, query_vec: &[f32], results: &mut Vec<ScoredEntity>) {
 		if !cfg.mmr_enabled || results.len() <= cfg.max_deliver_results {
 			return;
 		}
@@ -349,12 +350,12 @@ mod tests {
 			s ^= s << 17;
 			s
 		};
-		let unit = |n: &mut dyn FnMut() -> u64| ((n() % 2001) as f64 - 1000.0) / 1000.0; // [-1,1]
+		let unit = |n: &mut dyn FnMut() -> u64| ((n() % 2001) as f32 - 1000.0) / 1000.0; // [-1,1]
 
 		for trial in 0..200u32 {
 			let dim = 2 + (next() % 4) as usize; // 2..=5
 			let n = 1 + (next() % 40) as usize; // 1..=40
-			let q: Vec<f64> = if next() % 11 == 0 {
+			let q: Vec<f32> = if next() % 11 == 0 {
 				Vec::new() // exercise the empty-query score-fallback path
 			} else {
 				(0..dim).map(|_| unit(&mut next)).collect()

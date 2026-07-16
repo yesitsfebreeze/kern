@@ -5,9 +5,9 @@ pub fn expand_query(
 	cfg: &RetrievalConfig,
 	llm: Option<&LlmFunc>,
 	embed: Option<&EmbedFunc>,
-	query_vec: &[f64],
+	query_vec: &[f32],
 	query_text: &str,
-) -> Vec<f64> {
+) -> Vec<f32> {
 	if !cfg.hyde_enabled {
 		return query_vec.to_vec();
 	}
@@ -33,8 +33,8 @@ pub fn expand_query(
 		return query_vec.to_vec();
 	}
 
-	let w = cfg.hyde_fusion_weight;
-	let mut fused: Vec<f64> = query_vec
+	let w = cfg.hyde_fusion_weight as f32;
+	let mut fused: Vec<f32> = query_vec
 		.iter()
 		.zip(hypo_vec.iter())
 		.map(|(q, h)| q * (1.0 - w) + h * w)
@@ -93,9 +93,9 @@ mod tests {
 		let qv = vec![1.0, 0.0];
 		let out = expand_query(&cfg, Some(&llm), Some(&embed), &qv, "cat");
 		// fused (0.5,0.5) -> L2-normalized: equal components, unit norm.
-		assert!((out[0] - out[1]).abs() < 1e-9);
-		let norm: f64 = out.iter().map(|x| x * x).sum::<f64>().sqrt();
-		assert!((norm - 1.0).abs() < 1e-9, "fused vector is L2-normalized");
+		assert!((out[0] - out[1]).abs() < 1e-6);
+		let norm = out.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+		assert!((norm - 1.0).abs() < 1e-6, "fused vector is L2-normalized");
 	}
 
 	#[test]

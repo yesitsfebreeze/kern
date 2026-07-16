@@ -3,7 +3,7 @@ use super::util::cmp_partial;
 use crate::quant::{quantized_cosine_distance, QuantizationMode, QuantizedVec};
 use rand::RngExt;
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::marker::PhantomData;
 
 #[derive(Debug, Clone)]
@@ -32,37 +32,50 @@ impl Default for AdaptiveEfConfig {
 }
 
 struct HnswNode {
-	vec: Vec<f64>,
+	vec: Vec<f32>,
 	qvec: Option<QuantizedVec>,
-	layers: Vec<Vec<String>>,
+	layers: Vec<Vec<u32>>,
 }
 
-#[derive(Clone)]
+/// A frontier entry: an internal slot id and its distance to the query. `Copy`
+/// (a `u32` + `f64`) so the beam heaps never clone a `String` per hop.
+#[derive(Clone, Copy)]
 struct Candidate {
-	id: String,
+	id: u32,
 	dist: f64,
 }
 
+/// In-memory HNSW.
+///
+/// The hot path is pure `u32`: a contiguous node arena (`nodes`), `Vec<u32>`
+/// adjacency per layer, and beam heaps carrying slot ids. Strings only cross the
+/// boundary at the public API surface, via `slot_of` (id → slot) and `id_of`
+/// (slot → id). Deleted slots are recycled through `free`; a delete scrubs the
+/// slot out of every adjacency list first, so a reused slot can never resurrect
+/// a stale edge.
 pub struct HnswIndex {
 	m: usize,
 	m0: usize,
 	ef_construction: usize,
 	ml: f64,
-	nodes: HashMap<String, HnswNode>,
-	ep: String,
+	nodes: Vec<Option<HnswNode>>,
+	id_of: Vec<String>,
+	slot_of: HashMap<String, u32>,
+	free: Vec<u32>,
+	ep: Option<u32>,
 	max_layer: usize,
 	rng: rand::rngs::StdRng,
 	quant_mode: QuantizationMode,
 }
 
 enum Query<'a> {
-	Float(&'a [f64]),
-	Int8 { q: QuantizedVec, raw: &'a [f64] },
-	Binary { q: QuantizedVec, raw: &'a [f64] },
+	Float(&'a [f32]),
+	Int8 { q: QuantizedVec, raw: &'a [f32] },
+	Binary { q: QuantizedVec, raw: &'a [f32] },
 }
 
 impl<'a> Query<'a> {
-	fn new(vec: &'a [f64], mode: QuantizationMode) -> Self {
+	fn new(vec: &'a [f32], mode: QuantizationMode) -> Self {
 		match mode {
 			QuantizationMode::Int8 => Self::Int8 {
 				q: QuantizedVec::encode(vec, QuantizationMode::Int8),
@@ -90,8 +103,11 @@ impl HnswIndex {
 			m0: m * 2,
 			ef_construction,
 			ml: 1.0 / (m as f64).ln(),
-			nodes: HashMap::new(),
-			ep: String::new(),
+			nodes: Vec::new(),
+			id_of: Vec::new(),
+			slot_of: HashMap::new(),
+			free: Vec::new(),
+			ep: None,
 			max_layer: 0,
 			rng: rand::rngs::StdRng::seed_from_u64(42),
 			quant_mode,
@@ -103,27 +119,67 @@ impl HnswIndex {
 	}
 
 	pub fn set_quant_mode(&mut self, mode: QuantizationMode) {
-		debug_assert!(self.nodes.is_empty(), "set_quant_mode on a non-empty index");
+		debug_assert!(self.is_empty(), "set_quant_mode on a non-empty index");
 		self.quant_mode = mode;
 	}
 
 	pub fn len(&self) -> usize {
-		self.nodes.len()
+		self.nodes.len() - self.free.len()
 	}
 
 	pub fn is_empty(&self) -> bool {
-		self.nodes.is_empty()
+		self.len() == 0
 	}
 
-	pub fn delete(&mut self, id: &str) {
-		self.nodes.remove(id);
-		if self.ep == id {
-			self.ep = self.nodes.keys().next().cloned().unwrap_or_default();
+	fn node(&self, slot: u32) -> Option<&HnswNode> {
+		self.nodes.get(slot as usize).and_then(|n| n.as_ref())
+	}
+
+	fn node_mut(&mut self, slot: u32) -> Option<&mut HnswNode> {
+		self.nodes.get_mut(slot as usize).and_then(|n| n.as_mut())
+	}
+
+	fn id_str(&self, slot: u32) -> &str {
+		&self.id_of[slot as usize]
+	}
+
+	/// Claim a slot for `id`/`node`, reusing a freed one when available so the
+	/// arena stays compact under insert/delete churn.
+	fn alloc_slot(&mut self, id: String, node: HnswNode) -> u32 {
+		if let Some(slot) = self.free.pop() {
+			self.nodes[slot as usize] = Some(node);
+			self.id_of[slot as usize] = id.clone();
+			self.slot_of.insert(id, slot);
+			slot
+		} else {
+			let slot = self.nodes.len() as u32;
+			self.nodes.push(Some(node));
+			self.id_of.push(id.clone());
+			self.slot_of.insert(id, slot);
+			slot
 		}
 	}
 
-	pub fn insert(&mut self, id: String, vec: Vec<f64>) {
-		if vec.is_empty() || self.nodes.contains_key(&id) {
+	pub fn delete(&mut self, id: &str) {
+		let Some(slot) = self.slot_of.remove(id) else {
+			return;
+		};
+		// Scrub every inbound edge before freeing the slot: once it is recycled for
+		// a different id, a lingering edge would silently point at the new node.
+		for n in self.nodes.iter_mut().flatten() {
+			for layer in n.layers.iter_mut() {
+				layer.retain(|&s| s != slot);
+			}
+		}
+		self.nodes[slot as usize] = None;
+		self.free.push(slot);
+		if self.ep == Some(slot) {
+			self.ep = self.nodes.iter().position(|n| n.is_some()).map(|i| i as u32);
+		}
+	}
+
+	pub fn insert(&mut self, id: String, vec: Vec<f32>) {
+		if vec.is_empty() || self.slot_of.contains_key(&id) {
 			return;
 		}
 		let level = self.random_level();
@@ -139,93 +195,105 @@ impl HnswIndex {
 			qvec,
 			layers: vec![Vec::new(); level + 1],
 		};
-		self.nodes.insert(id.clone(), node);
+		let slot = self.alloc_slot(id, node);
 
-		if self.ep.is_empty() {
-			self.ep = id;
+		let Some(mut ep) = self.ep else {
+			self.ep = Some(slot);
 			self.max_layer = level;
 			return;
-		}
+		};
 
 		let query = Query::new(&vec, self.quant_mode);
-		let mut ep = self.ep.clone();
 
 		for l in (level + 1..=self.max_layer).rev() {
-			ep = self.greedy_nearest(&ep, &query, l);
+			ep = self.greedy_nearest(ep, &query, l);
 		}
 
 		let start = level.min(self.max_layer);
 		for l in (0..=start).rev() {
 			let cap = if l == 0 { self.m0 } else { self.m };
-			let candidates = self.beam_search(&ep, &query, l, self.ef_construction);
-			let neighbors: Vec<Candidate> = candidates.iter().take(cap).cloned().collect();
+			let candidates = self.beam_search(ep, &query, l, self.ef_construction);
+			let neighbors: Vec<Candidate> = candidates.iter().take(cap).copied().collect();
 
-			let node = self.nodes.get_mut(&id).expect("node just inserted above");
-			while node.layers.len() <= l {
-				node.layers.push(Vec::new());
+			{
+				let node = self.node_mut(slot).expect("node just inserted above");
+				while node.layers.len() <= l {
+					node.layers.push(Vec::new());
+				}
+				node.layers[l] = neighbors.iter().map(|n| n.id).collect();
 			}
-			node.layers[l] = neighbors.iter().map(|n| n.id.clone()).collect();
 
 			for nb in &neighbors {
-				let nb_node = match self.nodes.get_mut(&nb.id) {
-					Some(n) => n,
-					None => continue,
+				let over_cap = {
+					let nb_node = match self.node_mut(nb.id) {
+						Some(n) => n,
+						None => continue,
+					};
+					while nb_node.layers.len() <= l {
+						nb_node.layers.push(Vec::new());
+					}
+					nb_node.layers[l].push(slot);
+					nb_node.layers[l].len() > cap
 				};
-				while nb_node.layers.len() <= l {
-					nb_node.layers.push(Vec::new());
-				}
-				nb_node.layers[l].push(id.clone());
-				if nb_node.layers[l].len() > cap {
-					let ids: Vec<String> = nb_node.layers[l].clone();
-					let pruned = self.prune_neighbors(&nb.id, &ids, cap);
+				if over_cap {
+					let ids: Vec<u32> = self
+						.node(nb.id)
+						.expect("nb_node fetched via node_mut earlier in loop")
+						.layers[l]
+						.clone();
+					let pruned = self.prune_neighbors(nb.id, &ids, cap);
 					self
-						.nodes
-						.get_mut(&nb.id)
-						.expect("nb_node fetched via get_mut earlier in loop")
+						.node_mut(nb.id)
+						.expect("nb_node fetched via node_mut earlier in loop")
 						.layers[l] = pruned;
 				}
 			}
 
 			if let Some(c) = candidates.first() {
-				ep = c.id.clone();
+				ep = c.id;
 			}
 		}
 
 		if level > self.max_layer {
 			self.max_layer = level;
-			self.ep = id;
+			self.ep = Some(slot);
 		}
 	}
 
-	pub fn search(&self, vec: &[f64], k: usize, ef: usize) -> Vec<HnswHit> {
-		if self.ep.is_empty() || vec.is_empty() {
+	pub fn search(&self, vec: &[f32], k: usize, ef: usize) -> Vec<HnswHit> {
+		let Some(mut ep) = self.ep else {
+			return Vec::new();
+		};
+		if vec.is_empty() {
 			return Vec::new();
 		}
 		let query = Query::new(vec, self.quant_mode);
 		let ef = ef.max(k);
-		let mut ep = self.ep.clone();
 
 		for l in (1..=self.max_layer).rev() {
-			ep = self.greedy_nearest(&ep, &query, l);
+			ep = self.greedy_nearest(ep, &query, l);
 		}
 
-		let candidates = self.beam_search(&ep, &query, 0, ef);
+		let candidates = self.beam_search(ep, &query, 0, ef);
 		let k = k.min(candidates.len());
 		candidates[..k]
 			.iter()
 			.map(|c| HnswHit {
-				id: c.id.clone(),
+				id: self.id_str(c.id).to_string(),
 				score: 1.0 - c.dist,
 			})
 			.collect()
 	}
 
-	pub fn search_batch(&self, queries: &[&[f64]], k: usize, ef: usize) -> Vec<Vec<HnswHit>> {
+	pub fn search_batch(&self, queries: &[&[f32]], k: usize, ef: usize) -> Vec<Vec<HnswHit>> {
 		queries.par_iter().map(|q| self.search(q, k, ef)).collect()
 	}
 
-	pub fn search_adaptive(&self, vec: &[f64], k: usize, cfg: AdaptiveEfConfig) -> Vec<HnswHit> {
-		if self.ep.is_empty() || vec.is_empty() || k == 0 {
+	pub fn search_adaptive(&self, vec: &[f32], k: usize, cfg: AdaptiveEfConfig) -> Vec<HnswHit> {
+		let Some(mut ep) = self.ep else {
+			return Vec::new();
+		};
+		if vec.is_empty() || k == 0 {
 			return Vec::new();
 		}
 		let query = Query::new(vec, self.quant_mode);
@@ -233,23 +301,22 @@ impl HnswIndex {
 		let ef_max = cfg.ef_max.max(ef_start);
 		let ef_step = cfg.ef_step.max(1);
 
-		let mut ep = self.ep.clone();
 		for l in (1..=self.max_layer).rev() {
-			ep = self.greedy_nearest(&ep, &query, l);
+			ep = self.greedy_nearest(ep, &query, l);
 		}
 
 		let mut ef = ef_start;
-		let mut candidates = self.beam_search(&ep, &query, 0, ef);
+		let mut candidates = self.beam_search(ep, &query, 0, ef);
 		while ef < ef_max && is_ambiguous(&candidates, k, cfg.spread_epsilon) {
 			ef = (ef + ef_step).min(ef_max);
-			candidates = self.beam_search(&ep, &query, 0, ef);
+			candidates = self.beam_search(ep, &query, 0, ef);
 		}
 
 		let k = k.min(candidates.len());
 		candidates[..k]
 			.iter()
 			.map(|c| HnswHit {
-				id: c.id.clone(),
+				id: self.id_str(c.id).to_string(),
 				score: 1.0 - c.dist,
 			})
 			.collect()
@@ -268,28 +335,30 @@ impl HnswIndex {
 	/// walk. The `visited` set bounds it to O(nodes).
 	pub fn search_filtered(
 		&self,
-		vec: &[f64],
+		vec: &[f32],
 		k: usize,
 		ef: usize,
 		keep: &dyn Fn(&str) -> bool,
 	) -> Vec<HnswHit> {
-		if self.ep.is_empty() || vec.is_empty() || k == 0 {
+		let Some(mut ep) = self.ep else {
+			return Vec::new();
+		};
+		if vec.is_empty() || k == 0 {
 			return Vec::new();
 		}
 		let query = Query::new(vec, self.quant_mode);
 		let ef = ef.max(k);
-		let mut ep = self.ep.clone();
 		// Upper layers are pure navigation — no filter, just descend to a good
 		// entry point for the filtered beam at layer 0.
 		for l in (1..=self.max_layer).rev() {
-			ep = self.greedy_nearest(&ep, &query, l);
+			ep = self.greedy_nearest(ep, &query, l);
 		}
-		let candidates = self.beam_search_filtered(&ep, &query, 0, ef, keep);
+		let candidates = self.beam_search_filtered(ep, &query, 0, ef, keep);
 		let k = k.min(candidates.len());
 		candidates[..k]
 			.iter()
 			.map(|c| HnswHit {
-				id: c.id.clone(),
+				id: self.id_str(c.id).to_string(),
 				score: 1.0 - c.dist,
 			})
 			.collect()
@@ -302,7 +371,7 @@ impl HnswIndex {
 	/// of non-matching nodes are still found.
 	fn beam_search_filtered(
 		&self,
-		ep: &str,
+		ep: u32,
 		query: &Query<'_>,
 		layer: usize,
 		ef: usize,
@@ -311,15 +380,12 @@ impl HnswIndex {
 		let ep_dist = self.distance_to_query(ep, query);
 		let mut candidates = MinHeap::new();
 		let mut results = MaxHeap::new();
-		let mut visited = HashSet::new();
+		let mut visited = vec![false; self.nodes.len()];
 
-		let seed = Candidate {
-			id: ep.to_string(),
-			dist: ep_dist,
-		};
-		candidates.push(seed.clone());
-		visited.insert(ep.to_string());
-		if keep(ep) {
+		let seed = Candidate { id: ep, dist: ep_dist };
+		candidates.push(seed);
+		visited[ep as usize] = true;
+		if keep(self.id_str(ep)) {
 			results.push(seed);
 		}
 
@@ -333,33 +399,32 @@ impl HnswIndex {
 					}
 				}
 			}
-			let node = &self.nodes[&c.id];
+			let node = match self.node(c.id) {
+				Some(n) => n,
+				None => continue,
+			};
 			if layer >= node.layers.len() {
 				continue;
 			}
-			for nb_id in &node.layers[layer] {
-				if !visited.insert(nb_id.clone()) {
+			for &nb in &node.layers[layer] {
+				let vi = nb as usize;
+				if vi >= visited.len() || visited[vi] {
 					continue;
 				}
-				if !self.nodes.contains_key(nb_id) {
+				visited[vi] = true;
+				if self.node(nb).is_none() {
 					continue;
 				}
-				let d = self.distance_to_query(nb_id, query);
+				let d = self.distance_to_query(nb, query);
 				// Explore (navigate through) this node if the result set isn't full
 				// yet, or it could beat the worst match. Non-matching nodes are still
 				// pushed to the frontier — that is how we reach matches behind them.
 				let worst = results.peek().map(|w| w.dist);
 				let explore = results.len() < ef || worst.is_none_or(|w| d < w);
 				if explore {
-					candidates.push(Candidate {
-						id: nb_id.clone(),
-						dist: d,
-					});
-					if keep(nb_id) {
-						results.push(Candidate {
-							id: nb_id.clone(),
-							dist: d,
-						});
+					candidates.push(Candidate { id: nb, dist: d });
+					if keep(self.id_str(nb)) {
+						results.push(Candidate { id: nb, dist: d });
 						if results.len() > ef {
 							results.pop();
 						}
@@ -382,8 +447,8 @@ impl HnswIndex {
 		level.min(16)
 	}
 
-	fn distance_to_query(&self, node_id: &str, query: &Query<'_>) -> f64 {
-		let node = match self.nodes.get(node_id) {
+	fn distance_to_query(&self, slot: u32, query: &Query<'_>) -> f64 {
+		let node = match self.node(slot) {
 			Some(n) => n,
 			None => return 1.0,
 		};
@@ -396,8 +461,8 @@ impl HnswIndex {
 		}
 	}
 
-	fn distance_between(&self, a: &str, b: &str) -> f64 {
-		let (Some(na), Some(nb)) = (self.nodes.get(a), self.nodes.get(b)) else {
+	fn distance_between(&self, a: u32, b: u32) -> f64 {
+		let (Some(na), Some(nb)) = (self.node(a), self.node(b)) else {
 			return 1.0;
 		};
 		match self.quant_mode {
@@ -409,21 +474,24 @@ impl HnswIndex {
 		}
 	}
 
-	fn greedy_nearest(&self, ep: &str, query: &Query<'_>, layer: usize) -> String {
-		let mut best = ep.to_string();
+	fn greedy_nearest(&self, ep: u32, query: &Query<'_>, layer: usize) -> u32 {
+		let mut best = ep;
 		let mut best_dist = self.distance_to_query(ep, query);
 		loop {
 			let mut changed = false;
-			let node = &self.nodes[&best];
+			let node = match self.node(best) {
+				Some(n) => n,
+				None => break,
+			};
 			if layer >= node.layers.len() {
 				break;
 			}
-			for nb_id in &node.layers[layer] {
-				if self.nodes.contains_key(nb_id) {
-					let d = self.distance_to_query(nb_id, query);
+			for &nb in &node.layers[layer] {
+				if self.node(nb).is_some() {
+					let d = self.distance_to_query(nb, query);
 					if d < best_dist {
 						best_dist = d;
-						best = nb_id.clone();
+						best = nb;
 						changed = true;
 					}
 				}
@@ -435,19 +503,16 @@ impl HnswIndex {
 		best
 	}
 
-	fn beam_search(&self, ep: &str, query: &Query<'_>, layer: usize, ef: usize) -> Vec<Candidate> {
+	fn beam_search(&self, ep: u32, query: &Query<'_>, layer: usize, ef: usize) -> Vec<Candidate> {
 		let ep_dist = self.distance_to_query(ep, query);
 		let mut candidates = MinHeap::new();
 		let mut results = MaxHeap::new();
-		let mut visited = HashSet::new();
+		let mut visited = vec![false; self.nodes.len()];
 
-		let seed = Candidate {
-			id: ep.to_string(),
-			dist: ep_dist,
-		};
-		candidates.push(seed.clone());
+		let seed = Candidate { id: ep, dist: ep_dist };
+		candidates.push(seed);
 		results.push(seed);
-		visited.insert(ep.to_string());
+		visited[ep as usize] = true;
 
 		while let Some(c) = candidates.pop() {
 			if results.len() >= ef {
@@ -457,25 +522,27 @@ impl HnswIndex {
 					}
 				}
 			}
-			let node = &self.nodes[&c.id];
+			let node = match self.node(c.id) {
+				Some(n) => n,
+				None => continue,
+			};
 			if layer >= node.layers.len() {
 				continue;
 			}
-			for nb_id in &node.layers[layer] {
-				if !visited.insert(nb_id.clone()) {
+			for &nb in &node.layers[layer] {
+				let vi = nb as usize;
+				if vi >= visited.len() || visited[vi] {
 					continue;
 				}
-				if !self.nodes.contains_key(nb_id) {
+				visited[vi] = true;
+				if self.node(nb).is_none() {
 					continue;
 				}
-				let d = self.distance_to_query(nb_id, query);
+				let d = self.distance_to_query(nb, query);
 				let dominated = results.len() >= ef && results.peek().is_some_and(|w| d >= w.dist);
 				if !dominated {
-					let cand = Candidate {
-						id: nb_id.clone(),
-						dist: d,
-					};
-					candidates.push(cand.clone());
+					let cand = Candidate { id: nb, dist: d };
+					candidates.push(cand);
 					results.push(cand);
 					if results.len() > ef {
 						results.pop();
@@ -492,12 +559,12 @@ impl HnswIndex {
 		out
 	}
 
-	fn prune_neighbors(&self, center_id: &str, ids: &[String], m: usize) -> Vec<String> {
-		let mut pairs: Vec<(String, f64)> = ids
+	fn prune_neighbors(&self, center: u32, ids: &[u32], m: usize) -> Vec<u32> {
+		let mut pairs: Vec<(u32, f64)> = ids
 			.iter()
-			.filter_map(|id| {
-				if self.nodes.contains_key(id) {
-					Some((id.clone(), self.distance_between(center_id, id)))
+			.filter_map(|&id| {
+				if self.node(id).is_some() {
+					Some((id, self.distance_between(center, id)))
 				} else {
 					None
 				}
@@ -618,12 +685,21 @@ mod tests {
 	use rand::{RngExt, SeedableRng};
 	use std::collections::HashSet;
 
-	fn rand_vec(rng: &mut rand::rngs::StdRng, dim: usize) -> Vec<f64> {
-		(0..dim).map(|_| rng.random::<f64>() * 2.0 - 1.0).collect()
+	impl HnswIndex {
+		/// Physical arena size (live + freed slots). A `delete` followed by an
+		/// `insert` should recycle a slot rather than grow this, which the
+		/// slot-reuse test asserts.
+		fn arena_slots(&self) -> usize {
+			self.nodes.len()
+		}
+	}
+
+	fn rand_vec(rng: &mut rand::rngs::StdRng, dim: usize) -> Vec<f32> {
+		(0..dim).map(|_| rng.random::<f32>() * 2.0 - 1.0).collect()
 	}
 
 	/// Exact nearest-by-cosine ground truth for the recall assertions.
-	fn brute_force_topk(vecs: &[(String, Vec<f64>)], q: &[f64], k: usize) -> HashSet<String> {
+	fn brute_force_topk(vecs: &[(String, Vec<f32>)], q: &[f32], k: usize) -> HashSet<String> {
 		let mut scored: Vec<(String, f64)> = vecs
 			.iter()
 			.map(|(id, v)| (id.clone(), bf_cosine(v, q)))
@@ -632,7 +708,7 @@ mod tests {
 		scored.into_iter().take(k).map(|(id, _)| id).collect()
 	}
 
-	fn random_corpus(seed: u64, n: usize, dim: usize) -> Vec<(String, Vec<f64>)> {
+	fn random_corpus(seed: u64, n: usize, dim: usize) -> Vec<(String, Vec<f32>)> {
 		let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
 		(0..n)
 			.map(|i| (format!("v{i}"), rand_vec(&mut rng, dim)))
@@ -666,6 +742,57 @@ mod tests {
 	}
 
 	#[test]
+	fn delete_then_insert_reuses_slot_and_search_stays_correct() {
+		// Slot recycling: delete a batch, insert the same number of fresh ids, and
+		// require (a) the arena did NOT grow — the freed slots were reused — and
+		// (b) search still returns the exact nearest over the live set, proving a
+		// recycled slot carries no stale edge from its former occupant.
+		let dim = 24;
+		let corpus = random_corpus(3, 200, dim);
+		let mut idx = HnswIndex::new(16, 128);
+		for (id, v) in &corpus {
+			idx.insert(id.clone(), v.clone());
+		}
+		let slots_before = idx.arena_slots();
+
+		// Live set tracked alongside the index for the brute-force ground truth.
+		let mut live: Vec<(String, Vec<f32>)> = corpus.clone();
+		let mut rng = rand::rngs::StdRng::seed_from_u64(1234);
+		for i in 0..40 {
+			let victim = live.remove(rng.random_range(0..live.len()));
+			idx.delete(&victim.0);
+			let nv = rand_vec(&mut rng, dim);
+			let nid = format!("new{i}");
+			idx.insert(nid.clone(), nv.clone());
+			live.push((nid, nv));
+		}
+
+		assert_eq!(
+			idx.arena_slots(),
+			slots_before,
+			"deleted slots were recycled, arena did not grow"
+		);
+		assert_eq!(idx.len(), live.len(), "live count tracks the churn");
+
+		let mut qrng = rand::rngs::StdRng::seed_from_u64(77);
+		let k = 8;
+		let mut total = 0.0;
+		for _ in 0..25 {
+			let q = rand_vec(&mut qrng, dim);
+			let truth = brute_force_topk(&live, &q, k);
+			let got: HashSet<String> = idx.search(&q, k, 128).into_iter().map(|h| h.id).collect();
+			// No result may be a deleted id.
+			assert!(
+				got.iter().all(|id| live.iter().any(|(lid, _)| lid == id)),
+				"a recycled/deleted id leaked into results"
+			);
+			total += truth.intersection(&got).count() as f64 / k as f64;
+		}
+		let recall = total / 25.0;
+		assert!(recall >= 0.85, "recall after churn too low: {recall:.3}");
+	}
+
+	#[test]
 	fn recall_matches_brute_force() {
 		// The whole point of an ANN index is that its top-k closely tracks the
 		// exact top-k. Build a corpus, query it, and require high overlap with the
@@ -692,6 +819,42 @@ mod tests {
 	}
 
 	#[test]
+	fn search_order_matches_brute_force_on_separated_corpus() {
+		// On a well-separated seeded corpus the ANN top-k must equal the exact
+		// brute-force top-k in the SAME order — the strong guarantee that the u32
+		// arena rewrite preserves ranking, not just set overlap.
+		let dim = 48;
+		let corpus = random_corpus(2024, 400, dim);
+		let mut idx = HnswIndex::new(24, 200);
+		for (id, v) in &corpus {
+			idx.insert(id.clone(), v.clone());
+		}
+		let k = 5;
+		let mut qrng = rand::rngs::StdRng::seed_from_u64(2025);
+		let mut matched = 0;
+		let queries = 30;
+		for _ in 0..queries {
+			let q = rand_vec(&mut qrng, dim);
+			let mut scored: Vec<(String, f64)> = corpus
+				.iter()
+				.map(|(id, v)| (id.clone(), bf_cosine(v, &q)))
+				.collect();
+			scored.sort_by(|a, b| bf_cmp(&a.1, &b.1));
+			let truth: Vec<String> = scored.into_iter().take(k).map(|(id, _)| id).collect();
+			let got: Vec<String> = idx.search(&q, k, 256).into_iter().map(|h| h.id).collect();
+			if got == truth {
+				matched += 1;
+			}
+		}
+		// A high ef makes exact ordering the overwhelmingly common case; allow a
+		// couple of near-ties to differ without failing.
+		assert!(
+			matched >= queries - 2,
+			"exact-order match on separated corpus: {matched}/{queries}"
+		);
+	}
+
+	#[test]
 	fn search_filtered_matches_brute_force_over_subset() {
 		// Filtered search must equal brute-force ranking restricted to the matching
 		// subset — proving it filters DURING traversal (k matches returned), not
@@ -709,7 +872,7 @@ mod tests {
 				.map(|n| n % 2 == 0)
 				.unwrap_or(false)
 		};
-		let subset: Vec<(String, Vec<f64>)> =
+		let subset: Vec<(String, Vec<f32>)> =
 			corpus.iter().filter(|(id, _)| keep(id)).cloned().collect();
 
 		let k = 8;
@@ -854,10 +1017,7 @@ mod tests {
 
 	#[test]
 	fn is_ambiguous_flags_short_results_and_tight_spreads() {
-		let c = |dist: f64| Candidate {
-			id: "x".into(),
-			dist,
-		};
+		let c = |dist: f64| Candidate { id: 0, dist };
 		// Fewer than k candidates -> ambiguous (must widen to look harder).
 		assert!(
 			is_ambiguous(&[c(0.1)], 3, 0.05),
@@ -882,7 +1042,7 @@ mod tests {
 		// ef_start gives an ambiguous top-k, so search_adaptive must widen to recover
 		// the exact match (the recall guarantee that justifies the adaptive search).
 		for i in 0..20 {
-			idx.insert(format!("c{i}"), vec![1.0, 0.02 * (i as f64 + 1.0), 0.0]);
+			idx.insert(format!("c{i}"), vec![1.0, 0.02 * (i as f32 + 1.0), 0.0]);
 		}
 		idx.insert("exact".into(), vec![1.0, 0.0, 0.0]);
 

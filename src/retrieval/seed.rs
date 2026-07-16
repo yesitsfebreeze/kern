@@ -62,10 +62,29 @@ impl Weights {
 pub fn seed(
 	g: &GraphGnn,
 	cfg: &RetrievalConfig,
-	query_vec: &[f64],
+	query_vec: &[f32],
 	k: usize,
 	mode: Mode,
 	opts: Option<&QueryOptions>,
+) -> Vec<EntityHit> {
+	let important = seed_important(g, cfg, query_vec, opts);
+	seed_with_important(g, cfg, query_vec, k, mode, opts, &important)
+}
+
+/// The dense-seed core of [`seed`], but with the query-independent `important`
+/// list supplied by the caller instead of scanned here. Hybrid retrieval needs
+/// the same importance scan a second time (as its own RRF list in
+/// `fuse_hybrid_seeds`), so the caller runs the O(N) scan ONCE and threads the
+/// result into both consumers. [`seed`] is the wrapper that scans then delegates
+/// for callers that don't reuse the list.
+pub fn seed_with_important(
+	g: &GraphGnn,
+	cfg: &RetrievalConfig,
+	query_vec: &[f32],
+	k: usize,
+	mode: Mode,
+	opts: Option<&QueryOptions>,
+	important: &[EntityHit],
 ) -> Vec<EntityHit> {
 	let mut hits = match mode {
 		Mode::Reason => seed_by_reason(g, query_vec, k),
@@ -84,8 +103,7 @@ pub fn seed(
 			_ => search_all_unlocked(g, query_vec, k),
 		},
 	};
-	let important = seed_important(g, cfg, query_vec, opts);
-	hits = merge_seeds(hits, important);
+	hits = merge_seeds(hits, important.to_vec());
 	hits.truncate(k.max(cfg.seed_k));
 	hits
 }
@@ -126,7 +144,7 @@ pub fn seed_lexical(
 		.collect()
 }
 
-fn seed_by_reason(g: &GraphGnn, query_vec: &[f64], k: usize) -> Vec<EntityHit> {
+fn seed_by_reason(g: &GraphGnn, query_vec: &[f32], k: usize) -> Vec<EntityHit> {
 	let reason_hits = search_reasons_all_unlocked(g, query_vec, k);
 	let mut seen = HashMap::new();
 	for rh in &reason_hits {
@@ -153,7 +171,7 @@ fn seed_by_reason(g: &GraphGnn, query_vec: &[f64], k: usize) -> Vec<EntityHit> {
 pub fn seed_important(
 	g: &GraphGnn,
 	cfg: &RetrievalConfig,
-	query_vec: &[f64],
+	query_vec: &[f32],
 	opts: Option<&QueryOptions>,
 ) -> Vec<EntityHit> {
 	let kerns = g.all();
@@ -218,7 +236,7 @@ mod tests {
 	use super::*;
 	use crate::base::types::{Entity, EntityKind, Kern};
 
-	fn ent(id: &str, vector: Vec<f64>, access: u64, fact: bool) -> Entity {
+	fn ent(id: &str, vector: Vec<f32>, access: u64, fact: bool) -> Entity {
 		let mut e = Entity {
 			id: id.into(),
 			vector,
@@ -355,7 +373,7 @@ mod tests {
 		let mut g = GraphGnn::new();
 		let mut k = Kern::new("kx", "");
 		for i in 0..6 {
-			let e = ent(&format!("e{i}"), vec![1.0, i as f64 * 0.01], 0, false);
+			let e = ent(&format!("e{i}"), vec![1.0, i as f32 * 0.01], 0, false);
 			k.entities.insert(e.id.clone(), e);
 		}
 		g.kerns.insert("kx".into(), k);
@@ -382,6 +400,38 @@ mod tests {
 			ids(&empty),
 			"inactive filter == unfiltered path"
 		);
+	}
+
+	#[test]
+	fn seed_important_is_deterministic_at_scale() {
+		// The fuse_hybrid optimization computes seed_important ONCE and threads the
+		// result into both the dense-seed merge and the RRF list. That is only sound
+		// if the scan is deterministic across calls — otherwise the two consumers
+		// would see different lists than the old compute-twice code. Exercise the
+		// parallel scan over a large entity set and assert two calls are identical.
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("kx", "");
+		for i in 0..3000 {
+			let a = (i as f32 * 0.001).sin();
+			let b = (i as f32 * 0.001).cos();
+			let e = ent(&format!("e{i}"), vec![a, b], (i % 7) as u64, i % 5 == 0);
+			k.entities.insert(e.id.clone(), e);
+		}
+		g.kerns.insert("kx".into(), k);
+		let cfg = RetrievalConfig {
+			important_min_cosine: 0.1,
+			important_access_threshold: 3,
+			..Default::default()
+		};
+		let q = [0.6f32, 0.8];
+		let a = seed_important(&g, &cfg, &q, None);
+		let b = seed_important(&g, &cfg, &q, None);
+		assert!(a.len() > 50, "the scan surfaces a non-trivial set: {}", a.len());
+		assert_eq!(a.len(), b.len(), "same count across calls");
+		for (x, y) in a.iter().zip(b.iter()) {
+			assert_eq!(x.entity_id, y.entity_id, "same id order across calls");
+			assert_eq!(x.score, y.score, "same score across calls");
+		}
 	}
 
 	#[test]

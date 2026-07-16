@@ -53,7 +53,7 @@ use crate::base::constants::{QUERY_CACHE_DEFAULT_CAP, QUERY_CACHE_DEFAULT_THETA}
 /// time bounds, min-confidence). Two queries with the same embedding but a
 /// different `tag` must never share an entry.
 struct Entry {
-	qvec: Vec<f64>,
+	qvec: Vec<f32>,
 	tag: u64,
 	result: QueryResult,
 	epoch: u64,
@@ -128,7 +128,7 @@ impl QueryCache {
 	/// same-`tag` entry exists whose stamped epoch still matches the live graph.
 	/// A stale-epoch entry is treated as a miss (and stays until LRU-evicted or
 	/// overwritten by a fresh insert). Promotes the hit to most-recently-used.
-	pub fn lookup(&mut self, g: &GraphGnn, qvec: &[f64], tag: u64) -> Option<QueryResult> {
+	pub fn lookup(&mut self, g: &GraphGnn, qvec: &[f32], tag: u64) -> Option<QueryResult> {
 		let epoch = g.mutation_epoch();
 		let hit = self.entries.iter().position(|e| {
 			e.epoch == epoch
@@ -153,7 +153,7 @@ impl QueryCache {
 		&mut self,
 		epoch: u64,
 		text_hash: u64,
-		qvec: Vec<f64>,
+		qvec: Vec<f32>,
 		tag: u64,
 		result: QueryResult,
 	) {

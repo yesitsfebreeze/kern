@@ -1,12 +1,11 @@
 use crate::base::graph::GraphGnn;
 use crate::base::math::cosine;
-use crate::base::reason::collect_reason_ids;
 use crate::base::search::EntityHit;
 use crate::base::types::*;
 use crate::config::RetrievalConfig;
-use crate::retrieval::heap::{BeamHeap, HeapItem};
 use crate::retrieval::seed::Weights;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub struct PathChain {
@@ -20,102 +19,220 @@ pub struct ScoredEntity {
 	pub score: f64,
 }
 
-pub struct ExpandResult {
-	pub scored: Vec<ScoredEntity>,
-	pub chains: Vec<PathChain>,
+/// A scored entity borrowed from the graph. The retrieve pipeline works on
+/// these (no clones) and materialises owned [`ScoredEntity`]s only for the few
+/// results that survive the delivery cut.
+#[derive(Debug, Clone, Copy)]
+pub struct ScoredRef<'a> {
+	pub entity: &'a Entity,
+	pub score: f64,
 }
 
-/// The inputs that stay constant across one [`expand`] run while scoring each
-/// candidate neighbour, bundled so the per-reason step needs only the few inputs
-/// that actually vary (the current item, edge, threshold, and visited set).
-struct ExpandCtx<'a> {
-	g: &'a GraphGnn,
-	query_vec: &'a [f64],
-	w: Weights,
-	refine_tw: f64,
-	refine_cap: f64,
-}
-
-impl ExpandCtx<'_> {
-	/// Evaluate the neighbour reached from `item` along reason `rid`. Returns the
-	/// [`HeapItem`] to enqueue, or `None` when the edge is remote, a non-empty
-	/// Spawn edge, points at an empty/visited/missing entity, or scores below
-	/// `threshold`.
-	fn neighbor_step(
-		&self,
-		item: &HeapItem,
-		rid: &str,
-		reason: &Reason,
-		threshold: f64,
-		visited: &HashSet<String>,
-	) -> Option<HeapItem> {
-		if reason.is_remote() {
-			return None;
+impl ScoredRef<'_> {
+	pub fn to_owned(self) -> ScoredEntity {
+		ScoredEntity {
+			entity: self.entity.clone(),
+			score: self.score,
 		}
-		if reason.kind == ReasonKind::Spawn && !reason.to.is_empty() {
-			return None;
-		}
-		let neighbor_id = if reason.from == item.entity_id {
-			&reason.to
-		} else {
-			&reason.from
-		};
-		if neighbor_id.is_empty() || visited.contains(neighbor_id) {
-			return None;
-		}
-		let neighbor = find_entity_in_graph(self.g, neighbor_id)?;
-		let score = score_neighbor(
-			self.query_vec,
-			&neighbor,
-			reason,
-			self.w,
-			self.refine_tw,
-			self.refine_cap,
-		);
-		if score < threshold {
-			return None;
-		}
-		let mut chain = item.chain.clone();
-		chain.push(rid.to_string());
-		chain.push(neighbor_id.clone());
-		Some(HeapItem {
-			entity_id: neighbor_id.clone(),
-			score,
-			chain,
-		})
 	}
 }
 
-pub fn expand(
-	g: &GraphGnn,
+/// Uniform view over [`ScoredEntity`] (owned) and [`ScoredRef`] (borrowed) so
+/// the scoring/diversify stages run on either without cloning entities.
+pub trait Scored {
+	fn entity(&self) -> &Entity;
+	fn score(&self) -> f64;
+	fn set_score(&mut self, score: f64);
+}
+
+impl Scored for ScoredEntity {
+	fn entity(&self) -> &Entity {
+		&self.entity
+	}
+	fn score(&self) -> f64 {
+		self.score
+	}
+	fn set_score(&mut self, score: f64) {
+		self.score = score;
+	}
+}
+
+impl Scored for ScoredRef<'_> {
+	fn entity(&self) -> &Entity {
+		self.entity
+	}
+	fn score(&self) -> f64 {
+		self.score
+	}
+	fn set_score(&mut self, score: f64) {
+		self.score = score;
+	}
+}
+
+pub struct ExpandResult<'a> {
+	pub scored: Vec<ScoredRef<'a>>,
+	pub chains: Vec<PathChain>,
+}
+
+/// Assigns a dense `u32` to each distinct entity id seen during one [`expand`]
+/// run so the hot beam walk keys `visited`/`results` on integers (cheap hash, no
+/// per-touch `String` clone) instead of on the id strings. The id is cloned into
+/// an `Rc<str>` exactly once — the first time it is interned — and every later
+/// touch is a `u32` lookup. Ids are borrowed back out via [`name`](Self::name)
+/// only to resolve the surviving results and to materialise path chains.
+#[derive(Default)]
+struct Interner {
+	idx: HashMap<Rc<str>, u32>,
+	names: Vec<Rc<str>>,
+}
+
+impl Interner {
+	fn intern(&mut self, s: &str) -> u32 {
+		if let Some(&i) = self.idx.get(s) {
+			return i;
+		}
+		let rc: Rc<str> = Rc::from(s);
+		let i = self.names.len() as u32;
+		self.names.push(Rc::clone(&rc));
+		self.idx.insert(rc, i);
+		i
+	}
+
+	fn name(&self, i: u32) -> &str {
+		&self.names[i as usize]
+	}
+
+	/// A cheap owned handle to id `i` (a refcount bump). The beam holds the current
+	/// item's name as an `Rc<str>` rather than a `&str` borrow so it can keep
+	/// mutating the interner (eager-interning neighbours) in the same loop.
+	fn name_rc(&self, i: u32) -> Rc<str> {
+		Rc::clone(&self.names[i as usize])
+	}
+}
+
+/// One node of the beam's path forest. Rather than each frontier item carrying a
+/// cloned `Vec<String>` of its whole walk, every enqueued node stores just the
+/// entity it reached, the edge it arrived by, and the index of its parent node.
+/// A seed root has no edge (`rid == ""`) and no parent ([`NO_PARENT`]); a chain
+/// is materialised to owned strings only for the popped nodes that get recorded.
+struct ChainNode<'g> {
+	ent: u32,
+	rid: &'g str,
+	parent: u32,
+}
+
+const NO_PARENT: u32 = u32::MAX;
+
+/// One frontier entry: the interned entity id, its beam score, and the index of
+/// its [`ChainNode`] in the arena. The payload never participates in ordering.
+struct BeamNode {
+	ent: u32,
+	score: f64,
+	chain: u32,
+}
+
+/// Binary max-heap over [`BeamNode`]s keyed on `score`. Hand-rolled (rather than
+/// `BinaryHeap`) so the beam owns an interned `u32`/arena payload that stays out
+/// of the ordering; only `score` sifts. `score` is assumed finite.
+#[derive(Default)]
+struct Beam {
+	items: Vec<BeamNode>,
+}
+
+impl Beam {
+	fn push(&mut self, node: BeamNode) {
+		self.items.push(node);
+		let mut i = self.items.len() - 1;
+		while i > 0 {
+			let p = (i - 1) / 2;
+			if self.items[i].score <= self.items[p].score {
+				break;
+			}
+			self.items.swap(i, p);
+			i = p;
+		}
+	}
+
+	fn pop(&mut self) -> Option<BeamNode> {
+		if self.items.is_empty() {
+			return None;
+		}
+		let n = self.items.len() - 1;
+		self.items.swap(0, n);
+		let top = self.items.pop().unwrap();
+		let sz = self.items.len();
+		let mut i = 0;
+		loop {
+			let (l, r) = (2 * i + 1, 2 * i + 2);
+			let mut s = i;
+			if l < sz && self.items[l].score > self.items[s].score {
+				s = l;
+			}
+			if r < sz && self.items[r].score > self.items[s].score {
+				s = r;
+			}
+			if s == i {
+				break;
+			}
+			self.items.swap(i, s);
+			i = s;
+		}
+		Some(top)
+	}
+}
+
+/// Walk `node`'s parent chain and materialise it as the `[seed, rid, ent, rid,
+/// ent, …]` id list [`PathChain`] carries, matching the order the previous
+/// per-item `Vec<String>` chain accumulated.
+fn materialize_chain(arena: &[ChainNode], interner: &Interner, mut node: u32) -> Vec<String> {
+	let mut nodes: Vec<String> = Vec::new();
+	loop {
+		let n = &arena[node as usize];
+		nodes.push(interner.name(n.ent).to_string());
+		if n.parent == NO_PARENT {
+			break;
+		}
+		nodes.push(n.rid.to_string());
+		node = n.parent;
+	}
+	nodes.reverse();
+	nodes
+}
+
+pub fn expand<'a>(
+	g: &'a GraphGnn,
 	cfg: &RetrievalConfig,
-	query_vec: &[f64],
+	query_vec: &'a [f32],
 	seeds: &[EntityHit],
 	w: Weights,
-) -> ExpandResult {
-	let mut heap = BeamHeap::new();
-	let mut visited = HashSet::new();
-	let mut results: HashMap<String, f64> = HashMap::new();
+) -> ExpandResult<'a> {
+	let mut interner = Interner::default();
+	let mut heap = Beam::default();
+	let mut arena: Vec<ChainNode> = Vec::new();
+	let mut visited: HashSet<u32> = HashSet::new();
+	let mut results: HashMap<u32, f64> = HashMap::new();
 	let mut chains: Vec<PathChain> = Vec::new();
 	let mut global_best: f64 = 0.0;
 
 	for s in seeds {
-		heap.push(HeapItem {
-			entity_id: s.entity_id.clone(),
+		let ent = interner.intern(&s.entity_id);
+		let chain = arena.len() as u32;
+		arena.push(ChainNode {
+			ent,
+			rid: "",
+			parent: NO_PARENT,
+		});
+		heap.push(BeamNode {
+			ent,
 			score: s.score,
-			chain: vec![s.entity_id.clone()],
+			chain,
 		});
 	}
 
 	let max_expansions = cfg.max_expansions;
 	let decay = cfg.decay;
-	let ctx = ExpandCtx {
-		g,
-		query_vec,
-		w,
-		refine_tw: cfg.refine_traversal_weight,
-		refine_cap: cfg.refine_boost_cap,
-	};
+	let refine_tw = cfg.refine_traversal_weight;
+	let refine_cap = cfg.refine_boost_cap;
 	let mut expansions = 0;
 
 	while let Some(item) = heap.pop() {
@@ -124,11 +241,11 @@ pub fn expand(
 		}
 		expansions += 1;
 
-		if !visited.insert(item.entity_id.clone()) {
+		if !visited.insert(item.ent) {
 			continue;
 		}
 
-		let entry = results.entry(item.entity_id.clone()).or_insert(0.0);
+		let entry = results.entry(item.ent).or_insert(0.0);
 		if item.score > *entry {
 			*entry = item.score;
 		}
@@ -138,34 +255,71 @@ pub fn expand(
 		}
 		let threshold = global_best * decay;
 
-		if item.chain.len() > 1 {
+		if arena[item.chain as usize].parent != NO_PARENT {
 			chains.push(PathChain {
-				nodes: item.chain.clone(),
+				nodes: materialize_chain(&arena, &interner, item.chain),
 				score: item.score,
 			});
 		}
 
-		let (_thought, kern) = match find_entity_and_kern(g, &item.entity_id) {
-			Some(r) => r,
-			None => continue,
+		let item_name = interner.name_rc(item.ent);
+		let name: &str = &item_name;
+		let Some((_thought, kern)) = find_entity_and_kern(g, name) else {
+			continue;
 		};
-
-		let reason_ids = collect_reason_ids(kern, &item.entity_id);
-
-		for rid in &reason_ids {
+		let edges = kern
+			.by_from
+			.get(name)
+			.into_iter()
+			.flatten()
+			.chain(kern.by_to.get(name).into_iter().flatten());
+		for rid in edges {
 			let Some(reason) = kern.reasons.get(rid) else {
 				continue;
 			};
-			if let Some(next) = ctx.neighbor_step(&item, rid, reason, threshold, &visited) {
-				heap.push(next);
+			if reason.is_remote() {
+				continue;
 			}
+			if reason.kind == ReasonKind::Spawn && !reason.to.is_empty() {
+				continue;
+			}
+			let neighbor_id = if reason.from == name {
+				reason.to.as_str()
+			} else {
+				reason.from.as_str()
+			};
+			if neighbor_id.is_empty() {
+				continue;
+			}
+			let nu = interner.intern(neighbor_id);
+			if visited.contains(&nu) {
+				continue;
+			}
+			let Some((neighbor, _)) = find_entity_and_kern(g, neighbor_id) else {
+				continue;
+			};
+			let score = score_neighbor(query_vec, neighbor, reason, w, refine_tw, refine_cap);
+			if score < threshold {
+				continue;
+			}
+			let chain = arena.len() as u32;
+			arena.push(ChainNode {
+				ent: nu,
+				rid: rid.as_str(),
+				parent: item.chain,
+			});
+			heap.push(BeamNode {
+				ent: nu,
+				score,
+				chain,
+			});
 		}
 	}
 
-	let scored: Vec<ScoredEntity> = results
+	let scored: Vec<ScoredRef<'a>> = results
 		.into_iter()
 		.filter_map(|(id, score)| {
-			find_entity_in_graph(g, &id).map(|t| ScoredEntity { entity: t, score })
+			find_entity_and_kern(g, interner.name(id)).map(|(t, _)| ScoredRef { entity: t, score })
 		})
 		.collect();
 
@@ -173,7 +327,7 @@ pub fn expand(
 }
 
 pub fn score_neighbor(
-	query_vec: &[f64],
+	query_vec: &[f32],
 	neighbor: &Entity,
 	reason: &Reason,
 	w: Weights,
@@ -220,8 +374,8 @@ fn find_entity_and_kern<'a>(g: &'a GraphGnn, id: &str) -> Option<(&'a Entity, &'
 	None
 }
 
-pub fn find_entity_in_graph(g: &GraphGnn, id: &str) -> Option<Entity> {
-	find_entity_and_kern(g, id).map(|(t, _)| t.clone())
+pub fn find_entity_ref_in_graph<'a>(g: &'a GraphGnn, id: &str) -> Option<&'a Entity> {
+	find_entity_and_kern(g, id).map(|(t, _)| t)
 }
 
 #[cfg(test)]

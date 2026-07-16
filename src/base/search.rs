@@ -70,7 +70,7 @@ fn merge_hits(primary: Vec<HnswHit>, gnn: Vec<HnswHit>, k: usize) -> Vec<EntityH
 	ranked.into_iter().map(EntityHit::from).collect()
 }
 
-pub fn search_all_unlocked(g: &GraphGnn, vec: &[f64], k: usize) -> Vec<EntityHit> {
+pub fn search_all_unlocked(g: &GraphGnn, vec: &[f32], k: usize) -> Vec<EntityHit> {
 	if vec.is_empty() {
 		return Vec::new();
 	}
@@ -97,7 +97,7 @@ pub fn search_all_unlocked(g: &GraphGnn, vec: &[f64], k: usize) -> Vec<EntityHit
 /// function free of any retrieval dependency.
 pub fn search_all_filtered(
 	g: &GraphGnn,
-	vec: &[f64],
+	vec: &[f32],
 	k: usize,
 	keep: &dyn Fn(&str) -> bool,
 ) -> Vec<EntityHit> {
@@ -118,7 +118,7 @@ pub fn search_all_filtered(
 	merge_hits(primary, gnn, k)
 }
 
-pub fn search_reasons_all_unlocked(g: &GraphGnn, vec: &[f64], k: usize) -> Vec<ReasonHit> {
+pub fn search_reasons_all_unlocked(g: &GraphGnn, vec: &[f32], k: usize) -> Vec<ReasonHit> {
 	if g.reason_idx.is_empty() || vec.is_empty() {
 		return Vec::new();
 	}
@@ -183,9 +183,9 @@ mod tests {
 	fn populated() -> GraphGnn {
 		let mut g = GraphGnn::new();
 		for i in 0..60 {
-			let x = (i as f64 * 0.3).sin();
-			let y = (i as f64 * 0.3).cos();
-			let z = (i % 5) as f64 * 0.2;
+			let x = (i as f64 * 0.3).sin() as f32;
+			let y = (i as f64 * 0.3).cos() as f32;
+			let z = (i % 5) as f32 * 0.2;
 			g.entity_idx.insert(format!("e{i}"), vec![x, y, z]);
 		}
 		g
@@ -249,7 +249,7 @@ mod tests {
 	#[test]
 	fn search_all_filtered_returns_only_matching_ids() {
 		let g = populated();
-		let q = vec![0.0_f64.sin(), 0.0_f64.cos(), 0.0];
+		let q = vec![0.0_f32.sin(), 0.0_f32.cos(), 0.0];
 		let hits = search_all_filtered(&g, &q, 10, &even);
 		assert!(!hits.is_empty(), "filtered search finds matches");
 		assert!(
