@@ -64,23 +64,32 @@ facts, not just a similarity score). Retrieval can walk those edges, so recall
 follows a line of reasoning instead of returning a flat list of nearest
 neighbors. Ids are **content hashes**, so identical content is the same node
 everywhere — which is exactly what makes conflict-free merge across machines
-possible.
+possible. Knowledge is also **bi-temporal**: when a claim updates or contradicts
+an earlier one, the old revision is *superseded, not deleted* — it stays as
+invalidated history stamped with when it stopped being true, so a query can ask
+what was believed `as_of` a past instant or walk the supersede chain. The
+update-vs-contradiction call is made off the recall path, in the background tick.
 
 ### 3. Self-compacting — forgetting on its own
 
-Every access leaves a **heat** trace; heat decays on every tick. A stigmergy
-garbage collector evicts cold, stale, non-durable thoughts (Facts are immune)
-and spills them to an append-only cold store before dropping them — so
-compaction never destroys data. Similar thoughts cluster into child kerns. The
-hot graph stays small and fast; the long tail stays cheap and recoverable. An
-idle daemon still maintains itself on a timer.
+Every access deposits a **heat** trace, and the tick's pulse re-deposits heat
+on entities still reachable from the roots; heat decays lazily with age
+(half-life based), not per tick. A stigmergy garbage collector evicts cold,
+stale, non-durable thoughts (Facts are immune) and spills them to a capped cold
+tier before dropping them — a latest-wins keyed table holding the newest 50k
+entries, so recent evictions stay recoverable while the very oldest eventually
+age out. Similar thoughts cluster into child kerns. The hot graph stays small
+and fast; the recent long tail stays cheap and recoverable. An idle daemon
+still maintains itself on a timer.
 
 ### 4. Self-distributing — federation without a coordinator (opt-in)
 
 Multiple nodes share knowledge over LAN gossip with no central server. Each node
 heartbeats its peers and merges entity bodies via a content-addressed CRDT — a
 thought ingested on node A becomes searchable on node B under the same
-content-hash id. Off by default.
+content-hash id. Today, manually seeding `peers` is the reliable path;
+multicast discovery only pairs nodes that share the same `network_id`. Off by
+default.
 
 ## Design principles
 
@@ -96,8 +105,10 @@ These constraints shape every decision in the codebase.
   backend yields a *superset*, not a replacement — it forfeits kern's only
   structural advantage (in-process, GNN vectors coupled in memory, zero network
   hop). The path forward is all-internal.
-- **Never lose data on compaction.** Eviction always spills to the cold tier
-  first. Facts are never auto-forgotten.
+- **Don't lose data on compaction.** Eviction always spills to the cold tier
+  first; the tier is capped (newest 50k entries), so the recent tail is always
+  recoverable while the very oldest eventually age out. Facts are never
+  auto-forgotten.
 - **Fail open.** The capture and recall hooks no-op on any error or outage; a
   session always proceeds, and capture simply queues for later.
 
@@ -107,9 +118,9 @@ These constraints shape every decision in the codebase.
 |---|---|---|
 | **Ingestion** | Manual: you run a chunk-and-embed job over a corpus. | Automatic: sessions distill into typed claims via a Stop hook. |
 | **Unit stored** | Raw text chunks. | Distilled facts / decisions / preferences + *reason edges* between them. |
-| **Retrieval** | top-k vector similarity. | Hybrid vector + BM25, edge expansion, RRF fusion, GNN + PageRank rerank, diversify. |
+| **Retrieval** | top-k vector similarity. | Hybrid vector + BM25 with GNN-blended seeds, edge expansion, RRF + PageRank fusion, optional LLM rerank, diversify. |
 | **Structure** | A flat bag of vectors. | A knowledge graph — recall can follow *why* one fact connects to another. |
-| **Growth** | Index grows unbounded; you re-index and prune by hand. | Self-compacting: heat decay + stigmergy GC + clustering keep the hot graph small; cold tier preserves the tail. |
+| **Growth** | Index grows unbounded; you re-index and prune by hand. | Self-compacting: heat decay + stigmergy GC + clustering keep the hot graph small; a capped cold tier preserves the recent tail. |
 | **Staleness** | Stale chunks linger until you rebuild. | Cold, non-durable thoughts decay and evict on their own; Facts persist. |
 | **Feedback** | None — a bad chunk keeps ranking. | `degrade` down-weights bad retrieval paths; access heat re-ranks what you actually use. |
 | **Conflicts / sync** | Single store; multi-node needs external infra. | Content-addressed CRDT + gossip; nodes converge with no coordinator. |

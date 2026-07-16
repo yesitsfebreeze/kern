@@ -28,4 +28,3 @@ straight to its crate page.
   the self-organizing, federated design.
 - **[Aspiration](../../../aspiration.md)** — the north star and roadmap.
 - **API** — rustdoc for every crate (`cargo doc --open`).
-</content>

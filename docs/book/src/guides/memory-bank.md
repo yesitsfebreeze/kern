@@ -33,16 +33,19 @@ session text → spool file → distill (LLM) → claims → graph → digest �
   new session. For mid-session deep recall, the model calls the `query` MCP
   tool directly.
 
-Both hooks fail open: if the daemon or its LLM is down, the session proceeds
+The hooks fail open: if the daemon or its LLM is down, the session proceeds
 normally and capture simply queues.
 
 ### Self-compacting — heat, decay, eviction, clustering
 
 The graph stays small without manual gardening:
 
-- Access leaves a **heat** trace; heat **decays** on each tick.
+- Every access deposits a **heat** trace, and the tick's pulse re-deposits
+  heat on thoughts still reachable from the roots; heat then decays lazily
+  with age (half-life based), not per tick.
 - **Stigmergy GC** evicts cold, stale, non-durable thoughts (Facts are
-  immune). Cold duplicate claims fade on their own over time.
+  immune), spilling each one to the capped cold tier first. The staleness
+  clock reads the thought's last access, falling back to its creation time.
 - **Clustering** consolidates similar thoughts into child kerns.
 
 An **autonomous maintenance tick** (`[tick] interval_secs`, default 60s)
@@ -61,9 +64,9 @@ Everything is controlled from `<cwd>/.kern/kern.toml`:
 
 ```toml
 [reason]
-# LLM for distillation. Local Ollama. Default qwen2.5; larger models are sharper.
+# LLM for distillation. Local Ollama. Default qwen2.5:7b; larger models are sharper.
 url = "http://localhost:11434"
-model = "qwen2.5"
+model = "qwen2.5:7b"
 
 [capture]
 enabled = true          # self-learning
@@ -76,13 +79,16 @@ enabled = false         # self-distribution (opt-in)
 addr = "0.0.0.0:7400"
 discovery = true
 discovery_port = 7475
+# network_id = "team-alpha"  # optional shared discovery pool id (omit for an isolated per-daemon id)
 peers = []
 ```
 
-The two Claude Code hooks are registered once in `~/.claude/settings.json`
-(`Stop` → capture, `SessionStart` → recall). They are project-scoped by a
-guard: they no-op in any directory without a `.kern/` folder, so a single
-global registration is safe across all your projects.
+Three Claude Code hooks drive the automatic memory (`Stop` → capture,
+`SessionStart` → digest recall, `UserPromptSubmit` → per-prompt semantic
+recall); the simplest install is the Claude plugin, which registers all three
+plus the MCP server in one step (see the README's *Hooks* section). They are
+project-scoped by a guard: they no-op in any directory without a `.kern/`
+folder, so a single global registration is safe across all your projects.
 
 Seed the graph once via MCP: add a few `anchor`s — named top-level buckets the
 root routes matching memories into (anything unmatched lands in `generic`) — and
@@ -92,34 +98,48 @@ the typed descriptors (`preference`, `decision`, `project`, `fact`, `code-fact`,
 ## Status & known limits
 
 Self-learning and self-compaction run today. Self-distribution is wired and
-enableable. Recent work closed the two headline gaps:
+enableable, but narrower than the design. The load-bearing pieces:
 
 - **Graph CRDT (implemented).** `base::merge` provides content-addressed,
-  conflict-free merge of entity/edge metadata — counters join, heat /
-  confidence take the max, status follows the `Active < Superseded` lattice,
-  timestamps min/max. Because ids are content hashes, existence is a set
-  union. Remaining: a transport that actively propagates entity bodies
-  between nodes so the merge runs cross-node (today federation shares scope +
-  answers + counter deltas; full entity flooding is the next wiring step).
-- **Detached cold-storage tier (implemented).** Stigmergy GC spills cold,
-  abandoned, non-durable thoughts to an append-only cold store
-  (`<data_dir>/cold/cold.jsonl`) before dropping them from the hot graph, so
-  compaction never loses data. The store self-compacts (latest-per-id) each
-  GC sweep. Recall reaches it two ways: `kern get <id>` rehydrates by id, and
-  the `query` tool fills remaining result slots from a cosine search over the
-  cold store (marked `cold:true`) when the hot graph returns fewer than `k`.
+  conflict-free merge of thought/edge metadata — counters join, heat takes the
+  max, status follows the `Active < Superseded` lattice, timestamps min/max.
+  Confidence is deliberately **replica-local** (never imported from a peer) so
+  a compromised node cannot pin a poisoned claim's confidence high
+  federation-wide. Because ids are content hashes, existence is a set union.
+- **Capped cold tier (implemented).** Stigmergy GC spills cold, abandoned,
+  non-durable thoughts to a cold table in the same LMDB store before dropping
+  them from the hot graph — a latest-wins keyed table holding the newest 50k
+  entries, so recent evictions stay recoverable while the very oldest
+  eventually age out. Recall reaches it two ways: `kern get <id>` rehydrates
+  by id, and the `query` tool fills remaining result slots from a cosine
+  search over the cold tier (marked `cold:true`) when the hot graph returns
+  fewer than `k`.
+- **Bi-temporal invalidation (implemented).** When a same-kind near-duplicate
+  updates or contradicts a stored claim, the background tick *supersedes* the old
+  revision instead of deleting it: it flips to `Superseded`, stamps `valid_to`
+  (when it stopped being true) and `invalidated_at` (when kern learned of it),
+  evicts it from the ANN, and links the pair with a `Supersedes` edge. Invalidated
+  history loses its GC immunity and spills to the cold tier — invalidated is not
+  deleted. The `query` tool adds `as_of` (return the revision whose validity
+  window covered a past instant) and `include_history` (also return superseded
+  revisions reachable from the active hits, marked `history:true`). The
+  update-vs-contradiction call is a background reason-LLM classification, so recall
+  stays LLM-free; with no LLM configured a differing near-dup is kept as a
+  `Rephrase` edge exactly as before (fail open).
 - **Federation (verified, content-level).** `start_announce` broadcasts the
-  kern's scope and `start_entity_sync` broadcasts the hottest local entity
-  *bodies*; peers merge both into a per-network phantom kern via the
-  content-addressed CRDT (`base::merge`) and persist them. Verified end-to-end
-  on one host: two daemons bidirectionally propagate scope **and** entity
-  bodies — a thought ingested on node A becomes vector-searchable on node B
-  with the same content-hash id. The `kern_rpc` endpoint is now **per-cwd**
-  (was per-user), so each project gets its own daemon — fixing cross-project
-  memory contamination and letting multiple nodes run per host.
+  kern's scope and `start_entity_sync` broadcasts the hottest local thought
+  *bodies*; peers merge both into a per-network `remote-*` phantom kern via
+  the content-addressed CRDT (`base::merge`), index them for vector search on
+  receipt, and persist them. Verified end-to-end on one host: two daemons
+  bidirectionally propagate scope **and** thought bodies — a thought ingested
+  on node A becomes vector-searchable on node B with the same content-hash
+  id. Manually seeding `peers` is the reliable path today; multicast
+  discovery only pairs nodes that share the same `network_id`. The
+  Delta/Question/Pulse message kinds plus the fetch RPC are handled on
+  receipt but have no live senders yet.
 
-Near-duplicate handling relies on tighter distillation plus stigmergy GC; a
-non-destructive rephrase-linking pass (`find_rephrase_candidates` +
-`ReasonKind::Rephrase`) remains a future primitive. Federation tuning
-(entity-sync batch size, push vs. pull, anti-entropy) is open for scale, but
-the convergence path is proven.
+Near-duplicate ingests are handled non-destructively: a duplicate above the
+similarity threshold updates the existing thought's confidence and records
+the alternate phrasing as a `Rephrase` edge instead of mutating the canonical
+text. Federation tuning at scale (entity-sync batch size, push vs. pull,
+anti-entropy) is open, but the convergence path is proven.

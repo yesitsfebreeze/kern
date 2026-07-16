@@ -29,16 +29,29 @@ session text → spool → distill (LLM) → typed claims → graph → digest �
   injects it into every new session. For deeper mid-session lookups the agent
   calls the `query` MCP tool directly.
 
-- **Compacts itself.** Every access leaves a **heat** trace; heat decays on each
-  tick. A stigmergy GC evicts cold, stale, non-durable thoughts (Facts are
-  immune) and spills them to an append-only cold store before dropping them — so
-  compaction never destroys data. Similar thoughts cluster into child kerns. The
-  hot graph stays small; the long tail stays cheap.
+- **Compacts itself.** Every access deposits a **heat** trace, and the tick's
+  pulse re-deposits heat on entities still reachable from the roots; heat then
+  decays lazily with age (half-life based), not per tick. A stigmergy GC evicts
+  cold, stale, non-durable thoughts (Facts are immune) and spills them to a
+  capped cold tier before dropping them — a latest-wins keyed table holding the
+  newest 50k entries, so recent evictions stay recoverable while the very oldest
+  eventually age out. Similar thoughts cluster into child kerns. The hot graph
+  stays small; the long tail stays cheap.
+
+- **Remembers across time.** Knowledge carries a bi-temporal window. When a new
+  claim updates or contradicts a stored one of the same kind, kern supersedes the
+  old rather than deleting it — the invalidated revision stays as history, stamped
+  with when it stopped being true. A `query` can ask `as_of` a past instant to
+  recover what was believed then, or `include_history` to follow the supersede
+  chain back through prior revisions. The classification runs in the background
+  tick, so recall stays LLM-free.
 
 - **Federates (opt-in).** Multiple nodes share knowledge over LAN gossip with no
   coordinator. Each node heartbeats peers and merges entity bodies via a
   content-addressed CRDT — a thought ingested on node A becomes searchable on
-  node B under the same content-hash id. Off by default.
+  node B under the same content-hash id. Manually seeding `peers` is the
+  reliable path today; multicast discovery only pairs nodes that share the same
+  `network_id`. Off by default.
 
 - **One graph per directory.** The daemon is per-cwd. Each project gets its own
   isolated memory; no cross-project contamination, multiple daemons per host.
@@ -65,12 +78,14 @@ work.
 A query runs a hybrid pipeline, all hand-rolled, dependencies deliberately
 minimal:
 
-1. **Seed** — vector (HNSW) + lexical (BM25) candidate generation.
+1. **Seed** — vector (HNSW) + lexical (BM25) candidate generation. The dense
+   score blends the content vector with a **GNN** vector (0.4/0.6) that a
+   background tick keeps re-embedding from graph structure.
 2. **Expand** — walk reason edges out from the seeds; optionally **HyDE** a
    hypothetical answer to broaden recall.
-3. **Fuse** — reciprocal-rank fusion of the vector and lexical lists.
-4. **Rerank** — a GNN layer scores relationships with learned embeddings;
-   PageRank weights graph centrality.
+3. **Fuse** — reciprocal-rank fusion of the vector and lexical lists, with
+   PageRank centrality weighting the fused seeds.
+4. **Rerank** (optional) — an LLM reranker reorders the head of the list.
 5. **Diversify** — drop near-duplicates so the `k` results actually differ.
 6. **Answer** (optional) — synthesize an LLM answer over the top results.
 
@@ -87,10 +102,13 @@ returns fewer than `k`.
 A background **tick** (default 60s) drives decay, eviction, and clustering — an
 idle daemon still maintains itself. Persistence is **LMDB** (via
 [heed](https://github.com/meilisearch/heed)) — an ACID, multi-process embedded
-KV. Hot graph and cold tier live together in one `kern.mdb` file per data dir;
-vectors are stored int8, values are `zstd(bincode)`. The daemon, CLI, and recall
-hook all open the same data dir concurrently without contention. HNSW, the GNN,
-beam search, gossip, and the MCP server are all written from scratch.
+KV. Hot graph and cold tier live together in one LMDB environment
+(`data.mdb` + `lock.mdb`) per data dir; vectors are stored int8, values are
+`zstd(bincode)`. LMDB is single-writer: readers never block, writers serialize,
+and a guarded-flush protocol keeps a stale in-memory snapshot from overwriting
+newer on-disk state. The recall hook never opens the store at all — it only
+reads `.kern/digest.md`. HNSW, the GNN, beam search, gossip, and the MCP server
+are all written from scratch.
 
 ---
 
@@ -203,6 +221,7 @@ enabled = false         # self-distribution (opt-in)
 addr = "0.0.0.0:7400"
 discovery = true
 discovery_port = 7475
+# network_id = "team-alpha"  # optional shared discovery pool id (omit for an isolated per-daemon id)
 peers = []
 ```
 
@@ -269,7 +288,7 @@ capture hook.
 
 | Tool | Purpose |
 |------|---------|
-| `query` | Search the graph. Scored thoughts + optional LLM answer. Filter by `mode`, `kind`, `source`, time range, `min_conf`. |
+| `query` | Search the graph. Scored thoughts + optional LLM answer. Filter by `mode`, `kind`, `source`, time range, `min_conf`, and `as_of` (bi-temporal point-in-time); set `include_history` to also return superseded revisions (flagged `history:true`). |
 | `ingest` | Add text. Supports `object_id` update semantics and `descriptor` chunking context. |
 | `link` | Create a reason edge between two thoughts (LLM writes the reason if blank). |
 | `forget` | Remove a thought and cascade its edges. Facts are immune. |
@@ -291,9 +310,9 @@ that operates itself.
 |---|---|---|
 | **Ingestion** | Manual: you run a chunk-and-embed job over a corpus. | Automatic: sessions distill into typed claims via a Stop hook. |
 | **Unit stored** | Raw text chunks. | Distilled facts/decisions/preferences + *reason edges* between them. |
-| **Retrieval** | top-k vector similarity. | Hybrid vector + BM25, edge expansion, RRF fusion, GNN + PageRank rerank, diversify. |
+| **Retrieval** | top-k vector similarity. | Hybrid vector + BM25 with GNN-blended seeds, edge expansion, RRF + PageRank fusion, optional LLM rerank, diversify. |
 | **Structure** | A flat bag of vectors. | A knowledge graph — recall can follow *why* one fact connects to another. |
-| **Growth** | Index grows unbounded; you re-index and prune by hand. | Self-compacting: heat decay + stigmergy GC + clustering keep the hot graph small; cold tier preserves the tail. |
+| **Growth** | Index grows unbounded; you re-index and prune by hand. | Self-compacting: heat decay + stigmergy GC + clustering keep the hot graph small; a capped cold tier preserves the recent tail. |
 | **Staleness** | Stale chunks linger until you rebuild. | Cold, non-durable thoughts decay and evict on their own; Facts persist. |
 | **Feedback** | None — a bad chunk keeps ranking. | `degrade` down-weights bad retrieval paths; access heat re-ranks what you actually use. |
 | **Conflicts / sync** | Single store; multi-node needs external infra. | Content-addressed CRDT + gossip; nodes converge with no coordinator. |
@@ -308,8 +327,10 @@ of nearest neighbors.
 
 ## Status
 
-Self-learning and self-compaction run today. Self-distribution is wired,
-enableable, and verified content-level on a single host (scope + entity bodies
-propagate bidirectionally). Federation tuning at scale (batch size, push vs.
-pull, anti-entropy) is open, but the convergence path is proven. Version stays
-`1.0.0`.
+Self-learning and self-compaction run today. Self-distribution is wired and
+enableable, but narrower than the design: entity-body sharing is verified on a
+single host with manually seeded `peers` (the reliable path); multicast
+auto-discovery only pairs nodes sharing the same `network_id`; and the
+Delta/Question/Pulse message kinds plus the fetch RPC are handled on receipt
+but have no live senders yet. Federation tuning at scale (batch size, push vs.
+pull, anti-entropy) is open. Version stays `1.0.0`.

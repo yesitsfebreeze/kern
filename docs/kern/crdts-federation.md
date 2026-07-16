@@ -2,6 +2,17 @@
 
 Ticket: `A01F62NW` — "Study CRDTs for conflict-free federated kern state"
 
+> **Implementation status (2026-07).** Stage 0/1 shipped: `src/crdt.rs`
+> provides GCounter/PnCounter, `access_count` and `traversal_count` are
+> GCounters, and `src/base/merge.rs` is the content-addressed entity/edge
+> join (counters join, heat and timestamps merge, status follows the
+> `Active < Superseded` lattice). Two deliberate deviations from this study:
+> confidence is **replica-local** — never merged from a peer (anti-poisoning)
+> — and inbound `Delta` messages are handled with a hard value clamp but have
+> **no live sender yet**. OR-Set/LWW fields (Stage 2) and anti-entropy
+> (Stage 3) were not built. Type and path names below predate the
+> `Thought`→`Entity` rename and the move from `crates/` to `src/`.
+
 ## 1. Problem
 
 kern federates through hand-rolled TCP gossip (`crates/gossip`). The current wire
@@ -38,6 +49,17 @@ Fields that are federated or federation-relevant, grouped by mutation pattern.
 | `updated_at`         | `Option<SystemTime>`  | Max-merge; set when dedup merges touch the thought.  |
 | `unlinked_count`     | `i32`                 | Orphan counter; increments then resets on relink.    |
 | `valid_until` / `valid_at` | `Option<SystemTime>` | Authoritative window; LWW by producer.         |
+| `valid_from` / `valid_to` / `invalidated_at` | `Option<SystemTime>` | Bi-temporal stamps — **node-local, not federated** (`#[serde(skip)]`). See note below. |
+
+> **Bi-temporal fields are node-local.** `valid_from`/`valid_to`/`invalidated_at`
+> are `#[serde(skip)]`, so they never enter the gossip `EntitySyncPayload` (nor the
+> cold-tier blob) — the primary LMDB store persists them out-of-band via the
+> `StoredKern` temporal side-map. This is deliberate: it keeps the entity's wire
+> layout byte-identical to pre-temporal peers, so mixed-version nodes interoperate
+> with **no protocol version bump**. The essential "this claim was invalidated"
+> signal still propagates, because `superseded_by` and the `Superseded` status ARE
+> gossiped (rows above); only the exact invalidation *timestamps* stay local, and
+> each node re-derives its own bi-temporal view.
 
 ### 2.2 `base::types::Reason`
 

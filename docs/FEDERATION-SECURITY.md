@@ -12,8 +12,10 @@
   gossip network as a **trusted LAN segment only** — equivalent in trust to an
   NFS export or an internal Redis with no auth.
 - The blast radius of a malicious peer is **bounded but non-zero**: it can
-  inject and confidence-inflate entities within a quarantined remote namespace;
-  it cannot overwrite, delete, or downgrade your local thoughts.
+  inject entities (with attacker-chosen metadata) into a quarantined remote
+  namespace and pin their heat high; it cannot overwrite, delete, or downgrade
+  your local thoughts, and it cannot raise the confidence of anything you
+  already hold.
 
 ## What enabling gossip does
 
@@ -24,24 +26,31 @@ With `enabled = true`, a node:
    `<network_id>:<tcp_addr>`, and listens for peers announcing the same
    `network_id`.
 3. Heartbeats peers, broadcasts its root scope and hottest entity bodies, and
-   merges inbound entity bodies from same-`network_id` peers into a phantom
-   `remote-<network_id>-<kern_id>` kern via the content-addressed CRDT.
+   merges inbound entity bodies from peers into a phantom
+   `remote-<sender network_id>-<kern_id>` kern via the content-addressed CRDT
+   (each sender's data stays in its own remote namespace).
 
 ## Trust model: what is and isn't protected
 
 ### Protected / bounded
 
 - **Default-off.** No attack surface unless you opt in.
-- **Network partitioning by `network_id`.** Messages whose `network_id` does
-  not match the local node are rejected. This separates co-located deployments.
+- **Namespacing by `network_id`.** Multicast discovery only auto-pairs nodes
+  announcing the same `network_id`, and inbound data from a different
+  `network_id` never mixes with your own — it lands in that network's separate
+  `remote-*` namespace. This separates co-located deployments.
 - **Local data is never overwritten by peers.** Remote entities land in a
   separate `remote-*` phantom kern. Merge is a content-addressed union (ids are
   `sha256` of content), so a peer cannot mutate or delete an id you already
   hold — only contribute to the remote namespace.
-- **Per-merge id cap.** A single inbound sync can introduce at most a bounded
-  number of new ids into a target kern, limiting flood amplification.
-- **Sybil rate-clipping.** A per-peer rate clipper bounds how much one source
-  address can push.
+- **Remote-kern entity cap.** Each `remote-*` phantom kern holds at most a
+  bounded number of entities (50k); once at cap, new remote ids are dropped,
+  limiting flood amplification.
+- **Confidence is never imported.** The CRDT join deliberately excludes
+  confidence (`conf_alpha`/`conf_beta`) from remote merges — a peer inflating a
+  claim's confidence cannot raise it on your replica.
+- **CRDT delta clamping.** Inbound counter deltas are rejected above a hard
+  ceiling, so a peer cannot pin a counter slot arbitrarily high in one message.
 - **Seen-set loop suppression** with a TTL and a hard count ceiling, so
   replayed/looping messages are dropped and the set can't grow without bound.
 - **Poison-tolerant handlers.** A panic processing one message no longer
@@ -58,10 +67,11 @@ With `enabled = true`, a node:
   peer authored an entity. Signed payloads are a known future effort (see the
   comment at `gossip/handler.rs` `handle_entity_sync`); until then the id cap +
   remote-namespace scoping are the accepted bound.
-- **Confidence is monotone-increasing under merge.** Entity confidence joins by
-  `max`. A malicious peer can publish a claim at maximum confidence, and honest
-  replicas cannot lower it. Do not treat a remote entity's confidence as a
-  trust signal — it reflects the most optimistic source, not consensus.
+- **Remote metadata is attacker-chosen at insert time.** A brand-new remote
+  entity lands with whatever confidence, heat, and status its sender stamped on
+  it, and **heat joins by `max`** on later merges. Do not treat a remote
+  entity's confidence or heat as a trust signal — it reflects its most
+  optimistic (or malicious) source, not consensus.
 - **Content is accepted on cap, not verified.** Entity bodies are accepted up to
   the cap without semantic verification (an intentional, documented decision —
   see the EntitySync content-verification note in the git history).

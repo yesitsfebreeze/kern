@@ -3,6 +3,13 @@
 Ticket: HCXW4XG5
 Status: research / design decision
 
+> **Implementation status (2026-07).** The hybrid decision stands: supersede
+> (`EntityStatus::Superseded` + `Supersedes` edges) remains the default, and
+> alternate phrasings of an existing thought are captured non-destructively as
+> `ReasonKind::Rephrase` edges. The proposed `ReasonKind::Edit` rationale edge
+> and the 3RR-lite producer rate-limit were not built; the trigger conditions
+> below have not fired.
+
 ## Problem
 
 kern thought statements today use a **supersede model**: when a thought is

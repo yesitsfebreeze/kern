@@ -1,17 +1,134 @@
-# Aspiration — Supersede Qdrant in Every Regard
+# Aspiration — State-of-the-Art Agent Memory, Measured
 
-**North star:** every category below reads ✅. kern equals or beats Qdrant on
-its own turf (vector DB) *and* keeps the layers Qdrant will never have (graph
-memory, GNN, self-organization, LLM answers) — all in one self-contained,
-in-process, per-cwd binary with no network hop.
+**North star:** kern equals or beats Zep/Mem0-class agent-memory systems on
+LoCoMo / LongMemEval-style evals while staying local-first, self-contained,
+in-process, per-cwd — no cloud, no query-time LLM required, offline-capable.
+
+The old north star ("Supersede Qdrant in Every Regard", kept as Appendix A)
+aimed kern at a general-purpose vector-DB fight it doesn't need to win and
+can't win solo. kern's actual competitive set is agent memory — Zep/Graphiti,
+Mem0, Letta — and against those kern is architecturally credible today:
+
+| kern property | Zep/Graphiti | Mem0 | Letta |
+|---|---|---|---|
+| Per-project self-maintaining graph (per-cwd) | ❌ hosted/service | ❌ | ❌ |
+| No query-time LLM on the default path (sub-ms graph recall) | ❌ | ❌ | ❌ |
+| Local-first, offline, single binary, no network hop | ❌ | ❌ | partial |
+| Self-forgetting (stigmergy / decay / evict / cycle-safe GC) | ❌ | partial | ❌ |
+| Graph + dense ANN + lexical + GNN re-embedding in one process | partial | ❌ | ❌ |
+
+## Claim standard (the only scoreboard that counts)
+
+- **Measure, don't assume.** No SOTA claim without a run.
+- Published leaderboard gaps **under ~10 points are noise**: 2026 audits found
+  LoCoMo's answer key ~6% wrong and LLM-judge leniency inflating scores. So
+  kern's bar is **multi-seed runs with error bars and a strict judge**, not a
+  single-seed headline beating someone's blog number.
+- Harness exists: `src/bin/locomo_eval.rs` (feature `bench`) — F1 / ROUGE-L /
+  LLM-judge per category, adversarial abstention, context size, query latency,
+  `--json` for CI diffing.
+
+---
+
+## Plan (ordered by leverage)
+
+### Tier 0 — baseline first (unblocks everything)
+- [ ] **Run `locomo_eval` end-to-end** with the default local models
+      (`cargo run --features bench --bin locomo_eval`) and **record the
+      baseline** — per-category scores + latency, multi-seed, committed as the
+      reference JSON. Every later change is judged against this number.
+- [ ] Add the strict-judge / multi-seed loop (seeds + error bars in the report).
+- [x] Profile query latency — `kern profile` (`profile_cmd`): graph is sub-ms;
+      the LLM path (12–21s/call) is the delay villain.
+
+### Tier 1 — retrieval quality (moves the eval score)
+- [ ] Gate HyDE off on strong lexical/cache hits (skip query expansion when the
+      cheap path already wins).
+- [ ] Move the dense seed merge `merge_hits` (raw `0.4c+0.6g` blend) onto RRF —
+      fragile across scales; `fuse::rrf` already fuses the answer-layer lists.
+- [x] Filtered ANN end-to-end — all three seed sources filter during retrieval
+      on `QueryOptions::is_active`; recall@10 A/B validated (`9386de0`).
+- [x] RRF hybrid fusion at the answer layer — `fuse::rrf`, `cfg.rrf_k`,
+      `SweepParam::RrfK`.
+- [x] Workload regression trace + tuning loop — `traces/workload.json` (200
+      docs / 50 queries, deterministic), `just bench-workload`; first sweep
+      found `mmr_lambda` 0.45 over-diversifying (recall@10 0.925 → 1.0 at
+      0.75). Baselines in `docs/kern/bench-retrieval.md`.
+- [ ] Temporal-reasoning and multi-session categories are where LoCoMo-class
+      evals punish memory systems — tune graph expansion + distill against the
+      per-category baseline, not intuition.
+
+### Tier 2 — latency (Stage A carries over)
+- [x] A1 Default sub-ms graph path — `answer:false` never touches the LLM
+      (`answer_llm_args`, regression test `answer_false_passes_no_llm_or_embedder`).
+- [x] A2 Semantic query cache — cosine≥0.97 + version-stamp invalidation.
+- [ ] A3 Cut the LLM call when it IS needed — streaming, capped `num_ctx`,
+      warm-keeping shipped (`llm.rs`); *remaining:* HyDE gating (Tier 1) +
+      speculative decode (qwen3.5:0.8b draft → 4b generator).
+- [x] A4 Lock-scoped answer path — no write guard held across an LLM await.
+
+### Tier 3 — durability as memory-safety (not DB parity)
+A memory that loses what it was told is not a memory. This tier exists because
+agents trust kern with state, not because Qdrant has these boxes checked.
+- [ ] **Snapshots / restore** — reuse `persist::save_all` under a read lock into
+      a timestamped dir + `manifest.json`; restore = validate + load_dir +
+      atomic swap. No second persistence path.
+- [ ] **WAL** — append-only op-log + replay-on-start over the bincode shards
+      for ordered crash recovery.
+- [ ] Memmap tiering + background compaction (`diskann.rs` memmap +
+      `cold.rs`/`heat.rs` tiers exist) so startup and RAM scale sub-linearly.
+
+### Hold the line (don't regress)
+- [ ] DiskANN recall@k + latency edge; int8 recall parity; traversal-time +
+      graph-level filtering; graph/GNN/self-org/cache moat; per-cwd isolation.
+
+## Non-goals — unless kern becomes a database product
+
+Demoted from the old roadmap. None of these move an agent-memory eval score;
+all of them are table stakes only in a multi-tenant hosted-DB business kern is
+not in. Revisit only if that business materializes.
+
+- Distributed sharding (Raft-coordinated placement)
+- Replication + write-consistency factor
+- API key / JWT-RBAC / TLS / audit logging
+- Public REST + gRPC APIs + multi-language SDKs
+- Multitenancy (tenant payload index)
+- GPU-accelerated index building
+- SPLADE sparse vectors / ColBERT multi-vector / product quantization —
+  re-promote any of these individually **iff** a Tier-0 baseline shows a
+  retrieval-quality gap they would close.
+
+## Repo laws (unchanged by the re-aim)
+
+1. **Append-only bincode** — persisted enums/structs grow by appending only;
+   guard schema touches with a round-trip test.
+2. **No pluggable/fallback backend** — kern is all-internal, in-process,
+   self-contained. Mounting someone else's store forfeits the structural
+   advantage (no network hop, GNN vectors coupled in-memory).
+3. **One dispatch core** — every surface (MCP, HTTP, any future one) goes
+   through the single `tools::dispatch`; never a second copy.
+
+---
+
+# Appendix A — Historical framing: "Supersede Qdrant in Every Regard"
+*(vector-DB parity reference, superseded 2026-07-16 by the agent-memory north
+star above; preserved for history — the ✅ rows are still real capabilities to
+hold, the ❌ rows are now Non-goals or demoted tiers)*
+
+**Old north star:** every category below reads ✅. kern equals or beats Qdrant
+on its own turf (vector DB) *and* keeps the layers Qdrant will never have
+(graph memory, GNN, self-organization, LLM answers) — all in one
+self-contained, in-process, per-cwd binary with no network hop.
 
 Comparison baseline: real `qdrant/qdrant` repo + docs, v1.13+ feature line.
 Test surface: **562 test fns defined** across 114 files (workspace-wide,
 `#[test]`/`#[tokio::test]`). The earlier "441 passed / 0 failed (6 suites, green)"
 headline predates recent additions — re-run `cargo test` to refresh the pass count
 before quoting it (measure, don't assume).
-
----
+*[Stale — 2026-07-16]* These counts are historical snapshots. The Criterion
+`benches/` dir and its `[[bench]]` targets were removed in `1465a5e`; the
+`retrieval_bench` binary (`src/bin/retrieval_bench.rs`) remains the live bench
+entry point. Re-count before quoting.
 
 ## Where kern already leads (hold the line) — 8/27 ✅
 
@@ -26,205 +143,75 @@ before quoting it (measure, don't assume).
 | LLM answer synthesis (HyDE / rerank / answer) | ✅ | Cut latency from 12–21s → interactive. |
 | Semantic query cache | ✅ | Keep cosine≥0.97 + version-stamp invalidation. |
 
-## Where Qdrant still wins (the climb) — 18/27 ❌ + 1 🟡 → target ✅
+## Where Qdrant still wins (the old climb) — 18/27 ❌ + 1 🟡
 
 ### Quantization depth
-| Category | Now | Target |
+| Category | Now | Old target |
 |---|---|---|
 | Product quantization (up to 64×) | ❌ | ✅ ship PQ |
 | Binary quant / TurboQuant (1-bit) | ❌ | ✅ ship binary + rescoring |
 
 ### Filtering & payload
-| Category | Now | Target |
+| Category | Now | Old target |
 |---|---|---|
 | Payload / typed field indexing (keyword/int/float/bool/geo/datetime/text/tenant) | ❌ | ✅ |
 | Full-text / geo / range / nested filters + cardinality planning | ❌ | ✅ |
 
 ### Vector models
-| Category | Now | Target |
+| Category | Now | Old target |
 |---|---|---|
 | Sparse vectors (SPLADE) | ❌ | ✅ |
 | Named / multi-vector per point (ColBERT late-interaction) | ❌ | ✅ |
 | Hybrid query / RRF / structured prefetch | 🟡 RRF + multi-list hybrid live (`fuse::rrf`, `cfg.rrf_k` in `answer.rs`); structured-prefetch API ❌ | ✅ |
 | Recommend / Discover / Context / distance-matrix APIs | ❌ | ✅ |
 
-### Distribution & durability (the production-DB tier — biggest gap)
-| Category | Now | Target |
+### Distribution & durability
+| Category | Now | Old target |
 |---|---|---|
-| Distributed sharding (Raft-coordinated) | ❌ (gossip only) | ✅ |
-| Replication + write-consistency factor | ❌ | ✅ |
-| Snapshots / backup / restore | ❌ | ✅ |
-| WAL / ordered crash recovery + per-point versioning | ❌ | ✅ |
-| On-disk / memmap tiering + segment optimizer | ❌ | ✅ |
-| GPU-accelerated index building | ❌ (GPU = LLM only) | ✅ |
+| Distributed sharding (Raft-coordinated) | ❌ (gossip only) | ✅ — now a Non-goal |
+| Replication + write-consistency factor | ❌ | ✅ — now a Non-goal |
+| Snapshots / backup / restore | ❌ | ✅ — kept, as Tier 3 memory-safety |
+| WAL / ordered crash recovery + per-point versioning | ❌ | ✅ — kept, as Tier 3 memory-safety |
+| On-disk / memmap tiering + segment optimizer | ❌ | ✅ — kept, as Tier 3 |
+| GPU-accelerated index building | ❌ (GPU = LLM only) | ✅ — now a Non-goal |
 
 ### Interface, security, ops
-| Category | Now | Target |
+| Category | Now | Old target |
 |---|---|---|
-| REST + gRPC API + multi-language SDKs | ❌ (MCP + `trnsprt::http` axum serve + `kern_rpc`; no *public* REST/gRPC/SDK) | ✅ |
-| API key / JWT-RBAC / TLS / audit logging | ❌ | ✅ |
-| Multitenancy (tenant payload index) | ❌ | ✅ |
+| REST + gRPC API + multi-language SDKs | ❌ (MCP + `trnsprt::http` axum serve + `kern_rpc`; no *public* REST/gRPC/SDK) | ✅ — now a Non-goal |
+| API key / JWT-RBAC / TLS / audit logging | ❌ | ✅ — now a Non-goal |
+| Multitenancy (tenant payload index) | ❌ | ✅ — now a Non-goal |
 | Production-scale maturity / proven at scale | ❌ | ✅ |
 | Head-to-head benchmark harness vs Qdrant | ❌ | ✅ build first — measure, don't assume |
 
----
+### Old scoreboard
+- **Then: 8 ✅ / 1 🟡 / 18 ❌** (vs real Qdrant v1.13+).
+- **Old aspiration: 27 ✅ / 0 ❌** — retired; superseded by the eval-driven
+  plan above.
 
-## Scoreboard
-
-- **Now: 8 ✅ / 1 🟡 / 18 ❌** (vs real Qdrant v1.13+).
-- **Aspiration: 27 ✅ / 0 ❌.**
-
-## Strategic constraint (decided)
-
+### Strategic constraint (still decided, still true)
 Mounting Qdrant as a backend yields a *superset*, **not** supersession — it
 forfeits kern's only structural advantage (in-process, no network hop, GNN
 vectors coupled in-memory) and makes kern strictly slower than raw Qdrant on
-vector ops. "Supersede in every regard" therefore requires building the missing
-DB tier **inside** kern. Repo law forbids a pluggable/fallback backend, so the
-path is all-internal.
+vector ops. Repo law forbids a pluggable/fallback backend, so anything kern
+builds is all-internal. This constraint survives the re-aim; only the target
+list changed.
 
-**Next concrete move:** build the benchmark harness (measure the real recall@k +
-latency gap), then close the production-DB tier — sharding, replication, WAL,
-snapshots — since that is the largest, most-blocking cluster of ❌.
-
----
-
-## TODO — path to 27/27 ✅ (ordered by leverage)
-
-### Tier 0 — measure first (unblocks everything)
-- [ ] **Benchmark harness vs Qdrant** — recall@k + p50/p95/p99 latency + RPS + RAM on a shared dataset (start from `retrieval_bench`). Measure, don't assume.
-- [x] Wire `search_all_filtered` into the live query path — DONE for all three seed
-  sources: dense (`5dc6958`), importance (`47ca318`), lexical (`257a10d`). Each is
-  gated on `QueryOptions::is_active` (unfiltered queries byte-identical) and shares
-  the one `score::matches_filter` predicate. `apply_query_options` stays as the final
-  backstop. End-to-end recall@10 A/B confirms the fewer-than-k recovery (`9386de0`).
-- [x] Profile query latency — `kern profile` (`profile_cmd`) breaks the timeline into graph (sub-ms) vs LLM hyde/answer/distill (~12–16s each). Confirmed: the LLM path is the delay, not the index.
-
-### Tier 1 — production-DB tier (largest ❌ cluster)
-- [ ] **WAL** — ordered crash recovery + per-point versioning over bincode shards.
-- [ ] **Snapshots** — backup / restore (consistent point-in-time of shards + graph).
-- [ ] **Replication** — write-consistency factor on top of gossip.
-- [ ] **Distributed sharding** — Raft-coordinated placement (gossip → consensus).
-- [ ] **On-disk / memmap tiering** + segment optimizer (background compaction).
-
-### Tier 2 — interface, security, ops
-- [ ] **REST + gRPC API** + multi-language SDKs — no *public* REST/gRPC/SDK yet (`trnsprt::http` axum serve + `kern_rpc` already exist; see D1). Build over the shared `tools::dispatch`.
-- [ ] **Auth**: API key / JWT-RBAC / TLS / audit logging.
-- [ ] **Multitenancy** via tenant payload index.
-
-### Tier 3 — vector-model & quantization depth
-- [ ] **Product quantization** (up to 64×).
-- [ ] **Binary quant / TurboQuant** (1-bit) + rescoring.
-- [ ] **Sparse vectors** (SPLADE).
-- [ ] **Named / multi-vector per point** (ColBERT late-interaction).
-- [x] **RRF / multi-list hybrid fusion** — `fuse::rrf` live in `answer.rs` (`cfg.rrf_k`, `SweepParam::RrfK`). *Remaining:* **structured prefetch** API + RRF for the dense seed merge (`merge_hits` still `0.4c+0.6g`).
-- [ ] **Recommend / Discover / Context / distance-matrix** APIs.
-
-### Tier 4 — filtering & payload
-- [ ] **Typed payload field indexing** (keyword/int/float/bool/geo/datetime/text/tenant).
-- [ ] **Full-text / geo / range / nested filters** + cardinality-based query planning.
-
-### Tier 5 — index build & proof
-- [ ] **GPU-accelerated index building** (today GPU = LLM only).
-- [ ] **Production-scale maturity** — soak tests, large-corpus validation, the proof.
-- [ ] Cut LLM answer path 12–21s → interactive — streaming + `num_ctx` cap + `keep_alive` warm-keeping shipped (`llm.rs`); HyDE-gating on strong lexical hits + speculative-decode remain.
-
-### Hold the line (8 ✅ — don't regress)
-- [ ] Keep DiskANN recall@k + latency edge; maintain int8 recall parity; keep
-      traversal-time + graph-level filtering; widen graph/GNN/self-org/cache moat.
-
----
-
-## Step-by-step → robust, fluent memory engine with almost no delay
-
-Grounded in a codebase feasibility scan (what already exists, so each step is
-*extension*, not greenfield). **The delay villain is the LLM path (12–21s/call),
-not the graph (sub-ms).** So latency work front-loads; parity work follows.
-
-### Stage A — Near-zero perceived delay (latency first)
-A1. **Default to the sub-ms graph path (DONE).** `answer:false` returns ranked
-    graph hits with no LLM call — `answer_llm_args` (`tools_query.rs`) gates
-    HyDE/rerank/synthesis off unless `answer:true` (regression test
-    `answer_false_passes_no_llm_or_embedder`). Profiler confirms the graph engine
-    is sub-ms — most recalls never touch the LLM.
-A2. **Semantic query cache (DONE)** — cosine≥0.97 + version-stamp invalidation
-    skips the ~33s LLM path on repeat/similar recalls. Widen hit rate; pre-warm.
-A3. **Cut the LLM call when it IS needed (PARTIAL).** Shipped in `llm.rs`: token
-    streaming (`complete_stream`, `params.stream`), capped `num_ctx`
-    (`ANSWER/EMBED/REASON_NUM_CTX`), and Ollama warm-keeping (`*_KEEP_ALIVE` +
-    ~4-min warm ping); reason runs CPU-only (`num_gpu:0`). *Remaining:* gate HyDE
-    (skip query expansion on a strong lexical/cache hit) and speculative-decode
-    (qwen3.5:0.8b draft → 4b generator).
-A4. **Lock-scoped answer path (DONE)** — never hold a write guard across the LLM
-    await; keep read/write guards minimal so concurrent recalls don't serialize.
-
-### Stage B — Faster + lighter index (the quick-win bundle)
-B1. **Binary quantization** — append `Binary` to `QuantizationMode` + `b:Vec<u8>`
-    to `QuantizedVec` (bincode-APPEND only). 1-bit hamming for candidate gen, then
-    rescore with the retained f64 `HnswNode.vec` (kept even when quantized). 64×
-    smaller, faster traversal. Validate recall@k like int8.
-B2. **RRF hybrid fusion (DONE at the answer layer)** — `fuse::rrf` (Σ wᵢ/(k+rank),
-    `cfg.rrf_k`) already fuses the content/reason/edge/lexical lists live in
-    `answer.rs`, with a `SweepParam::RrfK` bench knob. *Remaining:* the dense seed
-    merge `merge_hits` still blends raw scores (`0.4c+0.6g`) — fragile across
-    scales; move it onto RRF too (+sparse lists later).
-B3. **Filtered ANN end-to-end (DONE for the seed sources)** — `seed.rs` now filters
-    during retrieval whenever `QueryOptions::is_active`: the dense path via
-    `search_all_filtered`, `seed_important` via a pre-cosine `matches_filter` gate,
-    and `seed_lexical` via `LexicalIndex::search_filtered` (filter before the BM25
-    truncate). Graph expansion runs on the already-filtered seed; `apply_query_options`
-    remains the final backstop. This kills post-filtering's fewer-than-k loss on
-    sparse matches — validated by an end-to-end recall@10 A/B (`9386de0`).
-
-### Stage C — Robustness / durability (don't lose data, recover fast)
-C1. **Snapshots / restore** — reuse `persist::save_all` under a read lock into a
-    timestamped dir + `manifest.json`; `restore` = validate + load_dir + atomic
-    swap. No second persistence path.
-C2. **WAL** — append-only op-log + replay-on-start over the bincode shards for
-    ordered crash recovery + per-point versioning.
-C3. **Memmap tiering + segment optimizer** — `diskann.rs` memmap + `cold.rs`/
-    `heat.rs` tiers exist; add lazy cold→hot promotion + background compaction so
-    startup and RAM scale sub-linearly with corpus size.
-
-### Stage D — Surface & access (reach parity on interface)
-D1. **REST API (axum already serving)** — `trnsprt::http` runs an axum server
-    today (MCP-over-HTTP + `kern_rpc` on the serve addr). The task is a
-    first-class REST surface over the full `tools::dispatch`. ⚠️ duplication
-    watch: REST + MCP MUST share one `tools::dispatch` core (don't add a second
-    copy).
-D2. **Auth** — API key / JWT-RBAC / TLS on the REST surface.
-D3. **gRPC + SDKs**, then **multitenancy** (per-tenant graph mux / tenant filter).
-
-### Stage E — The heavy climb (largest moat, biggest lift)
-E1. **Typed payload field indexing** (keyword/int/float/bool/geo/datetime) +
-    range/geo/nested filter predicates on the during-traversal `keep` fn.
-E2. **Sparse vectors (SPLADE)** + **multi-vector/ColBERT** (MaxSim) +
-    **product quantization** (codebook + ADC).
-E3. **Distributed sharding (Raft)** + **replication/consistency factor** over the
-    existing gossip layer — the one true architectural lift.
-E4. **GPU index build** — gated by the 8 GB GPU already owned by Ollama; lowest
-    feasibility, schedule last.
-
-### Always-on gate
-- **Benchmark harness first (Tier 0):** `retrieval_bench` → recall@k + p50/p95/p99
-  + RPS + RAM vs real Qdrant on a shared dataset. Measure every stage; never claim
-  "no delay" or "parity" without the number.
-
-**Repo-law flags carried by this roadmap:** (1) B1 touches bincode-positional
+**Repo-law flags carried by the old roadmap (still binding where the work
+survives):** (1) binary-quant work would touch bincode-positional
 `QuantizationMode`/`QuantizedVec` — append-only, guard with a round-trip test;
-(2) D1 REST must not duplicate MCP dispatch (warn-on-duplicate); (3) all stages
-in-process/self-contained — no pluggable backend (no-compat law).
-
----
+(2) any REST surface must not duplicate MCP dispatch (one `tools::dispatch`
+core); (3) all stages in-process/self-contained — no pluggable backend
+(no-compat law).
 
 ## Verification provenance
 
-Status markers below were checked against the **working tree atop `9683c5c`**
+Status markers above were checked against the **working tree atop `9683c5c`**
 (2026-06-10; ~76 modified tracked files uncommitted). Re-stamp when re-verifying.
 
 | Claim | Verified against (symbol) |
 |---|---|
-| RRF / hybrid fusion (🟡 / B2) | `fuse::rrf` (`retrieval/fuse.rs`), live at `answer.rs`; `cfg.rrf_k`, `SweepParam::RrfK` |
+| RRF / hybrid fusion (🟡) | `fuse::rrf` (`retrieval/fuse.rs`), live at `answer.rs`; `cfg.rrf_k`, `SweepParam::RrfK` |
 | A1 `answer:false` sub-ms path (DONE) | `answer_llm_args` + test `answer_false_passes_no_llm_or_embedder` (`tools_query.rs`) |
 | A3 latency bundle (PARTIAL) | `complete_stream`/`params.stream`, `*_NUM_CTX`, `*_KEEP_ALIVE`, `num_gpu:0` (`llm.rs`) |
 | Tier-0 profiling (DONE) | `profile_cmd` / `kern profile` |
@@ -232,8 +219,8 @@ Status markers below were checked against the **working tree atop `9683c5c`**
 | Snapshots / WAL / restore = ❌ | no backup/restore/WAL fns in `persist.rs` |
 | Recommend/Discover/distance-matrix = ❌ | no such fns repo-wide |
 | REST surface qualifier | `trnsprt::http` axum serve + `kern_rpc`; no public REST/gRPC/SDK |
-| Test surface | **799 lib + 1 integration tests PASS** (verified `cargo test` 2026-06-12 atop `84ba856`); ~962 `#[test]`/`#[tokio::test]` attrs across 170 src files |
+| Test surface | **799 lib + 1 integration tests PASS** (verified `cargo test` 2026-06-12 atop `84ba856`); ~962 `#[test]`/`#[tokio::test]` attrs across 170 src files. *[Stale — 2026-07-16: predates the `benches/` removal in `1465a5e` and later changes; re-run before quoting.]* |
 
 *Unverified (needs a run, not a grep):* actual recall@k / p50-p99 latency vs
-Qdrant (the Tier-0 harness, still ❌). *(The live `cargo test` pass count is now
-verified — see the Test-surface row above.)*
+Qdrant (the old Tier-0 harness, never built — and no longer a goal). *(The live
+`cargo test` pass count row above is a verified historical snapshot.)*

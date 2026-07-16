@@ -2,6 +2,12 @@
 
 Ticket: `246BPAA1` — "Study federated learning parallels vs kern federation"
 
+> **Implementation status (2026-07).** Comparison study; the decisions stand.
+> Of the "steal" list in §8, clipping shipped as the inbound CRDT delta clamp
+> (`GOSSIP_CRDT_DELTA_MAX`); per-peer ingest budgets, trimmed-mean
+> materialisation, and the provenance ledger extension were not built. Code
+> paths below reference the pre-1.0 `crates/` layout.
+
 ## 1. Problem framing
 
 kern federates **data** (thoughts, reasons, pulses, sphere advertisements)

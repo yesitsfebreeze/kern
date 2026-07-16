@@ -1,5 +1,68 @@
 # Benchmark Results
 
+> **Stale notice (2026-07-16):** The Criterion benchmark suite (`benches/bench.rs`) was
+> removed in commit 1465a5e. The numbers below are historical and are **not reproducible**
+> from the current tree. The live benchmark harnesses are
+> `cargo run --features bench --bin retrieval_bench` and
+> `cargo run --features bench --bin locomo_eval`.
+
+## Retrieval hot-path pass (2026-07-16, working tree)
+
+Same trace/protocol as the baseline below (`just bench-workload`, 8 threads,
+median of 3). Three changes, all quality-neutral (recall/NDCG bit-identical):
+
+1. **Epoch-cached PageRank adjacency** — the dense node index + out-edge
+   adjacency (String clones per entity/edge) was rebuilt per query; now built
+   once per `mutation_epoch` on `GraphGnn::entity_adjacency`.
+2. **By-ref neighbour scoring in expand** — `neighbor_step` cloned the full
+   `Entity` (512-dim vector included) per evaluated edge just to score it.
+3. **Deferred result materialisation** — `expand`/`merge`/boost/filter/MMR now
+   run on `ScoredRef` (borrowed entities); only the ≤`max_deliver_results`
+   survivors are cloned (`retrieval/expand.rs` `Scored` trait).
+
+| Metric | before (working tree) | after | Δ |
+|---|---|---|---|
+| recall@10 | 1.0000 | 1.0000 | 0 |
+| NDCG@10 | 0.9987 | 0.9987 | 0 |
+| latency mean (ms) | 0.127 | 0.103 | −19% |
+| latency p50 (ms) | 0.131 | 0.103 | −21% |
+| latency p95 (ms) | 0.183 | 0.152 | −17% |
+| throughput (qps) | 32 897 | 45 994 | +40% |
+
+Stage profile (per-query means): pagerank 29µs→11µs, merge 29µs→7µs, expand
+20µs→16µs (+5µs one-time materialise). Remaining top stages: dense seed ANN
+(~40µs, two HNSW searches — genuine distance work) and MMR (~20µs).
+
+## Workload regression baseline (2026-07-16, reproducible)
+
+Trace: `traces/workload.json` (`kern-ranking-fusion-v1`, 200 docs × dim 512, 50
+queries — exact-lexical, ranking-stress distractors, near-dup clusters,
+multi-relevant, `filter_kind:"fact"`, hard-negative polysemy; 42 hybrid /
+8 content). Generated, not committed: `just bench-workload` regenerates it via
+`just trace` (`scripts/gen_trace.py`, seed 42, byte-identical every run). Deterministic stub embedder — no
+Ollama; quality numbers are bit-stable across runs, latency/throughput are
+machine-dependent (below: 8 threads, median of 3).
+
+| Metric | HEAD `85eca25` | Working tree (f64→f32 vectors) | + `mmr_lambda` 0.45→0.75 |
+|---|---|---|---|
+| recall@10 | 0.9250 | 0.9250 | **1.0000** |
+| NDCG@10 | 0.9278 | 0.9278 | **0.9987** |
+| latency p50 (ms) | 0.333 | 0.251 | 0.161 |
+| latency p95 (ms) | 0.449 | 0.398 | 0.252 |
+| latency p99 (ms) | 0.493 | 0.470 | 0.337 |
+| throughput (qps) | 16 056 | 21 114 | 33 159 |
+| vector memory | f64 800 KiB / int8 100 KiB | f32 400 KiB / int8 100 KiB | (same) |
+
+Root cause of the original misses (hybrid multi-expected-id queries q19–q28,
+worst recall 0.25): `mmr_lambda: 0.45` weighted diversity at 0.55, so MMR
+suppressed legitimate near-dup cluster hits below rank 10. The λ sweep
+(`--sweep mmr_lambda --values 0.3..1.0`) showed recall@10 hitting 1.0 from
+λ=0.65 up; 0.75 chosen as the literature-standard relevance-dominant point —
+ingest-time dedup (cosine 0.95) already removes true duplicates, so
+retrieval-time MMR need not sacrifice recall. `rrf_k` sweep (10–80): no
+effect on this trace. `seed_k=10`'s recall 1.0 is an artifact (small result
+set skips MMR entirely) — not a lever. 646 lib tests pass after the change.
+
 Task: b173fee2 — Benchmark retrieval pipeline vs Go baseline
 Date: 2026-04-22
 Profile: `bench` (release, LTO=fat, codegen-units=1)

@@ -5,6 +5,14 @@ Scope: whether thoughts and reasons should carry a `(belief, uncertainty)` tuple
 instead of today's scalar `confidence` / `score`, and how that tuple updates as
 new observers arrive.
 
+> **Implementation status (2026-07).** Adopted: entities carry Beta-distributed
+> confidence (`conf_alpha`/`conf_beta` with `observe_support` /
+> `observe_contradict` on `Entity` in `src/base/types.rs`), seeded from the
+> ingest `conf` exactly as §3 proposes. Under federation the tuple is
+> deliberately **replica-local** — never merged from peers. The explicit
+> `ReasonKind::Contradicts` edge and observer-reputation weighting were not
+> built. Code paths below reference the pre-1.0 `crates/` layout.
+
 ## Thesis
 
 In kern's intended use — a shared memory substrate for many agents, possibly

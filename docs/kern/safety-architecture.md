@@ -2,6 +2,15 @@
 
 Working notes 2026-04-27, reconciled with `thesis.txt` and a code survey of `src/bin/kern/`.
 
+> **Historical snapshot.** This is a point-in-time survey; the code has moved
+> since (paths are now `src/…`, `Thought` became `Entity`, and
+> `gossip/sybil.rs`'s `RateClipper` was later removed). Two gaps it names have
+> since closed differently: remote confidence is no longer mergeable at all
+> (replica-local under CRDT join), and remote entities are quarantined in
+> `remote-*` phantom kerns with a hard entity cap. For the current federation
+> trust model read `docs/FEDERATION-SECURITY.md`. The staging discipline and
+> threat inventory below remain the rationale of record.
+
 kern is the graph-native memory substrate described in the thesis (Sections 3.1, 5.1, 8.1). It stores thoughts, edges, embeddings, descriptors; it persists; it gossips; it tick-propagates heat; it serves retrieval over a wire protocol. The thesis declares Stage Zero (substrate) complete. This document maps the **safety properties of that substrate as it exists today**, names the gaps, and stages remediation in line with thesis discipline.
 
 The thesis (Section 7, "What this is not (yet)") explicitly defers adversarial safety until Stage 4 ("Open Questions") on the principle that safety design before observable behavior is speculation. This document respects that: every recommendation is tagged.

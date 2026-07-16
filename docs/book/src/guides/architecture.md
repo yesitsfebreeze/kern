@@ -49,7 +49,7 @@ graph TB
         EMB["embed_chunks<br/>batch → retry [150,300,600]ms"]
         PCH["place_chunks"]
         BUILD["build_chunk_entity<br/>id=hash(text), conf=Beta(1+c,2-c)"]
-        GQ["generate_questions → ≤3 Question edges"]
+        GQ["defer SeedQuestions task<br/>(reason-LLM never blocks commit)"]
     end
     CS -->|extract_claims→distill| Q
     FWs -->|IngestRecord| Q
@@ -58,6 +58,7 @@ graph TB
     DDOC -->|no| ACCEPT
     PDOC --> EMB --> PCH --> BUILD --> ACCEPT
     PCH --> GQ
+    GQ -.-> QUE
 
     %% ===== accept / routing =====
     subgraph ACC["accept::accept"]
@@ -69,7 +70,6 @@ graph TB
     ACCEPT([accept]) --> RT
     UPD --> SAVE
     RSN --> SAVE["save_fn() → persist"]
-    GQ --> RSN
 
     %% ===== core graph =====
     subgraph CORE["Core — Arc&lt;RwLock&lt;GraphGnn&gt;&gt;"]
@@ -95,17 +95,18 @@ graph TB
     subgraph RETR["Retrieval (answer::query)"]
         HYDE["hyde::expand_query (blend w=0.5)"]
         SEED["seed::seed (Content|Reason|Hybrid)"]
-        FUSE["RRF fuse 1/(60+rank) gw=0.5"]
-        PR["pagerank PPR d=0.85 25it"]
+        PR["pagerank PPR d=0.85 25it → extra seed list"]
+        FUSE["RRF fuse 1/(60+rank) over vector+lexical+PR lists"]
         EXP["expand:: beam search → path_chains<br/>prune &lt; best·decay 0.25"]
         MRG["merge:: log-sum-exp corroboration"]
         BST["score: ·conf + QBST + fact_boost 0.3"]
         FLT["filter_delivery (drop Superseded, cap 25)"]
         MMR["mmr λ=0.45 + dedup_by_section"]
-        RRK["rerank::llm_rerank top-30"]
+        RRK["rerank::llm_rerank top-30 (optional)"]
         CMA["commit_access: access++ + deposit heat"]
         BAP["build_answer_prompt (chains+facts+Q)"]
-        HYDE --> SEED --> FUSE --> PR --> EXP --> MRG --> BST --> FLT --> MMR --> RRK --> CMA --> BAP
+        HYDE --> SEED --> FUSE --> EXP --> MRG --> BST --> FLT --> MMR --> RRK --> CMA --> BAP
+        SEED --> PR --> FUSE
     end
     RPC --> HYDE
     SEED -->|search 0.4·entity+0.6·gnn| EIDX
@@ -123,11 +124,13 @@ graph TB
         NM["do_name (LLM anchor name → radii; promote generic cluster → root)"]
         EN["do_enrich (LLM edge label → reason_idx)"]
         RQ["do_resolve (answer ≥0.80 else broadcast up)"]
-        ST["StigmergyGc: heat&lt;0.01 AND age&gt;7d AND not Fact/Doc"]
+        ST["StigmergyGc: heat&lt;0.01 AND stale&gt;7d<br/>(clock: accessed_at, else created_at) AND not Fact/Doc"]
         RB["do_reembed (dirty → vector/gnn_vector)"]
+        SQ["do_seed_questions (LLM → ≤3 Question edges)"]
+        DC["do_disk_consolidate (fold delta → DiskANN snapshot)"]
         PS["do_persist → save_kern"]
         PULSE --> QUE
-        QUE --> CL & NM & EN & RQ & ST & RB & PS
+        QUE --> CL & NM & EN & RQ & ST & RB & SQ & DC & PS
         CL --> NM & EN
     end
     subgraph GNN["GnnPropagate"]
@@ -146,38 +149,37 @@ graph TB
     ST --> COLD
 
     %% ===== persistence / tiering =====
-    subgraph STORE["Persistence (.kern) + tiering"]
-        KF["&lt;id&gt;.kern bincode + root.kern"]
+    subgraph STORE["Persistence (.kern LMDB env) + tiering"]
+        KF["Store: data.mdb + lock.mdb<br/>named DBs kern|cold|meta<br/>zstd(bincode) values, int8 vectors<br/>single-writer + epoch-guarded flush"]
         UNL["QUARANTINE: unloaded set<br/>auto-reload on get(); root never evicted"]
-        COLD["COLD: cold/cold.jsonl<br/>latest-wins, compact@256KiB, cap 50k"]
-        QM["_quant.meta (None|Int8)"]
+        COLD["COLD db: latest-wins keyed, cap 50k newest"]
         DG["digest.md (SessionStart)"]
-        KF --- QM
         KF -->|LRU enforce_kern_cap| UNL
         UNL -->|load_kern| KF
+        KF --- COLD
     end
     SAVE --> KF
     PS --> KF
     GRAPH <--> KF
     GRAPH -->|gc_empty_kerns leaf-first| KF
-    COLD -->|cold::search on demand| GRAPH
+    COLD -->|cold_search on demand| GRAPH
     TICK --> DG
 
     %% ===== gossip + crdt (optional) =====
     subgraph GOSSIP["Gossip forest (off by default)"]
-        ND["gossip::Node — peers≤50, SeenSet TTL60s, RateClipper"]
-        DISC["discovery UDP multicast 239.77.75.68 /10s"]
+        ND["gossip::Node — peers≤50, SeenSet TTL60s cap10k"]
+        DISC["discovery UDP multicast 239.77.75.68 /10s<br/>pairs only same network_id"]
         ANN["announce Sphere /30s + entity_sync top32 /30s"]
         FAN["broadcast → 3 random peers"]
-        HND["handler: Sphere|Question|Pulse|Delta|EntitySync"]
-        CRDT["GCounter per-slot max (commutative, idempotent)"]
+        HND["handler: Sphere|EntitySync live;<br/>Question|Pulse|Delta handled, no live senders; Fetch no-op"]
+        CRDT["GCounter per-slot max (commutative, idempotent)<br/>delta values clamped ≤1e6"]
         DISC --> ND
         ANN --> FAN --> ND
         ND --> HND --> CRDT
     end
     PEER <-->|TCP| FAN
     PEER -->|inbound| HND
-    HND -->|phantom remote-net-kern, persist| GRAPH
+    HND -->|merge → phantom remote-kern, ANN-index, persist| GRAPH
     HND -->|handle_pulse| PULSE
     CRDT -->|merge access/traversal counts| GRAPH
 
@@ -192,14 +194,14 @@ graph TB
     SPLIT --> REASON_M
     NM --> REASON_M
     EN --> REASON_M
-    GQ --> REASON_M
+    SQ --> REASON_M
     RRK --> REASON_M
     SEED -.embed query.-> EMBED_M
     WARM --> EMBED_M
     WARM --> ANS_M
 
     %% ===== config =====
-    CFG["Config (.kern): [embed][reason][answer][serve]<br/>[retrieval][ingest][gossip][tick][gnn][graph][watcher][capture]"]
+    CFG["Config (.kern): [embed][reason][answer][serve]<br/>[retrieval][ingest][gossip][tick][heat][gnn][graph][watcher][capture]"]
     CFG -.tunes.-> RETR
     CFG -.tunes.-> INGEST
     CFG -.tunes.-> TICK
@@ -212,9 +214,12 @@ graph TB
 - **Content-addressed IDs** — `id = sha256(text)`; equal ids ⇒ identical content. Dedup updates metadata only, never text/vector → CRDT-safe.
 - **Confidence replica-local** — Beta(α,β) never merged from remote (anti-poisoning); only access/traversal GCounters federate.
 - **Reason hosting** — edge lives in its `from` kern; `to_kern_id`/`to_net_id` stamp cross-kern / cross-network targets.
-- **Hybrid score** — `0.4·entity_idx + 0.6·gnn_entity_idx` wherever search runs.
-- **Heat → GC** — exp decay (~36h half-life); reaped when `heat<0.01 AND age>7d AND kind∉{Fact,Document}`.
+- **Hybrid score** — `0.4·entity_idx + 0.6·gnn_entity_idx` wherever search runs; the GNN is a background re-embedder feeding this seed-time blend, never a query-time reranker (the rerank stage is the optional LLM reranker).
+- **Heat → GC** — access deposits, pulse re-deposits on root-reachable entities; decay is lazy, half-life based (default 7d, `[heat] half_life_secs`). Reaped when `heat<0.01 AND stale>7d AND kind∉{Fact,Document}`, where the staleness clock is `accessed_at` (written back on daemon queries) falling back to `created_at`.
+- **Single-writer store** — one LMDB env per data dir; readers never block, writers serialize, and `flush_guarded` epoch-checks so a stale in-memory snapshot cannot overwrite newer on-disk state.
 - **Watchdog** — OS thread force-exits on 30s async stall so a peer seizes `:8080`.
 
-Notes: `diskann.rs` is built+tested but **not wired** into live search (hnsw is).
-`[graph] max_kerns` defaults to `usize::MAX` (cap off) — empty-kern GC keeps it from bloating.
+Notes: `diskann.rs` backs the optional `VectorBackend::Disk` spill for the entity
+index (`[graph] disk_threshold`, **off by default** — resident HNSW is the default
+path). `[graph] max_kerns` defaults to `usize::MAX` (cap off) — empty-kern GC
+keeps it from bloating.

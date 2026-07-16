@@ -6,6 +6,16 @@
 centrality (personalised PageRank), not vanilla global PageRank. Integrate as an
 optional additive prior in retrieval scoring, never as the sole rank signal.
 
+> **Implementation status (2026-07).** What shipped is the RRF variant of §6.2
+> at the *thought* level: retrieval runs a personalised PageRank (`d = 0.85`,
+> 25 iterations, teleport at the query's dense+lexical seeds —
+> `src/retrieval/pagerank.rs`) and fuses its top-k as an extra list in the RRF
+> seed fusion. The DB-level `AuthorityTable`, TrustRank seeding, and the Sybil
+> defences of §5 were not built (the gossip-side rate clipper that once
+> existed was later removed); see `docs/FEDERATION-SECURITY.md` for the
+> current trust model. Code paths below reference the pre-1.0 `crates/`
+> layout.
+
 ---
 
 ## 1. Problem

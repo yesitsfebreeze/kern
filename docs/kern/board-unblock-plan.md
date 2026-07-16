@@ -1,5 +1,9 @@
 # Board unblock plan — what each open ticket needs to finish
 
+> **Historical planning document (2026-06-05).** Kept as a record of the board
+> state at that date; card numbers, blockers, and code references reflect that
+> snapshot and are not updated.
+
 Research output for the `/goal` board loop (2026-06-05). Every card left in
 (RE)EVALUATE is blocked on one of four things: **(A)** the eval harness (which
 itself needs an external dataset + local models + a code seam), **(B)** a design

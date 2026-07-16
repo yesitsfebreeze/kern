@@ -113,7 +113,7 @@ maintenance, so the merge/consolidate job slots in next to stigmergy GC.
   flush semantics differ; the daemon is per-cwd and single-writer, which helps.
 - **Incremental Vamana quality.** Naive incremental inserts degrade the graph;
   RobustPrune + periodic full rebuild is the usual answer. Needs a recall
-  regression harness (extend the existing retrieval benches in `benches/`).
+  regression harness (extend the feature-gated `retrieval_bench` bin).
 - **Crash consistency.** Disk graph + vectors + the bincode metadata must not
   diverge on a mid-write crash. Write-ahead or atomic rename per segment.
 - **Compatibility.** Per repo policy ("no compat, clean base"), the disk format
@@ -124,7 +124,9 @@ maintenance, so the merge/consolidate job slots in next to stigmergy GC.
 
 - `src/base/hnsw.rs` — beam search, neighbor pruning, heaps (adapt to 1 layer).
 - `src/quant.rs` — quantization seam + int8; extend with PQ.
-- `src/base/cold.rs` — the cold tier, ideal Phase-1 target.
-- `src/base/persist.rs` — `compress_dir` + `QuantMeta` sidecar pattern for the
-  on-disk segment format.
-- `benches/` — retrieval benches to guard recall vs latency through the change.
+- `src/base/store.rs` — the LMDB store + cold tier (the original Phase-1
+  target, `src/base/cold.rs`, was absorbed here).
+- `src/base/vector_backend.rs` — the `Resident`/`Disk` backend seam the wiring
+  landed on.
+- `retrieval_bench` / `locomo_eval` (feature-gated bins) — harnesses to guard
+  recall vs latency through the change.
