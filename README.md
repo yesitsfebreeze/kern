@@ -156,17 +156,13 @@ server in one step. The scripts ship in [`hooks/`](hooks/); see the *Hooks*
 section below for the full table and behavior. They are guarded to no-op outside
 `.kern/` projects, so a single global registration is safe everywhere.
 
-**4. Enable capture.** Capture is **off by default**. In the project where you
-want memory, create `<cwd>/.kern/kern.toml` with at least:
-
-```toml
-[capture]
-enabled = true
-```
-
-(See *Configure* below for the full set of options.) The `.kern/` directory is
-also what the hooks gate on — once it exists, capture and recall activate for
-that project.
+**4. Opt the project in.** No config file is needed — every default (embedding,
+reasoning, capture, tick) works out of the box against a local Ollama. The
+hooks gate on the `.kern/` directory: it is created automatically the first
+time the daemon persists, or `mkdir .kern` to opt in immediately. Once it
+exists, capture and recall activate for that project. (A
+`<cwd>/.kern/kern.toml` is only for overriding defaults — see *Configure*
+below.)
 
 **5. Seed the graph** (see *Seed the graph* below), then start a session. From
 then on, capture and recall are automatic.
@@ -190,7 +186,10 @@ working. New projects need no migration — the LMDB store is created automatica
 
 ### Configure
 
-Everything lives in `<cwd>/.kern/kern.toml`:
+Configuration is **optional** — with no config file at all, kern ingests and
+recalls with the defaults shown below. To override, create
+`<cwd>/.kern/kern.toml` (project scope) or `<XDG_CONFIG>/kern/kern.toml`
+(user scope; project sections win):
 
 ```toml
 [reason]
@@ -211,7 +210,7 @@ model = "qwen3-embedding:0.6b"  # default; dimension locks the graph (use `kern 
 model = "qwen3.5:4b"        # default; must be an Ollama model
 
 [capture]
-enabled = true          # self-learning (OFF by default — must opt in)
+enabled = true          # self-learning (ON by default; set false to opt out)
 
 [tick]
 interval_secs = 60      # self-compaction cadence (0 = event-driven only)

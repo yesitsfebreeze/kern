@@ -85,7 +85,11 @@ impl Config {
 	/// cwd. Only `data_dir` depends on `cwd`; every other field is a fixed baseline.
 	pub fn default_in(cwd: &Path) -> Self {
 		Self {
-			data_dir: cwd.join(".kern").to_string_lossy().into_owned(),
+			data_dir: cwd
+				.join(".kern")
+				.join("data")
+				.to_string_lossy()
+				.into_owned(),
 			log_level: "info".into(),
 			embed: EmbedConfig::default(),
 			reason: ReasonConfig::default(),
@@ -310,7 +314,10 @@ mod tests {
 	fn default_in_pins_data_dir_to_the_given_cwd_deterministically() {
 		let cwd = Path::new("some_project_root");
 		let cfg = Config::default_in(cwd);
-		assert_eq!(cfg.data_dir, cwd.join(".kern").to_string_lossy());
+		assert_eq!(
+			cfg.data_dir,
+			cwd.join(".kern").join("data").to_string_lossy()
+		);
 		assert_eq!(
 			cfg.log_level, "info",
 			"baseline fields are independent of cwd"

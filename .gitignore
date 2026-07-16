@@ -2,9 +2,8 @@
 # committed for reproducible builds across machines.
 /target
 
-# kern runtime state (keep .kern/kern.toml tracked)
-/.kern/*
-!/.kern/kern.toml
+# kern runtime state (configless by default; kern.toml only for overrides)
+/.kern/
 ghpages/.kern/
 
 # stray crate-local runtime journals from in-dir test runs (tests use tempdir;
