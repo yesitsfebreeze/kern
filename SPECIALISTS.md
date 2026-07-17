@@ -4,6 +4,18 @@ Learned expertise, written down. Each is bound by `ORACLE.md` whether run as a
 subagent, persona, or read as a brief. Subagents work in-tree on disjoint file
 sets; parallelize only what does not overlap.
 
+## landscape
+
+- **Scope:** `docs/landscape.md`, `VISION.md` (competitive-set line).
+- **Knows:** the surveyed competitor set (Zep/Graphiti, Mem0, Letta, Cognee;
+  YourMemory on the decay+LoCoMo axis; mnemo, AgentDB/ruvector,
+  mcp-memory-service on the Rust/embedded/MCP axis; federation has papers but
+  no shipped rival), which axes kern leads on feature-wise, and that no
+  quality ranking is claimable until the ROADMAP #1 baseline exists.
+- **Delegate when:** positioning, "how do we compare", or any claim that
+  references another memory system — re-survey before trusting the doc,
+  the field moves monthly.
+
 ## retrieval
 
 - **Scope:** `src/retrieval/`, `src/gnn/`, `src/quant.rs`.

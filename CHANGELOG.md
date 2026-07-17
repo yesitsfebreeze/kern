@@ -1,5 +1,16 @@
 # Changelog
 
+- 2026-07-17 — Surveyed the competitive landscape and recorded it
+  (`docs/landscape.md` + `landscape` specialist): Zep/Graphiti, Mem0, Letta,
+  Cognee as the closest overall set; YourMemory as the direct decay+LoCoMo
+  rival; mnemo and AgentDB/ruvector on the Rust/embedded axis; no shipped
+  competitor on CRDT federation. The doc states feature-level position only —
+  no quality ranking until the ROADMAP #1 baseline
+  exists. Decided by: record-the-decision, verify-before-claiming.
+  Supersedes: the bare
+  competitive-set line in `VISION.md` as the place comparisons start from
+  (the line stays; the doc carries the detail).
+
 - 2026-07-16 — GitHub Pages enabled and self-healing: the site 404'd because Pages was never enabled on the repo (`gh api .../pages` → 404) and `actions/configure-pages@v5` defaults to `enablement:false`, so the lone deploy hard-errored. Enabled Pages via the API (`build_type: workflow`) and set `enablement:true` in `.github/workflows/pages.yml`; the deploy now succeeds (HTTP 200). Decided by: fix-bugs-on-sight. Supersedes: nothing.
 
 - 2026-07-16 — Validated `locomo_eval` end-to-end on the default local models (1 sample / 3 QA; `docs/kern/eval-locomo.md`). The pipeline runs and emits a CI-diffable JSON; no baseline number is claimed — n=3 is a smoke test, not a measurement. The real blocker for a recorded baseline is characterized precisely: the host runs the chat models (`qwen3.5:4b`, `qwen2.5:7b`) on CPU (~50 s per one-token call; `/api/ps` shows only the embed models in VRAM), so the full ~1990-probe run would measure CPU-bound generation, not the configured models. ROADMAP #1's blocker updated accordingly. Decided by: verify-before-claiming. Supersedes: the old ROADMAP #1 blocker ("run `locomo_eval` end-to-end with the default local models, multi-seed … and commit the reference JSON").
