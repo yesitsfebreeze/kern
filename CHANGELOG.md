@@ -1,5 +1,21 @@
 # Changelog
 
+- 2026-07-17 — HNSW insert is id-stable; ROADMAP #5 closed. Root causes of
+  nondeterminism: node levels drawn from a positional RNG stream (nth insert
+  ate the nth draw), HashMap iteration feeding insert order on every index
+  rebuild, and distance-only tie-breaking. Fixed at the root: levels are now
+  a pure function of the id (FNV-1a → exponential), rebuilds iterate ids in
+  sorted order, ties break on (distance, id); `structure_digest()` is the
+  determinism contract surface. Proven per verify-before-claiming: two new
+  tests failed on the old code (level-vs-insert-order, cross-instance rebuild
+  digest) and pass now; recall@10/NDCG@10 bit-identical before/after; latency
+  and throughput deltas within run-to-run noise, so no speed claim is made.
+  Tradeoff: O(n log n) id sorts per rebuild and hash-derived levels
+  marginally less statistically clean than a PRNG stream — accepted for
+  determinism at zero measured quality
+  cost. Decided by: verify-before-claiming, fix-the-root, name-the-tradeoff.
+  Supersedes: the RNG-seeded level path and unordered rebuild iteration.
+
 - 2026-07-17 — Root-caused the eval "GPU blocker": it was kern, not the host.
   The WSL gateway URL matches `is_local_ollama`'s `":11434"` marker, so eval
   traffic took the native path — where `complete()` hardcoded `num_gpu:0` (a

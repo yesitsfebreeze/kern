@@ -31,7 +31,12 @@ fn index_kern_into(
 	gnn_entity_idx: &mut VectorBackend,
 	reason_idx: &mut VectorBackend,
 ) {
-	for t in kern.entities.values() {
+	// HNSW structure depends on insert order, so the index-population loops run
+	// in id order — never HashMap iteration order, which differs per instance
+	// and per process. Same content in, same graph out.
+	let mut entities: Vec<_> = kern.entities.values().collect();
+	entities.sort_by(|a, b| a.id.cmp(&b.id));
+	for t in entities {
 		entity_kern.insert(t.id.clone(), kern.id.clone());
 		// A Superseded entity can never be a retrieval result (`retrieval::score`
 		// drops it), so it must not enter the ANN search indices on load/rebuild —
@@ -49,7 +54,9 @@ fn index_kern_into(
 			gnn_entity_idx.insert(t.id.clone(), t.gnn_vector.clone());
 		}
 	}
-	for r in kern.reasons.values() {
+	let mut reasons: Vec<_> = kern.reasons.values().collect();
+	reasons.sort_by(|a, b| a.id.cmp(&b.id));
+	for r in reasons {
 		reason_kern.insert(r.id.clone(), kern.id.clone());
 		if r.has_vector() {
 			reason_idx.insert(r.id.clone(), r.vector.clone());
@@ -284,7 +291,9 @@ impl GraphGnn {
 		// the whole snapshot into the delta). `None` skips entity insertion while
 		// still filling the reverse maps and the gnn/reason indices.
 		let skip_entity_insert = matches!(self.entity_idx, VectorBackend::Disk { .. });
-		for kern in self.kerns.values() {
+		let mut kerns: Vec<&Kern> = self.kerns.values().collect();
+		kerns.sort_by(|a, b| a.id.cmp(&b.id));
+		for kern in kerns {
 			index_kern_into(
 				kern,
 				&mut self.entity_kern,
@@ -739,6 +748,78 @@ mod tests {
 		let mut k = Kern::new(id, parent);
 		k.children = children.iter().map(|s| s.to_string()).collect();
 		k
+	}
+
+	#[test]
+	fn rebuild_index_is_deterministic_across_instances() {
+		// Two graphs holding the same kerns/entities/reasons must rebuild into
+		// byte-identical HNSW structures, regardless of HashMap iteration order
+		// (which differs per instance and per process). This is the 10k-scale
+		// determinism gate: without it every rebuild is a different index.
+		use crate::base::types::Reason;
+		let vec_of = |i: usize, off: f64| -> Vec<f32> {
+			(0..8)
+				.map(|j| ((i as f64) * (0.11 + 0.05 * j as f64) + off).sin() as f32)
+				.collect()
+		};
+		let make_kern = |k: usize| -> Kern {
+			let mut kern = Kern::new(format!("k{k}"), "root");
+			for e in 0..40 {
+				let id = format!("k{k}e{e}");
+				kern.entities.insert(
+					id.clone(),
+					Entity {
+						id,
+						vector: vec_of(k * 100 + e, 0.0),
+						gnn_vector: vec_of(k * 100 + e, 0.5),
+						..Default::default()
+					},
+				);
+			}
+			for r in 0..10 {
+				let id = format!("k{k}r{r}");
+				kern.reasons.insert(
+					id.clone(),
+					Reason {
+						id,
+						vector: vec_of(k * 100 + r, 1.0),
+						..Default::default()
+					},
+				);
+			}
+			kern
+		};
+		let digest = |be: &VectorBackend| match be {
+			VectorBackend::Resident(h) => h.structure_digest(),
+			VectorBackend::Disk { .. } => unreachable!("test graphs never spill"),
+		};
+		let mut a = GraphGnn::new();
+		for k in 0..5 {
+			let kern = make_kern(k);
+			a.kerns.insert(kern.id.clone(), kern);
+		}
+		let mut b = GraphGnn::new();
+		for k in (0..5).rev() {
+			let kern = make_kern(k);
+			b.kerns.insert(kern.id.clone(), kern);
+		}
+		a.rebuild_index();
+		b.rebuild_index();
+		assert_eq!(
+			digest(&a.entity_idx),
+			digest(&b.entity_idx),
+			"entity index structure differs across instances"
+		);
+		assert_eq!(
+			digest(&a.gnn_entity_idx),
+			digest(&b.gnn_entity_idx),
+			"gnn index structure differs across instances"
+		);
+		assert_eq!(
+			digest(&a.reason_idx),
+			digest(&b.reason_idx),
+			"reason index structure differs across instances"
+		);
 	}
 
 	#[test]

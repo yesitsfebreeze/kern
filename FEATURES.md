@@ -10,9 +10,10 @@ What exists right now. States: `building` | `active`.
 - **Prompt-time recall** — `UserPromptSubmit` hook runs semantic search over
   the prompt and injects scored thoughts, fail-open with a hard timeout.
   `active`
-- **Query pipeline** — hybrid retrieval: HNSW + BM25 + GNN-blended seeds, reason-edge
-  expansion, optional HyDE, RRF + PageRank fusion, optional LLM rerank,
-  diversify, optional LLM answer; cold-store backfill. `active`
+- **Query pipeline** — hybrid retrieval: HNSW (id-stable, deterministic
+  builds) + BM25 + GNN-blended seeds, reason-edge expansion, optional HyDE,
+  RRF + PageRank fusion, optional LLM rerank, diversify, optional LLM answer;
+  cold-store backfill. `active`
 - **Bi-temporal history** — contradicting claims supersede rather than delete;
   `as_of` point-in-time queries and `include_history` supersede-chain walks;
   classification runs off the recall path. `active`

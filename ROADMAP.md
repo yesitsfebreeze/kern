@@ -21,16 +21,13 @@ Decisions ahead, ordered. Questions, not tasks.
    loses what it was told is not a memory; both reuse the existing persistence
    path, neither exists. Blocker: none — ordering is the decision. Deciding
    behavior: name-the-tradeoff.
-5. **Does HNSW insert become id-stable?** Blocks 10k-scale determinism and
-   bench-build speed (`graph.rs`). Blocker: none. Deciding behavior:
-   verify-before-claiming (determinism is a measured property).
-6. **What must federation prove before it earns senders?** Delta/Question/Pulse
+5. **What must federation prove before it earns senders?** Delta/Question/Pulse
    and the fetch RPC are handled on receipt but never sent; transport is
    unauthenticated and unencrypted; batch size, push vs. pull, and anti-entropy
    are untuned. Blocker: a security stance for untrusted segments
    (`docs/FEDERATION-SECURITY.md`) — none of the pinned behaviors decides it.
    Deciding behavior: none yet — amend first.
-7. **When does the LLM answer path get interactive?** Streaming, capped
+6. **When does the LLM answer path get interactive?** Streaming, capped
    context, and warm-keeping shipped; speculative decode (draft → generator) is
    the open lever. Blocker: the baseline (1) for a before/after number.
    Deciding behavior: verify-before-claiming.

@@ -1,7 +1,6 @@
 use super::math::cosine_distance;
-use super::util::cmp_partial;
+use super::util::{cmp_partial, content_hash};
 use crate::quant::{quantized_cosine_distance, QuantizationMode, QuantizedVec};
-use rand::RngExt;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -64,7 +63,6 @@ pub struct HnswIndex {
 	free: Vec<u32>,
 	ep: Option<u32>,
 	max_layer: usize,
-	rng: rand::rngs::StdRng,
 	quant_mode: QuantizationMode,
 }
 
@@ -96,7 +94,6 @@ impl HnswIndex {
 	}
 
 	pub fn with_mode(m: usize, ef_construction: usize, quant_mode: QuantizationMode) -> Self {
-		use rand::SeedableRng;
 		let m = m.max(2);
 		Self {
 			m,
@@ -109,7 +106,6 @@ impl HnswIndex {
 			free: Vec::new(),
 			ep: None,
 			max_layer: 0,
-			rng: rand::rngs::StdRng::seed_from_u64(42),
 			quant_mode,
 		}
 	}
@@ -182,7 +178,7 @@ impl HnswIndex {
 		if vec.is_empty() || self.slot_of.contains_key(&id) {
 			return;
 		}
-		let level = self.random_level();
+		let level = self.level_for(&id);
 		let (stored_vec, qvec) = match self.quant_mode {
 			QuantizationMode::Int8 | QuantizationMode::Binary => (
 				Vec::new(),
@@ -441,8 +437,18 @@ impl HnswIndex {
 		out
 	}
 
-	fn random_level(&mut self) -> usize {
-		let r: f64 = self.rng.random::<f64>().max(1e-18);
+	/// Layer assignment as a pure function of the id (FNV-1a → uniform (0,1] →
+	/// the standard exponential level draw). Id-stable by construction: the same
+	/// id lands on the same level in every build, on every run, under any insert
+	/// order or delete/insert churn — the property an RNG keyed on insert
+	/// position cannot give.
+	fn level_for(&self, id: &str) -> usize {
+		let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+		for &b in id.as_bytes() {
+			h ^= b as u64;
+			h = h.wrapping_mul(0x100_0000_01b3);
+		}
+		let r = ((h >> 11) as f64 / (1u64 << 53) as f64).max(1e-18);
 		let level = (-r.ln() * self.ml).floor() as usize;
 		level.min(16)
 	}
@@ -559,6 +565,35 @@ impl HnswIndex {
 		out
 	}
 
+	/// Canonical hash of the full graph structure: entry point, max layer, and
+	/// every live node in id order with its per-layer adjacency (as ids, so the
+	/// digest is independent of slot numbering). Equal digests = identical
+	/// graphs; the determinism tests assert on it.
+	pub fn structure_digest(&self) -> String {
+		let mut slots: Vec<u32> = self.slot_of.values().copied().collect();
+		slots.sort_by(|a, b| self.id_of[*a as usize].cmp(&self.id_of[*b as usize]));
+		let mut canon = format!(
+			"ep={};max={}\n",
+			self.ep.map(|s| self.id_str(s)).unwrap_or(""),
+			self.max_layer
+		);
+		for slot in slots {
+			let Some(node) = self.node(slot) else {
+				continue;
+			};
+			canon.push_str(self.id_str(slot));
+			for layer in &node.layers {
+				canon.push('|');
+				for &nb in layer {
+					canon.push_str(self.id_str(nb));
+					canon.push(',');
+				}
+			}
+			canon.push('\n');
+		}
+		content_hash(&canon)
+	}
+
 	fn prune_neighbors(&self, center: u32, ids: &[u32], m: usize) -> Vec<u32> {
 		let mut pairs: Vec<(u32, f64)> = ids
 			.iter()
@@ -570,7 +605,7 @@ impl HnswIndex {
 				}
 			})
 			.collect();
-		pairs.sort_by(|a, b| cmp_partial(&a.1, &b.1));
+		pairs.sort_by(|a, b| cmp_partial(&a.1, &b.1).then_with(|| a.0.cmp(&b.0)));
 		pairs.truncate(m);
 		pairs.into_iter().map(|(id, _)| id).collect()
 	}
@@ -590,23 +625,24 @@ fn is_ambiguous(candidates: &[Candidate], k: usize, epsilon: f64) -> bool {
 	(worst.dist - best.dist) < epsilon
 }
 
-/// Sift order for [`Heap`]: `prefer(a, b)` is true when a node at distance `a`
-/// belongs ABOVE one at distance `b` (nearer the root). `Min` keeps the smallest
-/// distance on top, `Max` the largest. A zero-sized type parameter, so the
+/// Sift order for [`Heap`]: `prefer(a, b)` is true when candidate `a` belongs
+/// ABOVE `b` (nearer the root). `Min` keeps the smallest distance on top, `Max`
+/// the largest; equal distances break on slot id so the order is strict and
+/// pop order never depends on push order. A zero-sized type parameter, so the
 /// comparison monomorphizes with no per-operation branch.
 trait HeapOrder {
-	fn prefer(a: f64, b: f64) -> bool;
+	fn prefer(a: Candidate, b: Candidate) -> bool;
 }
 struct Min;
 struct Max;
 impl HeapOrder for Min {
-	fn prefer(a: f64, b: f64) -> bool {
-		a < b
+	fn prefer(a: Candidate, b: Candidate) -> bool {
+		a.dist < b.dist || (a.dist == b.dist && a.id < b.id)
 	}
 }
 impl HeapOrder for Max {
-	fn prefer(a: f64, b: f64) -> bool {
-		a > b
+	fn prefer(a: Candidate, b: Candidate) -> bool {
+		a.dist > b.dist || (a.dist == b.dist && a.id > b.id)
 	}
 }
 
@@ -638,7 +674,7 @@ impl<O: HeapOrder> Heap<O> {
 		let mut i = self.items.len() - 1;
 		while i > 0 {
 			let p = (i - 1) / 2;
-			if !O::prefer(self.items[i].dist, self.items[p].dist) {
+			if !O::prefer(self.items[i], self.items[p]) {
 				break;
 			}
 			self.items.swap(i, p);
@@ -658,10 +694,10 @@ impl<O: HeapOrder> Heap<O> {
 		loop {
 			let (l, r) = (2 * i + 1, 2 * i + 2);
 			let mut s = i;
-			if l < sz && O::prefer(self.items[l].dist, self.items[s].dist) {
+			if l < sz && O::prefer(self.items[l], self.items[s]) {
 				s = l;
 			}
-			if r < sz && O::prefer(self.items[r].dist, self.items[s].dist) {
+			if r < sz && O::prefer(self.items[r], self.items[s]) {
 				s = r;
 			}
 			if s == i {
@@ -692,6 +728,15 @@ mod tests {
 		fn arena_slots(&self) -> usize {
 			self.nodes.len()
 		}
+
+		fn level_of(&self, id: &str) -> usize {
+			let slot = self.slot_of[id];
+			self.nodes[slot as usize]
+				.as_ref()
+				.expect("live node")
+				.layers
+				.len() - 1
+		}
 	}
 
 	fn rand_vec(rng: &mut rand::rngs::StdRng, dim: usize) -> Vec<f32> {
@@ -713,6 +758,44 @@ mod tests {
 		(0..n)
 			.map(|i| (format!("v{i}"), rand_vec(&mut rng, dim)))
 			.collect()
+	}
+
+	#[test]
+	fn node_level_depends_only_on_id_not_insert_order() {
+		// A node's layer count must be a function of its id alone, not of how many
+		// inserts preceded it — otherwise any change in arrival order (HashMap
+		// iteration upstream, delete/insert churn) reshapes the whole graph.
+		let corpus = random_corpus(41, 300, 16);
+		let mut fwd = HnswIndex::new(16, 128);
+		let mut rev = HnswIndex::new(16, 128);
+		for (id, v) in &corpus {
+			fwd.insert(id.clone(), v.clone());
+		}
+		for (id, v) in corpus.iter().rev() {
+			rev.insert(id.clone(), v.clone());
+		}
+		for (id, _) in &corpus {
+			assert_eq!(
+				fwd.level_of(id),
+				rev.level_of(id),
+				"level of {id} depends on insert position, not id"
+			);
+		}
+	}
+
+	#[test]
+	fn identical_insert_sequence_builds_identical_graph() {
+		// Two indexes fed the same (id, vec) sequence must be structurally equal —
+		// full adjacency, entry point, and max layer, compared by hash.
+		let corpus = random_corpus(42, 300, 16);
+		let build = || {
+			let mut idx = HnswIndex::new(16, 128);
+			for (id, v) in &corpus {
+				idx.insert(id.clone(), v.clone());
+			}
+			idx.structure_digest()
+		};
+		assert_eq!(build(), build(), "same insert sequence, different graph");
 	}
 
 	#[test]
