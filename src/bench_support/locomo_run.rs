@@ -38,6 +38,8 @@ pub struct EvalConfig {
 	pub max_samples: Option<usize>,
 	pub max_qa_per_sample: Option<usize>,
 	pub dedup_threshold: f64,
+	/// Sampling seed forwarded to ollama; vary it across runs for error bars.
+	pub seed: i64,
 }
 
 /// Running totals for one LoCoMo category.
@@ -148,16 +150,24 @@ pub async fn run_eval(cfg: &EvalConfig) -> Result<EvalReport, String> {
 	let take = cfg.max_samples.unwrap_or(samples.len());
 
 	// Answerer + embedder share one client (reason endpoint = answerer).
+	// `for_eval`: reason calls run on GPU (they are the workload, not
+	// background distillation) and sampling is seeded for multi-seed runs.
 	let client = LlmClient::new(
 		Endpoint::new(&cfg.base_url, &cfg.answer_model, ""),
 		Endpoint::default(),
 		Endpoint::new(&cfg.base_url, &cfg.embed_model, ""),
-	);
+	)
+	.for_eval(cfg.seed);
+	// Judge at temperature 0: it is the measurement instrument — verdicts
+	// must not carry sampling noise. The answerer/distiller keep the model
+	// default; the seed makes that sampling reproducible per run.
 	let judge = LlmClient::new(
 		Endpoint::new(&cfg.base_url, &cfg.judge_model, ""),
 		Endpoint::default(),
 		Endpoint::new(&cfg.base_url, &cfg.embed_model, ""),
-	);
+	)
+	.for_eval(cfg.seed)
+	.with_temperature(0.0);
 
 	let llm: LlmFunc = Arc::new(client.complete_func());
 	let embed_fn: EmbedFunc = {
@@ -300,7 +310,11 @@ struct EvalContext<'a> {
 	rcfg: &'a RetrievalConfig,
 }
 
-/// Answer + score every QA probe for one sample.
+/// Answer + score every QA probe for one sample, in two phases: first answer
+/// everything (answerer + embedder resident on GPU), then judge everything
+/// (judge model resident). The answerer and judge cannot share an 8 GB GPU,
+/// so interleaving them pays a model reload per probe; batching pays one
+/// swap per sample.
 async fn eval_sample(
 	ctx: &EvalContext<'_>,
 	graph: &Arc<RwLock<GraphGnn>>,
@@ -309,6 +323,9 @@ async fn eval_sample(
 	report: &mut EvalReport,
 ) {
 	let limit = max_qa.unwrap_or(sample.qa.len());
+	// (question, gold, predicted, category) deferred to the judge phase.
+	let mut to_judge: Vec<(&str, &str, String, u8)> = Vec::new();
+
 	for q in sample.qa.iter().take(limit) {
 		let qvec = match ctx.client.embed(&q.question).await {
 			Ok(v) => v,
@@ -350,13 +367,22 @@ async fn eval_sample(
 		} else if let Some(gold) = q.answer.as_deref() {
 			agg.f1 += locomo::token_f1(pred, gold);
 			agg.rouge += locomo::rouge_l(pred, gold);
-			let verdict = ctx
-				.judge
-				.complete(&locomo::judge_prompt(&q.question, gold, pred))
-				.await
-				.map(|r| locomo::parse_judge_verdict(&r))
-				.unwrap_or(false);
-			if verdict {
+			to_judge.push((&q.question, gold, pred.to_string(), q.category));
+		}
+	}
+
+	if !to_judge.is_empty() {
+		eprintln!("  judging {} answers ...", to_judge.len());
+	}
+	for (question, gold, pred, category) in &to_judge {
+		let verdict = ctx
+			.judge
+			.complete(&locomo::judge_prompt(question, gold, pred))
+			.await
+			.map(|r| locomo::parse_judge_verdict(&r))
+			.unwrap_or(false);
+		if verdict {
+			if let Some(agg) = report.per_category.get_mut(category) {
 				agg.judge_correct += 1;
 			}
 		}

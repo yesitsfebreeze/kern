@@ -1,5 +1,28 @@
 # Changelog
 
+- 2026-07-17 — Root-caused the eval "GPU blocker": it was kern, not the host.
+  The WSL gateway URL matches `is_local_ollama`'s `":11434"` marker, so eval
+  traffic took the native path — where `complete()` hardcoded `num_gpu:0` (a
+  serving tradeoff protecting `/ask` from distillation bursts) and forced the
+  eval's answerer and judge onto CPU. Measured after the fix: `qwen3.5:4b`
+  64 tok/s and `qwen2.5:7b` 53 tok/s, each fully VRAM-resident at
+  `num_ctx:8192`; the earlier HTTP 500 on `num_gpu:99` was the model-default
+  context (~13 GiB KV cache) overflowing the 8 GiB card, not a driver fault.
+  Changes: `Client::for_eval(seed)` puts reason calls on GPU and seeds
+  sampling (serving default untouched); `with_temperature` pins the judge to
+  0 — the judge is the measurement instrument, its verdicts must not carry
+  sampling noise, while the answerer/distiller keep default temperature
+  because their sampling variance is what multi-seed error bars measure; the
+  eval judges in a second phase per sample so the 4b answerer and 7b judge
+  swap VRAM once per dialogue instead of twice per probe (measured p50 query
+  latency 2.3 s, down from 20–53 s). Tradeoff: serving still pins reason to
+  CPU — a distillation burst on an 8 GB card must not evict the answer path;
+  eval flips the pin because there reason IS the
+  workload. Decided by: fix-the-root, verify-before-claiming, name-the-tradeoff.
+  Supersedes: the 2026-07-16 blocker characterization ("host cannot
+  GPU-offload the chat models") and `docs/kern/eval-locomo.md`'s routing note
+  claiming gateway traffic uses `/v1`.
+
 - 2026-07-17 — Surveyed the competitive landscape and recorded it
   (`docs/landscape.md` + `landscape` specialist): Zep/Graphiti, Mem0, Letta,
   Cognee as the closest overall set; YourMemory as the direct decay+LoCoMo

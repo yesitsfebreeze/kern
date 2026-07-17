@@ -27,35 +27,36 @@ Models (the binary defaults from `src/config/`): `qwen3-embedding:0.6b`
   3 QA). Quality at n=3 is meaningless (f1 ≈ 0.19) — scoring machinery works,
   no claim is made from it.
 
-## Routing note
+## Routing note (corrected 2026-07-17)
 
 The harness ran against the WSL→Windows-host gateway IP (`172.27.176.1`).
-`llm::is_local_ollama` matches `localhost`/`127.0.0.1`/`ollama` literals, so a
-gateway IP routes chat/embed calls through ollama's OpenAI-compat `/v1/*` path
-instead of native `/api/embed`. Ollama serves both, so it works — but the
-intended native path (with `num_ctx`/`keep_alive`/`num_gpu` tuning) is not
-exercised this run. To get the native path from WSL, either bind a
-`localhost:11434` forward to the host or teach `is_local_ollama` the gateway.
+`llm::is_local_ollama` matches the `":11434"` port marker, so the gateway URL
+takes the **native** `/api/*` path — the original version of this note
+(claiming `/v1` routing) was wrong.
 
-## The real blocker (not kern, not the routing)
+## The blocker, root-caused (2026-07-17): it was kern, not the host
 
-The host **cannot GPU-offload the chat models** — confirmed, not assumed:
+The "host cannot GPU-offload the chat models" characterization above the fold
+of the original note was disproved by measurement:
 
-- `/api/ps` shows only the two embedding models resident in VRAM
-  (`size_vram == size`); `qwen3.5:4b` and `qwen2.5:7b` never land in VRAM.
-- Forcing `num_gpu:99` on `qwen3.5:4b` via native `/api/chat` returns
-  **HTTP 500** (server error, empty reply) after ~35 s — GPU offload fails.
-- `/api/show` on all three models carries **no `num_gpu` pin**, so this is not a
-  kern/Modelfile config forcing CPU; it is the host's GPU stack refusing the
-  larger offload. The 0.6 b embedder offloads fine; the 4 b / 7 b do not — most
-  likely they exceed free VRAM, or a CUDA/driver fault on the larger offload.
-  A one-token `/v1/chat/completions` reply (CPU fallback) is 48–57 s vs <2 s on
-  GPU.
+- Native `complete()` hardcoded `num_gpu:0` — a serving tradeoff (a
+  distillation burst must not evict the embedder + answer model from an 8 GB
+  card). Because the gateway URL routes native, the eval's answerer *and*
+  judge inherited that pin: kern itself forced them onto CPU. That is why
+  `/api/ps` never showed them in VRAM and one-token replies took 48–57 s.
+- The HTTP 500 on `num_gpu:99` was the model-default context window
+  (~13 GiB with KV cache for `qwen3.5:4b`) overflowing the 8 GiB card when
+  all layers were forced on — not a CUDA/driver fault. With `num_ctx:8192`
+  both chat models offload fully: `qwen3.5:4b` 3.3 GiB @ 64 tok/s,
+  `qwen2.5:7b` 4.8 GiB @ 53 tok/s (measured warm).
 
-Remediation is on the Windows host: free VRAM / check the ollama log behind
-the 500 / update the GPU driver — not a kern change. Once the chat models
-offload, the full ~1990-probe run drops from ≈11–27 h (CPU) to ≈1.7 h (GPU) and
-the numbers measure the configured models, not CPU-bound generation.
+Fix: `Client::for_eval(seed)` lifts the pin for eval clients (reason calls
+are the workload there) and seeds sampling; the judge is additionally pinned
+to temperature 0 (measurement instrument); `eval_sample` judges in a second
+phase so the 4b answerer and 7b judge swap VRAM once per dialogue instead of
+twice per probe. Measured after the fix: p50 query latency 2.3 s (was
+20–53 s). Serving behavior is unchanged — the `num_gpu:0` pin still protects
+`/ask`.
 
 ## What this unblocks / does not
 

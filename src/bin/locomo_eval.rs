@@ -40,6 +40,9 @@ struct Args {
 	/// Dedup cosine threshold at ingest.
 	#[arg(long, default_value_t = 0.95)]
 	dedup: f64,
+	/// Sampling seed forwarded to ollama. Vary across runs for error bars.
+	#[arg(long, default_value_t = 0)]
+	seed: i64,
 	/// Emit the report as JSON (machine-readable / CI-diffable) instead of the
 	/// human-readable summary table.
 	#[arg(long)]
@@ -82,11 +85,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 		max_samples: args.samples,
 		max_qa_per_sample: args.max_qa,
 		dedup_threshold: args.dedup,
+		seed: args.seed,
 	};
 
 	eprintln!(
-		"locomo_eval: dataset={dataset} embed={} answer={} judge={}",
-		cfg.embed_model, cfg.answer_model, cfg.judge_model
+		"locomo_eval: dataset={dataset} embed={} answer={} judge={} seed={}",
+		cfg.embed_model, cfg.answer_model, cfg.judge_model, cfg.seed
 	);
 	let report = run_eval(&cfg).await?;
 

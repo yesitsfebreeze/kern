@@ -84,6 +84,7 @@ pub struct Client {
 	inner: Arc<Inner>,
 }
 
+#[derive(Clone)]
 struct Inner {
 	reason_url: String,
 	reason_model: String,
@@ -95,6 +96,17 @@ struct Inner {
 	embed_model: String,
 	embed_headers: HeaderMap,
 	http: reqwest::Client,
+	/// Serving pins the reason model to CPU (`num_gpu:0`) so a distillation
+	/// burst can't evict the embedder + answer model from an 8 GB GPU. Eval
+	/// flips this: reason calls are the workload, not background noise.
+	reason_gpu: bool,
+	/// Sampling seed forwarded to ollama's native path; eval sets it so
+	/// multi-seed runs vary sampling, serving leaves it unset.
+	seed: Option<i64>,
+	/// Sampling temperature override for reason calls. Eval pins the judge to
+	/// 0.0 — the judge is the measurement instrument, its verdicts must not
+	/// carry sampling noise. Unset keeps the model default.
+	temperature: Option<f64>,
 }
 
 impl Client {
@@ -141,8 +153,27 @@ impl Client {
 				embed_model: embed.model.clone(),
 				embed_headers: make_headers(embed_key),
 				http,
+				reason_gpu: false,
+				seed: None,
+				temperature: None,
 			}),
 		}
+	}
+
+	/// Eval-mode client: reason calls may use the GPU (they ARE the workload)
+	/// and sampling is seeded so multi-seed runs are reproducible. Serving
+	/// clients never call this — the `num_gpu:0` pin protects `/ask` there.
+	pub fn for_eval(mut self, seed: i64) -> Self {
+		let inner = Arc::make_mut(&mut self.inner);
+		inner.reason_gpu = true;
+		inner.seed = Some(seed);
+		self
+	}
+
+	/// Pin the reason-call sampling temperature (native ollama path only).
+	pub fn with_temperature(mut self, t: f64) -> Self {
+		Arc::make_mut(&mut self.inner).temperature = Some(t);
+		self
 	}
 
 	pub fn new_embed_only(embed_url: &str, embed_model: &str) -> Self {
@@ -276,13 +307,23 @@ impl Client {
 		// don't support `num_gpu`, so they stay on the `/v1` path below.
 		if is_local_ollama(&self.inner.reason_url) {
 			let url = format!("{}/api/chat", self.inner.reason_url);
+			let mut options = serde_json::json!({ "num_ctx": REASON_NUM_CTX });
+			if !self.inner.reason_gpu {
+				options["num_gpu"] = 0.into();
+			}
+			if let Some(s) = self.inner.seed {
+				options["seed"] = s.into();
+			}
+			if let Some(t) = self.inner.temperature {
+				options["temperature"] = t.into();
+			}
 			let body = serde_json::json!({
 				"model": self.inner.reason_model,
 				"messages": [{"role": "user", "content": prompt}],
 				"stream": false,
 				"think": false,
 				"keep_alive": REASON_KEEP_ALIVE,
-				"options": { "num_ctx": REASON_NUM_CTX, "num_gpu": 0 },
+				"options": options,
 			});
 			let resp = self
 				.post_checked(

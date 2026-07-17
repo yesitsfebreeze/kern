@@ -3,13 +3,12 @@
 Decisions ahead, ordered. Questions, not tasks.
 
 1. **What is the recorded eval baseline?** Every retrieval/distill change is
-   currently judged against intuition. The `locomo_eval` harness was validated
-   end-to-end on the default local models (1 sample / 3 QA, `docs/kern/eval-locomo.md`):
-   pipeline runs, report shape correct. Blocker: a real multi-sample,
-   multi-seed baseline needs the host chat models on GPU — they currently run
-   on CPU (~50 s per one-token call, ~11–27 h extrapolated for the full run),
-   so any number recorded now would measure CPU-bound generation, not the
-   configured models. Deciding behavior: verify-before-claiming.
+   currently judged against intuition. The `locomo_eval` harness is validated
+   end-to-end and the GPU blocker is root-caused and fixed (kern's own
+   `num_gpu:0` serving pin leaking into eval via the native-path routing;
+   `docs/kern/eval-locomo.md`) — measured p50 query latency is 2.3 s on GPU.
+   Blocker: none — the multi-sample, multi-seed run itself remains to be run
+   and recorded. Deciding behavior: verify-before-claiming.
 2. **When does HyDE run?** Query expansion costs an LLM call even when the
    cheap lexical/cache path already wins. Blocker: the baseline (1) — gating
    must show a measured win, not a plausible one. Deciding behavior:
