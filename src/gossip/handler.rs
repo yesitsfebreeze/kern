@@ -111,9 +111,7 @@ pub fn start_entity_sync(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 						if entities.is_empty() {
 							None
 						} else {
-							entities.sort_by(|a, b| {
-								b.heat.partial_cmp(&a.heat).unwrap_or(std::cmp::Ordering::Equal)
-							});
+							entities.sort_by(|a, b| crate::base::util::cmp_rank(a.heat as f64, &a.id, b.heat as f64, &b.id));
 							entities.truncate(32);
 							Some(EntitySyncPayload {
 								network_id: g.network_id.clone(),

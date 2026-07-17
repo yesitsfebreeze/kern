@@ -12,3 +12,18 @@ Second-pass migration:
 - `validated_delta_value` doc compressed. Rationale: because `value` is an absolute slot total merged via GCounter per-slot max, delivery in any order and with duplication converges (commutative + idempotent). Empty replica/object ids and zero are dropped as no-ops.
 - `handle_entity_sync` doc compressed; full threat model already recorded above. Also: ignores own-network echoes and empty network ids; persists only when the merge changed the graph.
 - `handle_crdt_delta` persist comment compressed; full rule: the save closure read-locks the graph, so calling it while the write guard is held deadlocks — drop the guard first, and skip persist when the merge was a no-op (idempotent re-delta).
+
+# Ratings — scope: src/gossip/handler.rs
+
+Scope rating: 7/10 — gossip message handlers for CRDT deltas, entity sync, question/answer sphere, pulse. Correct persist-after-drop-guard pattern. Entity sync sort was non-deterministic on heat ties; fixed.
+
+## Function ratings (non-test)
+
+- `start_entity_sync` — 7/10→9/10: periodic entity sync broadcast, sorts by heat then truncates to 32. Sort was `partial_cmp.unwrap_or(Equal)` (non-deterministic on heat ties → which entities get synced varies); fixed to `cmp_rank` with entity id.
+- `handle_crdt_delta` — 8/10: validates + merges GCounter, persists after dropping write guard. Correct deadlock avoidance.
+- `handle_answer` — 8/10: resolves question from peer + triggers pulse.
+- `handle_question` — 8/10: question routing with ledger.
+- `handle_pulse` — 8/10: pulse fallback to root for unknown kern.
+- `handle_entity_sync` — 8/10: merges remote body into phantom kern, ignores same-network.
+- `resolve_question_from_peer` — 8/10: fills answer + promotes reason to Similarity.
+- `validated_delta_value` — 9/10: bounds-checks CRDT delta value.

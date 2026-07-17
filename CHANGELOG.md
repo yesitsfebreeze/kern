@@ -1,5 +1,15 @@
 # Changelog
 
+- 2026-07-17 — `start_entity_sync` (gossip handler) and `resource_thoughts`
+  (MCP resources) had the same non-deterministic
+  `partial_cmp.unwrap_or(Equal)` sort without id tiebreaks. Entity sync
+  truncates to 32 entities — which entities get federated varied on heat
+  ties; resource thoughts truncates to TOP_THOUGHTS — which thoughts appear
+  in the listing varied on score ties. Both now use `cmp_rank` with entity
+  id. Added per-scope and per-function ratings as splinter notes on
+  `src/gossip/handler.rs` and `src/mcp/resources.rs`.
+  Decided by: fix-bugs-on-sight. Supersedes: nothing.
+
 - 2026-07-17 — `build_digest` and `build_connections` (the digest generator
   that writes `.kern/digest.md` injected into every session by the
   `SessionStart` hook) sorted by `partial_cmp.unwrap_or(Equal)` with no id
