@@ -62,7 +62,7 @@ fn process_task(q: &Queue, g: &Arc<RwLock<GraphGnn>>, t: &Task, ctx: &TickContex
 	let (llm, embed) = (ctx.llm.as_ref(), ctx.embed.as_ref());
 	match t.kind {
 		TaskKind::Cluster => do_cluster(q, g, &t.kern_id, &ctx.tick_cfg, llm, embed),
-		TaskKind::SeedQuestions => do_seed_questions(g, &t.extra, llm),
+		TaskKind::SeedQuestions => do_seed_questions(q, g, &t.extra, llm),
 		TaskKind::ClassifyContradiction => do_classify_contradiction(q, g, &t.kern_id, &t.extra, llm, embed),
 		TaskKind::Name => do_name(q, g, &t.kern_id, &ctx.tick_cfg, llm, embed),
 		TaskKind::Enrich => do_enrich(q, g, &t.kern_id, &t.extra, llm, embed),
@@ -131,6 +131,14 @@ fn do_cluster(
 	let did_structural_work =
 		!spawned_children.is_empty() || evicted || !enrich_jobs.is_empty() || !question_jobs.is_empty();
 	if !spawned_children.is_empty() || evicted {
+		// Children BEFORE the parent: a spawned child exists only in RAM until its
+		// Persist runs, while Persist(parent) writes the parent row WITHOUT the
+		// migrated entities. Parent-first + crash erased those entities from disk
+		// entirely (the child row was never written); child-first + crash merely
+		// leaves them duplicated in the stale parent row until the next persist.
+		for child_id in &spawned_children {
+			q.enqueue(task(TaskKind::Persist, child_id));
+		}
 		q.enqueue(task(TaskKind::Persist, kern_id));
 	}
 	// Skip GNN propagation when the cluster pass produced no structural change — the previous gnn_vector state is still valid.
@@ -628,6 +636,59 @@ mod tests {
 			1,
 			"a named kern's off-core cohesive cluster still spawns",
 		);
+	}
+
+	#[test]
+	fn do_cluster_persists_each_spawned_child_before_the_parent() {
+		// Crash-loss guard: the spawned child holds the migrated entities and exists
+		// only in RAM until persisted, while Persist(parent) rewrites the parent row
+		// WITHOUT them. Each child needs its own Persist, ordered before the
+		// parent's so a crash between the two duplicates instead of destroys.
+		let q = Queue::new(64);
+		let mut g = GraphGnn::new();
+		let mut kern = Kern::new("k", "");
+		kern.anchor_text = "named".into();
+		kern.anchor_vec = vec![1.0, 0.0];
+		for i in 0..crate::base::constants::KERN_MIN_CLUSTER_SIZE {
+			let id = format!("e{i}");
+			kern.entities.insert(
+				id.clone(),
+				Entity {
+					id,
+					vector: vec![0.0, 1.0],
+					..Default::default()
+				},
+			);
+		}
+		g.kerns.insert("k".into(), kern);
+		let g = Arc::new(RwLock::new(g));
+
+		do_cluster(&q, &g, "k", &TickConfig::default(), None, None);
+
+		let children = read_recovered(&g).kerns.get("k").unwrap().children.clone();
+		assert!(!children.is_empty(), "precondition: a child spawned");
+
+		let mut rx = q.take_receiver().unwrap();
+		let mut persists = Vec::new();
+		while let Ok(t) = rx.try_recv() {
+			if matches!(t.kind, TaskKind::Persist) {
+				persists.push(t.kern_id.clone());
+			}
+		}
+		let parent_pos = persists
+			.iter()
+			.position(|k| k == "k")
+			.expect("parent Persist enqueued");
+		for c in &children {
+			let child_pos = persists
+				.iter()
+				.position(|k| k == c)
+				.unwrap_or_else(|| panic!("spawned child {c} gets its own Persist"));
+			assert!(
+				child_pos < parent_pos,
+				"child Persist must run before the parent row drops the migrated entities"
+			);
+		}
 	}
 
 	#[test]

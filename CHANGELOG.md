@@ -1,5 +1,26 @@
 # Changelog
 
+- 2026-07-17 — Durability primitive: snapshots first; ROADMAP #4 closed. The
+  primitive is `snapshot_if_dirty` on the maintenance tick — a
+  mutation-epoch-gated guarded full flush reusing `flush_guarded` verbatim
+  (no-op when the epoch hasn't moved). Tradeoff: up to one tick interval
+  (60 s) of derived-state loss is accepted — heat/access stamps stay
+  epoch-exempt by design — in exchange for zero new recovery code; a WAL in
+  front of LMDB would duplicate LMDB's own journal, add a persisted op enum
+  to the append-only surface, and introduce replay-ordering semantics the
+  state-based CRDT merge deliberately avoids (a stale WAL replayed after a
+  gossip merge could resurrect superseded entities). Along the way, two tick
+  tasks were leaking durability: `do_cluster` rewrote the parent kern without
+  its migrated entities while never persisting the spawned child — a crash
+  there permanently erased already-durable entities (destructive, not a
+  window; now child-first Persist, proven by a crash test that fails on the
+  old code) — and `do_seed_questions` minted edges with no Persist at all.
+  Loss window after: ≤ 1 tick for epoch-bumping state, zero for cluster
+  migrations and seeded questions, per-job for ingest
+  (unchanged). Decided by: name-the-tradeoff, fix-bugs-on-sight, verify-before-claiming.
+  Supersedes: the crash-lossy tick tasks and the "neither primitive exists"
+  framing of ROADMAP #4.
+
 - 2026-07-17 — HNSW insert is id-stable; ROADMAP #5 closed. Root causes of
   nondeterminism: node levels drawn from a positional RNG stream (nth insert
   ate the nth draw), HashMap iteration feeding insert order on every index

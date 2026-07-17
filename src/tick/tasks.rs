@@ -52,7 +52,12 @@ fn strip_name_prefixes(raw: &str) -> String {
 /// work off the interactive path — runs this. Locks: text + root id read
 /// under one read guard, the LLM call runs UNLOCKED, edges written under one
 /// write guard (same discipline as `do_name`).
-pub fn do_seed_questions(g: &Arc<RwLock<GraphGnn>>, entity_id: &str, llm: Option<&LlmFunc>) {
+pub fn do_seed_questions(
+	q: &Queue,
+	g: &Arc<RwLock<GraphGnn>>,
+	entity_id: &str,
+	llm: Option<&LlmFunc>,
+) {
 	let Some(llm) = llm else { return };
 	let (text, root_id) = {
 		let g = read_recovered(g);
@@ -87,28 +92,34 @@ pub fn do_seed_questions(g: &Arc<RwLock<GraphGnn>>, entity_id: &str, llm: Option
 		.filter(|l| !l.is_empty())
 		.take(3)
 		.collect();
+	if questions.is_empty() {
+		return;
+	}
 
-	let mut g = write_recovered(g);
-	for q in questions {
-		let rid = reason_id(entity_id, "", ReasonKind::Question, &q, "");
-		let reason = Reason {
-			id: rid,
-			from: entity_id.to_string(),
-			to: String::new(),
-			to_kern_id: String::new(),
-			to_net_id: String::new(),
-			kind: ReasonKind::Question,
-			dirty: false,
-			text: q,
-			vector: Vec::new(),
-			score: 0.5,
-			traversal_count: crate::crdt::GCounter::new(),
-			producer_id: String::new(),
-		};
-		if let Some(kern) = g.kerns.get_mut(&root_id) {
-			add_reason(kern, reason);
+	{
+		let mut g = write_recovered(g);
+		for question in questions {
+			let rid = reason_id(entity_id, "", ReasonKind::Question, &question, "");
+			let reason = Reason {
+				id: rid,
+				from: entity_id.to_string(),
+				to: String::new(),
+				to_kern_id: String::new(),
+				to_net_id: String::new(),
+				kind: ReasonKind::Question,
+				dirty: false,
+				text: question,
+				vector: Vec::new(),
+				score: 0.5,
+				traversal_count: crate::crdt::GCounter::new(),
+				producer_id: String::new(),
+			};
+			if let Some(kern) = g.kerns.get_mut(&root_id) {
+				add_reason(kern, reason);
+			}
 		}
 	}
+	q.enqueue(task(TaskKind::Persist, &root_id));
 }
 
 /// Classify a recorded `Rephrase` near-duplicate as UPDATE/CONTRADICTION vs
@@ -657,7 +668,8 @@ mod tests {
 
 		let llm: LlmFunc =
 			Arc::new(|_p: &str| "What shipped today?\nWhen did the gate ship?".to_string());
-		do_seed_questions(&g, "e1", Some(&llm));
+		let q = Queue::new(16);
+		do_seed_questions(&q, &g, "e1", Some(&llm));
 
 		let gg = g.read();
 		let qs: Vec<_> = gg
@@ -669,6 +681,20 @@ mod tests {
 			.filter(|r| r.kind == ReasonKind::Question && r.from == "e1" && r.to.is_empty())
 			.collect();
 		assert_eq!(qs.len(), 2, "one dangling Question edge per LLM line");
+		drop(gg);
+
+		let mut rx = q.take_receiver().unwrap();
+		let mut persists = Vec::new();
+		while let Ok(t) = rx.try_recv() {
+			if matches!(t.kind, TaskKind::Persist) {
+				persists.push(t.kern_id.clone());
+			}
+		}
+		assert_eq!(
+			persists,
+			vec![root.clone()],
+			"seeded Question edges are followed by a root Persist — without it they lived only in RAM until an unrelated flush"
+		);
 	}
 
 	/// Build a graph carrying one entity `old` and a pending Rephrase edge from it
@@ -767,11 +793,12 @@ mod tests {
 	#[test]
 	fn do_seed_questions_is_a_noop_without_llm_or_entity() {
 		let g = Arc::new(RwLock::new(GraphGnn::new()));
+		let q = Queue::new(16);
 		// No LLM -> noop.
-		do_seed_questions(&g, "e1", None);
+		do_seed_questions(&q, &g, "e1", None);
 		// LLM but unknown entity -> noop (no panic, no edges).
 		let llm: LlmFunc = Arc::new(|_p: &str| "Q?".to_string());
-		do_seed_questions(&g, "missing", Some(&llm));
+		do_seed_questions(&q, &g, "missing", Some(&llm));
 		let gg = g.read();
 		let root = gg.root.id.clone();
 		assert!(

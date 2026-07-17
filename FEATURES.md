@@ -23,7 +23,9 @@ What exists right now. States: `building` | `active`.
   before they drop. `active`
 - **LMDB persistence** — single ACID env per data dir, int8 vectors,
   `zstd(bincode)` values, guarded flush against stale-snapshot overwrite;
-  `kern migrate` imports legacy file shards. `active`
+  periodic mutation-epoch-gated snapshot on the maintenance tick bounds
+  crash loss to one tick interval; `kern migrate` imports legacy file
+  shards. `active`
 - **MCP surface** — stdio + HTTP/SSE server exposing `query`, `ingest`,
   `link`, `forget`, `degrade`, `anchor`, `descriptor`, `health`, `pulse`; all
   through the one `tools::dispatch` core. `active`

@@ -351,6 +351,34 @@ pub(crate) fn save_graph_guarded(
 	}
 }
 
+/// Interval snapshot — the periodic durability net under the event-driven saves.
+/// Flushes the whole graph through the guarded path when (and only when) the
+/// graph's mutation epoch moved since the last snapshot, then remembers the epoch
+/// it captured. Returns whether a flush ran.
+///
+/// The event-driven flushes (ingest worker per job, MCP mutations, gossip) cover
+/// their own writes; what they miss is every mutation whose task crashes between
+/// the graph write and its Persist, plus any path that forgets to save. Without
+/// this, that loss window was UNBOUNDED on an idle daemon (kill -9 / SIGTERM skip
+/// the ctrl-c shutdown flush); with it, the window is one tick interval. Known
+/// accepted gap: heat/access stamps (pulse deposits, CommitAccess) deliberately
+/// do not bump the mutation epoch (see `GraphGnn::get_mut`), so a heat-only
+/// interval skips the flush — advisory decay state, recomputed by use, is the
+/// tradeoff paid to avoid rewriting an idle graph every interval forever.
+pub(crate) fn snapshot_if_dirty(
+	graph: &SharedGraph,
+	cfg: &crate::config::Config,
+	last_snap_epoch: &mut u64,
+) -> bool {
+	let epoch = read_recovered(graph).mutation_epoch();
+	if epoch == *last_snap_epoch {
+		return false;
+	}
+	save_graph_guarded(graph, cfg);
+	*last_snap_epoch = epoch;
+	true
+}
+
 /// Reload the graph from disk when another writer has advanced the store past what
 /// this graph last reconciled to. Returns `true` if a reload happened. The daemon
 /// calls this on its maintenance tick so its in-RAM graph adopts CLI-committed
@@ -1041,6 +1069,7 @@ fn spawn_maintenance_tick(
 	let q_tick = q.clone();
 	let cfg_tick = cfg.clone();
 	let every = std::time::Duration::from_secs(cfg.tick.interval_secs);
+	let mut last_snap_epoch = read_recovered(g).mutation_epoch();
 	tokio::spawn(async move {
 		loop {
 			tokio::time::sleep(every).await;
@@ -1059,6 +1088,10 @@ fn spawn_maintenance_tick(
 				crate::tick::pulse::pulse(&q_tick, &mut g, &root_id, 1.0);
 			}
 			crate::tick::enqueue_all(&q_tick, &g_tick);
+			// Periodic snapshot: bound the crash-loss window for any mutation whose
+			// event-driven save never ran (task crashed pre-Persist, SIGTERM before
+			// the shutdown flush) to one tick interval.
+			snapshot_if_dirty(&g_tick, &cfg_tick, &mut last_snap_epoch);
 		}
 	});
 }
@@ -1223,6 +1256,132 @@ mod entry_point_tests {
 			on_disk.entities.contains_key("e"),
 			"stale per-kern persist was skipped — the CLI's entity survives"
 		);
+	}
+
+	#[test]
+	fn periodic_snapshot_closes_the_unflushed_mutation_crash_window() {
+		// The durability primitive itself: prove the crash-loss window exists
+		// without the interval snapshot, then that snapshot_if_dirty closes it.
+		// "Crash" = drop every handle with NO shutdown flush (kill -9 / SIGTERM
+		// semantics), then reopen the same data dir.
+		use parking_lot::RwLock;
+		use std::sync::Arc;
+
+		use crate::base::locks::{read_recovered, write_recovered};
+		use crate::base::types::Kern;
+
+		let dir = tempfile::tempdir().unwrap();
+		let cfg = crate::config::Config {
+			data_dir: dir.path().to_string_lossy().into_owned(),
+			..Default::default()
+		};
+
+		// BEFORE: a mutation with no flush dies with the process.
+		{
+			let g = Arc::new(RwLock::new(super::load_graph(&cfg)));
+			let root_id = read_recovered(&g).root.id.clone();
+			write_recovered(&g).register(Kern::new("unflushed", &root_id));
+		} // crash: all env handles dropped, no save
+		{
+			let g = super::load_graph(&cfg);
+			assert!(
+				g.loaded("unflushed").is_none(),
+				"window proven: an unflushed mutation is lost across a crash"
+			);
+		}
+
+		// AFTER: the interval snapshot makes the same mutation durable.
+		{
+			let g = Arc::new(RwLock::new(super::load_graph(&cfg)));
+			let mut last = read_recovered(&g).mutation_epoch();
+			assert!(
+				!super::snapshot_if_dirty(&g, &cfg, &mut last),
+				"clean graph -> the interval snapshot is a no-op"
+			);
+			let root_id = read_recovered(&g).root.id.clone();
+			write_recovered(&g).register(Kern::new("snapshotted", &root_id));
+			assert!(
+				super::snapshot_if_dirty(&g, &cfg, &mut last),
+				"mutation epoch moved -> the snapshot flushes"
+			);
+			assert!(
+				!super::snapshot_if_dirty(&g, &cfg, &mut last),
+				"no further mutation -> the next interval skips the rewrite"
+			);
+		} // crash again: no shutdown flush
+		{
+			let g = super::load_graph(&cfg);
+			assert!(
+				g.loaded("snapshotted").is_some(),
+				"the snapshot bounded the loss window: the mutation survived the crash"
+			);
+		}
+	}
+
+	#[test]
+	fn cluster_migrated_entities_survive_a_crash_after_the_spawn_persists() {
+		// The destructive half of the old window: do_cluster moved entities out of
+		// the parent and Persist(parent) rewrote the parent row WITHOUT them, while
+		// the spawned child holding them was never persisted — a crash then erased
+		// the entities from disk even though an earlier flush had them. The child
+		// Persist enqueued by do_cluster must land them on disk before the crash.
+		use parking_lot::RwLock;
+		use std::sync::Arc;
+
+		use crate::base::constants::KERN_MIN_CLUSTER_SIZE;
+		use crate::base::locks::{read_recovered, write_recovered};
+		use crate::base::types::{mk_entity, EntityKind, Kern};
+
+		let dir = tempfile::tempdir().unwrap();
+		let cfg = crate::config::Config {
+			data_dir: dir.path().to_string_lossy().into_owned(),
+			..Default::default()
+		};
+		let entity_ids: Vec<String> = (0..KERN_MIN_CLUSTER_SIZE)
+			.map(|i| format!("spill{i}"))
+			.collect();
+
+		{
+			let g = Arc::new(RwLock::new(super::load_graph(&cfg)));
+			let root_id = read_recovered(&g).root.id.clone();
+			// Named kern whose entities form one cohesive cluster orthogonal to its
+			// anchor — exactly the shape do_cluster spins out into a child.
+			let mut k = Kern::new("k", &root_id);
+			k.anchor_text = "named".into();
+			k.anchor_vec = vec![1.0, 0.0];
+			for id in &entity_ids {
+				let mut e = mk_entity(id, id, 1.0, EntityKind::Claim);
+				e.vector = vec![0.0, 1.0];
+				k.entities.insert(id.clone(), e);
+			}
+			write_recovered(&g).register(k);
+			// Everything durable before the re-shard (the state a running daemon has
+			// after its per-job ingest flush).
+			super::save_graph_guarded(&g, &cfg);
+
+			// Run the cluster pass synchronously: spawns the child, migrates the
+			// entities, and processes the enqueued Persist tasks.
+			crate::tick::tick_sync(&g, "k", None, None, None);
+			let child_exists = {
+				let gg = read_recovered(&g);
+				let parent = gg.loaded("k").expect("parent kern still loaded");
+				assert!(
+					parent.entities.is_empty(),
+					"precondition: the cluster migrated out of the parent"
+				);
+				!parent.children.is_empty()
+			};
+			assert!(child_exists, "precondition: a child kern was spawned");
+		} // crash: no shutdown flush
+
+		let g = super::load_graph(&cfg);
+		for id in &entity_ids {
+			let found = g.all().iter().any(|k| k.entities.contains_key(id));
+			assert!(
+				found,
+				"entity {id} must survive the crash — the spawned child's Persist landed it on disk"
+			);
+		}
 	}
 
 	#[test]
