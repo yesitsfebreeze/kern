@@ -193,11 +193,7 @@ pub fn merge_seeds(a: Vec<EntityHit>, b: Vec<EntityHit>) -> Vec<EntityHit> {
 	let scored =
 		crate::base::math::softmax_merge_scores(a.into_iter().chain(b).map(|h| (h.entity_id, h.score)));
 	let mut out: Vec<EntityHit> = scored.into_iter().map(EntityHit::from).collect();
-	out.sort_by(|a, b| {
-		b.score
-			.partial_cmp(&a.score)
-			.unwrap_or(std::cmp::Ordering::Equal)
-	});
+	out.sort_by(|a, b| crate::base::util::cmp_rank(a.score, &a.entity_id, b.score, &b.entity_id));
 	out
 }
 

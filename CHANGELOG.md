@@ -1,5 +1,11 @@
 # Changelog
 
+- 2026-07-17 — `merge_seeds` (softmax seed merge) had the same
+  non-deterministic `partial_cmp.unwrap_or(Equal)` sort as the two seed
+  functions fixed in the prior commit. Now uses `cmp_rank` for a
+  score-desc/id-asc total order, consistent with the rest of the seed path.
+  Decided by: fix-bugs-on-sight. Supersedes: nothing.
+
 - 2026-07-17 — `seed_important` and `seed_by_reason` sorted by
   `partial_cmp(...).unwrap_or(Equal)` with no id tiebreak, so equal-cosine
   ties broke non-deterministically (parallel iteration order) — the same
