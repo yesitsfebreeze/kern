@@ -47,7 +47,7 @@ pub fn build_digest(graph: &GraphGnn, k: usize, min_trust: f64, token_budget: us
 		})
 		.map(|e| (e, e.heat as f64 * e.conf_mean()))
 		.collect();
-	ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+	ranked.sort_by(|a, b| crate::base::util::cmp_rank(a.1, &a.0.id, b.1, &b.0.id));
 
 	let mut bullets: Vec<&str> = Vec::new();
 	let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -129,7 +129,7 @@ fn build_connections(graph: &GraphGnn, conn_budget: usize) -> String {
 			(r, heat_conf)
 		})
 		.collect();
-	kern_reasons.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+	kern_reasons.sort_by(|a, b| crate::base::util::cmp_rank(a.1, &a.0.id, b.1, &b.0.id));
 
 	for (r, _) in kern_reasons {
 		let from_text = entity_cache

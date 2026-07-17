@@ -1,5 +1,15 @@
 # Changelog
 
+- 2026-07-17 — `build_digest` and `build_connections` (the digest generator
+  that writes `.kern/digest.md` injected into every session by the
+  `SessionStart` hook) sorted by `partial_cmp.unwrap_or(Equal)` with no id
+  tiebreak, so equal-heat×confidence ties broke non-deterministically — the
+  same graph could produce a different digest across runs. Both now use
+  `cmp_rank` with entity/reason id tiebreaks, making the digest reproducible.
+  Added per-scope and per-function ratings as a splinter note on
+  `src/retrieval/digest.rs`.
+  Decided by: fix-bugs-on-sight. Supersedes: nothing.
+
 - 2026-07-17 — `merge_seeds` (softmax seed merge) had the same
   non-deterministic `partial_cmp.unwrap_or(Equal)` sort as the two seed
   functions fixed in the prior commit. Now uses `cmp_rank` for a
