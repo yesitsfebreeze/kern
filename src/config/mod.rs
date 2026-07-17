@@ -13,6 +13,7 @@ mod retrieval;
 mod serve;
 mod tick;
 mod watcher;
+mod wsl;
 
 pub use answer::{AnswerConfig, DEFAULT_ANSWER_MODEL};
 pub use capture::CaptureConfig;
@@ -100,13 +101,38 @@ impl Config {
 
 	pub fn load(cwd: &Path) -> Result<Self, config_io::Error> {
 		let user = dirs::config_dir()
-			.unwrap_or_else(|| cwd.join(".kern"))
-			.join("kern")
-			.join("kern.toml");
+			.map(|d| d.join("kern").join("kern.toml"))
+			.unwrap_or_else(|| cwd.join(".kern").join("kern.toml"));
 		let project = cwd.join(".kern").join("kern.toml");
 		let mut cfg: Self = config_io::load_layered(&user, &project)?;
 		cfg.data_dir = anchor_data_dir(&cfg.data_dir, cwd);
+		cfg.redirect_loopback_to_wsl_host();
 		Ok(cfg)
+	}
+
+	/// Repoint loopback LLM endpoints at the Windows host when running under
+	/// WSL2 NAT networking, where `localhost` cannot reach a host-side Ollama.
+	/// Only fires when loopback is dead and the gateway is live, so mirrored-mode
+	/// WSL2 and in-distro Ollama are untouched — see [`wsl::resolve_loopback`].
+	///
+	/// Without this a stock WSL install fails silently forever: embeds return
+	/// transient connect errors, ingest re-spools every job, and the graph just
+	/// stays empty with nothing surfaced to the user.
+	fn redirect_loopback_to_wsl_host(&mut self) {
+		for (leg, url) in [
+			("embed", &mut self.embed.url),
+			("reason", &mut self.reason.url),
+			("answer", &mut self.answer.url),
+		] {
+			if let Some(fixed) = wsl::resolve_loopback(url) {
+				tracing::info!(
+					target: "kern.config",
+					leg, from = %url, to = %fixed,
+					"WSL detected: loopback Ollama unreachable, using Windows host gateway"
+				);
+				*url = fixed;
+			}
+		}
 	}
 
 	/// Anchor dir: nearest ancestor with `.git` (innermost wins), else nearest

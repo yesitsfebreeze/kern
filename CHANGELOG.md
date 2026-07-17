@@ -1,5 +1,17 @@
 # Changelog
 
+- 2026-07-17 — `Config::load` fallback path doubled the `kern/` segment when
+  `dirs::config_dir()` returned `None`: the chain
+  `.unwrap_or_else(|| cwd.join(".kern")).join("kern").join("kern.toml")`
+  produced `cwd/.kern/kern/kern.toml` instead of `cwd/.kern/kern.toml`.
+  Restructured to `.map(|d| d.join("kern").join("kern.toml")).unwrap_or_else(||
+  cwd.join(".kern").join("kern.toml"))` so the `None` fallback hits the
+  project-local path, matching the intent. Latent — `dirs::config_dir()`
+  returns `Some` on all supported platforms (Linux/macOS/Windows) — but the
+  fallback was wrong. Added per-scope and per-function ratings as a splinter
+  note on `src/config/mod.rs`.
+  Decided by: fix-bugs-on-sight. Supersedes: nothing.
+
 - 2026-07-17 — `is_local_ollama` matched `localhost` and `127.0.0.1` as bare
   substrings, so a URL like `http://notlocalhost.com` false-positive-matched
   and would have been routed to Ollama-native `/api/*` calls a non-Ollama host
