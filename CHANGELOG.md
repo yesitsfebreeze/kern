@@ -1,5 +1,15 @@
 # Changelog
 
+- 2026-07-17 — `is_local_ollama` matched `localhost` and `127.0.0.1` as bare
+  substrings, so a URL like `http://notlocalhost.com` false-positive-matched
+  and would have been routed to Ollama-native `/api/*` calls a non-Ollama host
+  404s on. Tightened to `//localhost` and `//127.0.0.1`, anchoring the host
+  check to the URL authority component (after the `http(s)://` prefix); the
+  `:11434` port marker stays loose as the WSL-gateway heuristic. New test:
+  `notlocalhost.com` is NOT local. Added per-scope and per-function ratings
+  as a splinter note on `src/llm.rs`.
+  Decided by: fix-bugs-on-sight. Supersedes: nothing.
+
 - 2026-07-17 — `gossip/seen.rs` first reclaim loop used a bare `.unwrap()`
   on `VecDeque::pop_front` where every sibling invariant-guarded unwrap in
   the tree uses `.expect("…checked above")`; the second loop right below it
