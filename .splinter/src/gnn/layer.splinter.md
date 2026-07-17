@@ -6,3 +6,7 @@ Second-pass migration:
 - `zero_grads`: deleted "in place — keeps the allocations" (restates `fill(0.0)`; the `backward_accumulates_across_calls_until_zeroed` assert message already names the in-place contract).
 - Deleted test narration: the `// 2 samples x 4 features` trailing label and the infallible-degrades-to-zero preamble — both duplicated their assert messages.
 - Kept inline: the `weight` / `bias` shape labels, the dInput shape derivation in the error arm, and the `d_bias`/`d_weight` magic-number derivations (both = 2.0).
+
+## Preserved from stripped comments (2026-07-17)
+- Linear backward gradient identities: `d_bias[j] = sum over rows of d_out[:,j]` (column sums of d_out); `d_weight = Xᵀ·dOut`. Both accumulate across backward calls until `zero_grads`.
+- `with_rng` gives deterministic weight init from a seeded RNG for tests asserting on training dynamics (no system-entropy dependence).

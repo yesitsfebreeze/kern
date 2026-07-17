@@ -1,16 +1,9 @@
 use crate::base::constants::INGEST_DEDUP_THRESHOLD;
 
-/// Runtime ingest knobs. Distinct from the serde
-/// [`IngestConfig`](crate::config::IngestConfig): this form carries `ttl_secs`.
 #[derive(Debug, Clone)]
 pub struct Config {
-	/// Cosine-similarity floor in `[0.0, 1.0]`; at or above it a new vector
-	/// merges into its nearest neighbour instead of inserting.
 	pub dedup_threshold: f64,
-	/// Seconds; `None` = no expiry.
 	pub ttl_secs: Option<u64>,
-	/// World-time start from a distilled `valid_from` hint; `None` falls back to
-	/// the ingestion time.
 	pub valid_from: Option<std::time::SystemTime>,
 }
 
@@ -25,7 +18,6 @@ impl Default for Config {
 }
 
 impl Config {
-	/// The dedup similarity floor must lie in `[0.0, 1.0]`.
 	pub fn validate(&self) -> Result<(), String> {
 		if !(0.0..=1.0).contains(&self.dedup_threshold) {
 			return Err(format!(

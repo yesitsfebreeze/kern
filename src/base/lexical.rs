@@ -38,8 +38,7 @@ impl LexicalIndex {
 		}
 	}
 
-	/// Update BM25 `k1`/`b`. Read at QUERY time, so no re-indexing; nonsensical
-	/// inputs (negative `k1`, `b` outside `[0,1]`, NaN) are clamped or ignored.
+	// Read at QUERY time — no re-indexing. Invalid inputs are clamped/ignored.
 	pub fn set_bm25_params(&self, k1: f32, b: f32) {
 		let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
 		if k1.is_finite() {
@@ -64,8 +63,7 @@ impl LexicalIndex {
 		self.search_filtered(query, k, &|_| true)
 	}
 
-	/// [`search`](Self::search) with `keep` applied BEFORE the top-`k` truncation,
-	/// so a sparse filter still returns a full `k` matching hits.
+	// keep applied BEFORE top-k truncation, so a sparse filter still returns a full k.
 	pub fn search_filtered(
 		&self,
 		query: &str,
@@ -143,8 +141,7 @@ impl LexicalIndex {
 	}
 }
 
-/// Upsert `entity_id`'s postings under an already-held write guard (no locking);
-/// removing any prior version first makes it idempotent.
+// Caller holds the write guard — do NOT lock here. Removes any prior version first (idempotent).
 fn inner_insert(inner: &mut Inner, entity_id: &str, text: &str) {
 	let tokens = tokenize(text);
 	inner_remove(inner, entity_id);
@@ -185,8 +182,6 @@ fn inner_remove(inner: &mut Inner, entity_id: &str) {
 	}
 }
 
-/// Lowercased, stemmed terms split on non-alphanumeric boundaries. No stopword
-/// list — BM25's idf already down-weights common words.
 fn tokenize(text: &str) -> Vec<String> {
 	let mut out = Vec::new();
 	let mut cur = String::new();
@@ -206,8 +201,7 @@ fn tokenize(text: &str) -> Vec<String> {
 	out
 }
 
-/// Strip the FIRST matching suffix, only when the stem stays > 2 chars. Traps:
-/// irregular forms left as-is; first-match order can over-strip ("ties" -> "t").
+// FIRST matching suffix, only if the stem stays > 2 chars; first-match can over-strip.
 fn stem(t: &str) -> String {
 	let s = t;
 	for suf in &["ing", "edly", "ed", "ly", "ies", "es", "s"] {
@@ -228,7 +222,6 @@ mod tests {
 		assert_eq!(stem("running"), "runn", "`ing` stripped");
 		assert_eq!(stem("cats"), "cat", "`s` stripped");
 		assert_eq!(stem("happily"), "happi", "`ly` stripped");
-		// Too short after stripping (stem must stay > 2 chars) — left intact.
 		assert_eq!(stem("bus"), "bus");
 		assert_eq!(stem("the"), "the", "no matching suffix");
 	}
@@ -253,7 +246,7 @@ mod tests {
 			.into_iter()
 			.map(|h| h.score)
 			.collect();
-		idx.set_bm25_params(2.5, 0.0); // drop length normalisation, raise tf saturation
+		idx.set_bm25_params(2.5, 0.0);
 		let tuned: Vec<f32> = idx
 			.search("alpha", 10)
 			.into_iter()
@@ -297,7 +290,7 @@ mod tests {
 	#[test]
 	fn search_filtered_drops_nonmatching_before_truncation() {
 		let idx = LexicalIndex::new_in_ram(1.2, 0.75);
-		idx.insert("drop_a", "rust rust rust"); // high tf -> tops an unfiltered search
+		idx.insert("drop_a", "rust rust rust");
 		idx.insert("drop_b", "rust rust");
 		idx.insert("keep_1", "rust");
 		idx.insert("keep_2", "rust ownership");

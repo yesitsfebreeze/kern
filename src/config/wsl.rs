@@ -1,34 +1,17 @@
-//! Resolving the default Ollama URL under WSL2.
-//!
-//! kern's promise is that a stock install just works against a local Ollama.
-//! Under WSL2 with the default (NAT) networking mode that promise silently
-//! broke: Ollama runs as a Windows host process, the loopback default
-//! (`http://localhost:11434`) resolves inside the WSL VM where nothing is
-//! listening, every embed call fails as a transient connect error, and ingest
-//! leaves the job spooled forever. The failure is invisible — no crash, no
-//! error surfaced to the user, just a graph that stays empty. (Measured on this
-//! machine: 13 daemons, weeks of uptime, zero thoughts each.)
-//!
-//! WSL2 in *mirrored* networking mode DOES reach the host over loopback, and a
-//! Linux box running its own Ollama obviously does too, so this must never be a
-//! blanket "on WSL, rewrite to the gateway" rule. Hence: probe loopback first
-//! and only fall back to the host gateway when loopback is genuinely dead. This
-//! is a rewrite of the DEFAULT only — an explicitly configured URL is the
-//! user's decision and is never second-guessed.
+//! WSL2 NAT networking: the loopback default resolves inside the WSL VM, not the
+//! Windows host where Ollama listens, so embeds fail silently and the graph stays
+//! empty. Rewrite the DEFAULT loopback URL to the host gateway, but only when
+//! loopback is genuinely dead so mirrored-mode WSL2 and in-distro Ollama are
+//! untouched. An explicitly configured URL is never second-guessed.
 
 use std::io::BufRead as _;
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
-/// How long to wait for the loopback/gateway TCP probes. Both ends are local
-/// (a VM loopback and the host across a virtual switch), so a live Ollama
-/// answers in single-digit milliseconds; this only bounds the dead case.
 const PROBE_TIMEOUT: Duration = Duration::from_millis(300);
 
-/// Whether this process is running inside WSL. WSL1 and WSL2 both stamp the
-/// kernel release string, which is why this reads `/proc/version` rather than
-/// trusting `WSL_DISTRO_NAME` (unset under some service managers and settable
-/// by anyone).
+// Reads `/proc/version`, not `WSL_DISTRO_NAME` (unset under some service managers,
+// and settable by anyone). WSL1/WSL2 both stamp the kernel release string.
 pub fn in_wsl() -> bool {
 	std::fs::read_to_string("/proc/version")
 		.map(|v| {
@@ -38,10 +21,8 @@ pub fn in_wsl() -> bool {
 		.unwrap_or(false)
 }
 
-/// The Windows host address as seen from a NAT-mode WSL2 VM: the default
-/// route's gateway. `/etc/resolv.conf`'s nameserver usually matches it, but not
-/// when `generateResolvConf=false` or a custom DNS is set, so the route table
-/// is the authority.
+// Windows host = the default-route gateway, not `/etc/resolv.conf`'s nameserver:
+// that diverges under `generateResolvConf=false` or custom DNS, so route wins.
 fn host_gateway() -> Option<String> {
 	let f = std::fs::File::open("/proc/net/route").ok()?;
 	for line in std::io::BufReader::new(f)
@@ -51,7 +32,7 @@ fn host_gateway() -> Option<String> {
 	{
 		let mut cols = line.split_whitespace();
 		let (_iface, dest, gw) = (cols.next()?, cols.next()?, cols.next()?);
-		// The default route: destination 0.0.0.0. Gateway is little-endian hex.
+		// Default route: destination 0.0.0.0; gateway is little-endian hex.
 		if dest != "00000000" {
 			continue;
 		}
@@ -75,9 +56,6 @@ fn port_open(host: &str, port: u16) -> bool {
 		.is_some()
 }
 
-/// Split a `http://host:port` URL into (host, port), port defaulting to 80.
-/// Deliberately tiny — this only ever sees kern's own loopback defaults, and
-/// pulling in a URL parser for that would be the tail wagging the dog.
 fn split_host_port(url: &str) -> Option<(String, u16)> {
 	let rest = url
 		.strip_prefix("http://")
@@ -89,21 +67,14 @@ fn split_host_port(url: &str) -> Option<(String, u16)> {
 	}
 }
 
-/// Whether `url` points at loopback — the only shape this module rewrites.
 fn is_loopback_url(url: &str) -> bool {
 	split_host_port(url)
 		.map(|(h, _)| h == "localhost" || h == "127.0.0.1" || h == "::1" || h == "[::1]")
 		.unwrap_or(false)
 }
 
-/// Rewrite a loopback `url` to the WSL host gateway when — and only when — all
-/// of: we are inside WSL, the URL is loopback, loopback is NOT listening, and
-/// the gateway IS. Returns `None` when the URL should be left exactly as-is,
-/// which is the common case on every non-WSL machine.
-///
-/// Ordering matters: loopback is probed FIRST so a mirrored-mode WSL2 (or a WSL
-/// distro running its own Ollama) keeps using loopback and never pays a rewrite
-/// it did not need.
+// Probe loopback FIRST so a mirrored-mode WSL2 (or a WSL distro running its own
+// Ollama) keeps loopback and never pays a rewrite it did not need.
 pub fn resolve_loopback(url: &str) -> Option<String> {
 	if !in_wsl() || !is_loopback_url(url) {
 		return None;
@@ -144,21 +115,16 @@ mod tests {
 	fn only_loopback_urls_are_rewrite_candidates() {
 		assert!(is_loopback_url("http://localhost:11434"));
 		assert!(is_loopback_url("http://127.0.0.1:11434"));
-		// A real host — the user's explicit choice, never touched.
 		assert!(!is_loopback_url("http://172.27.176.1:11434"));
 		assert!(!is_loopback_url("https://api.openai.com/v1"));
 	}
 
-	/// The guard that keeps this from firing on normal Linux/macOS boxes.
 	#[test]
 	fn a_non_loopback_url_is_never_rewritten_even_inside_wsl() {
 		assert_eq!(resolve_loopback("http://172.27.176.1:11434"), None);
 		assert_eq!(resolve_loopback("https://api.openai.com/v1"), None);
 	}
 
-	/// Nothing listens on this port anywhere, so on a non-WSL host the answer is
-	/// None (not-WSL guard) and inside WSL it is None too (no gateway listener).
-	/// Either way: no rewrite, no panic.
 	#[test]
 	fn a_dead_port_resolves_to_no_rewrite() {
 		assert_eq!(resolve_loopback("http://localhost:1"), None);
@@ -166,8 +132,6 @@ mod tests {
 
 	#[test]
 	fn host_gateway_parses_the_route_table_or_declines() {
-		// Must never panic on whatever /proc/net/route this machine has; on a
-		// routed box it yields a dotted quad.
 		if let Some(gw) = host_gateway() {
 			assert_eq!(
 				gw.split('.').count(),

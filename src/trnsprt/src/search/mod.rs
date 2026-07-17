@@ -1,6 +1,3 @@
-//! `SearchSvc` — typed-RPC surface for search. Client + serve fn are macro-
-//! expanded in place: edit the trait in `svc.rs`, there is no generated file.
-
 pub mod dto;
 pub mod mock;
 pub mod svc;

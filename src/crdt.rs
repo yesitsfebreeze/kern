@@ -1,6 +1,3 @@
-//! Grow-only (`GCounter`) and positive-negative (`PnCounter`) CRDT counters
-//! backing the per-replica access/traversal counts merged by `base::merge`.
-
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -86,7 +83,6 @@ impl PnCounter {
 mod tests {
 	use super::*;
 
-	/// Single-replica absolute-value slot — the shape inbound CRDT deltas merge as.
 	fn slot(replica: &str, value: u64) -> GCounter {
 		let mut g = GCounter::new();
 		g.increment(replica, value);
@@ -117,7 +113,7 @@ mod tests {
 		}
 
 		assert_eq!(a, b, "merge must be order- and duplicate-independent");
-		assert_eq!(a.value(), 6 + 7); // max(r1)=6, r2=7
+		assert_eq!(a.value(), 6 + 7);
 	}
 
 	#[test]

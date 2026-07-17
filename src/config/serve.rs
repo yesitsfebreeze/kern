@@ -4,14 +4,10 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServeConfig {
-	/// HTTP RPC + MCP-over-HTTP bind address.
 	pub addr: String,
-	/// Internal kern_rpc typed socket, not the public HTTP API.
 	pub core_addr: String,
-	/// Federation gossip bind address. **UDP** — its port lives in a separate
-	/// namespace from the TCP listeners above.
+	// `gossip` is UDP: its port lives in a separate namespace from the TCP binds.
 	pub gossip: String,
-	/// MCP SSE streaming endpoint.
 	pub mcp_sse: String,
 }
 
@@ -27,8 +23,6 @@ impl Default for ServeConfig {
 }
 
 impl ServeConfig {
-	/// Reject two TCP listeners sharing a port. `gossip` is excluded (UDP);
-	/// empty, port-0, and unparseable addresses are skipped.
 	pub fn validate(&self) -> Result<(), String> {
 		let mut seen: HashMap<u16, &'static str> = HashMap::new();
 		for (name, addr) in [
@@ -40,10 +34,10 @@ impl ServeConfig {
 				continue;
 			}
 			let Some(port) = addr.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()) else {
-				continue; // unparseable host:port -> leave it for the bind to surface
+				continue;
 			};
 			if port == 0 {
-				continue; // ephemeral port, never a real clash
+				continue;
 			}
 			if let Some(prev) = seen.insert(port, name) {
 				return Err(format!(
@@ -88,9 +82,9 @@ mod tests {
 	#[test]
 	fn empty_and_ephemeral_addrs_are_skipped() {
 		let cfg = ServeConfig {
-			addr: String::new(),    // disabled
-			core_addr: ":0".into(), // ephemeral
-			mcp_sse: ":0".into(),   // ephemeral — two :0 must NOT collide
+			addr: String::new(),
+			core_addr: ":0".into(),
+			mcp_sse: ":0".into(),
 			..Default::default()
 		};
 		assert!(cfg.validate().is_ok());

@@ -1,22 +1,12 @@
-//! Serde view of the GNN re-embedder's `[gnn]` knobs. Both this and the runtime
-//! [`gnn::propagate::GnnConfig`] draw defaults from the same `DEFAULT_*` consts.
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GnnConfig {
-	/// Residual self-weight `[0,1]`: blend `self_weight*own + (1-self_weight)*neighbour`.
-	/// Higher keeps more own signal (less smoothing).
 	pub self_weight: f64,
-	/// Edge-weight floor: propagation ignores weaker neighbour edges.
 	pub min_weight: f64,
-	/// Minimum entity count before GNN training runs — below it a multi-layer GNN
-	/// overfits, so retrieval falls back to vector + BM25 + PageRank + reason edges.
 	pub min_thoughts: usize,
-	/// Adam training epochs per re-embed pass.
 	pub train_epochs: usize,
-	/// Adam learning rate for training.
 	pub train_learning_rate: f64,
 }
 
@@ -50,7 +40,6 @@ mod tests {
 
 	#[test]
 	fn from_maps_every_field_without_drift() {
-		// Distinct per-field values so a swapped/dropped `From` mapping is caught.
 		let serde_cfg = GnnConfig {
 			self_weight: 0.11,
 			min_weight: 0.22,

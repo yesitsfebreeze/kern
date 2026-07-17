@@ -68,3 +68,9 @@ Second-pass migration (comment -> note):
   `load_dir_loads_every_sibling` is the parity guard for the rayon decode — a large
   sibling set must come back complete and order-independent, with a corrupt sibling
   mixed in so the skip path is exercised concurrently with the happy path.
+
+Third-pass migration (2026-07-17, comment -> note):
+- `load_legacy_dir` corrupt-sibling policy: a corrupt/unreadable sibling `.kern`
+  is warned-and-skipped, never allowed to vanish silently or truncate the load;
+  the root is loaded up front and still hard-errors, since a graph without its
+  root is unusable.

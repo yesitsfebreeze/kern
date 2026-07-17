@@ -1,7 +1,5 @@
 // Mock mirrors the trait's explicit `impl Future` surface.
 #![allow(clippy::manual_async_fn)]
-//! In-memory [`KernRpc`] handler for tests. `query` honours `cancel_token`:
-//! only the highest token seen yields `fresh: true`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -49,7 +47,6 @@ impl MockKernServer {
 		format!("mock:{prefix}:{n}")
 	}
 
-	/// Seed one hit so `query` returns something without a prior `ingest`.
 	pub fn seed(&self, label: &str, kind: EntityKindLite) -> String {
 		let id = self.next_id("seed");
 		let mut g = self.inner.entities.lock().unwrap();
@@ -131,7 +128,6 @@ impl KernRpc for MockKernServer {
 					edges: vec![],
 				},
 			};
-			// Silence unused warnings for DTO fields the mock ignores.
 			let _ = (&req.descriptor, req.conf, &req.source);
 			state.entities.lock().unwrap().push(entity);
 			IngestRes {
@@ -151,7 +147,6 @@ impl KernRpc for MockKernServer {
 				to: req.to_id,
 				kind: req.reason_kind,
 			};
-			// `text` isn't stored in the mock.
 			let _ = req.text;
 			state.edges.lock().unwrap().push(edge);
 			LinkRes { reason_id: next_id }
@@ -164,7 +159,6 @@ impl KernRpc for MockKernServer {
 	) -> impl ::core::future::Future<Output = NeighborsRes> + Send {
 		let state = self.inner.clone();
 		async move {
-			// `depth` is clamped but NOT traversed — the mock is depth-1 only.
 			let _depth = req.depth.min(3);
 			let entities = state.entities.lock().unwrap();
 			let edges = state.edges.lock().unwrap();
@@ -241,7 +235,6 @@ mod facet_filter_tests {
 	use crate::kern_rpc::dto::SourceLite;
 	use crate::kern_rpc::IngestReq;
 
-	/// 4 entities = 2 kinds x 2 schemes, so both filter axes are exercised.
 	async fn seeded() -> MockKernServer {
 		let mock = MockKernServer::new();
 		mock
@@ -399,7 +392,6 @@ mod facet_filter_tests {
 			EntityKindLite::from_label("conclusion"),
 			Some(EntityKindLite::Conclusion)
 		);
-		// Superseded is a status, not a kind -> None (degrades to "no filter").
 		assert_eq!(EntityKindLite::from_label("superseded"), None);
 		assert_eq!(EntityKindLite::from_label("bogus"), None);
 		assert_eq!(EntityKindLite::from_label(""), None);

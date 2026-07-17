@@ -1,6 +1,3 @@
-//! Errors for the typed-RPC stack, one per layer: [`AdapterError`] (byte-level
-//! transport), [`CodecError`] (wire-format frame), [`RpcError`] (application).
-
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -43,8 +40,6 @@ impl From<serde_json::Error> for CodecError {
 	}
 }
 
-// `Framed{Read,Write}` lifts I/O errors into the codec's `Error` type, so
-// absorb `io::Error` here as a decode-side failure.
 impl From<std::io::Error> for CodecError {
 	fn from(e: std::io::Error) -> Self {
 		CodecError::Decode(format!("io: {e}"))

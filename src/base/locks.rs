@@ -1,5 +1,4 @@
-//! Thin graph-lock acquisition wrappers. parking_lot does not poison, so these
-//! forward directly; the `_recovered` names are historical.
+// parking_lot does not poison; the `_recovered` names are historical.
 
 use parking_lot::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 

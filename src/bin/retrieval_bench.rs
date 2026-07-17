@@ -1,6 +1,3 @@
-//! `retrieval_bench` — replay a retrieval trace and report NDCG@10, optionally
-//! sweeping one [`SweepParam`] over a list of values. Trace format: [`trace::Trace`].
-
 use clap::Parser;
 use kern::bench_support::build::build_graph;
 use kern::bench_support::replay::replay;
@@ -65,8 +62,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let args = Args::parse();
 	let mut t = trace::load(&args.trace)?;
 
-	// `--mode` keeps only queries declaring that mode (docs are untouched, so the
-	// graph is identical — only the scored query set narrows).
 	if let Some(mode) = &args.mode {
 		let want = mode.to_lowercase();
 		let total = t.queries.len();

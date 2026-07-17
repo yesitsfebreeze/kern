@@ -1,6 +1,3 @@
-//! The vector-index seam behind `GraphGnn`'s indices: in-memory HNSW or mmap'd
-//! Vamana snapshot + in-RAM delta. Every method mirrors [`HnswIndex`].
-
 use std::collections::HashSet;
 
 use super::diskann::DiskIndex;
@@ -10,8 +7,8 @@ use crate::quant::QuantizationMode;
 
 pub enum VectorBackend {
 	Resident(HnswIndex),
-	/// Immutable mmap'd `snapshot` + in-RAM `delta`. Invariant: every delta id is
-	/// tombstoned, so search (snapshot − tombstones ∪ delta) never serves an id twice.
+	// Invariant: every delta id is tombstoned, so search (snapshot − tombstones ∪
+	// delta) never serves an id twice.
 	Disk {
 		snapshot: DiskIndex,
 		delta: HnswIndex,
@@ -24,7 +21,6 @@ impl VectorBackend {
 		Self::Resident(HnswIndex::with_mode(m, ef_construction, quant_mode))
 	}
 
-	/// The delta uses `quant_mode` so its in-RAM scoring matches a resident index's.
 	pub fn disk(snapshot: DiskIndex, quant_mode: QuantizationMode) -> Self {
 		Self::Disk {
 			snapshot,
@@ -33,8 +29,7 @@ impl VectorBackend {
 		}
 	}
 
-	/// Live (searchable) vector count. For [`Disk`](Self::Disk) this is an
-	/// O(snapshot) scan — not a hot-path call.
+	// For the Disk variant this is an O(snapshot) scan — not a hot-path call.
 	pub fn len(&self) -> usize {
 		match self {
 			Self::Resident(h) => h.len(),
@@ -53,8 +48,6 @@ impl VectorBackend {
 		}
 	}
 
-	/// Post-snapshot writes buffered in the disk `delta` (0 when not disk-backed);
-	/// drives the consolidation trigger.
 	pub fn pending_delta_len(&self) -> usize {
 		match self {
 			Self::Resident(_) => 0,
@@ -62,8 +55,7 @@ impl VectorBackend {
 		}
 	}
 
-	/// Cheap structural check: a fully tombstoned but non-empty snapshot still
-	/// reports non-empty, which only costs a search returning nothing.
+	// A fully tombstoned but non-empty snapshot still reports non-empty.
 	pub fn is_empty(&self) -> bool {
 		match self {
 			Self::Resident(h) => h.is_empty(),
@@ -135,8 +127,8 @@ impl VectorBackend {
 	}
 }
 
-/// Dedupe keeping the higher score (defensive — the `Disk` invariant already
-/// prevents overlap), then rank score-desc/id-asc so `truncate(k)` is deterministic.
+// Rank score-desc/id-asc so truncate(k) is deterministic; the higher-score dedupe
+// is a defensive backstop (the Disk invariant already prevents overlap).
 fn union_rank(a: Vec<HnswHit>, b: Vec<HnswHit>, k: usize) -> Vec<HnswHit> {
 	use std::collections::hash_map::Entry;
 	let mut by_id: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
@@ -166,15 +158,13 @@ mod tests {
 	use super::*;
 	use crate::base::diskann::{build_and_save, Params};
 
-	// Deterministic, well-separated vectors (distinct per-dim frequencies).
 	fn vec_of(i: usize) -> Vec<f32> {
 		(0..8)
 			.map(|j| ((i as f64) * (0.13 + 0.07 * j as f64)).sin() as f32)
 			.collect()
 	}
 
-	// Returns the index plus the TempDir that backs its mmap'd files; the caller
-	// must keep the TempDir alive for the index's lifetime (dropping it cleans up).
+	// Caller must keep the returned TempDir alive: it backs the index's mmap'd files.
 	fn snapshot_over(ids: impl Iterator<Item = usize>) -> (DiskIndex, tempfile::TempDir) {
 		let items: Vec<(String, Vec<f32>)> = ids.map(|i| (format!("e{i}"), vec_of(i))).collect();
 		let dir = tempfile::tempdir().unwrap();
@@ -215,7 +205,6 @@ mod tests {
 		for i in 40..80 {
 			be.insert(format!("e{i}"), vec_of(i));
 		}
-		// Query a delta point and a snapshot point; each should rank itself first.
 		assert_eq!(
 			be.search(&vec_of(63), 5, 128).first().map(|h| h.id.clone()),
 			Some("e63".into())

@@ -1,6 +1,3 @@
-//! Latency percentiles + concurrent-reader throughput over the LLM-free graph
-//! retrieval path. A/B numbers over a fixed trace, not absolute SLAs.
-
 use std::time::Instant;
 
 use crate::base::graph::GraphGnn;
@@ -22,8 +19,6 @@ pub struct LatencyReport {
 
 use crate::base::util::percentile_sorted;
 
-/// Time the retrieval path for every query in `trace`. The LLM/embedder hooks are
-/// `None`, so this times only the graph/index work, never an LLM leg.
 pub fn measure_latency(
 	g: &GraphGnn,
 	cfg: &RetrievalConfig,
@@ -76,14 +71,11 @@ pub fn measure_latency(
 pub struct ThroughputReport {
 	pub trace_name: String,
 	pub threads: usize,
-	/// Total queries executed across all threads.
 	pub total_queries: usize,
 	pub elapsed_secs: f64,
 	pub qps: f64,
 }
 
-/// Run the whole trace `per_thread_iters` times on each of `threads` concurrent
-/// readers. The graph is a shared `&GraphGnn` — retrieval never mutates it.
 pub fn measure_throughput(
 	g: &GraphGnn,
 	cfg: &RetrievalConfig,

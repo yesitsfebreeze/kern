@@ -1,6 +1,3 @@
-//! Daemon runtime state: the lock-guarded live graph + ingest worker + LLM
-//! clients. Distinct from `base::store`, the LMDB persistence layer + cold tier.
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,8 +21,7 @@ pub struct StoreEntry {
 	pub worker: Arc<Worker>,
 	pub tick_q: Arc<Queue>,
 	pub tick_handle: tokio::task::JoinHandle<()>,
-	/// Persists this store's graph. Single instance per store — clone from here,
-	/// never build a duplicate closure over the same graph.
+	// Single instance per store — clone this, never build a duplicate persist closure.
 	pub save_fn: Arc<dyn Fn() + Send + Sync>,
 	pub last_touch: RwLock<Instant>,
 }
@@ -33,8 +29,8 @@ pub struct StoreEntry {
 #[derive(Default)]
 pub struct Registry {
 	stores: RwLock<HashMap<StoreKey, Arc<StoreEntry>>>,
-	/// Per-key build locks: serialize concurrent `open()`s of the SAME dir so a
-	/// losing racer can't orphan its already-spawned worker/tick onto a dropped graph.
+	// Per-key build locks serialize concurrent `open()`s of the SAME dir so a losing
+	// racer can't orphan its already-spawned worker/tick onto a dropped graph.
 	builds: Mutex<HashMap<StoreKey, Arc<Mutex<()>>>>,
 }
 
@@ -76,8 +72,6 @@ impl Registry {
 			return e.clone();
 		}
 
-		// Hold this key's build lock across construction: a second caller blocks
-		// here, then re-checks and returns our entry.
 		let build_lock = lock_recovered(&self.builds)
 			.entry(key.clone())
 			.or_default()
@@ -95,8 +89,7 @@ impl Registry {
 
 		let graph = Arc::new(RwLock::new(crate::commands::load_graph(&store_cfg)));
 
-		// The ONE persist closure (see `StoreEntry.save_fn`); guarded flush won't
-		// overwrite a graph another writer grew on disk.
+		// The one persist closure; guarded flush won't overwrite a graph another writer grew on disk.
 		let save_g = graph.clone();
 		let save_cfg = store_cfg.clone();
 		let save_fn: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
@@ -105,8 +98,6 @@ impl Registry {
 
 		let tick_q = Arc::new(Queue::new(cfg.tick.queue_capacity.max(1)));
 
-		// Defer hook: a placed entity enqueues a `SeedQuestions` tick task so the
-		// commit path stays embed-bound; the tick seeds the Question edges.
 		let defer_q = tick_q.clone();
 		let defer: crate::ingest::worker::DeferQuestionsFn = Arc::new(move |entity_id: &str| {
 			let _ = defer_q.enqueue(crate::tick::queue::task_extra(
@@ -116,8 +107,6 @@ impl Registry {
 			));
 		});
 
-		// Dedup hook: a same-kind near-dup enqueues a `ClassifyContradiction` tick
-		// task so the commit path stays embed-bound; the tick decides and supersedes.
 		let contra_q = tick_q.clone();
 		let defer_contradiction: crate::ingest::worker::DeferContradictionFn =
 			Arc::new(move |kern_id: &str, reason_id: &str| {

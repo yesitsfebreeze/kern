@@ -1,6 +1,3 @@
-//! Claude-Code capture intake: drain dropped conversation deltas, distill, ingest.
-//! A delta is archived ONLY once every claim ingested — an outage never loses it.
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -11,8 +8,6 @@ use crate::ingest::outcome::OutcomeStatus;
 use crate::ingest::Worker;
 use crate::types::LlmFunc;
 
-/// Read + distill one delta into `(stem, claims)`; the stem becomes the session
-/// id. `None` on read failure OR no LLM output — the file stays in place for retry.
 pub fn extract_claims(path: &Path, llm: &dyn Fn(&str) -> String) -> Option<(String, Vec<Claim>)> {
 	let text = match std::fs::read_to_string(path) {
 		Ok(t) => t,
@@ -36,8 +31,7 @@ pub fn extract_claims(path: &Path, llm: &dyn Fn(&str) -> String) -> Option<(Stri
 	Some((stem, claims))
 }
 
-/// Move a fully-ingested delta into `<done>/`. Best effort: on rename failure
-/// (e.g. cross-device) the source is removed so it is not re-processed.
+// Best effort: on rename failure (cross-device) the source is removed so it is not re-processed.
 pub fn archive(path: &Path, done_dir: &Path) {
 	let _ = std::fs::create_dir_all(done_dir);
 	if let Some(name) = path.file_name() {
@@ -47,8 +41,6 @@ pub fn archive(path: &Path, done_dir: &Path) {
 	}
 }
 
-/// Archive `path` iff every claim ingested (or there were none); any failed
-/// claim leaves the delta in the intake for a later retry.
 pub fn finalize(path: &Path, done_dir: &Path, results: &[bool]) -> bool {
 	if results.iter().all(|&ok| ok) {
 		archive(path, done_dir);
@@ -58,11 +50,10 @@ pub fn finalize(path: &Path, done_dir: &Path, results: &[bool]) -> bool {
 	}
 }
 
-/// Delete archived deltas older than `max_age`; `now` is injected for testing.
 pub fn prune_done(done_dir: &Path, max_age: Duration, now: SystemTime) -> usize {
 	let entries = match std::fs::read_dir(done_dir) {
 		Ok(e) => e,
-		Err(_) => return 0, // archive dir may not exist yet
+		Err(_) => return 0,
 	};
 	let mut removed = 0;
 	for ent in entries.flatten() {
@@ -85,8 +76,6 @@ pub fn prune_done(done_dir: &Path, max_age: Duration, now: SystemTime) -> usize 
 	removed
 }
 
-/// Distill + ingest one `*.txt` delta, archiving iff every claim committed. Any
-/// read/LLM/claim failure leaves it for the next cycle — outages never drop knowledge.
 async fn drain_entry(
 	path: &Path,
 	done: &Path,
@@ -122,8 +111,6 @@ async fn drain_entry(
 	finalize(path, done, &results)
 }
 
-/// One drain cycle: [`drain_entry`] every delta, drain the direct lane, prune
-/// both `done/` dirs. Returns the number of deltas archived.
 async fn drain_once(
 	intake_dir: &Path,
 	done: &Path,
@@ -152,8 +139,6 @@ async fn drain_once(
 	archived
 }
 
-/// Daemon loop: [`drain_once`] immediately on startup, then every `interval`;
-/// each cycle prunes archives older than `done_retention` so `done/` stays bounded.
 pub async fn run(
 	intake_dir: PathBuf,
 	worker: Arc<Worker>,
@@ -168,8 +153,6 @@ pub async fn run(
 		dedup_threshold,
 		..Default::default()
 	};
-	// Drain first, sleep after — a delta dropped before startup is processed on
-	// the first cycle instead of waiting a full `interval`.
 	loop {
 		drain_once(
 			&intake_dir,
@@ -197,7 +180,6 @@ mod tests {
 		let done = dir.path().to_path_buf();
 		let f = done.join("old.txt");
 		std::fs::write(&f, "x").unwrap();
-		// Treat "now" as an hour past the file's mtime, retention 60s -> pruned.
 		let future = SystemTime::now() + Duration::from_secs(3600);
 		let removed = prune_done(&done, Duration::from_secs(60), future);
 		assert_eq!(removed, 1);
@@ -248,7 +230,6 @@ mod tests {
 
 	#[test]
 	fn extract_returns_none_on_llm_outage() {
-		// Regression: an outage once archived the delta unread (data loss).
 		let dir = tempdir().unwrap();
 		let delta = dir.path().join("sess-outage.txt");
 		std::fs::write(&delta, "user: remember my API key lives in vault X").unwrap();
@@ -259,7 +240,6 @@ mod tests {
 
 	#[test]
 	fn extract_returns_some_on_genuine_no_claims() {
-		// "[]" (nothing worth keeping) is success — Some([]), archivable.
 		let dir = tempdir().unwrap();
 		let delta = dir.path().join("sess-empty.txt");
 		std::fs::write(&delta, "user: hi\nassistant: hello").unwrap();
@@ -304,8 +284,6 @@ mod tests {
 		assert!(!done.join("sess-3.txt").exists());
 	}
 
-	/// One drain cycle end-to-end: delta distilled, claims through a REAL Worker,
-	/// file archived — no network (local /api/embed stub), no forever loop.
 	#[tokio::test]
 	async fn drain_once_ingests_a_delta_and_archives_it_end_to_end() {
 		use crate::base::graph::GraphGnn;
@@ -322,7 +300,6 @@ mod tests {
 		let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
 		let embedder = crate::llm::Client::new_embed_only(&format!("http://{addr}"), "m");
-		// One-claim mock; the chunk splitter falls back to heuristic splitting.
 		let llm: LlmFunc =
 			Arc::new(|_p: &str| r#"[{"text":"the API key lives in vault X","kind":"fact"}]"#.to_string());
 		let graph = Arc::new(RwLock::new(GraphGnn::new()));

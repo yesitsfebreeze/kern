@@ -1,29 +1,18 @@
-//! `[gossip]`: opt-in federation over TCP + LAN multicast discovery. OFF by
-//! default — a lone daemon opens no socket and never announces itself.
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GossipConfig {
-	/// Master switch for federation; false runs no node, listener, or discovery.
 	pub enabled: bool,
-	/// TCP bind address for the gossip listener; `:0` picks an ephemeral port.
 	pub addr: String,
-	/// LAN multicast discovery: advertise, and auto-add same-network-id peers.
 	pub discovery: bool,
-	/// Discovery id shared by the daemons to pool. Unset announces the graph's
-	/// per-daemon UUID, so independent daemons never auto-pair.
 	pub network_id: Option<String>,
-	/// UDP port for discovery announce/listen.
 	pub discovery_port: u16,
-	/// Seed peers (host:port) to dial on startup, in addition to discovery.
 	pub peers: Vec<String>,
 }
 
 impl GossipConfig {
-	/// The id to announce: the configured `network_id` when valid, else
-	/// `generated`. A ':' would corrupt the `kern:<id>:<addr>` announce format.
+	// A ':' in the id would corrupt the `kern:<id>:<addr>` announce wire format.
 	pub fn effective_network_id(&self, generated: &str) -> String {
 		match self.network_id.as_deref() {
 			Some(id) if !id.is_empty() && !id.contains(':') => id.to_string(),

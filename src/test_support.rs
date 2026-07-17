@@ -1,5 +1,3 @@
-//! Shared test-only helpers. Compiled only under `#[cfg(test)]`.
-
 use crate::base::types::{Entity, Reason};
 use tokio::task::JoinHandle;
 
@@ -18,7 +16,6 @@ pub(crate) fn entity_vec(id: &str, vector: Vec<f32>) -> Entity {
 	}
 }
 
-/// A default [`Reason`] edge `from -> to`, id `"{from}->{to}"`.
 pub(crate) fn edge(from: &str, to: &str) -> Reason {
 	Reason {
 		id: format!("{from}->{to}"),
@@ -28,8 +25,6 @@ pub(crate) fn edge(from: &str, to: &str) -> Reason {
 	}
 }
 
-/// Bind an axum app to an ephemeral localhost port; returns its base URL and
-/// the task handle. Dropping the handle detaches — the stub keeps serving.
 pub(crate) async fn spawn_http(app: axum::Router) -> (String, JoinHandle<()>) {
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let addr = listener.local_addr().unwrap();

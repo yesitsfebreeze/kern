@@ -27,3 +27,6 @@ Scope rating: 7/10 — gossip message handlers for CRDT deltas, entity sync, que
 - `handle_entity_sync` — 8/10: merges remote body into phantom kern, ignores same-network.
 - `resolve_question_from_peer` — 8/10: fills answer + promotes reason to Similarity.
 - `validated_delta_value` — 9/10: bounds-checks CRDT delta value.
+
+## Third-pass comment-strip (STRICT bar):
+- `new_phantom_kern` returns an UNREGISTERED kern parented under the local root with the federation `root_id` stamped; callers (`inject_remote_scope`, `handle_entity_sync`) fill in scope/content and THEN call `g.register(k)`. Returning it unregistered is deliberate so the caller can populate anchor/entities before it becomes visible.

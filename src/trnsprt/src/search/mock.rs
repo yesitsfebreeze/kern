@@ -1,7 +1,5 @@
 // Mock mirrors the trait's explicit `impl Future` surface.
 #![allow(clippy::manual_async_fn)]
-//! In-memory [`SearchSvc`] handler for tests. `cancel_token`: only the highest
-//! token seen yields `fresh: true`; older in-flight requests report stale.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -12,8 +10,6 @@ use super::dto::{
 };
 use super::svc::SearchSvc;
 
-/// Mock [`SearchSvc`]. State is `Arc`-shared, so all clones observe the same
-/// cancel-token watermark.
 #[derive(Clone, Default)]
 pub struct MockSearchServer {
 	inner: Arc<MockState>,
@@ -21,7 +17,6 @@ pub struct MockSearchServer {
 
 #[derive(Default)]
 struct MockState {
-	/// Highest `cancel_token` seen; atomic so concurrent calls bump monotonically.
 	high_water: AtomicU64,
 }
 
@@ -30,7 +25,6 @@ impl MockSearchServer {
 		Self::default()
 	}
 
-	/// Canned corpus shared by `search` and `neighbors`.
 	fn corpus() -> [EntityRef; 4] {
 		[
 			EntityRef {
@@ -76,8 +70,6 @@ impl MockSearchServer {
 		]
 	}
 
-	/// Facets AND across the list; within each `Facet` the `scheme`/`kind`
-	/// axes also AND when both are set.
 	fn filter(query: &str, facets: &[Facet], k: u32) -> Vec<EntityRef> {
 		let q = query.to_lowercase();
 		let mut hits: Vec<EntityRef> = Self::corpus()
@@ -108,7 +100,7 @@ impl SearchSvc for MockSearchServer {
 			let token = req.cancel_token.unwrap_or(0);
 			let prev = state.high_water.fetch_max(token, Ordering::SeqCst);
 			let high = prev.max(token);
-			let fresh = token >= high; // == when token==high; >= so absent tokens still fresh
+			let fresh = token >= high;
 			SearchRes {
 				hits: Self::filter(&req.query, &req.facets, req.k.max(1)),
 				fresh,
@@ -126,8 +118,6 @@ impl SearchSvc for MockSearchServer {
 				.into_iter()
 				.filter(|e| e.id != req.entity_id)
 				.collect();
-			// Restricting kinds without `Supports` drops the Claim row — canned
-			// demo of edge-kind filtering.
 			let neighbors = if !req.edge_kinds.is_empty() && !req.edge_kinds.contains(&EdgeKind::Supports)
 			{
 				neighbors

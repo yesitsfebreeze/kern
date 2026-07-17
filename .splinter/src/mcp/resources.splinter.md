@@ -11,3 +11,4 @@ Scope rating: 8/10 — MCP resource surface (thoughts list, individual thought/r
 - `resource_thought` — 9/10: individual thought rendering with edges.
 - `resource_reason` — 9/10: individual reason rendering with endpoints.
 - `resource_thought_missing_returns_error_json` — 9/10: covers missing-entity error path.
+TOP_THOUGHTS=50 caps kern://local/thoughts to the highest-scoring slice — deliberately not an unbounded full-graph dump.

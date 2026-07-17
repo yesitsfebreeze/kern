@@ -104,8 +104,7 @@ pub fn average_vec(a: &[f32], b: &[f32]) -> Vec<f32> {
 		.collect()
 }
 
-/// L2-normalize `v` in place to unit Euclidean norm. A zero vector (norm 0) is
-/// left unchanged rather than producing NaNs from a divide-by-zero.
+// A zero vector (norm 0) is left unchanged — avoids divide-by-zero NaNs.
 pub fn l2_normalize(v: &mut [f32]) {
 	let norm = v
 		.iter()
@@ -193,8 +192,7 @@ impl OnlineSoftmax {
 		self.m
 	}
 
-	/// Log-sum-exp (`m + ln(s)`) — deliberately pooling, not max: `k` equal scores
-	/// finalize to `x + ln(k)`, a corroboration boost. Do NOT swap for `running_max`.
+	// Deliberately pooling (log-sum-exp), not max — do NOT swap for running_max.
 	pub fn finalize(&self) -> f64 {
 		if self.is_empty() {
 			return f64::NEG_INFINITY;
@@ -268,8 +266,7 @@ mod cosine_tests {
 		assert_eq!(cosine(&[], &[1.0, 2.0]), 0.0);
 	}
 
-	/// Lengths exercise BOTH the 8-wide chunk loop and the unchecked tail
-	/// (e.g. 17 = 2*8 + 1).
+	// Lengths exercise both the 8-wide chunk loop and the unchecked tail (17 = 2*8+1).
 	#[cfg(target_arch = "x86_64")]
 	#[test]
 	fn avx2_path_matches_scalar_reference() {
@@ -348,15 +345,13 @@ mod online_softmax_tests {
 
 	#[test]
 	fn corroborated_item_can_outrank_higher_single_observation() {
-		// Pins the pooling design: a switch to running_max is a deliberate,
-		// test-breaking change.
+		// Pins the pooling design — a switch to running_max is a deliberate, test-breaking change.
 		let mut corroborated = OnlineSoftmax::new();
 		corroborated.update(0.8);
 		corroborated.update(0.8);
 		let mut single = OnlineSoftmax::new();
 		single.update(0.9);
 		assert!(corroborated.finalize() > single.finalize());
-		// running_max would reverse this (0.8 < 0.9).
 		assert!(corroborated.running_max() < single.running_max());
 	}
 }

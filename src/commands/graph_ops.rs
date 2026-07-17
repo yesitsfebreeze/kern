@@ -8,7 +8,6 @@ use crate::base::util::{explain_relationship_prompt, short_id, truncate};
 
 use super::{load_graph, save_graph, with_graph, Client, Endpoint};
 
-/// Exact-id lookup, else the first id-prefix match across every kern.
 fn find_entity_by_prefix(g: &GraphGnn, id: &str) -> Option<(Entity, String)> {
 	if let Some(pair) = find_entity(g, id) {
 		return Some(pair);
@@ -57,8 +56,6 @@ pub(super) fn cmd_get(cfg: &crate::config::Config, id: &str) {
 	let (thought, kern_id) = match find_entity_by_prefix(&g, id) {
 		Some(pair) => pair,
 		None => {
-			// Cold-tier fallback: stigmergy GC spills evicted thoughts to the store
-			// before dropping them from the hot graph.
 			if let Some(e) = g.store().and_then(|s| s.cold_get(id).ok().flatten()) {
 				println!("ID:     {}", e.id);
 				println!("Kind:   {:?}", e.kind);
@@ -118,8 +115,6 @@ pub(super) fn cmd_forget(cfg: &crate::config::Config, id: &str) {
 	});
 }
 
-/// Remove a non-fact thought; returns how many incident edges went with it.
-/// Facts are immutable and refused.
 fn forget_entity(g: &mut GraphGnn, id: &str) -> Result<usize, &'static str> {
 	let (thought, kern_id) = find_entity(g, id).ok_or("thought not found")?;
 	if thought.is_fact() {
@@ -128,8 +123,7 @@ fn forget_entity(g: &mut GraphGnn, id: &str) -> Result<usize, &'static str> {
 	let edges_before = g.kerns.get(&kern_id).map(|k| k.reasons.len()).unwrap_or(0);
 	remove_entity(g, &kern_id, id);
 	let edges_after = g.kerns.get(&kern_id).map(|k| k.reasons.len()).unwrap_or(0);
-	// saturating: remove_entity only ever drops incident edges, never adds, but
-	// guard the subtraction so a future change can't panic on underflow.
+	// saturating: remove_entity only drops edges, never adds — guard against underflow.
 	Ok(edges_before.saturating_sub(edges_after))
 }
 
@@ -239,8 +233,6 @@ pub(super) fn cmd_degrade(cfg: &crate::config::Config, id: &str) {
 	});
 }
 
-/// Cut each incident edge's score by a geometric schedule (`BASE * POW^i`);
-/// edges falling below `DEGRADE_MIN_THRESHOLD` are removed. `(decayed, removed)`.
 fn degrade_entity_reasons(g: &mut GraphGnn, kern_id: &str, id: &str) -> (usize, usize) {
 	let rids: Vec<String> = match g.kerns.get(kern_id) {
 		Some(kern) => crate::base::reason::collect_reason_ids(kern, id),
@@ -293,8 +285,7 @@ mod tests {
 	fn degrade_decays_survivors_and_removes_below_threshold() {
 		let mut g = GraphGnn::new();
 		let mut k = Kern::new("kx", "");
-		// With BASE=0.15 the first decay pushes a->c (0.0) below the 0.05 floor;
-		// a->b (1.0) merely decays.
+		// BASE=0.15 pushes a->c (0.0) below the 0.05 floor; a->b (1.0) merely decays.
 		add_reason(&mut k, edge("a", "b", 1.0));
 		add_reason(&mut k, edge("a", "c", 0.0));
 		g.kerns.insert("kx".into(), k);

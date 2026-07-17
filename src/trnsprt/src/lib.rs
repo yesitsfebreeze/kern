@@ -1,6 +1,3 @@
-//! `trnsprt` — kern's transport + typed-RPC layer. Two stacks: the legacy MCP
-//! JSON-RPC boundary and the typed-RPC stack ([`typed`] + [`service!`]).
-
 mod client;
 mod error;
 mod http;
@@ -32,8 +29,8 @@ pub mod search;
 
 pub mod kern_rpc;
 
-/// Re-exports solely for [`service!`]-generated code (`::trnsprt::__private::*`).
-/// NOT public API — may change in any release; never import directly.
+// Re-exports solely for service!-generated code (::trnsprt::__private::*).
+// NOT public API — may change in any release; never import directly.
 #[doc(hidden)]
 pub mod __private {
 	pub use bytes;

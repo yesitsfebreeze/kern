@@ -10,3 +10,11 @@ Second-pass migration:
 - `validate_fact_source`: MCP entrypoint always pins source to `AGENT_SOURCE`; the guard exists to backstop future caller paths.
 - `is_zero` doc deleted (restated the code); see existing note line above for why it is generic.
 - `conf_inclusive_bounds_accepted` comment compressed to the one-line oracle.
+## Design context (moved from source doc comments)
+
+- Module purpose: wire-format payload types + trust-boundary validators for MCP/RPC shapes. Bad inputs surface as structured `WireError`s and are NEVER silently coerced.
+- `WIRE_CONF_MIN`/`WIRE_CONF_MAX` are the INCLUSIVE [0.0, 1.0] bounds for any caller-supplied `conf` on the wire.
+- `validate_wire_conf`: NaN is rejected too (not just out-of-range).
+- `validate_wire_kind`: only `Claim` and `Fact` are wire-acceptable. `Document`/`Question`/`Answer`/`Conclusion` are internal lifecycle states produced by ingest/synthesis, never sent by clients.
+- `validate_fact_source`: `Fact` promotion (conf >= 1.0) is restricted to `USER_SOURCE`/`AGENT_SOURCE`; this backstops any future caller path beyond MCP.
+- Test `conf_inclusive_bounds_accepted` pins both inclusive endpoints so a `<`/`>` typo can't silently start rejecting them.

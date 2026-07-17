@@ -27,8 +27,6 @@ impl LayerNorm {
 		}
 	}
 
-	/// Fallible backward — [`GnnError::MissingForwardState`] instead of a panic
-	/// when `forward` has not run. The infallible [`Backward::backward`] delegates here.
 	pub fn try_backward(&mut self, d_out: &Tensor) -> Result<Tensor, GnnError> {
 		let x_hat = self
 			.last_x_hat
@@ -140,7 +138,7 @@ mod tests {
 
 	#[test]
 	fn forward_normalizes_each_row() {
-		let mut ln = LayerNorm::new(3); // gamma=1, beta=0 -> output is x_hat
+		let mut ln = LayerNorm::new(3);
 		let x = Tensor::new(1, 3, vec![1.0, 2.0, 3.0]).unwrap();
 		let out = ln.forward(&x);
 		let mean: f64 = out.data.iter().sum::<f64>() / 3.0;
@@ -189,7 +187,6 @@ mod tests {
 
 		ln.backward(&d_out);
 		let after_one: Vec<f64> = ln.d_beta.data.clone();
-		// d_beta[j] += d_out (=1) each pass, so a single row of ones gives [1;3].
 		assert!(after_one.iter().all(|&v| (v - 1.0).abs() < 1e-12));
 
 		ln.backward(&d_out);

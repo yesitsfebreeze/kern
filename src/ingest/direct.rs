@@ -1,6 +1,3 @@
-//! Durable direct-ingest lane (MCP `ingest`): payload persisted BEFORE the
-//! `"accepted"` ack, replayed as-is through the Worker (no distill).
-
 use std::path::Path;
 
 use crate::base::types::{EntityKind, Source};
@@ -10,8 +7,7 @@ use crate::ingest::Worker;
 
 use serde::{Deserialize, Serialize};
 
-/// The post-clamp job parameters exactly as the worker sees them. Serialized as
-/// serde_json (name-based — the bincode positional law does not apply here).
+// Serialized as serde_json (name-based) — the bincode positional law does not apply here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectJob {
 	pub text: String,
@@ -21,8 +17,6 @@ pub struct DirectJob {
 	pub confidence: f64,
 }
 
-/// Atomic persist (pid-tagged tmp + rename) into `<direct_dir>/<doc_id>.json`;
-/// content-hash naming makes identical re-submits idempotent. Returns the doc_id.
 pub fn intake_direct(direct_dir: &Path, job: &DirectJob) -> std::io::Result<String> {
 	std::fs::create_dir_all(direct_dir)?;
 	let doc_id = util::content_hash(&job.text);
@@ -40,8 +34,6 @@ pub fn intake_direct(direct_dir: &Path, job: &DirectJob) -> std::io::Result<Stri
 	Ok(doc_id)
 }
 
-/// Replay every `*.json` job; archive on any non-`Failed` outcome (`Deduped` is
-/// success), leave `Failed` for retry. An unparseable payload archives as poison.
 pub async fn drain_direct_once(
 	direct_dir: &Path,
 	worker: &Worker,
@@ -49,7 +41,7 @@ pub async fn drain_direct_once(
 ) -> usize {
 	let entries = match std::fs::read_dir(direct_dir) {
 		Ok(e) => e,
-		Err(_) => return 0, // lane unused so far — nothing submitted
+		Err(_) => return 0,
 	};
 	let done = direct_dir.join("done");
 	let mut archived = 0;
@@ -149,8 +141,6 @@ mod tests {
 		assert_eq!(back.confidence, 0.7);
 	}
 
-	/// End-to-end through a REAL worker (local /api/embed stub): the payload must
-	/// arrive verbatim (no distill) and the intake file is archived.
 	#[tokio::test]
 	async fn drain_direct_once_ingests_and_archives_end_to_end() {
 		let app = axum::Router::new().route(
@@ -192,8 +182,6 @@ mod tests {
 		server.abort();
 	}
 
-	/// Embed down → job fails → the file must remain: a transient outage or
-	/// daemon death never loses an acked ingest (the point of the lane).
 	#[tokio::test]
 	async fn drain_direct_once_leaves_failed_job_for_retry() {
 		let embedder = crate::llm::Client::new_embed_only("http://127.0.0.1:1", "m");

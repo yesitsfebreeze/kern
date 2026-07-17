@@ -7,12 +7,10 @@ use crate::transport::Transport;
 use crate::types::{ToolResult, ToolSchema};
 use crate::PROTOCOL_VERSION;
 
-/// Bounds [`Client::request`]'s read loop so a peer flooding unrelated frames
-/// (or a wire desync) can't spin forever.
+// Bounds Client::request's read loop so a peer flooding unrelated frames (or a
+// wire desync) can't spin forever.
 const MAX_UNMATCHED_FRAMES: usize = 1024;
 
-/// Blocking MCP client over a newline-delimited JSON-RPC wire. At most one
-/// in-flight request — [`Client::request`] blocks until its id comes back.
 pub struct Client {
 	transport: Box<dyn Transport>,
 	next_id: AtomicU64,

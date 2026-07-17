@@ -4,14 +4,10 @@ use thiserror::Error;
 pub enum McpError {
 	#[error("mcp transport i/o: {0}")]
 	Io(#[from] std::io::Error),
-	/// Wire-format violation — distinct from [`Rpc`](Self::Rpc), which is a
-	/// *well-formed* error response.
 	#[error("mcp protocol: {0}")]
 	Protocol(String),
 	#[error("mcp json: {0}")]
 	Json(#[from] serde_json::Error),
-	/// Well-formed JSON-RPC error reply — application-level, NOT a transport
-	/// fault. `code` follows JSON-RPC conventions (`-32601`, `-32602`, ...).
 	#[error("mcp rpc error {code}: {message}")]
 	Rpc { code: i64, message: String },
 	#[error("unknown mcp server: {0}")]

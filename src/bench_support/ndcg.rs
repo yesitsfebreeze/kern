@@ -1,6 +1,3 @@
-//! NDCG@k for the retrieval bench. Relevance is binary (gain 1 iff in
-//! `expected_ids`); NDCG = DCG/IDCG ∈ [0,1] — see the note for the formula.
-
 use std::collections::HashSet;
 
 pub fn ndcg_at_k(ranked_ids: &[String], expected_ids: &[String], k: usize) -> f64 {
@@ -27,8 +24,6 @@ pub fn ndcg_at_k(ranked_ids: &[String], expected_ids: &[String], k: usize) -> f6
 	dcg / idcg
 }
 
-/// Recall@k: `|expected ∩ ranked[..k]| / |expected|` ∈ [0,1], order-insensitive
-/// coverage. Both sides de-duplicated; when `|expected| > k`, 1.0 is unreachable.
 pub fn recall_at_k(ranked_ids: &[String], expected_ids: &[String], k: usize) -> f64 {
 	if expected_ids.is_empty() || k == 0 {
 		return 0.0;
@@ -105,7 +100,6 @@ mod tests {
 
 	#[test]
 	fn recall_is_bounded_by_k_and_never_exceeds_one() {
-		// 3 relevant ids but k=1: only the top slot counts -> 1/3.
 		let r = recall_at_k(&ids(&["a", "b", "c"]), &ids(&["a", "b", "c"]), 1);
 		assert!(
 			(r - 1.0 / 3.0).abs() < 1e-9,

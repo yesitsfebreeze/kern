@@ -1,13 +1,9 @@
-//! GNN subsystem: kern's learned re-embedder. The tick loop trains it on the
-//! live graph; retrieval fuses its `gnn_vector`s with content similarity.
-
 pub mod activation;
 pub mod backward;
 
 pub use activation::Activation;
 pub use backward::{BackwardGraphLayer, GraphLayer};
 
-/// Shared across gnn submodules — extend this enum, don't add per-site errors.
 #[derive(Debug, thiserror::Error)]
 pub enum GnnError {
 	#[error("gnn: missing forward state ({0}); call forward_graph before backward/inference")]

@@ -8,3 +8,6 @@ Module map (moved from the `//!` doc):
 - `sweep`: sweep retrieval parameters over a trace, emit CSV.
 - `ndcg`: NDCG@k scoring of ranked results against expected ids.
 - `embed`: deterministic stub embedder so trace replays are reproducible without a live embedding model.
+# src/bench_support/mod.rs — commentary (migrated from source doc comments)
+
+- This module is benchmark + evaluation scaffolding for kern's retrieval stack. It is bench/eval ONLY — NOT part of the production daemon path.

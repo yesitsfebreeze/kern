@@ -1,5 +1,4 @@
-//! One-shot migration from the legacy file-per-shard bincode tier into the LMDB
-//! store in the same dir. Never destroys the source; no dual-read fallback.
+// One-shot legacy-shard -> LMDB migration in the same dir. Never destroys the source.
 
 use crate::base::persist::{load_legacy_dir, save_graph_into};
 use crate::base::store::Store;
@@ -9,7 +8,7 @@ pub struct MigrateReport {
 	pub entities: usize,
 }
 
-/// Idempotent: re-running overwrites the store with the same legacy data.
+// Idempotent: re-running overwrites the store with the same legacy data.
 pub fn migrate_dir(dir: &str) -> Result<MigrateReport, String> {
 	let g = load_legacy_dir(dir).map_err(|e| format!("read legacy shards: {e}"))?;
 	let kerns = g.map().len();

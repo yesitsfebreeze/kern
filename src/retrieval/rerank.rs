@@ -3,8 +3,7 @@ use crate::config::RetrievalConfig;
 use crate::retrieval::expand::ScoredEntity;
 use crate::retrieval::LlmFunc;
 
-/// Hard prompt ceiling overriding `rerank_pool_size` — each candidate is ~300
-/// chars, so a large configured pool would blow the context window (see note).
+// Hard prompt ceiling overriding rerank_pool_size — a large pool (~300 chars/candidate) would blow the LLM context window.
 const MAX_RERANK_CANDIDATES: usize = 32;
 
 pub fn llm_rerank(
@@ -78,7 +77,6 @@ pub fn parse_ranking(response: &str, pool: usize) -> Option<Vec<usize>> {
 	let list = arr.as_array()?;
 	let mut out = Vec::with_capacity(list.len());
 	for v in list {
-		// Accept 1 or 1.0 (models emit both); reject fractions like 1.5.
 		let i = v
 			.as_i64()
 			.or_else(|| v.as_f64().filter(|f| f.fract() == 0.0).map(|f| f as i64))? as usize;
@@ -223,7 +221,6 @@ mod tests {
 
 	#[test]
 	fn negative_index_is_filtered_not_panic() {
-		// -1 as usize is huge -> filtered by the `< pool` check, no panic.
 		assert_eq!(parse_ranking("[-1,1]", 2), Some(vec![1]));
 	}
 
@@ -244,7 +241,6 @@ mod tests {
 
 	#[test]
 	fn fractional_float_discards_ranking() {
-		// A fractional index invalidates the WHOLE ranking — never trust a partial parse.
 		assert_eq!(parse_ranking("[1.5, 0]", 3), None);
 	}
 }

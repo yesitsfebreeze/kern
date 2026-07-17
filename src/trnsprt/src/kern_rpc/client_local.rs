@@ -1,34 +1,22 @@
-//! `KernRpcClient::connect_local` — dials the per-cwd kern endpoint with the
-//! JSON-envelope codec. No port file: the endpoint resolver IS the coordination.
-
 use std::time::Duration;
 
 use crate::typed::{connect_kern, AdapterError, Channel, Endpoint, JsonEnvelopeCodec};
 
 use super::svc::KernRpcClient;
 
-/// Connect attempts before giving up — absorbs the daemon-start race (a client
-/// launched alongside `kern --daemon` may dial before the listener is up).
 pub const RETRIES: u32 = 5;
-/// Default base delay between connect attempts, in milliseconds (jittered at use).
 pub const RETRY_DELAY_MS: u64 = 100;
 
 impl KernRpcClient<JsonEnvelopeCodec> {
-	/// Connect to a kern singleton at the per-cwd endpoint. Caller is expected to
-	/// run on a tokio runtime.
 	pub async fn connect_local() -> Result<Self, AdapterError> {
 		Self::connect_endpoint(&Endpoint::kern()).await
 	}
 
-	/// Connect at an explicit endpoint with the default retry budget
-	/// ([`RETRIES`] / [`RETRY_DELAY_MS`]).
 	pub async fn connect_endpoint(endpoint: &Endpoint) -> Result<Self, AdapterError> {
 		Self::connect_endpoint_with_retry(endpoint, RETRIES, Duration::from_millis(RETRY_DELAY_MS))
 			.await
 	}
 
-	/// Connect, retrying up to `retries` times with a [`jittered`] `base_delay`
-	/// between attempts.
 	pub async fn connect_endpoint_with_retry(
 		endpoint: &Endpoint,
 		retries: u32,
@@ -49,8 +37,6 @@ impl KernRpcClient<JsonEnvelopeCodec> {
 	}
 }
 
-/// Full-jitter into `[base/2, base]`; zero base stays zero. Entropy is
-/// wall-clock sub-second nanos — no `rand` dependency.
 fn jittered(base: Duration) -> Duration {
 	let base_ms = base.as_millis() as u64;
 	if base_ms == 0 {
@@ -68,7 +54,6 @@ fn jittered(base: Duration) -> Duration {
 mod tests {
 	use super::*;
 
-	/// An endpoint that nothing is listening on, for exercising the failure path.
 	fn bogus_endpoint() -> Endpoint {
 		#[cfg(unix)]
 		{

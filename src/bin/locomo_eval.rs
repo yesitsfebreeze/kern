@@ -1,6 +1,3 @@
-//! LoCoMo eval harness (#36): drives capture→distill→retrieve over the LoCoMo corpus
-//! with live ollama. Dataset is CC BY-NC 4.0 — supplied via a path, never bundled.
-
 use clap::Parser;
 use kern::bench_support::locomo_run::{run_eval, EvalConfig};
 use kern::config::{DEFAULT_ANSWER_MODEL, DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL};
@@ -11,7 +8,8 @@ use kern::config::{DEFAULT_ANSWER_MODEL, DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL}
 	about = "Measure kern memory quality on the LoCoMo benchmark."
 )]
 struct Args {
-	/// Path to locomo10.json. Defaults to $KERN_LOCOMO_PATH, then eval/locomo10.json.
+	/// Path to locomo10.json (CC BY-NC 4.0; supply it yourself, never bundled).
+	/// Falls back to $KERN_LOCOMO_PATH, then eval/locomo10.json.
 	#[arg(long)]
 	dataset: Option<String>,
 	/// Ollama base URL.
@@ -20,7 +18,7 @@ struct Args {
 	/// Embedding model tag.
 	#[arg(long, default_value = DEFAULT_EMBED_MODEL)]
 	embed_model: String,
-	/// Answerer model tag (kern's reason endpoint glues retrieved context).
+	/// Answerer model tag (kern's `reason` endpoint glues retrieved context).
 	#[arg(long, default_value = DEFAULT_ANSWER_MODEL)]
 	answer_model: String,
 	/// LLM-judge model tag.
@@ -35,19 +33,17 @@ struct Args {
 	/// Dedup cosine threshold at ingest.
 	#[arg(long, default_value_t = 0.95)]
 	dedup: f64,
-	/// Sampling seed forwarded to ollama. Vary across runs for error bars.
+	/// Sampling seed forwarded to ollama; vary across runs for error bars.
 	#[arg(long, default_value_t = 0)]
 	seed: i64,
-	/// Emit the report as JSON (machine-readable / CI-diffable) instead of the
-	/// human-readable summary table.
+	/// Emit a machine-readable (CI-diffable) report instead of the human table.
 	#[arg(long)]
 	json: bool,
-	/// Write the report to this file instead of stdout.
+	/// Write the report to a file instead of stdout.
 	#[arg(long)]
 	output: Option<String>,
 }
 
-/// Precedence: explicit `--dataset`, then `$KERN_LOCOMO_PATH`, then the default.
 fn resolve_dataset(arg: Option<String>, env: Option<String>) -> String {
 	arg
 		.or(env)

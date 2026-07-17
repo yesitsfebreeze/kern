@@ -1,6 +1,3 @@
-//! Wire-format payload types and trust-boundary validators (MCP / RPC shapes).
-//! Bad inputs surface as structured [`WireError`]s — never silently coerced.
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -9,12 +6,9 @@ use crate::base::types::EntityKind;
 
 pub const VERSION: &str = "1";
 
-/// Inclusive lower bound for any caller-supplied `conf` value on the wire.
 pub const WIRE_CONF_MIN: f64 = 0.0;
-/// Inclusive upper bound for any caller-supplied `conf` value on the wire.
 pub const WIRE_CONF_MAX: f64 = 1.0;
 
-/// Trust-boundary validation errors for inbound wire payloads.
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum WireError {
 	#[error("conf {0} out of range [0.0..=1.0]")]
@@ -25,7 +19,6 @@ pub enum WireError {
 	FactFromUntrustedSource(String),
 }
 
-/// Validate caller-supplied `conf` at the wire boundary — NaN is rejected too.
 pub fn validate_wire_conf(conf: f64) -> Result<f64, WireError> {
 	if conf.is_nan() || !(WIRE_CONF_MIN..=WIRE_CONF_MAX).contains(&conf) {
 		return Err(WireError::ConfOutOfRange(conf));
@@ -33,8 +26,6 @@ pub fn validate_wire_conf(conf: f64) -> Result<f64, WireError> {
 	Ok(conf)
 }
 
-/// Only `Claim` and `Fact` are wire-acceptable; the rest are internal lifecycle
-/// states produced by ingest / synthesis, never by clients.
 pub fn validate_wire_kind(kind: EntityKind) -> Result<EntityKind, WireError> {
 	match kind {
 		EntityKind::Claim | EntityKind::Fact => Ok(kind),
@@ -44,8 +35,6 @@ pub fn validate_wire_kind(kind: EntityKind) -> Result<EntityKind, WireError> {
 	}
 }
 
-/// `Fact` promotion (conf >= 1.0) is restricted to [`USER_SOURCE`] /
-/// [`AGENT_SOURCE`]; backstops any future caller path beyond MCP.
 pub fn validate_fact_source(source: &str) -> Result<(), WireError> {
 	if source == USER_SOURCE || source == AGENT_SOURCE {
 		Ok(())
@@ -420,7 +409,6 @@ mod wire_validation_tests {
 
 	#[test]
 	fn conf_inclusive_bounds_accepted() {
-		// Pin both inclusive endpoints so a `<`/`>` typo can't reject them.
 		assert_eq!(validate_wire_conf(0.0), Ok(0.0));
 		assert_eq!(validate_wire_conf(1.0), Ok(1.0));
 		assert_eq!(validate_wire_conf(0.5), Ok(0.5));

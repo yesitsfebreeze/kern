@@ -1,33 +1,18 @@
 use serde::{Deserialize, Serialize};
 
-/// Claude-Code memory capture + recall. ON by default.
-///
-/// `dir` and `digest_path` MUST stay cwd-relative and independent of `data_dir`:
-/// the Claude-Code hooks resolve them from the session cwd — deriving from
-/// `data_dir` breaks the hook contract.
+// `dir` and `digest_path` MUST stay cwd-relative and independent of `data_dir`:
+// the Claude-Code hooks resolve them from session cwd; deriving from data_dir breaks the hook contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CaptureConfig {
-	/// Master switch for the intake + digest tasks.
 	pub enabled: bool,
-	/// Intake directory (relative to cwd) the Stop hook writes deltas into.
 	pub dir: String,
-	/// How often the intake is drained, in seconds.
 	pub poll_secs: u64,
-	/// Output path (relative to cwd) for the recall digest.
 	pub digest_path: String,
-	/// How often the digest is regenerated, in seconds.
 	pub digest_secs: u64,
-	/// Max thoughts included in the digest.
 	pub digest_k: usize,
-	/// Trust floor (`conf_mean`) a claim must clear to re-enter the digest;
-	/// `0.0` disables the gate.
 	pub digest_min_trust: f64,
-	/// Approximate token budget for the digest body (best-first by heat ×
-	/// confidence); `0` disables the token cap. `digest_k` still caps item count.
 	pub digest_token_budget: usize,
-	/// Retention window (seconds) for archived deltas under `<dir>/done/` — a
-	/// transient audit trail swept each drain cycle (the graph is durable).
 	pub done_retention_secs: u64,
 }
 
@@ -48,8 +33,6 @@ impl Default for CaptureConfig {
 }
 
 impl CaptureConfig {
-	/// Reject zero poll/digest intervals that busy-loop the tasks. Only enforced
-	/// when `enabled` — dormant capture never runs the loops.
 	pub fn validate(&self) -> Result<(), String> {
 		if self.enabled {
 			if self.poll_secs == 0 {
@@ -78,7 +61,6 @@ mod tests {
 		assert_eq!(c.digest_k, 40);
 		assert_eq!(c.digest_min_trust, 0.35);
 		assert_eq!(c.digest_token_budget, 1500);
-		// Concrete value (not the default's expression) to catch a silent change.
 		assert_eq!(c.done_retention_secs, 604_800, "7 days in seconds");
 	}
 

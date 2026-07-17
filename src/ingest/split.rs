@@ -1,5 +1,3 @@
-/// Split `text` into atomic statements. No `llm`, or an empty LLM response,
-/// falls back to [`paragraph_split`] — ingest always gets some chunking.
 pub fn split(text: &str, descriptor: &str, llm: Option<&dyn Fn(&str) -> String>) -> Vec<String> {
 	if let Some(llm_fn) = llm {
 		let result = llm_split(text, descriptor, llm_fn);
@@ -32,7 +30,6 @@ pub(crate) fn paragraph_split(text: &str) -> Vec<String> {
 	if !chunks.is_empty() {
 		return chunks;
 	}
-	// Only whitespace-only input reaches here — emit nothing, never a blank chunk.
 	let trimmed = text.trim();
 	if trimmed.is_empty() {
 		Vec::new()

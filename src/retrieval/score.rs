@@ -30,28 +30,20 @@ impl SortField {
 pub struct QueryOptions {
 	pub sort: SortField,
 	pub ascending: bool,
-	/// Legacy free-form source-system filter. Compared against
-	/// `Source::system()`.
 	pub source: String,
-	/// Typed entity-kind filter; `None` disables the filter.
 	pub kind: Option<EntityKind>,
-	/// URI scheme filter (`"file"` / `"ticket"` / etc); `None` disables.
 	pub scheme: Option<String>,
 	pub since: Option<SystemTime>,
 	pub before: Option<SystemTime>,
 	pub min_conf: f64,
 	pub valid_at: Option<SystemTime>,
-	/// Bi-temporal WORLD-TIME point query: keep entities whose `[valid_from,
-	/// valid_to)` covers this instant — distinct from `valid_at`, which gates TTL expiry.
+	// WORLD-TIME point query (`[valid_from, valid_to)` covers this instant) — distinct from `valid_at`, which gates TTL expiry.
 	pub as_of: Option<SystemTime>,
-	/// Include Superseded entities via `Supersedes` chain walks from active hits —
-	/// a tool-layer walk, not a per-entity filter (the ANN never holds superseded entities).
+	// Superseded-history walk done at the tool layer, NOT a per-entity filter (the ANN never holds superseded entities).
 	pub include_history: bool,
 }
 
 impl QueryOptions {
-	/// Whether any metadata filter is set — `sort`/`ascending` are presentation,
-	/// not filters. False lets callers take the cheaper unfiltered ANN path.
 	pub fn is_active(&self) -> bool {
 		!self.source.is_empty()
 			|| self.kind.is_some()
@@ -102,8 +94,7 @@ pub fn filter_delivery<T: Scored>(cfg: &RetrievalConfig, results: &mut Vec<T>) {
 	if results.iter().any(|r| r.score() >= floor) {
 		results.retain(|r| r.score() >= floor);
 	}
-	// With MMR on, keep the larger MMR pool — truncating to the delivery cap here
-	// would make MMR's len-guard a no-op (see filter_delivery_keeps_mmr_pool_when_mmr_enabled).
+	// With MMR on, keep the larger MMR pool — truncating to the delivery cap here would make MMR's len-guard a no-op.
 	let cap = if cfg.mmr_enabled {
 		cfg.mmr_pool_size.max(cfg.max_deliver_results)
 	} else {
@@ -112,8 +103,7 @@ pub fn filter_delivery<T: Scored>(cfg: &RetrievalConfig, results: &mut Vec<T>) {
 	results.truncate(cap);
 }
 
-/// The single filter predicate shared by post-filtering ([`apply_query_options`])
-/// and pre-filtered ANN search (`search_all_filtered`) — the two must never diverge.
+// Single filter predicate shared by post-filtering and pre-filtered ANN search (`search_all_filtered`) — the two must never diverge.
 pub fn matches_filter(entity: &Entity, opts: &QueryOptions) -> bool {
 	if !opts.source.is_empty() && entity.source.system() != opts.source {
 		return false;
@@ -131,8 +121,6 @@ pub fn matches_filter(entity: &Entity, opts: &QueryOptions) -> bool {
 	if opts.min_conf > 0.0 && entity.score < opts.min_conf {
 		return false;
 	}
-	// `since`/`before` gate on `created_at`; an entity with no timestamp is not
-	// excluded by either bound.
 	if let Some(since) = opts.since {
 		if entity.created_at.is_some_and(|t| t < since) {
 			return false;
@@ -143,8 +131,6 @@ pub fn matches_filter(entity: &Entity, opts: &QueryOptions) -> bool {
 			return false;
 		}
 	}
-	// `valid_at`: an entity whose validity has expired before the query instant
-	// is filtered out; no expiry means always valid.
 	if let Some(valid_at) = opts.valid_at {
 		if entity.valid_until.is_some_and(|exp| exp < valid_at) {
 			return false;
@@ -197,8 +183,6 @@ pub fn commit_access_with_half_life(results: &mut [ScoredEntity], half_life_secs
 	}
 }
 
-/// The single access-stamp: bump the CRDT counter, set `accessed_at`, deposit
-/// heat. Shared by [`commit_access`] (result copies) and [`commit_access_ids`] (live graph).
 fn stamp_access(e: &mut Entity, now: SystemTime, half_life_secs: u64) {
 	let replica = if e.producer_id.is_empty() {
 		"local"
@@ -221,8 +205,7 @@ pub fn commit_access_ids(g: &mut GraphGnn, ids: &[String]) {
 	commit_access_ids_with_half_life(g, ids, HeatConfig::default().half_life_secs);
 }
 
-/// Stamp the LIVE entities (`commit_access` only touches result copies). Goes through
-/// `kerns` directly, NOT `get_mut`: an access stamp must not bump the mutation epoch (see note).
+// Goes through `kerns` directly, NOT `get_mut`: an access stamp must not bump the mutation epoch (it would invalidate the query cache).
 pub fn commit_access_ids_with_half_life(g: &mut GraphGnn, ids: &[String], half_life_secs: u64) {
 	let now = SystemTime::now();
 	for id in ids {
@@ -342,7 +325,6 @@ mod query_filter_tests {
 				..Default::default()
 			}
 		));
-		// Confidence floor (entity.score is 0.5 from the `ent` helper).
 		assert!(matches_filter(
 			&fact_file,
 			&QueryOptions {
@@ -374,7 +356,6 @@ mod query_filter_tests {
 		let t = |s| UNIX_EPOCH + Duration::from_secs(s);
 
 		let mut e = ent("a", EntityKind::Fact, file_src("/a")).entity;
-		// Open window: valid_from = 100 (via created_at), valid_to = None.
 		e.created_at = Some(t(100));
 
 		assert!(!matches_filter(
@@ -399,7 +380,6 @@ mod query_filter_tests {
 			}
 		));
 
-		// Closed window [100, 200): the instant AT valid_to is excluded (half-open).
 		e.valid_to = Some(t(200));
 		assert!(matches_filter(
 			&e,
@@ -425,7 +405,6 @@ mod query_filter_tests {
 				..Default::default()
 			}
 		));
-		// An explicit valid_from hint overrides created_at as the lower bound.
 		e.valid_from = Some(t(120));
 		assert!(!matches_filter(
 			&e,
@@ -438,8 +417,7 @@ mod query_filter_tests {
 
 	#[test]
 	fn filter_delivery_keeps_mmr_pool_when_mmr_enabled() {
-		// Regression: truncating straight to max_deliver_results made MMR's len-guard a no-op.
-		let cfg = RetrievalConfig::default(); // mmr on, pool 50, cap 25
+		let cfg = RetrievalConfig::default();
 		let mut results: Vec<ScoredEntity> = (0..60)
 			.map(|i| ent(&format!("e{i}"), EntityKind::Fact, file_src("/x")))
 			.collect();
@@ -498,7 +476,6 @@ mod query_filter_tests {
 	#[test]
 	fn qbst_zero_access_and_no_recency_is_zero() {
 		let cfg = RetrievalConfig::default();
-		// ln(0+1)=0 access component; accessed_at None -> 0 recency.
 		assert_eq!(qbst(&cfg, 0, None), 0.0);
 	}
 
@@ -506,8 +483,8 @@ mod query_filter_tests {
 	fn qbst_access_component_follows_log_count_times_weight() {
 		let cfg = RetrievalConfig {
 			qbst_access_weight: 1.5,
-			qbst_recency_weight: 0.0, // isolate the access term
-			qbst_cap: 1e9,            // don't clamp
+			qbst_recency_weight: 0.0,
+			qbst_cap: 1e9,
 			..Default::default()
 		};
 		let got = qbst(&cfg, 9, None);
@@ -518,12 +495,11 @@ mod query_filter_tests {
 	#[test]
 	fn qbst_recency_is_near_full_weight_at_zero_age() {
 		let cfg = RetrievalConfig {
-			qbst_access_weight: 0.0, // isolate the recency term
+			qbst_access_weight: 0.0,
 			qbst_recency_weight: 3.0,
 			qbst_cap: 1e9,
 			..Default::default()
 		};
-		// age ~0 -> exp(0) ~ 1 -> ~ full recency weight.
 		let got = qbst(&cfg, 0, Some(SystemTime::now()));
 		assert!(
 			(got - 3.0).abs() < 0.05,
@@ -549,26 +525,24 @@ mod query_filter_tests {
 	#[test]
 	fn apply_boosts_scales_by_confidence_and_adds_fact_bonus_only_for_facts() {
 		let cfg = RetrievalConfig {
-			qbst_access_weight: 0.0, // boost = 0 so the arithmetic is exact
+			qbst_access_weight: 0.0,
 			qbst_recency_weight: 0.0,
 			fact_score_boost: 0.5,
 			..Default::default()
 		};
 		let mut fact = ent("f", EntityKind::Fact, file_src("/f"));
-		fact.score = 2.0; // raw retrieval score
-		fact.entity.score = 0.5; // confidence
+		fact.score = 2.0;
+		fact.entity.score = 0.5;
 		let mut claim = ent("c", EntityKind::Claim, file_src("/c"));
 		claim.score = 2.0;
 		claim.entity.score = 0.5;
 		let mut results = vec![fact, claim];
 		apply_boosts(&cfg, &mut results);
-		// fact: 2.0*0.5 + 0(boost) + 0.5(fact bonus) = 1.5
 		assert!(
 			(results[0].score - 1.5).abs() < 1e-9,
 			"fact got {}",
 			results[0].score
 		);
-		// claim: 2.0*0.5 + 0 + 0 = 1.0 (no fact bonus)
 		assert!(
 			(results[1].score - 1.0).abs() < 1e-9,
 			"claim got {}",

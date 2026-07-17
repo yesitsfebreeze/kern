@@ -2,8 +2,6 @@
 pub enum OutcomeStatus {
 	Committed,
 	Partial,
-	/// Merged into an existing entity: the acked content-hash `doc_id` never
-	/// enters the graph. In-memory only, never persisted.
 	Deduped,
 	Failed,
 }
@@ -19,8 +17,7 @@ impl OutcomeStatus {
 	}
 }
 
-/// A chunk- or document-scope ingest failure. `class` is `"permanent"` or
-/// `"transient"` (retryable); `chunk_index` is `0` for document scope.
+// class: "permanent" | "transient" (retryable); chunk_index 0 = document scope.
 #[derive(Debug, Clone)]
 pub struct FailureReport {
 	pub scope: String,
@@ -30,8 +27,6 @@ pub struct FailureReport {
 }
 
 impl FailureReport {
-	/// The one shape for document-level errors — scope/class strings must not
-	/// drift between call sites.
 	pub fn document_permanent(error: impl Into<String>) -> Self {
 		Self {
 			scope: "document".into(),
@@ -42,8 +37,7 @@ impl FailureReport {
 	}
 }
 
-/// The terminal result of an ingest call. INVARIANT: `transient_failures` +
-/// `permanent_failures` == `failures.len()`.
+// INVARIANT: transient_failures + permanent_failures == failures.len().
 #[derive(Debug, Clone)]
 pub struct Outcome {
 	pub status: OutcomeStatus,
@@ -58,7 +52,6 @@ pub struct Outcome {
 }
 
 impl Outcome {
-	/// A wholly-failed outcome (all counters zero) for enqueue/dispatch failures.
 	pub fn failed(message: impl Into<String>, failures: Vec<FailureReport>) -> Self {
 		Self {
 			status: OutcomeStatus::Failed,

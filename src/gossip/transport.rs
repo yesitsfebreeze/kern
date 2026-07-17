@@ -1,6 +1,3 @@
-//! TCP wire transport for gossip: length-prefixed bincode framing plus the
-//! dial-and-send / dial-and-roundtrip helpers.
-
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -8,8 +5,7 @@ use crate::base::constants::{GOSSIP_DIAL_TIMEOUT, GOSSIP_FETCH_TIMEOUT, GOSSIP_M
 
 use super::types::*;
 
-/// Write `msg` as a big-endian u32 length prefix followed by its bincode bytes,
-/// then flush.
+// Wire frame: big-endian u32 length prefix, then bincode bytes.
 pub(super) async fn encode_msg(
 	stream: &mut TcpStream,
 	msg: &GossipMessage,
@@ -23,8 +19,7 @@ pub(super) async fn encode_msg(
 	Ok(())
 }
 
-/// Read one length-prefixed frame and bincode-decode it. `None` on I/O or decode
-/// failure, or a prefix over `GOSSIP_MAX_FRAME_BYTES` — rejected before allocating.
+// Reject a prefix over GOSSIP_MAX_FRAME_BYTES before allocating the body buffer.
 pub(super) async fn decode_msg(stream: &mut TcpStream) -> Option<GossipMessage> {
 	let mut len_buf = [0u8; 4];
 	stream.read_exact(&mut len_buf).await.ok()?;
@@ -39,7 +34,6 @@ pub(super) async fn decode_msg(stream: &mut TcpStream) -> Option<GossipMessage> 
 		.map(|(v, _)| v)
 }
 
-/// Dial `addr` (with `GOSSIP_DIAL_TIMEOUT`) and send one framed message.
 pub(super) async fn send_msg(addr: &str, msg: &GossipMessage) -> Result<(), std::io::Error> {
 	let mut stream = tokio::time::timeout(GOSSIP_DIAL_TIMEOUT, TcpStream::connect(addr))
 		.await
@@ -47,8 +41,6 @@ pub(super) async fn send_msg(addr: &str, msg: &GossipMessage) -> Result<(), std:
 	encode_msg(&mut stream, msg).await
 }
 
-/// Dial `addr`, send `msg`, then await a single framed reply (bounded by
-/// `GOSSIP_FETCH_TIMEOUT`). `None` on any dial / send / read failure.
 pub(super) async fn send_and_receive(addr: &str, msg: &GossipMessage) -> Option<GossipMessage> {
 	let mut stream = tokio::time::timeout(GOSSIP_DIAL_TIMEOUT, TcpStream::connect(addr))
 		.await
@@ -116,7 +108,6 @@ mod tests {
 		});
 
 		let mut client = TcpStream::connect(&addr).await.unwrap();
-		// One byte over cap: decode must bail on the prefix alone, no body sent.
 		let oversized = (GOSSIP_MAX_FRAME_BYTES as u32 + 1).to_be_bytes();
 		client.write_all(&oversized).await.unwrap();
 		client.flush().await.unwrap();

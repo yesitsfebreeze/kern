@@ -115,7 +115,6 @@ impl Graph {
 		}
 	}
 
-	/// Dense N×N directed adjacency.
 	fn adjacency_matrix(&self) -> Tensor {
 		let n = self.nodes.len();
 		let mut adj = Tensor::zeros(n, n);
@@ -263,7 +262,7 @@ mod tests {
 		] {
 			g.add_edge(s, t, vec![]).unwrap();
 		}
-		g.add_self_loops(); // each node now has degree 3 (two neighbours + self)
+		g.add_self_loops();
 
 		let na = g.normalized_adjacency();
 		let n = g.num_nodes();

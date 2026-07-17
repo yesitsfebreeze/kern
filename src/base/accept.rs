@@ -146,8 +146,6 @@ fn commit_entity(
 	}
 }
 
-/// Mint, attach, and index a reason edge `from -> to`; returns its id.
-/// Shared commit tail of every `add_*_reason`.
 fn commit_reason(
 	g: &mut GraphGnn,
 	kern_id: &str,
@@ -315,8 +313,6 @@ fn supersede(
 		}
 	};
 
-	// Bi-temporal stamp: the new revision's world-time start closes the old one's
-	// window, and `now` records WHEN kern learned of the supersedence.
 	let now = std::time::SystemTime::now();
 	let new_valid_from = g
 		.loaded(placed_kern_id)
@@ -353,16 +349,12 @@ fn supersede(
 	)]
 }
 
-/// Background contradiction classifier outcome: does the incoming near-duplicate
-/// REPLACE the stored claim, or is it merely RELATED?
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContradictionClass {
 	Supersede,
 	Related,
 }
 
-/// Prompt the reason-LLM to decide whether `new_text` supersedes `old_text`.
-/// Single-word answer so the parse stays trivial and robust.
 pub fn classify_prompt(old_text: &str, new_text: &str) -> String {
 	format!(
 		"Two statements are near-duplicates about the same subject. Decide whether \
@@ -372,8 +364,7 @@ UPDATE, CONTRADICTION, or RELATED.\n\nOLD: {old_text}\nNEW: {new_text}\n"
 	)
 }
 
-/// `UPDATE`/`CONTRADICTION` → Supersede; anything else, or any `RELATED` mention,
-/// fails OPEN to Related — today's rephrase behavior, the conservative choice.
+// Fails open to Related (any RELATED mention wins) — the conservative choice.
 pub fn parse_contradiction(raw: &str) -> ContradictionClass {
 	let up = raw.trim().to_uppercase();
 	let supersede = up.contains("CONTRADICT") || up.contains("UPDATE");
@@ -384,9 +375,6 @@ pub fn parse_contradiction(raw: &str) -> ContradictionClass {
 	}
 }
 
-/// Mirror of [`supersede`] for near-duplicates with NO shared `external_id`:
-/// materializes the dedup-withheld `new_thought`, supersedes `old_id` (no-op if
-/// it is gone or already superseded). Returns the `Supersedes` reason id(s).
 pub fn supersede_by_contradiction(
 	g: &mut GraphGnn,
 	kern_id: &str,
@@ -473,8 +461,8 @@ pub fn get_or_spawn_unnamed_child(g: &mut GraphGnn, kern_id: &str) -> String {
 	spawn_unnamed_child(g, kern_id)
 }
 
-/// Always creates a FRESH unnamed child — one per call (the tick: one per cluster).
-/// For the single reusable holding-pen child use [`get_or_spawn_unnamed_child`].
+// Always creates a FRESH unnamed child (one per call). For the single reusable
+// holding-pen child use get_or_spawn_unnamed_child.
 pub fn spawn_unnamed_child(g: &mut GraphGnn, kern_id: &str) -> String {
 	let root_id = g
 		.get(kern_id)
@@ -489,8 +477,7 @@ pub fn spawn_unnamed_child(g: &mut GraphGnn, kern_id: &str) -> String {
 	child_id
 }
 
-/// Find or create the parent's permanent `generic` catch-all child. Its empty
-/// `anchor_vec` means similarity routing never matches it; named, hence immortal.
+// The generic catch-all: empty anchor_vec never matches routing; named, hence immortal.
 pub(crate) fn get_or_spawn_generic_child(g: &mut GraphGnn, parent_id: &str) -> String {
 	// Use `get` (auto-loads), NOT `loaded`: even the immortal generic child can
 	// spill to disk — same duplicate-spawn runaway as get_or_spawn_unnamed_child.
@@ -518,8 +505,7 @@ pub(crate) fn get_or_spawn_generic_child(g: &mut GraphGnn, parent_id: &str) -> S
 	child_id
 }
 
-/// Create a named root child carrying `vec` as its routing vector (an anchor).
-/// One anchor per name: a same-normalized-name anchor is updated in place.
+// One anchor per name: a same-normalized-name anchor is updated in place.
 pub(crate) fn add_anchor(g: &mut GraphGnn, name: &str, vec: Vec<f32>) {
 	if let Some(existing) = find_anchor_by_name(g, name) {
 		if let Some(k) = g.get_mut(&existing) {
@@ -539,7 +525,6 @@ pub(crate) fn add_anchor(g: &mut GraphGnn, name: &str, vec: Vec<f32>) {
 	}
 }
 
-/// Root anchor whose name matches `name` after trim + lowercase, if any.
 fn find_anchor_by_name(g: &GraphGnn, name: &str) -> Option<String> {
 	let needle = name.trim().to_lowercase();
 	root_anchor_ids(g).into_iter().find(|cid| {
@@ -549,8 +534,6 @@ fn find_anchor_by_name(g: &GraphGnn, name: &str) -> Option<String> {
 	})
 }
 
-/// Duplicate-anchor guard for promotion: same normalized name, OR near-parallel
-/// routing vectors (cosine ≥ `ANCHOR_DEDUP_THRESHOLD`).
 fn equivalent_anchor_exists(g: &GraphGnn, name: &str, vec: &[f32]) -> bool {
 	if find_anchor_by_name(g, name).is_some() {
 		return true;
@@ -569,8 +552,7 @@ fn equivalent_anchor_exists(g: &GraphGnn, name: &str, vec: &[f32]) -> bool {
 	})
 }
 
-/// The root's named children excluding `generic`, read from the kern map —
-/// runtime mutations land there, not on the `g.root` snapshot field.
+// Read from the kern map, not the g.root snapshot — runtime mutations land there.
 pub(crate) fn root_anchor_ids(g: &GraphGnn) -> Vec<String> {
 	let root = g.root.id.clone();
 	let children = g
@@ -587,8 +569,6 @@ pub(crate) fn root_anchor_ids(g: &GraphGnn) -> Vec<String> {
 		.collect()
 }
 
-/// Promote a kern sitting directly under `generic` to a root anchor (the tick
-/// calls this after naming a dense cluster). Returns whether it moved.
 pub(crate) fn promote_to_root_if_generic(g: &mut GraphGnn, kern_id: &str) -> bool {
 	let parent_id = match g.loaded(kern_id) {
 		Some(k) => k.parent.clone(),
@@ -623,8 +603,6 @@ pub(crate) fn promote_to_root_if_generic(g: &mut GraphGnn, kern_id: &str) -> boo
 	true
 }
 
-/// Demote a named root anchor and reparent its kern under `generic`. Returns
-/// whether an anchor of that name was found.
 pub(crate) fn remove_anchor(g: &mut GraphGnn, name: &str) -> bool {
 	let root = g.root.id.clone();
 	let generic = get_or_spawn_generic_child(g, &root);
@@ -706,7 +684,7 @@ mod tests {
 		g.set_store(std::sync::Arc::new(
 			crate::base::store::Store::open(&g.data_dir).unwrap(),
 		));
-		g.set_max_loaded_kerns(1); // only the root stays resident → child evicts
+		g.set_max_loaded_kerns(1);
 		let root = g.root.id.clone();
 
 		let first = get_or_spawn_unnamed_child(&mut g, &root);
@@ -725,7 +703,7 @@ mod tests {
 		g.set_store(std::sync::Arc::new(
 			crate::base::store::Store::open(&g.data_dir).unwrap(),
 		));
-		g.set_max_loaded_kerns(1); // only the root stays resident → generic evicts
+		g.set_max_loaded_kerns(1);
 		let root = g.root.id.clone();
 
 		let first = get_or_spawn_generic_child(&mut g, &root);
@@ -742,19 +720,16 @@ mod tests {
 
 	#[test]
 	fn unnamed_child_not_duplicated_when_non_root_parent_evicts() {
-		// Deep-tree variant: the PARENT itself evicts after linking the child;
-		// `unload` must persist its `children` so reuse survives the round-trip.
 		let dir = tempfile::tempdir().unwrap();
 		let mut g = GraphGnn::new();
 		g.data_dir = dir.path().to_string_lossy().into_owned();
 		g.set_store(std::sync::Arc::new(
 			crate::base::store::Store::open(&g.data_dir).unwrap(),
 		));
-		g.set_max_loaded_kerns(1); // only the root stays resident; parent + child spill
+		g.set_max_loaded_kerns(1);
 		let root = g.root.id.clone();
 		let root_net = g.root.root_id.clone();
 
-		// A named (immortal) child of root to act as the non-root parent that evicts.
 		let parent = {
 			let p = Kern::new_named_child(&root, &root_net, "parent-anchor", vec![1.0, 0.0]);
 			let pid = p.id.clone();
@@ -833,8 +808,6 @@ mod tests {
 		assert_eq!(old_e.superseded_by, "new", "supersede chain preserved");
 	}
 
-	/// Accept must NEVER leave an empty unnamed kern behind — the orphan-shard
-	/// data-dir leak (see note). Exercises dup, anchor-match, fallthrough, reject.
 	#[test]
 	fn accept_never_leaves_empty_unnamed_kern() {
 		let (mut g, root, _anchor) = graph_with_anchor();
@@ -995,7 +968,6 @@ mod tests {
 		let root = g.root.id.clone();
 		let r1 = accept(&mut g, &root, ent("a", vec![1.0, 0.0, 0.0]), "");
 		assert!(!r1.deduped, "first entity is placed, not deduped");
-		// Identical vector -> cosine 1.0 > dedup threshold -> deduped.
 		let r2 = accept(&mut g, &root, ent("b", vec![1.0, 0.0, 0.0]), "");
 		assert!(r2.deduped, "identical vector must dedup");
 	}
@@ -1005,12 +977,10 @@ mod tests {
 		let mut g = GraphGnn::new();
 		let root = g.root.id.clone();
 		accept(&mut g, &root, ent("a", vec![1.0, 0.0, 0.0]), "");
-		// Orthogonal vector -> cosine 0.0 < threshold -> placed, not deduped.
 		let r = accept(&mut g, &root, ent("c", vec![0.0, 1.0, 0.0]), "");
 		assert!(!r.deduped, "orthogonal vector must not dedup");
 	}
 
-	/// Build a root with one named anchor pointing at +x.
 	fn graph_with_anchor() -> (GraphGnn, String, String) {
 		let mut g = GraphGnn::new();
 		let root = g.root.id.clone();
@@ -1025,7 +995,6 @@ mod tests {
 	#[test]
 	fn routes_nonmatch_to_generic() {
 		let (mut g, root, anchor_id) = graph_with_anchor();
-		// Orthogonal to the anchor -> p = 0 < ACCEPT_FLOOR -> falls through.
 		let r = accept(&mut g, &root, ent("e", vec![0.0, 1.0, 0.0]), "");
 		assert_ne!(
 			r.placed_in, root,
@@ -1045,7 +1014,6 @@ mod tests {
 	#[test]
 	fn routes_match_to_anchor() {
 		let (mut g, root, anchor_id) = graph_with_anchor();
-		// Aligned with the anchor -> dist 0 -> p = 1 >= ACCEPT_FLOOR.
 		let r = accept(&mut g, &root, ent("e", vec![1.0, 0.0, 0.0]), "");
 		assert_eq!(r.placed_in, anchor_id, "matching entity enters its anchor");
 	}
@@ -1087,8 +1055,6 @@ mod tests {
 
 	#[test]
 	fn promote_skips_when_root_has_equivalent_anchor_by_name() {
-		// Anchor-proliferation regression (see note): an exact normalized-name
-		// match must block promotion; the kern stays named under generic.
 		let mut g = GraphGnn::new();
 		let root = g.root.id.clone();
 		add_anchor(&mut g, "sessions with no parent", vec![1.0, 0.0, 0.0]);
@@ -1127,7 +1093,6 @@ mod tests {
 		let generic = get_or_spawn_generic_child(&mut g, &root);
 		let root_net = g.root.root_id.clone();
 
-		// Near-duplicate direction (cosine ~0.995 to the existing anchor).
 		let near = Kern::new_named_child(
 			&generic,
 			&root_net,
@@ -1181,7 +1146,6 @@ mod tests {
 		let root = g.root.id.clone();
 		let generic = get_or_spawn_generic_child(&mut g, &root);
 		let root_net = g.root.root_id.clone();
-		// A freshly-named kern sitting under generic (as the tick would leave it).
 		let child = Kern::new_named_child(&generic, &root_net, "shaders", vec![1.0, 0.0, 0.0]);
 		let cid = child.id.clone();
 		g.register(child);

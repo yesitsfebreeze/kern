@@ -1,8 +1,3 @@
-//! `Channel<C>` — pairs a transport's reader/writer halves with a `Codec` for
-//! framed `send`/`recv`, backed by `tokio_util::codec::{FramedRead, FramedWrite}`.
-//! Each half owns its own codec instance; the writer's comes from `Codec::Default`
-//! (both codecs are zero-sized, so free).
-
 use futures::{SinkExt, StreamExt};
 use tokio_util::codec::{Decoder, Encoder, FramedRead, FramedWrite};
 

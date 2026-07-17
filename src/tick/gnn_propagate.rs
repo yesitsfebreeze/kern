@@ -79,8 +79,6 @@ pub fn build_gnn_snapshot(kern: &Kern, cfg: &GnnConfig) -> Option<GnnSnapshot> {
 	let mut pair_seen = HashSet::new();
 	let mut pos_edges: Vec<[usize; 2]> = Vec::new();
 
-	// Cross-kern reasons (`to_kern_id` non-empty) are skipped by design — their
-	// target embedding is not in this kern's snapshot.
 	for r in kern.reasons.values() {
 		if !r.to_kern_id.is_empty() || r.to.is_empty() {
 			continue;
@@ -165,8 +163,6 @@ fn apply_gnn_updates(
 	}
 }
 
-/// Cosine mapped into a `[0,1]` alignment weight: identical → 1.0, opposite → 0.0,
-/// orthogonal/degenerate (zero-norm, length mismatch) → 0.5 neutral.
 fn cosine_align(a: &[f32], b: &[f32]) -> f64 {
 	if a.is_empty() || b.is_empty() || a.len() != b.len() {
 		return 0.5;
@@ -181,8 +177,6 @@ mod tests {
 	use crate::base::reason::add_reason;
 	use crate::base::types::{mk_entity, EntityKind, Reason};
 
-	/// `n` entities (each with a vector) chained by local reason edges, so a
-	/// snapshot has both nodes and positive edges once the floor is cleared.
 	fn kern_with_n(n: usize) -> Kern {
 		let mut k = Kern::new("k", "");
 		for i in 0..n {
@@ -209,7 +203,7 @@ mod tests {
 	#[test]
 	fn gnn_skipped_below_min_thoughts_default() {
 		let k = kern_with_n(3);
-		let cfg = GnnConfig::defaults(); // min_thoughts = 128
+		let cfg = GnnConfig::defaults();
 		assert!(
 			build_gnn_snapshot(&k, &cfg).is_none(),
 			"3-node graph skips GNN under the default min_thoughts floor"
@@ -229,7 +223,6 @@ mod tests {
 
 	#[test]
 	fn superseded_entities_excluded_from_gnn_snapshot() {
-		// Supersede a LEAF (e3) so e0->e1->e2 stay connected.
 		let mut k = kern_with_n(4);
 		k.entities.get_mut("e3").unwrap().status = EntityStatus::Superseded;
 		let mut cfg = GnnConfig::defaults();
@@ -320,7 +313,7 @@ mod tests {
 		let g = Arc::new(RwLock::new(g));
 
 		let mut updates = HashMap::new();
-		updates.insert("e0".to_string(), Vec::new()); // empty -> skipped
+		updates.insert("e0".to_string(), Vec::new());
 		let q = Queue::new(16);
 		apply_gnn_updates(&q, &g, "k", updates, Vec::new());
 

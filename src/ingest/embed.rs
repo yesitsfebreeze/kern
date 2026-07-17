@@ -1,11 +1,8 @@
 use crate::ingest::outcome::FailureReport;
 use crate::llm::{is_transient, Client as LlmClient};
 
-/// Backoff for transient embed failures; a permanent error skips the remainder.
 const RETRY_DELAYS_MS: [u64; 3] = [150, 300, 600];
 
-/// One batch call, falling back to per-chunk [`embed_with_retry`] on error or a
-/// count mismatch; a failed chunk's slot holds an empty `Vec` + a [`FailureReport`].
 pub(crate) async fn embed_chunks(
 	embedder: &LlmClient,
 	chunks: &[String],
@@ -34,8 +31,6 @@ pub(crate) async fn embed_chunks(
 	(vecs, failures)
 }
 
-/// Embed `text` on the [`RETRY_DELAYS_MS`] schedule. A permanent error bails
-/// immediately; exhausting every retry yields `class: "transient"`.
 pub(crate) async fn embed_with_retry(
 	embedder: &LlmClient,
 	text: &str,
@@ -75,7 +70,6 @@ mod tests {
 	use super::*;
 	use serde_json::{json, Value};
 
-	/// Honest `/api/embed` stub: one embedding per input, so the batch path matches.
 	fn echo_count_app() -> axum::Router {
 		axum::Router::new().route(
 			"/api/embed",
@@ -107,8 +101,6 @@ mod tests {
 
 	#[tokio::test]
 	async fn embed_chunks_falls_back_to_per_item_on_a_count_mismatch() {
-		// Always ONE embedding regardless of input count -> the 2-input batch
-		// mismatches and drops to the per-item loop.
 		let app = axum::Router::new().route(
 			"/api/embed",
 			axum::routing::post(|| async { axum::Json(json!({ "embeddings": [[0.5, 0.6]] })) }),
@@ -126,7 +118,6 @@ mod tests {
 
 	#[tokio::test]
 	async fn embed_with_retry_treats_an_empty_response_as_permanent() {
-		// `{"embeddings": []}` -> EmptyEmbedding -> not transient -> no retry storm.
 		let app = axum::Router::new().route(
 			"/api/embed",
 			axum::routing::post(|| async { axum::Json(json!({ "embeddings": [] })) }),

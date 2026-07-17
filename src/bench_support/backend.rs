@@ -1,13 +1,9 @@
-//! Pluggable vector backend for the Qdrant head-to-head baseline. Embeddings are
-//! computed ONCE by the caller, so any recall gap is the index — not the embedder.
-
 use crate::base::graph::GraphGnn;
 use crate::base::math::cosine;
 use crate::base::search::{search_all_filtered, search_all_unlocked};
 use crate::base::types::{Entity, EntityKind, Kern};
 use crate::base::util::cmp_rank;
 
-/// A pre-embedded corpus document. `vector` is kern-native `f32`.
 #[derive(Debug, Clone)]
 pub struct Doc {
 	pub id: String,
@@ -15,21 +11,17 @@ pub struct Doc {
 	pub kind: Option<EntityKind>,
 }
 
-/// A ranked result: entity id + similarity score (descending).
 #[derive(Debug, Clone)]
 pub struct QueryHit {
 	pub id: String,
 	pub score: f64,
 }
 
-/// A vector index that can be A/B'd against kern in the baseline harness.
 pub trait VectorBackend {
 	fn name(&self) -> &str;
 	fn index(&mut self, docs: &[Doc]);
-	/// Top-`k` nearest ids. When `kind_filter` is set, only that kind is returned
-	/// (filtered DURING the search, not post-filtered — the fewer-than-k fix).
+	// kind_filter must filter DURING the search, not post-filter (post-filtering yields fewer than k).
 	fn query(&self, vec: &[f32], k: usize, kind_filter: Option<EntityKind>) -> Vec<QueryHit>;
-	/// Vector-payload bytes (a lower bound on RSS) for the memory column.
 	fn vector_bytes(&self) -> usize;
 }
 
@@ -96,8 +88,6 @@ impl VectorBackend for KernBackend {
 	}
 }
 
-/// Exact brute-force cosine scan — the ground-truth recall ceiling for kern's ANN.
-/// O(n) per query: a baseline, not a contender.
 #[derive(Default)]
 pub struct BruteForceBackend {
 	docs: Vec<Doc>,
@@ -129,7 +119,6 @@ impl VectorBackend for BruteForceBackend {
 				score: cosine(vec, &d.vector),
 			})
 			.collect();
-		// Same deterministic ranking as the rest of the stack: score desc, id asc.
 		hits.sort_by(|a, b| cmp_rank(a.score, &a.id, b.score, &b.id));
 		hits.truncate(k);
 		hits
@@ -202,8 +191,6 @@ mod tests {
 			doc("claim1", vec![1.0, 0.0], EntityKind::Claim),
 			doc("claim2", vec![1.0, 0.0], EntityKind::Claim),
 		]);
-		// All three are equally near; a Fact filter must surface only the Fact
-		// (filtered during traversal, so it is not lost behind the closer claims).
 		let hits = b.query(&[1.0, 0.0], 5, Some(EntityKind::Fact));
 		assert!(
 			!hits.is_empty() && hits.iter().all(|h| h.id == "fact"),

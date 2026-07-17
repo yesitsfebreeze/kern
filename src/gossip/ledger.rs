@@ -13,8 +13,7 @@ struct Entry {
 	expires: Instant,
 }
 
-/// Capped table: `map` for lookup, `by_expiry` mirrored by `(expiry, key)` for
-/// soonest-expiry eviction. INVARIANT: every mutation touches both in lockstep.
+// INVARIANT: every mutation touches `map` and `by_expiry` in lockstep.
 #[derive(Default)]
 struct Index {
 	map: HashMap<String, Entry>,
@@ -22,8 +21,7 @@ struct Index {
 }
 
 impl Index {
-	/// Overwriting drops the prior expiry-index entry BEFORE the cap check, so
-	/// it neither goes stale nor spuriously evicts another entry.
+	// Drop the prior expiry-index entry BEFORE the cap check, else it goes stale or spuriously evicts another entry.
 	fn insert(&mut self, key: String, addr: String, expires: Instant, cap: usize) {
 		if let Some(old) = self.map.remove(&key) {
 			self.by_expiry.remove(&(old.expires, key.clone()));
@@ -44,8 +42,6 @@ impl Index {
 	}
 }
 
-/// Advisory TTL'd routing hints learned from gossip ("which peer serves X"):
-/// `entities` = thought id -> addr, `routing` = kern id -> addr.
 pub struct Ledger {
 	entities: RwLock<Index>,
 	routing: RwLock<Index>,
@@ -148,7 +144,6 @@ mod tests {
 			.filter(|k| l.lookup_routing(k).is_some())
 			.count();
 		assert_eq!(live, 2, "cap=2 holds at most two entries");
-		// "a" inserted first -> soonest expiry (lexicographic tie-break on equal Instant).
 		assert_eq!(
 			l.lookup_routing("a"),
 			None,

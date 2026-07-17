@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
-/// Composite ignore matcher: per-root `.gitignore` + `.kernignore`.
 pub struct IgnoreRules {
 	per_root: Vec<RootRules>,
 }
@@ -14,7 +13,6 @@ struct RootRules {
 }
 
 impl IgnoreRules {
-	/// Missing ignore files are silently skipped (no rules).
 	pub fn from_roots(roots: &[PathBuf]) -> Self {
 		let per_root = roots
 			.iter()
@@ -38,10 +36,9 @@ impl IgnoreRules {
 		}
 	}
 
-	/// Returns true if `path` should be skipped. Passing `is_dir = false`
-	/// unconditionally is correct: notify event paths are never directory listings.
+	// `matched(rel, false)`: notify event paths are never directory listings, so `is_dir` is always false.
 	pub fn is_ignored(&self, path: &Path) -> bool {
-		// `.git/**` is always skipped — bursty internal churn we don't index.
+		// `.git` always skipped — bursty internal churn, never removed even if unignored.
 		if path.components().any(|c| c.as_os_str() == ".git") {
 			return true;
 		}
@@ -71,7 +68,7 @@ fn build(root: &Path, file: &str) -> Option<Gitignore> {
 	}
 	let mut b = GitignoreBuilder::new(root);
 	if b.add(&path).is_some() {
-		// `add` returns `Some(error)` on failure; treat as no rules.
+		// `add` returns `Some(error)` on failure (not success); treat as no rules.
 		return None;
 	}
 	b.build().ok()
@@ -99,7 +96,6 @@ mod tests {
 			rules.is_ignored(&dir.path().join("server.log")),
 			"*.log ignored"
 		);
-		// `Gitignore::matched` checks the event path only — no parent-dir walking.
 		assert!(
 			rules.is_ignored(&dir.path().join("target")),
 			"named path ignored"

@@ -21,12 +21,10 @@ pub struct ReasonHit {
 	pub score: f64,
 }
 
-/// Blend weights for a node found in BOTH indices; sum to 1.0 (GNN trusted more).
+// Blend weights for a node found in both indices; must sum to 1.0.
 const CONTENT_BLEND: f64 = 0.4;
 const GNN_BLEND: f64 = 0.6;
 
-/// Merge content (`primary`) and GNN hits into one ranked list: in both → blend,
-/// in one → keep that score. The single fusion point for both search_all variants.
 fn merge_hits(primary: Vec<HnswHit>, gnn: Vec<HnswHit>, k: usize) -> Vec<EntityHit> {
 	use std::collections::hash_map::Entry;
 	let mut scores: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
@@ -35,8 +33,8 @@ fn merge_hits(primary: Vec<HnswHit>, gnn: Vec<HnswHit>, k: usize) -> Vec<EntityH
 	}
 	for h in gnn {
 		match scores.entry(h.id) {
-			// PRESENCE in the content map — not the score's sign — decides the blend:
-			// scores are cosine similarities in [-1, 1], so zero/negative still blend.
+			// Presence in the content map — not the score's sign — decides the blend
+			// (scores are cosine in [-1, 1]); do not gate on score > 0.
 			Entry::Occupied(mut e) => {
 				let blended = CONTENT_BLEND * *e.get() + GNN_BLEND * h.score;
 				e.insert(blended);
@@ -50,8 +48,7 @@ fn merge_hits(primary: Vec<HnswHit>, gnn: Vec<HnswHit>, k: usize) -> Vec<EntityH
 		return Vec::new();
 	}
 	let mut ranked: Vec<_> = scores.into_iter().collect();
-	// Score desc, id-asc tiebreak: deterministic total order over a HashMap source,
-	// so the `truncate(k)` boundary is reproducible (same convention as fuse::rrf).
+	// Score desc, id-asc tiebreak — deterministic over HashMap order, so truncate(k) is reproducible.
 	ranked.sort_by(|a, b| cmp_rank(a.1, &a.0, b.1, &b.0));
 	ranked.truncate(k);
 	ranked.into_iter().map(EntityHit::from).collect()
@@ -75,8 +72,6 @@ pub fn search_all_unlocked(g: &GraphGnn, vec: &[f32], k: usize) -> Vec<EntityHit
 	merge_hits(primary, gnn, k)
 }
 
-/// [`search_all_unlocked`] restricted to ids passing `keep`, filtered DURING the
-/// ANN traversal so sparse matches still fill `k` (see `HnswIndex::search_filtered`).
 pub fn search_all_filtered(
 	g: &GraphGnn,
 	vec: &[f32],
@@ -160,7 +155,6 @@ pub fn find_reason(g: &GraphGnn, id: &str) -> Option<(Reason, String)> {
 mod tests {
 	use super::*;
 
-	// No kerns needed: filtered search operates on the index + the id predicate.
 	fn populated() -> GraphGnn {
 		let mut g = GraphGnn::new();
 		for i in 0..60 {

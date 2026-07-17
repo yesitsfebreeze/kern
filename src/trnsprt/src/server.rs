@@ -15,12 +15,9 @@ pub trait McpServer: Send {
 	}
 	fn tools_list(&self) -> Vec<ToolSchema>;
 	fn call_tool(&self, name: &str, args: &Value) -> Result<ToolResult, McpError>;
-	/// Extra MCP capabilities beyond `tools` (e.g. `{"resources": {}, "prompts": {}}`).
 	fn extra_capabilities(&self) -> Value {
 		Value::Object(serde_json::Map::new())
 	}
-	/// Handle MCP methods not covered by the standard tool/init/shutdown dispatch.
-	/// Return `None` to fall through to method-not-found.
 	fn handle_method(&self, _method: &str, _params: Value) -> Option<Result<Value, McpError>> {
 		None
 	}
@@ -136,7 +133,6 @@ pub(crate) fn dispatch(server: &dyn McpServer, frame: &Value) -> Option<Value> {
 	}
 }
 
-/// `Rpc` carries its own JSON-RPC code; every other arm collapses to -32000.
 fn rpc_code_message(e: McpError) -> (i64, String) {
 	match e {
 		McpError::Rpc { code, message } => (code, message),
@@ -200,7 +196,6 @@ mod tests {
 		}
 	}
 
-	/// Run `serve_rw` over the newline-joined `lines` and return the written frames.
 	fn run(lines: &[&str]) -> Vec<Value> {
 		let input = lines.join("\n") + "\n";
 		let mut reader = Cursor::new(input.into_bytes());
@@ -221,7 +216,6 @@ mod tests {
 			r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
 			r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"x":1}}}"#,
 			r#"{"jsonrpc":"2.0","id":4,"method":"shutdown"}"#,
-			// Must NOT be processed — shutdown returns before reading it.
 			r#"{"jsonrpc":"2.0","id":5,"method":"tools/list"}"#,
 		]);
 		assert_eq!(frames.len(), 4, "shutdown stops the loop before id 5");

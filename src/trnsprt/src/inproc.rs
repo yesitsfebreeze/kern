@@ -5,8 +5,6 @@ use serde_json::Value;
 use crate::server::{dispatch, McpServer};
 use crate::transport::Transport;
 
-/// In-process [`Transport`]: a synchronous loopback running an [`McpServer`] in
-/// the caller's thread. TESTS and local-dev only — unbounded, no backpressure.
 pub struct InProcTransport {
 	server: Box<dyn McpServer>,
 	req_buf: Vec<u8>,

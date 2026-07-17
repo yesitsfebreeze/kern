@@ -1,14 +1,9 @@
-//! DTOs for [`KernRpc`](super::KernRpc) — mirror types that intentionally do
-//! NOT depend on the `kern` crate; kern translates at the wire boundary.
-
 use serde::{Deserialize, Serialize};
 
 pub use crate::search::dto::{
 	EdgeKind, EntityKindLite, EntityRef, EntityStatusLite, NeighborsReq, NeighborsRes,
 };
 
-/// Lightweight mirror of `kern::Source`, one variant per URI scheme. Optional
-/// fields collapse to `""` on the wire (matches the kern-side `Default`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SourceLite {
 	File {
@@ -66,7 +61,6 @@ impl Default for SourceLite {
 }
 
 impl SourceLite {
-	/// Stable URI scheme tag — matches `kern::Source::scheme`.
 	pub fn scheme(&self) -> &'static str {
 		match self {
 			SourceLite::File { .. } => "file",
@@ -81,41 +75,29 @@ impl SourceLite {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct QueryReq {
 	pub text: String,
-	/// Number of hits to return. Server clamps to a sane maximum.
 	pub k: u32,
-	/// Same wire strings as MCP `query.mode` (`"hybrid"` | `"vector"` |
-	/// `"lexical"`); empty defaults to `"hybrid"`.
 	#[serde(default)]
 	pub mode: String,
-	/// If true, kern attempts an LLM-synthesised answer alongside hits.
 	#[serde(default)]
 	pub answer: bool,
-	/// Optional kind filter (lower-case label, e.g. `"fact"`).
 	#[serde(default)]
 	pub kind: String,
-	/// Optional source-scheme filter (e.g. `"file"`).
 	#[serde(default)]
 	pub source: String,
-	/// Cancellation/freshness token, mirrors `SearchSvc::SearchReq`.
 	#[serde(default)]
 	pub cancel_token: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct QueryRes {
-	/// Ranked entity hits ([`EntityRef`] shared with `SearchSvc`).
 	pub hits: Vec<EntityRef>,
-	/// LLM answer when requested; empty when no LLM is configured server-side.
 	#[serde(default)]
 	pub answer: String,
-	/// True iff this response was for the most-recent `cancel_token`
-	/// the server has seen. Mirrors `SearchRes::fresh`.
 	#[serde(default = "default_true")]
 	pub fresh: bool,
 }
 
-/// Missing `fresh` on the wire means "not stale" — bool's derived `Default`
-/// (`false`) would invert that.
+// Missing `fresh` on the wire means "not stale" — bool's derived Default (false) would invert that.
 fn default_true() -> bool {
 	true
 }
@@ -125,15 +107,10 @@ pub struct IngestReq {
 	pub text: String,
 	pub source: SourceLite,
 	pub kind: EntityKindLite,
-	/// Descriptor classifier for the ingest pipeline; `None` skips routing.
 	#[serde(default)]
 	pub descriptor: Option<String>,
-	/// Confidence in [0.0, 1.0]. Server clamps to its agent-source
-	/// ceiling (Fact tier requires user-source).
 	#[serde(default)]
 	pub conf: f64,
-	/// If true, block until ingest commits; otherwise queue and return the
-	/// content-hash doc id immediately — stable and resolvable on a later read.
 	#[serde(default)]
 	pub sync: bool,
 }
@@ -153,13 +130,8 @@ impl Default for IngestReq {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct IngestRes {
-	/// New entity id; when `sync=false`, the content-hash doc id returned
-	/// before the pipeline has committed.
 	pub entity_id: String,
-	/// One of `"queued" | "ingested" | "duplicate" | "rejected"` —
-	/// matches kern's `ingest::outcome::Status::as_str`.
 	pub status: String,
-	/// Optional pipeline note (rejection reason, dedup pointer, etc.).
 	#[serde(default)]
 	pub message: String,
 }
@@ -168,10 +140,7 @@ pub struct IngestRes {
 pub struct LinkReq {
 	pub from_id: String,
 	pub to_id: String,
-	/// Mapped server-side to kern's `ReasonKind`; non-1:1 kinds map to the
-	/// closest match, with the original kind-name kept in the edge text.
 	pub reason_kind: EdgeKind,
-	/// Free-text explanation of the relationship.
 	#[serde(default)]
 	pub text: String,
 }
@@ -192,8 +161,7 @@ pub struct LinkRes {
 	pub reason_id: String,
 }
 
-/// Caller-context snapshot carried into a replicated fork. `byte_range` is
-/// `[start, end)` over the underlying source bytes.
+// `byte_range` is `[start, end)` over the underlying source bytes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Anchor {
 	pub entity_id: String,
@@ -202,8 +170,6 @@ pub struct Anchor {
 	pub selection: Option<String>,
 }
 
-/// Hard-delete an entity by id. The id is matched by prefix server-side
-/// (matches the existing kern `tool_forget` semantics).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ForgetReq {
 	pub id: String,
@@ -211,12 +177,9 @@ pub struct ForgetReq {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ForgetRes {
-	/// True iff an entity with that id (or prefix) was found and removed.
 	pub removed: bool,
 }
 
-/// Decay confidence on an entity by id (prefix-matched). Mirrors the
-/// kern `tool_degrade` MCP path.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DegradeReq {
 	pub id: String,
@@ -224,27 +187,20 @@ pub struct DegradeReq {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DegradeRes {
-	/// True iff the entity was found and its confidence decayed.
 	pub applied: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HealthRes {
-	/// True when the daemon is up and the store is loaded.
 	pub ok: bool,
-	/// Currently-active store data_dir (canonical path string).
 	#[serde(default)]
 	pub data_dir: String,
-	/// Total kerns loaded across all attached stores.
 	#[serde(default)]
 	pub kerns: u64,
-	/// Total entities loaded across all attached stores.
 	#[serde(default)]
 	pub entities: u64,
 }
 
-/// `action` is `"list"` (default), `"add"` (needs name+text), or
-/// `"remove"` (needs name).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AnchorReq {
 	pub action: String,
@@ -252,13 +208,11 @@ pub struct AnchorReq {
 	pub text: String,
 }
 
-/// The anchor tool's JSON result, serialized as a string for transport.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AnchorRes {
 	pub result: String,
 }
 
-/// One of `"add"` or `"rm"`. Matches the existing kern descriptor CLI.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DescriptorReq {
 	pub action: String,
@@ -270,10 +224,8 @@ pub struct DescriptorReq {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DescriptorRes {}
 
-/// Fire a stigmergic pulse through the root kern.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PulseReq {
-	/// Pulse strength. `1.0` is the conventional default.
 	#[serde(default = "default_pulse_strength")]
 	pub strength: f64,
 }
@@ -293,8 +245,6 @@ impl Default for PulseReq {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PulseRes {}
 
-/// Generic MCP tool dispatch for the `kern mcp` proxy. `args` is the raw
-/// `tools/call.params.arguments` object, forwarded verbatim.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CallToolReq {
 	pub name: String,
@@ -304,16 +254,12 @@ pub struct CallToolReq {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CallToolRes {
-	/// MCP envelope as emitted by the daemon-side
-	/// `mcp::Server::call_tool` — `{ "content": [...], "isError": bool }`.
 	pub envelope: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ListToolsReq {}
 
-/// The daemon's live `tools/list`: each entry is a raw MCP tool-schema JSON
-/// object exactly as `mcp::Server::tools_list` advertises it.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ListToolsRes {
 	pub tools: Vec<serde_json::Value>,

@@ -1,19 +1,11 @@
-//! LLM-gated distillation of a raw conversation into durable claims. Pure-ish:
-//! the only side effect is the injected LLM call.
-
-/// One durable, reusable piece of knowledge extracted from a conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Claim {
-	/// Self-contained statement worth remembering across sessions.
 	pub text: String,
-	/// Descriptor key (the typed-memory taxonomy). One of `DESCRIPTORS`.
 	pub descriptor: String,
-	/// Optional bi-temporal world-time hint (ISO8601), stamped onto `valid_from`.
-	/// Parsed leniently — garbage or absent yields `None` (ingestion time).
 	pub valid_from: Option<std::time::SystemTime>,
 }
 
-/// The typed-memory taxonomy. Mirrors the descriptors seeded into the kern.
+// Must mirror the descriptors seeded into the kern.
 pub const DESCRIPTORS: [&str; 7] = [
 	"preference",
 	"decision",
@@ -58,8 +50,6 @@ markdown.\n\nCONVERSATION:\n{conversation}\n"
 	Some(parse_claims(&raw))
 }
 
-/// Parse the first-`[`-to-last-`]` span, tolerant of surrounding prose. A lone
-/// nested `[[...]]` is unwrapped; malformed JSON and an unknown `kind` fail soft.
 pub(crate) fn parse_claims(raw: &str) -> Vec<Claim> {
 	let (start, end) = match (raw.find('['), raw.rfind(']')) {
 		(Some(s), Some(e)) if e > s => (s, e),
@@ -99,7 +89,6 @@ pub(crate) fn parse_claims(raw: &str) -> Vec<Claim> {
 		} else {
 			"fact".to_string()
 		};
-		// A bad `valid_from` hint never blocks a good claim — ignore it.
 		let valid_from = it
 			.get("valid_from")
 			.and_then(|v| v.as_str())

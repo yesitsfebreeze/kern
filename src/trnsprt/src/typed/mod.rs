@@ -1,6 +1,3 @@
-//! Typed-RPC stack, three orthogonal layers: [`Adapter`] (byte-stream
-//! transport), [`Codec`] (wire format), [`Channel`] (framed `send`/`recv`).
-
 pub mod adapter;
 pub mod channel;
 pub mod codec;

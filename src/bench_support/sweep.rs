@@ -13,18 +13,11 @@ pub struct SweepRow {
 	pub num_queries: usize,
 }
 
-/// A single tunable the bench harness can sweep over a list of values.
 #[derive(Debug, Clone, Copy)]
 pub enum SweepParam {
-	/// Reciprocal-rank-fusion constant `k` in `1/(k + rank)`. Typically 10–60.
 	RrfK,
-	/// Minimum blended score in `[0.0, 1.0]` a hit must clear to be delivered.
 	MinDeliverScore,
-	/// MMR relevance-vs-diversity tradeoff in `[0.0, 1.0]`: 1.0 = pure relevance,
-	/// 0.0 = pure diversity.
 	MmrLambda,
-	/// Number of seed entities pulled before graph expansion. Integer `>= 1`; a
-	/// swept value `< 1` is clamped to 1 (with a warning) since 0 seeds nothing.
 	SeedK,
 }
 

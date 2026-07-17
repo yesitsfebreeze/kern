@@ -1,6 +1,3 @@
-//! Integration tests for `SearchSvc`: end-to-end client/server roundtrip on
-//! `InprocAdapter` + `JsonEnvelopeCodec`, plus the cancellation race.
-
 use std::sync::Arc;
 
 use trnsprt::search::{
@@ -54,7 +51,6 @@ async fn search_roundtrips_filtered_hits() {
 async fn neighbors_respects_edge_kind_filter() {
 	let (client, handle, _mock) = spawn_mock_server();
 
-	// Empty edge_kinds = all edges; depth gets clamped to 3 server-side.
 	let all = client
 		.neighbors(NeighborsReq {
 			entity_id: "e:fact:1".into(),

@@ -1,6 +1,3 @@
-//! `kern mcp`: stdio MCP. Proxy mode when a daemon owns `kern.sock` (forward
-//! over kern_rpc); standalone fallback loads a full local engine.
-
 use parking_lot::RwLock as StdRwLock;
 use std::sync::Arc;
 
@@ -12,7 +9,6 @@ use trnsprt::{McpError, McpServer, ToolResult, ToolSchema};
 use super::load_graph;
 
 pub(super) async fn cmd_mcp(cfg: &crate::config::Config) {
-	// Short retry catches the "daemon up but slow to respond" race.
 	match attach_with_retry(2, 150).await {
 		Ok(client) => {
 			run_proxy(client).await;
@@ -62,8 +58,8 @@ async fn run_proxy(client: KernRpcClient<JsonEnvelopeCodec>) {
 	let proxy = ProxyServer {
 		client: Arc::new(TokioMutex::new(client)),
 	};
-	// `serve_stdio` is sync — run on a blocking thread so it doesn't park a
-	// worker; `call_tool` crosses back via `block_in_place` (multi-thread rt only).
+	// serve_stdio is sync — on a blocking thread so it doesn't park a worker;
+	// call_tool crosses back via block_in_place (multi-thread rt only).
 	if let Err(e) = tokio::task::spawn_blocking(move || trnsprt::serve_stdio(&proxy)).await {
 		tracing::warn!(target: "kern.mcp_proxy", error = %e, "stdio loop");
 	}
@@ -181,8 +177,6 @@ impl McpServer for ProxyServer {
 	}
 }
 
-/// Map a kern_rpc `call_tool` reply envelope to an MCP [`ToolResult`];
-/// absent/mistyped fields default to empty content / not-error.
 fn tool_result_from_envelope(envelope: &serde_json::Value) -> ToolResult {
 	let content = envelope
 		.get("content")
@@ -243,8 +237,6 @@ async fn run_standalone(cfg: &crate::config::Config) {
 		super::save_graph_guarded(&save_g, &save_cfg);
 	});
 	let q = Arc::new(crate::tick::queue::Queue::new(512));
-	// Defer question seeding to the tick — same wiring as the registry path:
-	// the worker carries no reason-LLM and stays embed-bound.
 	let defer: crate::ingest::worker::DeferQuestionsFn = {
 		let defer_q = q.clone();
 		Arc::new(move |entity_id: &str| {
@@ -255,8 +247,6 @@ async fn run_standalone(cfg: &crate::config::Config) {
 			));
 		})
 	};
-	// Same deferral for contradiction classification: the tick runs the
-	// classify-LLM and any bi-temporal supersedence.
 	let defer_contradiction: crate::ingest::worker::DeferContradictionFn = {
 		let contra_q = q.clone();
 		Arc::new(move |kern_id: &str, reason_id: &str| {
@@ -317,8 +307,7 @@ async fn run_standalone(cfg: &crate::config::Config) {
 	server.run_stdio();
 }
 
-/// Register kern in the project's `.mcp.json` (Claude Code MCP config).
-/// Idempotent — inserts only absent entries, never touches existing keys.
+// Idempotent: inserts only absent entries, never touches existing keys.
 pub(crate) fn ensure_mcp_registered(cwd: &std::path::Path) {
 	let mcp_path = cwd.join(".mcp.json");
 

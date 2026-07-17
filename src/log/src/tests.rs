@@ -62,7 +62,6 @@ fn global_sink_installs_once_then_routes_log() {
 #[test]
 fn concurrent_pushes_are_thread_safe_and_stay_capped() {
 	use std::thread;
-	// 8*500 = 4000 pushes >> MAX_ENTRIES exercises eviction under contention.
 	let s = Sink::new();
 	let handles: Vec<_> = (0..8u8)
 		.map(|t| {

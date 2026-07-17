@@ -1,9 +1,7 @@
-//! Deterministic feature-hashing embedding STUB — benchmarks only. Not a semantic
-//! embedder: cosine reflects token *overlap*, not meaning. Never wire into production.
+//! Feature-hashing embedding STUB for benchmarks only: cosine reflects token overlap, not meaning. Never wire into production.
 
 use crate::base::util::content_hash;
 
-// 512, not smaller: fewer dims collide enough to drown the token-overlap signal.
 pub const DIM: usize = 512;
 
 pub fn embed(text: &str) -> Vec<f32> {
@@ -76,7 +74,6 @@ mod tests {
 
 	#[test]
 	fn empty_or_tokenless_input_is_a_zero_vector() {
-		// No tokens deposited -> norm 0 -> l2_normalize leaves zeros (no NaN).
 		assert_eq!(embed(""), vec![0.0; DIM]);
 		assert_eq!(embed("   !!! "), vec![0.0; DIM]);
 	}

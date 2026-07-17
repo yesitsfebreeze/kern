@@ -61,8 +61,7 @@ pub(super) fn cmd_health(cfg: &crate::config::Config) {
 	}
 }
 
-/// Offline compaction: reap empty kerns, persist, shrink the env. Daemon must
-/// be stopped — a live daemon would race and re-persist the bloated graph.
+// Daemon must be stopped: a live daemon would race and re-persist the bloated graph.
 pub(super) fn cmd_gc(cfg: &crate::config::Config) {
 	let mut g = load_graph(cfg);
 	let (before, reaped, after) = g.gc_empty_kerns_counted();
@@ -87,8 +86,7 @@ pub(super) fn cmd_gc(cfg: &crate::config::Config) {
 	}
 }
 
-/// Compact-only: shrink `data.mdb` to its live size without reaping. Daemon must
-/// be stopped. Useful when the reap already ran but the file never shrank.
+// Daemon must be stopped.
 pub(super) fn cmd_compact(cfg: &crate::config::Config) {
 	match crate::base::store::compact_dir(&cfg.data_dir) {
 		Ok((old, new)) => println!(
@@ -269,8 +267,8 @@ mod cmd_tests {
 	#[test]
 	fn descriptor_add_then_remove_persists_through_the_graph() {
 		let (_dir, cfg) = temp_cfg();
-		// A custom key, NOT a default load_graph re-injects on every load (e.g.
-		// "code") — else Rm would appear to fail on the next load.
+		// A custom key, not a default: default keys re-inject on every load, so Rm
+		// would appear to fail on the next load.
 		let key = "custom_test_kind";
 
 		cmd_descriptor(

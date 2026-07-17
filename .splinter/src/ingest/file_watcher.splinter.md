@@ -7,3 +7,4 @@ Built as "slice O". The sink deliberately duplicates no placement/dedup logic â€
 Second-pass migration (from source comments):
 
 - `strip_file_uri` test: the non-empty-authority case (`file://host/p.rs` -> `/p.rs`) drops the host and keeps the path's leading slash â€” the RFC 8089 rule is stated on the function itself.
+- `KernFileWatcherSink::ingest` is fire-and-forget; re-ingesting the same file stays idempotent because `place_document`'s dedup (content-hash id) merges into the existing entity instead of spawning a duplicate, keeping the entity count stable.

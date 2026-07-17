@@ -1,5 +1,5 @@
-//! Watcher integration tests. Filesystem events are racy (especially Windows):
-//! assert on observed *kinds* within a budget, never exact ordering or counts.
+// Filesystem events are racy (especially Windows): these tests assert on observed
+// *kinds* within a time budget, never exact ordering or counts.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,8 +31,8 @@ async fn collect_events(w: &mut FileWatcher, budget: Duration) -> Vec<WatchEvent
 	out
 }
 
-/// Early-exits once `done(&events)` holds — use for *presence* assertions.
-/// [`collect_events`] drains the full budget, required for *negative* assertions.
+// Use only for *presence* assertions: early-exits once `done` holds. Negative
+// assertions must use `collect_events`, which drains the full budget.
 async fn collect_until(
 	w: &mut FileWatcher,
 	budget: Duration,
@@ -67,7 +67,7 @@ async fn create_modify_delete_cycle_emits_expected_events() {
 	let root = tmp.path().to_path_buf();
 	let mut w = FileWatcher::new(vec![root.clone()], IgnoreRules::empty()).unwrap();
 
-	// Give notify a moment to install its OS-level hook before we mutate.
+	// Let notify install its OS-level hook before we mutate.
 	tokio::time::sleep(Duration::from_millis(100)).await;
 
 	let file = root.join("a.txt");
@@ -77,8 +77,7 @@ async fn create_modify_delete_cycle_emits_expected_events() {
 	tokio::time::sleep(Duration::from_millis(150)).await;
 	tokio::fs::remove_file(&file).await.unwrap();
 
-	// Windows often collapses the initial write into Modified — accept either;
-	// debouncing decides whether the second write survives as its own event.
+	// Windows often collapses the initial write into Modified — accept either.
 	let want = |evs: &[WatchEvent]| {
 		has_kind(evs, &file, |k| {
 			matches!(k, WatchKind::Created | WatchKind::Modified)
@@ -107,8 +106,7 @@ async fn debounce_collapses_rapid_modifies_to_one_event() {
 	let file = root.join("burst.txt");
 	tokio::fs::write(&file, b"seed").await.unwrap();
 
-	// Start watching *after* the seed write so the seed Created doesn't
-	// pollute the count.
+	// Watch *after* the seed write so its Created doesn't pollute the count.
 	let mut w = FileWatcher::new(vec![root.clone()], IgnoreRules::empty()).unwrap();
 	tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -118,7 +116,7 @@ async fn debounce_collapses_rapid_modifies_to_one_event() {
 		tokio::time::sleep(Duration::from_millis(5)).await;
 	}
 
-	// Wait long enough for the debouncer to flush.
+	// Wait for the debouncer to flush.
 	tokio::time::sleep(Duration::from_millis(250)).await;
 
 	let events = collect_events(&mut w, Duration::from_millis(500)).await;
@@ -179,8 +177,7 @@ async fn rename_within_root_emits_renamed_or_delete_create_pair() {
 	let dst = root.join("new.txt");
 	tokio::fs::rename(&src, &dst).await.unwrap();
 
-	// Platforms report either one `Renamed` (`Name(Both)`) or a `Deleted` +
-	// `Created` pair (`From`/`To` halves); both shapes are valid per `translate`.
+	// Platforms report either one `Renamed` or a `Deleted` + `Created` pair; accept both.
 	let saw_rename = |evs: &[WatchEvent]| {
 		let renamed = evs
 			.iter()

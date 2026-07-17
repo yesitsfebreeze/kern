@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// Coarse dispatch tag — the AUTHORITATIVE shape is the [`GossipPayload`] variant
-/// (not 1:1). `repr(u8)` values are on-wire: append variants, never renumber.
+// repr(u8) values are on-wire: append variants, never renumber.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum GossipKind {
@@ -9,7 +8,6 @@ pub enum GossipKind {
 	Question = 1,
 	Pulse = 2,
 	PeerExchange = 3,
-	/// Both directions of a fetch — `FetchRequest` and `FetchResult` payloads.
 	Fetch = 4,
 	Delta = 5,
 	EntitySync = 6,
@@ -35,24 +33,18 @@ pub enum GossipPayload {
 	EntitySync(EntitySyncPayload),
 }
 
-/// Advertises a kern ("sphere") to peers so they can route thoughts toward it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpherePayload {
-	/// Federation network this sphere belongs to (gossip is scoped per network).
 	pub network_id: String,
 	pub kern_id: String,
-	/// Anchor centroid thoughts are routed against; empty = un-centred, matches
-	/// nothing. Serialized as `Vec<f64>` so the wire format stays stable.
+	// Serialized as Vec<f64> to keep the wire format stable.
 	#[serde(with = "crate::base::util::vec_f64_compat")]
 	pub anchor_vec: Vec<f32>,
 	pub anchor_text: String,
-	/// A representative entity id for the sphere (provenance / dedup handle).
 	pub entity_id: String,
-	/// Inner routing radius as a COSINE DISTANCE (`1 - cos`, smaller = closer);
-	/// within it a thought is firmly inside this kern.
+	// Cosine distance (1 - cos), smaller = closer.
 	pub inner_radius: f64,
-	/// Beyond it firmly outside; `inner..outer` is the fuzzy "consider" zone.
-	/// Invariant: `inner_radius <= outer_radius`.
+	// Invariant: inner_radius <= outer_radius.
 	pub outer_radius: f64,
 }
 
@@ -102,8 +94,8 @@ pub struct EntitySyncPayload {
 	pub entities: Vec<crate::base::types::Entity>,
 }
 
-/// CRDT counter update. `value` is the sender's ABSOLUTE `replica`-slot total —
-/// an increment-since-last would be lost under the receiver's max-merge.
+// value is the sender's ABSOLUTE replica-slot total, not an increment — a
+// delta-since-last would be lost under the receiver's max-merge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrdtDeltaPayload {
 	pub kern_id: String,

@@ -1,6 +1,3 @@
-//! Query-latency profiler (`kern profile`): labelled [`Checkpoint`]s splitting a
-//! recall into graph-engine vs LLM (HyDE / answer / distill) stages.
-
 use std::time::Instant;
 
 #[derive(Debug, Clone)]
@@ -83,7 +80,6 @@ impl std::fmt::Display for Profile {
 	}
 }
 
-/// Render profiles as an aligned ASCII timeline; bars are scaled to the slowest.
 pub fn render_timeline(profiles: &[Profile], width: usize) -> String {
 	const FILLS: [char; 4] = ['█', '▓', '▒', '░'];
 	let max = profiles.iter().map(|p| p.total_ms).fold(0.0_f64, f64::max);
@@ -104,8 +100,7 @@ pub fn render_timeline(profiles: &[Profile], width: usize) -> String {
 			bar.extend(std::iter::repeat_n('█', n.max(1)));
 		} else {
 			for (i, c) in p.checkpoints.iter().enumerate() {
-				// Floor a positive stage to one cell: rounding alone makes a small
-				// stage invisible. A genuinely zero stage stays empty.
+				// Floor a positive stage to 1 cell (rounding alone hides a small stage); zero stays empty.
 				let n = if c.elapsed_ms > 0.0 {
 					(((c.elapsed_ms / max) * width as f64).round() as usize).max(1)
 				} else {
@@ -135,8 +130,6 @@ pub fn render_timeline(profiles: &[Profile], width: usize) -> String {
 	out
 }
 
-/// Macro to instrument a code block with timing.
-/// Usage: profile_block!("name", { /* code */ })
 #[macro_export]
 macro_rules! profile_block {
 	($name:expr, $code:block) => {{
@@ -268,8 +261,6 @@ mod tests {
 
 	#[test]
 	fn render_timeline_tiny_nonzero_stage_gets_at_least_one_cell() {
-		// `tiny` is 0.4/100*20 = 0.08 -> round() = 0 cells without the min-1
-		// floor; with it, the stage (FILLS[1] = '▓') must still appear once.
 		let profiles = vec![Profile {
 			name: "p".to_string(),
 			checkpoints: vec![

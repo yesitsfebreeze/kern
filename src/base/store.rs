@@ -1,6 +1,3 @@
-//! The durable substrate: one embedded LMDB environment per data_dir, bincode
-//! wrapped in zstd. Vectors are int8 on disk; `gnn_vector` is never persisted.
-
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -12,40 +9,30 @@ use serde::{Deserialize, Serialize};
 use crate::base::types::{Entity, Kern};
 use crate::quant::{QuantizationMode, QuantizedVec};
 
-/// LMDB map size = max on-disk size. Headroom is a DURABILITY requirement: a full
-/// env fails even the *deletes* that would free space (`MDB_MAP_FULL`).
+// Headroom is a DURABILITY requirement: a full env fails even the deletes that
+// would free space (MDB_MAP_FULL).
 const MAP_SIZE: usize = 16 * 1024 * 1024 * 1024;
-/// Named databases: kern, cold, meta.
 const MAX_DBS: u32 = 3;
 
 const KERN_DB: &str = "kern";
 const COLD_DB: &str = "cold";
 const META_DB: &str = "meta";
 const META_KEY: &str = "graph";
-/// Write-generation counter, bumped by every full persist; lets a stale flusher
-/// detect another writer. Own key (not in [`GraphMeta`]) so old stores read 0.
+// Own meta key (not in GraphMeta) so pre-epoch stores read 0.
 const EPOCH_KEY: &str = "epoch";
 
-/// Value-format version byte, prepended ahead of the zstd frame so an old reader
-/// rejects a newer value loudly instead of mis-decoding it.
+// Version byte prepended ahead of the zstd frame so an old reader rejects a newer
+// value instead of mis-decoding it.
 const FORMAT_V1: u8 = 1;
-/// Current write version: V2 appends [`StoredKern::temporal`]. The embedded
-/// `Kern`/`Entity` bincode layout is UNCHANGED, so V1 decodes via [`StoredKernV1`].
+// V2 appends StoredKern::temporal; the embedded Kern/Entity layout is unchanged,
+// so V1 decodes via StoredKernV1.
 const FORMAT_V2: u8 = 2;
 const ZSTD_LEVEL: i32 = 3;
 
-/// Result of [`Store::flush_guarded`]: snapshot written, or refused because the
-/// on-disk epoch advanced past what the flusher expected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlushOutcome {
-	Flushed {
-		epoch: u64,
-	},
-	/// Refused: writing would drop newer committed rows. The store is untouched.
-	RefusedStale {
-		disk_epoch: u64,
-		expected: u64,
-	},
+	Flushed { epoch: u64 },
+	RefusedStale { disk_epoch: u64, expected: u64 },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -62,13 +49,13 @@ pub enum StoreError {
 	BadVersion(u8),
 }
 
-/// The one bincode config shared by both persistence backends so encodings never
-/// drift. The 1 GiB alloc cap rejects corrupt length prefixes (see tests/persist_fuzz.rs).
+// Shared by both backends so encodings never drift; the 1 GiB alloc cap rejects
+// corrupt length prefixes (tests/persist_fuzz.rs).
 pub(crate) fn bincode_cfg() -> impl bincode::config::Config {
 	bincode::config::standard().with_limit::<{ 1024 * 1024 * 1024 }>()
 }
 
-/// `[FORMAT_V2] ++ zstd(bincode(v))`.
+// [FORMAT_V2] ++ zstd(bincode(v)).
 fn encode<T: Serialize>(v: &T) -> Result<Vec<u8>, StoreError> {
 	let raw = bincode::serde::encode_to_vec(v, bincode_cfg())?;
 	let comp = zstd::encode_all(raw.as_slice(), ZSTD_LEVEL)?;
@@ -78,8 +65,6 @@ fn encode<T: Serialize>(v: &T) -> Result<Vec<u8>, StoreError> {
 	Ok(out)
 }
 
-/// Strip and validate the leading version byte, returning the decompressed body.
-/// Rejects an unknown version rather than feeding arbitrary bytes to bincode.
 fn strip_version(bytes: &[u8]) -> Result<(u8, Vec<u8>), StoreError> {
 	let (&ver, body) = bytes.split_first().ok_or(StoreError::BadVersion(0))?;
 	if ver != FORMAT_V1 && ver != FORMAT_V2 {
@@ -88,16 +73,14 @@ fn strip_version(bytes: &[u8]) -> Result<(u8, Vec<u8>), StoreError> {
 	Ok((ver, zstd::decode_all(body)?))
 }
 
-/// Inverse of [`encode`] for values whose layout is IDENTICAL across V1/V2 —
-/// everything except [`StoredKern`], which must go through [`decode_stored_kern`].
+// For values whose layout is identical across V1/V2; StoredKern must use
+// decode_stored_kern instead.
 fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, StoreError> {
 	let (_ver, raw) = strip_version(bytes)?;
 	let (v, _) = bincode::serde::decode_from_slice(&raw, bincode_cfg())?;
 	Ok(v)
 }
 
-/// Version-aware decode for [`StoredKern`], the one layout that changed in V2: a
-/// V1 blob decodes through [`StoredKernV1`] and gets an empty temporal side-map.
 fn decode_stored_kern(bytes: &[u8]) -> Result<StoredKern, StoreError> {
 	let (ver, raw) = strip_version(bytes)?;
 	match ver {
@@ -110,8 +93,8 @@ fn decode_stored_kern(bytes: &[u8]) -> Result<StoredKern, StoreError> {
 	}
 }
 
-/// Bincode-safe int8 vector: every field always present. Do NOT persist
-/// [`QuantizedVec`] directly — its `skip_serializing_if` desyncs positional bincode.
+// Do NOT persist QuantizedVec directly — its skip_serializing_if desyncs
+// positional bincode. Every field here is always present.
 #[derive(Serialize, Deserialize)]
 pub struct StoredVec {
 	pub scale: f32,
@@ -132,8 +115,8 @@ impl StoredVec {
 	}
 }
 
-/// Bi-temporal stamps lifted out of an [`Entity`]: its temporal fields are
-/// `#[serde(skip)]` (byte-stable embedded layout), so the store carries them here.
+// Entity's temporal fields are serde(skip) for byte-stable layout, so the store
+// carries them here.
 #[derive(Serialize, Deserialize, Default)]
 pub struct StoredTemporal {
 	pub valid_from: Option<std::time::SystemTime>,
@@ -142,20 +125,17 @@ pub struct StoredTemporal {
 }
 
 impl StoredTemporal {
-	/// An open, never-invalidated entity (the common case) needs no side-map row.
 	fn is_set(e: &Entity) -> bool {
 		e.valid_from.is_some() || e.valid_to.is_some() || e.invalidated_at.is_some()
 	}
 }
 
-/// On-disk projection of a [`Kern`]: vectors lifted into int8 side-maps,
-/// `gnn_vector` dropped (derived), temporal stamps lifted into `temporal`.
 #[derive(Serialize, Deserialize)]
 pub struct StoredKern {
 	pub kern: Kern,
 	pub entity_vecs: HashMap<String, StoredVec>,
 	pub reason_vecs: HashMap<String, StoredVec>,
-	/// Stamps keyed by entity id (only entities that carry one). New in FORMAT_V2.
+	// Appended field — new in FORMAT_V2.
 	pub temporal: HashMap<String, StoredTemporal>,
 }
 
@@ -179,8 +159,8 @@ impl StoredKern {
 					},
 				);
 			}
-			// Cleared so they don't bloat the blob: `vector` restored from the side-map
-			// on load, `gnn_vector` recomputed by GnnPropagate — never persisted.
+			// vector is restored from the side-map on load; gnn_vector is recomputed,
+			// never persisted.
 			e.vector = Vec::new();
 			e.gnn_vector = Vec::new();
 		}
@@ -209,7 +189,6 @@ impl StoredKern {
 				e.valid_to = t.valid_to;
 				e.invalidated_at = t.invalidated_at;
 			}
-			// gnn_vector stays empty — recomputed lazily.
 		}
 		for (id, r) in kern.reasons.iter_mut() {
 			if let Some(q) = self.reason_vecs.get(id) {
@@ -220,8 +199,8 @@ impl StoredKern {
 	}
 }
 
-/// FORMAT_V1 mirror of [`StoredKern`] without the `temporal` side-map. Reuses the
-/// real [`Kern`] — the embedded entity bytes are identical across versions.
+// FORMAT_V1 mirror without the temporal side-map; the embedded entity bytes are
+// identical across versions.
 #[derive(Serialize, Deserialize)]
 struct StoredKernV1 {
 	kern: Kern,
@@ -246,20 +225,18 @@ struct GraphMeta {
 	quant_mode: QuantizationMode,
 }
 
-/// One embedded LMDB environment per `data_dir`; `Env` is ref-counted and cheap
-/// to clone. LMDB gives many-reader / single-writer concurrency across processes.
+// One embedded LMDB env per data_dir; LMDB gives many-reader / single-writer
+// concurrency across processes.
 pub struct Store {
 	env: Env,
 	kern: Database<Str, Bytes>,
 	cold: Database<Str, Bytes>,
 	meta: Database<Str, Bytes>,
-	/// Held so the offline compactor can locate `data.mdb` for the copy-and-swap.
 	dir: std::path::PathBuf,
 }
 
 impl Store {
-	/// Open (creating if absent) the env under `dir`. All named databases are
-	/// created up front so later read txns never miss one on a fresh env.
+	// All named databases are created up front so later read txns never miss one.
 	pub fn open(dir: &str) -> Result<Self, StoreError> {
 		std::fs::create_dir_all(dir)?;
 		let path = Path::new(dir);
@@ -286,8 +263,6 @@ impl Store {
 		})
 	}
 
-	/// Size of `data.mdb` — the LMDB high-water mark, which only [`compact_dir`]
-	/// ever shrinks. Drives the is-compaction-worth-it decision; 0 if unstat-able.
 	pub fn data_file_len(&self) -> u64 {
 		std::fs::metadata(self.dir.join("data.mdb"))
 			.map(|m| m.len())
@@ -315,8 +290,6 @@ impl Store {
 		self.get_with(db, key, decode)
 	}
 
-	/// [`get`](Self::get) with an explicit decoder, so kern rows route through the
-	/// version-aware [`decode_stored_kern`].
 	fn get_with<T>(
 		&self,
 		db: Database<Str, Bytes>,
@@ -337,8 +310,6 @@ impl Store {
 		Ok(())
 	}
 
-	/// Decode every row; corrupt rows are skipped with a warning — one bad value
-	/// must not blind the daemon to the rest of the graph.
 	fn scan<T: DeserializeOwned>(
 		&self,
 		db: Database<Str, Bytes>,
@@ -346,7 +317,6 @@ impl Store {
 		self.scan_with(db, decode)
 	}
 
-	/// [`scan`](Self::scan) with an explicit decoder (see [`get_with`](Self::get_with)).
 	fn scan_with<T>(
 		&self,
 		db: Database<Str, Bytes>,
@@ -366,8 +336,7 @@ impl Store {
 		Ok(out)
 	}
 
-	/// Current write generation (see [`EPOCH_KEY`]). Missing or garbled reads as 0
-	/// — the epoch is an advisory staleness signal and must never fail a load.
+	// Missing/garbled reads as 0 — the epoch is advisory and must never fail a load.
 	pub fn read_epoch(&self) -> u64 {
 		self
 			.get::<u64>(self.meta, EPOCH_KEY)
@@ -376,8 +345,7 @@ impl Store {
 			.unwrap_or(0)
 	}
 
-	/// Read the epoch inside an open txn, so the guard's check and the subsequent
-	/// write commit atomically. Missing/garbled reads as 0.
+	// Read inside the open txn so the guard's check and the write commit atomically.
 	fn epoch_in(&self, wtxn: &heed::RwTxn) -> Result<u64, StoreError> {
 		match self.meta.get(wtxn, EPOCH_KEY)? {
 			Some(b) => Ok(decode::<u64>(b).unwrap_or(0)),
@@ -385,8 +353,7 @@ impl Store {
 		}
 	}
 
-	/// Prune-and-write the whole snapshot inside an open write txn, then stamp
-	/// `next_epoch`. The one destructive-prune body, shared by both save paths.
+	// Destructive prune-and-write shared by both save paths; stamps next_epoch.
 	fn write_snapshot(
 		&self,
 		wtxn: &mut heed::RwTxn,
@@ -425,8 +392,7 @@ impl Store {
 		Ok(())
 	}
 
-	/// Persist the whole graph (live kerns + prune removed + meta) in one atomic
-	/// commit — a crash leaves old or new, never a torn mix. Returns the new epoch.
+	// One atomic commit — a crash leaves old or new, never a torn mix.
 	pub fn save_all_kerns(
 		&self,
 		kerns: &HashMap<String, Kern>,
@@ -440,8 +406,8 @@ impl Store {
 		Ok(next)
 	}
 
-	/// Stale-safe full flush: writes ONLY while the on-disk epoch still equals
-	/// `expected`, else REFUSES untouched. Check and write share one txn — atomic.
+	// Writes ONLY while the on-disk epoch still equals `expected`, else refuses
+	// untouched; check and write share one txn.
 	pub fn flush_guarded(
 		&self,
 		kerns: &HashMap<String, Kern>,
@@ -464,8 +430,6 @@ impl Store {
 		Ok(FlushOutcome::Flushed { epoch: next })
 	}
 
-	/// Load every kern plus metadata; corrupt rows are skipped with a warning.
-	/// Missing metadata yields empty network_id + `None` mode (caller backfills).
 	pub fn load_all_kerns(
 		&self,
 	) -> Result<(HashMap<String, Kern>, String, QuantizationMode), StoreError> {
@@ -481,12 +445,10 @@ impl Store {
 		Ok((kerns, network_id, quant_mode))
 	}
 
-	/// Persist a single kern (the tick worker's per-kern `do_persist` path).
 	pub fn save_one_kern(&self, kern: &Kern) -> Result<(), StoreError> {
 		self.put(self.kern, &kern.id, &StoredKern::from_kern(kern))
 	}
 
-	/// Load a single kern by id (the lazy-load path for an unloaded kern).
 	pub fn load_one_kern(&self, id: &str) -> Result<Option<Kern>, StoreError> {
 		Ok(
 			self
@@ -495,13 +457,10 @@ impl Store {
 		)
 	}
 
-	/// Delete a single kern row (deregister). Idempotent — a missing row is fine.
 	pub fn delete_one_kern(&self, id: &str) -> Result<(), StoreError> {
 		self.remove(self.kern, id)
 	}
 
-	/// Spill an evicted entity to the cold db (latest-wins put, so never duplicate
-	/// rows), then enforce the size cap.
 	pub fn cold_spill(&self, entity: &Entity) -> Result<(), StoreError> {
 		self.put(self.cold, &entity.id, entity)?;
 		self.cold_cap(crate::base::constants::COLD_MAX_ENTRIES)?;
@@ -512,13 +471,10 @@ impl Store {
 		self.get(self.cold, id)
 	}
 
-	/// Every cold entity (used by `reembed` to re-vector the whole cold tier).
 	pub fn cold_all(&self) -> Result<Vec<Entity>, StoreError> {
 		Ok(self.scan(self.cold)?.into_iter().map(|(_, e)| e).collect())
 	}
 
-	/// Insert/replace many cold entities in one txn, then cap once — a per-entity
-	/// `cold_spill` from `reembed` would fsync a separate commit per row.
 	pub fn cold_put_all(&self, entities: &[Entity]) -> Result<(), StoreError> {
 		let mut wtxn = self.env.write_txn()?;
 		for e in entities {
@@ -530,8 +486,6 @@ impl Store {
 		Ok(())
 	}
 
-	/// Top-`k` cold entities by cosine, descending; empty/mismatched-dim vectors
-	/// skipped. `COLD_MAX_ENTRIES` bounds the full decode-and-score scan.
 	pub fn cold_search(&self, query_vec: &[f32], k: usize) -> Result<Vec<(Entity, f64)>, StoreError> {
 		if query_vec.is_empty() || k == 0 {
 			return Ok(Vec::new());
@@ -558,8 +512,6 @@ impl Store {
 		Ok(scored)
 	}
 
-	/// Cap the cold tier at `max` rows, dropping the oldest by `created_at` (rows
-	/// with no timestamp sort oldest). No-op while under cap.
 	fn cold_cap(&self, max: usize) -> Result<(), StoreError> {
 		let len = {
 			let rtxn = self.env.read_txn()?;
@@ -580,13 +532,11 @@ impl Store {
 	}
 }
 
-/// The sidecar path a compacted copy is written to before the swap.
 fn compact_tmp(dir: &Path) -> std::path::PathBuf {
 	dir.join("data.mdb.compact")
 }
 
-/// Swap `data.mdb` for the compacted copy; returns `(old_bytes, new_bytes)`. The
-/// caller MUST drop every handle first; retries ride out Windows' async unmap lag.
+// Caller MUST drop every env handle first; retries ride out Windows' async unmap lag.
 pub fn swap_compacted(dir: &str) -> Result<(u64, u64), StoreError> {
 	let path = Path::new(dir);
 	let data = path.join("data.mdb");
@@ -603,24 +553,22 @@ pub fn swap_compacted(dir: &str) -> Result<(u64, u64), StoreError> {
 			}
 			Err(e) => {
 				last_err = Some(e);
-				// Backoff up to ~2.5s total while the OS releases the old mmap.
 				std::thread::sleep(std::time::Duration::from_millis(100 + attempt * 4));
 			}
 		}
 	}
-	// Give up: clean the tmp so a retry isn't confused by a stale copy.
 	let _ = std::fs::remove_file(&tmp);
 	Err(StoreError::Io(last_err.unwrap_or_else(|| {
 		std::io::Error::other("compaction swap failed")
 	})))
 }
 
-/// Rewrite the env into a fresh file — the only way to shrink LMDB's high-water
-/// mark. REQUIRES exclusive access: run offline, daemon stopped.
+// The only way to shrink LMDB's high-water mark. REQUIRES exclusive access:
+// run offline, daemon stopped.
 pub fn compact_dir(dir: &str) -> Result<(u64, u64), StoreError> {
 	let path = Path::new(dir);
 	let tmp = compact_tmp(path);
-	let _ = std::fs::remove_file(&tmp); // clear any stale tmp
+	let _ = std::fs::remove_file(&tmp);
 
 	{
 		let env = unsafe {
@@ -630,7 +578,7 @@ pub fn compact_dir(dir: &str) -> Result<(u64, u64), StoreError> {
 				.open(path)?
 		};
 		env.copy_to_file(&tmp, CompactionOption::Enabled)?;
-		// Block until the env is truly closed (mmap released, handles shut).
+		// Block until the env is truly closed (mmap released) before the swap.
 		env.prepare_for_closing().wait();
 	}
 
@@ -814,7 +762,6 @@ mod tests {
 	#[test]
 	fn stored_kern_handles_empty_vectors() {
 		let e = mk_entity("e1", "novec", 0.0, EntityKind::Claim);
-		// mk_entity gives a zero vector; clear it to exercise the empty path.
 		let mut e = e;
 		e.vector = Vec::new();
 		let k = kern_with("k", e);
@@ -849,7 +796,6 @@ mod tests {
 
 	#[test]
 	fn stored_kern_v1_blob_decodes_with_none_temporal() {
-		// Must decode, NOT get skipped as corrupt — that would silently drop the graph.
 		let mut e = mk_entity("e1", "old claim", 1.0, EntityKind::Fact);
 		e.vector = vec![0.3, 0.4];
 		let k = kern_with("k", e);
@@ -860,7 +806,6 @@ mod tests {
 			entity_vecs: sk.entity_vecs,
 			reason_vecs: sk.reason_vecs,
 		};
-		// Hand-roll a V1 envelope: [FORMAT_V1] ++ zstd(bincode(v1)).
 		let raw = bincode::serde::encode_to_vec(&v1, bincode_cfg()).unwrap();
 		let comp = zstd::encode_all(raw.as_slice(), ZSTD_LEVEL).unwrap();
 		let mut bytes = vec![FORMAT_V1];
@@ -958,7 +903,6 @@ mod tests {
 		let d = tmp();
 		let s = Store::open(&dir_of(&d)).unwrap();
 
-		// Writer A (the external CLI) commits a populated graph at epoch 0.
 		let mut a = HashMap::new();
 		a.insert("root".to_string(), Kern::new("root", ""));
 		a.insert(
@@ -970,7 +914,6 @@ mod tests {
 			FlushOutcome::Flushed { epoch: 1 },
 		);
 
-		// Writer B (the stale daemon) still believes the epoch is 0 and lacks `ka`.
 		let mut b = HashMap::new();
 		b.insert("root".to_string(), Kern::new("root", ""));
 		assert_eq!(
@@ -987,7 +930,6 @@ mod tests {
 		);
 		assert_eq!(s.read_epoch(), 1, "a refusal does not advance the epoch");
 
-		// Reconciled to the current epoch, B may flush and prune.
 		assert_eq!(
 			s.flush_guarded(&b, "n", QuantizationMode::None, 1).unwrap(),
 			FlushOutcome::Flushed { epoch: 2 },
@@ -1022,7 +964,6 @@ mod tests {
 	fn compact_dir_shrinks_after_bulk_delete() {
 		let d = tmp();
 		let dir = dir_of(&d);
-		// Grow the high-water mark with fat rows, then delete almost all of them.
 		{
 			let s = Store::open(&dir).unwrap();
 			let mut kerns = HashMap::new();
@@ -1041,8 +982,6 @@ mod tests {
 			small.insert("k0".to_string(), kerns.remove("k0").unwrap());
 			s.save_all_kerns(&small, "n", QuantizationMode::Int8)
 				.unwrap();
-			// The delete frees pages inside the file but never returns them to the
-			// OS — the whole bug this test pins.
 			assert!(
 				s.data_file_len() >= bloated * 9 / 10,
 				"LMDB keeps ~all of the high-water mark after delete: {} vs peak {bloated}",
@@ -1076,7 +1015,6 @@ mod tests {
 		assert!(s.load_one_kern("k").unwrap().is_some());
 		s.delete_one_kern("k").unwrap();
 		assert!(s.load_one_kern("k").unwrap().is_none());
-		// idempotent
 		s.delete_one_kern("k").unwrap();
 	}
 

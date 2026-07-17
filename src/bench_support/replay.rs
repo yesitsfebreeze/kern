@@ -51,7 +51,6 @@ pub fn replay(g: &GraphGnn, cfg: &RetrievalConfig, trace: &Trace) -> ReplayRepor
 fn run_one(g: &GraphGnn, cfg: &RetrievalConfig, q: &TraceQuery) -> QueryReport {
 	let mode = Mode::parse(&q.mode);
 	let qvec = embed::embed(&q.query);
-	// An unparseable kind falls back to no filter, not a wrong-scoring silent match.
 	let opts = q
 		.filter_kind
 		.as_deref()
@@ -100,8 +99,6 @@ mod tests {
 		}
 	}
 
-	/// Asserts recall + positive ranking quality rather than exact rank-1: the full
-	/// pipeline (graph expansion, MMR, GNN blend) reorders results.
 	#[test]
 	fn replay_retrieves_relevant_doc_with_positive_ndcg() {
 		let trace = Trace {
@@ -146,8 +143,6 @@ mod tests {
 
 	#[test]
 	fn replay_applies_the_kind_filter_end_to_end() {
-		// Every doc is a Claim, so a `fact` filter must zero recall while no-filter /
-		// kind=claim restores it — proving it is the filter, not a broken query.
 		let docs = vec![
 			doc("d1", "rust ownership and the borrow checker"),
 			doc("d2", "graph neural network message passing"),
@@ -185,8 +180,6 @@ mod tests {
 
 	#[test]
 	fn filtered_query_recovers_a_minority_kind_buried_by_the_majority() {
-		// 15 Claims + 2 Facts share identical text; id-ascending ties bury the Facts
-		// past top-10 unfiltered.
 		let text = "rust ownership and the borrow checker semantics";
 		let mut docs: Vec<TraceDoc> = (0..15).map(|i| doc(&format!("c{i:02}"), text)).collect();
 		docs.push(doc_kind("fact0", text, "fact"));
@@ -219,8 +212,6 @@ mod tests {
 
 	#[test]
 	fn filtered_query_survives_delivery_pool_truncation() {
-		// 60 Claims (> the ~50 delivery cap): if the filter runs only AFTER
-		// truncation, the id-trailing Facts get cut and recall@10 collapses.
 		let text = "rust ownership and the borrow checker semantics".to_string();
 		let mut docs: Vec<TraceDoc> = (0..60).map(|i| doc(&format!("c{i:03}"), &text)).collect();
 		docs.push(doc_kind("fact0", &text, "fact"));

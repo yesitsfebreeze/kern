@@ -1,21 +1,15 @@
-//! Vector-storage footprint estimate for a built graph: f32 vs int8. PAYLOAD only —
-//! excludes HNSW structure, text/metadata, allocator — so it is a lower bound on RSS.
-
 use crate::base::graph::GraphGnn;
 
 #[derive(Debug, Clone)]
 pub struct MemoryReport {
 	pub entities: usize,
-	/// Entities carrying a non-empty embedding.
 	pub vectors: usize,
-	/// Embedding dimension (the widest seen; 0 when there are no vectors).
 	pub dim: usize,
 	pub float_vector_bytes: usize,
 	pub int8_vector_bytes: usize,
 }
 
 impl MemoryReport {
-	/// float bytes / int8 bytes; 0 when there are no vectors.
 	pub fn quant_ratio(&self) -> f64 {
 		if self.int8_vector_bytes == 0 {
 			0.0

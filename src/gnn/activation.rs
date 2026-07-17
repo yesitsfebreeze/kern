@@ -72,8 +72,6 @@ pub fn gelu_deriv(x: f64) -> f64 {
 	0.5 * (1.0 + t) + 0.5 * x * sech2 * d_inner
 }
 
-/// An activation paired with its analytic derivative — backward uses `deriv`,
-/// never a finite difference.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Activation {
 	Relu,

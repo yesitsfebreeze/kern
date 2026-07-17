@@ -7,3 +7,7 @@ Second-pass migration:
 - `Optimizer::zero_grad` doc compressed to 2 lines (it zeroes the PASSED-IN tensors, not model- or optimizer-owned state). Moved here: the training loop hands the model's own grad tensors in between steps; calling it on unrelated tensors is inert and never touches SGD velocity or Adam m/v.
 - `adam_keeps_independent_moment_state_per_parameter` / `sgd_momentum_velocity_is_independent_per_parameter`: deleted narration preambles — both restate the test name (the independence property is already pinned above).
 - Kept inline: the arithmetic derivations for the expected values (`1.0 - 0.1*0.5`, the v=1.0/v=1.9 momentum steps, and Adam's t=1 update reducing to ~lr*sign(g)).
+
+## Preserved from stripped comments (2026-07-17)
+- `Optimizer::zero_grad` invariant: it zeroes ONLY the gradient tensors passed in — never model-owned grads, and never the optimizer's own momentum / Adam moment state (m, v). (The `&self` receiver already prevents touching internal state.)
+- SGD-momentum recurrence (from tests): v ← momentum·v + grad, then p -= lr·v. e.g. lr=0.1, momentum=0.9, grad=1: step1 v=1.0 p-=0.10; step2 v=1.9 p-=0.19 (p=-0.29).

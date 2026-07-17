@@ -7,3 +7,10 @@ Mock behavior sketch: tiny in-memory store of `EntityRef`s plus a list of `Reaso
 - `unrecognised_kind_string_disables_kind_filter` (test): guards against silently eating every hit on a typo'd kind label — the filter must degrade to "no kind constraint", not "match nothing".
 
 Second-pass migration: header `#![allow(clippy::manual_async_fn)]` rationale — the mock returns explicit `impl Future` to mirror the trait surface; the async-fn rewrite adds no value in a test double. `seed()` exists so integration tests get a `query` hit without a prior `ingest`.
+Design notes (moved from source comments during comment sweep):
+- MockKernServer is an in-memory KernRpc handler for tests. query honours cancel_token: only the highest token seen yields fresh:true.
+- seed() seeds one hit so query returns something without a prior ingest.
+- ingest mock ignores descriptor/conf/source; link mock ignores req.text (not stored).
+- neighbors mock: depth is clamped but NOT traversed — the mock is depth-1 only.
+- facet_filter_tests::seeded uses 4 entities = 2 kinds x 2 schemes, so both filter axes are exercised.
+- from_label: "superseded" is a status, not a kind -> None (degrades to "no kind filter").

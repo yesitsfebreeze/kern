@@ -1,6 +1,3 @@
-// Generic TOML load/save/layer for per-binary configs. User scope
-// <XDG_CONFIG>/kern/<bin>.toml, project scope <cwd>/.kern/<bin>.toml.
-
 use std::path::{Path, PathBuf};
 
 use serde::{de::DeserializeOwned, Serialize};
@@ -108,7 +105,7 @@ mod tests {
 	fn load_layered_merges_project_section_over_missing_user() {
 		let dir = std::env::temp_dir().join(format!("cfgio_ll_{}", std::process::id()));
 		std::fs::create_dir_all(&dir).unwrap();
-		let user = dir.join("user.toml"); // intentionally absent
+		let user = dir.join("user.toml");
 		let project = dir.join("project.toml");
 		std::fs::write(&project, "[section]\nenabled = true\n").unwrap();
 		let merged: toml::Table = load_layered(&user, &project).expect("load_layered");

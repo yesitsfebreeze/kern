@@ -171,8 +171,7 @@ impl Server {
 		}
 	}
 
-	/// Live GC: reap empty/orphan kerns (write lock held only for the reap), then
-	/// persist via the shared save closure. No env close — safe while serving.
+	// Write lock held only for the reap; no env close, so safe while serving.
 	pub(crate) fn tool_gc(&self) -> serde_json::Value {
 		let (before, reaped, after) = {
 			let mut g = write_recovered(&self.graph);
@@ -181,7 +180,7 @@ impl Server {
 		if reaped > 0 {
 			(self.save_fn)();
 		}
-		// LMDB keeps freed pages until a restart/`kern compact`; report the footprint.
+		// LMDB keeps freed pages until a restart/`kern compact`.
 		let data_bytes = read_recovered(&self.graph)
 			.store()
 			.map(|s| s.data_file_len())
@@ -204,8 +203,6 @@ impl Server {
 		let strength = if p.strength <= 0.0 { 1.0 } else { p.strength };
 
 		let q = match &self.task_q {
-			// No tick queue (one-shot CLI Server): label the no-op so a caller can
-			// tell it from a real 0-enqueue pulse.
 			None => {
 				return tool_result_json(&serde_json::json!({
 					"status": "noop",
@@ -276,7 +273,6 @@ mod descriptor_tests {
 
 	#[tokio::test]
 	async fn health_stats_aggregates_entities_and_descriptors() {
-		// Guards health_stats against drifting from repl.rs's copy of the aggregation.
 		use crate::base::types::{Entity, Kern};
 		let (srv, _c) = make_server();
 		{
@@ -407,7 +403,7 @@ mod descriptor_tests {
 	#[tokio::test]
 	async fn anchor_list_on_empty_graph_returns_no_anchors() {
 		let (srv, _) = make_server();
-		let out = srv.tool_anchor(&serde_json::json!({})); // action defaults to "list"
+		let out = srv.tool_anchor(&serde_json::json!({}));
 		assert!(!is_error(&out));
 		let body: serde_json::Value = serde_json::from_str(&text(&out)).unwrap();
 		assert!(

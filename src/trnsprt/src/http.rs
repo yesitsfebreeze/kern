@@ -1,6 +1,3 @@
-//! MCP Streamable HTTP transport (2025 spec). `POST /mcp` — request → JSON
-//! response; `GET /mcp` — SSE stream for server-initiated notifications.
-
 use std::sync::Arc;
 
 use axum::extract::State;

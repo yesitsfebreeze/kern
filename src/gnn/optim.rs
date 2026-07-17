@@ -2,8 +2,6 @@ use crate::gnn::tensor::Tensor;
 
 pub trait Optimizer {
 	fn step(&mut self, params: &mut [&mut Tensor], grads: &[&Tensor]);
-	/// Zeroes the gradient tensors PASSED IN — never model-owned grads nor the
-	/// optimizer's own momentum / Adam moment state.
 	fn zero_grad(&self, grads: &mut [Tensor]) {
 		for g in grads.iter_mut() {
 			for v in &mut g.data {
@@ -133,7 +131,7 @@ mod tests {
 		let g = scalar(0.5);
 		let mut opt = SGD::new(0.1);
 		opt.step(&mut [&mut p], &[&g]);
-		assert!((p.data[0] - 0.95).abs() < 1e-12); // 1.0 - 0.1*0.5
+		assert!((p.data[0] - 0.95).abs() < 1e-12);
 	}
 
 	#[test]
@@ -141,8 +139,8 @@ mod tests {
 		let mut p = scalar(0.0);
 		let g = scalar(1.0);
 		let mut opt = SGD::with_momentum(0.1, 0.9);
-		opt.step(&mut [&mut p], &[&g]); // v=1.0   -> p -= 0.1   => -0.10
-		opt.step(&mut [&mut p], &[&g]); // v=1.9   -> p -= 0.19  => -0.29
+		opt.step(&mut [&mut p], &[&g]);
+		opt.step(&mut [&mut p], &[&g]);
 		assert!((p.data[0] - (-0.29)).abs() < 1e-12);
 	}
 
@@ -175,8 +173,8 @@ mod tests {
 		let g0 = scalar(1.0);
 		let g1 = scalar(-1.0);
 		let mut opt = SGD::with_momentum(0.1, 0.9);
-		opt.step(&mut [&mut p0, &mut p1], &[&g0, &g1]); // v0=1, v1=-1
-		opt.step(&mut [&mut p0, &mut p1], &[&g0, &g1]); // v0=1.9, v1=-1.9
+		opt.step(&mut [&mut p0, &mut p1], &[&g0, &g1]);
+		opt.step(&mut [&mut p0, &mut p1], &[&g0, &g1]);
 		assert!((p0.data[0] - (-0.29)).abs() < 1e-12, "p0 {}", p0.data[0]);
 		assert!((p1.data[0] - 0.29).abs() < 1e-12, "p1 {}", p1.data[0]);
 	}

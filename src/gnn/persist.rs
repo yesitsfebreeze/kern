@@ -139,7 +139,6 @@ mod tests {
 		let src = small_model(1);
 		let bytes = marshal_weights(&src).expect("marshal");
 
-		// Same architecture, different weights — unmarshal must overwrite them all.
 		let mut dst = small_model(999);
 		unmarshal_weights(&mut dst, &bytes).expect("unmarshal");
 

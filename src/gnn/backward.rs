@@ -3,8 +3,6 @@ use crate::gnn::dropout::Dropout;
 use crate::gnn::graph::Graph;
 use crate::gnn::tensor::Tensor;
 
-/// Incoming gradient times the activation's analytic derivative at the
-/// pre-activation values — exact, no finite-difference bias at kinks.
 pub fn act_deriv_mul(act: Activation, d_out: &Tensor, pre_act: &Tensor) -> Tensor {
 	let mut out = Tensor::zeros(d_out.rows, d_out.cols);
 	for (i, &x) in pre_act.data.iter().enumerate() {
@@ -65,11 +63,8 @@ pub trait GraphLayer {
 	fn parameters(&self) -> Vec<&Tensor>;
 	fn parameters_mut(&mut self) -> Vec<&mut Tensor>;
 
-	/// The layer's dropout, if it has one. Backs the default `set_training`.
 	fn dropout_mut(&mut self) -> Option<&mut Dropout>;
 
-	/// Switch train/eval mode. Default: flip the layer's dropout (if any) —
-	/// the only train-mode-sensitive component these layers carry.
 	fn set_training(&mut self, training: bool) {
 		if let Some(d) = self.dropout_mut() {
 			d.set_training(training);
@@ -90,7 +85,6 @@ mod tests {
 
 	#[test]
 	fn relu_backward_is_exact_no_kink_bias() {
-		// Deriv gates exactly: 0 where x <= 0 (including 0.0), pass-through above.
 		let pre = Tensor {
 			data: vec![-2.0, -1e-6, 0.0, 1e-6, 3.0],
 			rows: 1,
@@ -118,7 +112,7 @@ mod tests {
 			cols: 2,
 		};
 		let g = act_deriv_mul(Activation::LeakyRelu(0.2), &d_out, &pre);
-		assert_eq!(g.data, vec![0.5, 0.1]); // 0.5*1, 0.5*0.2
+		assert_eq!(g.data, vec![0.5, 0.1]);
 	}
 
 	#[test]
@@ -172,8 +166,6 @@ mod tests {
 	}
 }
 
-/// Numeric gradient checks for the GNN math-critical paths: layer backward
-/// passes (vs central finite differences) and core tensor ops.
 #[cfg(test)]
 mod gnn_math_tests {
 	use crate::gnn::activation::Activation;
@@ -183,7 +175,6 @@ mod gnn_math_tests {
 	use crate::gnn::tensor::Tensor;
 	use rand::SeedableRng;
 
-	/// Fixed 3-node ring (with self-loops) and its feature matrix.
 	fn tiny_graph() -> (Graph, Tensor) {
 		let feats = [
 			[0.5, -0.2, 0.1, 0.3],
@@ -202,8 +193,6 @@ mod gnn_math_tests {
 		(g, x)
 	}
 
-	/// Analytic param grads (d_out = ones, loss = sum(output)) vs central finite
-	/// differences over every parameter element. Init-agnostic.
 	fn assert_grad_matches_numeric(layer: &mut dyn BackwardGraphLayer, g: &Graph, x: &Tensor) {
 		const H: f64 = 1e-6;
 		let out = layer.forward_graph(g, x);
@@ -224,7 +213,7 @@ mod gnn_math_tests {
 				let lp = layer.forward_graph(g, x).sum_all();
 				layer.parameters_mut()[pi].data[ei] -= 2.0 * H;
 				let lm = layer.forward_graph(g, x).sum_all();
-				layer.parameters_mut()[pi].data[ei] += H; // restore
+				layer.parameters_mut()[pi].data[ei] += H;
 				numeric.push((lp - lm) / (2.0 * H));
 			}
 		}
@@ -239,8 +228,6 @@ mod gnn_math_tests {
 		}
 	}
 
-	/// The INPUT gradient `backward_graph` returns vs central finite differences —
-	/// the gradient `Model::backward` chains into the PREVIOUS layer's `d_out`.
 	fn assert_input_grad_matches_numeric(layer: &mut dyn BackwardGraphLayer, g: &Graph, x: &Tensor) {
 		const H: f64 = 1e-6;
 		let out = layer.forward_graph(g, x);
@@ -274,7 +261,6 @@ mod gnn_math_tests {
 
 	#[test]
 	fn gcn_linear_input_grad_matches_numeric() {
-		// d_input = Aᵀ·(d_out·Wᵀ): the layer-chaining gradient.
 		let (g, x) = tiny_graph();
 		let mut rng = rand::rngs::StdRng::seed_from_u64(23);
 		let mut l = GCNLayer::with_rng(4, 3, None, false, 0.0, &mut rng);

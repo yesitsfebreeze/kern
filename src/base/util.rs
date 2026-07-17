@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 
-/// Serde shim keeping in-memory `Vec<f32>` byte-identical to the legacy
-/// `Vec<f64>` wire shape (write: widen f32→f64; read: narrow f64→f32).
+// Keeps in-memory Vec<f32> byte-identical to the legacy Vec<f64> wire shape:
+// write widens f32→f64, read narrows f64→f32. Changing this desyncs every store.
 pub mod vec_f64_compat {
 	use serde::{Deserialize, Deserializer, Serializer};
 
@@ -24,8 +24,6 @@ pub fn content_hash(s: &str) -> String {
 	hex::encode(hash)
 }
 
-/// Hand-rolled lowercase hex encoder — not the `hex` crate: one call site
-/// (`content_hash`) does not justify the dependency. Switch if hex use spreads.
 mod hex {
 	const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
 
@@ -54,14 +52,12 @@ pub fn truncate(s: &str, max: usize) -> String {
 	}
 }
 
-/// Total order over `PartialOrd` values, treating incomparable pairs (NaN)
-/// as `Equal`.
 pub fn cmp_partial<T: PartialOrd>(a: &T, b: &T) -> std::cmp::Ordering {
 	a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
 }
 
-/// Score desc, id asc — the single source of truth for the ranking tiebreak;
-/// use at every ranking site or top-k regresses to nondeterministic order.
+// Score desc, id asc — the single ranking tiebreak; use at every ranking site
+// or top-k regresses to nondeterministic order.
 pub fn cmp_rank<S: PartialOrd>(
 	a_score: S,
 	a_id: &str,
@@ -71,8 +67,7 @@ pub fn cmp_rank<S: PartialOrd>(
 	cmp_partial(&b_score, &a_score).then_with(|| a_id.cmp(b_id))
 }
 
-/// Nearest-rank percentile of an ascending-SORTED slice; `p` is a fraction in
-/// `[0, 1]`. Element at 1-based rank `ceil(p * len)`; `None` only when empty.
+// Input must be ascending-sorted; p is a fraction in [0, 1].
 pub fn percentile_sorted<T: Copy>(sorted: &[T], p: f64) -> Option<T> {
 	if sorted.is_empty() {
 		return None;
@@ -87,7 +82,6 @@ pub fn percentile_sorted<T: Copy>(sorted: &[T], p: f64) -> Option<T> {
 	Some(sorted[rank.clamp(1, sorted.len()) - 1])
 }
 
-/// Wall-clock nanoseconds since the Unix epoch.
 pub fn now_nanos() -> u128 {
 	std::time::SystemTime::now()
 		.duration_since(std::time::UNIX_EPOCH)
@@ -95,8 +89,6 @@ pub fn now_nanos() -> u128 {
 		.as_nanos()
 }
 
-/// LLM prompt asking why two entities are related — single source for the
-/// prompt text and the 500-char truncation budget.
 pub fn explain_relationship_prompt(a: &str, b: &str) -> String {
 	format!(
 		"Write one sentence describing the specific connection between these two pieces of knowledge. \
@@ -160,7 +152,6 @@ mod tests {
 		assert_eq!(cmp_rank(0.5_f64, "a", 0.5, "b"), Ordering::Less);
 		assert_eq!(cmp_rank(0.5_f64, "b", 0.5, "a"), Ordering::Greater);
 		assert_eq!(cmp_rank(0.5_f64, "a", 0.5, "a"), Ordering::Equal);
-		// NaN falls back to the id tiebreak rather than panicking.
 		assert_eq!(cmp_rank(f64::NAN, "a", f64::NAN, "b"), Ordering::Less);
 		assert_eq!(cmp_rank(2.0_f32, "a", 1.0_f32, "z"), Ordering::Less);
 	}
@@ -181,7 +172,6 @@ mod tests {
 		assert_eq!(short_id("0123456789abcdef"), "0123456789ab");
 		assert_eq!(short_id("abc"), "abc");
 		assert_eq!(short_id("0123456789ab"), "0123456789ab");
-		// Multibyte: slicing must land on a char boundary, never panic.
 		let s = short_id("ααααααααααααββ");
 		assert_eq!(s.chars().count(), 12);
 	}
@@ -194,7 +184,6 @@ mod tests {
 			"hello...",
 			"over max -> cut + ellipsis"
 		);
-		// Char-boundary safe on multibyte input.
 		assert_eq!(truncate("αβγδε", 3), "αβγ...");
 	}
 
@@ -221,9 +210,7 @@ mod tests {
 			"5 dash-separated groups of 8-4-4-4-12"
 		);
 		assert!(u.bytes().all(|c| c == b'-' || c.is_ascii_hexdigit()));
-		// Version nibble: first char of the 3rd group is '4'.
 		assert_eq!(&groups[2][0..1], "4", "RFC4122 version 4");
-		// Variant: first char of the 4th group is one of 8/9/a/b.
 		assert!(
 			matches!(&groups[3][0..1], "8" | "9" | "a" | "b"),
 			"RFC4122 variant bits"
@@ -241,7 +228,6 @@ mod tests {
 mod vec_f64_compat_tests {
 	use serde::{Deserialize, Serialize};
 
-	/// The historic on-wire shape: a raw `Vec<f64>` field.
 	#[derive(Serialize, Deserialize, PartialEq, Debug)]
 	struct Legacy {
 		name: String,
@@ -249,7 +235,6 @@ mod vec_f64_compat_tests {
 		tail: u32,
 	}
 
-	/// The current in-memory shape: `Vec<f32>` behind the compat shim.
 	#[derive(Serialize, Deserialize, PartialEq, Debug)]
 	struct Current {
 		name: String,

@@ -42,8 +42,6 @@ struct Candidate {
 	dist: f64,
 }
 
-/// In-memory HNSW. Ids map to internal `u32` slots via `slot_of`/`id_of`;
-/// deleted slots are recycled through `free`.
 pub struct HnswIndex {
 	m: usize,
 	m0: usize,
@@ -312,8 +310,6 @@ impl HnswIndex {
 			.collect()
 	}
 
-	/// Up to `k` hits whose id passes `keep`, filtered DURING traversal so matches
-	/// hidden behind non-matching nodes stay reachable. Worst case O(nodes).
 	pub fn search_filtered(
 		&self,
 		vec: &[f32],
@@ -344,8 +340,8 @@ impl HnswIndex {
 			.collect()
 	}
 
-	/// Frontier admits every visited node; results admit only `keep` matches, so
-	/// matches behind walls of non-matching nodes are still found.
+	// Frontier admits every visited node; results admit only keep matches, so
+	// matches behind walls of non-matching nodes are still found.
 	fn beam_search_filtered(
 		&self,
 		ep: u32,
@@ -416,8 +412,7 @@ impl HnswIndex {
 		out
 	}
 
-	/// Id-stable layer assignment (FNV-1a of the id → exponential level draw):
-	/// the same id lands on the same level under any insert order or churn.
+	// Id-stable layer: the same id lands on the same level under any insert order or churn.
 	fn level_for(&self, id: &str) -> usize {
 		let mut h: u64 = 0xcbf2_9ce4_8422_2325;
 		for &b in id.as_bytes() {
@@ -544,8 +539,7 @@ impl HnswIndex {
 		out
 	}
 
-	/// Canonical hash of the graph structure, in ids so it is independent of slot
-	/// numbering. Equal digests = identical graphs; determinism tests assert on it.
+	// Slot-independent canonical digest; determinism tests assert on it.
 	pub fn structure_digest(&self) -> String {
 		let mut slots: Vec<u32> = self.slot_of.values().copied().collect();
 		slots.sort_by(|a, b| self.id_of[*a as usize].cmp(&self.id_of[*b as usize]));
@@ -602,8 +596,7 @@ fn is_ambiguous(candidates: &[Candidate], k: usize, epsilon: f64) -> bool {
 	(worst.dist - best.dist) < epsilon
 }
 
-/// Sift order for [`Heap`]: `prefer(a, b)` = `a` belongs above `b`. Equal
-/// distances break on slot id so pop order never depends on push order.
+// Equal distances break on slot id, so pop order never depends on push order.
 trait HeapOrder {
 	fn prefer(a: Candidate, b: Candidate) -> bool;
 }
@@ -620,8 +613,7 @@ impl HeapOrder for Max {
 	}
 }
 
-/// Binary heap of [`Candidate`]s ordered by `O`. Hand-rolled rather than std
-/// `BinaryHeap` because the sort key is an `f64` distance, which is not `Ord`.
+// Hand-rolled: the f64 distance sort key is not Ord, so std BinaryHeap won't do.
 struct Heap<O: HeapOrder> {
 	items: Vec<Candidate>,
 	_order: PhantomData<O>,
@@ -696,7 +688,6 @@ mod tests {
 	use std::collections::HashSet;
 
 	impl HnswIndex {
-		/// Physical arena size (live + freed slots).
 		fn arena_slots(&self) -> usize {
 			self.nodes.len()
 		}
@@ -883,7 +874,6 @@ mod tests {
 				matched += 1;
 			}
 		}
-		// High ef makes exact order the norm; allow a couple of near-ties to differ.
 		assert!(
 			matched >= queries - 2,
 			"exact-order match on separated corpus: {matched}/{queries}"
@@ -1052,7 +1042,6 @@ mod tests {
 	#[test]
 	fn search_adaptive_finds_the_true_nearest_by_widening_from_a_small_ef() {
 		let mut idx = HnswIndex::new(8, 64);
-		// Near-identical decoys make the small-ef top-k ambiguous, forcing a widen.
 		for i in 0..20 {
 			idx.insert(format!("c{i}"), vec![1.0, 0.02 * (i as f32 + 1.0), 0.0]);
 		}

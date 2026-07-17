@@ -25,3 +25,12 @@ Scope rating: 8/10 — builds the session-injected digest.md (anchors + hottest 
 - `near_duplicate_claims_are_skipped` — 9/10: covers dedup.
 - `low_trust_claim_quarantined_even_when_hottest` — 9/10: covers trust gating.
 - `documents_are_excluded_claims_kept` — 9/10: covers kind filtering.
+Recall digest: a markdown snapshot of purpose + hottest thoughts, written for the Claude-Code SessionStart hook. Pure builder (build_digest) + thin writer (write_digest); no live query path.
+
+- est_tokens: ~4 chars/token; the digest only needs an approximate budget.
+- dedup_key: near-duplicate key (whitespace-collapsed, lowercased, first 80 chars) so restatements of the same fact collapse to one key and only the first (hottest) survives.
+- build_digest: purpose header + active claims ranked by heat * conf_mean. min_trust and token_budget of 0 disable those gates; k stays a hard item cap regardless. Excludes Document and Question kinds.
+- Connections get 1/3 of the remaining token budget so they don't crowd the bullets (default 500 when no cap).
+- build_connections: the ## Connections section = top enriched SEMANTIC edges ranked by from-entity heat*conf. Structural kinds (Spawn/Supersedes) carry no prose and are excluded (is_semantic() gate). entity_cache is built once (id -> (display, heat*conf)) and shared by scoring and formatting.
+- Connection entity display truncates on a CHAR boundary via char_indices().nth(39): REGRESSION guard — slicing at raw byte 39 panicked when a multibyte char (e.g. '→') straddled the boundary.
+- write_digest is best-effort: creates parent dirs and logs a warning on write failure.

@@ -1,6 +1,3 @@
-//! Benchmark graph construction: turn a replay `Trace`'s documents into a
-//! `GraphGnn` with similarity edges. The replay/scoring loop lives in `replay.rs`.
-
 use crate::base::graph::GraphGnn;
 use crate::base::math::{average_vec, cosine, reason_id};
 use crate::base::reason::add_reason;
@@ -15,8 +12,7 @@ pub fn build_graph(trace: &Trace) -> GraphGnn {
 	insert_docs(&mut g, &root_id, trace);
 	seed_similarity_edges(&mut g, &root_id, trace);
 	g.rebuild_index();
-	// Populate the BM25 index as the real load path does; empty, "hybrid" queries
-	// silently fall back to dense-only (see build_graph_populates_a_searchable_lexical_index).
+	// Populate BM25 as the real load path does; without it "hybrid" queries silently fall back to dense-only.
 	if let Some(lex) = g.lexical() {
 		lex.rebuild_from_graph(&g);
 	}
@@ -50,12 +46,10 @@ fn insert_docs(g: &mut GraphGnn, root_id: &str, trace: &Trace) {
 	}
 }
 
-/// Cosine floor for a similarity edge. A looser floor densifies the graph and
-/// tanks ranking (NDCG) without changing recall.
+// A looser floor densifies the graph and tanks NDCG without changing recall.
 const SIMILARITY_EDGE_FLOOR: f64 = 0.5;
 
-/// Seed similarity edges for every pair clearing [`SIMILARITY_EDGE_FLOOR`].
-/// O(n^2) on purpose (see pairwise_seeding_matches_ann_top_k_1k).
+// O(n^2) on purpose (see pairwise_seeding_matches_ann_top_k_1k).
 fn seed_similarity_edges(g: &mut GraphGnn, root_id: &str, trace: &Trace) {
 	use rayon::prelude::*;
 
@@ -112,8 +106,6 @@ mod tests {
 	use crate::bench_support::trace::{Trace, TraceDoc};
 	use std::collections::HashSet;
 
-	/// 1000 docs: 40 clusters of 3 near-identical docs (siblings cosine ~0.89 >
-	/// FLOOR) among 880 unrelated singles — the only >FLOOR pairs are 120 edges.
 	fn thousand_doc_clustered_trace() -> Trace {
 		let mut docs = Vec::new();
 		for c in 0..40 {
@@ -152,8 +144,6 @@ mod tests {
 			.collect()
 	}
 
-	/// The edge set an ANN top-k seeder WOULD produce: probe each doc's index
-	/// neighbourhood, then apply the same exact cosine + floor as the pairwise scan.
 	fn ann_top_k_edge_ids(g: &GraphGnn, trace: &Trace) -> HashSet<String> {
 		const NEIGHBOR_K: usize = 64;
 		const NEIGHBOR_EF: usize = 256;
@@ -199,8 +189,8 @@ mod tests {
 		ids
 	}
 
-	/// Decision record: ANN top-k seeding was rejected — identical edge set, net
-	/// slower. Do not "optimize" the O(n^2) scan away without re-running this.
+	// ANN top-k seeding was rejected: identical edge set, net slower.
+	// Don't optimize the O(n^2) scan away without re-running this.
 	#[test]
 	fn pairwise_seeding_matches_ann_top_k_1k() {
 		let trace = thousand_doc_clustered_trace();
@@ -242,7 +232,6 @@ mod tests {
 
 	#[test]
 	fn build_graph_populates_a_searchable_lexical_index() {
-		// Regression for the empty-lexical-index bug.
 		let trace = Trace {
 			name: "t".into(),
 			docs: vec![

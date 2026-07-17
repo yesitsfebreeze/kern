@@ -3,8 +3,6 @@ use clap::Parser;
 use kern::commands::{dispatch, run_server, Cli, Commands};
 use kern::config::Config;
 
-/// Worker-thread count for the tokio runtime: the detected core count, but never
-/// below the hard floor of 4 (and 4 when detection fails).
 fn worker_thread_count(available: Option<usize>) -> usize {
 	available.unwrap_or(4).max(4)
 }

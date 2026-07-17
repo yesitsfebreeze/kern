@@ -5,8 +5,8 @@ use std::time::Instant;
 use crate::base::constants::{GOSSIP_SEEN_SET_CAP, GOSSIP_SEEN_TTL};
 use crate::base::locks::lock_recovered;
 
-/// Loop-suppression set for gossip message ids. The constant TTL makes expiry
-/// monotonic in insertion order, so expired entries always sit at the deque front.
+// Constant TTL makes expiry monotonic in insertion order, so expired entries sit at
+// the deque front — the reclaim loop relies on this.
 pub struct SeenSet {
 	inner: Mutex<SeenInner>,
 }
@@ -26,12 +26,10 @@ impl SeenSet {
 		}
 	}
 
-	/// Record `id`; `true` means already seen and live — suppress the message.
 	pub fn add_and_check(&self, id: &str) -> bool {
 		self.add_and_check_at(id, Instant::now())
 	}
 
-	/// Clock-injected core of [`add_and_check`], for deterministic tests.
 	fn add_and_check_at(&self, id: &str, now: Instant) -> bool {
 		let mut inner = lock_recovered(&self.inner);
 
@@ -41,7 +39,6 @@ impl SeenSet {
 			}
 		}
 
-		// Reclaim expired entries from the front (expiry is monotonic).
 		while inner.order.front().is_some_and(|(_, exp)| *exp <= now) {
 			let (fid, fexp) = inner
 				.order
@@ -53,7 +50,6 @@ impl SeenSet {
 			}
 		}
 
-		// Hard count ceiling: under a flood of live unique ids, evict oldest.
 		while inner.order.len() >= GOSSIP_SEEN_SET_CAP {
 			let Some((fid, fexp)) = inner.order.pop_front() else {
 				break;
@@ -74,8 +70,6 @@ impl SeenSet {
 		self.inner.lock().live.len()
 	}
 
-	/// Order-deque length; equals [`len`](Self::len) in a settled state (no stale
-	/// dupes). Exposed so tests can assert the two structures stay in lock-step.
 	#[cfg(test)]
 	fn len_order(&self) -> usize {
 		self.inner.lock().order.len()
@@ -118,7 +112,6 @@ mod tests {
 		let s = SeenSet::new();
 		let t0 = Instant::now();
 		assert!(!s.add_and_check_at("a", t0));
-		// Still live just before TTL; expired past TTL -> treated as new again.
 		assert!(s.add_and_check_at("a", t0 + GOSSIP_SEEN_TTL - Duration::from_millis(1)));
 		let past = t0 + GOSSIP_SEEN_TTL + Duration::from_secs(1);
 		assert!(!s.add_and_check_at("a", past));
@@ -130,11 +123,9 @@ mod tests {
 		let s = SeenSet::new();
 		let t0 = Instant::now();
 		for i in 0..1000 {
-			// Each id one second apart; all but the last expire as time advances.
 			let now = t0 + Duration::from_secs(i);
 			s.add_and_check_at(&format!("id{i}"), now);
 		}
-		// At the last timestamp, only ids within the TTL window remain live.
 		let live = s.len();
 		assert!(
 			live <= (GOSSIP_SEEN_TTL.as_secs() as usize) + 2,
@@ -169,7 +160,6 @@ mod tests {
 			"expired id is treated as new again"
 		);
 
-		// Fresh TTL is measured from `past`, not from the original `t0`.
 		let near = past + GOSSIP_SEEN_TTL - Duration::from_millis(1);
 		assert!(
 			s.add_and_check_at("a", near),

@@ -28,8 +28,6 @@ impl LinearLayer {
 		Self::with_rng(in_features, out_features, &mut rng)
 	}
 
-	/// Deterministic weight init from a seeded RNG — use in tests asserting on
-	/// training dynamics so the run does not depend on system entropy.
 	pub fn with_rng<R: rand::Rng>(in_features: usize, out_features: usize, rng: &mut R) -> Self {
 		let scale = (2.0 / (in_features + out_features) as f64).sqrt();
 		let weight = Tensor::rand_with(in_features, out_features, scale, rng);
@@ -45,8 +43,6 @@ impl LinearLayer {
 		}
 	}
 
-	/// Fallible backward — errors instead of panicking when `forward` has not run.
-	/// The infallible [`Backward::backward`] delegates here.
 	pub fn try_backward(&mut self, d_out: &Tensor) -> Result<Tensor, GnnError> {
 		let input = self
 			.last_input
@@ -132,12 +128,10 @@ mod tests {
 		let d_in = l.backward(&d_out);
 
 		assert_eq!((d_in.rows, d_in.cols), (2, 4), "dInput matches input shape");
-		// d_bias[j] = sum over rows of d_out[:,j] = 2 rows * 1.0 = 2.0.
 		assert!(
 			l.d_bias.data.iter().all(|&b| (b - 2.0).abs() < 1e-12),
 			"d_bias = column sums of d_out"
 		);
-		// d_weight = Xᵀ·dOut; X all 1s (2x4), dOut all 1s (2x3) -> each elem = 2.0.
 		assert!(
 			l.d_weight.data.iter().all(|&w| (w - 2.0).abs() < 1e-12),
 			"d_weight = Xᵀ·dOut"

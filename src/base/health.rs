@@ -1,9 +1,5 @@
-//! Shared graph health aggregation — one roll-up over the loaded graph, used by
-//! both the REPL `health` command and the MCP `health` tool/resource.
-
 use crate::base::graph::GraphGnn;
 
-/// Roll-up of the loaded graph's headline counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HealthStats {
 	pub kerns: usize,
@@ -13,7 +9,6 @@ pub struct HealthStats {
 	pub anchors: Vec<String>,
 }
 
-/// Aggregate headline health counts over every loaded kern. Read-only.
 pub fn graph_health_stats(g: &GraphGnn) -> HealthStats {
 	let kerns = g.all();
 	let mut entities = 0usize;
@@ -51,7 +46,6 @@ mod tests {
 		assert_eq!(h.entities, 0, "fresh graph has no entities");
 		assert_eq!(h.reasons, 0, "fresh graph has no reasons");
 		assert!(h.kerns >= 1, "at least the root kern is present");
-		// Anchor names are exactly the loaded root anchors — never more.
 		assert!(h.anchors.len() <= h.kerns);
 	}
 }

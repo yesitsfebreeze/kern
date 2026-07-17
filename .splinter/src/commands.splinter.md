@@ -13,3 +13,11 @@
 - `spawn_capture`: two file-mediated loops — capture drain (intake deltas → distill → enqueue → archive) and digest writer (periodic snapshot of purpose + hot thoughts).
 - `start_gossip` ledger cap: `node.ledger.set_max_entries(cfg.graph.max_ledger_entries)` exists because the config knob was previously dead — the routing/thought ledger always used the hardcoded `DEFAULT_LEDGER_CAP`.
 - `spawn_maintenance_tick`: the interval snapshot bounds the crash-loss window for any mutation whose event-driven save never ran (task crashed pre-Persist, SIGTERM before shutdown flush) to one tick interval.
+Design notes carried from stripped comments:
+- embed_fn: blocking embed closure over block_on_in_place ("no runtime" outside tokio). server_llm_client takes reason from the resolved endpoint but answer/embed ALWAYS from cfg (embedding with any model but the graph's degenerates every cosine).
+- EngineHandle bundles the live engine plus side-channels a caller's serve/park loop needs; its save_fn is the store's guarded persist closure (shutdown flush never overwrites a grown disk).
+- bootstrap builds the engine stack and spawns every background service but does NOT register .mcp.json, bind kern.sock, or block — the caller owns the serve/park loop.
+- The Commands::Daemon match arm is a fallthrough; main.rs intercepts Daemon first, kept so callers need not special-case it.
+- start_gossip (federation) is OFF by default ([gossip] enabled). spawn_maintenance_tick pulses the root and re-enqueues clustering on a timer so an idle daemon still decays/merges/evicts (interval_secs = 0 disables it); it also bounds the crash-loss window (snapshot_if_dirty) for mutations whose event-driven save never ran.
+- spawn_capture wires Claude-Code memory: capture-intake drain + recall digest writer, both file-mediated, on by default (disable via [capture] enabled = false).
+- spawn_watchdog: OS-thread watchdog immune to runtime starvation; STALL_LIMIT=6 * CHECK_SECS=5s = ~30s of no async progress before force-exit.

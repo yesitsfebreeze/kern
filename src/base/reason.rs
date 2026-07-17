@@ -2,8 +2,6 @@ use super::graph::GraphGnn;
 use super::types::{Kern, Reason, ReasonKind};
 use std::collections::HashSet;
 
-/// All reason ids incident to `entity_id` — outgoing (`by_from`) then incoming
-/// (`by_to`). Single edge-collection source for retrieval, MCP, and the CLI.
 pub(crate) fn collect_reason_ids(kern: &Kern, entity_id: &str) -> Vec<String> {
 	let mut ids = Vec::new();
 	if let Some(from_ids) = kern.by_from.get(entity_id) {
@@ -15,8 +13,7 @@ pub(crate) fn collect_reason_ids(kern: &Kern, entity_id: &str) -> Vec<String> {
 	ids
 }
 
-/// Every superseded ancestor of an active head: `Supersedes` edges point new -> old,
-/// so the walk follows outgoing edges. `seen` terminates cyclic chains.
+// Supersedes edges point new -> old; walk outgoing. `seen` terminates cycles.
 pub fn superseded_ancestors(g: &GraphGnn, entity_id: &str) -> Vec<String> {
 	let mut out = Vec::new();
 	let mut seen: HashSet<String> = HashSet::new();
@@ -70,8 +67,7 @@ pub fn remove_reason(kern: &mut Kern, id: &str) {
 	}
 }
 
-/// Relocate an entity and its OUTGOING reasons (a kern hosts a reason iff it
-/// hosts its `from`); incoming stay put. `to_net_id` set ⇒ never stamp over it.
+// A kern hosts a reason iff it hosts its `from`: OUTGOING reasons move, incoming stay.
 pub fn move_entity(g: &mut GraphGnn, from_kern_id: &str, to_kern_id: &str, entity_id: &str) {
 	if from_kern_id == to_kern_id {
 		return;
@@ -132,8 +128,7 @@ pub fn move_entity(g: &mut GraphGnn, from_kern_id: &str, to_kern_id: &str, entit
 	}
 }
 
-/// Remove an entity and cascade through every index that referenced it. Active
-/// Facts are immune (Superseded facts are not); anything missing is a silent no-op.
+// Active Facts are immune; Superseded facts are not. Missing id is a silent no-op.
 pub fn remove_entity(g: &mut GraphGnn, kern_id: &str, id: &str) {
 	let kern = match g.kerns.get_mut(kern_id) {
 		Some(k) => k,
@@ -173,8 +168,7 @@ pub fn remove_entity(g: &mut GraphGnn, kern_id: &str, id: &str) {
 	}
 }
 
-/// Partition the reasons touching `entity_id` into `(outgoing, incoming)` rid
-/// clones; a self-loop counts once, as outgoing.
+// A self-loop counts once, as outgoing.
 fn reasons_touching(kern: &Kern, entity_id: &str) -> (Vec<String>, Vec<String>) {
 	let outgoing: Vec<String> = kern.by_from.get(entity_id).cloned().unwrap_or_default();
 	let mut incoming = Vec::new();
@@ -188,8 +182,7 @@ fn reasons_touching(kern: &Kern, entity_id: &str) -> (Vec<String>, Vec<String>) 
 	(outgoing, incoming)
 }
 
-/// Remove the first occurrence of `s`. Linear scan intentional: adjacency lists
-/// stay tens of ids, and swapping the serde-persisted `Vec` is a format change.
+// Linear scan intentional: the serde-persisted `Vec` is a format change to swap.
 fn remove_string_from_vec(vec: Option<&mut Vec<String>>, s: &str) {
 	if let Some(v) = vec {
 		if let Some(pos) = v.iter().position(|x| x == s) {
@@ -207,7 +200,6 @@ mod tests {
 
 	#[test]
 	fn superseded_ancestors_walks_the_supersedes_chain_backward() {
-		// Chain: newest -> mid -> old (each Supersedes edge points new->old).
 		let mut g = GraphGnn::new();
 		let root = g.root.id.clone();
 		for id in ["newest", "mid", "old"] {
@@ -245,7 +237,6 @@ mod tests {
 		let mut anc = superseded_ancestors(&g, "newest");
 		anc.sort();
 		assert_eq!(anc, vec!["mid".to_string(), "old".to_string()]);
-		// A head with no Supersedes edges yields nothing.
 		assert!(superseded_ancestors(&g, "old").is_empty());
 	}
 
@@ -253,7 +244,7 @@ mod tests {
 	fn add_reason_is_idempotent_on_adjacency() {
 		let mut k = Kern::new("k", "");
 		add_reason(&mut k, edge("a", "b"));
-		add_reason(&mut k, edge("a", "b")); // same content-hash id
+		add_reason(&mut k, edge("a", "b"));
 		add_reason(&mut k, edge("a", "b"));
 
 		assert_eq!(k.reasons.len(), 1, "one reason in the map");
@@ -274,7 +265,7 @@ mod tests {
 	fn remove_after_reobserve_fully_clears_adjacency() {
 		let mut k = Kern::new("k", "");
 		add_reason(&mut k, edge("a", "b"));
-		add_reason(&mut k, edge("a", "b")); // re-observe
+		add_reason(&mut k, edge("a", "b"));
 		remove_reason(&mut k, "a->b");
 
 		assert!(k.reasons.is_empty(), "reason removed from map");
@@ -293,10 +284,10 @@ mod tests {
 		let mut g = GraphGnn::new();
 		let mut src = Kern::new("src", "");
 		src.entities.insert("E".into(), ent("E", vec![]));
-		src.entities.insert("X".into(), ent("X", vec![])); // third entity stays behind
-		add_reason(&mut src, edge("E", "X")); // outgoing -> moves, stamp to_kern_id=src
-		add_reason(&mut src, edge("E", "E")); // self-loop -> moves, no stamp
-		add_reason(&mut src, edge("Y", "E")); // incoming -> stays in src, stamp to_kern_id=dst
+		src.entities.insert("X".into(), ent("X", vec![]));
+		add_reason(&mut src, edge("E", "X"));
+		add_reason(&mut src, edge("E", "E"));
+		add_reason(&mut src, edge("Y", "E"));
 		g.kerns.insert("src".into(), src);
 		g.kerns.insert("dst".into(), Kern::new("dst", ""));
 
@@ -307,7 +298,6 @@ mod tests {
 		assert!(dst.entities.contains_key("E"), "entity moved to dst");
 		assert!(!src.entities.contains_key("E"), "entity gone from src");
 
-		// Outgoing E->X moved and stamped with the SOURCE kern (X left behind there).
 		assert_eq!(
 			dst.reasons.get("E->X").map(|r| r.to_kern_id.as_str()),
 			Some("src")
@@ -320,13 +310,11 @@ mod tests {
 			src.by_from.get("E").map(|v| v.is_empty()).unwrap_or(true),
 			"src by_from[E] cleared"
 		);
-		// Self-loop E->E moved with both endpoints -> no cross-kern stamp.
 		assert_eq!(
 			dst.reasons.get("E->E").map(|r| r.to_kern_id.as_str()),
 			Some("")
 		);
 
-		// Incoming Y->E stays in src (its `from` didn't move) but is stamped to dst.
 		assert_eq!(
 			src.reasons.get("Y->E").map(|r| r.to_kern_id.as_str()),
 			Some("dst")
@@ -344,9 +332,9 @@ mod tests {
 		k.entities.insert("E".into(), ent("E", vec![]));
 		g.kerns.insert("k".into(), k);
 
-		move_entity(&mut g, "k", "k", "E"); // same kern -> silent no-op
+		move_entity(&mut g, "k", "k", "E");
 		assert!(g.kerns.get("k").unwrap().entities.contains_key("E"));
-		move_entity(&mut g, "k", "dst", "ghost"); // missing entity -> silent no-op
+		move_entity(&mut g, "k", "dst", "ghost");
 		assert!(g.kerns.get("k").unwrap().entities.contains_key("E"));
 	}
 

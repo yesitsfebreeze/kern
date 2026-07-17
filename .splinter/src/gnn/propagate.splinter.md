@@ -7,3 +7,7 @@ Second-pass migration:
 - `GnnSnapshot::weights`: deleted the `// persisted model state` trailing label (restates the field name; the `marshal_weights` / `unmarshal_weights` round trip types it).
 - `tiny_snapshot` doc compressed to 2 lines. It has no persistence or LLM dependency, which is why the propagate tests run in-process.
 - Undocumented behaviour worth knowing: `run_learned_propagation` swallows an `unmarshal_weights` failure (`let _ =`) and trains from fresh init instead — corrupt or version-stale persisted weights degrade to a cold start, never an error. `hidden` is `(dim/2).clamp(16, 256)`. `sample_negative_edges` is best-effort: it gives up after `want * 30` rejection-sampling attempts and may return fewer than `want`, and an empty result aborts the run.
+
+## Preserved from stripped comments (2026-07-17)
+- `DEFAULT_MIN_THOUGHTS` (=128) rationale: skip GNN training below this many entities; small graphs fall back to the vector + BM25 + PageRank + reason-edge retrieval path instead.
+- Weight-load is FAIL-OPEN by design: a corrupt or version-stale snapshot must not kill the tick, so a failed `unmarshal_weights` logs at error and cold-starts from fresh weights rather than aborting. It logs (not silent) because a silent cold-start would hide a GNN that never warm-starts again.

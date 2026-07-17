@@ -1,6 +1,3 @@
-//! Filesystem watcher (notify + 50 ms per-path debounce + ignore rules) feeding
-//! an [`IngestPipeline`]; files over [`MAX_INGEST_BYTES`] are silently skipped.
-
 mod event;
 mod ignore_rules;
 mod pipeline;

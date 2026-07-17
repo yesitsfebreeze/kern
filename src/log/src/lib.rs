@@ -102,8 +102,7 @@ fn now_ms() -> u64 {
 		.unwrap_or(0)
 }
 
-/// Log at an explicit [`Level`]. Named `klog!` (not `log!`) so it never shadows
-/// `log::log!` in downstream code that imports both crates.
+// Named `klog!` (not `log!`) so it never shadows `log::log!` for crates importing both.
 #[macro_export]
 macro_rules! klog {
 	($level:expr, $source:expr, $($arg:tt)+) => {{

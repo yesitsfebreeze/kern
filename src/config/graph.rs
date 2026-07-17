@@ -7,8 +7,6 @@ use crate::base::constants::KERN_CAP_DISABLED;
 pub struct GraphConfig {
 	pub max_kerns: usize,
 	pub max_ledger_entries: usize,
-	/// Entity count above which `rebuild_index` spills the vector index to a
-	/// disk-resident DiskANN snapshot. [`KERN_CAP_DISABLED`] = never spill.
 	pub disk_threshold: usize,
 }
 
@@ -16,8 +14,7 @@ impl Default for GraphConfig {
 	fn default() -> Self {
 		Self {
 			// Do NOT set a finite cap: eviction drops unpersisted `children` pushes,
-			// re-spawning a child every tick until the graph fragments. Fix the
-			// evict/persist bug first.
+			// re-spawning a child every tick until the graph fragments.
 			max_kerns: KERN_CAP_DISABLED,
 			max_ledger_entries: 10_000,
 			disk_threshold: KERN_CAP_DISABLED,

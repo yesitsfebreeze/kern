@@ -1,14 +1,9 @@
-//! Content-addressed CRDT merge: equal ids ⇒ identical immutable content, so
-//! only mutable metadata joins, via commutative/idempotent/monotone lattice ops.
-
 use std::time::SystemTime;
 
 use crate::base::constants;
 use crate::base::graph::GraphGnn;
 use crate::base::types::{Entity, EntityStatus, Reason};
 
-/// Timestamp join: take a present `remote` when `take(remote, local)` holds
-/// (a missing local always loses). Returns whether `local` changed.
 fn join_time(
 	local: &mut Option<SystemTime>,
 	remote: Option<SystemTime>,
@@ -36,8 +31,6 @@ fn join_min_time(local: &mut Option<SystemTime>, remote: Option<SystemTime>) -> 
 	join_time(local, remote, |r, l| r < l)
 }
 
-/// `superseded_by` join: a non-empty remote that sorts HIGHER wins; empty never
-/// clears.
 fn join_superseded_by(local: &mut String, remote: &str) -> bool {
 	if !remote.is_empty() && remote > local.as_str() {
 		*local = remote.to_string();
@@ -47,8 +40,6 @@ fn join_superseded_by(local: &mut String, remote: &str) -> bool {
 	}
 }
 
-/// CRDT join of `remote` into `local` (same content id assumed). Returns
-/// whether `local` changed. Commutative, associative, idempotent, monotone.
 pub fn merge_entity(local: &mut Entity, remote: &Entity) -> bool {
 	let mut changed = local.access_count.merge(&remote.access_count);
 	if remote.heat > local.heat {
@@ -73,7 +64,6 @@ pub fn merge_entity(local: &mut Entity, remote: &Entity) -> bool {
 	changed
 }
 
-/// CRDT join for reasons (edge metadata).
 pub fn merge_reason(local: &mut Reason, remote: &Reason) -> bool {
 	let mut changed = local.traversal_count.merge(&remote.traversal_count);
 	if remote.score > local.score {
@@ -83,9 +73,8 @@ pub fn merge_reason(local: &mut Reason, remote: &Reason) -> bool {
 	changed
 }
 
-/// Merge a remote entity body into `target_kern_id` (a `remote-*` phantom kern).
-/// SECURITY: id owned by a DIFFERENT kern → reject (hijack); owned by none →
-/// insert under a per-kern cap; already in target → CRDT-merge.
+// SECURITY: id owned by a DIFFERENT kern → reject (hijack); owned by none →
+// insert under a per-kern cap; already in target → CRDT-merge.
 pub fn merge_remote_entity(g: &mut GraphGnn, target_kern_id: &str, remote: Entity) -> bool {
 	let host = g
 		.kerns

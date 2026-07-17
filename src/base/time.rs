@@ -1,8 +1,3 @@
-//! Minimal time parsing for the base layer: a dependency-free RFC3339 reader
-//! used by the retrieval/MCP filter path (`since` / `before` / `valid_at`).
-
-/// Parse the `YYYY-MM-DDTHH:MM:SS` prefix of an RFC3339 timestamp; timezone and
-/// sub-second fraction are ignored. Malformed input is `Err(())`, never a panic.
 pub(crate) fn parse_rfc3339(s: &str) -> Result<std::time::SystemTime, ()> {
 	let s = s.trim();
 	// The fixed slices below read bytes 0..19: length must be checked AFTER the
@@ -43,24 +38,21 @@ mod tests {
 	#[test]
 	fn valid_timestamps_parse() {
 		assert!(parse_rfc3339("2026-06-05T09:00:00Z").is_ok());
-		// 19 chars, no timezone suffix.
 		assert!(parse_rfc3339("2026-06-05T09:00:00").is_ok());
-		// Surrounding whitespace is trimmed.
 		assert!(parse_rfc3339("  2026-06-05T09:00:00Z  ").is_ok());
 	}
 
 	#[test]
 	fn short_after_trim_is_err_not_panic() {
-		// >=20 bytes untrimmed, but trims to far fewer than 19 chars.
 		assert_eq!(parse_rfc3339("   2026   "), Err(()));
-		assert_eq!(parse_rfc3339("                    "), Err(())); // 20 spaces
+		assert_eq!(parse_rfc3339("                    "), Err(()));
 		assert_eq!(parse_rfc3339(""), Err(()));
 	}
 
 	#[test]
 	fn multibyte_in_slice_region_is_err_not_panic() {
-		assert_eq!(parse_rfc3339("20é6-06-05T09:00:00Z"), Err(())); // 'é' = 2 bytes
-		assert_eq!(parse_rfc3339("2026-06-05T09:00:0😀"), Err(())); // at a split point
+		assert_eq!(parse_rfc3339("20é6-06-05T09:00:00Z"), Err(()));
+		assert_eq!(parse_rfc3339("2026-06-05T09:00:0😀"), Err(()));
 	}
 
 	#[test]

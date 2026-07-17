@@ -12,23 +12,16 @@ pub enum TaskKind {
 	Name,
 	Enrich,
 	ResolveQuestion,
-	/// Seed dangling Question edges for a placed entity (`extra` = entity id);
-	/// deferred so the reason-LLM never blocks the ingest commit path.
+	// extra = entity id
 	SeedQuestions,
-	/// Classify a recorded `Rephrase` near-dup (`extra` = reason id) for bi-temporal
-	/// supersedence; deferred so the reason-LLM never blocks the commit path.
+	// extra = reason id
 	ClassifyContradiction,
 	Persist,
 	GnnPropagate,
-	/// Cold-path GC: drop thoughts whose pheromone has fully evaporated.
 	StigmergyGc,
-	/// Re-embed dirty (edited) thoughts/reasons in a kern and clear the flag.
 	Reembed,
-	/// Fold the disk index's in-RAM delta into a fresh DiskANN snapshot.
-	/// Graph-global (not per-kern).
 	DiskConsolidate,
-	/// Deferred access write-back for a completed query (`extra` = newline-joined
-	/// entity ids; `kern_id` empty), so queries stay read-only.
+	// extra = newline-joined entity ids; kern_id empty
 	CommitAccess,
 }
 
@@ -59,9 +52,6 @@ pub struct Queue {
 	rx: Mutex<Option<mpsc::Receiver<Task>>>,
 	pending: Mutex<HashMap<TaskKey, bool>>,
 	inflight: std::sync::atomic::AtomicUsize,
-
-	/// Cumulative `(completed count, total latency)` behind one lock — the hot
-	/// `record_task_latency` path takes one mutex, not two.
 	stats: Mutex<(i64, Duration)>,
 }
 
@@ -153,8 +143,7 @@ pub fn task_extra(kind: TaskKind, kern_id: &str, extra: &str) -> Task {
 	}
 }
 
-/// `CommitAccess` task: ids newline-joined in `extra`. Entity ids never contain
-/// a newline, so the join round-trips.
+// ids newline-joined in `extra`; entity ids never contain a newline, so it round-trips.
 pub fn task_commit_access(ids: &[String]) -> Task {
 	Task {
 		kind: TaskKind::CommitAccess,
@@ -191,7 +180,6 @@ mod tests {
 
 	#[test]
 	fn full_channel_send_failure_rolls_back_pending() {
-		// Capacity 1: 'a' fills the channel so 'b' fails try_send.
 		let q = Queue::new(1);
 		assert!(q.enqueue(task(TaskKind::Cluster, "a")));
 		let b = task(TaskKind::Cluster, "b");

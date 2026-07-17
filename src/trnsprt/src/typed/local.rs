@@ -1,13 +1,9 @@
-//! Local-socket transport for the kern singleton daemon: per-cwd endpoint
-//! resolution, Unix/named-pipe [`Adapter`] impls, singleton-aware bind/accept.
-
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 
 use super::adapter::{Adapter, DynRead, DynWrite};
 use super::error::AdapterError;
 
-/// Platform-specific endpoint location for a singleton local daemon.
 #[derive(Clone, Debug)]
 pub enum Endpoint {
 	#[cfg(unix)]
@@ -17,8 +13,6 @@ pub enum Endpoint {
 }
 
 impl Endpoint {
-	/// Per-cwd `kern` endpoint — the cwd hash is folded into the socket/pipe
-	/// name so each project gets its own daemon.
 	pub fn kern() -> Self {
 		let tag = cwd_tag();
 		#[cfg(unix)]
@@ -39,7 +33,6 @@ impl Endpoint {
 		}
 	}
 
-	/// Human-readable identifier for logs and error messages.
 	pub fn display(&self) -> String {
 		match self {
 			#[cfg(unix)]
@@ -50,8 +43,8 @@ impl Endpoint {
 	}
 }
 
-/// FNV-1a over the canonical cwd — stable across processes (unlike
-/// `DefaultHasher`'s randomized state), so daemon and clients always agree.
+// FNV-1a over the canonical cwd — MUST stay stable across processes (unlike
+// DefaultHasher's randomized state) so daemon and clients always agree.
 fn cwd_tag() -> String {
 	let dir = std::env::current_dir().unwrap_or_default();
 	let canon = dir.canonicalize().unwrap_or(dir);
@@ -153,7 +146,6 @@ impl Adapter for NamedPipeAdapter {
 	}
 }
 
-/// Platform-tagged local-socket adapter.
 pub enum LocalAdapter {
 	#[cfg(unix)]
 	Unix(UnixStreamAdapter),
@@ -172,8 +164,6 @@ impl Adapter for LocalAdapter {
 	}
 }
 
-/// Connect to a kern singleton at `endpoint`. Returns a [`LocalAdapter`]
-/// ready to wrap in a [`Channel`](super::Channel) with any codec.
 pub async fn connect_kern(endpoint: &Endpoint) -> Result<LocalAdapter, AdapterError> {
 	match endpoint {
 		#[cfg(unix)]
@@ -185,11 +175,8 @@ pub async fn connect_kern(endpoint: &Endpoint) -> Result<LocalAdapter, AdapterEr
 	}
 }
 
-/// Result of [`bind_kern_listener`].
 pub enum BindOutcome {
-	/// Endpoint bound. Caller now owns the singleton and may [`LocalListener::accept`].
 	Bound(LocalListener),
-	/// Another live daemon already owns the endpoint. Caller should exit 0.
 	AlreadyRunning,
 }
 
@@ -199,8 +186,6 @@ pub enum BindError {
 	Io(#[from] std::io::Error),
 }
 
-/// Singleton-aware bind: Unix probes for a live owner before removing a stale
-/// socket; Windows `first_pipe_instance(true)` lets the OS enforce uniqueness.
 pub async fn bind_kern_listener(endpoint: &Endpoint) -> Result<BindOutcome, BindError> {
 	match endpoint {
 		#[cfg(unix)]
@@ -217,11 +202,9 @@ pub async fn bind_kern_listener(endpoint: &Endpoint) -> Result<BindOutcome, Bind
 				}
 				Err(_) => {}
 			}
-			// AddrInUse — probe whether a live daemon owns it.
 			if tokio::net::UnixStream::connect(path).await.is_ok() {
 				return Ok(BindOutcome::AlreadyRunning);
 			}
-			// Stale socket file. Remove and retry once.
 			let _ = std::fs::remove_file(path);
 			let listener = tokio::net::UnixListener::bind(path)?;
 			Ok(BindOutcome::Bound(LocalListener {
@@ -254,8 +237,6 @@ pub async fn bind_kern_listener(endpoint: &Endpoint) -> Result<BindOutcome, Bind
 	}
 }
 
-/// Unified local-socket listener. Unix drives a `UnixListener`; Windows holds
-/// the current `NamedPipeServer` and re-creates one per accept.
 pub struct LocalListener {
 	#[cfg(unix)]
 	inner: tokio::net::UnixListener,
@@ -341,8 +322,6 @@ mod bind_tests_unix {
 	async fn a_stale_socket_file_is_removed_and_rebound() {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("kern.sock");
-		// Bind then drop a listener WITHOUT going through LocalListener's Drop, so the
-		// socket file is left on disk with nothing listening (a stale endpoint).
 		{
 			let _l = tokio::net::UnixListener::bind(&path).unwrap();
 		}

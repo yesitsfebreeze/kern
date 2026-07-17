@@ -4,10 +4,7 @@ use trnsprt::{
 	Client, InProcTransport, LiveServer, McpError, Registry, ServerId, ToolSchema, PROTOCOL_VERSION,
 };
 
-/// Loose ceiling — catches an accidental blocking call or per-call allocation on
-/// the hot path, not real latency (the transport is a direct function call).
 const PER_CALL_CEILING: std::time::Duration = std::time::Duration::from_millis(5);
-/// Calls averaged in the latency probe to smooth scheduler/timer noise.
 const LATENCY_ITERS: u32 = 100;
 
 #[test]

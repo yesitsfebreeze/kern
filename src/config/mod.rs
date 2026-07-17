@@ -1,6 +1,3 @@
-// Kern runtime config: user <XDG_CONFIG>/kern/kern.toml overlaid by project
-// <cwd>/.kern/kern.toml. Section-level merge; missing fields fall to Default.
-
 mod answer;
 mod capture;
 mod embed;
@@ -61,8 +58,8 @@ impl Default for Config {
 	}
 }
 
-/// Pin a relative `data_dir` to the load-time `cwd` — re-resolving against the
-/// live current_dir silently reads an empty graph from a wrong launch dir.
+// Pin a relative `data_dir` to the load-time `cwd`: re-resolving against the
+// live current_dir silently reads an empty graph from a wrong launch dir.
 fn anchor_data_dir(data_dir: &str, cwd: &Path) -> String {
 	let p = Path::new(data_dir);
 	if p.is_absolute() {
@@ -73,8 +70,6 @@ fn anchor_data_dir(data_dir: &str, cwd: &Path) -> String {
 }
 
 impl Config {
-	/// [`Default`] with an explicit cwd (deterministic for tests). Only
-	/// `data_dir` depends on `cwd`; every other field is a fixed baseline.
 	pub fn default_in(cwd: &Path) -> Self {
 		Self {
 			data_dir: cwd
@@ -110,14 +105,6 @@ impl Config {
 		Ok(cfg)
 	}
 
-	/// Repoint loopback LLM endpoints at the Windows host when running under
-	/// WSL2 NAT networking, where `localhost` cannot reach a host-side Ollama.
-	/// Only fires when loopback is dead and the gateway is live, so mirrored-mode
-	/// WSL2 and in-distro Ollama are untouched — see [`wsl::resolve_loopback`].
-	///
-	/// Without this a stock WSL install fails silently forever: embeds return
-	/// transient connect errors, ingest re-spools every job, and the graph just
-	/// stays empty with nothing surfaced to the user.
 	fn redirect_loopback_to_wsl_host(&mut self) {
 		for (leg, url) in [
 			("embed", &mut self.embed.url),
@@ -135,8 +122,7 @@ impl Config {
 		}
 	}
 
-	/// Anchor dir: nearest ancestor with `.git` (innermost wins), else nearest
-	/// with `.kern`, else `start`. `.git` may be a FILE (worktree/submodule) — existence, not `is_dir()`.
+	// `.git` may be a FILE (worktree/submodule): test existence, not `is_dir()`.
 	pub fn resolve_root(start: &Path) -> PathBuf {
 		for anc in start.ancestors() {
 			if anc.join(".git").exists() {
@@ -164,7 +150,6 @@ impl Config {
 			.validate()
 			.map_err(|e| format!("capture: {e}"))?;
 		self.serve.validate().map_err(|e| format!("serve: {e}"))?;
-		// RetrievalConfig::validate accumulates issues; surface them all.
 		let retrieval = self.retrieval.validate();
 		if !retrieval.is_empty() {
 			return Err(format!("retrieval: {}", retrieval.join("; ")));
@@ -172,8 +157,6 @@ impl Config {
 		Ok(())
 	}
 
-	/// Endpoint precedence (URL and key alike): `reason_*` falls back to
-	/// `[embed]`; `answer_*` falls back to the resolved `reason_*`.
 	pub fn reason_url(&self) -> &str {
 		if self.reason.url.is_empty() {
 			&self.embed.url
@@ -258,7 +241,6 @@ mod tests {
 
 	#[test]
 	fn resolve_root_detects_git_as_a_file() {
-		// Worktrees/submodules store `.git` as a file — existence check, not is_dir().
 		let dir = tempfile::tempdir().unwrap();
 		let root = dir.path().canonicalize().unwrap();
 		std::fs::write(root.join(".git"), "gitdir: /elsewhere/.git/worktrees/x\n").unwrap();
@@ -283,7 +265,6 @@ mod tests {
 
 	#[test]
 	fn resolve_root_prefers_git_root_over_deeper_kern() {
-		// Git root (tier 1) beats a deeper `.kern` (tier 2).
 		let dir = tempfile::tempdir().unwrap();
 		let root = dir.path().canonicalize().unwrap();
 		std::fs::create_dir_all(root.join(".git")).unwrap();
@@ -319,7 +300,6 @@ mod tests {
 		no_embed.embed.url = String::new();
 		assert!(no_embed.validate().unwrap_err().contains("embed.url"));
 
-		// A bad sub-config knob propagates through the top-level validate, tagged.
 		let mut bad_ingest = Config::default_in(Path::new("x"));
 		bad_ingest.ingest.dedup_threshold = 2.0;
 		let err = bad_ingest.validate().unwrap_err();

@@ -2,19 +2,14 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// `[watcher]`: filesystem changes in as `Document` entities. OFF by default.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WatcherConfig {
-	/// Master switch. False keeps the watcher dormant even if `roots` set.
 	pub enabled: bool,
-	/// Recursive roots; empty defaults to cwd — see [`WatcherConfig::effective_roots`].
 	pub roots: Vec<String>,
 }
 
 impl WatcherConfig {
-	/// Configured `roots`, else `cwd` when enabled, else empty when disabled.
-	/// `cwd` is injected rather than read from the process, for testability.
 	pub fn effective_roots(&self, cwd: &Path) -> Vec<PathBuf> {
 		if !self.enabled {
 			return Vec::new();

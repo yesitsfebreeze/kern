@@ -1,29 +1,21 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// One corpus document in a trace: an id plus the text that gets ingested.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceDoc {
 	pub id: String,
 	pub text: String,
-	/// Optional entity kind ([`EntityKind::parse`](crate::base::types::EntityKind::parse),
-	/// defaults to `Claim`) so a trace can mix kinds for `filter_kind` queries.
 	#[serde(default)]
 	pub kind: Option<String>,
 }
 
-/// One query probe. `expected_ids` are the docs that count as relevant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceQuery {
 	pub id: String,
 	pub query: String,
 	pub expected_ids: Vec<String>,
-	/// Retrieval mode (`"content"` | `"reason"` | `"hybrid"`). Optional in JSON;
-	/// defaults to `"hybrid"` via [`default_mode`].
 	#[serde(default = "default_mode")]
 	pub mode: String,
-	/// Optional entity-kind filter ([`EntityKind::parse`](crate::base::types::EntityKind::parse)).
-	/// When set, the query runs the filtered retrieval path end-to-end.
 	#[serde(default)]
 	pub filter_kind: Option<String>,
 }
@@ -32,8 +24,6 @@ fn default_mode() -> String {
 	"hybrid".to_string()
 }
 
-/// A retrieval benchmark trace: named corpus + queries, deserialized by [`load`].
-/// All JSON fields required except each query's `mode` (defaults to `"hybrid"`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Trace {
 	pub name: String,

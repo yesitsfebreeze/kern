@@ -4,12 +4,9 @@ use tokio::sync::mpsc;
 
 use crate::event::{WatchEvent, WatchKind};
 
-/// Hard cap on the size of files we read into an [`IngestRecord`]. Anything
-/// larger is silently skipped.
 pub const MAX_INGEST_BYTES: u64 = 1024 * 1024;
 
-/// Payload handed to a downstream sink. `source_uri` is always a `file://`
-/// URI built from the absolute path; kern's `ingest` MCP tool expects this.
+// `source_uri` must be a `file://` URI — kern's `ingest` MCP tool requires that scheme.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestRecord {
 	pub source_uri: String,
@@ -17,15 +14,13 @@ pub struct IngestRecord {
 	pub language_hint: Option<String>,
 }
 
-/// Downstream consumer. Implemented by the kern wiring — this crate must
-/// NOT depend on kern.
+// This crate must NOT depend on kern; the sink is implemented by the kern wiring.
 #[async_trait::async_trait]
 pub trait IngestSink: Send + Sync + 'static {
 	async fn ingest(&self, record: IngestRecord);
 }
 
-/// Drives [`WatchEvent`]s into an [`IngestSink`]. `Deleted` is ignored at this
-/// layer (kern deletes via a separate path); oversize/non-UTF-8 files skip at `debug`.
+// `Deleted` is intentionally ignored here — kern deletes via a separate path.
 pub struct IngestPipeline<S: IngestSink> {
 	sink: S,
 }
@@ -87,7 +82,7 @@ fn file_uri(path: &Path) -> String {
 		Err(_) => path.to_path_buf(),
 	};
 	let s = abs.to_string_lossy().replace('\\', "/");
-	// Windows canonical paths come back as `\\?\C:\foo`; normalise.
+	// Windows canonicalize returns `\\?\C:\foo` (now `//?/C:/foo`); strip the UNC prefix.
 	let trimmed = s.strip_prefix("//?/").unwrap_or(&s);
 	if trimmed.starts_with('/') {
 		format!("file://{trimmed}")
@@ -119,8 +114,8 @@ mod tests {
 	use std::path::PathBuf;
 	use std::time::SystemTime;
 
-	// file_uri cases use paths that don't exist on disk: `canonicalize` fails, so
-	// the deterministic string-normalisation fallback runs on every machine.
+	// Paths below must not exist on disk: `canonicalize` fails so the deterministic
+	// string-normalisation fallback runs identically on every machine.
 
 	#[test]
 	fn file_uri_unix_absolute_path_gets_three_slashes() {
@@ -132,8 +127,8 @@ mod tests {
 
 	#[test]
 	fn file_uri_strips_windows_unc_prefix() {
-		// `\\?\C:\..` is what Windows canonicalize returns; backslashes are literal
-		// chars on Unix, so the string ops are identical cross-platform.
+		// Backslashes are literal chars on Unix, so this Windows-shaped input
+		// exercises the same string ops on every platform.
 		assert_eq!(
 			file_uri(Path::new(r"\\?\C:\foo\bar.rs")),
 			"file:///C:/foo/bar.rs"

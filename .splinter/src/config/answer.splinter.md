@@ -5,3 +5,4 @@
 
 Second-pass migration:
 - The empty `url`/`key` defaults are intentional, not an oversight: `Config::answer_url` / `answer_key` then fall back to `[reason]`, which falls back to `[embed]`, so a single local Ollama needs no extra wiring. `default_leaves_endpoint_empty_and_uses_the_answer_model` pins that contract.
+AnswerConfig drives the user-facing /ask oracle. Empty url/key fall back to [reason], which itself falls back to [embed] (resolved via Config::answer_url/answer_key). Default model is DEFAULT_ANSWER_MODEL with url/key left empty so the fallback chain applies out of the box.

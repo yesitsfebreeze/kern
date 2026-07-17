@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-/// Model for the user-facing `/ask` oracle. Empty `url`/`key` fall back to
-/// [reason], which itself falls back to [embed].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AnswerConfig {

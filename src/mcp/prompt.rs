@@ -2,13 +2,10 @@ use serde_json::value::RawValue;
 
 use super::{err_resp, ok, Response, ERR_INVALID_REQ, ERR_NOT_FOUND};
 
-// Tool names the `research` prompt body references; guarded by the
-// `research_prompt_names_are_real_tools` test against renames in `tools.rs`.
+// Guarded by `research_prompt_names_are_real_tools` against renames in `tools.rs`.
 const QUERY_TOOL: &str = "query";
 const INGEST_TOOL: &str = "ingest";
 
-/// MCP prompt catalogue. To add a prompt: append here AND add a matching arm in
-/// [`handle_prompt_get`]; keep referenced tool names as consts (see the guard test).
 pub fn prompt_definitions() -> Vec<serde_json::Value> {
 	vec![serde_json::json!({
 		"name": "research",

@@ -11,8 +11,6 @@ struct Wire {
 	killed: bool,
 }
 
-/// One client end of the in-memory pipe. Directional: `Read` drains `from_server`,
-/// `Write` appends to `to_server` — drive each end only through its matching trait.
 struct ClientEnd(Arc<Mutex<Wire>>);
 
 impl Read for ClientEnd {
@@ -120,8 +118,6 @@ impl McpServer for AdderServer {
 				message: format!("unknown tool: {name}"),
 			});
 		}
-		// A missing or non-integer arg is a -32602 Rpc error, never a silent
-		// default-to-zero — tests rely on exercising this validation path.
 		let a = args
 			.get("a")
 			.and_then(Value::as_i64)

@@ -70,3 +70,6 @@ Second-pass migration (comment -> note):
   (the version-aware scan migrates rather than skipping the old layout as
   corrupt); `flush_guarded` refusal proves the guard blocks only the stale case —
   after reconciling to the current epoch the same snapshot flushes and prunes.
+Third-pass sweep (strict Oracle bar, 2026-07-17): removed all remaining `///`/`//!` doc comments; kept only load-bearing hazards inline as `//` (durability/MDB_MAP_FULL, FORMAT byte layout + append-only V2 temporal, StoredVec skip_serializing_if trap, StoredTemporal serde(skip), epoch guard atomicity/advisory-never-fail, cold_search id tiebreak determinism, swap_compacted caller-must-drop + Windows unmap, compact_dir exclusive-access + prepare_for_closing-before-swap) plus the SAFETY block verbatim. Two rationales removed from source that were not already recorded here:
+- `cold_put_all` batches all rows into ONE txn then caps once, specifically to avoid the per-row fsync a loop of `cold_spill` would incur (the reembed path re-vectors the whole cold tier).
+- `load_all_kerns` on missing meta returns empty `network_id` + `QuantizationMode::None`; the caller backfills those rather than the store erroring.

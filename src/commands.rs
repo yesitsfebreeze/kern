@@ -303,8 +303,8 @@ pub(crate) fn reconcile_if_stale(
 		None => false,
 	};
 	if stale {
-		// Reload reusing the open store handle (never load_graph, which would
-		// double-open the LMDB env on a dir already open in this process).
+		// Reload reusing the open store handle: load_graph would double-open the
+		// LMDB env on a dir already open in this process.
 		let fresh = reload_graph(cfg, &w);
 		*w = fresh;
 		tracing::info!(
@@ -324,8 +324,7 @@ fn maybe_self_heal_store(cfg: &crate::config::Config) {
 	}
 	tracing::info!(target: "kern.startup", bytes = len, "data.mdb is bloated; self-healing (reap + compact)");
 
-	// Reap empties and persist the deletions in a throwaway graph, then drop it so
-	// its env handle releases before the compaction swap.
+	// Drop the throwaway graph so its env handle releases before the compaction swap.
 	{
 		let mut g = load_graph(cfg);
 		let (before, reaped, after) = g.gc_empty_kerns_counted();
@@ -359,7 +358,6 @@ pub(crate) fn resolve<'a>(arg: &'a Option<String>, fallback: &'a str) -> &'a str
 
 pub(crate) use crate::llm::{Client, Endpoint};
 
-/// Blocking embed closure over `block_on_in_place`; "no runtime" outside tokio.
 pub(crate) fn embed_fn(client: &Client) -> crate::types::EmbedFunc {
 	let c = client.clone();
 	std::sync::Arc::new(move |text: &str| -> Result<Vec<f32>, String> {
@@ -372,8 +370,8 @@ pub(crate) fn embed_fn(client: &Client) -> crate::types::EmbedFunc {
 	})
 }
 
-/// Reason endpoint arrives already resolved; answer/embed are ALWAYS taken from
-/// config — embedding with any model but the graph's degenerates every cosine.
+// answer/embed are ALWAYS taken from config — embedding with any model but the
+// graph's degenerates every cosine.
 pub(crate) fn server_llm_client(
 	cfg: &crate::config::Config,
 	reason_url: &str,
@@ -511,23 +509,19 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 			}
 		}
 		Commands::Daemon => {
-			// main.rs intercepts Daemon first; kept so callers need not special-case it.
+			// main.rs intercepts Daemon first; this arm is kept as a fallthrough.
 			run_server(&Cli::daemon(), cfg).await;
 		}
 	}
 }
 
-/// The live engine plus the side-channels a caller's serve/park loop needs.
 pub(crate) struct EngineHandle {
 	pub server: std::sync::Arc<crate::mcp::Server>,
 	pub task_q: std::sync::Arc<crate::tick::queue::Queue>,
-	/// The store's guarded persist closure, so the shutdown flush goes through the
-	/// same stale-safe path as every other save (never overwrites a grown disk).
+	// Guarded persist closure: the shutdown flush never overwrites a grown disk.
 	pub save_fn: std::sync::Arc<dyn Fn() + Send + Sync>,
 }
 
-/// Build the engine stack and spawn every background service. Does NOT register
-/// `.mcp.json`, bind `kern.sock`, or block — the caller owns the serve/park loop.
 pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineHandle {
 	// Must run BEFORE any env opens: the compaction swaps data.mdb, and only
 	// here — post kern.sock win, pre env open — is the dir held exclusively.
@@ -640,8 +634,8 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 		let _ = shutdown_tx.send(());
 	});
 
-	// kern.sock bound synchronously so `AlreadyRunning` short-circuits run_server
-	// before more scaffolding spins up; the accept loop runs detached.
+	// kern.sock bound synchronously so `AlreadyRunning` short-circuits before more
+	// scaffolding spins up.
 	{
 		let handler = crate::rpc::KernRpcHandler::new(mcp_server.clone());
 		let endpoint = trnsprt::typed::Endpoint::kern();
@@ -696,8 +690,7 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 
 type SharedGraph = Arc<parking_lot::RwLock<GraphGnn>>;
 
-/// OS-thread watchdog, immune to runtime starvation: force-exits when the async
-/// beat stops advancing ~30s (deadlock/starvation) so a peer can take the hub.
+// Force-exits if the async beat stalls ~30s (deadlock/starvation) so a peer can take the hub.
 fn spawn_watchdog() {
 	use std::sync::atomic::{AtomicU64, Ordering};
 	let beat = Arc::new(AtomicU64::new(0));
@@ -739,8 +732,8 @@ fn spawn_watchdog() {
 		.expect("spawn kern-watchdog thread");
 }
 
-/// Ollama unloads after ~5 min idle and /v1 ignores `keep_alive`, so a tiny
-/// embed + 1-token answer ping every 4 min keeps both models resident.
+// Ollama unloads after ~5 min idle and /v1 ignores `keep_alive`; ping every 4 min
+// keeps both models resident.
 fn spawn_keepalive(llm_client: &Client) {
 	let warm = llm_client.clone();
 	tokio::spawn(async move {
@@ -779,8 +772,6 @@ fn spawn_file_watcher(cfg: &crate::config::Config, worker: &Arc<crate::ingest::W
 	});
 }
 
-/// Claude-Code memory: capture intake drain + recall digest writer. Both
-/// file-mediated; on by default, disable via `[capture] enabled = false`.
 fn spawn_capture(
 	cfg: &crate::config::Config,
 	worker: &Arc<crate::ingest::Worker>,
@@ -830,7 +821,6 @@ fn spawn_capture(
 	});
 }
 
-/// Start the gossip node (federation). OFF by default (`[gossip] enabled`).
 async fn start_gossip(
 	cfg: &crate::config::Config,
 	g: &SharedGraph,
@@ -872,8 +862,6 @@ async fn start_gossip(
 	}
 }
 
-/// Pulse the root and re-enqueue clustering on a timer so an idle daemon still
-/// decays, merges, and evicts. `interval_secs = 0` disables it.
 fn spawn_maintenance_tick(
 	cfg: &crate::config::Config,
 	g: &SharedGraph,
@@ -1121,8 +1109,8 @@ mod entry_point_tests {
 
 	#[test]
 	fn cluster_migrated_entities_survive_a_crash_after_the_spawn_persists() {
-		// Old destructive window: Persist(parent) rewrote the row WITHOUT the
-		// migrated entities while the spawned child holding them went unpersisted.
+		// Guards the old data-loss window: Persist(parent) rewrote the parent row
+		// without the migrated entities while the spawned child went unpersisted.
 		use parking_lot::RwLock;
 		use std::sync::Arc;
 
@@ -1142,8 +1130,6 @@ mod entry_point_tests {
 		{
 			let g = Arc::new(RwLock::new(super::load_graph(&cfg)));
 			let root_id = read_recovered(&g).root.id.clone();
-			// Named kern whose entities form one cohesive cluster orthogonal to its
-			// anchor — exactly the shape do_cluster spins out into a child.
 			let mut k = Kern::new("k", &root_id);
 			k.anchor_text = "named".into();
 			k.anchor_vec = vec![1.0, 0.0];
@@ -1153,10 +1139,8 @@ mod entry_point_tests {
 				k.entities.insert(id.clone(), e);
 			}
 			write_recovered(&g).register(k);
-			// Everything durable before the re-shard (post-ingest-flush daemon state).
 			super::save_graph_guarded(&g, &cfg);
 
-			// tick_sync spawns the child, migrates entities, runs enqueued Persists.
 			crate::tick::tick_sync(&g, "k", None, None, None);
 			let child_exists = {
 				let gg = read_recovered(&g);

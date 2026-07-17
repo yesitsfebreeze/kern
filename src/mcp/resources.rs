@@ -91,8 +91,6 @@ fn resource_health(server: &Server) -> String {
 	serde_json::to_string(&server.health_stats()).unwrap_or_default()
 }
 
-/// Cap for `kern://local/thoughts`: the highest-scoring slice, never an
-/// unbounded full-graph dump.
 const TOP_THOUGHTS: usize = 50;
 
 fn resource_thoughts(server: &Server) -> String {

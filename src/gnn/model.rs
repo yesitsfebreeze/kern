@@ -3,8 +3,7 @@ use crate::gnn::graph::Graph;
 use crate::gnn::layer::{Backward, Layer, LinearLayer};
 use crate::gnn::tensor::Tensor;
 
-/// Graph-layer stack + optional final linear projection and residual skip.
-/// A `forward` must precede its `backward`; call `zero_grads` before each backward.
+// A `forward` must precede its `backward`; call `zero_grads` before each backward.
 pub struct Model {
 	pub layers: Vec<Box<dyn BackwardGraphLayer>>,
 	pub out_layer: Option<LinearLayer>,
@@ -169,7 +168,6 @@ mod tests {
 	fn residual_model_adds_the_input_back() {
 		let (g, x) = tiny_graph();
 
-		// Residual model: a shape-preserving 4->4 layer, so the skip add fires.
 		let mut rng = StdRng::seed_from_u64(7);
 		let mut model = Model::new_residual(
 			vec![Box::new(GCNLayer::with_rng(
@@ -184,7 +182,6 @@ mod tests {
 			"residual preserves the feature shape"
 		);
 
-		// Same seed -> identical weights; residual out must equal layer_out + input.
 		let mut rng2 = StdRng::seed_from_u64(7);
 		let mut bare = GCNLayer::with_rng(4, 4, None, false, 0.0, &mut rng2);
 		let layer_out = bare.forward_graph(&g, &x);

@@ -11,8 +11,6 @@ pub struct Cluster {
 	pub members: Vec<Entity>,
 }
 
-/// Greedy single-pass clustering by cosine to the SEED — the centroid never
-/// evolves, so membership is seed-biased and order-dependent; `max_sample` caps the O(n²).
 pub fn vector_cluster(thoughts: &[&Entity], max_sample: usize) -> Vec<Cluster> {
 	let mut all: Vec<&Entity> = thoughts
 		.iter()
@@ -137,8 +135,6 @@ pub fn compute_centroid(members: &[Entity]) -> Vec<f32> {
 	centroid
 }
 
-/// LLM prompt for a one-phrase cluster anchor label; the reply is used VERBATIM
-/// as anchor text. Big clusters sample the `MAX_SAMPLES` thoughts nearest the centroid.
 pub fn anchor_prompt(c: &Cluster) -> String {
 	const MAX_SAMPLES: usize = 10;
 	let members = if c.members.len() > MAX_SAMPLES {
@@ -292,7 +288,6 @@ mod tests {
 			],
 		};
 		let clusters = vec![small, large];
-		// Use explicit small thresholds (the public wrappers require >=10 members).
 		assert_eq!(best_cluster(&clusters, 2, 0.5), Some(1));
 	}
 

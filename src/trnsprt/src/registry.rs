@@ -10,8 +10,6 @@ use crate::server::McpServer;
 use crate::transport::ChildStdio;
 use crate::types::{ServerId, ToolResult, ToolSchema};
 
-/// A connected MCP server + its connect-time tool snapshot. The snapshot goes
-/// stale silently — call [`refresh_tools`](LiveServer::refresh_tools).
 pub struct LiveServer {
 	pub(crate) client: Client,
 	pub(crate) tools: Vec<ToolSchema>,
@@ -36,8 +34,6 @@ impl LiveServer {
 	}
 }
 
-/// Lifecycle owner for every connected MCP server, keyed by [`ServerId`]. A
-/// duplicate id errors — it never silently replaces the live connection.
 #[derive(Default)]
 pub struct Registry {
 	servers: HashMap<ServerId, LiveServer>,

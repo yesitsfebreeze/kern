@@ -1,5 +1,21 @@
 # Changelog
 
+- 2026-07-17 — Strict comment sweep across the whole crate: doc comments
+  (`///`/`//!`) and rationale prose are now in splinter notes, not source.
+  Descriptive docs, derivations, benchmark provenance, and restatement were
+  moved into per-file `.splinter.md` notes (the durable node memory) before
+  deletion; only load-bearing hazards a maintainer would trip over — SAFETY
+  blocks, lock ordering, must-run-before constraints, LMDB single-open,
+  data-loss/crash windows, wire-format byte layout, units, platform-quirk
+  workarounds — stay inline (tightened to ≤2 lines; SAFETY verbatim). Whole
+  crate: 2324 → 625 comment lines; `///`/`//!` 1598 → 18. 154 source files,
+  123 notes. Restored clap `///` help text on `bin/retrieval_bench` and
+  `bin/locomo_eval` after confirming its deletion emptied `--help` output.
+  Supersedes the softer first pass (594fb5d), which only thinned inline
+  prose and left the doc blocks. Build green across the workspace
+  (`--all-targets --features bench`), fmt clean, 723-test suite passing.
+  Decided by: comments-last-resort. Supersedes: 594fb5d.
+
 - 2026-07-17 — `start_entity_sync` (gossip handler) and `resource_thoughts`
   (MCP resources) had the same non-deterministic
   `partial_cmp.unwrap_or(Equal)` sort without id tiebreaks. Entity sync

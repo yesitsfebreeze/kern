@@ -1,6 +1,3 @@
-//! Live LoCoMo eval driver (#36): capture→distill→ingest→query end-to-end
-//! against ollama. All numeric scoring lives in the pure [`super::locomo`].
-
 use super::locomo::{self, Sample};
 use crate::base::graph::GraphGnn;
 use crate::base::types::{EntityKind, Source};
@@ -17,33 +14,24 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use std::time::Instant;
 
-/// Knobs for a run. Models are ollama tags; `base_url` is the ollama endpoint.
 pub struct EvalConfig {
 	pub dataset_path: String,
 	pub base_url: String,
 	pub embed_model: String,
-	/// The answerer: kern's `reason` endpoint glues retrieved context into prose.
 	pub answer_model: String,
-	/// The LLM-judge model (separate so it can differ from the answerer).
 	pub judge_model: String,
 	pub max_samples: Option<usize>,
 	pub max_qa_per_sample: Option<usize>,
 	pub dedup_threshold: f64,
-	/// Sampling seed forwarded to ollama; vary it across runs for error bars.
 	pub seed: i64,
 }
 
-/// Running totals for one LoCoMo category.
 #[derive(Default, Clone, serde::Serialize)]
 pub struct CatAgg {
 	pub n: usize,
-	/// Sum of token-F1 over answerable questions in this category.
 	pub f1: f64,
-	/// Sum of ROUGE-L over answerable questions.
 	pub rouge: f64,
-	/// Count of LLM-judge CORRECT verdicts (answerable only).
 	pub judge_correct: usize,
-	/// Adversarial only: count of correct abstentions.
 	pub abstain_correct: usize,
 }
 
@@ -53,9 +41,7 @@ pub struct EvalReport {
 	pub latencies_ms: Vec<u128>,
 	pub total_claims: usize,
 	pub n_samples: usize,
-	/// Sum of delivered-entity counts across queries (context-size proxy).
 	pub ctx_entities_sum: usize,
-	/// Sum of delivered-entity text lengths in chars (token-efficiency proxy).
 	pub ctx_chars_sum: usize,
 	pub n_queries: usize,
 }
@@ -177,7 +163,6 @@ pub async fn run_eval(cfg: &EvalConfig) -> Result<EvalReport, String> {
 		eprintln!("[{}/{}] ingesting {} ...", i + 1, take, sample.sample_id);
 		// Fresh graph per dialogue: LoCoMo dialogues are independent personas.
 		let graph: Arc<RwLock<GraphGnn>> = Arc::new(RwLock::new(GraphGnn::new()));
-		// Bench: no tick loop here, question seeding not measured — no defer hook.
 		let worker = Worker::new(graph.clone(), client.clone(), None, None, None);
 
 		let claims = ingest_sample(&worker, &llm, sample, &icfg).await;
@@ -209,8 +194,6 @@ pub async fn run_eval(cfg: &EvalConfig) -> Result<EvalReport, String> {
 	Ok(report)
 }
 
-/// LoCoMo-specific distill: personal/episodic facts instead of coding knowledge.
-/// Same contract as `distill`: None on LLM outage, Some([]) when nothing to keep.
 fn distill_locomo(conversation: &str, llm: &dyn Fn(&str) -> String) -> Option<Vec<distill::Claim>> {
 	if conversation.trim().is_empty() {
 		return Some(Vec::new());
@@ -239,7 +222,6 @@ DIALOGUE:\n{conversation}\n"
 	Some(distill::parse_claims(&raw))
 }
 
-/// Distill each session and ingest every claim through the canonical worker.
 async fn ingest_sample(worker: &Worker, llm: &LlmFunc, sample: &Sample, icfg: &Config) -> usize {
 	let mut total = 0;
 	for session in &sample.sessions {
@@ -252,7 +234,7 @@ async fn ingest_sample(worker: &Worker, llm: &LlmFunc, sample: &Sample, icfg: &C
 		}
 		let claims = match distill_locomo(&convo, llm.as_ref()) {
 			Some(c) => c,
-			None => continue, // LLM outage on this session; skip
+			None => continue,
 		};
 		for c in claims {
 			let src = Source::Session {
@@ -284,8 +266,8 @@ struct EvalContext<'a> {
 	rcfg: &'a RetrievalConfig,
 }
 
-/// Two phases — answer everything, then judge everything: the answerer and judge
-/// cannot share an 8 GB GPU, so interleaving would pay a model reload per probe.
+// Two-phase (answer all, then judge all): answerer and judge can't share an 8 GB
+// GPU, so interleaving would pay a model reload per probe.
 async fn eval_sample(
 	ctx: &EvalContext<'_>,
 	graph: &Arc<RwLock<GraphGnn>>,
@@ -294,13 +276,12 @@ async fn eval_sample(
 	report: &mut EvalReport,
 ) {
 	let limit = max_qa.unwrap_or(sample.qa.len());
-	// (question, gold, predicted, category) deferred to the judge phase.
 	let mut to_judge: Vec<(&str, &str, String, u8)> = Vec::new();
 
 	for q in sample.qa.iter().take(limit) {
 		let qvec = match ctx.client.embed(&q.question).await {
 			Ok(v) => v,
-			Err(_) => continue, // embed outage; skip this probe
+			Err(_) => continue,
 		};
 
 		let t0 = Instant::now();
@@ -360,7 +341,6 @@ async fn eval_sample(
 	}
 }
 
-/// Synchronously resolve an embed call from inside the multi-thread runtime.
 fn block_on_embed(client: &LlmClient, text: &str) -> Result<Vec<f32>, String> {
 	let client = client.clone();
 	let text = text.to_string();
@@ -463,7 +443,6 @@ mod tests {
 
 	use super::locomo::{Session, Turn};
 
-	/// Throwaway Ollama-native /api/embed stub: any input -> a fixed 3-dim vector.
 	async fn serve_embed() -> String {
 		let app = axum::Router::new().route(
 			"/api/embed",
@@ -474,8 +453,6 @@ mod tests {
 		crate::test_support::spawn_http(app).await.0
 	}
 
-	/// Mock LLM is role-aware: "DIALOGUE:" prompts get a claims JSON array, the
-	/// chunk splitter's get "" (heuristic fallback); embeds come from a local stub.
 	#[tokio::test]
 	async fn ingest_sample_distills_and_flows_claims_through_the_worker() {
 		let embed_url = serve_embed().await;

@@ -1,6 +1,3 @@
-//! Mixed read/write/persist contention bench over the real locked store paths —
-//! the worst read stall is the number that moves when a writer/flush pins the lock.
-
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -34,8 +31,6 @@ pub struct MixedReport {
 	pub read_max_ms: f64,
 }
 
-/// `readers` query threads + `writers` accept threads + one persist thread. The
-/// graph is bound to a throwaway on-disk store so persist runs the real LMDB flush.
 pub fn measure_mixed(
 	trace: &Trace,
 	cfg: &RetrievalConfig,
@@ -47,7 +42,7 @@ pub fn measure_mixed(
 
 	let mut g = build_graph(trace);
 
-	// tempfile is a dev-dependency (unavailable in this bin): mint the dir by hand.
+	// tempfile is a dev-dependency (unavailable in this bin) — mint the dir by hand.
 	let dir = std::env::temp_dir().join(format!(
 		"kern-mixed-bench-{}-{}",
 		std::process::id(),
@@ -64,7 +59,6 @@ pub fn measure_mixed(
 
 	let graph: Arc<GraphLock> = Arc::new(GraphLock::new(g));
 
-	// Query set + writer corpus, precomputed once so no thread re-embeds in the loop.
 	let queries: Vec<(String, Vec<f32>, Mode)> = trace
 		.queries
 		.iter()
@@ -192,8 +186,6 @@ pub fn measure_mixed(
 	}
 }
 
-/// Sleep up to `dur`, but wake early (in short slices) once `stop` is set so a
-/// finished run doesn't wait out the whole 2s persist interval.
 fn sleep_interruptible(stop: &AtomicBool, dur: Duration) {
 	let deadline = Instant::now() + dur;
 	while Instant::now() < deadline {
@@ -204,8 +196,6 @@ fn sleep_interruptible(stop: &AtomicBool, dur: Duration) {
 	}
 }
 
-/// A synthetic Claim entity in the same shape as [`build`](super::build)'s doc
-/// inserts, so accept treats it like a real ingested chunk.
 fn synthetic_entity(id: &str, vec: Vec<f32>) -> Entity {
 	Entity {
 		id: id.to_string(),

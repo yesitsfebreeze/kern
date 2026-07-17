@@ -9,8 +9,6 @@ use super::node::Node;
 
 const ANNOUNCE_PREFIX: &str = "kern:";
 
-/// Announce `kern:<network_id>:<tcp_addr>` on the discovery multicast group
-/// every `GOSSIP_DISCOVERY_INTERVAL` — zero-config LAN peering with [`start_listen`].
 pub fn start_broadcast(node: &Arc<Node>, port: u16) {
 	let node = node.clone();
 	let addr: SocketAddr = match format!("{GOSSIP_DISCOVERY_MULTICAST}:{port}").parse() {
@@ -39,8 +37,6 @@ pub fn start_broadcast(node: &Arc<Node>, port: u16) {
 	});
 }
 
-/// Listen for multicast announcements and add matching peers (same network id,
-/// not ourselves) — the inbound half of [`start_broadcast`].
 pub fn start_listen(node: &Arc<Node>, port: u16) {
 	let node = node.clone();
 	tokio::spawn(async move {
@@ -74,8 +70,7 @@ pub fn start_listen(node: &Arc<Node>, port: u16) {
 	});
 }
 
-/// Parse `kern:<network_id>:<host>:<port>`. The id is everything up to the first
-/// ':' — ids never contain one (enforced by `GossipConfig::effective_network_id`).
+// ids never contain ':' (enforced by GossipConfig::effective_network_id), so split_once is safe.
 pub fn parse_announce(s: &str) -> Option<(String, String)> {
 	let s = s.strip_prefix(ANNOUNCE_PREFIX)?;
 	let (network_id, tcp_addr) = s.split_once(':')?;
@@ -89,7 +84,6 @@ pub fn parse_announce(s: &str) -> Option<(String, String)> {
 mod tests {
 	use super::*;
 
-	// A UUID-shaped network id (the generated default).
 	const NID: &str = "123e4567-e89b-12d3-a456-426614174000";
 
 	#[test]
@@ -102,7 +96,6 @@ mod tests {
 
 	#[test]
 	fn parse_announce_accepts_operator_configured_id() {
-		// A [gossip] network_id override is any colon-free string, not a UUID.
 		let raw = "kern:team-alpha:10.0.0.5:7400";
 		let (nid, addr) = parse_announce(raw).expect("custom id parses");
 		assert_eq!(nid, "team-alpha");
@@ -125,7 +118,6 @@ mod tests {
 
 	#[test]
 	fn parse_announce_rejects_addr_without_port_separator() {
-		// Splitting at the first ':' leaves an addr with no host:port colon.
 		let raw = format!("kern:{NID}X127.0.0.1:7400");
 		assert!(
 			parse_announce(&raw).is_none(),

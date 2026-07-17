@@ -1,6 +1,3 @@
-//! Benchmark + evaluation scaffolding for kern's retrieval stack — bench/eval
-//! only, NOT part of the production daemon path.
-
 pub mod backend;
 pub mod build;
 pub mod compare;

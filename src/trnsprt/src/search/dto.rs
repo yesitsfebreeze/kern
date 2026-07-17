@@ -1,13 +1,8 @@
-//! DTOs for [`SearchSvc`](super::SearchSvc) — mirror types that intentionally
-//! do NOT depend on the `kern` crate; kern translates at the wire boundary.
-
 use serde::{Deserialize, Serialize};
 
-/// Lightweight mirror of `kern::EntityKind`.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum EntityKindLite {
 	Fact,
-	/// Default unverified statement — mirrors `kern::EntityKind`'s own default.
 	#[default]
 	Claim,
 	Document,
@@ -18,8 +13,8 @@ pub enum EntityKindLite {
 }
 
 impl EntityKindLite {
-	/// Single source of truth for label→kind. `None` (unknown labels AND
-	/// `"superseded"`, a status not a kind) means "no kind filter", never "match nothing".
+	// `None` (unknown labels AND "superseded", a status not a kind) means "no kind
+	// filter", never "match nothing".
 	pub fn from_label(s: &str) -> Option<Self> {
 		match s {
 			"fact" => Some(Self::Fact),
@@ -33,7 +28,6 @@ impl EntityKindLite {
 	}
 }
 
-/// Lightweight mirror of `kern::EntityStatus` — orthogonal lifecycle flag.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum EntityStatusLite {
 	#[default]
@@ -41,7 +35,6 @@ pub enum EntityStatusLite {
 	Superseded,
 }
 
-/// Mirror of `kern::Reason` kinds — one variant per typed edge.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum EdgeKind {
 	#[default]
@@ -57,41 +50,28 @@ pub enum EdgeKind {
 	Consolidates,
 }
 
-/// One enriched relationship edge attached to a search hit.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct EdgeRef {
 	pub from: String,
 	pub to: String,
 	pub kind: EdgeKind,
-	/// LLM-generated sentence naming the `from` → `to` link mechanism. Empty
-	/// until kern tick enrichment — callers should skip unenriched edges.
 	pub text: String,
-	/// Cosine similarity between the two endpoint vectors.
 	pub score: f32,
 }
 
-/// One result row delivered to the palette — only what `Card` needs to
-/// render, plus the id used to drill in.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct EntityRef {
 	pub id: String,
 	pub kind: EntityKindLite,
 	pub status: EntityStatusLite,
-	/// URI scheme without the `://` (e.g. `file`, `ticket`, `inline`).
 	pub scheme: String,
 	pub label: String,
-	/// Short snippet shown under the label; already server-truncated.
 	pub snippet: String,
-	/// Fused score (HNSW + BM25 + PageRank + heat). Higher = better.
 	pub score: f32,
-	/// Only edges with a non-empty `text` sentence are included. Empty when
-	/// none exist or the response predates this field.
 	#[serde(default)]
 	pub edges: Vec<EdgeRef>,
 }
 
-/// One filter chip. `scheme` and `kind` are independently optional — a facet
-/// constrains either axis or both (e.g. `>file !fact`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Facet {
 	pub scheme: Option<String>,
@@ -103,25 +83,20 @@ pub struct SearchReq {
 	pub query: String,
 	pub facets: Vec<Facet>,
 	pub k: u32,
-	/// Monotonic per-keystroke token; newer supersedes older. Servers may use
-	/// it to early-return stale work.
 	pub cancel_token: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SearchRes {
 	pub hits: Vec<EntityRef>,
-	/// True iff this response was for the most-recent `cancel_token`
-	/// the server has seen. The client may discard stale frames.
 	pub fresh: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NeighborsReq {
 	pub entity_id: String,
-	/// Empty = all edge kinds.
+	// Empty = all edge kinds.
 	pub edge_kinds: Vec<EdgeKind>,
-	/// Server clamps to `[0, 3]`.
 	pub depth: u8,
 }
 
@@ -135,20 +110,16 @@ pub struct PreviewReq {
 	pub entity_id: String,
 }
 
-/// Preview pane payload; the palette dispatches a sub-renderer on the
-/// discriminant.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PreviewRes {
-	/// File-backed entity. `language` is a tree-sitter grammar id
-	/// (`"rust"`, `"python"`, ...) or `None` for plain text.
 	File {
 		path: String,
 		content: String,
 		language: Option<String>,
 	},
-	/// Generic entity body — Fact, Claim, Conclusion, etc.
-	Text { content: String },
-	/// Reason edge between two entities; rendered as a sentence.
+	Text {
+		content: String,
+	},
 	Edge {
 		from_label: String,
 		to_label: String,

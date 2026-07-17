@@ -13,14 +13,12 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use std::time::{Duration, SystemTime};
 
-/// Beta-Bernoulli prior from a clamped `[0,1]` confidence:
-/// `Beta(1 + conf, 1 + (1 - conf))`.
 fn beta_params_from_confidence(conf: f32) -> (f32, f32) {
 	(1.0 + conf, 1.0 + (1.0 - conf))
 }
 
-/// The ONLY place the ingest paths materialize an `Entity`: two drifting literals
-/// would silently corrupt every persisted shard (`Entity` is bincode-positional).
+// The ONLY place ingest materializes an Entity — Entity is bincode-positional;
+// drifting field literals silently corrupt every persisted shard.
 #[allow(clippy::too_many_arguments)]
 fn new_statement_entity(
 	id: String,
@@ -201,7 +199,6 @@ pub(crate) fn place_chunks(
 		}
 
 		if !result.deduped {
-			// Question seeding is DEFERRED to the tick — the hook just enqueues.
 			if let Some(defer) = defer_questions {
 				defer(&result.entity_id);
 			}
@@ -267,8 +264,6 @@ mod tests {
 		Arc::new(RwLock::new(GraphGnn::new()))
 	}
 
-	/// Graph-wide entity count: `accept` routes thoughts into spawned children,
-	/// so a root-only count would miss them.
 	fn total_entity_count(g: &Arc<RwLock<GraphGnn>>) -> usize {
 		let gg = g.read();
 		gg.all().iter().map(|k| k.entities.len()).sum()
@@ -309,7 +304,6 @@ mod tests {
 		assert!(matches!(e.kind, EntityKind::Claim));
 		assert!(matches!(e.status, EntityStatus::Active));
 		assert_eq!(e.chunks.len(), 1, "single statement-ref chunk part");
-		// confidence 1.0 -> Beta(2, 1)
 		assert_eq!((e.conf_alpha, e.conf_beta), (2.0, 1.0));
 	}
 
@@ -341,7 +335,6 @@ mod tests {
 	fn place_chunks_inserts_each_distinct_nonempty_chunk() {
 		let g = empty_graph();
 		let chunks = vec!["alpha beta".to_string(), "gamma delta".to_string()];
-		// Orthogonal so neither chunk dedups against the other.
 		let vecs = vec![vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]];
 		let placed = place_chunks(
 			&g,
@@ -365,7 +358,6 @@ mod tests {
 	fn place_chunks_skips_empty_vectors() {
 		let g = empty_graph();
 		let chunks = vec!["a".to_string(), "b".to_string()];
-		// Empty vec = the embed failed for that chunk.
 		let vecs = vec![Vec::new(), vec![1.0, 0.0]];
 		let placed = place_chunks(
 			&g,
@@ -412,7 +404,6 @@ mod tests {
 	#[tokio::test]
 	async fn place_document_reports_failure_and_leaves_graph_untouched_on_embed_error() {
 		let g = empty_graph();
-		// Dead endpoint: place_document must bail before mutating the graph.
 		let embedder = LlmClient::new_embed_only("http://127.0.0.1:1", "test");
 		let (id, fail) =
 			place_document(&g, &embedder, &job("a document", 1.0), "doc1", 0.95, None).await;

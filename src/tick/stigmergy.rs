@@ -1,6 +1,3 @@
-//! Cold-path GC — the `forget()` half of evaporate → cool → forget; the
-//! heat-decay half lives in `tick::pulse`.
-
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -12,11 +9,7 @@ use crate::base::locks::write_recovered;
 use crate::base::reason::remove_entity;
 use crate::base::types::{Entity, EntityKind};
 
-/// Cold-GC predicate: cold + stale + non-durable. Staleness reads `accessed_at`,
-/// else `created_at`; no timestamp at all or a future clock (skew) preserves.
 fn is_cold_victim(entity: &Entity, now: SystemTime) -> bool {
-	// Fact/Document are immune UNLESS superseded — an invalidated fact is history
-	// and may spill to the cold tier (invalidated ≠ deleted; the cold tier keeps it).
 	if !entity.is_superseded() && matches!(entity.kind, EntityKind::Fact | EntityKind::Document) {
 		return false;
 	}
@@ -32,8 +25,6 @@ fn is_cold_victim(entity: &Entity, now: SystemTime) -> bool {
 	}
 }
 
-/// Cold GC for one kern; victim policy in [`is_cold_victim`]. One write guard
-/// for the whole kern; removal cascades edge cleanup via `remove_entity`.
 pub fn run_gc(graph: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
 	let mut g = write_recovered(graph);
 	let kern = match g.kerns.get(kern_id) {
@@ -53,8 +44,7 @@ pub fn run_gc(graph: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
 		return;
 	}
 
-	// Spill-before-drop: eviction never loses data. The store handle is cloned
-	// out so the graph can keep mutating under the single write guard.
+	// Spill-before-drop: eviction must never lose data.
 	let store = g.store();
 	let kept = evict_victims(&mut g, kern_id, &victims, |e| match &store {
 		Some(s) => s.cold_spill(e).is_ok(),
@@ -71,8 +61,6 @@ pub fn run_gc(graph: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
 	}
 }
 
-/// Drop each victim only after `spill` returns true (durably persisted); a failed
-/// spill keeps the thought hot for the next pass. Returns the kept count.
 fn evict_victims(
 	g: &mut GraphGnn,
 	kern_id: &str,
@@ -192,7 +180,6 @@ mod tests {
 			is_cold_victim(&superseded, now),
 			"a superseded (invalidated) Fact is no longer immune"
 		);
-		// Losing immunity means "subject to GC", not "force-evicted".
 		let mut fresh_superseded = ent(EntityKind::Fact, 0.0, Some(now));
 		fresh_superseded.status = EntityStatus::Superseded;
 		assert!(

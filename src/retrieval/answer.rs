@@ -33,8 +33,6 @@ pub fn query(
 	result
 }
 
-/// As [`query`], but returns the stage-level [`crate::profile::Profile`] so
-/// callers (`kern profile`) can render the timing breakdown.
 #[allow(clippy::too_many_arguments)]
 pub fn query_profiled(
 	g: &GraphGnn,
@@ -77,16 +75,13 @@ pub fn query_profiled(
 	)
 }
 
-/// Output of the lock-scoped graph phase. `chain_text` is pre-rendered while the
-/// lock is held so the answer prompt needs no graph access afterward.
+// chain_text is pre-rendered while the graph lock is held, so the answer prompt needs no graph access afterward.
 pub struct Retrieved {
 	pub results: Vec<ScoredEntity>,
 	pub chains: Vec<PathChain>,
 	pub chain_text: String,
 }
 
-/// Hybrid seed fusion via weighted RRF. Query-relevant lists (dense, lexical)
-/// weigh 1.0; query-independent priors (importance, PageRank) get `cfg.rrf_global_weight` (see note).
 fn fuse_hybrid_seeds(
 	g: &GraphGnn,
 	cfg: &RetrievalConfig,
@@ -98,8 +93,7 @@ fn fuse_hybrid_seeds(
 ) -> Vec<crate::base::search::EntityHit> {
 	let lex_hits = seed::seed_lexical(lex, g, query_text, cfg.seed_k * 4, opts);
 	let pr_hits = if cfg.pagerank_enabled {
-		// Teleport personalized at dense + lexical seeds only — importance is
-		// query-independent and would make PageRank query-blind.
+		// Teleport personalized at dense + lexical seeds only — importance is query-independent and would make PageRank query-blind.
 		let ppr_seeds: Vec<crate::base::search::EntityHit> =
 			dense_seeds.iter().chain(lex_hits.iter()).cloned().collect();
 		pagerank::pagerank(
@@ -122,8 +116,7 @@ fn fuse_hybrid_seeds(
 	fuse::rrf(&lists, &weights, cfg.rrf_k, cfg.seed_k.max(1) * 2)
 }
 
-/// The graph-only half of retrieval: seed → expand → merge → score → diversify.
-/// **No LLM** — callers hold the graph lock for exactly this sub-millisecond phase.
+// Graph-only half of retrieval (seed -> expand -> merge -> score -> diversify). NO LLM — callers hold the graph lock for exactly this sub-ms phase.
 #[allow(clippy::too_many_arguments)]
 pub fn retrieve(
 	g: &GraphGnn,
@@ -137,8 +130,6 @@ pub fn retrieve(
 	retrieve_profiled(g, cfg, qvec, query_text, mode, opts, w).0
 }
 
-/// As [`retrieve`], but returns per-stage timings. This is the single
-/// implementation; [`retrieve`] delegates and drops the profile.
 #[allow(clippy::too_many_arguments)]
 pub fn retrieve_profiled(
 	g: &GraphGnn,
@@ -152,8 +143,7 @@ pub fn retrieve_profiled(
 	let mut prof = Profiler::new("retrieve");
 	let lexical = g.lexical();
 	let lex_ref = lexical.as_deref();
-	// The O(N) importance scan feeds both the dense-seed merge and the RRF list in
-	// `fuse_hybrid_seeds` — run once here, threaded into both.
+	// The O(N) importance scan feeds both the dense-seed merge and the RRF list — run once here, threaded into both.
 	let important = seed::seed_important(g, cfg, qvec, opts);
 	let dense_seeds = seed::seed_with_important(g, cfg, qvec, cfg.seed_k, mode, opts, &important);
 	prof.checkpoint("seed_dense");
@@ -186,8 +176,7 @@ pub fn retrieve_profiled(
 	prof.checkpoint("merge");
 
 	score::apply_boosts(cfg, &mut results);
-	// An active filter must run BEFORE filter_delivery's pool truncation, or expansion's
-	// non-matching neighbours crowd matching entities out of the cap (see note).
+	// An active filter must run BEFORE filter_delivery's pool truncation, or expansion's non-matching neighbours crowd matching entities out of the cap.
 	if let Some(o) = opts {
 		if o.is_active() {
 			results.retain(|r| score::matches_filter(r.entity, o));
@@ -219,8 +208,7 @@ pub fn retrieve_profiled(
 	)
 }
 
-/// Build the answer prompt and run the LLM — no graph access, callable after
-/// the lock is released. Empty when there is no query or no LLM.
+// No graph access — callable after the lock is released.
 pub fn synthesize(
 	chain_text: &str,
 	scored: &[ScoredEntity],
@@ -239,8 +227,7 @@ pub fn synthesize(
 	}
 }
 
-/// Retrieval holding the read lock for **only** the graph phase; every LLM call
-/// runs unlocked. Daemon MCP path; the plain [`query`] serves the one-shot CLI.
+// Holds the read lock for ONLY the graph phase; every LLM call runs unlocked. Daemon MCP path; plain query() serves the one-shot CLI.
 #[allow(clippy::too_many_arguments)]
 pub fn query_locked(
 	graph: &parking_lot::RwLock<GraphGnn>,
@@ -290,8 +277,6 @@ pub fn build_answer_prompt(
 	answer_prompt_from(&format_chains(g, chains), scored, query_text)
 }
 
-/// Assemble the answer prompt from pre-rendered `chain_text` — no graph access.
-/// [`build_answer_prompt`] is the graph-taking convenience wrapper.
 pub fn answer_prompt_from(chain_text: &str, scored: &[ScoredEntity], query_text: &str) -> String {
 	let mut prompt = String::from("Context from knowledge graph:\n\n");
 	if !chain_text.is_empty() {

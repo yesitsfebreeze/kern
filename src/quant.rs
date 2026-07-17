@@ -1,6 +1,3 @@
-//! Vector quantisation for the search index (int8 / 1-bit sign), original f32
-//! kept for rescoring — not LLM-model quantisation.
-
 use serde::{Deserialize, Serialize};
 
 pub const INT8_MAX_ABS: f32 = 127.0;
@@ -34,7 +31,6 @@ impl QuantizationMode {
 		}
 	}
 
-	/// Size estimates only.
 	pub fn bytes_per_dim(self) -> f32 {
 		match self {
 			Self::None => 4.0,
@@ -52,10 +48,9 @@ pub struct QuantizedVec {
 	pub f: Vec<f32>,
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub q: Vec<i8>,
-	/// Packed sign bits for `Binary` mode (8 dims/byte), empty otherwise.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub b: Vec<u8>,
-	/// True dim for `Binary` — the padded last byte makes `b.len() * 8` over-count.
+	// True Binary dim: the padded last byte makes `b.len() * 8` over-count.
 	#[serde(default)]
 	pub dim_bits: usize,
 }
@@ -137,7 +132,6 @@ fn encode_int8(v: &[f32]) -> QuantizedVec {
 	}
 }
 
-/// One sign bit per dim, `1` iff `x >= 0.0` — zero counts as positive.
 fn encode_binary(v: &[f32]) -> QuantizedVec {
 	let mut b = vec![0u8; v.len().div_ceil(8)];
 	for (i, &x) in v.iter().enumerate() {
@@ -155,8 +149,6 @@ fn encode_binary(v: &[f32]) -> QuantizedVec {
 	}
 }
 
-/// Hamming-based cosine-distance estimate in `[0, 2]` (same scale as the
-/// float/int8 paths), monotone in Hamming distance.
 fn binary_cosine_distance(a: &QuantizedVec, b: &QuantizedVec) -> f64 {
 	let dim = a.dim_bits.min(b.dim_bits);
 	if dim == 0 || a.b.len() != b.b.len() {
@@ -365,9 +357,9 @@ mod tests {
 	#[test]
 	fn float_cosine_edge_cases() {
 		assert_eq!(float_cosine_distance(&[], &[]), 1.0);
-		assert_eq!(float_cosine_distance(&[1.0, 2.0], &[1.0]), 1.0); // len mismatch
-		assert_eq!(float_cosine_distance(&[0.0, 0.0], &[1.0, 1.0]), 1.0); // zero vec
-		assert!(float_cosine_distance(&[1.0, 1.0], &[1.0, 1.0]) < 1e-6); // identical
+		assert_eq!(float_cosine_distance(&[1.0, 2.0], &[1.0]), 1.0);
+		assert_eq!(float_cosine_distance(&[0.0, 0.0], &[1.0, 1.0]), 1.0);
+		assert!(float_cosine_distance(&[1.0, 1.0], &[1.0, 1.0]) < 1e-6);
 	}
 
 	#[test]
@@ -438,15 +430,12 @@ mod tests {
 		);
 	}
 
-	/// -128 is included although encode never emits it — the kernel must still
-	/// match scalar on it.
 	#[cfg(target_arch = "x86_64")]
 	#[test]
 	fn int8_avx2_dot_norms_match_scalar_reference() {
 		if !is_x86_feature_detected!("avx2") {
 			return;
 		}
-		// Deterministic LCG so the test needs no rng dependency.
 		let mut state = 0x2545_f491_4f6c_dd1d_u64;
 		let mut next_i8 = || {
 			state = state.wrapping_mul(6364136223846793005).wrapping_add(1);

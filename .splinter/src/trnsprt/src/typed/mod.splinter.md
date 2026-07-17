@@ -13,3 +13,5 @@ let server = Channel::new(server_side, JsonEnvelopeCodec::new());
 ```
 
 Second-pass migration: module doc compressed to the three-layer inventory (Adapter/Codec/Channel). The usage example and Phase-1-additive context are preserved above.
+Design notes (moved from source comments during comment sweep):
+- Typed-RPC stack, three orthogonal layers: Adapter (byte-stream transport), Codec (wire format), Channel (framed send/recv).

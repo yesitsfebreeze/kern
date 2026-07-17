@@ -1,6 +1,3 @@
-//! Ingest pipeline: raw text → placed, deduplicated graph entities. [`Worker`]
-//! drives [`split`] → [`embed`] → [`place`]; [`outcome`] reports status.
-
 pub mod config;
 pub mod dedup;
 pub mod direct;
@@ -19,8 +16,6 @@ pub use outcome::{FailureReport, Outcome, OutcomeStatus};
 pub(crate) use worker::Job;
 pub use worker::Worker;
 
-/// Test-only embedder: 256-dim one-hot from the content hash — distinct seeds
-/// land in different slots (cosine ~0), so the dedup check is dodged.
 #[cfg(test)]
 pub(crate) fn stub_one_hot(seed: &str) -> Vec<f32> {
 	let h = crate::base::util::content_hash(seed);

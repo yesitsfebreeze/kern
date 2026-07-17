@@ -5,3 +5,5 @@
 - `recv_returns_none_on_closed_adapter` (test): dropping one side closes its write half; the peer's reader hits EOF and `recv` must surface a clean `Ok(None)`, not an error.
 
 Second-pass migration: module doc compressed (Codec-mirrors-Encoder/Decoder bridge + why two codec instances). `adapter_err_from_codec` inline comment deleted — Framed{Read,Write} surface either a CodecError or an io::Error wrapped into the codec's Error type; our codecs use `CodecError` directly, so it folds straight into `AdapterError::Codec` (already in the note above).
+Design notes (moved from source comments during comment sweep):
+- Channel<C> pairs a transport's reader/writer halves with a Codec for framed send/recv, backed by tokio_util::codec::{FramedRead, FramedWrite}. Each half owns its own codec instance; the writer's comes from Codec::Default (both codecs are zero-sized, so free).

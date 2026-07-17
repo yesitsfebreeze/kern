@@ -1,6 +1,3 @@
-//! Default data-type descriptors: one `SOURCE_*` kind (see
-//! [`crate::base::constants`]) → the distiller's extraction hint for it.
-
 use std::collections::HashMap;
 
 use crate::base::constants::{
@@ -33,8 +30,6 @@ pub fn default_descriptors() -> HashMap<String, String> {
 		.collect()
 }
 
-/// Insert missing defaults only, leaving existing keys untouched. Returns the
-/// number newly inserted.
 pub fn register_default_descriptors(descriptors: &mut HashMap<String, String>) -> usize {
 	let defaults = default_descriptors();
 	let mut n = 0;

@@ -1,9 +1,5 @@
-//! LoCoMo eval corpus: loader + answer scorers (#36) — the pure half of the eval
-//! harness. Dataset is CC BY-NC 4.0: supplied via a path, never redistributed.
-
 use std::collections::HashMap;
 
-/// One conversational turn. Image turns fold their BLIP caption into `text`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Turn {
 	pub speaker: String,
@@ -13,14 +9,11 @@ pub struct Turn {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
-	/// 1-based session index parsed from the `session_N` key.
 	pub index: u32,
 	pub date_time: String,
 	pub turns: Vec<Turn>,
 }
 
-/// One QA probe. Category 5 is adversarial (unanswerable): `answer` is `None`
-/// and `adversarial_answer` holds the plausible-but-unsupported distractor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QaItem {
 	pub question: String,
@@ -64,8 +57,6 @@ pub fn category_name(cat: u8) -> &'static str {
 	}
 }
 
-/// SQuAD-style answer normalization: lowercase, strip punctuation, drop the
-/// articles a/an/the, collapse whitespace.
 pub fn normalize_answer(s: &str) -> String {
 	s.to_lowercase()
 		.chars()
@@ -77,7 +68,6 @@ pub fn normalize_answer(s: &str) -> String {
 		.join(" ")
 }
 
-/// Token-level F1 between predicted and gold answer (normalized).
 pub fn token_f1(pred: &str, gold: &str) -> f64 {
 	let p: Vec<String> = normalize_answer(pred)
 		.split_whitespace()
@@ -88,7 +78,6 @@ pub fn token_f1(pred: &str, gold: &str) -> f64 {
 		.map(String::from)
 		.collect();
 	if p.is_empty() || g.is_empty() {
-		// Both empty → vacuous match; exactly one empty → no overlap.
 		return if p.is_empty() && g.is_empty() {
 			1.0
 		} else {
@@ -116,7 +105,6 @@ pub fn token_f1(pred: &str, gold: &str) -> f64 {
 	2.0 * precision * recall / (precision + recall)
 }
 
-/// ROUGE-L F1 (longest-common-subsequence based) over normalized tokens.
 pub fn rouge_l(pred: &str, gold: &str) -> f64 {
 	let p: Vec<String> = normalize_answer(pred)
 		.split_whitespace()
@@ -142,8 +130,6 @@ pub fn rouge_l(pred: &str, gold: &str) -> f64 {
 	2.0 * precision * recall / (precision + recall)
 }
 
-/// Heuristic: does the prediction decline to answer? Used to score the
-/// adversarial category, where the correct behavior is abstention.
 pub fn is_abstention(pred: &str) -> bool {
 	let p = pred.to_lowercase();
 	const MARKERS: [&str; 16] = [
@@ -167,8 +153,6 @@ pub fn is_abstention(pred: &str) -> bool {
 	MARKERS.iter().any(|m| p.contains(m))
 }
 
-/// Build the LLM-judge prompt: decide whether `pred` answers the question as
-/// well as the gold `answer`. The judge replies CORRECT / INCORRECT.
 pub fn judge_prompt(question: &str, gold: &str, pred: &str) -> String {
 	format!(
 		"You are grading a question-answering system against a gold answer.\n\
@@ -181,8 +165,7 @@ pub fn judge_prompt(question: &str, gold: &str, pred: &str) -> String {
 	)
 }
 
-/// `INCORRECT` wins over `CORRECT` (the latter is a substring of the former);
-/// anything unrecognized is treated as incorrect.
+// "INCORRECT" contains "CORRECT" — must test INCORRECT first.
 pub fn parse_judge_verdict(raw: &str) -> bool {
 	let up = raw.to_uppercase();
 	if up.contains("INCORRECT") {
@@ -192,8 +175,6 @@ pub fn parse_judge_verdict(raw: &str) -> bool {
 	}
 }
 
-/// LCS length via rolling-row DP: `O(a*b)` time, `O(b)` space — sized for short
-/// normalized-answer token lists; cap the token count before passing long ones.
 fn lcs_len(a: &[String], b: &[String]) -> usize {
 	let mut dp = vec![0usize; b.len() + 1];
 	for ai in a {
@@ -341,7 +322,6 @@ mod tests {
 		let s = &samples[0];
 		assert_eq!(s.sample_id, "conv-1");
 		assert_eq!(s.sessions.len(), 2);
-		// Ordered by index despite session_2 appearing first in the JSON.
 		assert_eq!(s.sessions[0].index, 1);
 		assert_eq!(s.sessions[1].index, 2);
 		assert_eq!(s.sessions[0].date_time, "1:00 pm on 7 May, 2023");
@@ -399,7 +379,6 @@ mod tests {
 
 	#[test]
 	fn f1_partial_overlap() {
-		// pred {cat,sat}, gold {cat,sat,down}: P=1, R=2/3, F1=0.8
 		assert!((token_f1("the cat sat", "cat sat down") - 0.8).abs() < 1e-9);
 	}
 
@@ -410,7 +389,6 @@ mod tests {
 
 	#[test]
 	fn rouge_l_lcs_partial() {
-		// pred [x,b,c,d], gold [x,c,d]: LCS=3, R=1, P=3/4, F=6/7
 		assert!((rouge_l("x b c d", "x c d") - 6.0 / 7.0).abs() < 1e-9);
 	}
 
@@ -418,7 +396,6 @@ mod tests {
 	fn judge_verdict_parses_correct_and_incorrect() {
 		assert!(parse_judge_verdict("CORRECT"));
 		assert!(parse_judge_verdict("The answer is correct."));
-		// "INCORRECT" contains "correct" — must not be read as a positive.
 		assert!(!parse_judge_verdict("INCORRECT"));
 		assert!(!parse_judge_verdict("This is incorrect"));
 		assert!(!parse_judge_verdict("maybe"));
@@ -454,17 +431,13 @@ mod tests {
 			is_abstention("...ultimately this is unanswerable"),
 			"marker at the end"
 		);
-		// Unicode around a marker doesn't break detection (lowercasing is char-wise).
 		assert!(is_abstention("Désolé — I don't know. 不知道"));
-		// Unicode content that simply answers is not a false positive.
 		assert!(!is_abstention("réponse : 7 mai 2023"));
 	}
 
 	#[test]
 	fn rouge_l_all_article_string_normalizes_to_empty() {
 		assert_eq!(normalize_answer("the a an"), "");
-		// Empty vs empty is a vacuous match (1.0); empty vs content is 0.0 — the
-		// guard in rouge_l handles both without a divide-by-zero.
 		assert!((rouge_l("the a an", "an the a") - 1.0).abs() < 1e-9);
 		assert_eq!(rouge_l("the a an", "real content here"), 0.0);
 	}

@@ -57,8 +57,6 @@ pub fn mmr<T: Scored>(cfg: &RetrievalConfig, query_vec: &[f32], results: &mut Ve
 	let tail = results.split_off(pool_size);
 	let mut pool: Vec<T> = std::mem::take(results);
 
-	// sim(query, candidate) is fixed for the whole selection — computed once per
-	// candidate; falls back to the incoming score when either vector is absent.
 	let query_usable = !query_vec.is_empty();
 	let mut sim_q: Vec<f64> = pool
 		.iter()
@@ -71,8 +69,6 @@ pub fn mmr<T: Scored>(cfg: &RetrievalConfig, query_vec: &[f32], results: &mut Ve
 		})
 		.collect();
 
-	// max_sim[i] = max cosine of candidate i to any selected item, floored at 0.0
-	// (negative similarity never *rewards*); maintained incrementally.
 	let mut max_sim: Vec<f64> = vec![0.0; pool.len()];
 
 	let mut selected: Vec<T> = Vec::with_capacity(target);
@@ -87,14 +83,11 @@ pub fn mmr<T: Scored>(cfg: &RetrievalConfig, query_vec: &[f32], results: &mut Ve
 				best_i = i;
 			}
 		}
-		// sim_q and max_sim are swap-removed in lockstep so index i keeps
-		// addressing the same candidate as pool[i].
+		// sim_q and max_sim swap-removed in lockstep with pool so index i stays aligned.
 		let chosen = pool.swap_remove(best_i);
 		sim_q.swap_remove(best_i);
 		max_sim.swap_remove(best_i);
 
-		// Fold the chosen item into every remaining candidate's redundancy; a
-		// vector-less item contributes 0.0 and can only lose the max, so skip it.
 		if !chosen.entity().vector.is_empty() {
 			for (j, cand) in pool.iter().enumerate() {
 				if !cand.entity().vector.is_empty() {
@@ -136,10 +129,10 @@ mod tests {
 
 	#[test]
 	fn dedup_keeps_highest_per_section() {
-		let cfg = RetrievalConfig::default(); // dedup_by_section = true
+		let cfg = RetrievalConfig::default();
 		let mut results = vec![
 			sect("a", "doc#chunk0", 0.4),
-			sect("b", "doc#chunk1", 0.9), // same stem "doc" -> higher kept
+			sect("b", "doc#chunk1", 0.9),
 			sect("c", "other#chunk0", 0.5),
 		];
 		dedup_by_section(&cfg, &mut results);
@@ -167,13 +160,11 @@ mod tests {
 
 	#[test]
 	fn dedup_preserves_relative_order_of_survivors() {
-		// retain keeps survivors in original positions — a guard so a future
-		// rewrite (e.g. collect/sort) can't silently reorder the delivered set.
 		let cfg = RetrievalConfig::default();
 		let mut results = vec![
 			sect("first", "alpha#chunk0", 0.5),
 			sect("second", "beta#chunk0", 0.9),
-			sect("beta_low", "beta#chunk1", 0.2), // same stem as second, lower -> dropped
+			sect("beta_low", "beta#chunk1", 0.2),
 			sect("third", "gamma#chunk0", 0.7),
 		];
 		dedup_by_section(&cfg, &mut results);
@@ -209,8 +200,6 @@ mod tests {
 
 	#[test]
 	fn mmr_runs_and_selects_diverse_over_near_duplicates() {
-		// 26 near-identical vectors + 2 distinct; lambda 0.3 and cap 3 must keep
-		// one near-dup and BOTH distinct items.
 		let q = vec![1.0, 0.0, 0.0];
 		let mut results: Vec<ScoredEntity> = (0..26)
 			.map(|i| ent(&format!("dup{i}"), vec![1.0, 0.0, 0.0], 0.9))
@@ -243,15 +232,13 @@ mod tests {
 
 	#[test]
 	fn mmr_lambda_one_is_pure_relevance_order() {
-		// lambda=1.0 zeroes redundancy, so MMR must equal the pool sorted by
-		// sim(query, ·) descending — pins the compute-sim_q-once path.
 		let q = vec![1.0, 0.0, 0.0];
 		let mut results = vec![
-			ent("c", vec![1.0, 1.0, 0.0], 0.1), // cos = 0.707
-			ent("a", vec![1.0, 0.0, 0.0], 0.1), // cos = 1.0  (most relevant)
-			ent("b", vec![0.0, 1.0, 0.0], 0.1), // cos = 0.0
-			ent("e", vec![1.0, 0.1, 0.0], 0.1), // cos ~ 0.995
-			ent("d", vec![0.0, 0.0, 1.0], 0.1), // cos = 0.0
+			ent("c", vec![1.0, 1.0, 0.0], 0.1),
+			ent("a", vec![1.0, 0.0, 0.0], 0.1),
+			ent("b", vec![0.0, 1.0, 0.0], 0.1),
+			ent("e", vec![1.0, 0.1, 0.0], 0.1),
+			ent("d", vec![0.0, 0.0, 1.0], 0.1),
 		];
 		let cfg = RetrievalConfig {
 			mmr_enabled: true,
@@ -269,8 +256,7 @@ mod tests {
 		);
 	}
 
-	/// The pre-optimization O(P*T^2) MMR body, kept verbatim as the reference
-	/// oracle. Do NOT "simplify" it — its value is being the old code.
+	// Reference oracle: the pre-optimization O(P*T^2) MMR body. Do NOT simplify — its value is being the old code.
 	fn mmr_reference(cfg: &RetrievalConfig, query_vec: &[f32], results: &mut Vec<ScoredEntity>) {
 		if !cfg.mmr_enabled || results.len() <= cfg.max_deliver_results {
 			return;
@@ -318,8 +304,6 @@ mod tests {
 
 	#[test]
 	fn mmr_is_byte_identical_to_naive_reference() {
-		// Random pools exercise negative cosines (the 0.0 floor), empty vectors
-		// (fallback paths), and tied scores; equivalence is exact — no float tolerance (see note).
 		let mut s: u64 = 0x9E3779B97F4A7C15;
 		let mut next = || {
 			s ^= s << 13;
@@ -344,7 +328,7 @@ mod tests {
 				} else {
 					(0..dim).map(|_| unit(&mut next)).collect()
 				};
-				let score = (next() % 3) as f64 / 2.0; // coarse buckets force ties
+				let score = (next() % 3) as f64 / 2.0;
 				a.push(ent(&format!("e{i}"), vector, score));
 			}
 			let cfg = RetrievalConfig {

@@ -23,8 +23,8 @@ pub fn find_duplicate(
 		.map(|h| h.id)
 }
 
-/// Reinforce a near-dup. INVARIANT: never overwrite `statements`/`vector` under
-/// the existing id (= content_hash(text)) — differing phrasing → `Rephrase` edge.
+// INVARIANT: never overwrite statements/vector under the existing id
+// (= content_hash(text)); differing phrasing → Rephrase edge.
 pub fn update_existing_entity(
 	graph: &Arc<RwLock<GraphGnn>>,
 	entity_id: &str,
@@ -57,8 +57,8 @@ pub fn update_existing_entity(
 		let reason = Reason {
 			id: rid.clone(),
 			from: entity_id.to_string(),
-			// Rephrase is a LOCAL annotation on `from` — no target, so the three
-			// cross-kern fields are intentionally blank (a normal edge fills them).
+			// Rephrase is a LOCAL annotation on `from` — the three cross-kern fields
+			// are intentionally blank.
 			to: String::new(),
 			to_kern_id: String::new(),
 			to_net_id: String::new(),
@@ -72,8 +72,7 @@ pub fn update_existing_entity(
 		};
 		add_reason(kern, reason);
 
-		// Kind guard: only a SAME-KIND near-dup is a supersede candidate (a
-		// preference must not supersede a fact). Deferred to the tick; fail open.
+		// Only a SAME-KIND near-dup may supersede (a preference must not supersede a fact).
 		if incoming_kind == old_kind {
 			if let Some(hook) = on_supersede_candidate {
 				hook(&kern_id, &rid);
@@ -102,7 +101,6 @@ mod tests {
 		g.kerns.get(&kid).unwrap().entities.get(id).unwrap().clone()
 	}
 
-	/// One entity with an explicit vector, indexed so `find_duplicate` can hit it.
 	fn graph_with_vec_entity(id: &str, vec: Vec<f32>) -> Arc<RwLock<GraphGnn>> {
 		let mut g = GraphGnn::new();
 		let root = g.root.id.clone();
@@ -121,7 +119,6 @@ mod tests {
 			Some("e1")
 		);
 		assert_eq!(find_duplicate(&graph, &[0.0, 1.0, 0.0], 0.9), None);
-		// cos([0.9,0.1,0],[1,0,0]) ~= 0.994: guards the `score >= threshold` bound.
 		assert_eq!(find_duplicate(&graph, &[0.9, 0.1, 0.0], 0.999), None);
 		assert_eq!(
 			find_duplicate(&graph, &[0.9, 0.1, 0.0], 0.9).as_deref(),
@@ -212,7 +209,6 @@ mod tests {
 
 	#[test]
 	fn rephrase_edge_is_idempotent_under_repeat() {
-		// reason_id is content-addressed, so add_reason de-dupes repeat phrasings.
 		let graph = graph_with_entity("e1", "the original claim");
 		update_existing_entity(&graph, "e1", "reworded claim", 1.0, EntityKind::Claim, None);
 		update_existing_entity(&graph, "e1", "reworded claim", 1.0, EntityKind::Claim, None);

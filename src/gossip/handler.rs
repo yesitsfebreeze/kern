@@ -17,8 +17,7 @@ pub struct Deps {
 	pub graph: Arc<RwLock<GraphGnn>>,
 	pub node: Arc<Node>,
 	pub queue: Option<Arc<tick::queue::Queue>>,
-	/// Persist hook — every federation mutation must call this so federated
-	/// knowledge survives a restart instead of living only in memory.
+	// Every federation mutation must call this or federated knowledge is lost on restart.
 	pub save: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 }
 
@@ -48,8 +47,6 @@ pub fn new_handler(d: Arc<Deps>) -> Handler {
 	})
 }
 
-/// Periodically broadcast this node's root-kern scope so peers can route
-/// questions / fetches to it — the outbound counterpart to `handle_sphere`.
 pub fn start_announce(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 	let mut stop = node.stop_rx.clone();
 	tokio::spawn(async move {
@@ -59,7 +56,6 @@ pub fn start_announce(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 				_ = interval.tick() => {
 					let payload = {
 						let g = read_recovered(&graph);
-						// Nothing worth announcing until the kern has a purpose.
 						if g.root.anchor_vec.is_empty() {
 							None
 						} else {
@@ -91,8 +87,6 @@ pub fn start_announce(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 	});
 }
 
-/// Periodically broadcast this node's hottest LOCAL entities — the outbound
-/// counterpart to `handle_entity_sync`. Never re-broadcasts `remote-*` kerns.
 pub fn start_entity_sync(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 	let mut stop = node.stop_rx.clone();
 	tokio::spawn(async move {
@@ -252,8 +246,6 @@ fn handle_peer_exchange(d: &Deps, msg: GossipMessage) {
 	}
 }
 
-/// `value` is the sender's ABSOLUTE slot total (max-merged), not an increment.
-/// Values above [`GOSSIP_CRDT_DELTA_MAX`] are rejected to bound slot pinning.
 fn validated_delta_value(replica: &str, object_id: &str, value: u64) -> Option<u64> {
 	if replica.is_empty() || object_id.is_empty() {
 		return None;
@@ -303,15 +295,13 @@ fn handle_crdt_delta(d: &Deps, msg: GossipMessage) {
 			}
 		}
 	}
-	// Persist only after dropping the write guard — the save closure read-locks
-	// the graph (deadlock otherwise) — and only on a real change.
+	// Persist only after dropping the write guard — the save closure read-locks the graph (deadlock otherwise).
 	if changed {
 		d.persist();
 	}
 }
 
-/// Merge peer entity bodies into a per-network phantom kern. Content↔id binding
-/// is NOT verified — network scoping + `GOSSIP_REMOTE_KERN_ENTITY_CAP` bound it.
+// Content↔id binding is NOT verified — network scoping + GOSSIP_REMOTE_KERN_ENTITY_CAP bound it.
 fn handle_entity_sync(d: &Deps, msg: GossipMessage) {
 	let payload = match &msg.payload {
 		GossipPayload::EntitySync(p) => p,
@@ -357,8 +347,6 @@ fn inject_remote_scope(g: &mut GraphGnn, sphere: &SpherePayload, _origin: &str) 
 	}
 }
 
-/// Unregistered phantom kern parented under the local root, federation
-/// `root_id` stamped; callers fill in scope/content and then `register`.
 fn new_phantom_kern(g: &GraphGnn, phantom_id: &str) -> Kern {
 	let mut k = Kern::new(phantom_id, &g.root.id);
 	k.root_id = g.root.root_id.clone();
@@ -408,7 +396,6 @@ mod tests {
 	use crate::base::reason::add_reason;
 	use crate::base::types::{mk_entity as mk_entity_kind, Entity, EntityKind, Reason};
 
-	/// Local convenience: these gossip tests only ever need `Fact` entities.
 	fn mk_entity(id: &str, text: &str, heat: f64) -> Entity {
 		mk_entity_kind(id, text, heat, EntityKind::Fact)
 	}
@@ -601,8 +588,6 @@ mod tests {
 		);
 	}
 
-	/// One OPEN question reason ("r1", empty `to`) in kern "kq"; returns the
-	/// graph and the local network id.
 	fn graph_with_open_question() -> (Arc<RwLock<GraphGnn>>, String) {
 		let mut g = GraphGnn::new();
 		let net = g.network_id.clone();
@@ -675,7 +660,7 @@ mod tests {
 				question_text: String::new(),
 			}),
 		};
-		handle_question(&d, msg); // empty reason_vec -> early return, must not panic
+		handle_question(&d, msg);
 	}
 
 	#[test]
@@ -697,6 +682,6 @@ mod tests {
 				strength: 1.0,
 			}),
 		};
-		handle_pulse(&d, msg); // unknown kern -> root fallback; must not panic
+		handle_pulse(&d, msg);
 	}
 }

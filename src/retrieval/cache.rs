@@ -1,6 +1,3 @@
-//! Semantic query-result cache keyed on the **raw** (pre-HyDE) query embedding.
-//! Any mutation flushes everything — the global epoch is required for soundness (see note).
-
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
@@ -11,20 +8,15 @@ use crate::retrieval::answer::QueryResult;
 // Defaults live in base::constants so `config` can use them without a config -> retrieval cycle.
 use crate::base::constants::{QUERY_CACHE_DEFAULT_CAP, QUERY_CACHE_DEFAULT_THETA};
 
-/// `tag` folds in everything that changes the result but is not in the query
-/// vector (mode + filters): same embedding, different `tag` must never share an entry.
+// `tag` folds mode + filters into the key: same embedding, different `tag` must never share an entry.
 struct Entry {
 	qvec: Vec<f32>,
 	tag: u64,
 	result: QueryResult,
 	epoch: u64,
-	/// Hash of the exact query text — lets an identical re-ask hit *before* the
-	/// query is embedded (see [`QueryCache::lookup_text`]).
 	text_hash: u64,
 }
 
-/// Bounded, LRU semantic cache over query results. Not thread-safe on its own —
-/// wrap in a `Mutex` when shared (the daemon holds one alongside the graph).
 pub struct QueryCache {
 	entries: VecDeque<Entry>,
 	cap: usize,
@@ -32,13 +24,11 @@ pub struct QueryCache {
 }
 
 impl QueryCache {
-	/// `cap` bounds the number of cached queries (LRU eviction past it). `theta`
-	/// is the cosine floor — high (≈0.97+) keeps distinct questions from colliding.
 	pub fn new(cap: usize, theta: f64) -> Self {
 		// lookup/lookup_text scan every entry — O(cap): fine at the default 256, not thousands.
 		debug_assert!(
 			cap <= 4096,
-			"QueryCache cap {cap} is large — lookup is O(cap); see the note in new()"
+			"QueryCache cap {cap} is large — lookup is O(cap)"
 		);
 		Self {
 			entries: VecDeque::new(),
@@ -55,8 +45,6 @@ impl QueryCache {
 		Self::shared(QUERY_CACHE_DEFAULT_CAP, QUERY_CACHE_DEFAULT_THETA)
 	}
 
-	/// Exact-text fast path, checked *before* embedding: a verbatim re-ask (same
-	/// `tag`, current epoch) skips embed + LLM entirely. Promotes the hit to MRU.
 	pub fn lookup_text(&mut self, g: &GraphGnn, text_hash: u64, tag: u64) -> Option<QueryResult> {
 		let epoch = g.mutation_epoch();
 		let hit = self
@@ -69,8 +57,6 @@ impl QueryCache {
 		Some(result)
 	}
 
-	/// Semantic hit: same `tag`, current epoch, cosine >= theta. A stale-epoch
-	/// entry is a miss (left to LRU eviction). Promotes the hit to MRU.
 	pub fn lookup(&mut self, g: &GraphGnn, qvec: &[f32], tag: u64) -> Option<QueryResult> {
 		let epoch = g.mutation_epoch();
 		let hit = self.entries.iter().position(|e| {
@@ -85,8 +71,7 @@ impl QueryCache {
 		Some(result)
 	}
 
-	/// `epoch` must be captured WHEN the result was computed, not now — a racing
-	/// write leaves the entry born stale (correct). Empty results are never cached (see note).
+	// `epoch` must be captured WHEN the result was computed, not now: a racing write leaves the entry born stale (a miss, not a stale serve).
 	pub fn insert(
 		&mut self,
 		epoch: u64,
@@ -123,8 +108,6 @@ impl QueryCache {
 	}
 }
 
-/// Per-process hash for the exact-text fast path — process-local is fine, the
-/// cache itself is in-memory and per-daemon.
 pub fn hash_text(text: &str) -> u64 {
 	use std::hash::{Hash, Hasher};
 	let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -199,7 +182,6 @@ mod tests {
 			result_with("e1", "ans"),
 		);
 
-		// Nearly the same direction → cosine well above 0.95.
 		let hit = cache.lookup(&g, &[0.99, 0.01, 0.0], TAG);
 		assert!(hit.is_some(), "paraphrase-close query hits");
 	}
@@ -216,7 +198,6 @@ mod tests {
 			result_with("e1", "ans"),
 		);
 
-		// Orthogonal → cosine 0 < theta.
 		assert!(
 			cache.lookup(&g, &[0.0, 1.0, 0.0], TAG).is_none(),
 			"distant query misses"
@@ -314,7 +295,6 @@ mod tests {
 
 	#[test]
 	fn mutation_to_any_kern_invalidates_soundness() {
-		// A kern the cached result never touched could match after HyDE — must still invalidate.
 		let mut g = graph_with_entity("k1", "e1");
 		let root_id = g.root.id.clone();
 		g.register(Kern::new("k2", &root_id));
@@ -391,7 +371,7 @@ mod tests {
 	#[test]
 	fn lookup_promotes_an_entry_protecting_it_from_the_next_eviction() {
 		let g = graph_with_entity("k1", "e1");
-		let mut cache = QueryCache::new(2, 0.999); // theta high: each vec hits only itself
+		let mut cache = QueryCache::new(2, 0.999);
 		cache.insert(
 			g.mutation_epoch(),
 			0,

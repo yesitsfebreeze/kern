@@ -98,8 +98,8 @@ struct IngestArgs {
 	kind: Option<EntityKind>,
 }
 
-/// Wire-boundary validation before any graph access: an agent caller can mint
-/// neither Fact-kind nor Fact-confidence entities (docs/kern/safety-architecture.md).
+// Wire boundary: an agent caller can mint neither Fact-kind nor Fact-confidence
+// entities (docs/kern/safety-architecture.md).
 fn validate_ingest_wire(p: &IngestArgs) -> Result<(), String> {
 	validate_wire_conf(p.conf).map_err(|e| e.to_string())?;
 	if let Some(k) = p.kind {

@@ -9,8 +9,7 @@ pub enum WatchKind {
 	Renamed { from: PathBuf, to: PathBuf },
 }
 
-/// Single coalesced filesystem event emitted by [`crate::FileWatcher`].
-/// Invariant: for `Renamed`, `path == to` — build via [`WatchEvent::new`].
+// Invariant: for `Renamed`, `path == to` — build via `WatchEvent::new`, not the fields.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WatchEvent {
 	pub path: PathBuf,
@@ -19,7 +18,6 @@ pub struct WatchEvent {
 }
 
 impl WatchEvent {
-	/// For `Renamed` the `path` argument is overridden with `to`.
 	pub fn new(path: PathBuf, kind: WatchKind, ts: SystemTime) -> Self {
 		let path = match &kind {
 			WatchKind::Renamed { to, .. } => to.clone(),

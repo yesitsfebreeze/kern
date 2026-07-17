@@ -1,6 +1,3 @@
-//! `KernRpc` — typed-RPC surface exposing kern's read+write operations
-//! to sub-agents and other clients.
-
 pub mod client_local;
 pub mod dto;
 pub mod mock;

@@ -65,7 +65,6 @@ impl Tensor {
 		}
 	}
 
-	/// In-place — keeps the existing allocation, unlike assigning fresh `zeros`.
 	pub fn fill(&mut self, v: f64) {
 		self.data.iter_mut().for_each(|x| *x = v);
 	}
@@ -83,8 +82,6 @@ impl Tensor {
 		Self::rand_with(rows, cols, scale, &mut rng)
 	}
 
-	/// Box-Muller normal init with a caller-supplied RNG — seed it for
-	/// deterministic tests; production uses [`Tensor::rand`] (system entropy).
 	pub fn rand_with<R: rand::Rng>(rows: usize, cols: usize, scale: f64, rng: &mut R) -> Self {
 		use rand::RngExt;
 		let data: Vec<f64> = (0..rows * cols)
@@ -165,7 +162,6 @@ impl Tensor {
 		}
 	}
 
-	/// Row count at or above which `matmul` parallelizes across rows with rayon.
 	const MATMUL_PAR_THRESHOLD: usize = 64;
 
 	pub fn matmul(&self, other: &Tensor) -> Result<Tensor, TensorError> {
@@ -304,7 +300,6 @@ mod tests {
 
 	#[test]
 	fn matmul_small_path_is_correct() {
-		// [[1,2,3],[4,5,6]] (2x3) · [[7,8],[9,10],[11,12]] (3x2) = [[58,64],[139,154]].
 		let a = Tensor::new(2, 3, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
 		let b = Tensor::new(3, 2, vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]).unwrap();
 		let c = a.matmul(&b).unwrap();
@@ -314,8 +309,6 @@ mod tests {
 
 	#[test]
 	fn matmul_parallel_and_serial_paths_agree_at_the_threshold() {
-		// m == THRESHOLD takes the rayon path; m == THRESHOLD-1 takes the serial
-		// path. ones(m,2) · ones(2,2) = a matrix of 2.0; both paths must match.
 		let t = Tensor::MATMUL_PAR_THRESHOLD;
 		for &m in &[t - 1, t] {
 			let out = Tensor::ones(m, 2).matmul(&Tensor::ones(2, 2)).unwrap();
@@ -330,7 +323,7 @@ mod tests {
 	#[test]
 	fn matmul_inner_dimension_mismatch_errors() {
 		let a = Tensor::zeros(2, 3);
-		let b = Tensor::zeros(2, 2); // inner 3 vs 2
+		let b = Tensor::zeros(2, 2);
 		assert!(matches!(
 			a.matmul(&b),
 			Err(TensorError::InnerMismatch { lhs: 3, rhs: 2 })
@@ -342,8 +335,8 @@ mod tests {
 		let a = Tensor::new(2, 3, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
 		let t = a.transpose();
 		assert_eq!(t.shape(), (3, 2));
-		assert_eq!(t.at(0, 1), 4.0); // was at(1,0)
-		assert_eq!(t.at(2, 0), 3.0); // was at(0,2)
+		assert_eq!(t.at(0, 1), 4.0);
+		assert_eq!(t.at(2, 0), 3.0);
 		assert_eq!(t.data, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
 	}
 
@@ -370,7 +363,7 @@ mod tests {
 
 	#[test]
 	fn debug_truncates_large_data() {
-		let big = Tensor::zeros(10, 10); // 100 elements
+		let big = Tensor::zeros(10, 10);
 		let s = format!("{big:?}");
 		assert!(s.contains("10x10"));
 		assert!(s.contains("(100 total)"), "preview is truncated: {s}");

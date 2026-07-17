@@ -10,3 +10,6 @@ Second-pass migration (comment -> note):
   vector indices, BM25 lexical index, CRDT merge, heat decay, shared
   types/constants/math primitives — is just the `pub mod` list below it, so the
   doc now states the layer's purpose and lets the module list enumerate itself.
+## Design context (moved from source doc comments)
+
+- Module: `base` is the foundational layer the rest of the daemon builds on — knowledge graph, LMDB store + cold tier, vector/lexical indices, CRDT merge, heat, and shared types.

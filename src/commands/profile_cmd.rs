@@ -9,7 +9,6 @@ use super::{load_graph, Client, Endpoint};
 
 const TIMELINE_WIDTH: usize = 40;
 
-/// Small fixed conversation so distill timing is comparable across runs.
 const DISTILL_SAMPLE: &str = "User: The deploy failed because the config pointed at the staging \
 	bucket. Assistant: Fixed — the bucket name is now anchored to the environment, so production \
 	reads prod-artifacts and staging keeps its own.";
@@ -31,8 +30,7 @@ fn renamed(mut p: Profile, name: &str) -> Profile {
 	p
 }
 
-/// Time every hot path against the live graph and print a scaled timeline.
-/// Read-only: nothing is persisted, so it is safe to run next to a daemon.
+// Read-only: nothing is persisted, so it is safe to run next to a daemon.
 pub(super) async fn cmd_profile(cfg: &crate::config::Config, text: &str, no_llm: bool) {
 	let mut profiles: Vec<Profile> = Vec::new();
 
@@ -52,7 +50,6 @@ pub(super) async fn cmd_profile(cfg: &crate::config::Config, text: &str, no_llm:
 		Endpoint::new(&cfg.embed.url, &cfg.embed.model, &cfg.embed.key),
 	);
 
-	// First embed may pay a model (re)load; the second is the steady-state cost.
 	let t = Instant::now();
 	let qvec = match llm_client.embed(text).await {
 		Ok(v) => v,
@@ -137,7 +134,6 @@ mod tests {
 	use super::*;
 	use serde_json::{json, Value};
 
-	/// Only `/api/embed` is stubbed — no_llm=true never touches reason/answer.
 	#[tokio::test]
 	async fn cmd_profile_no_llm_path_does_not_panic() {
 		let app = axum::Router::new().route(

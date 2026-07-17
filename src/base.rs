@@ -1,6 +1,3 @@
-//! Foundational layer the rest of the daemon builds on: knowledge graph, LMDB
-//! store + cold tier, vector/lexical indices, CRDT merge, heat, shared types.
-
 pub mod accept;
 pub mod constants;
 pub mod descriptors;

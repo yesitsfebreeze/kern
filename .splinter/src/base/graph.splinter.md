@@ -51,3 +51,16 @@ Second-pass migration (comment -> note):
   setup — a named anchor and an entity-bearing kern under root, plus a root whose
   child list references all four children — mirrors the real on-disk root so the
   dangling-ref scrub is actually exercised.
+
+Third-pass migration (2026-07-17, comment -> note):
+- `get_mut` bumps `mutation_epoch` on any hit before handing out the `&mut`: a
+  `&mut Kern` is presumed to mutate, and over-bumping only costs a query-cache
+  flush, never stale data — so the unconditional bump is deliberate, not a bug to
+  "optimize" to conditional.
+- `index_kern_into`: superseded entities are still recorded in `entity_kern` (so
+  the supersede chain resolves) but skipped from the ANN indices — a superseded
+  entity is never a valid retrieval result, so indexing it would only burn ANN
+  slots.
+- `enforce_kern_cap`: `unload` errors are swallowed — degrading under memory
+  pressure is accepted. Currently dormant since `max_loaded_kerns` defaults to
+  `KERN_CAP_DISABLED`.

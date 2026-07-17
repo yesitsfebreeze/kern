@@ -6,3 +6,5 @@ The daemon is the single graph owner, so intake ingest happens in-process with n
 Second-pass migration (from source comments):
 
 - `extract_claims` outage guard: an LLM outage (empty output) returns `None` so the delta stays in the intake for retry and is never archived. This was a real data-loss bug — the outage path archived the delta unread. `extract_returns_none_on_llm_outage` is the regression guard; `extract_returns_some_on_genuine_no_claims` pins the other side (`"[]"` = nothing worth keeping = `Some([])`, archivable).
+- `run` loop: drains first, sleeps after — a delta dropped before daemon startup is processed on the first cycle instead of waiting a full `interval`.
+- `archive`: best-effort; on rename failure (e.g. cross-device) the source is removed rather than left in place, so it is never re-processed.

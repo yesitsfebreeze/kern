@@ -62,7 +62,7 @@ mod tests {
 
 	#[test]
 	fn long_query_skips_expansion() {
-		let cfg = RetrievalConfig::default(); // hyde_min_query_tokens = 6
+		let cfg = RetrievalConfig::default();
 		let llm: LlmFunc = Arc::new(|_: &str| "x".to_string());
 		let embed: EmbedFunc = Arc::new(|_: &str| Ok(vec![9.0, 9.0]));
 		let qv = vec![1.0, 0.0];
@@ -92,7 +92,6 @@ mod tests {
 		let embed: EmbedFunc = Arc::new(|_: &str| Ok(vec![0.0, 1.0]));
 		let qv = vec![1.0, 0.0];
 		let out = expand_query(&cfg, Some(&llm), Some(&embed), &qv, "cat");
-		// fused (0.5,0.5) -> L2-normalized: equal components, unit norm.
 		assert!((out[0] - out[1]).abs() < 1e-6);
 		let norm = out
 			.iter()
@@ -104,7 +103,6 @@ mod tests {
 
 	#[test]
 	fn fusion_weight_one_yields_pure_hypo_direction() {
-		// w=1.0 → fused = hypo (then L2-normalized): drops the query component.
 		let cfg = RetrievalConfig {
 			hyde_fusion_weight: 1.0,
 			..Default::default()
@@ -113,7 +111,6 @@ mod tests {
 		let embed: EmbedFunc = Arc::new(|_: &str| Ok(vec![0.0, 3.0]));
 		let qv = vec![1.0, 0.0];
 		let out = expand_query(&cfg, Some(&llm), Some(&embed), &qv, "cat");
-		// pure hypo (0,3) normalized → (0,1).
 		assert!(out[0].abs() < 1e-9 && (out[1] - 1.0).abs() < 1e-9);
 	}
 
@@ -130,8 +127,8 @@ mod tests {
 	fn embed_length_mismatch_returns_query() {
 		let cfg = RetrievalConfig::default();
 		let llm: LlmFunc = Arc::new(|_: &str| "answer".to_string());
-		let embed: EmbedFunc = Arc::new(|_: &str| Ok(vec![1.0, 2.0, 3.0])); // len 3
-		let qv = vec![1.0, 0.0]; // len 2
+		let embed: EmbedFunc = Arc::new(|_: &str| Ok(vec![1.0, 2.0, 3.0]));
+		let qv = vec![1.0, 0.0];
 		assert_eq!(expand_query(&cfg, Some(&llm), Some(&embed), &qv, "cat"), qv);
 	}
 
@@ -139,7 +136,7 @@ mod tests {
 	fn empty_hypo_vec_returns_query_without_fusing() {
 		let cfg = RetrievalConfig::default();
 		let llm: LlmFunc = Arc::new(|_: &str| "answer".to_string());
-		let embed: EmbedFunc = Arc::new(|_: &str| Ok(vec![])); // 0-dim
+		let embed: EmbedFunc = Arc::new(|_: &str| Ok(vec![]));
 		let qv = vec![1.0, 0.0];
 		assert_eq!(expand_query(&cfg, Some(&llm), Some(&embed), &qv, "cat"), qv);
 	}

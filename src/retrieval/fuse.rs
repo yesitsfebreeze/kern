@@ -1,8 +1,6 @@
 use crate::base::search::EntityHit;
 use std::collections::HashMap;
 
-/// Weighted Reciprocal Rank Fusion: list `i` contributes `weights[i] / (k_rrf +
-/// rank)`; a missing weight defaults to `1.0` (plain RRF).
 pub fn rrf(lists: &[&[EntityHit]], weights: &[f64], k_rrf: f64, top_k: usize) -> Vec<EntityHit> {
 	let mut agg: HashMap<String, f64> = HashMap::new();
 	for (li, list) in lists.iter().enumerate() {
@@ -17,8 +15,7 @@ pub fn rrf(lists: &[&[EntityHit]], weights: &[f64], k_rrf: f64, top_k: usize) ->
 		return Vec::new();
 	}
 	let mut out: Vec<EntityHit> = agg.into_iter().map(EntityHit::from).collect();
-	// Score desc, id asc — unique ids make this a STRICT total order, so the
-	// top_k partition + sorting only the survivors equals a full sort + truncate.
+	// Unique ids make this a STRICT total order, so the top_k partition + sorting only the survivors equals a full sort + truncate.
 	let cmp = |a: &EntityHit, b: &EntityHit| {
 		crate::base::util::cmp_rank(a.score, &a.entity_id, b.score, &b.entity_id)
 	};
@@ -52,7 +49,6 @@ mod tests {
 
 	#[test]
 	fn global_list_downweight_sinks_popular_irrelevant_entity() {
-		// Both rank 1 in their own list; a 0.5 global weight must lift dense `rel` over `pop`.
 		let dense = [hit("rel")];
 		let global = [hit("pop")];
 		let lists: Vec<&[EntityHit]> = vec![&dense, &global];
@@ -73,15 +69,13 @@ mod tests {
 		let a = [hit("x")];
 		let b = [hit("x")];
 		let lists: Vec<&[EntityHit]> = vec![&a, &b];
-		let out = rrf(&lists, &[1.0], 60.0, 10); // second list defaults to 1.0
+		let out = rrf(&lists, &[1.0], 60.0, 10);
 		let both = rrf(&lists, &[1.0, 1.0], 60.0, 10);
 		assert_eq!(out[0].score, both[0].score, "missing weight == 1.0");
 	}
 
 	#[test]
 	fn equal_score_tie_broken_by_id_ascending_under_top_k() {
-		// Tied fused scores; top_k=1 must resolve by id ascending — breaks under a
-		// non-total-order comparator.
 		let la = [hit("b")];
 		let lb = [hit("a")];
 		let lists: Vec<&[EntityHit]> = vec![&la, &lb];

@@ -1,5 +1,3 @@
-/// The full MCP tool catalogue. Order is intentional (asserted in
-/// `definitions_are_well_formed_and_complete`).
 pub fn tool_definitions() -> Vec<serde_json::Value> {
 	let mut defs = super::tools_query::tool_schemas();
 	defs.extend(super::tools_mutate::tool_schemas());

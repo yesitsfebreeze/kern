@@ -50,8 +50,6 @@ impl Weights {
 	}
 }
 
-/// Dense seed set: vector ANN (reason-vector ANN in [`Mode::Reason`]) merged with
-/// "important" entities. Lexical/PageRank blend on top in `answer::retrieve`, not here (see note).
 pub fn seed(
 	g: &GraphGnn,
 	cfg: &RetrievalConfig,
@@ -64,8 +62,6 @@ pub fn seed(
 	seed_with_important(g, cfg, query_vec, k, mode, opts, &important)
 }
 
-/// [`seed`] with the `important` list supplied by the caller — Hybrid retrieval
-/// needs it twice and runs the O(N) scan once.
 pub fn seed_with_important(
 	g: &GraphGnn,
 	cfg: &RetrievalConfig,
@@ -77,8 +73,7 @@ pub fn seed_with_important(
 ) -> Vec<EntityHit> {
 	let mut hits = match mode {
 		Mode::Reason => seed_by_reason(g, query_vec, k),
-		// Filter DURING the ANN traversal so a sparse filter still yields k matching
-		// hits (not an unfiltered top-k post-filtered to fewer); `keep` IS the post-filter predicate.
+		// Filter DURING the ANN traversal so a sparse filter still yields k matching hits (not an unfiltered top-k post-filtered to fewer).
 		_ => match opts {
 			Some(o) if o.is_active() => {
 				let keep = matches_keep(g, o);
@@ -92,8 +87,7 @@ pub fn seed_with_important(
 	hits
 }
 
-/// `keep(id)` predicate applying [`matches_filter`] by reference — the single
-/// filter shared by dense ANN, lexical, and post-filter, so they never diverge.
+// The single filter shared by dense ANN, lexical, and post-filter, so they never diverge.
 fn matches_keep<'a>(g: &'a GraphGnn, opts: &'a QueryOptions) -> impl Fn(&str) -> bool + 'a {
 	move |id: &str| {
 		g.kern_of_entity(id)
@@ -110,8 +104,7 @@ pub fn seed_lexical(
 	k: usize,
 	opts: Option<&QueryOptions>,
 ) -> Vec<EntityHit> {
-	// Filter BEFORE the BM25 top-k truncation, so a sparse filter still yields k
-	// matching lexical hits (no fewer-than-k).
+	// Filter BEFORE the BM25 top-k truncation, so a sparse filter still yields k matching lexical hits.
 	let raw = match opts {
 		Some(o) if o.is_active() => lex.search_filtered(query_text, k, &matches_keep(g, o)),
 		_ => lex.search(query_text, k),
@@ -154,8 +147,7 @@ pub fn seed_important(
 	let kerns = g.all();
 	let min_cos = cfg.important_min_cosine;
 	let access_threshold = cfg.important_access_threshold;
-	// Importance must respect an active filter at the SOURCE: non-matching important
-	// entities would crowd the merged seed and truncate matching ones out pre-post-filter.
+	// Importance must respect an active filter at the SOURCE: non-matching important entities would crowd the merged seed and truncate matching ones out before the post-filter.
 	let active_filter = opts.filter(|o| o.is_active());
 	let mut hits: Vec<EntityHit> = kerns
 		.par_iter()
@@ -283,8 +275,6 @@ mod tests {
 
 	#[test]
 	fn active_kind_filter_seeds_matches_post_filtering_would_miss() {
-		// 30 Claims at cosine 1.0 bury 3 Facts (~0.994) below any unfiltered top-k;
-		// min_cosine 1.5 disables importance to isolate the dense seed (see note).
 		let mut g = GraphGnn::new();
 		let mut k = Kern::new("kx", "");
 		for i in 0..30 {
@@ -360,8 +350,6 @@ mod tests {
 
 	#[test]
 	fn seed_important_is_deterministic_at_scale() {
-		// fuse_hybrid runs the scan ONCE for two consumers — sound only if the
-		// parallel scan is deterministic across calls.
 		let mut g = GraphGnn::new();
 		let mut k = Kern::new("kx", "");
 		for i in 0..3000 {

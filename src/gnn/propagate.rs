@@ -14,8 +14,6 @@ use crate::gnn::tensor::Tensor;
 /// and the serde `crate::config::GnnConfig` must read them from here, never re-literal.
 pub const DEFAULT_SELF_WEIGHT: f64 = 0.6;
 pub const DEFAULT_MIN_WEIGHT: f64 = 0.01;
-/// Skip GNN training below this many entities; small graphs fall back to the
-/// vector+BM25+PageRank+reason-edge path.
 pub const DEFAULT_MIN_THOUGHTS: usize = 128;
 pub const DEFAULT_TRAIN_EPOCHS: usize = 24;
 pub const DEFAULT_TRAIN_LEARNING_RATE: f64 = 0.01;
@@ -86,8 +84,6 @@ pub fn run_learned_propagation(
 	let mut model = Model::new(vec![l1, l2], None);
 
 	if !snap.weights.is_empty() {
-		// Fail open: a corrupt or version-stale snapshot must not kill the tick, but
-		// cold-starting silently would hide a GNN that never warm-starts again.
 		if let Err(e) = unmarshal_weights(&mut model, &snap.weights) {
 			tracing::error!(error = %e, "GNN weight load failed; cold-starting from fresh weights");
 		}
@@ -194,8 +190,6 @@ fn has_nan_or_inf(v: &[f64]) -> bool {
 mod tests {
 	use super::*;
 
-	/// `n` nodes over `dim` features joined in a path — the minimum connected
-	/// shape `run_learned_propagation` can train on.
 	fn tiny_snapshot(n: usize, dim: usize) -> GnnSnapshot {
 		let mut graph = Graph::new();
 		for i in 0..n {

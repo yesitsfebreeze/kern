@@ -1,6 +1,3 @@
-//! Background tick scheduler — the autonomic loop: clusters thoughts,
-//! spawns/evicts child kerns, GNN propagation, heat decay, cold-GC.
-
 pub mod cluster;
 pub mod gnn_propagate;
 pub mod pulse;
@@ -135,7 +132,6 @@ fn do_cluster(
 	}
 }
 
-/// Phase 1 — pure read: cluster the kern's thoughts, pick the spawn indices.
 fn select_spawn_clusters(
 	kern: &crate::base::types::Kern,
 	max_sample: usize,
@@ -161,7 +157,6 @@ fn select_spawn_clusters(
 	(clusters, spawn_indices)
 }
 
-/// Phase 2 — one unnamed child per selected cluster; members move out of the parent.
 fn spawn_child_clusters(
 	graph: &mut GraphGnn,
 	kern_id: &str,
@@ -190,7 +185,6 @@ fn spawn_child_clusters(
 	spawned_children
 }
 
-/// Phase 3 — pure read; returns (un-enriched real edges, dangling Question edges).
 fn collect_follow_up_jobs(kern: &crate::base::types::Kern) -> (Vec<String>, Vec<String>) {
 	use crate::base::types::ReasonKind;
 
@@ -214,7 +208,6 @@ fn collect_follow_up_jobs(kern: &crate::base::types::Kern) -> (Vec<String>, Vec<
 	(enrich_jobs, question_jobs)
 }
 
-/// Phase 4 — reap empty AND unnamed children, reparenting strays; true if any evicted.
 fn evict_empty_children(graph: &mut GraphGnn, kern_id: &str) -> bool {
 	let children_ids = match graph.kerns.get(kern_id) {
 		Some(k) => k.children.clone(),
@@ -570,7 +563,6 @@ mod tests {
 		assert!(kern.is_named(), "precondition: kern is named");
 		for i in 0..crate::base::constants::KERN_MIN_CLUSTER_SIZE {
 			let id = format!("e{i}");
-			// Orthogonal to the anchor -> off-core, cohesive among themselves.
 			kern.entities.insert(
 				id.clone(),
 				Entity {
@@ -640,7 +632,6 @@ mod tests {
 
 	#[test]
 	fn do_cluster_skips_gnn_when_no_structural_work() {
-		// One thought, no edges, no children -> no structural work of any kind.
 		let q = Queue::new(64);
 		let mut g = GraphGnn::new();
 		let root_id = g.root.id.clone();

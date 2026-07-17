@@ -1,6 +1,3 @@
-//! MCP server surface: tool / prompt / resource handlers exposing kern over
-//! MCP (stdio + SSE/HTTP).
-
 pub mod prompt;
 pub mod resources;
 pub mod sse;
@@ -51,7 +48,6 @@ pub struct Server {
 	pub save_fn: Arc<dyn Fn() + Send + Sync>,
 	pub task_q: Option<Arc<tick::queue::Queue>>,
 	pub cfg: Arc<Config>,
-	/// Semantic cache over answered queries; see [`crate::retrieval::cache`].
 	pub cache: Arc<Mutex<QueryCache>>,
 }
 

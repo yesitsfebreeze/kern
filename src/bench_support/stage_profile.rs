@@ -1,6 +1,3 @@
-//! Per-stage profiling leg for the retrieval harness: runs the LLM-free graph phase
-//! through `retrieve_profiled` and aggregates each stage's mean/p50/p95 and share.
-
 use std::collections::BTreeMap;
 
 use crate::base::graph::GraphGnn;
@@ -26,8 +23,6 @@ pub struct StageProfileReport {
 	stages: Vec<StageStats>,
 }
 
-/// Run every query `iters` times (after `warmup` untimed passes), aggregating by
-/// stage label. Output follows first-seen stage order so the table reads seed → chains.
 pub fn measure_stage_profile(
 	g: &GraphGnn,
 	cfg: &RetrievalConfig,
@@ -191,7 +186,6 @@ mod tests {
 			"per-stage percentiles are monotonic"
 		);
 		let share_sum: f64 = r.stages.iter().map(|s| s.share).sum();
-		// Checkpoint gaps sum to the total, so shares sum to ~1.0 barring Profiler slack.
 		assert!(
 			(0.5..=1.5).contains(&share_sum),
 			"stage shares sum near 1.0, got {share_sum}"

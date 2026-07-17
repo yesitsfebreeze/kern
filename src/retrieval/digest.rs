@@ -1,16 +1,10 @@
-//! Recall digest: markdown snapshot of purpose + hottest thoughts, written for
-//! the Claude-Code SessionStart hook. Pure builder + thin writer; no live query path.
-
 use crate::base::graph::GraphGnn;
 use crate::base::types::{Entity, EntityKind, EntityStatus};
 
-/// ~4 chars/token — the digest only needs an approximate budget.
 fn est_tokens(s: &str) -> usize {
 	s.len() / 4 + 1
 }
 
-/// Near-duplicate key: restatements of the same fact collapse to one key, so
-/// only the first (hottest) survives.
 fn dedup_key(s: &str) -> String {
 	let norm: String = s
 		.split_whitespace()
@@ -20,8 +14,6 @@ fn dedup_key(s: &str) -> String {
 	norm.chars().take(80).collect()
 }
 
-/// Digest markdown: purpose header + active claims ranked by `heat * conf_mean`.
-/// `min_trust` / `token_budget` of 0 disable those gates; `k` stays a hard item cap (see note).
 pub fn build_digest(graph: &GraphGnn, k: usize, min_trust: f64, token_budget: usize) -> String {
 	let mut out = String::from("# kern memory\n\n");
 	let anchors: Vec<String> = crate::base::accept::root_anchor_ids(graph)
@@ -84,15 +76,13 @@ pub fn build_digest(graph: &GraphGnn, k: usize, min_trust: f64, token_budget: us
 		let used = est_tokens(&out);
 		(token_budget.saturating_sub(used)) / 3
 	} else {
-		500 // default connection budget when no cap
+		500
 	};
 	out.push_str(&build_connections(graph, conn_budget));
 
 	out
 }
 
-/// The `## Connections` section: top enriched SEMANTIC edges ranked by from-entity
-/// heat×conf — structural kinds (Spawn/Supersedes) carry no prose and are excluded.
 fn build_connections(graph: &GraphGnn, conn_budget: usize) -> String {
 	if conn_budget == 0 {
 		return String::new();
@@ -101,13 +91,13 @@ fn build_connections(graph: &GraphGnn, conn_budget: usize) -> String {
 	let mut conn_tokens = 0usize;
 	let mut conn_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-	// Built once: id → (display, heat×conf), shared by scoring and formatting.
 	let entity_cache: std::collections::HashMap<&str, (String, f64)> = graph
 		.kerns
 		.values()
 		.flat_map(|k| k.entities.values())
 		.map(|e| {
 			let t = e.text();
+			// char_indices, not raw byte 39: slicing mid-multibyte-char panics.
 			let display = match t.char_indices().nth(39) {
 				Some((byte_pos, _)) => format!("{}…", &t[..byte_pos]),
 				None => t,
@@ -161,7 +151,6 @@ fn build_connections(graph: &GraphGnn, conn_budget: usize) -> String {
 	section
 }
 
-/// Render and write the digest to `path`, creating parent dirs. Best effort.
 pub fn write_digest(
 	graph: &GraphGnn,
 	path: &std::path::Path,
@@ -269,10 +258,9 @@ mod tests {
 		let mut g = GraphGnn::default();
 		let root_id = g.root.id.clone();
 		let kern = g.kerns.get_mut(&root_id).expect("root kern");
-		// Hottest entity, but repeatedly contradicted → low posterior trust.
 		let mut poisoned = mk_entity("p", "poisoned hot claim", 99.0, EntityKind::Claim);
 		poisoned.conf_alpha = 1.0;
-		poisoned.conf_beta = 9.0; // conf_mean = 0.1
+		poisoned.conf_beta = 9.0;
 		poisoned.refresh_score();
 		kern.entities.insert("p".into(), poisoned);
 		kern.entities.insert(
@@ -280,8 +268,6 @@ mod tests {
 			mk_entity("t", "trusted cool claim", 0.5, EntityKind::Claim),
 		);
 
-		// Gate at 0.35: poisoned (0.1) quarantined despite being hottest;
-		// trusted (mk_entity mean 0.667) survives.
 		let gated = build_digest(&g, 10, 0.35, 0);
 		assert!(
 			!gated.contains("poisoned hot claim"),
@@ -301,7 +287,6 @@ mod tests {
 		let mut g = GraphGnn::default();
 		let root_id = g.root.id.clone();
 		let kern = g.kerns.get_mut(&root_id).expect("root kern");
-		// Three ~40-char claims; hotter = earlier. Budget admits ~the first one.
 		kern.entities.insert(
 			"a".into(),
 			mk_entity(
@@ -329,7 +314,6 @@ mod tests {
 				EntityKind::Claim,
 			),
 		);
-		// ~10 tokens budget: first bullet always admitted, later ones trimmed.
 		let md = build_digest(&g, 10, 0.0, 10);
 		assert!(md.contains("alpha claim"), "hottest within budget kept");
 		assert!(!md.contains("charlie claim"), "over-budget claim trimmed");
@@ -344,7 +328,6 @@ mod tests {
 			"a".into(),
 			mk_entity("a", "The build uses cargo nextest", 9.0, EntityKind::Claim),
 		);
-		// Same fact, different casing/spacing → same dedup key → skipped.
 		kern.entities.insert(
 			"b".into(),
 			mk_entity(
@@ -372,11 +355,11 @@ mod tests {
 		let kern = g.kerns.get_mut(&root_id).expect("root kern");
 		let mut hot_lowconf = mk_entity("h", "hot but shaky", 10.0, EntityKind::Claim);
 		hot_lowconf.conf_alpha = 1.0;
-		hot_lowconf.conf_beta = 3.0; // conf_mean 0.25 → score 2.5
+		hot_lowconf.conf_beta = 3.0;
 		hot_lowconf.refresh_score();
 		let mut warm_trusted = mk_entity("w", "warm and solid", 5.0, EntityKind::Claim);
 		warm_trusted.conf_alpha = 9.0;
-		warm_trusted.conf_beta = 1.0; // conf_mean 0.9 → score 4.5
+		warm_trusted.conf_beta = 1.0;
 		warm_trusted.refresh_score();
 		kern.entities.insert("h".into(), hot_lowconf);
 		kern.entities.insert("w".into(), warm_trusted);
@@ -415,12 +398,9 @@ mod tests {
 
 	#[test]
 	fn connection_entity_display_truncates_on_char_boundary() {
-		// Regression: slicing at raw byte 39 panicked when a multibyte char
-		// straddled the boundary ('→' at bytes 38..41).
 		let mut g = GraphGnn::default();
 		let root_id = g.root.id.clone();
 		let kern = g.kerns.get_mut(&root_id).expect("root kern");
-		// 38 ASCII bytes, then a 3-byte '→' spanning bytes 38..41.
 		let text = "UDP multicast discovery works for kern→kern but not browser→kern.";
 		kern
 			.entities
@@ -465,7 +445,6 @@ mod tests {
 	#[test]
 	fn write_digest_creates_parent_dirs_and_writes_the_markdown() {
 		let dir = tempfile::tempdir().unwrap();
-		// A nested path so create_dir_all is exercised.
 		let path = dir.path().join("a/b/digest.md");
 		let mut g = GraphGnn::default();
 		let root_id = g.root.id.clone();
@@ -479,10 +458,8 @@ mod tests {
 		let contents = std::fs::read_to_string(&path).expect("digest file exists after write");
 		assert!(contents.contains("# kern memory"), "header written");
 		assert!(contents.contains("a written claim"), "claim body written");
-		// Matches the pure builder exactly (writer is a thin wrapper).
 		assert_eq!(contents, build_digest(&g, 10, 0.0, 0));
 
-		// Second write overwrites cleanly (no append / leftover).
 		write_digest(&g, &path, 10, 0.0, 0);
 		assert_eq!(
 			std::fs::read_to_string(&path)

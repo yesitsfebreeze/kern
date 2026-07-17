@@ -41,8 +41,6 @@ pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 
 use super::{tool_error, tool_result_json, Server};
 
-/// Empty string = no filter; a non-empty unparseable value is a hard error so
-/// a typo'd time filter fails loudly instead of silently going unfiltered.
 fn parse_time_filter(field: &str, value: &str) -> Result<Option<std::time::SystemTime>, String> {
 	if value.is_empty() {
 		return Ok(None);
@@ -91,12 +89,10 @@ struct QueryArgs {
 	sort: String,
 	#[serde(default)]
 	ascending: bool,
-	/// Legacy free-form source-system filter; prefer `scheme` for typed routing.
 	#[serde(default)]
 	source: String,
 	#[serde(default)]
 	kind: Option<EntityKind>,
-	/// URI scheme filter on `Source` (see `Source::parse_scheme`); unknown values error.
 	#[serde(default)]
 	scheme: Option<String>,
 	#[serde(default)]
@@ -107,11 +103,8 @@ struct QueryArgs {
 	min_conf: f64,
 	#[serde(default)]
 	valid_at: String,
-	/// Bi-temporal point query (ISO8601): return the revision whose
-	/// `[valid_from, valid_to)` window covered this instant.
 	#[serde(default)]
 	as_of: String,
-	/// Also return Superseded revisions reachable from the active hits.
 	#[serde(default)]
 	include_history: bool,
 }
@@ -152,8 +145,6 @@ impl Server {
 		let tag = mode as u64;
 		let text_hash = retrieval::cache::hash_text(&p.text);
 
-		// Exact-text fast path: a verbatim re-ask skips even the embed round-trip.
-		// `vec` stays `None` here; cold-tier fill below is guarded on it.
 		let text_hit = if cacheable {
 			let g = crate::base::locks::read_recovered(&self.graph);
 			self
@@ -192,8 +183,8 @@ impl Server {
 
 			let (llm_arg, embed_arg) = answer_llm_args(answer_on, &llm_fn, &embed_fn);
 
-			// `query_locked` runs HyDE/rerank/answer with the read lock RELEASED — a
-			// slow LLM must never pin it (starves writers, trips the 30s watchdog).
+			// query_locked runs HyDE/rerank/answer with the read lock RELEASED — a slow
+			// LLM must never pin it (starves writers, trips the 30s watchdog).
 			let cached = if cacheable {
 				let g = crate::base::locks::read_recovered(&self.graph);
 				self
@@ -224,8 +215,8 @@ impl Server {
 							c.insert(epoch, text_hash, vec.clone(), tag, fresh.clone());
 						}
 					}
-					// query_locked took ONLY a read lock; the access stamp is committed off
-					// the hot path by a CommitAccess task (advisory, skipped without a queue).
+					// query_locked took only a read lock; access stamps commit off the hot
+					// path via CommitAccess (advisory, skipped without a queue).
 					if let Some(ref q) = self.task_q {
 						let ids: Vec<String> = fresh.entities.iter().map(|s| s.entity.id.clone()).collect();
 						if !ids.is_empty() {
@@ -247,12 +238,9 @@ impl Server {
 
 		let k = if p.k == 0 { rcfg.seed_k } else { p.k };
 
-		// Cold-tier recall: below k, fill from the cold store read-only — demoted
-		// thoughts stay findable without rehydrating into the hot graph.
 		let mut scored: Vec<retrieval::expand::ScoredEntity> = result.entities.clone();
 		let mut cold_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-		// The exact-text fast path skipped embedding (`vec` None), so cold-tier
-		// fill is skipped too.
+		// Exact-text fast path skipped embedding (`vec` None), so cold-tier fill is skipped too.
 		if let Some(ref vec) = vec {
 			if scored.len() < k {
 				// Clone the store handle under a brief read guard; drop it before the scan.
@@ -273,8 +261,8 @@ impl Server {
 			}
 		}
 
-		// Bi-temporal history: walk Supersedes chains back from the active hits (the
-		// ANN never holds Superseded rows); same `matches_filter`, flagged history:true.
+		// The ANN never holds Superseded rows; walk Supersedes chains back from the
+		// active hits for history.
 		let mut history_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 		if p.include_history {
 			let opts = match build_query_options(&p) {
@@ -312,7 +300,6 @@ impl Server {
 			}
 		}
 
-		// History rides ALONGSIDE the top-k, not displacing it — raise the cut.
 		let take_n = k + history_ids.len();
 		let entities: Vec<serde_json::Value> = {
 			let g = crate::base::locks::read_recovered(&self.graph);
@@ -320,7 +307,6 @@ impl Server {
 				.iter()
 				.take(take_n)
 				.map(|st| {
-					// Only enriched reasons (have text) — skip label-only placeholders.
 					let edges: Vec<serde_json::Value> = g
 						.kern_of_entity(&st.entity.id)
 						.and_then(|kid| g.kerns.get(kid))
@@ -362,8 +348,6 @@ impl Server {
 	}
 }
 
-/// Gate the LLM/embedder handles on `answer:true` — `answer:false` stays a
-/// fast pure-vector retrieval (no HyDE / rerank / synthesis generations).
 fn answer_llm_args<'a>(
 	answer: bool,
 	llm: &'a LlmFunc,
@@ -410,8 +394,7 @@ fn entity_detail(
 	})
 }
 
-/// Per-hit JSON shape for `tool_query`'s `entities` array. The kind/scheme/
-/// status labels are consumed directly by `kern_rpc::query` — do not drop them.
+// kind/scheme/status labels are consumed by `kern_rpc::query` — do not drop them.
 pub(super) fn base_entity_json(
 	entity: &crate::base::types::Entity,
 	score: f64,
@@ -433,8 +416,8 @@ pub(super) fn base_entity_json(
 	})
 }
 
-/// Only answer-on, cache-enabled, UNFILTERED, default-sorted queries cache —
-/// any filter/sort changes the result set/order for the same query vector.
+// Only unfiltered, default-sorted, answer-on queries may cache — any filter/sort
+// changes the result set/order for the same query vector.
 fn query_is_cacheable(answer: bool, cache_cap: usize, p: &QueryArgs) -> bool {
 	answer
 		&& cache_cap > 0
@@ -453,8 +436,6 @@ fn query_is_cacheable(answer: bool, cache_cap: usize, p: &QueryArgs) -> bool {
 
 #[cfg(test)]
 mod answer_gating_tests {
-	//! Regression guard: no LLM calls unless `answer:true` (the unconditional-LLM
-	//! bug overran the MCP client timeout as `-32000 Connection closed`).
 	use super::answer_llm_args;
 	use crate::types::{EmbedFunc, LlmFunc};
 	use std::sync::Arc;
@@ -480,8 +461,6 @@ mod answer_gating_tests {
 
 #[cfg(test)]
 mod envelope_shape_tests {
-	//! The envelope must carry kind/scheme/status labels — kern_rpc::query
-	//! silently falls back to defaults if a refactor drops them.
 	use super::base_entity_json as build_entity_json;
 	use crate::base::types::{ChunkPart, ChunkPartKind, Entity, EntityKind, EntityStatus, Source};
 
@@ -571,7 +550,6 @@ mod time_filter_tests {
 
 	#[test]
 	fn nonempty_malformed_is_hard_error() {
-		// Full-length but non-numeric year — must not parse.
 		let e = parse_time_filter("valid_at", "20XX-06-05T09:00:00Z").unwrap_err();
 		assert!(e.contains("valid_at"), "error names the field: {e}");
 	}

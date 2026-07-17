@@ -1,5 +1,3 @@
-//! Tool schema, tool result, and server-id value types.
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -8,13 +6,10 @@ pub struct ToolSchema {
 	pub name: String,
 	#[serde(default)]
 	pub description: Option<String>,
-	/// Opaque `Value`: MCP `inputSchema` is forwarded verbatim and validated by the
-	/// consuming host, not here. `None` means the tool takes no arguments.
 	#[serde(default, rename = "inputSchema")]
 	pub input_schema: Option<Value>,
 }
 
-// Only `PartialEq`: `serde_json::Value`'s number variant is `f64`, so `Value: !Eq`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolResult {
 	#[serde(default)]

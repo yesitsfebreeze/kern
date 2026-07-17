@@ -22,3 +22,12 @@ Scope rating: 8/10 — three seed strategies (important/lexical/reason) feeding 
 - `merge_seeds` — 8/10: priority-ordered seed merge with dedup.
 - `matches_keep` — 9/10: filter predicate bridge for lexical search.
 - `seed_important_is_deterministic_at_scale` — 9/10: covers determinism at scale; now backed by cmp_rank tiebreak.
+Seeding stage:
+- seed(): dense seed set = vector ANN (reason-vector ANN in Mode::Reason) merged with "important" entities. The Lexical/PageRank blend layers on top in answer::retrieve, NOT here.
+- seed_with_important(): same as seed() but the caller supplies the `important` list — Hybrid retrieval needs it twice, so the O(N) importance scan runs once.
+
+Filter-ordering hazards (all three seed sources share matches_keep, applying matches_filter — the single predicate so dense ANN, lexical, and post-filter never diverge):
+- Dense: filter DURING the ANN traversal (search_all_filtered) so a sparse filter still yields k matching hits, not an unfiltered top-k post-filtered down to fewer. `keep` IS the post-filter predicate.
+- Lexical (seed_lexical): filter BEFORE the BM25 top-k truncation, same reason (no fewer-than-k).
+- Importance (seed_important): must respect an active filter at the SOURCE — otherwise non-matching important entities crowd the merged seed and truncate matching ones out before the post-filter runs.
+- seed_important's parallel (rayon) scan must be deterministic across calls, because fuse_hybrid runs it once for two consumers.

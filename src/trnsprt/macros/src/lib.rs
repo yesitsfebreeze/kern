@@ -1,6 +1,3 @@
-//! `service!` proc macro: expands a trait decl into the trait, `<Name>Client<C>`,
-//! and `serve_<snake>(channel, handler)`. Emits `::trnsprt::*` paths only.
-
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
@@ -333,8 +330,6 @@ fn to_snake(s: &str) -> String {
 mod tests {
 	use super::to_snake;
 
-	// `to_snake` names the generated `serve_<snake>` fn, so its output is public
-	// surface. `expand()` is covered only by the consumer-crate integration tests.
 	#[test]
 	fn to_snake_lowercases_and_word_splits_on_interior_capitals() {
 		assert_eq!(to_snake("MemoryRpc"), "memory_rpc");

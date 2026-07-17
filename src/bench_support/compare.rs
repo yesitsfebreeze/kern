@@ -1,6 +1,3 @@
-//! Multi-backend comparison harness: index one [`Corpus`] into every
-//! [`VectorBackend`], score all through the same `ndcg` + latency code.
-
 use std::time::Instant;
 
 use crate::base::types::EntityKind;
@@ -17,14 +14,12 @@ pub struct CompareQuery {
 	pub kind_filter: Option<EntityKind>,
 }
 
-/// A shared corpus + query set, embedded once and handed to every backend.
 pub struct Corpus {
 	pub docs: Vec<Doc>,
 	pub queries: Vec<CompareQuery>,
 }
 
 impl Corpus {
-	/// Deterministic for a given `seed`.
 	pub fn synthetic(n_docs: usize, n_queries: usize, seed: u64) -> Self {
 		let vocab: Vec<String> = (0..200).map(|i| format!("term{i}")).collect();
 		let mut s = seed | 1; // xorshift needs a non-zero state
@@ -86,8 +81,6 @@ pub struct BackendReport {
 
 pub const K: usize = 10;
 
-/// Index, query, and score every backend through identical metric code, so any
-/// difference between rows is the index/fusion — not the measurement.
 pub fn compare(backends: &mut [Box<dyn VectorBackend>], corpus: &Corpus) -> Vec<BackendReport> {
 	let mut out = Vec::with_capacity(backends.len());
 	for b in backends.iter_mut() {
@@ -170,7 +163,6 @@ mod tests {
 
 	#[test]
 	fn synthetic_corpus_drives_a_scale_comparison() {
-		// 500 docs: enough to exercise real ANN traversal, not a 4-doc toy.
 		let corpus = Corpus::synthetic(500, 50, 42);
 		assert_eq!(corpus.docs.len(), 500);
 		assert_eq!(corpus.queries.len(), 50);
@@ -203,7 +195,6 @@ mod tests {
 		);
 	}
 
-	/// Fraction of queries whose expected target lands in the backend's top-10.
 	fn mean_target_recall_10(
 		queries: &[CompareQuery],
 		mut top10: impl FnMut(&CompareQuery) -> Vec<String>,
@@ -221,8 +212,6 @@ mod tests {
 		hits as f64 / queries.len() as f64
 	}
 
-	// disk_threshold = 0 forces the spill, so this exercises the real rebuild_index
-	// routing rather than DiskIndex in isolation.
 	fn disk_backed_graph(docs: &[Doc], dir: &std::path::Path) -> crate::base::graph::GraphGnn {
 		use crate::base::graph::GraphGnn;
 		use crate::base::types::{Entity, Kern};
@@ -249,7 +238,6 @@ mod tests {
 
 	#[test]
 	fn disk_spilled_path_recall_tracks_the_in_ram_index() {
-		// I7 regression: the disk tier must not silently lose recall vs the in-RAM HNSW.
 		let corpus = Corpus::synthetic(300, 40, 99);
 
 		let mut kern = KernBackend::new();
@@ -304,7 +292,6 @@ mod tests {
 
 	#[test]
 	fn identical_backends_produce_identical_quality_and_memory() {
-		// Latency is wall-clock and deliberately excluded.
 		let mut backends: Vec<Box<dyn VectorBackend>> =
 			vec![Box::new(KernBackend::new()), Box::new(KernBackend::new())];
 		let r = compare(&mut backends, &corpus());

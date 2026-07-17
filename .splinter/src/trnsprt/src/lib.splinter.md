@@ -15,3 +15,6 @@ MCP (legacy)  McpServer / Client / Registry / Transport      JSON-RPC, wire in `
 - `mod kern_rpc`: sibling to `search::SearchSvc`; DTOs are intentionally shared where the wire shape overlaps.
 
 Second-pass migration: crate `//!` doc compressed to 2 lines (stack inventory lives in the layering sketch above). `__private` doc compressed — full contract: internals re-exported solely for `service!`-generated code, which emits fully-qualified `::trnsprt::__private::*` paths so the expansion needs no `use` in the caller crate; anything inside may be added, removed, or version-bumped in any release — depend only on the generated service client/trait.
+Design notes (moved from source comments during comment sweep):
+- trnsprt is kern's transport + typed-RPC layer. Two stacks: the legacy MCP JSON-RPC boundary and the typed-RPC stack (typed + service!).
+- KEPT in source: the __private mod re-exports are solely for service!-generated code (::trnsprt::__private::*) and are NOT public API. The `extern crate self as trnsprt` alias makes the macro's emitted ::trnsprt::* paths resolve when service! is invoked inside this crate.

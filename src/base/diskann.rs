@@ -1,5 +1,4 @@
-//! Disk-resident Vamana (DiskANN-style) ANN index: an α-pruned proximity graph
-//! persisted as three mmap'd files. NOT yet wired into the live search path.
+// Not yet wired into the live search path.
 
 use std::collections::HashSet;
 use std::io;
@@ -10,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::base::hnsw::HnswHit;
 
-/// Adjacency padding marker: "no neighbour in this slot".
+// Adjacency padding marker: "no neighbour in this slot".
 const SENTINEL: u32 = u32::MAX;
 
 fn le_u32(c: &[u8]) -> u32 {
@@ -19,11 +18,8 @@ fn le_u32(c: &[u8]) -> u32 {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Params {
-	/// Max out-degree of the graph.
 	pub r: usize,
-	/// Beam width during construction.
 	pub build_l: usize,
-	/// α for RobustPrune (>1 keeps longer-range edges for better recall).
 	pub alpha: f32,
 }
 
@@ -56,7 +52,7 @@ fn graph_path(dir: &Path) -> PathBuf {
 	dir.join("graph.bin")
 }
 
-/// `1 - cos`; mismatched or zero-norm inputs yield the max distance `1.0`.
+// 1 - cos; mismatched or zero-norm inputs yield the max distance 1.0.
 fn cos_dist(a: &[f32], b: &[f32]) -> f32 {
 	if a.len() != b.len() {
 		return 1.0;
@@ -75,8 +71,6 @@ fn cos_dist(a: &[f32], b: &[f32]) -> f32 {
 	1.0 - dot / (na.sqrt() * nb.sqrt())
 }
 
-/// Greedy beam search. Returns `(beam, visited)`: `beam` sorted nearest first,
-/// `visited` every node expanded (feeds construction's RobustPrune).
 fn greedy(
 	entry: u32,
 	beam_l: usize,
@@ -110,8 +104,6 @@ fn greedy(
 	(beam, visited.into_iter().collect())
 }
 
-/// RobustPrune: choose ≤ `r` out-neighbours for `p` from `candidates`, dropping
-/// any candidate occluded by a closer-to-`p` one under the α test.
 fn robust_prune(
 	p: u32,
 	candidates: &[u32],
@@ -155,8 +147,7 @@ fn robust_prune(
 	result
 }
 
-/// Build a Vamana graph from `items` and persist it under `dir`. Deterministic
-/// (fixed RNG seed) for reproducible indexes. Returns the entity count written.
+// Deterministic (fixed RNG seed) for reproducible indexes.
 pub fn build_and_save(
 	dir: &Path,
 	items: &[(String, Vec<f32>)],
@@ -177,7 +168,6 @@ pub fn build_and_save(
 		use rand::SeedableRng;
 		let mut rng = rand::rngs::StdRng::seed_from_u64(42);
 
-		// Random R-regular-ish init so the graph is connected before pruning.
 		for (i, slot) in adj.iter_mut().enumerate().take(count) {
 			let mut nbrs = HashSet::new();
 			while nbrs.len() < params.r.min(count - 1) {
@@ -223,7 +213,6 @@ pub fn build_and_save(
 	Ok(count)
 }
 
-/// Index node closest to the centroid — a good central entry point.
 fn medoid(vectors: &[Vec<f32>]) -> u32 {
 	if vectors.is_empty() {
 		return 0;
@@ -250,9 +239,9 @@ fn medoid(vectors: &[Vec<f32>]) -> u32 {
 	best
 }
 
-/// Layout under `dir/`: `meta.bin` bincode `Meta`; `vectors.bin` `count×dim` f32
-/// LE, fixed stride; `graph.bin` `count×r` u32 LE, `SENTINEL`-padded.
-#[allow(clippy::too_many_arguments)] // serializer: grouping the on-disk fields into a struct is churn for no gain
+// On-disk layout: meta.bin bincode Meta; vectors.bin count×dim f32 LE fixed
+// stride; graph.bin count×r u32 LE, SENTINEL-padded.
+#[allow(clippy::too_many_arguments)]
 fn write_files(
 	dir: &Path,
 	dim: usize,
@@ -299,7 +288,6 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 	std::fs::rename(&tmp, path)
 }
 
-/// A memory-mapped, read-only Vamana index opened from disk.
 pub struct DiskIndex {
 	dim: usize,
 	count: usize,
@@ -311,8 +299,6 @@ pub struct DiskIndex {
 }
 
 impl DiskIndex {
-	/// Open an index previously written by [`build_and_save`]. The vector and
-	/// graph files are memory-mapped; only `meta` is read into memory.
 	pub fn open(dir: &Path) -> io::Result<Self> {
 		let corrupt = |msg: &str| io::Error::new(io::ErrorKind::InvalidData, format!("diskann: {msg}"));
 		let meta_bytes = std::fs::read(meta_path(dir))?;
@@ -367,7 +353,6 @@ impl DiskIndex {
 		self.count == 0
 	}
 
-	/// The id of every vector in the index, in build order.
 	pub fn ids(&self) -> &[String] {
 		&self.ids
 	}
@@ -389,8 +374,6 @@ impl DiskIndex {
 			.collect()
 	}
 
-	/// Approximate `k` nearest neighbours; `search_l` is the beam width (≥ `k`).
-	/// Returns `(id, distance)` nearest first.
 	pub fn search(&self, query: &[f32], k: usize, search_l: usize) -> Vec<(String, f32)> {
 		if self.count == 0 || k == 0 || query.len() != self.dim {
 			return Vec::new();
@@ -406,8 +389,6 @@ impl DiskIndex {
 			.collect()
 	}
 
-	/// [`search`](Self::search) as [`HnswHit`]s with a cosine *similarity* score
-	/// (`1.0 - distance`), so disk and in-RAM hits fuse in one ranking.
 	pub fn search_hits(&self, query: &[f32], k: usize, search_l: usize) -> Vec<HnswHit> {
 		self
 			.search(query, k, search_l)
@@ -419,8 +400,6 @@ impl DiskIndex {
 			.collect()
 	}
 
-	/// [`search_hits`](Self::search_hits) restricted to ids passing `keep`; the
-	/// pool widens to `search_l.max(k)` first so a sparse filter still fills `k`.
 	pub fn search_hits_filtered(
 		&self,
 		query: &[f32],
@@ -479,7 +458,6 @@ mod tests {
 		assert_eq!(idx.len(), 200);
 		let hits = idx.search(&items[0].1, 5, 64);
 		assert_eq!(hits.len(), 5);
-		// The query is an indexed point, so it should find itself first.
 		assert_eq!(hits[0].0, "e0");
 	}
 
@@ -551,7 +529,6 @@ mod tests {
 		build_and_save(dir.path(), &items, Params::default()).unwrap();
 		let idx = DiskIndex::open(dir.path()).unwrap();
 
-		// search_l widened so the sparse even-id filter still yields a full k.
 		let even = |id: &str| {
 			id.trim_start_matches('e')
 				.parse::<usize>()
@@ -605,7 +582,6 @@ mod tests {
 		let items = rand_items(10, 8, 3);
 		build_and_save(dir.path(), &items, Params::default()).unwrap();
 		let mut graph = std::fs::read(graph_path(dir.path())).unwrap();
-		// Right size, bogus content: first slot points past the last node.
 		graph[..4].copy_from_slice(&(items.len() as u32 + 7).to_le_bytes());
 		std::fs::write(graph_path(dir.path()), &graph).unwrap();
 		assert!(DiskIndex::open(dir.path()).is_err());

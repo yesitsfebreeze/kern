@@ -27,8 +27,6 @@ use super::queue::{task, task_extra, Queue, TaskKind};
 pub use crate::types::{EmbedFunc, LlmFunc};
 pub type BroadcastQuestionFunc = Arc<dyn Fn(&str, &str, &[f32], &str) + Send + Sync>;
 
-/// Strip one leading `Theme:`/`Name:`/`Label:` label the naming LLM sometimes
-/// prepends; only the first matching prefix is removed.
 fn strip_name_prefixes(raw: &str) -> String {
 	let mut name = raw.trim().to_string();
 	for pfx in &["Theme:", "Name:", "Label:", "theme:", "name:"] {
@@ -40,8 +38,7 @@ fn strip_name_prefixes(raw: &str) -> String {
 	name
 }
 
-/// Seed up to 3 dangling Question edges for a freshly ingested entity.
-/// Lock order: snapshot under a read guard, LLM UNLOCKED, one write guard.
+// Lock order: snapshot under a read guard, LLM unlocked, one write guard.
 pub fn do_seed_questions(
 	q: &Queue,
 	g: &Arc<RwLock<GraphGnn>>,
@@ -112,8 +109,7 @@ pub fn do_seed_questions(
 	q.enqueue(task(TaskKind::Persist, &root_id));
 }
 
-/// Classify a recorded `Rephrase` near-dup; on CONTRADICTION run bi-temporal
-/// supersedence. LLM runs UNLOCKED; fail open at every step (edge left as recorded).
+// LLM runs unlocked; fail open at every step (edge left as recorded).
 pub fn do_classify_contradiction(
 	q: &Queue,
 	g: &Arc<RwLock<GraphGnn>>,
@@ -195,7 +191,6 @@ pub fn do_classify_contradiction(
 			if let Some(k) = graph.get_mut(kern_id) {
 				remove_reason(k, rid);
 			}
-			// Mirror the ingest commit path: index the revision for lexical recall.
 			if let Some(lex) = graph.lexical() {
 				lex.insert(&new_id, &new_text);
 			}
@@ -206,8 +201,6 @@ pub fn do_classify_contradiction(
 	q.enqueue(task(TaskKind::GnnPropagate, kern_id));
 }
 
-/// Read-locked: anchor `(prompt, centroid id, parent id)` from the largest
-/// cohesive cluster; `None` when gone, already named, or nothing cohesive.
 fn naming_prompt(
 	g: &Arc<RwLock<GraphGnn>>,
 	kern_id: &str,
@@ -381,7 +374,6 @@ pub fn do_resolve(
 	rid: &str,
 	bq: Option<&BroadcastQuestionFunc>,
 ) {
-	// The ANN search is the expensive part — run it under a read guard only.
 	let top_hit = {
 		let graph = read_recovered(g);
 		let kern = match graph.loaded(kern_id) {
@@ -426,7 +418,6 @@ pub fn do_resolve(
 		return;
 	}
 
-	// Unresolved locally — broadcast the question to peers.
 	let broadcast_data = if bq.is_some() {
 		let graph = read_recovered(g);
 		graph.loaded(kern_id).and_then(|kern| {
@@ -448,14 +439,10 @@ pub fn do_resolve(
 	}
 }
 
-/// Fold the disk index's in-RAM delta into a fresh DiskANN snapshot (see
-/// [`GraphGnn::consolidate_disk_index`]). Graph-global; no-op when not disk-backed.
 pub fn do_disk_consolidate(g: &Arc<RwLock<GraphGnn>>) {
 	write_recovered(g).consolidate_disk_index();
 }
 
-/// Deferred access write-back (`extra` = newline-joined entity ids). Stamps live
-/// entities WITHOUT bumping the mutation epoch (see `score::commit_access_ids`).
 pub fn do_commit_access(g: &Arc<RwLock<GraphGnn>>, extra: &str) {
 	let ids: Vec<String> = extra
 		.lines()
@@ -499,8 +486,6 @@ pub fn do_persist(g: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
 	let _ = store.save_one_kern(kern);
 }
 
-/// Re-embed dirty entities/reasons in `kern_id` and rebuild the index. The dirty
-/// flag is durable truth — set on edit, cleared only once the vector is replaced.
 pub fn do_reembed(g: &Arc<RwLock<GraphGnn>>, kern_id: &str, embed: Option<&EmbedFunc>) {
 	let Some(embed) = embed else { return };
 
@@ -572,8 +557,7 @@ pub fn do_reembed(g: &Arc<RwLock<GraphGnn>>, kern_id: &str, embed: Option<&Embed
 				_ => None,
 			};
 			if let Some(r) = k.reasons.get_mut(&rid) {
-				// `nv` None (an endpoint not yet embedded): leave the edge dirty so a
-				// later sweep retries, rather than pinning a stale vector.
+				// endpoint not yet embedded: leave the edge dirty to retry, don't pin a stale vector.
 				if let Some(v) = nv {
 					r.vector = v;
 					r.dirty = false;
@@ -606,7 +590,6 @@ mod tests {
 			.unwrap()
 			.entities
 			.insert("e1".into(), e);
-		// Repopulate entity_kern (private) from the kern maps, like load does.
 		g.rebuild_index();
 		let g = Arc::new(RwLock::new(g));
 
@@ -641,8 +624,6 @@ mod tests {
 		);
 	}
 
-	/// One entity `old` plus a pending Rephrase edge to `new_text` (as the ingest
-	/// dedup path records). Returns `(graph, root_id, rephrase_reason_id)`.
 	fn graph_with_rephrase(
 		old_text: &str,
 		new_text: &str,
@@ -849,7 +830,6 @@ mod tests {
 		g.kerns.insert(kid.clone(), kern);
 		let g = Arc::new(RwLock::new(g));
 
-		// Embedder is unused here (no dirty entities), but required by the signature.
 		let embed: EmbedFunc = Arc::new(|_t: &str| Ok(vec![9.0, 9.0]));
 		do_reembed(&g, &kid, Some(&embed));
 
@@ -891,12 +871,12 @@ mod tests {
 				from: "asker".into(),
 				to: String::new(),
 				kind: ReasonKind::Question,
-				vector: vec![1.0, 0.0, 0.0], // identical to `target` -> cosine 1.0
+				vector: vec![1.0, 0.0, 0.0],
 				..Default::default()
 			},
 		);
 		g.kerns.insert(kid.clone(), kern);
-		g.rebuild_index(); // populate entity_idx so search_all_unlocked can hit
+		g.rebuild_index();
 		let g = Arc::new(RwLock::new(g));
 
 		let q = Queue::new(16);
@@ -930,7 +910,7 @@ mod tests {
 			Reason {
 				id: "linked".into(),
 				from: "x".into(),
-				to: "y".into(), // already linked
+				to: "y".into(),
 				kind: ReasonKind::Question,
 				vector: vec![1.0, 0.0],
 				..Default::default()

@@ -1,5 +1,4 @@
-//! `kern reembed`: re-embed every stored vector after an `[embed] model` change
-//! (dim locks at first ingest). Daemon stopped — this writes the graph directly.
+// Daemon must be stopped: this writes the graph directly.
 
 use std::collections::HashMap;
 
@@ -39,8 +38,7 @@ pub(super) async fn cmd_reembed(cfg: &crate::config::Config, embed_url: &str, em
 		}
 	};
 
-	// gnn_vector is re-seeded from the raw embed; the GNN tick refines it later
-	// (a stale-dimension gnn_vector would break its index).
+	// Re-seed gnn_vector from the raw embed: a stale-dimension gnn_vector would break its index.
 	for kern in g.kerns.values_mut() {
 		for e in kern.entities.values_mut() {
 			if let Some(v) = new_vecs.get(&e.id) {
@@ -49,8 +47,7 @@ pub(super) async fn cmd_reembed(cfg: &crate::config::Config, embed_url: &str, em
 			}
 		}
 	}
-	// Reason edge vectors are the mean of their endpoints — recompute from the
-	// new entity vectors so the reason index matches the new dimension.
+	// Recompute reason-edge vectors (mean of endpoints) so the reason index matches the new dimension.
 	for kern in g.kerns.values_mut() {
 		for r in kern.reasons.values_mut() {
 			if let (Some(fv), Some(tv)) = (new_vecs.get(&r.from), new_vecs.get(&r.to)) {
@@ -101,8 +98,8 @@ async fn embed_all(
 	Ok(out)
 }
 
-/// Re-embed cold-tier entities too — old-dim vectors silently drop from cold
-/// search. Atomic: commits only if EVERY batch succeeds. `Ok(n)` = count done.
+// Atomic: commits only if every batch succeeds; old-dim cold vectors silently
+// drop from search otherwise.
 async fn reembed_cold(
 	store: Option<std::sync::Arc<crate::base::store::Store>>,
 	client: &crate::llm::Client,
@@ -158,7 +155,6 @@ mod tests {
 
 	#[tokio::test]
 	async fn embed_all_errs_when_server_returns_a_mismatched_vector_count() {
-		// Stub always returns ONE embedding, so a 2-input batch trips the count guard.
 		let app = axum::Router::new().route(
 			"/api/embed",
 			axum::routing::post(|| async {
@@ -187,7 +183,6 @@ mod tests {
 		use crate::base::store::Store;
 		use crate::base::types::Entity;
 
-		// Stub returns ONE embedding, so the 2-entity cold batch trips the count guard.
 		let app = axum::Router::new().route(
 			"/api/embed",
 			axum::routing::post(|| async {

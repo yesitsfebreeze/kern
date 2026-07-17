@@ -1,6 +1,3 @@
-//! Provider-agnostic LLM dispatch: `embed`, `complete`, and `answer` legs, each
-//! with a native Ollama path and an OpenAI-compat path ([`wants_native`] picks).
-
 use futures_util::StreamExt as _;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
@@ -36,22 +33,16 @@ pub fn is_transient(err: &LlmError) -> bool {
 	}
 }
 
-/// Retry a failed batch embed as a single only for batch-specific failures
-/// (transient / empty batch) — a permanent client error fails identically single.
 fn should_retry_single(err: &LlmError) -> bool {
 	is_transient(err) || matches!(err, LlmError::EmptyEmbedding)
 }
 
-/// Parameters for [`Client::answer`]. `num_predict` caps generated tokens —
-/// `None` for a real answer, `Some(1)` for the warm ping.
 pub struct AnswerParams {
 	pub messages: Vec<(String, String)>,
 	pub stream: bool,
 	pub num_predict: Option<u64>,
 }
 
-/// One LLM endpoint. Empty fields fall back per [`Client::new`] (answer/embed →
-/// reason), so `Endpoint::default()` means "reuse the reason endpoint".
 #[derive(Default, Clone)]
 pub struct Endpoint {
 	pub url: String,
@@ -89,18 +80,13 @@ struct Inner {
 	embed_headers: HeaderMap,
 	embed_native: bool,
 	http: reqwest::Client,
-	/// Serving pins the reason model to CPU (`num_gpu:0`) so a distillation
-	/// burst can't evict the embedder + answer model; eval flips this.
 	reason_gpu: bool,
-	/// Sampling seed for reason calls (both paths); eval sets it, serving doesn't.
 	seed: Option<i64>,
-	/// Reason-call temperature override; eval pins the judge to 0.0.
 	temperature: Option<f64>,
 }
 
 impl Client {
-	/// Empty `answer`/`embed` fields fall back to `reason` (embed: url+key;
-	/// answer: url+key+model — an empty answer model would 400 on `/ask`).
+	// answer falls back with its model too (an empty answer model would 400 on `/ask`); embed takes no reason model.
 	pub fn new(reason: Endpoint, answer: Endpoint, embed: Endpoint) -> Self {
 		fn or<'a>(v: &'a str, fallback: &'a str) -> &'a str {
 			if v.is_empty() {
@@ -114,8 +100,7 @@ impl Client {
 		let answer_url = or(&answer.url, &reason.url);
 		let answer_key = or(&answer.key, &reason.key);
 		let answer_model = or(&answer.model, &reason.model);
-		// Flags are decided on the configured URL — normalize strips the `/v1`
-		// that marks an OpenAI-compat server.
+		// wants_native reads the pre-normalize URL: normalize strips the `/v1` that marks OpenAI-compat.
 		let reason_native = wants_native(&reason.url);
 		let answer_native = wants_native(answer_url);
 		let embed_native = wants_native(embed_url);
@@ -125,8 +110,8 @@ impl Client {
 		};
 		let http = reqwest::Client::builder()
 			.timeout(Duration::from_secs(120))
-			// Short connect bound: a dead endpoint must fail fast (transient -> retry)
-			// — WSL passthrough to a closed port hangs rather than refusing.
+			// Short connect bound so a dead endpoint fails fast (transient -> retry):
+			// WSL passthrough to a closed port hangs rather than refusing.
 			.connect_timeout(Duration::from_secs(3))
 			.build()
 			.expect("failed to build HTTP client");
@@ -152,8 +137,6 @@ impl Client {
 		}
 	}
 
-	/// Eval-mode client: reason calls may use the GPU (they ARE the workload)
-	/// and sampling is seeded so multi-seed runs are reproducible.
 	pub fn for_eval(mut self, seed: i64) -> Self {
 		let inner = Arc::make_mut(&mut self.inner);
 		inner.reason_gpu = true;
@@ -161,26 +144,13 @@ impl Client {
 		self
 	}
 
-	/// Pin the reason-call sampling temperature (both reason paths).
 	pub fn with_temperature(mut self, t: f64) -> Self {
 		Arc::make_mut(&mut self.inner).temperature = Some(t);
 		self
 	}
 
-	/// Whether serving should force reason calls onto the CPU (`num_gpu:0`).
-	///
-	/// The pin exists for ONE reason: a distillation burst on a reason model that
-	/// is a *different, larger* model than the answerer evicts the embedder +
-	/// answer model from an 8 GB GPU and thrashes `/ask`. When reason and answer
-	/// resolve to the same model on the same endpoint there is nothing to evict —
-	/// one Ollama runner serves both legs — so the pin has no justification left
-	/// and is actively harmful: Ollama keys a runner by its placement, the first
-	/// call wins, and a reason call would strand the shared runner on the CPU
-	/// where every subsequent `/ask` then pays CPU inference (measured: same tag,
-	/// `num_gpu:0` first, and the later GPU-allowed call silently reuses the CPU
-	/// runner rather than starting a second one).
-	///
-	/// Eval always clears the pin: there reason calls ARE the workload.
+	// CPU-pin reason calls so a distillation burst can't evict the answer model. Dropped when reason
+	// and answer share one runner (same url+model): pinning would strand `/ask` on CPU. Full note in splinter.
 	fn pins_reason_to_cpu(&self) -> bool {
 		if self.inner.reason_gpu {
 			return false;
@@ -211,8 +181,6 @@ impl Client {
 		}
 	}
 
-	/// `/api/embed` body; `input` is one string or an array. Only the NATIVE
-	/// endpoint honors `num_ctx`/`keep_alive`; `truncate` clips instead of erroring.
 	fn embed_body(&self, input: Value) -> Value {
 		serde_json::json!({
 			"model": self.inner.embed_model,
@@ -223,8 +191,6 @@ impl Client {
 		})
 	}
 
-	/// POST `body` as JSON, mapping any non-2xx to [`LlmError::Api`]. Body
-	/// decoding stays with the caller — each path parses a different shape.
 	async fn post_checked<T: Serialize + ?Sized>(
 		&self,
 		url: &str,
@@ -356,8 +322,6 @@ impl Client {
 		Ok(content)
 	}
 
-	/// Answer-model entry point (`/ask` UI, `query --answer`, warm ping). Yields
-	/// each non-empty content delta in order; errors surface as a single `Err`.
 	pub fn answer(
 		&self,
 		params: AnswerParams,
@@ -443,8 +407,6 @@ impl Client {
 		move |prompt: &str| {
 			let client = client.clone();
 			let prompt = prompt.to_string();
-			// No runtime or a completion error both collapse to "" — the distill /
-			// edge-label callers treat that as "no output".
 			block_on_in_place(client.complete(&prompt))
 				.and_then(Result::ok)
 				.unwrap_or_default()
@@ -452,8 +414,7 @@ impl Client {
 	}
 }
 
-/// Sync bridge on a runtime worker thread: `block_in_place` makes `block_on`
-/// legal here (plain `block_on` panics). `None` outside any runtime.
+// `block_in_place` makes `block_on` legal on a runtime worker (plain `block_on` panics); `None` outside any runtime.
 pub(crate) fn block_on_in_place<F: std::future::Future>(fut: F) -> Option<F::Output> {
 	let handle = tokio::runtime::Handle::try_current().ok()?;
 	Some(tokio::task::block_in_place(|| handle.block_on(fut)))
@@ -479,15 +440,11 @@ fn make_headers(key: &str) -> HeaderMap {
 	h
 }
 
-/// Response from Ollama's native `/api/embed`. `embeddings` preserves the order
-/// of the request `input` (one row per input string).
 #[derive(Deserialize)]
 struct NativeEmbedResponse {
 	embeddings: Vec<Vec<f32>>,
 }
 
-/// Response from OpenAI-compat `/v1/embeddings`. Order is NOT guaranteed —
-/// callers must sort by `index` before returning.
 #[derive(Deserialize)]
 struct OpenAiEmbedResponse {
 	data: Vec<OpenAiEmbedItem>,
@@ -530,46 +487,36 @@ struct ChatChoiceMessage {
 	content: String,
 }
 
-/// Ollama's 32k default allocates a KV cache big enough to spill the answer
-/// model off the GPU (VRAM numbers in the note); 8192 keeps it GPU-resident.
+// Ollama's 32k default KV cache would spill the answer model off the GPU; 8192 keeps it GPU-resident.
 const ANSWER_NUM_CTX: u64 = 8192;
 
-/// Keep the answer model resident (`/v1` ignores `keep_alive`). Paired with the
-/// ~4-min warm ping so a user `/ask` never pays a cold reload.
+// Keep the answer model resident (`/v1` ignores `keep_alive`); paired with the warm ping so `/ask` never cold-reloads.
 const ANSWER_KEEP_ALIVE: &str = "10m";
 
-/// Without a cap Ollama allocates the model's DEFAULT-context KV cache, which
-/// cannot share an 8 GB GPU with the answer model (VRAM numbers in the note).
+// Without a cap Ollama's default-context KV cache can't share an 8 GB GPU with the answer model.
 const EMBED_NUM_CTX: u64 = 2048;
 
-/// Keep the embedder resident; same rationale as [`ANSWER_KEEP_ALIVE`].
+// Keep the embedder resident; same rationale as `ANSWER_KEEP_ALIVE`.
 const EMBED_KEEP_ALIVE: &str = "10m";
 
-/// Reason prompts are bounded and a larger window only slows CPU prefill.
 const REASON_NUM_CTX: u64 = 8192;
 
-/// Short keep-alive frees the large CPU model's RAM between distillation bursts.
 const REASON_KEEP_ALIVE: &str = "2m";
 
-/// Overrides the client's 120 s default — slow CPU inference, large RAG prompts,
-/// or long streaming answers can run well past it.
+// Overrides the client's 120 s default: slow CPU inference / large RAG prompts / long streams run past it.
 const LLM_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// Pinned so embed timeouts stay stable if the client-level default changes.
 const EMBED_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn is_local_ollama(url: &str) -> bool {
 	url.contains("//localhost") || url.contains("//127.0.0.1") || url.contains(":11434")
 }
 
-/// Local URLs get Ollama's native `/api/*`; an explicit `/v1` suffix opts into
-/// OpenAI-compat regardless of host (vLLM, llama-server).
 fn wants_native(url: &str) -> bool {
 	!url.trim_end_matches('/').ends_with("/v1") && is_local_ollama(url)
 }
 
-/// One parsed streaming event from either backend. The terminal chunk may
-/// carry both content and `done:true` — emit content before acting on `done`.
+// Terminal chunk may carry both content and `done:true` — emit content before acting on `done`.
 #[derive(Debug, PartialEq)]
 struct ChatLine {
 	content: Option<String>,
@@ -682,7 +629,6 @@ mod tests {
 				done: true
 			})
 		);
-		// Terminal chunk with both content and done=true — content must survive.
 		assert_eq!(
 			parse_chat_line(r#"{"message":{"content":"Full answer."},"done":true}"#),
 			Some(ChatLine {
@@ -703,7 +649,6 @@ mod tests {
 
 	#[test]
 	fn permanent_client_errors_do_not_retry_single() {
-		// 400/401 fail identically as a single call — no wasted second round-trip.
 		assert!(!should_retry_single(&LlmError::Api {
 			status: 400,
 			body: String::new()
@@ -733,10 +678,7 @@ mod tests {
 		assert!(is_local_ollama("http://localhost"));
 		assert!(is_local_ollama("http://127.0.0.1:9999"));
 		assert!(is_local_ollama("http://ollama:11434"));
-		// A remote OpenAI-compat host is NOT local — must stay on /v1.
 		assert!(!is_local_ollama("https://api.openai.com"));
-		// Host substring must be anchored to the authority, not matched anywhere
-		// in the URL — `notlocalhost.com` is NOT localhost.
 		assert!(!is_local_ollama("http://notlocalhost.com"));
 	}
 
@@ -744,7 +686,6 @@ mod tests {
 	fn explicit_v1_suffix_forces_openai_compat_even_on_localhost() {
 		assert!(wants_native("http://localhost:11434"));
 		assert!(wants_native("http://localhost:11434/"));
-		// Local vLLM / llama-server: `/v1` opts out of the native path.
 		assert!(!wants_native("http://localhost:8000/v1"));
 		assert!(!wants_native("http://127.0.0.1:8000/v1/"));
 		assert!(!wants_native("https://api.openai.com/v1"));
@@ -758,8 +699,6 @@ mod tests {
 		)
 	}
 
-	/// Distinct reason/answer models compete for one 8 GB GPU, so serving keeps
-	/// the CPU pin that stops a distillation burst evicting `/ask`.
 	#[test]
 	fn distinct_reason_and_answer_models_keep_the_serving_cpu_pin() {
 		let c = client_with(
@@ -769,8 +708,6 @@ mod tests {
 		assert!(c.pins_reason_to_cpu());
 	}
 
-	/// One model on one endpoint means one Ollama runner for both legs: nothing
-	/// can evict anything, and pinning would strand `/ask` on a CPU runner.
 	#[test]
 	fn shared_reason_and_answer_model_drops_the_cpu_pin() {
 		let c = client_with(
@@ -779,8 +716,6 @@ mod tests {
 		);
 		assert!(!c.pins_reason_to_cpu());
 
-		// The stock config path: an empty answer endpoint falls back to reason,
-		// which is exactly how a zero-config install resolves both legs.
 		let stock = Client::new(
 			Endpoint::new("http://localhost:11434", "granite4:3b", ""),
 			Endpoint::default(),
@@ -789,8 +724,6 @@ mod tests {
 		assert!(!stock.pins_reason_to_cpu());
 	}
 
-	/// Same model tag on DIFFERENT hosts is two runners on two machines — the
-	/// shared-runner reasoning does not apply, so the pin stays.
 	#[test]
 	fn same_model_on_different_endpoints_keeps_the_cpu_pin() {
 		let c = client_with(
@@ -800,7 +733,6 @@ mod tests {
 		assert!(c.pins_reason_to_cpu());
 	}
 
-	/// Eval clears the pin regardless: there reason calls ARE the workload.
 	#[test]
 	fn eval_never_pins_reason_to_cpu() {
 		let c = client_with(
@@ -811,8 +743,6 @@ mod tests {
 		assert!(!c.pins_reason_to_cpu());
 	}
 
-	/// The stub distinguishes batch (array `input`) from the single retry (string):
-	/// the fallback fires only after a retry-worthy batch failure.
 	#[tokio::test]
 	async fn embed_falls_back_to_single_on_transient_batch_error() {
 		use axum::http::StatusCode;
@@ -841,7 +771,6 @@ mod tests {
 		assert_eq!(v, vec![1.0, 2.0, 3.0]);
 	}
 
-	/// An empty batch response is retry-worthy too — the single retry recovers.
 	#[tokio::test]
 	async fn embed_falls_back_to_single_on_empty_batch_response() {
 		let app = axum::Router::new().route(

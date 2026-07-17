@@ -1,6 +1,3 @@
-//! Retrieval pipeline — query text → ranked entities (+ an optional LLM answer).
-//! Sibling modules are [`answer::query`]'s stages — deliberately NOT re-exported at crate level.
-
 pub use crate::types::{EmbedFunc, LlmFunc};
 
 pub mod answer;

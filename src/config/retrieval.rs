@@ -45,8 +45,6 @@ pub struct RetrievalConfig {
 	pub weights_reason: ModeWeights,
 	pub weights_hybrid: ModeWeights,
 	pub rrf_k: f64,
-	/// Weighted-RRF multiplier on the query-INDEPENDENT seed lists (importance +
-	/// PageRank); `< 1.0` down-weights global priors, `1.0` is plain RRF.
 	pub rrf_global_weight: f64,
 	pub dedup_by_section: bool,
 	pub mmr_enabled: bool,
@@ -56,8 +54,6 @@ pub struct RetrievalConfig {
 	pub rerank_pool_size: usize,
 	pub hyde_enabled: bool,
 	pub hyde_min_query_tokens: usize,
-	/// HyDE fusion weight: `fused = query*(1-w) + hypo*w`, then L2-normalized.
-	/// Higher trusts the generated hypo more; `0.5` is the symmetric blend.
 	pub hyde_fusion_weight: f64,
 	pub lexical_enabled: bool,
 	pub bm25_k1: f64,
@@ -71,11 +67,7 @@ pub struct RetrievalConfig {
 	pub adaptive_ef_max: usize,
 	pub adaptive_ef_step: usize,
 	pub adaptive_ef_spread_epsilon: f64,
-	/// Semantic query cache: number of answered queries retained before LRU
-	/// eviction. `0` disables the cache.
 	pub query_cache_cap: usize,
-	/// Cosine floor for a semantic cache hit; high (≈0.97) so only paraphrases
-	/// share an entry, never merely topical neighbours.
 	pub query_cache_theta: f64,
 }
 
@@ -145,8 +137,6 @@ impl Default for RetrievalConfig {
 }
 
 impl RetrievalConfig {
-	/// Cross-field invariants; returns all problems (empty = valid). Structural
-	/// sanity check, not a tuning oracle.
 	pub fn validate(&self) -> Vec<String> {
 		let mut errs = Vec::new();
 
@@ -172,8 +162,6 @@ impl RetrievalConfig {
 			("query_cache_theta", self.query_cache_theta),
 			("mmr_lambda", self.mmr_lambda),
 			("hyde_fusion_weight", self.hyde_fusion_weight),
-			// bm25_b is BM25's length-normalisation weight; outside [0,1] the score
-			// term `1 - b + b*dl/avgdl` goes negative or over-normalises.
 			("bm25_b", self.bm25_b),
 		] {
 			if !(0.0..=1.0).contains(&v) {
@@ -182,7 +170,6 @@ impl RetrievalConfig {
 		}
 
 		if self.bm25_k1 < 0.0 {
-			// BM25 tf-saturation term; a negative k1 inverts the saturation curve.
 			errs.push(format!("bm25_k1 ({}) must be >= 0.0", self.bm25_k1));
 		}
 
@@ -194,8 +181,6 @@ impl RetrievalConfig {
 		}
 
 		if self.rrf_k < 0.0 {
-			// fuse::rrf scores 1/(rrf_k + rank), rank >= 1: a negative rrf_k drives
-			// the denominator to <= 0, inverting or NaN-ing the fusion.
 			errs.push(format!("rrf_k ({}) must be >= 0.0", self.rrf_k));
 		}
 		if self.seed_k == 0 {
@@ -224,7 +209,7 @@ mod tests {
 	#[test]
 	fn weights_not_summing_to_one_are_flagged() {
 		let mut cfg = RetrievalConfig::default();
-		cfg.weights_hybrid.content = 0.9; // 0.9 + 0.30 + 0.20 + 0.0 = 1.4
+		cfg.weights_hybrid.content = 0.9;
 		let errs = cfg.validate();
 		assert!(
 			errs.iter().any(|e| e.contains("weights_hybrid")),
@@ -316,7 +301,6 @@ mod tests {
 			"max_deliver_results 0"
 		);
 
-		// rrf_k == 0 is valid RRF, must NOT flag.
 		let zero_rrf = RetrievalConfig {
 			rrf_k: 0.0,
 			..Default::default()

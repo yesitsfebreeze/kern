@@ -19,8 +19,6 @@ pub struct ScoredEntity {
 	pub score: f64,
 }
 
-/// A scored entity borrowed from the graph — the pipeline works on these, cloning
-/// to owned [`ScoredEntity`] only for delivery survivors.
 #[derive(Debug, Clone, Copy)]
 pub struct ScoredRef<'a> {
 	pub entity: &'a Entity,
@@ -36,8 +34,6 @@ impl ScoredRef<'_> {
 	}
 }
 
-/// Uniform view over owned [`ScoredEntity`] and borrowed [`ScoredRef`] so the
-/// scoring/diversify stages run on either without cloning.
 pub trait Scored {
 	fn entity(&self) -> &Entity;
 	fn score(&self) -> f64;
@@ -73,8 +69,6 @@ pub struct ExpandResult<'a> {
 	pub chains: Vec<PathChain>,
 }
 
-/// Assigns a dense `u32` to each distinct entity id in one [`expand`] run: the id
-/// clones into an `Rc<str>` once (on intern), every later touch is a `u32` lookup.
 #[derive(Default)]
 struct Interner {
 	idx: HashMap<Rc<str>, u32>,
@@ -97,15 +91,13 @@ impl Interner {
 		&self.names[i as usize]
 	}
 
-	/// Owned handle to id `i` (a refcount bump) — held as `Rc<str>` not `&str` so
-	/// the loop can keep mutating the interner (interning neighbours) meanwhile.
+	// Rc<str> not &str so the caller can keep mutating the interner (interning neighbours) while holding this handle.
 	fn name_rc(&self, i: u32) -> Rc<str> {
 		Rc::clone(&self.names[i as usize])
 	}
 }
 
-/// One node of the beam's path forest. A seed root has no edge (`rid == ""`) and
-/// no parent ([`NO_PARENT`]).
+// A seed root has no edge (rid == "") and no parent (NO_PARENT).
 struct ChainNode<'g> {
 	ent: u32,
 	rid: &'g str,
@@ -114,16 +106,13 @@ struct ChainNode<'g> {
 
 const NO_PARENT: u32 = u32::MAX;
 
-/// One frontier entry. The payload (interned id, arena index) never participates
-/// in ordering; only `score` does.
 struct BeamNode {
 	ent: u32,
 	score: f64,
 	chain: u32,
 }
 
-/// Binary max-heap over [`BeamNode`]s keyed on `score` (assumed finite).
-/// Hand-rolled so the u32/arena payload stays out of the ordering.
+// Max-heap keyed on score (assumed finite); ordering ignores the u32/arena payload.
 #[derive(Default)]
 struct Beam {
 	items: Vec<BeamNode>,
@@ -171,8 +160,6 @@ impl Beam {
 	}
 }
 
-/// Walk `node`'s parent chain into the `[seed, rid, ent, rid, ent, …]` id list
-/// [`PathChain`] carries.
 fn materialize_chain(arena: &[ChainNode], interner: &Interner, mut node: u32) -> Vec<String> {
 	let mut nodes: Vec<String> = Vec::new();
 	loop {
@@ -341,8 +328,7 @@ pub fn score_neighbor(
 	w.content * content_score + w.reason * reason_score + w.edge * edge_score
 }
 
-/// Resolve an entity and its owning kern by reference. Two-pass: O(1) via the
-/// `kern_of_entity` index, then a full scan as fallback for stale/missing index entries.
+// Two-pass: O(1) via the kern_of_entity index, then a full scan fallback for stale/missing index entries.
 fn find_entity_and_kern<'a>(g: &'a GraphGnn, id: &str) -> Option<(&'a Entity, &'a Kern)> {
 	if let Some(kid) = g.kern_of_entity(id) {
 		if let Some(kern) = g.loaded(kid) {
@@ -383,7 +369,7 @@ mod tests {
 	#[test]
 	fn score_neighbor_pure_content_weight_is_cosine() {
 		let neighbor = ent("n", vec![1.0, 0.0]);
-		let r = edge("a", "n", 0.5); // no reason vector -> reason component 0
+		let r = edge("a", "n", 0.5);
 		let w = Weights {
 			content: 1.0,
 			reason: 0.0,
@@ -399,8 +385,8 @@ mod tests {
 
 	#[test]
 	fn score_neighbor_pure_edge_weight_uses_clamped_reason_score() {
-		let neighbor = ent("n", vec![]); // no vector -> content 0
-		let r = edge("a", "n", 0.4); // traversal_count 0 -> ln(1)*tw = 0 boost
+		let neighbor = ent("n", vec![]);
+		let r = edge("a", "n", 0.4);
 		let w = Weights {
 			content: 0.0,
 			reason: 0.0,

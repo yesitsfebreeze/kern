@@ -28,8 +28,6 @@ impl GCNLayer {
 		Self::with_rng(in_features, out_features, act, norm, drop_rate, &mut rng)
 	}
 
-	/// Deterministic weight init from a seeded RNG — use in tests asserting on
-	/// training dynamics so the run does not depend on system entropy.
 	pub fn with_rng<R: rand::Rng>(
 		in_features: usize,
 		out_features: usize,
@@ -56,8 +54,6 @@ impl GCNLayer {
 		}
 	}
 
-	/// Fallible backward — errors instead of panicking when `forward_graph` has
-	/// not run. The infallible [`BackwardGraphLayer::backward_graph`] delegates here.
 	pub fn try_backward_graph(&mut self, _g: &Graph, d_out: &Tensor) -> Result<Tensor, GnnError> {
 		let mut grad = d_out.clone();
 		if let Some(ref d) = self.drop {
@@ -201,7 +197,6 @@ mod tests {
 	fn try_backward_before_forward_is_missing_state_and_infallible_path_zeroes() {
 		let g = two_node_graph();
 		let mut rng = StdRng::seed_from_u64(2);
-		// With an activation, the act path's last_pre_act guard trips first.
 		let mut layer = GCNLayer::with_rng(2, 3, Some(Activation::Relu), false, 0.0, &mut rng);
 		let d_out = Tensor::ones(2, 3);
 

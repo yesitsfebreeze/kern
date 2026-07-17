@@ -12,8 +12,8 @@ use tokio::task::JoinHandle;
 use crate::event::{WatchEvent, WatchKind};
 use crate::ignore_rules::IgnoreRules;
 
-/// Per-path debounce window: wide enough to coalesce the multi-event burst
-/// Windows notify fires per logical edit, short enough for interactive saves.
+// Debounce window: wide enough to coalesce the multi-event burst Windows notify
+// fires per logical edit, short enough for interactive saves. Milliseconds.
 const DEBOUNCE: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Error)]
@@ -24,21 +24,18 @@ pub enum WatcherError {
 	Closed,
 }
 
-/// Cross-platform recursive filesystem watcher with per-path debouncing.
 pub struct FileWatcher {
-	// Drop order matters: drop `_notify` first so the std channel closes,
-	// then `_task` joins on its own.
+	// Drop order matters: `_notify` must drop before `_task` so the std channel
+	// closes and the blocking coalesce loop exits; field order dictates drop order.
 	rx: mpsc::UnboundedReceiver<WatchEvent>,
 	_notify: RecommendedWatcher,
 	_task: JoinHandle<()>,
 }
 
 impl FileWatcher {
-	/// Events matching `ignore` are dropped before debouncing.
 	pub fn new(roots: Vec<PathBuf>, ignore: IgnoreRules) -> Result<Self, WatcherError> {
 		let (raw_tx, raw_rx) = std_mpsc::channel::<notify::Result<Event>>();
 		let mut notify_watcher = notify::recommended_watcher(move |res| {
-			// Best-effort: if the receiver is gone we're shutting down.
 			let _ = raw_tx.send(res);
 		})?;
 
@@ -56,7 +53,6 @@ impl FileWatcher {
 		})
 	}
 
-	/// `None` once the watcher is dropped or its background task exits.
 	pub async fn next_event(&mut self) -> Option<WatchEvent> {
 		self.rx.recv().await
 	}
@@ -74,7 +70,6 @@ fn spawn_coalescer(
 	tokio::task::spawn_blocking(move || coalesce_loop(raw_rx, out_tx, ignore))
 }
 
-/// Latest un-emitted event per path — last write wins within the debounce window.
 struct Pending {
 	event: WatchEvent,
 	deadline: Instant,
@@ -153,8 +148,6 @@ fn flush_all(pending: &mut HashMap<PathBuf, Pending>, out_tx: &mpsc::UnboundedSe
 	}
 }
 
-/// Convert a raw notify event into zero, one, or two [`WatchEvent`]s.
-/// `Name(Both)` → one `Renamed`; lone `From`/`To` halves → `Deleted`/`Created`.
 fn translate(ev: Event, ignore: &IgnoreRules) -> Vec<WatchEvent> {
 	let ts = SystemTime::now();
 	let paths = ev.paths;
@@ -179,15 +172,13 @@ fn translate(ev: Event, ignore: &IgnoreRules) -> Vec<WatchEvent> {
 					if ignore.is_ignored(&to) && ignore.is_ignored(&from) {
 						return Vec::new();
 					}
-					// `new` pins path == to for Renamed (the path arg is overridden).
 					vec![WatchEvent::new(
 						to.clone(),
 						WatchKind::Renamed { from, to },
 						ts,
 					)]
 				}
-				// Some backends deliver `Both` with a single endpoint (or none);
-				// degrade to Modified like the generic Modify arm.
+				// Some backends deliver `Both` with a single endpoint (or none); degrade to Modified.
 				Err(paths) => paths
 					.into_iter()
 					.filter_map(|p| mk(p, WatchKind::Modified))
@@ -212,7 +203,6 @@ fn translate(ev: Event, ignore: &IgnoreRules) -> Vec<WatchEvent> {
 			.into_iter()
 			.filter_map(|p| mk(p, WatchKind::Deleted))
 			.collect(),
-		// Access / Any / Other: not actionable for ingest.
 		_ => Vec::new(),
 	}
 }

@@ -11,3 +11,9 @@ Second-pass migration:
 - `l2_norm_backward_zero_row_yields_zero_grad` essay deleted; contract: a zero row has no defined direction, forward and backward both skip it, so its gradient stays zero and no NaN arises from a 1/0 norm.
 - `row_sum_sq` doc deleted (name says it; sharing rationale already noted above).
 - `relu_backward_is_exact_no_kink_bias` setup narration compressed; inputs straddle zero with grad all 1.0.
+
+## Preserved from stripped comments (2026-07-17)
+- `act_deriv_mul` multiplies the incoming gradient by the activation's ANALYTIC derivative at the pre-activation values — exact, no finite-difference bias at kinks (matters for ReLU/LeakyReLU at 0).
+- `GraphLayer::set_training` default flips only the layer's dropout — the sole train-mode-sensitive component these layers carry.
+- Test methodology (gnn_math_tests): analytic grads are taken with `d_out = ones`, loss = `sum(output)`, checked against CENTRAL finite differences (±H, H=1e-6), init-agnostic.
+- Gradient identity verified: GCN input (layer-chaining) gradient is `d_input = Aᵀ·(d_out·Wᵀ)` — the gradient `Model::backward` chains into the previous layer's `d_out`.

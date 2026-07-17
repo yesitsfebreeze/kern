@@ -1,6 +1,3 @@
-//! Integration tests for `KernRpc`: end-to-end client/server roundtrip on
-//! `InprocAdapter` + `JsonEnvelopeCodec`, plus the cancellation race on `query`.
-
 use std::sync::Arc;
 
 use trnsprt::kern_rpc::{
@@ -94,7 +91,6 @@ async fn link_then_neighbors_walks_the_edge() {
 		.expect("neighbors rpc");
 	assert!(n.neighbors.iter().any(|e| e.id == b));
 
-	// depth clamping: any value over 3 should still answer.
 	let n2 = client
 		.neighbors(NeighborsReq {
 			entity_id: a,
