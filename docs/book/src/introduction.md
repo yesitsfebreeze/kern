@@ -6,7 +6,7 @@ sessions, keeps itself small without manual gardening, and serves the right
 context back when you need it.
 
 ```
-session text → spool → distill (LLM) → typed claims → graph → digest → recall
+session text → intake → distill (LLM) → typed claims → graph → digest → recall
 ```
 
 If you're new, start with [The Memory Bank](./guides/memory-bank.md) — what kern

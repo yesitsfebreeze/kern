@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Claude Code Stop hook: extract the new conversation delta from the
-// transcript and write it to the kern capture spool. Fail-open.
+// transcript and write it to the kern capture intake. Fail-open.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,18 +41,18 @@ export function extractDelta(lines, offset) {
   return { text: out.join('\n\n'), consumed: lines.length };
 }
 
-function offsetsFile(spool) { return path.join(spool, '.offsets.json'); }
+function offsetsFile(intake) { return path.join(intake, '.offsets.json'); }
 
-function readOffsets(spool) {
-  try { return JSON.parse(fs.readFileSync(offsetsFile(spool), 'utf8')); }
+function readOffsets(intake) {
+  try { return JSON.parse(fs.readFileSync(offsetsFile(intake), 'utf8')); }
   catch { return {}; }
 }
 
-function writeOffsets(spool, offsets) {
+function writeOffsets(intake, offsets) {
   // Atomic write: a tmp file (pid-tagged so two rapidly-firing Stop hooks don't
   // clobber each other's temp) then a rename, so a concurrent reader never sees
   // a half-written `.offsets.json`.
-  const dst = offsetsFile(spool);
+  const dst = offsetsFile(intake);
   const tmp = `${dst}.${process.pid}.tmp`;
   try {
     fs.writeFileSync(tmp, JSON.stringify(offsets));
@@ -62,13 +62,13 @@ function writeOffsets(spool, offsets) {
   }
 }
 
-/** Cap on capture files kept in the spool. */
-export const MAX_SPOOL_FILES = 500;
+/** Cap on capture files kept in the intake. */
+export const MAX_INTAKE_FILES = 500;
 
 /** Return the capture file names to delete so at most `maxFiles` remain,
  *  dropping the OLDEST (lowest `mtimeMs`) first. `entries` is `[{name,mtimeMs}]`.
  *  Pure, so the eviction policy is unit-testable without touching the fs. */
-export function spoolEvictions(entries, maxFiles) {
+export function intakeEvictions(entries, maxFiles) {
   if (entries.length <= maxFiles) return [];
   return [...entries]
     .sort((a, b) => a.mtimeMs - b.mtimeMs)
@@ -89,34 +89,34 @@ async function main() {
 
   // Opt-in: only capture in projects that already have a `.kern` dir (a kern
   // is or has been active here). Prevents this global hook from polluting
-  // unrelated projects with empty spool dirs.
+  // unrelated projects with empty intake dirs.
   if (!fs.existsSync(path.join(cwd, '.kern'))) return;
 
-  const spool = path.join(cwd, '.kern', 'capture');
-  fs.mkdirSync(spool, { recursive: true });
+  const intake = path.join(cwd, '.kern', 'capture');
+  fs.mkdirSync(intake, { recursive: true });
 
   const lines = readLines(fs.readFileSync(transcript_path, 'utf8'));
-  const offsets = readOffsets(spool);
+  const offsets = readOffsets(intake);
   const start = offsets[session_id] || 0;
   if (start >= lines.length) return;
 
   const { text, consumed } = extractDelta(lines, start);
   if (text.trim()) {
-    const file = path.join(spool, `${session_id}-${consumed}.txt`);
+    const file = path.join(intake, `${session_id}-${consumed}.txt`);
     fs.writeFileSync(file, text);
   }
   offsets[session_id] = consumed;
-  writeOffsets(spool, offsets);
+  writeOffsets(intake, offsets);
 
-  // Cap the spool so an un-drained capture dir can't grow without bound across
-  // many sessions; evict the oldest beyond MAX_SPOOL_FILES.
+  // Cap the intake so an un-drained capture dir can't grow without bound across
+  // many sessions; evict the oldest beyond MAX_INTAKE_FILES.
   try {
     const entries = fs
-      .readdirSync(spool)
+      .readdirSync(intake)
       .filter((n) => n.endsWith('.txt'))
-      .map((n) => ({ name: n, mtimeMs: fs.statSync(path.join(spool, n)).mtimeMs }));
-    for (const name of spoolEvictions(entries, MAX_SPOOL_FILES)) {
-      try { fs.unlinkSync(path.join(spool, name)); } catch {}
+      .map((n) => ({ name: n, mtimeMs: fs.statSync(path.join(intake, n)).mtimeMs }));
+    for (const name of intakeEvictions(entries, MAX_INTAKE_FILES)) {
+      try { fs.unlinkSync(path.join(intake, name)); } catch {}
     }
   } catch {}
 }

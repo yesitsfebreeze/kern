@@ -10,11 +10,11 @@
 //!    spawning a divergent one. [`outcome`] reports per-document success /
 //!    partial / failure.
 //!
-//! Ambient document sources that feed the Worker: [`capture_spool`] (the
-//! Claude-Code Stop-hook spool) and [`file_watcher`]; [`distill`] extracts
+//! Ambient document sources that feed the Worker: [`intake`] (the
+//! Claude-Code Stop-hook intake) and [`file_watcher`]; [`distill`] extracts
 //! durable claims from conversation text.
 
-pub mod capture_spool;
+pub mod intake;
 pub mod config;
 pub mod dedup;
 pub mod direct;

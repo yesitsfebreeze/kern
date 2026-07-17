@@ -17,11 +17,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CaptureConfig {
-	/// Master switch for the capture_spool + digest tasks.
+	/// Master switch for the intake + digest tasks.
 	pub enabled: bool,
-	/// Spool directory (relative to cwd) the Stop hook writes deltas into.
+	/// Intake directory (relative to cwd) the Stop hook writes deltas into.
 	pub dir: String,
-	/// How often the spool is drained, in seconds.
+	/// How often the intake is drained, in seconds.
 	pub poll_secs: u64,
 	/// Output path (relative to cwd) for the recall digest.
 	pub digest_path: String,
@@ -71,13 +71,13 @@ impl Default for CaptureConfig {
 
 impl CaptureConfig {
 	/// Reject knobs that would busy-loop the capture tasks. A zero poll/digest
-	/// interval makes the spool-drain / digest-rebuild loop spin with no delay.
+	/// interval makes the intake-drain / digest-rebuild loop spin with no delay.
 	/// Only enforced when `enabled` — a dormant capture with zero intervals is
 	/// harmless because the tasks never run.
 	pub fn validate(&self) -> Result<(), String> {
 		if self.enabled {
 			if self.poll_secs == 0 {
-				return Err("poll_secs must be > 0 (0 busy-loops the spool drain)".into());
+				return Err("poll_secs must be > 0 (0 busy-loops the intake drain)".into());
 			}
 			if self.digest_secs == 0 {
 				return Err("digest_secs must be > 0 (0 busy-loops the digest rebuild)".into());

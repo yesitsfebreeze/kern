@@ -1,11 +1,11 @@
-//! Claude-Code capture spool.
+//! Claude-Code capture intake.
 //!
-//! The CC `Stop` hook drops plain-text conversation deltas into the spool
+//! The CC `Stop` hook drops plain-text conversation deltas into the intake
 //! directory. This task drains them: each delta is distilled into durable
 //! `Claim`s (LLM), each claim is ingested through the canonical `Worker`,
-//! and the consumed file is archived to `<spool>/done/` — but ONLY once every
+//! and the consumed file is archived to `<intake>/done/` — but ONLY once every
 //! claim has ingested successfully. If ingest fails (e.g. the embed endpoint
-//! is down) the delta is left in the spool and retried on the next drain, so
+//! is down) the delta is left in the intake and retried on the next drain, so
 //! a transient LLM outage never loses captured knowledge.
 //!
 //! The daemon is the single graph owner, so ingest happens in-process with
@@ -29,7 +29,7 @@ pub fn extract_claims(path: &Path, llm: &dyn Fn(&str) -> String) -> Option<(Stri
 	let text = match std::fs::read_to_string(path) {
 		Ok(t) => t,
 		Err(e) => {
-			tracing::warn!(target: "kern.capture_spool", path = %path.display(), error = %e, "failed to read delta; leaving in spool");
+			tracing::warn!(target: "kern.ingest.intake", path = %path.display(), error = %e, "failed to read delta; leaving in intake");
 			return None;
 		}
 	};
@@ -41,7 +41,7 @@ pub fn extract_claims(path: &Path, llm: &dyn Fn(&str) -> String) -> Option<(Stri
 	let claims = match distill(&text, llm) {
 		Some(c) => c,
 		None => {
-			tracing::warn!(target: "kern.capture_spool", path = %path.display(), "distill got no LLM output; leaving delta in spool for retry");
+			tracing::warn!(target: "kern.ingest.intake", path = %path.display(), "distill got no LLM output; leaving delta in intake for retry");
 			return None;
 		}
 	};
@@ -61,7 +61,7 @@ pub fn archive(path: &Path, done_dir: &Path) {
 
 /// Archive `path` iff every claim ingested successfully (`results` all true),
 /// or there were no claims at all. Returns whether the file was archived.
-/// A delta with any failed claim is left in the spool for a later retry.
+/// A delta with any failed claim is left in the intake for a later retry.
 pub fn finalize(path: &Path, done_dir: &Path, results: &[bool]) -> bool {
 	if results.iter().all(|&ok| ok) {
 		archive(path, done_dir);
@@ -105,7 +105,7 @@ pub fn prune_done(done_dir: &Path, max_age: Duration, now: SystemTime) -> usize 
 /// Distill + ingest one `*.txt` delta, archiving it into `done/` iff every claim
 /// committed. Returns whether the file was archived. A non-`.txt` path, a read
 /// failure, an LLM outage (no distill output), or any failed claim leaves the
-/// delta in the spool for the next cycle to retry — so transient outages never
+/// delta in the intake for the next cycle to retry — so transient outages never
 /// drop captured knowledge.
 async fn drain_entry(
 	path: &Path,
@@ -143,22 +143,22 @@ async fn drain_entry(
 			.await;
 		let ok = !matches!(outcome.status, OutcomeStatus::Failed);
 		if !ok {
-			tracing::warn!(target: "kern.capture_spool", stem = %stem, status = outcome.status.as_str(), "claim ingest failed; leaving delta for retry");
+			tracing::warn!(target: "kern.ingest.intake", stem = %stem, status = outcome.status.as_str(), "claim ingest failed; leaving delta for retry");
 		}
 		results.push(ok);
 	}
 	finalize(path, done, &results)
 }
 
-/// Process one drain cycle: [`drain_entry`] every delta in `spool_dir`, then
+/// Process one drain cycle: [`drain_entry`] every delta in `intake_dir`, then
 /// prune `done/` of entries older than `done_retention`. Returns the number of
 /// deltas archived.
 ///
-/// Split out of [`run`]'s poll loop so the full spool→distill→ingest→archive
+/// Split out of [`run`]'s poll loop so the full intake→distill→ingest→archive
 /// path is unit-testable without spawning the never-returning loop. `now` is
 /// injected for the prune step's age comparison.
 async fn drain_once(
-	spool_dir: &Path,
+	intake_dir: &Path,
 	done: &Path,
 	worker: &Worker,
 	llm: &LlmFunc,
@@ -166,10 +166,10 @@ async fn drain_once(
 	done_retention: Duration,
 	now: SystemTime,
 ) -> usize {
-	let entries = match std::fs::read_dir(spool_dir) {
+	let entries = match std::fs::read_dir(intake_dir) {
 		Ok(e) => e,
 		Err(e) => {
-			tracing::warn!(target: "kern.capture_spool", dir = %spool_dir.display(), error = %e, "failed to read spool dir");
+			tracing::warn!(target: "kern.ingest.intake", dir = %intake_dir.display(), error = %e, "failed to read intake dir");
 			return 0;
 		}
 	};
@@ -180,29 +180,29 @@ async fn drain_once(
 		}
 	}
 	// The durable direct-ingest lane shares this drain cycle: MCP `ingest`
-	// payloads spooled under `<spool>/direct/` replay through the same worker
+	// payloads accepted under `<intake>/direct/` replay through the same worker
 	// (verbatim — no distill) and archive into `direct/done/` on success.
-	archived += super::direct::drain_direct_once(&spool_dir.join("direct"), worker, cfg).await;
+	archived += super::direct::drain_direct_once(&intake_dir.join("direct"), worker, cfg).await;
 	prune_done(done, done_retention, now);
-	prune_done(&spool_dir.join("direct").join("done"), done_retention, now);
+	prune_done(&intake_dir.join("direct").join("done"), done_retention, now);
 	archived
 }
 
-/// Daemon loop. Drains `spool_dir` immediately on startup, then every
+/// Daemon loop. Drains `intake_dir` immediately on startup, then every
 /// `interval`, via [`drain_once`]: for each `*.txt` delta — distill, ingest each
 /// claim through `worker` (awaiting the outcome), and archive the file only if
 /// all claims committed. Each cycle also prunes archived deltas older than
 /// `done_retention` so `done/` stays bounded.
 pub async fn run(
-	spool_dir: PathBuf,
+	intake_dir: PathBuf,
 	worker: Arc<Worker>,
 	llm: LlmFunc,
 	dedup_threshold: f64,
 	interval: Duration,
 	done_retention: Duration,
 ) {
-	let _ = std::fs::create_dir_all(&spool_dir);
-	let done = spool_dir.join("done");
+	let _ = std::fs::create_dir_all(&intake_dir);
+	let done = intake_dir.join("done");
 	let cfg = crate::ingest::Config {
 		dedup_threshold,
 		..Default::default()
@@ -211,7 +211,7 @@ pub async fn run(
 	// processed on the first cycle instead of waiting a full `interval`.
 	loop {
 		drain_once(
-			&spool_dir,
+			&intake_dir,
 			&done,
 			&worker,
 			&llm,
@@ -289,7 +289,7 @@ mod tests {
 	fn extract_returns_none_on_llm_outage() {
 		// LLM outage: complete_func returns "". A non-empty delta must NOT be
 		// archived as done — extract_claims returns None so run() leaves it in
-		// the spool for retry. Regression guard for the data-loss bug.
+		// the intake for retry. Regression guard for the data-loss bug.
 		let dir = tempdir().unwrap();
 		let delta = dir.path().join("sess-outage.txt");
 		std::fs::write(&delta, "user: remember my API key lives in vault X").unwrap();
@@ -314,9 +314,9 @@ mod tests {
 	#[test]
 	fn finalize_archives_when_all_ok() {
 		let dir = tempdir().unwrap();
-		let spool = dir.path().to_path_buf();
-		let done = spool.join("done");
-		let delta = spool.join("sess-1.txt");
+		let intake = dir.path().to_path_buf();
+		let done = intake.join("done");
+		let delta = intake.join("sess-1.txt");
 		std::fs::write(&delta, "x").unwrap();
 		assert!(finalize(&delta, &done, &[true, true]));
 		assert!(!delta.exists());
@@ -326,9 +326,9 @@ mod tests {
 	#[test]
 	fn finalize_archives_when_no_claims() {
 		let dir = tempdir().unwrap();
-		let spool = dir.path().to_path_buf();
-		let done = spool.join("done");
-		let delta = spool.join("sess-2.txt");
+		let intake = dir.path().to_path_buf();
+		let done = intake.join("done");
+		let delta = intake.join("sess-2.txt");
 		std::fs::write(&delta, "x").unwrap();
 		assert!(finalize(&delta, &done, &[]));
 		assert!(done.join("sess-2.txt").exists());
@@ -337,12 +337,12 @@ mod tests {
 	#[test]
 	fn finalize_skips_archive_when_any_fail() {
 		let dir = tempdir().unwrap();
-		let spool = dir.path().to_path_buf();
-		let done = spool.join("done");
-		let delta = spool.join("sess-3.txt");
+		let intake = dir.path().to_path_buf();
+		let done = intake.join("done");
+		let delta = intake.join("sess-3.txt");
 		std::fs::write(&delta, "x").unwrap();
 		assert!(!finalize(&delta, &done, &[true, false]));
-		assert!(delta.exists(), "delta left in spool for retry");
+		assert!(delta.exists(), "delta left in intake for retry");
 		assert!(!done.join("sess-3.txt").exists());
 	}
 
@@ -374,9 +374,9 @@ mod tests {
 		let worker = Arc::new(Worker::new(graph.clone(), embedder, None, None, None));
 
 		let dir = tempdir().unwrap();
-		let spool = dir.path().to_path_buf();
-		let done = spool.join("done");
-		let delta = spool.join("sess-42.txt");
+		let intake = dir.path().to_path_buf();
+		let done = intake.join("done");
+		let delta = intake.join("sess-42.txt");
 		std::fs::write(&delta, "user: where is my key\nassistant: vault X").unwrap();
 
 		let cfg = crate::ingest::Config {
@@ -384,7 +384,7 @@ mod tests {
 			..Default::default()
 		};
 		let archived = drain_once(
-			&spool,
+			&intake,
 			&done,
 			&worker,
 			&llm,
@@ -398,7 +398,7 @@ mod tests {
 			archived, 1,
 			"the delta's single claim committed -> archived"
 		);
-		assert!(!delta.exists(), "consumed delta left the spool");
+		assert!(!delta.exists(), "consumed delta left the intake");
 		assert!(done.join("sess-42.txt").exists(), "delta moved into done/");
 		let g = crate::base::locks::read_recovered(&graph);
 		let entities: usize = g.all().iter().map(|k| k.entities.len()).sum();

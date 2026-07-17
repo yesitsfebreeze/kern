@@ -121,7 +121,7 @@ impl Config {
 	}
 
 	/// Resolve the directory this instance should anchor to (cwd, `data_dir`,
-	/// capture spool), walking up from `start` (inclusive) and returning the first
+	/// capture intake), walking up from `start` (inclusive) and returning the first
 	/// match in three tiers:
 	///
 	/// 1. Nearest ancestor containing a `.git` entry — the git repository root is

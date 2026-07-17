@@ -5,10 +5,10 @@
 //! `exit(101)`, crash, operator stop) silently vaporized every queued job
 //! after the ack. Observed live: 5 acked ingests lost to one restart.
 //!
-//! This lane reuses the capture spool's proven durability shape instead:
-//! the payload is serialized to `<spool>/direct/<doc_id>.json` (atomic
-//! tmp+rename, content-hash named so re-spooling the same text is
-//! idempotent) BEFORE the ack — which becomes `"spooled"` — and the drain
+//! This lane reuses the capture intake's proven durability shape instead:
+//! the payload is serialized to `<intake>/direct/<doc_id>.json` (atomic
+//! tmp+rename, content-hash named so re-submitting the same text is
+//! idempotent) BEFORE the ack — which becomes `"accepted"` — and the drain
 //! cycle replays it through the canonical `Worker` with its ORIGINAL
 //! source/kind/confidence, archiving the file only on a non-`Failed`
 //! outcome. Unlike the `.txt` capture lane there is NO distill step: an
@@ -38,10 +38,10 @@ pub struct DirectJob {
 /// Persist `job` into `<direct_dir>/<doc_id>.json` atomically (tmp + rename),
 /// creating the directory if needed. Returns the doc_id (content hash of the
 /// text — the same id the worker will commit under on a fresh placement).
-/// Content-hash naming makes re-spooling identical text idempotent. The tmp
-/// file is pid-tagged so two concurrent spoolers can't clobber each other's
+/// Content-hash naming makes re-submitting identical text idempotent. The tmp
+/// file is pid-tagged so two concurrent writers can't clobber each other's
 /// half-written payload (same shape as the capture hook's offsets write).
-pub fn spool_direct(direct_dir: &Path, job: &DirectJob) -> std::io::Result<String> {
+pub fn intake_direct(direct_dir: &Path, job: &DirectJob) -> std::io::Result<String> {
 	std::fs::create_dir_all(direct_dir)?;
 	let doc_id = util::content_hash(&job.text);
 	let dst = direct_dir.join(format!("{doc_id}.json"));
@@ -50,7 +50,7 @@ pub fn spool_direct(direct_dir: &Path, job: &DirectJob) -> std::io::Result<Strin
 	std::fs::write(&tmp, payload)?;
 	if let Err(e) = std::fs::rename(&tmp, &dst) {
 		let _ = std::fs::remove_file(&tmp);
-		// The destination already existing (concurrent identical spool) is
+		// The destination already existing (concurrent identical intake) is
 		// success — the payload IS on disk under the right name.
 		if !dst.exists() {
 			return Err(e);
@@ -72,7 +72,7 @@ pub async fn drain_direct_once(
 ) -> usize {
 	let entries = match std::fs::read_dir(direct_dir) {
 		Ok(e) => e,
-		Err(_) => return 0, // lane unused so far — nothing spooled
+		Err(_) => return 0, // lane unused so far — nothing submitted
 	};
 	let done = direct_dir.join("done");
 	let mut archived = 0;
@@ -93,7 +93,7 @@ pub async fn drain_direct_once(
 					error = %e,
 					"unreadable direct payload; archiving as poison (retry cannot succeed)"
 				);
-				super::capture_spool::archive(&path, &done);
+				super::intake::archive(&path, &done);
 				archived += 1;
 				continue;
 			}
@@ -117,7 +117,7 @@ pub async fn drain_direct_once(
 			);
 			continue;
 		}
-		super::capture_spool::archive(&path, &done);
+		super::intake::archive(&path, &done);
 		archived += 1;
 	}
 	archived
@@ -146,12 +146,12 @@ mod tests {
 	}
 
 	#[test]
-	fn spool_direct_writes_idempotent_json_named_by_content_hash() {
+	fn intake_direct_writes_idempotent_json_named_by_content_hash() {
 		let dir = tempdir().unwrap();
 		let direct = dir.path().join("direct");
 
-		let id1 = spool_direct(&direct, &job("a durable fact")).expect("spooled");
-		let id2 = spool_direct(&direct, &job("a durable fact")).expect("re-spool ok");
+		let id1 = intake_direct(&direct, &job("a durable fact")).expect("accepted");
+		let id2 = intake_direct(&direct, &job("a durable fact")).expect("re-submit ok");
 		assert_eq!(
 			id1,
 			util::content_hash("a durable fact"),
@@ -175,7 +175,7 @@ mod tests {
 
 	/// A direct job is replayed through a REAL worker (embeddings from a local
 	/// /api/embed stub), lands in the graph with its original parameters, and
-	/// the spool file is archived. No distill step is involved — the payload
+	/// the intake file is archived. No distill step is involved — the payload
 	/// must arrive verbatim, not as extracted claims.
 	#[tokio::test]
 	async fn drain_direct_once_ingests_and_archives_end_to_end() {
@@ -195,7 +195,7 @@ mod tests {
 
 		let dir = tempdir().unwrap();
 		let direct = dir.path().join("direct");
-		let doc_id = spool_direct(&direct, &job("the spawn gate shipped today")).expect("spooled");
+		let doc_id = intake_direct(&direct, &job("the spawn gate shipped today")).expect("accepted");
 
 		let cfg = crate::ingest::Config {
 			dedup_threshold: 0.95,
@@ -206,7 +206,7 @@ mod tests {
 		assert_eq!(archived, 1, "the job committed -> archived");
 		assert!(
 			direct.join("done").join(format!("{doc_id}.json")).exists(),
-			"spool file moved into direct/done/"
+			"intake file moved into direct/done/"
 		);
 		let g = crate::base::locks::read_recovered(&graph);
 		let total: usize = g.all().iter().map(|k| k.entities.len()).sum();
@@ -218,7 +218,7 @@ mod tests {
 		server.abort();
 	}
 
-	/// Embed endpoint down -> the job FAILS -> the spool file must remain for
+	/// Embed endpoint down -> the job FAILS -> the intake file must remain for
 	/// the next drain cycle. This is the whole point of the lane: a transient
 	/// outage (or a daemon death before the drain) never loses an acked ingest.
 	#[tokio::test]
@@ -229,7 +229,7 @@ mod tests {
 
 		let dir = tempdir().unwrap();
 		let direct = dir.path().join("direct");
-		let doc_id = spool_direct(&direct, &job("must survive the outage")).expect("spooled");
+		let doc_id = intake_direct(&direct, &job("must survive the outage")).expect("accepted");
 
 		let cfg = crate::ingest::Config {
 			dedup_threshold: 0.95,
@@ -245,7 +245,7 @@ mod tests {
 		assert_eq!(archived, 0, "failed job is not archived");
 		assert!(
 			direct.join(format!("{doc_id}.json")).exists(),
-			"file left in the direct spool for retry"
+			"file left in the direct intake for retry"
 		);
 	}
 }

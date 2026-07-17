@@ -33,14 +33,14 @@ fn main() {
 
 	rt.block_on(async {
 		// Pin this instance to its project root (the nearest ancestor holding a
-		// `.kern`), so the endpoint tag, data_dir, and capture spool all anchor
+		// `.kern`), so the endpoint tag, data_dir, and capture intake all anchor
 		// to the same directory. Without this, a daemon launched from a subdir
 		// or the wrong cwd resolves the relative `.kern/data` against an empty
 		// location and silently boots an empty graph while still serving queries.
 		let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 		let root = Config::resolve_root(&cwd);
 		if root != cwd {
-			// Operators inspecting where the daemon anchored its data_dir / spool
+			// Operators inspecting where the daemon anchored its data_dir / intake
 			// need to see this re-pin; a silent cwd change is hard to diagnose.
 			tracing::info!(
 				target: "kern",

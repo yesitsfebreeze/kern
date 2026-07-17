@@ -280,7 +280,7 @@ async fn ingest_sample(worker: &Worker, llm: &LlmFunc, sample: &Sample, icfg: &C
 				section: String::new(),
 				title: format!("locomo://{}", c.descriptor),
 			};
-			// The capture spool ingests every distilled claim as `EntityKind::Claim`.
+			// The capture intake ingests every distilled claim as `EntityKind::Claim`.
 			let _ = worker
 				.run(
 					c.text,

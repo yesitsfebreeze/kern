@@ -954,7 +954,7 @@ fn spawn_file_watcher(cfg: &crate::config::Config, worker: &Arc<crate::ingest::W
 	});
 }
 
-/// Claude-Code memory: capture spool drain + recall digest writer. Both
+/// Claude-Code memory: capture intake drain + recall digest writer. Both
 /// file-mediated; on by default, disable via `[capture] enabled = false`.
 fn spawn_capture(
 	cfg: &crate::config::Config,
@@ -967,15 +967,15 @@ fn spawn_capture(
 	}
 	let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-	// Capture drain: spool deltas -> distill -> enqueue -> archive.
+	// Capture drain: intake deltas -> distill -> enqueue -> archive.
 	if let Some(llm_fn) = llm_fn.clone() {
-		let spool = cwd.join(&cfg.capture.dir);
+		let intake = cwd.join(&cfg.capture.dir);
 		let worker_c = worker.clone();
 		let dedup = cfg.ingest.dedup_threshold;
 		let poll = std::time::Duration::from_secs(cfg.capture.poll_secs);
 		let done_retention = std::time::Duration::from_secs(cfg.capture.done_retention_secs);
-		tokio::spawn(crate::ingest::capture_spool::run(
-			spool,
+		tokio::spawn(crate::ingest::intake::run(
+			intake,
 			worker_c,
 			llm_fn,
 			dedup,
@@ -985,7 +985,7 @@ fn spawn_capture(
 	} else {
 		tracing::warn!(
 			target: "kern.capture",
-			"capture: spool drain inactive — add a [reason] section to kern.toml to enable distillation; deltas will accumulate in .kern/capture/ and will be processed once the daemon restarts with a reason LLM configured"
+			"capture: intake drain inactive — add a [reason] section to kern.toml to enable distillation; deltas will accumulate in .kern/capture/ and will be processed once the daemon restarts with a reason LLM configured"
 		);
 	}
 

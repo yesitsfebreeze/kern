@@ -2,7 +2,7 @@
 
 What exists right now. States: `building` | `active`.
 
-- **Capture & distillation** — `Stop` hook spools the session delta; the daemon
+- **Capture & distillation** — `Stop` hook intakes the session delta; the daemon
   drains it through one LLM pass into typed claims (facts, decisions,
   preferences). `active`
 - **Digest recall** — `SessionStart` hook injects `.kern/digest.md` (root

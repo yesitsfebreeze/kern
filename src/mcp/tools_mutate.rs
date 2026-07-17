@@ -224,13 +224,13 @@ impl Server {
 			}));
 		}
 
-		// Durable ack: persist the payload to the direct spool BEFORE
+		// Durable ack: persist the payload to the direct intake BEFORE
 		// acknowledging, so a daemon exit after the ack loses nothing — the
 		// next drain cycle replays it. The in-RAM enqueue path acked "queued"
 		// and then held the job only in a 64-slot channel; observed live: a
-		// daemon restart vaporized 5 acked ingests. Spool-first only when the
+		// daemon restart vaporized 5 acked ingests. Intake-first only when the
 		// drain loop actually runs (capture on + a reason endpoint configured
-		// — `spawn_capture` skips the loop otherwise); an undrained spool
+		// — `spawn_capture` skips the loop otherwise); an undrained intake
 		// would be strictly worse than the RAM queue.
 		let drain_runs = self.cfg.capture.enabled && !self.cfg.reason_url().is_empty();
 		if drain_runs {
@@ -245,23 +245,23 @@ impl Server {
 				descriptor: p.descriptor.clone(),
 				confidence: conf,
 			};
-			match crate::ingest::direct::spool_direct(&direct_dir, &job) {
+			match crate::ingest::direct::intake_direct(&direct_dir, &job) {
 				Ok(doc_id) => {
 					return tool_result_json(&serde_json::json!({
-						"status": "spooled",
+						"status": "accepted",
 						"doc_id": doc_id,
 						"conf": conf,
 						"kind": kind as u8,
 					}));
 				}
 				Err(e) => {
-					// Fail-open: a spool-write failure (disk full, perms) must
+					// Fail-open: an intake-write failure (disk full, perms) must
 					// not reject knowledge — fall through to the RAM queue and
 					// say so in the journal.
 					tracing::warn!(
 						target: "kern.ingest.direct",
 						error = %e,
-						"direct spool write failed; falling back to in-RAM enqueue"
+						"direct intake write failed; falling back to in-RAM enqueue"
 					);
 				}
 			}

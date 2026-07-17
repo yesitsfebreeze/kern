@@ -49,7 +49,7 @@ sets; parallelize only what does not overlap.
 ## ingest
 
 - **Scope:** `src/ingest/`, `src/llm.rs`, `src/watcher/`.
-- **Knows:** the capture spool and its outage-safe queueing, the one-pass
+- **Knows:** the capture intake and its outage-safe queueing, the one-pass
   distillation into typed claims, descriptors and anchors, Ollama endpoints
   (reason/embed/answer split), streaming, `num_ctx` caps, warm-keeping.
 - **Delegate when:** distillation quality, claim typing, LLM latency, or

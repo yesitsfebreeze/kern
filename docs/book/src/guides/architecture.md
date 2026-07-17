@@ -34,7 +34,7 @@ graph TB
 
     %% ===== ingest sources =====
     subgraph SRC["Ingest sources (fire-and-forget)"]
-        CS["capture_spool::run<br/>spool/*.txt /poll_secs"]
+        CS["intake::run<br/>capture/*.txt /poll_secs"]
         FWs["file_watcher::run"]
     end
     FS --> FWs

@@ -1,5 +1,22 @@
 # Changelog
 
+- 2026-07-17 — The capture drop-dir is named the **intake**; the interim
+  print-queue-style working name it shipped under is scrubbed from the
+  entire tree — code (`ingest::intake`, `intake_direct`, tracing target
+  `kern.ingest.intake`), hook internals (`MAX_INTAKE_FILES`,
+  `intakeEvictions`), docs, agent briefs, and splinter notes, with no alias
+  or historical mention kept anywhere (git history remains the only record).
+  The MCP `ingest` durable ack status is now `"accepted"` (HTTP 202
+  semantics: persisted, processed later). On-disk layout untouched —
+  `.kern/capture/`, `direct/`, `done/` keep their names, so nothing
+  migrates. Tradeoff: any external client matching the old ack string
+  breaks, and future readers must consult git history to trace the old
+  vocabulary; accepted — the only shipped consumers (kern hooks) don't read
+  the ack, and the old name was never meant to ship.
+  Decided by: delete-superseded, name-the-tradeoff.
+  Supersedes: the previous capture-queue vocabulary everywhere (code,
+  hooks, docs).
+
 - 2026-07-17 — Durability primitive: snapshots first; ROADMAP #4 closed. The
   primitive is `snapshot_if_dirty` on the maintenance tick — a
   mutation-epoch-gated guarded full flush reusing `flush_guarded` verbatim

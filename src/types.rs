@@ -7,7 +7,7 @@
 //!
 //! The aliases live at the crate root — not inline at each call site — because
 //! they thread through many modules (`ingest::Worker`, `retrieval`,
-//! `capture_spool`, `tick`); one canonical definition keeps those signatures
+//! `intake`, `tick`); one canonical definition keeps those signatures
 //! identical and importable without module-to-module type coupling.
 
 use std::sync::Arc;

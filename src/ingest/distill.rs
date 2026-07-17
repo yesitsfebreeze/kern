@@ -1,7 +1,7 @@
 //! LLM-gated distillation of a raw conversation into durable claims.
 //!
 //! Pure-ish: the only side effect is the injected LLM call. The caller
-//! (capture_spool) turns each `Claim` into an ingested thought.
+//! (intake) turns each `Claim` into an ingested thought.
 
 /// One durable, reusable piece of knowledge extracted from a conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,7 +39,7 @@ pub const DESCRIPTORS: [&str; 7] = [
 /// `"[]"` or prose). Returns `None` when the LLM call produced *no output at
 /// all* — the daemon's `complete_func` returns an empty string on any error,
 /// so an empty raw response signals a transient outage. The caller leaves such
-/// a delta in the spool to retry rather than archiving it, so an outage never
+/// a delta in the intake to retry rather than archiving it, so an outage never
 /// loses captured knowledge.
 pub fn distill(conversation: &str, llm: &dyn Fn(&str) -> String) -> Option<Vec<Claim>> {
 	if conversation.trim().is_empty() {
@@ -191,7 +191,7 @@ mod tests {
 	#[test]
 	fn empty_llm_response_signals_retry() {
 		// An empty raw response means the LLM call failed; distill must return
-		// None so the caller leaves the delta in the spool for retry.
+		// None so the caller leaves the delta in the intake for retry.
 		let llm = stub("");
 		assert!(distill("a real conversation worth keeping", &llm).is_none());
 	}

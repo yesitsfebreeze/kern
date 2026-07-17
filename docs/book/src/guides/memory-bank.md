@@ -15,13 +15,13 @@ A long-running `kern` daemon owns one knowledge graph per working directory.
 Knowledge flows in automatically:
 
 ```
-session text → spool file → distill (LLM) → claims → graph → digest → recall
+session text → intake file → distill (LLM) → claims → graph → digest → recall
 ```
 
 - A **Stop hook** (`kern-capture.mjs`) extracts the new conversation delta
   from the Claude Code transcript (user prompts + assistant text only) and
   writes it to `<cwd>/.kern/capture/`.
-- The daemon's **capture spool** (`ingest::capture_spool`) drains each delta,
+- The daemon's **capture intake** (`ingest::intake`) drains each delta,
   runs **distillation** (`ingest::distill`) — one LLM pass that extracts
   durable facts / decisions / preferences as typed claims — and ingests each
   through the canonical `Worker`. A delta is archived to `capture/done/` only

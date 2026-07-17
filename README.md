@@ -10,7 +10,7 @@ learns on its own, compacts on its own, and (optionally) federates across
 machines on its own.
 
 ```
-session text → spool → distill (LLM) → typed claims → graph → digest → recall
+session text → intake → distill (LLM) → typed claims → graph → digest → recall
 ```
 
 ---

@@ -14,7 +14,7 @@ what isn't, connects facts with reasons, and (optionally) shares what it learns
 across machines, all on its own.
 
 ```
-session text → spool → distill (LLM) → typed claims → graph → digest → recall
+session text → intake → distill (LLM) → typed claims → graph → digest → recall
 ```
 
 ## Why it exists
