@@ -3,11 +3,6 @@ use std::path::{Path, PathBuf};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 /// Composite ignore matcher: per-root `.gitignore` + `.kernignore`.
-///
-/// Reuses the `ignore` crate (already a dep of `shared/search`) so we don't
-/// duplicate gitignore semantics. Matchers are evaluated per-root: an event
-/// is ignored if the path falls inside a root and the matcher for that root
-/// reports a match.
 pub struct IgnoreRules {
 	per_root: Vec<RootRules>,
 }
@@ -19,8 +14,7 @@ struct RootRules {
 }
 
 impl IgnoreRules {
-	/// Build matchers by reading `<root>/.gitignore` and `<root>/.kernignore`
-	/// for every root. Missing files are silently skipped (no rules).
+	/// Missing ignore files are silently skipped (no rules).
 	pub fn from_roots(roots: &[PathBuf]) -> Self {
 		let per_root = roots
 			.iter()
@@ -38,22 +32,14 @@ impl IgnoreRules {
 		Self { per_root }
 	}
 
-	/// Empty matcher — nothing is ignored. Useful for tests.
 	pub fn empty() -> Self {
 		Self {
 			per_root: Vec::new(),
 		}
 	}
 
-	/// Returns true if `path` should be skipped.
-	///
-	/// Every gitignore match below passes `is_dir = false` unconditionally. That
-	/// is correct here because the watcher only ever feeds this function paths
-	/// from notify filesystem events, which are file-shaped (a concrete path that
-	/// changed), not directory listings. The `ignore` crate uses `is_dir` only to
-	/// classify the matched path itself for trailing-slash patterns; a notify
-	/// file event is never a directory, so `false` avoids a `stat` and still
-	/// matches file patterns (`*.log`, `secret*`) as intended.
+	/// Returns true if `path` should be skipped. Passing `is_dir = false`
+	/// unconditionally is correct: notify event paths are never directory listings.
 	pub fn is_ignored(&self, path: &Path) -> bool {
 		// `.git/**` is always skipped — bursty internal churn we don't index.
 		if path.components().any(|c| c.as_os_str() == ".git") {
@@ -63,7 +49,6 @@ impl IgnoreRules {
 			let Ok(rel) = path.strip_prefix(&rules.root) else {
 				continue;
 			};
-			// `is_dir = false` — see the function doc; notify events are file-shaped.
 			if let Some(g) = &rules.gitignore {
 				if g.matched(rel, false).is_ignore() {
 					return true;
@@ -99,7 +84,6 @@ mod tests {
 
 	#[test]
 	fn dot_git_paths_are_always_ignored() {
-		// The `.git` guard fires regardless of configured rules (even empty()).
 		let r = IgnoreRules::empty();
 		assert!(r.is_ignored(Path::new("/repo/.git/HEAD")));
 		assert!(r.is_ignored(Path::new("/repo/sub/.git/index")));
@@ -115,10 +99,7 @@ mod tests {
 			rules.is_ignored(&dir.path().join("server.log")),
 			"*.log ignored"
 		);
-		// A name pattern (`target`) matches that exact path. (The code matches the
-		// event path itself via `Gitignore::matched`, which does not walk parents,
-		// so a trailing-slash dir pattern would not catch nested files — `.git` is
-		// the one recursive prune, handled separately above.)
+		// `Gitignore::matched` checks the event path only — no parent-dir walking.
 		assert!(
 			rules.is_ignored(&dir.path().join("target")),
 			"named path ignored"
@@ -146,7 +127,6 @@ mod tests {
 		let dir = tempdir().unwrap();
 		std::fs::write(dir.path().join(".gitignore"), "*.log\n").unwrap();
 		let rules = IgnoreRules::from_roots(&[dir.path().to_path_buf()]);
-		// A .log path OUTSIDE the watched root fails strip_prefix -> not matched.
 		assert!(!rules.is_ignored(Path::new("/elsewhere/server.log")));
 	}
 

@@ -4,9 +4,6 @@ use crate::base::locks::{read_recovered, write_recovered};
 
 use super::{tool_error, tool_result_json, Server};
 
-// Argument DTOs for the admin tools, hoisted to module level (out of the method
-// bodies) so they can be reused and unit-tested in isolation.
-
 #[derive(Deserialize, Default)]
 struct AnchorArgs {
 	#[serde(default)]
@@ -31,9 +28,6 @@ struct PulseArgs {
 	strength: f64,
 }
 
-/// MCP schemas for the admin tools, co-located with their `tool_health` /
-/// `tool_anchor` / `tool_descriptor` / `tool_pulse` handlers so schema and
-/// handler can't drift. Aggregated (in this order) by `tools::tool_definitions`.
 pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 	vec![
 		serde_json::json!({
@@ -177,10 +171,8 @@ impl Server {
 		}
 	}
 
-	/// Live garbage-collect: reap empty/orphan kerns from this daemon's graph and
-	/// persist. Safe to call while serving — it takes the graph write lock only for
-	/// the reap, then persists through the shared save closure (which prunes the
-	/// deleted rows from the store). No env close, so no restart needed.
+	/// Live GC: reap empty/orphan kerns (write lock held only for the reap), then
+	/// persist via the shared save closure. No env close — safe while serving.
 	pub(crate) fn tool_gc(&self) -> serde_json::Value {
 		let (before, reaped, after) = {
 			let mut g = write_recovered(&self.graph);
@@ -189,8 +181,7 @@ impl Server {
 		if reaped > 0 {
 			(self.save_fn)();
 		}
-		// Report the on-disk footprint so the caller knows when a restart/`kern
-		// compact` would reclaim the freed pages (LMDB keeps them until then).
+		// LMDB keeps freed pages until a restart/`kern compact`; report the footprint.
 		let data_bytes = read_recovered(&self.graph)
 			.store()
 			.map(|s| s.data_file_len())
@@ -213,9 +204,8 @@ impl Server {
 		let strength = if p.strength <= 0.0 { 1.0 } else { p.strength };
 
 		let q = match &self.task_q {
-			// No tick queue wired in (e.g. a one-shot CLI Server, not the daemon).
-			// Label the no-op so a caller can tell it apart from a real 0-enqueue
-			// pulse rather than silently seeing enqueued:0.
+			// No tick queue (one-shot CLI Server): label the no-op so a caller can
+			// tell it from a real 0-enqueue pulse.
 			None => {
 				return tool_result_json(&serde_json::json!({
 					"status": "noop",
@@ -286,10 +276,7 @@ mod descriptor_tests {
 
 	#[tokio::test]
 	async fn health_stats_aggregates_entities_and_descriptors() {
-		// Server::health_stats wraps base::health::graph_health_stats and adds the
-		// root descriptor count. Seed a kern with two entities + one descriptor
-		// and assert the aggregation surfaces them (guards against the loop
-		// drifting from repl.rs's copy).
+		// Guards health_stats against drifting from repl.rs's copy of the aggregation.
 		use crate::base::types::{Entity, Kern};
 		let (srv, _c) = make_server();
 		{
@@ -355,7 +342,6 @@ mod descriptor_tests {
 	#[tokio::test]
 	async fn add_missing_required_field_returns_deser_error() {
 		let (srv, _) = make_server();
-		// `name` is required; omitting it triggers serde error path
 		let out = srv.tool_descriptor(&serde_json::json!({"action": "add"}));
 		assert!(is_error(&out));
 		assert!(text(&out).contains("invalid arguments"));
@@ -396,8 +382,6 @@ mod descriptor_tests {
 
 	#[tokio::test]
 	async fn pulse_without_a_task_queue_is_a_labeled_noop() {
-		// make_server() wires task_q: None, so pulse can't enqueue. It must say so
-		// (status=noop + reason), not silently return a bare enqueued:0.
 		let (srv, _) = make_server();
 		let out = srv.tool_pulse(&serde_json::json!({}));
 		assert!(!is_error(&out));
@@ -409,8 +393,6 @@ mod descriptor_tests {
 
 	#[tokio::test]
 	async fn anchor_remove_not_found_errors_and_does_not_save() {
-		// Guards the "save on not-found" concern: remove of a missing anchor must
-		// return an error and leave save_fn UNcalled (counter stays 0).
 		let (srv, counter) = make_server();
 		let out = srv.tool_anchor(&serde_json::json!({"action": "remove", "name": "ghost"}));
 		assert!(is_error(&out));

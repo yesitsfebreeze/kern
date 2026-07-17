@@ -26,9 +26,8 @@ impl Dropout {
 			return Tensor::zeros(input.rows, input.cols);
 		}
 		let mut rng = rand::rng();
-		// Inverted dropout: surviving activations are scaled by 1/(1-p) at
-		// train time so the expected sum matches the unscaled inference pass
-		// (no scaling needed in forward when training == false).
+		// Inverted dropout: survivors scaled by 1/(1-p) at train time, so the
+		// eval path needs no rescaling.
 		let scale = 1.0 / (1.0 - self.p);
 		let mut mask = Tensor::zeros(input.rows, input.cols);
 		let mut out = Tensor::zeros(input.rows, input.cols);
@@ -86,7 +85,7 @@ mod tests {
 
 	#[test]
 	fn backward_without_forward_mask_is_identity() {
-		let d = Dropout::new(0.5); // no forward() called -> last_mask is None
+		let d = Dropout::new(0.5);
 		let grad = t();
 		assert_eq!(d.backward(&grad).data, grad.data);
 	}

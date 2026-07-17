@@ -1,10 +1,5 @@
-//! LoCoMo eval harness (#36): measure kern memory quality.
-//!
-//! Drives capture→distill→retrieve over the LoCoMo corpus with live ollama
-//! models and reports per-category quality (F1 / ROUGE-L / LLM-judge, plus
-//! abstention on the adversarial category), retrieved-context size, and query
-//! latency. The dataset is CC BY-NC 4.0 — supply it via `--dataset` or
-//! `KERN_LOCOMO_PATH`; it is never bundled in the repo.
+//! LoCoMo eval harness (#36): drives capture→distill→retrieve over the LoCoMo corpus
+//! with live ollama. Dataset is CC BY-NC 4.0 — supplied via a path, never bundled.
 
 use clap::Parser;
 use kern::bench_support::locomo_run::{run_eval, EvalConfig};
@@ -52,8 +47,7 @@ struct Args {
 	output: Option<String>,
 }
 
-/// Resolve the dataset path: explicit `--dataset` wins, then `$KERN_LOCOMO_PATH`,
-/// then the `eval/locomo10.json` default. Pure so the precedence is unit-testable.
+/// Precedence: explicit `--dataset`, then `$KERN_LOCOMO_PATH`, then the default.
 fn resolve_dataset(arg: Option<String>, env: Option<String>) -> String {
 	arg
 		.or(env)
@@ -65,8 +59,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let args = Args::parse();
 	let dataset = resolve_dataset(args.dataset, std::env::var("KERN_LOCOMO_PATH").ok());
 
-	// Fail loudly with actionable guidance instead of a bare "file not found" deep
-	// in the loader — the dataset is never bundled (CC BY-NC 4.0).
 	if !std::path::Path::new(&dataset).exists() {
 		eprintln!("locomo_eval: dataset not found at `{dataset}`.");
 		eprintln!(

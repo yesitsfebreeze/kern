@@ -1,8 +1,5 @@
-//! Grow-only (`GCounter`) and positive-negative (`PnCounter`) CRDT counters:
-//! conflict-free, commutative, idempotent, monotone primitives that converge to
-//! the same value across gossip-replicated nodes regardless of delivery order or
-//! duplication. They back the per-replica access and traversal counts merged by
-//! `base::merge`.
+//! Grow-only (`GCounter`) and positive-negative (`PnCounter`) CRDT counters
+//! backing the per-replica access/traversal counts merged by `base::merge`.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -89,8 +86,7 @@ impl PnCounter {
 mod tests {
 	use super::*;
 
-	/// Build a GCounter with a single replica slot set to an absolute value —
-	/// the shape an inbound CRDT delta is merged as.
+	/// Single-replica absolute-value slot — the shape inbound CRDT deltas merge as.
 	fn slot(replica: &str, value: u64) -> GCounter {
 		let mut g = GCounter::new();
 		g.increment(replica, value);
@@ -100,26 +96,24 @@ mod tests {
 	#[test]
 	fn merge_is_per_slot_max() {
 		let mut a = slot("r1", 5);
-		a.merge(&slot("r1", 3)); // smaller -> no change
+		a.merge(&slot("r1", 3));
 		assert_eq!(a.value(), 5);
-		a.merge(&slot("r1", 9)); // larger -> wins
+		a.merge(&slot("r1", 9));
 		assert_eq!(a.value(), 9);
 	}
 
 	#[test]
 	fn merge_is_commutative_and_order_independent() {
-		// Three absolute-total deltas across two replicas, applied in two
-		// different orders (with a duplicate), must converge to the same state.
 		let deltas = [slot("r1", 4), slot("r2", 7), slot("r1", 6)];
 
 		let mut a = GCounter::new();
 		for d in [&deltas[0], &deltas[1], &deltas[2], &deltas[1]] {
-			a.merge(d); // includes a duplicate of r2=7
+			a.merge(d);
 		}
 
 		let mut b = GCounter::new();
 		for d in [&deltas[2], &deltas[1], &deltas[0]] {
-			b.merge(d); // reverse order
+			b.merge(d);
 		}
 
 		assert_eq!(a, b, "merge must be order- and duplicate-independent");

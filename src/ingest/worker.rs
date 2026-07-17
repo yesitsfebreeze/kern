@@ -22,18 +22,12 @@ pub(crate) struct Job {
 	pub(crate) result_tx: Option<oneshot::Sender<Outcome>>,
 }
 
-/// Post-placement hook: called with each freshly placed (non-deduped) entity
-/// id so question seeding can be DEFERRED to the tick instead of running a
-/// blocking reason-LLM call on the commit path. The hook must be cheap (it
-/// enqueues a `SeedQuestions` task); the worker stays embed-bound.
+/// Post-placement hook with each freshly placed (non-deduped) entity id —
+/// question seeding is DEFERRED to the tick. The hook must be cheap (enqueue only).
 pub type DeferQuestionsFn = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// Dedup-time hook: called with `(kern_id, rephrase_reason_id)` when a near-dup
-/// with DIFFERENT text of the same kind was recorded as a `Rephrase` edge, so the
-/// contradiction classification (a reason-LLM call that decides UPDATE/CONTRADICT
-/// vs RELATED, and on the former runs bi-temporal supersedence) can be DEFERRED to
-/// the tick. Same discipline as [`DeferQuestionsFn`]: the worker stays embed-bound;
-/// no hook wired means today's rephrase behavior is unchanged (fail open).
+/// Dedup-time hook `(kern_id, rephrase_reason_id)` for a same-kind near-dup with
+/// different text. Classification is DEFERRED to the tick; no hook = fail open.
 pub type DeferContradictionFn = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 pub struct Worker {
@@ -41,12 +35,8 @@ pub struct Worker {
 }
 
 impl Worker {
-	/// The worker deliberately takes NO reason-LLM: every LLM-bound step
-	/// (question seeding, enrichment, naming) is deferred to the tick via
-	/// `defer_questions`, and chunk splitting always uses the heuristic
-	/// splitter. This is a type-level guarantee that the ingest commit path
-	/// is embed-bound — measured before the change: a one-line sync ingest
-	/// queued 69.7 minutes behind LLM-bound jobs (600s timeout each).
+	/// Deliberately takes NO reason-LLM: every LLM-bound step defers to the tick
+	/// — a type-level guarantee that the ingest commit path is embed-bound.
 	pub fn new(
 		graph: Arc<RwLock<GraphGnn>>,
 		embedder: LlmClient,
@@ -135,12 +125,16 @@ async fn run_loop(
 	mut rx: mpsc::Receiver<Job>,
 ) {
 	while let Some(job) = rx.recv().await {
-		let outcome = process(&graph, &embedder, &defer_questions, &defer_contradiction, &job).await;
-		// Log every job's outcome, fire-and-forget jobs included. Before this, an
-		// `enqueue`d job that failed vanished without a trace: result_tx is None
-		// on that path, so the Outcome — including its FailureReports — was
-		// dropped unread. Observed live: 8/8 MCP ingests acked "queued" with
-		// nothing in the graph and no log to say why.
+		let outcome = process(
+			&graph,
+			&embedder,
+			&defer_questions,
+			&defer_contradiction,
+			&job,
+		)
+		.await;
+		// Log every job's outcome here: on the fire-and-forget `enqueue` path
+		// result_tx is None, so this is the failure's only trace.
 		log_outcome(&outcome);
 		if let Some(sf) = &save_fn {
 			sf();
@@ -152,7 +146,6 @@ async fn run_loop(
 }
 
 /// Severity bucket for an ingest outcome: failures are loud, success is quiet.
-/// Pure so the mapping is unit-testable; `log_outcome` applies it.
 fn outcome_log_severity(o: &Outcome) -> &'static str {
 	match o.status {
 		OutcomeStatus::Failed => "error",
@@ -161,8 +154,7 @@ fn outcome_log_severity(o: &Outcome) -> &'static str {
 	}
 }
 
-/// Log one processed job. The first failure's class+error is inlined so a
-/// single log line answers "what happened to doc X" without a debugger.
+/// Log one processed job; the first failure's class+error is inlined.
 fn log_outcome(o: &Outcome) {
 	let first_failure = o
 		.failures
@@ -201,12 +193,8 @@ fn log_outcome(o: &Outcome) {
 	}
 }
 
-/// Resolve the outcome's document identity after placement. `place_document`
-/// returns the SURVIVING entity id: the content hash on a fresh place, or an
-/// existing entity's id on a dedup merge. The outcome must carry the surviving
-/// id — the caller was acked the content hash, and after a merge that id does
-/// not exist in the graph — and a `Committed` merge becomes `Deduped` so the
-/// two are distinguishable. Partial/Failed are never upgraded.
+/// The outcome must carry placement's SURVIVING id — after a merge the acked
+/// content hash is not in the graph. Only `Committed` becomes `Deduped`.
 fn finalize_doc_identity(
 	content_id: &str,
 	surviving_id: String,
@@ -230,9 +218,8 @@ async fn process(
 ) -> Outcome {
 	let doc_id = util::content_hash(&job.text);
 
-	// Heuristic splitting ONLY — the LLM splitter was one reason-LLM call per
-	// document on the commit path. The heuristic fallback was already the
-	// common case (any LLM hiccup) and keeps the worker embed-bound.
+	// Heuristic splitting ONLY — an LLM split would put a reason-LLM call per
+	// document on the commit path (see splinter note).
 	let chunks = split::split(&job.text, &job.descriptor, None);
 
 	let (doc_thought, doc_fail) = place_document(
@@ -278,9 +265,6 @@ async fn process(
 	let permanent = failures.iter().filter(|f| f.class != "transient").count();
 
 	let status = classify_status(embedded_chunks, failed_chunks);
-	// Carry the SURVIVING id (existing entity on a dedup merge) and mark the
-	// merge as Deduped — the acked content hash does not exist in the graph
-	// after a merge, which previously made merges look like silent loss.
 	let (doc_id, status) = finalize_doc_identity(&doc_id, surviving_id, status);
 
 	Outcome {
@@ -296,10 +280,8 @@ async fn process(
 	}
 }
 
-/// Classify an ingest outcome from chunk tallies: every chunk embedded ->
-/// `Committed`; at least one but not all -> `Partial`; none embedded (and at
-/// least one failed) -> `Failed`. Note a zero-chunk document (`failed_chunks == 0`)
-/// is `Committed` — the document entity itself was placed.
+/// Committed / Partial / Failed from chunk tallies. A zero-chunk document is
+/// `Committed` — the document entity itself was placed.
 fn classify_status(embedded_chunks: usize, failed_chunks: usize) -> OutcomeStatus {
 	if failed_chunks == 0 {
 		OutcomeStatus::Committed
@@ -316,13 +298,9 @@ mod tests {
 
 	#[test]
 	fn classify_status_maps_tallies_to_outcome() {
-		// All chunks embedded -> Committed.
 		assert_eq!(classify_status(3, 0), OutcomeStatus::Committed);
-		// Some embedded, some failed -> Partial.
 		assert_eq!(classify_status(2, 1), OutcomeStatus::Partial);
-		// None embedded, some failed -> Failed.
 		assert_eq!(classify_status(0, 3), OutcomeStatus::Failed);
-		// Zero-chunk document (nothing failed) -> Committed.
 		assert_eq!(classify_status(0, 0), OutcomeStatus::Committed);
 	}
 
@@ -344,16 +322,13 @@ mod tests {
 	}
 
 	fn dead_worker(graph: Arc<RwLock<GraphGnn>>) -> Worker {
-		// Embed endpoint that always fails, so the ingest pipeline exercises its
-		// failure assembly without needing a live model.
+		// Always-failing embed endpoint so failure assembly runs without a live model.
 		let embedder = LlmClient::new_embed_only("http://127.0.0.1:1", "test");
 		Worker::new(graph, embedder, None, None, None)
 	}
 
 	#[tokio::test]
 	async fn enqueue_returns_the_content_hash_doc_id() {
-		// The fire-and-forget path hands the caller a doc id immediately; it must be
-		// the content hash of the text (the same id the worker will commit under).
 		let worker = dead_worker(Arc::new(RwLock::new(GraphGnn::new())));
 		let text = "some document text".to_string();
 		let doc_id = worker.enqueue(
@@ -383,29 +358,22 @@ mod tests {
 
 	#[test]
 	fn finalize_doc_identity_marks_dedup_and_keeps_surviving_id() {
-		// Dedup merge: place_document returned an EXISTING entity id, not the
-		// content hash — the outcome must carry the surviving id and say so,
-		// otherwise the caller holds a doc_id that does not exist in the graph
-		// (indistinguishable from silent loss).
 		let (id, st) =
 			finalize_doc_identity("hash-a", "existing-b".to_string(), OutcomeStatus::Committed);
 		assert_eq!(id, "existing-b");
 		assert_eq!(st, OutcomeStatus::Deduped);
 
-		// Fresh placement: surviving id IS the content hash — status unchanged.
 		let (id, st) = finalize_doc_identity("hash-a", "hash-a".to_string(), OutcomeStatus::Committed);
 		assert_eq!(id, "hash-a");
 		assert_eq!(st, OutcomeStatus::Committed);
 
-		// Partial/Failed outcomes are never upgraded to Deduped — chunk failures
-		// still need to surface as such.
+		// Partial/Failed are never upgraded.
 		let (_, st) = finalize_doc_identity("hash-a", "existing-b".to_string(), OutcomeStatus::Partial);
 		assert_eq!(st, OutcomeStatus::Partial);
 	}
 
 	#[test]
 	fn outcome_log_severity_maps_status_to_level() {
-		// Every processed job must be observable: failures loudly, success quietly.
 		assert_eq!(
 			outcome_log_severity(&outcome_with(OutcomeStatus::Committed)),
 			"info"

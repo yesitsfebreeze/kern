@@ -10,10 +10,8 @@ use crate::base::util::truncate;
 
 use super::{load_graph, Client, Endpoint};
 
-/// Bound on optimistic-retry rounds for a CLI write that lost a flush race to
-/// another writer (a live daemon's tick, a parallel CLI). Each round reloads the
-/// committed state and re-applies, so a handful suffices; the cap just prevents an
-/// unbounded spin under pathological contention.
+/// Optimistic-retry bound for a CLI write that lost a flush race. Each round
+/// reloads committed state and re-applies; the cap only stops a pathological spin.
 const WRITE_RETRIES: u32 = 5;
 
 #[allow(clippy::too_many_arguments)]
@@ -50,12 +48,8 @@ pub(super) async fn cmd_ingest(
 		Endpoint::default(),
 		Endpoint::new(embed_url, embed_model, embed_key),
 	);
-	// No worker save_fn: this command owns persistence so it can use the
-	// stale-safe guarded flush below instead of a bare full-snapshot overwrite.
-	// One-shot CLI ingest: no tick loop exists here, so question seeding is
-	// skipped (no defer hook). Questions are enrichment, not data — the daemon's
-	// tick will not backfill them for CLI-ingested entities, which is the
-	// documented trade for keeping the worker free of reason-LLM calls.
+	// No worker save_fn: this command owns persistence via the guarded flush.
+	// No defer hooks: no tick loop here, so question seeding is skipped.
 	let worker = crate::ingest::Worker::new(g.clone(), llm_client, None, None, None);
 
 	let (conf, kind) = clamp_confidence(1.0, "user");
@@ -64,22 +58,15 @@ pub(super) async fn cmd_ingest(
 		section: String::new(),
 	};
 
-	// Optimistic concurrency: place the ingest, then flush only if no other writer
-	// committed since we loaded. A live daemon (or a parallel CLI) is the second
-	// writer the "never two writers on one data_dir" hazard warns about; rather
-	// than blindly overwriting — which is exactly how the daemon used to wipe
-	// committed ingests — we detect the divergence via the store epoch, reload the
-	// committed state, and re-apply. The reload re-embeds, but only on an actual
-	// race, which is rare.
+	// Optimistic concurrency: flush only if no other writer committed since we
+	// loaded; on a lost race, reload the committed state and re-apply.
 	let mut outcome = run_once(&worker, &g, &text, &src, kind, conf, cfg).await;
 	for attempt in 0..WRITE_RETRIES {
-		// Guard against the epoch observed at LOAD time (flushed_epoch), not a
-		// re-read at flush time — otherwise a writer that committed between our load
-		// and our flush would go unnoticed and we'd overwrite it.
+		// Guard against the epoch observed at LOAD time, not a re-read at flush
+		// time — else a writer that committed in between gets overwritten unseen.
 		let expected = read_recovered(&g).flushed_epoch();
-		// Bind before matching: a scrutinee temporary would keep the read guard
-		// alive across the whole match — deadlocking write_recovered below and
-		// holding the lock across the retry await.
+		// Bind before matching: a scrutinee temporary keeps the read guard alive
+		// across the match — deadlocking write_recovered below.
 		let flushed = crate::base::persist::flush_guarded(&read_recovered(&g), expected);
 		match flushed {
 			Ok(FlushOutcome::Flushed { .. }) => break,
@@ -93,7 +80,10 @@ pub(super) async fn cmd_ingest(
 				}
 				outcome = run_once(&worker, &g, &text, &src, kind, conf, cfg).await;
 			}
-			Ok(FlushOutcome::RefusedStale { disk_epoch, expected }) => {
+			Ok(FlushOutcome::RefusedStale {
+				disk_epoch,
+				expected,
+			}) => {
 				eprintln!(
 					"ingest: persisted under contention after {WRITE_RETRIES} tries \
 					 (disk epoch {disk_epoch} vs {expected}); another writer is active on this data_dir"
@@ -113,11 +103,15 @@ pub(super) async fn cmd_ingest(
 		outcome.status.as_str(),
 		outcome.total_chunks
 	);
+	for f in &outcome.failures {
+		eprintln!(
+			"  {} #{} ({}): {}",
+			f.scope, f.chunk_index, f.class, f.error
+		);
+	}
 }
 
-/// One placement pass: run the ingest worker against the (possibly just-reloaded)
-/// graph. Factored out so the optimistic-retry loop can re-place after adopting a
-/// concurrently-committed graph without duplicating the argument plumbing.
+/// One placement pass against the (possibly just-reloaded) graph.
 async fn run_once(
 	worker: &crate::ingest::Worker,
 	_g: &Arc<RwLock<crate::base::graph::GraphGnn>>,
@@ -139,8 +133,6 @@ async fn run_once(
 		.await
 }
 
-/// The ingest `Config` for a CLI ingest: only `dedup_threshold` is carried over
-/// from the user's config; every other field uses ingest defaults.
 fn ingest_config(cfg: &crate::config::Config) -> crate::ingest::Config {
 	crate::ingest::Config {
 		dedup_threshold: cfg.ingest.dedup_threshold,
@@ -161,7 +153,6 @@ mod tests {
 			ic.dedup_threshold, 0.87,
 			"dedup_threshold comes from the user config"
 		);
-		// Everything else matches ingest defaults (not the user config).
 		assert_eq!(ic.dedup_threshold, 0.87);
 		let default_dedup = crate::ingest::Config::default().dedup_threshold;
 		assert_ne!(

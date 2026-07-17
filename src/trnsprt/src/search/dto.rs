@@ -1,22 +1,9 @@
-//! Data transfer objects for [`SearchSvc`](super::SearchSvc).
-//!
-//! These are mirror types — they intentionally do NOT depend on the
-//! `kern` crate. The kern side translates its richer internal types to
-//! and from these on the boundary. Keeping DTOs colocated with the
-//! transport keeps the `repl` palette free of any kern dependency.
-//!
-//! All DTOs derive `serde::{Serialize, Deserialize}` so they can be
-//! shuttled by either the line-delimited JSON envelope codec or the
-//! length-delimited bincode codec — the codec choice is per-channel.
+//! DTOs for [`SearchSvc`](super::SearchSvc) — mirror types that intentionally
+//! do NOT depend on the `kern` crate; kern translates at the wire boundary.
 
 use serde::{Deserialize, Serialize};
 
-// ---- entity kind / status -------------------------------------------------
-
 /// Lightweight mirror of `kern::EntityKind`.
-///
-/// The canonical seven-variant enum from the PRD. Held here so the
-/// `repl` palette never needs the `kern` crate as a build dependency.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum EntityKindLite {
 	Fact,
@@ -31,14 +18,8 @@ pub enum EntityKindLite {
 }
 
 impl EntityKindLite {
-	/// Parse a wire-side lower-case kind label (e.g. `"fact"`) into the lite
-	/// enum. The single source of truth for label→kind, shared by the mock and
-	/// the kern RPC server so the mapping can't drift between them.
-	///
-	/// Returns `None` for unknown labels AND for `"superseded"`: Superseded is a
-	/// lifecycle *status* ([`EntityStatusLite`]), not a content kind — it mirrors
-	/// `kern::EntityKind`, which has no `Superseded` variant. Callers treat `None`
-	/// as "no kind filter", not "match nothing".
+	/// Single source of truth for label→kind. `None` (unknown labels AND
+	/// `"superseded"`, a status not a kind) means "no kind filter", never "match nothing".
 	pub fn from_label(s: &str) -> Option<Self> {
 		match s {
 			"fact" => Some(Self::Fact),
@@ -60,10 +41,7 @@ pub enum EntityStatusLite {
 	Superseded,
 }
 
-// ---- edges ----------------------------------------------------------------
-
-/// Mirror of `kern::Reason` kinds. One variant per typed edge in the
-/// connected index.
+/// Mirror of `kern::Reason` kinds — one variant per typed edge.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum EdgeKind {
 	#[default]
@@ -79,55 +57,41 @@ pub enum EdgeKind {
 	Consolidates,
 }
 
-// ---- edge reference (relationship) ----------------------------------------
-
-/// One enriched relationship edge attached to a search hit. Carries the
-/// sentence that explains the specific logical connection so callers can
-/// reason about WHY two entities are linked, not just THAT they are.
+/// One enriched relationship edge attached to a search hit.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct EdgeRef {
 	pub from: String,
 	pub to: String,
 	pub kind: EdgeKind,
-	/// LLM-generated sentence naming the exact mechanism, cause, or logical
-	/// dependency linking `from` → `to`. Empty until kern tick enrichment;
-	/// callers should skip unenriched edges.
+	/// LLM-generated sentence naming the `from` → `to` link mechanism. Empty
+	/// until kern tick enrichment — callers should skip unenriched edges.
 	pub text: String,
 	/// Cosine similarity between the two endpoint vectors.
 	pub score: f32,
 }
 
-// ---- entity reference (search hit) ----------------------------------------
-
-/// One result row delivered to the palette. Cheap to clone; carries
-/// only what `Card` needs to render plus the id used to drill in.
+/// One result row delivered to the palette — only what `Card` needs to
+/// render, plus the id used to drill in.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct EntityRef {
 	pub id: String,
 	pub kind: EntityKindLite,
 	pub status: EntityStatusLite,
-	/// URI scheme without the `://` (e.g. `file`, `ticket`, `session`,
-	/// `agent`, `inline`). Lets the palette pick the source-glyph
-	/// without parsing a full URI.
+	/// URI scheme without the `://` (e.g. `file`, `ticket`, `inline`).
 	pub scheme: String,
 	pub label: String,
-	/// Short snippet shown under the label; already truncated by the
-	/// server.
+	/// Short snippet shown under the label; already server-truncated.
 	pub snippet: String,
 	/// Fused score (HNSW + BM25 + PageRank + heat). Higher = better.
 	pub score: f32,
-	/// Enriched relationship edges incident to this entity. Only edges with
-	/// a non-empty `text` sentence are included. Empty when no enriched
-	/// edges exist or the response predates this field.
+	/// Only edges with a non-empty `text` sentence are included. Empty when
+	/// none exist or the response predates this field.
 	#[serde(default)]
 	pub edges: Vec<EdgeRef>,
 }
 
-// ---- search ---------------------------------------------------------------
-
-/// One filter chip applied to a query. `scheme` and `kind` are
-/// independently optional so a facet can constrain by either axis (or
-/// both, when the user types e.g. `>file !fact`).
+/// One filter chip. `scheme` and `kind` are independently optional — a facet
+/// constrains either axis or both (e.g. `>file !fact`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Facet {
 	pub scheme: Option<String>,
@@ -139,9 +103,8 @@ pub struct SearchReq {
 	pub query: String,
 	pub facets: Vec<Facet>,
 	pub k: u32,
-	/// Monotonic per-keystroke token. Newer tokens supersede older
-	/// ones in the server's mock cancellation logic; production
-	/// implementations may use it to early-return stale work.
+	/// Monotonic per-keystroke token; newer supersedes older. Servers may use
+	/// it to early-return stale work.
 	pub cancel_token: Option<u64>,
 }
 
@@ -152,8 +115,6 @@ pub struct SearchRes {
 	/// the server has seen. The client may discard stale frames.
 	pub fresh: bool,
 }
-
-// ---- neighbors ------------------------------------------------------------
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NeighborsReq {
@@ -169,16 +130,13 @@ pub struct NeighborsRes {
 	pub neighbors: Vec<EntityRef>,
 }
 
-// ---- preview --------------------------------------------------------------
-
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PreviewReq {
 	pub entity_id: String,
 }
 
-/// Preview pane payload. The variant carries everything the renderer
-/// needs — the palette decides which sub-renderer to dispatch to based
-/// on the discriminant.
+/// Preview pane payload; the palette dispatches a sub-renderer on the
+/// discriminant.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PreviewRes {
 	/// File-backed entity. `language` is a tree-sitter grammar id
@@ -190,8 +148,7 @@ pub enum PreviewRes {
 	},
 	/// Generic entity body — Fact, Claim, Conclusion, etc.
 	Text { content: String },
-	/// Reason edge between two entities; rendered as a sentence in the
-	/// preview pane.
+	/// Reason edge between two entities; rendered as a sentence.
 	Edge {
 		from_label: String,
 		to_label: String,
@@ -199,8 +156,6 @@ pub enum PreviewRes {
 		sentence: String,
 	},
 }
-
-// ---- bincode + serde_json roundtrip smoke ---------------------------------
 
 #[cfg(test)]
 mod dto_serde_tests {
@@ -236,7 +191,6 @@ mod dto_serde_tests {
 
 	#[test]
 	fn entity_ref_with_no_edges_roundtrips_json() {
-		// Ensure #[serde(default)] lets old payloads without `edges` deserialise cleanly.
 		let json = r#"{"id":"e0","kind":"Fact","status":"Active","scheme":"inline","label":"x","snippet":"y","score":0.5}"#;
 		let back: EntityRef = serde_json::from_str(json).unwrap();
 		assert!(
@@ -285,16 +239,12 @@ mod dto_serde_tests {
 		for c in cases {
 			let s = serde_json::to_string(&c).unwrap();
 			let back: PreviewRes = serde_json::from_str(&s).unwrap();
-			// PreviewRes now derives PartialEq, so a round-trip is a single `==`
-			// instead of per-variant field matching.
 			assert_eq!(back, c, "PreviewRes survives a JSON round-trip");
 		}
 	}
 
 	#[test]
 	fn search_req_cancel_token_roundtrips_through_bincode() {
-		// Explicitly cover the Option<u64> serde path: None and the boundary
-		// values, since a codec bug there would silently break cancellation.
 		let cfg = bincode::config::standard();
 		for token in [None, Some(0u64), Some(42), Some(u64::MAX)] {
 			let req = SearchReq {
@@ -326,7 +276,6 @@ mod dto_serde_tests {
 			EntityStatusLite::Active,
 			"default status is Active"
 		);
-		// Two defaults compare equal now that EntityRef derives PartialEq.
 		assert_eq!(EntityRef::default(), d);
 	}
 }

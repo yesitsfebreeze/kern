@@ -1,6 +1,3 @@
-//! CLI command handlers for the `kern` binary: each subcommand (admin, graph
-//! ops, ingest, MCP, profile, reembed, …) dispatched from `main`.
-
 mod admin;
 mod graph_ops;
 mod ingest_cmd;
@@ -9,8 +6,6 @@ mod profile_cmd;
 mod query;
 mod reembed;
 
-/// Register kern MCP servers in the project's `.mcp.json`.
-/// Called at daemon startup — idempotent, safe to call every boot.
 pub(crate) use mcp_cmd::ensure_mcp_registered;
 
 use std::sync::Arc;
@@ -20,45 +15,37 @@ use clap::{Parser, Subcommand};
 use crate::base::graph::GraphGnn;
 use crate::base::locks::read_recovered;
 
+const SELF_HEAL_BLOAT_BYTES: u64 = 512 * 1024 * 1024;
+
 #[derive(Parser)]
 #[command(name = "kern", version, about = "Self-organizing knowledge graph")]
 pub struct Cli {
 	#[command(subcommand)]
 	pub command: Option<Commands>,
 
-	/// Run the long-lived daemon (tick worker + MCP + kern_rpc) for this cwd.
 	#[arg(short = 'd', long)]
 	pub daemon: bool,
 
-	/// Serve MCP over HTTP/SSE on this address instead of stdio (e.g. 127.0.0.1:7777).
 	#[arg(long, default_value = "")]
 	pub mcp_addr: String,
 
-	/// Serve MCP over stdio (for direct embedding in an MCP client).
 	#[arg(long)]
 	pub mcp_stdio: bool,
 
-	/// Embedding endpoint (Ollama-compatible). Overrides config.
 	#[arg(long, default_value = crate::config::DEFAULT_EMBED_URL)]
 	pub embed_url: String,
 
-	/// Embedding model name. Overrides config.
 	#[arg(long, default_value = crate::config::DEFAULT_EMBED_MODEL)]
 	pub embed_model: String,
 
-	/// Reasoning/distillation endpoint (Ollama-compatible). Overrides config.
 	#[arg(long, default_value = "")]
 	pub reason_url: String,
 
-	/// Reasoning/distillation model name. Overrides config.
 	#[arg(long, default_value = "")]
 	pub reason_model: String,
 }
 
 impl Cli {
-	/// Headless daemon invocation: no subcommand, `--daemon`, every network/model
-	/// field at its clap default. Used by the `Daemon` arm, which runs
-	/// the server with no CLI flags.
 	fn daemon() -> Self {
 		Cli {
 			command: None,
@@ -75,10 +62,6 @@ impl Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-	/// Add text (or a --file) to the graph; distills into typed claims.
-	/// (The old `--no_llm` flag is gone: the ingest commit path no longer
-	/// makes reason-LLM calls at all — splitting is heuristic and question
-	/// seeding belongs to the daemon's tick.)
 	Ingest {
 		text: Vec<String>,
 		#[arg(long)]
@@ -92,7 +75,6 @@ pub enum Commands {
 		#[arg(long)]
 		reason_model: Option<String>,
 	},
-	/// Search the graph; prints scored thoughts (+ optional LLM --answer).
 	Query {
 		text: String,
 		#[arg(long, default_value = "hybrid")]
@@ -108,7 +90,6 @@ pub enum Commands {
 		#[arg(long)]
 		reason_model: Option<String>,
 	},
-	/// Raw vector + lexical search; print the top-k hits.
 	Search {
 		text: String,
 		#[arg(long, default_value = "5")]
@@ -118,21 +99,19 @@ pub enum Commands {
 		#[arg(long)]
 		embed_model: Option<String>,
 	},
-	/// Re-embed the whole graph with the configured embedding model (run after
-	/// changing `[embed] model`; stop the daemon first).
 	Reembed {
 		#[arg(long)]
 		embed_url: Option<String>,
 		#[arg(long)]
 		embed_model: Option<String>,
 	},
-	/// Print a single thought by id (rehydrates from the cold store).
-	Get { id: String },
-	/// List all thoughts in the graph.
+	Get {
+		id: String,
+	},
 	List,
-	/// Remove a thought and cascade its edges (Facts are immune).
-	Forget { id: String },
-	/// Create a reason edge between two thoughts (LLM writes the reason if blank).
+	Forget {
+		id: String,
+	},
 	Link {
 		from: String,
 		to: String,
@@ -147,48 +126,35 @@ pub enum Commands {
 		#[arg(long)]
 		reason_model: Option<String>,
 	},
-	/// Print graph stats: thought/edge counts, tick heat, purpose.
 	Health,
-	/// Time every hot path (load, embed, search, query stages, distill,
-	/// digest) and print a scaled timeline. Read-only.
 	Profile {
-		/// Query text driving the embed/search/query stages.
 		#[arg(long, default_value = "what is this project about")]
 		text: String,
-		/// Skip LLM-dependent stages (hyde, rerank, answer, distill).
 		#[arg(long)]
 		no_llm: bool,
 	},
-	/// Reap empty unnamed kerns, persist, and shrink data.mdb (daemon stopped).
 	Gc,
-	/// Shrink data.mdb to its live size without reaping (daemon stopped). LMDB
-	/// keeps freed pages in-file after a delete; this rewrites the env compactly.
 	Compact,
-	/// Manage anchors: named top-level buckets the root routes memories into.
-	/// Memories that match no anchor fall through to `generic`.
 	Anchor {
 		#[command(subcommand)]
 		action: AnchorAction,
 	},
-	/// Down-weight the edges along a bad retrieval path (learn from a miss).
-	Degrade { id: String },
-	/// Add or remove data-type descriptors.
+	Degrade {
+		id: String,
+	},
 	Descriptor {
 		#[command(subcommand)]
 		action: DescriptorAction,
 	},
-	/// List known gossip peers.
 	Peers,
-	/// Import a kern store from a directory into this graph.
-	Register { path: String },
-	/// Inspect kerns that have no name yet.
+	Register {
+		path: String,
+	},
 	Unnamed {
 		#[command(subcommand)]
 		action: UnnamedAction,
 	},
-	/// Run the MCP server over stdio (attaches to or spawns the daemon).
 	Mcp,
-	/// Quantize a kern store's vectors (none | int8) into a new directory.
 	Compress {
 		src: String,
 		#[arg(long, default_value = "int8")]
@@ -196,19 +162,14 @@ pub enum Commands {
 		#[arg(long)]
 		out: Option<String>,
 	},
-	/// One-shot: migrate a legacy file-shard data dir to the LMDB store (in place).
-	/// The old `.kern` files are left for you to delete.
 	Migrate {
-		/// Data dir to migrate; defaults to the configured data_dir.
 		path: Option<String>,
 	},
-	/// Start the long-lived daemon (same as `--daemon`). Convenience alias.
 	Daemon,
 }
 
 #[derive(Subcommand)]
 pub enum AnchorAction {
-	/// Add a named anchor; `text` is embedded into its routing vector.
 	Add {
 		name: String,
 		text: String,
@@ -217,10 +178,10 @@ pub enum AnchorAction {
 		#[arg(long)]
 		embed_model: Option<String>,
 	},
-	/// List the root's anchors.
 	List,
-	/// Remove a named anchor; its memories fall back to generic.
-	Remove { name: String },
+	Remove {
+		name: String,
+	},
 }
 
 #[derive(Subcommand)]
@@ -234,11 +195,6 @@ pub enum UnnamedAction {
 	List,
 }
 
-/// Apply the `[graph]` config to a freshly loaded graph. `load_dir` already ran
-/// `rebuild_index` once, but with the DEFAULT `disk_threshold` — so when spilling
-/// is enabled we rebuild ONCE more here, after the configured threshold is set, or
-/// the disk tier would stay inert until some later organic rebuild. Guarded so the
-/// common default-off case pays nothing (no second rebuild).
 pub(crate) fn apply_graph_config(g: &mut GraphGnn, cfg: &crate::config::GraphConfig) {
 	g.set_max_loaded_kerns(cfg.max_kerns);
 	g.set_disk_threshold(cfg.disk_threshold);
@@ -251,8 +207,6 @@ pub(crate) fn load_graph(cfg: &crate::config::Config) -> GraphGnn {
 	let mut g = match crate::base::persist::load_dir(&cfg.data_dir) {
 		Ok(g) => g,
 		Err(_) => {
-			// load_dir only errors on a real LMDB/IO fault (an empty store yields a
-			// fresh graph, not an error). Still bind a store so saves persist.
 			let mut g = GraphGnn::new();
 			g.data_dir = cfg.data_dir.clone();
 			if let Ok(store) = crate::base::store::Store::open(&cfg.data_dir) {
@@ -262,9 +216,6 @@ pub(crate) fn load_graph(cfg: &crate::config::Config) -> GraphGnn {
 		}
 	};
 	apply_graph_config(&mut g, &cfg.graph);
-	// Wire the configured BM25 parameters into the lexical index. Without this the
-	// `config.retrieval.bm25_k1`/`bm25_b` fields were dead — the index always scored
-	// with the hardcoded construction defaults regardless of config.
 	if let Some(lex) = g.lexical() {
 		lex.set_bm25_params(cfg.retrieval.bm25_k1 as f32, cfg.retrieval.bm25_b as f32);
 	}
@@ -277,12 +228,6 @@ pub(crate) fn save_graph(g: &GraphGnn) {
 	}
 }
 
-/// Reload a live graph from disk REUSING its open store handle, then re-apply the
-/// runtime graph config (BM25 params, disk-spill threshold). Reload paths must use
-/// this rather than [`load_graph`]: load_graph opens a fresh LMDB env, and a second
-/// env on a dir already open in this process is a forbidden double-open that
-/// corrupts the lock and can SIGSEGV. Falls back to [`load_graph`] only for an
-/// in-memory graph that has no store to reuse (tests).
 pub(crate) fn reload_graph(cfg: &crate::config::Config, old: &GraphGnn) -> GraphGnn {
 	match crate::base::persist::reload_from_disk(old) {
 		Some(mut g) => {
@@ -296,32 +241,18 @@ pub(crate) fn reload_graph(cfg: &crate::config::Config, old: &GraphGnn) -> Graph
 	}
 }
 
-/// Stale-safe persist for a long-lived server's shared save closure. The flush is
-/// refused (and the graph reloaded from disk) when the on-disk store epoch has
-/// moved past the epoch this graph last reconciled to — i.e. another writer (a
-/// stray CLI direct-write, a second daemon) committed underneath us. That makes a
-/// server flush strictly additive: it can never overwrite a graph that grew on
-/// disk with its own staler, smaller snapshot — the root data-loss bug.
-///
-/// On a refusal we adopt the on-disk graph (the authoritative one) so reads stop
-/// lying and the next flush proceeds from the reconciled state instead of
-/// re-refusing forever. Called only with no graph lock held (every `save_fn` site
-/// drops its lock first), so taking the write lock to swap in the reload is safe.
 pub(crate) fn save_graph_guarded(
 	graph: &std::sync::Arc<parking_lot::RwLock<GraphGnn>>,
 	cfg: &crate::config::Config,
 ) {
-	// Capture the flush snapshot under the read guard — the map clone is the ONLY
-	// work done with the lock held — then drop the guard so the LMDB transaction
-	// below runs lock-free. The epoch guard is unchanged: `flushed_epoch` is read at
-	// capture time and the disk-epoch comparison still happens inside the store's
-	// write txn, so another writer that advanced the store is still detected.
 	let (snapshot, expected) = {
 		let g = read_recovered(graph);
-		(crate::base::persist::snapshot_for_flush(&g), g.flushed_epoch())
+		(
+			crate::base::persist::snapshot_for_flush(&g),
+			g.flushed_epoch(),
+		)
 	};
 	let Some(snapshot) = snapshot else {
-		// In-memory graph (no store bound): nothing to flush.
 		return;
 	};
 	let outcome = crate::base::persist::flush_snapshot(&snapshot, expected);
@@ -340,9 +271,6 @@ pub(crate) fn save_graph_guarded(
 				data_dir = %cfg.data_dir,
 				"refused to flush a stale snapshot — disk advanced under us (another writer); reloading from disk so live rows are not dropped"
 			);
-			// Adopt the on-disk graph as source of truth, reusing the open store
-			// handle (a second env on this dir would double-open LMDB). The reloaded
-			// graph re-stamps the loaded epoch, so it is no longer stale.
 			let mut w = crate::base::locks::write_recovered(graph);
 			let fresh = reload_graph(cfg, &w);
 			*w = fresh;
@@ -351,20 +279,6 @@ pub(crate) fn save_graph_guarded(
 	}
 }
 
-/// Interval snapshot — the periodic durability net under the event-driven saves.
-/// Flushes the whole graph through the guarded path when (and only when) the
-/// graph's mutation epoch moved since the last snapshot, then remembers the epoch
-/// it captured. Returns whether a flush ran.
-///
-/// The event-driven flushes (ingest worker per job, MCP mutations, gossip) cover
-/// their own writes; what they miss is every mutation whose task crashes between
-/// the graph write and its Persist, plus any path that forgets to save. Without
-/// this, that loss window was UNBOUNDED on an idle daemon (kill -9 / SIGTERM skip
-/// the ctrl-c shutdown flush); with it, the window is one tick interval. Known
-/// accepted gap: heat/access stamps (pulse deposits, CommitAccess) deliberately
-/// do not bump the mutation epoch (see `GraphGnn::get_mut`), so a heat-only
-/// interval skips the flush — advisory decay state, recomputed by use, is the
-/// tradeoff paid to avoid rewriting an idle graph every interval forever.
 pub(crate) fn snapshot_if_dirty(
 	graph: &SharedGraph,
 	cfg: &crate::config::Config,
@@ -379,12 +293,6 @@ pub(crate) fn snapshot_if_dirty(
 	true
 }
 
-/// Reload the graph from disk when another writer has advanced the store past what
-/// this graph last reconciled to. Returns `true` if a reload happened. The daemon
-/// calls this on its maintenance tick so its in-RAM graph adopts CLI-committed
-/// rows promptly — before the tick clusters/persists, so the per-kern persist path
-/// never writes a stale kern over a newer on-disk one, and so `health` reflects
-/// committed state rather than a stale empty load.
 pub(crate) fn reconcile_if_stale(
 	graph: &std::sync::Arc<parking_lot::RwLock<GraphGnn>>,
 	cfg: &crate::config::Config,
@@ -408,17 +316,6 @@ pub(crate) fn reconcile_if_stale(
 	stale
 }
 
-/// data.mdb size above which a startup self-heal (reap + compact) is worth its
-/// double-load cost. A clean graph is a few MB; this only fires on the runaway
-/// bloat (observed up to 4 GiB) the unnamed-kern fragmentation used to leave.
-const SELF_HEAL_BLOAT_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
-
-/// If `data.mdb` is bloated, reap empty kerns and compact the env in place — once,
-/// at startup, before the serving env opens. MUST be called only while this
-/// process holds the cwd exclusively (no other daemon serving it), or the reap
-/// would race a live writer and the swap would fail on a held file. Idempotent and
-/// best-effort: any failure is logged and startup continues with the un-compacted
-/// (but still functional) store.
 fn maybe_self_heal_store(cfg: &crate::config::Config) {
 	let data = std::path::Path::new(&cfg.data_dir).join("data.mdb");
 	let len = std::fs::metadata(&data).map(|m| m.len()).unwrap_or(0);
@@ -436,10 +333,7 @@ fn maybe_self_heal_store(cfg: &crate::config::Config) {
 			save_graph(&g);
 			eprintln!("kern: self-heal reaped {reaped} empty kerns ({before} -> {after})");
 		}
-		// g (and its env handle) dropped here.
 	}
-	// `compact_dir` opens its own env and closes it deterministically before the
-	// swap, so the just-reaped data.mdb shrinks to its live size.
 	match crate::base::store::compact_dir(&cfg.data_dir) {
 		Ok((old, new)) => eprintln!(
 			"kern: self-heal compacted data.mdb {} MiB -> {} MiB",
@@ -465,11 +359,7 @@ pub(crate) fn resolve<'a>(arg: &'a Option<String>, fallback: &'a str) -> &'a str
 
 pub(crate) use crate::llm::{Client, Endpoint};
 
-/// Build the shared blocking embed closure used by the tick worker and the
-/// `profile` command: clone the LLM client into an `EmbedFunc` that drives
-/// `embed` on the current runtime via `block_on_in_place`. One definition so the
-/// call sites can't drift. (The standalone MCP path uses a distinct
-/// runtime-handle variant and is intentionally not routed through this.)
+/// Blocking embed closure over `block_on_in_place`; "no runtime" outside tokio.
 pub(crate) fn embed_fn(client: &Client) -> crate::types::EmbedFunc {
 	let c = client.clone();
 	std::sync::Arc::new(move |text: &str| -> Result<Vec<f32>, String> {
@@ -482,13 +372,8 @@ pub(crate) fn embed_fn(client: &Client) -> crate::types::EmbedFunc {
 	})
 }
 
-/// Build the full reason+answer+embed [`Client`] shared by the long-lived daemon
-/// (`run_server`) and the standalone MCP server (`mcp_cmd::run_standalone`). The
-/// reason endpoint is passed in already resolved — `run_server` lets a CLI flag
-/// win over the `[reason]` config section, the MCP path uses config directly —
-/// while answer and embed are ALWAYS taken from config: the daemon must embed
-/// with the same model the graph was built with, never a CLI default, or every
-/// cosine degenerates on a dimension mismatch.
+/// Reason endpoint arrives already resolved; answer/embed are ALWAYS taken from
+/// config — embedding with any model but the graph's degenerates every cosine.
 pub(crate) fn server_llm_client(
 	cfg: &crate::config::Config,
 	reason_url: &str,
@@ -626,16 +511,13 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 			}
 		}
 		Commands::Daemon => {
-			// Fallback: `main.rs` handles this arm first (before calling dispatch),
-			// but keeping it here ensures `dispatch` handles all Commands variants,
-			// so future call sites don't need to special-case Daemon.
+			// main.rs intercepts Daemon first; kept so callers need not special-case it.
 			run_server(&Cli::daemon(), cfg).await;
 		}
 	}
 }
 
-/// Handles produced by [`bootstrap`]: the live engine plus the side-channels a
-/// caller's serve/park loop needs.
+/// The live engine plus the side-channels a caller's serve/park loop needs.
 pub(crate) struct EngineHandle {
 	pub server: std::sync::Arc<crate::mcp::Server>,
 	pub task_q: std::sync::Arc<crate::tick::queue::Queue>,
@@ -644,34 +526,14 @@ pub(crate) struct EngineHandle {
 	pub save_fn: std::sync::Arc<dyn Fn() + Send + Sync>,
 }
 
-/// Build the engine stack (graph + worker + tick + MCP server) and spawn every
-/// background service: watchdog, keepalive, file-watcher,
-/// capture, gossip, maintenance tick. Used by `run_server`. Does NOT register
-/// `.mcp.json`, does NOT bind `kern.sock`, and does NOT block — the caller owns
-/// the serve/park loop.
+/// Build the engine stack and spawn every background service. Does NOT register
+/// `.mcp.json`, bind `kern.sock`, or block — the caller owns the serve/park loop.
 pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineHandle {
-	// Self-heal a bloated store BEFORE the serving env opens. LMDB never returns
-	// freed pages to the OS, so a graph that was once fragmented to a runaway of
-	// empty unnamed kerns leaves a multi-GB `data.mdb` that every load must mmap
-	// and that the startup reap alone can't shrink. Here — while we still hold the
-	// cwd exclusively (bootstrap runs only after winning kern.sock) and no serving
-	// env is open yet — reap the empties and rewrite the file compactly.
-	// Guarded by a size threshold so a normal small graph pays nothing.
+	// Must run BEFORE any env opens: the compaction swaps data.mdb, and only
+	// here — post kern.sock win, pre env open — is the dir held exclusively.
 	maybe_self_heal_store(cfg);
 
-	// Runtime watchdog. A wedged daemon — deadlock on the graph lock, a panic
-	// loop, or every worker thread pinned in a blocking LLM call — keeps
-	// holding the kern.sock endpoint and stops serving with no visible failure.
-	// An async task bumps `beat` every second; a DEDICATED OS thread — immune to
-	// runtime starvation, unlike any tokio task — force-exits the process if
-	// `beat` stops advancing. The threshold (30s) is far above any single LLM
-	// call: normal blocking work pins one worker, never the time driver, so the
-	// beat keeps advancing — only a TOTAL stall trips the watchdog.
 	spawn_watchdog();
-	// Effective reason endpoint: CLI flag wins when set, else fall back to the
-	// `[reason]` config section (which itself falls back to `[embed]`). Without
-	// this the daemon ignored configured reasoning entirely, so distillation /
-	// edge-proposal were silently disabled unless `--reason-url` was passed.
 	let reason_url = if cli.reason_url.is_empty() {
 		cfg.reason_url().to_string()
 	} else {
@@ -682,11 +544,7 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 	} else {
 		cli.reason_model.clone()
 	};
-	// The daemon embeds from its CONFIG, not the CLI flags. The `--daemon`
-	// dispatch hardcodes cli.embed_* to DEFAULT_EMBED_* (a non-empty constant),
-	// so reading them here ignored `[embed]` in kern.toml — the daemon embedded
-	// with the default model even when the graph was built with another, a
-	// dimension mismatch that makes every cosine degenerate. Use cfg.embed.
+	// Embed/answer must come from cfg, never cli.embed_* — see server_llm_client.
 	let llm_client = server_llm_client(cfg, &reason_url, &reason_model);
 
 	let llm_fn: Option<crate::ingest::LlmFunc> = if !reason_url.is_empty() {
@@ -695,20 +553,10 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 		None
 	};
 
-	// Keep the embedding AND answer models resident. Ollama unloads after ~5 min
-	// idle, and the OpenAI-compat /v1 endpoint kern uses ignores `keep_alive`, so
-	// the next call pays a multi-second cold reload (~7s for qwen3-embedding, more
-	// for the 4b answer model). A tiny embed + a 1-token answer ping every 4 min
-	// re-touches both so retrieval and the user-facing /ask stay warm. Cheap and
-	// self-contained — no dependency on OLLAMA_KEEP_ALIVE.
 	spawn_keepalive(&llm_client);
 
-	// Gate the tick's reason hook exactly like `llm_fn` above: with no reason
-	// endpoint configured, `complete_func` POSTs to a relative URL and returns
-	// "" — but `do_cluster` gates Name-enqueue on `llm.is_some()`, so an
-	// ungated Some here meant infinite no-op Name re-enqueue churn (and now
-	// SeedQuestions no-ops) that masked the misconfiguration instead of the
-	// capture path's loud warning.
+	// Gate like `llm_fn`: an ungated Some with no reason endpoint means infinite
+	// no-op Name re-enqueue churn (do_cluster gates on `llm.is_some()`).
 	let tick_llm: Option<crate::tick::tasks::LlmFunc> = if reason_url.is_empty() {
 		None
 	} else {
@@ -730,11 +578,6 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 	let q = entry.tick_q.clone();
 	let save_fn = entry.save_fn.clone();
 
-	// Self-heal the unnamed-kern fragmentation on startup. The historical spawn
-	// runaway (now fixed) left graphs with tens of thousands of empty kerns
-	// persisted to disk; since retrieval and tick are both O(loaded
-	// kerns), that bloat taxes every request. Reap them once here so every
-	// restart converges to a clean graph, then persist the compacted form.
 	{
 		let (before, reaped, after) = crate::base::locks::write_recovered(&g).gc_empty_kerns_counted();
 		if reaped > 0 {
@@ -746,16 +589,12 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 				"reaped empty unnamed kerns"
 			);
 			eprintln!("kern: reaped {reaped} empty kerns ({before} -> {after})");
-			// Persist the reap through the store's guarded closure (not a bare
-			// save_graph) so its epoch bump stays tracked — otherwise the next flush
-			// would see disk ahead of the daemon's tracked epoch and spuriously
-			// refuse-and-reload its own reap.
+			// Persist via the guarded closure (not bare save_graph) so the epoch bump
+			// stays tracked — else the next flush refuse-reloads its own reap.
 			save_fn();
 		}
 	}
 
-	// Build the MCP server — shared by the RPC surface (kern_rpc handler), the
-	// SSE/HTTP transport, and stdio. One Arc so all three reference the same.
 	let mcp_server = std::sync::Arc::new(crate::mcp::Server {
 		graph: g.clone(),
 		worker: worker.clone(),
@@ -785,7 +624,6 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 }
 
 pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
-	// Register kern in .claude/settings.json so Claude Code picks it up.
 	{
 		let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 		ensure_mcp_registered(&cwd);
@@ -802,11 +640,8 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 		let _ = shutdown_tx.send(());
 	});
 
-	// Singleton kern_rpc surface on the per-user `kern.sock` endpoint.
-	// Bound synchronously here so an `AlreadyRunning` outcome (another
-	// daemon owns the endpoint) can short-circuit run_server before any
-	// other daemon scaffolding spins up. The accept loop runs in a
-	// detached task; this function returns when ctrl-c arrives.
+	// kern.sock bound synchronously so `AlreadyRunning` short-circuits run_server
+	// before more scaffolding spins up; the accept loop runs detached.
 	{
 		let handler = crate::rpc::KernRpcHandler::new(mcp_server.clone());
 		let endpoint = trnsprt::typed::Endpoint::kern();
@@ -859,13 +694,10 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	eprintln!("done");
 }
 
-/// Shared shape of the live graph handle the daemon subsystems read/write.
 type SharedGraph = Arc<parking_lot::RwLock<GraphGnn>>;
 
-/// Dedicated OS-thread watchdog: force-exits the process if the async runtime
-/// stalls (graph deadlock or total worker starvation) so a healthy peer can take
-/// over the hub socket. An async task bumps `beat` every second; the OS thread —
-/// immune to runtime starvation — exits if `beat` stops advancing for ~30s.
+/// OS-thread watchdog, immune to runtime starvation: force-exits when the async
+/// beat stops advancing ~30s (deadlock/starvation) so a peer can take the hub.
 fn spawn_watchdog() {
 	use std::sync::atomic::{AtomicU64, Ordering};
 	let beat = Arc::new(AtomicU64::new(0));
@@ -892,7 +724,6 @@ fn spawn_watchdog() {
 				if now == last {
 					stalls += 1;
 					if stalls >= STALL_LIMIT {
-						// stderr → daemon.err.log, so the next wedge is visible.
 						eprintln!(
 							"kern watchdog: async runtime stalled ~{}s (graph deadlock or worker starvation) — exiting so a peer can take the hub",
 							u64::from(stalls) * CHECK_SECS
@@ -908,11 +739,8 @@ fn spawn_watchdog() {
 		.expect("spawn kern-watchdog thread");
 }
 
-/// Keep the embedding AND answer models resident. Ollama unloads after ~5 min
-/// idle and the /v1 endpoint ignores `keep_alive`, so the next call pays a cold
-/// reload. A tiny embed + a 1-token answer ping every 4 min re-touches both
-/// (warmed concurrently — they live in separate runners) so retrieval and `/ask`
-/// stay warm. The first tick fires immediately, loading both at boot.
+/// Ollama unloads after ~5 min idle and /v1 ignores `keep_alive`, so a tiny
+/// embed + 1-token answer ping every 4 min keeps both models resident.
 fn spawn_keepalive(llm_client: &Client) {
 	let warm = llm_client.clone();
 	tokio::spawn(async move {
@@ -934,15 +762,12 @@ fn spawn_keepalive(llm_client: &Client) {
 	});
 }
 
-/// Slice O — kern-side filesystem watcher. Off unless `[watcher] enabled = true`.
-/// Roots default to cwd when enabled but none are listed.
 fn spawn_file_watcher(cfg: &crate::config::Config, worker: &Arc<crate::ingest::Worker>) {
 	if !cfg.watcher.enabled {
 		return;
 	}
 	use crate::ingest::file_watcher::{run as run_file_watcher, KernFileWatcherSink};
 	use watcher::IgnoreRules;
-	// `effective_roots` applies the documented "empty roots → cwd" rule.
 	let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 	let roots = cfg.watcher.effective_roots(&cwd);
 	let ignore = IgnoreRules::from_roots(&roots);
@@ -967,7 +792,6 @@ fn spawn_capture(
 	}
 	let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-	// Capture drain: intake deltas -> distill -> enqueue -> archive.
 	if let Some(llm_fn) = llm_fn.clone() {
 		let intake = cwd.join(&cfg.capture.dir);
 		let worker_c = worker.clone();
@@ -989,7 +813,6 @@ fn spawn_capture(
 		);
 	}
 
-	// Digest writer: periodically snapshot purpose + hot thoughts.
 	let digest_path = cwd.join(&cfg.capture.digest_path);
 	let g_digest = g.clone();
 	let k = cfg.capture.digest_k;
@@ -1007,9 +830,7 @@ fn spawn_capture(
 	});
 }
 
-/// Federation: start the gossip node so this kern can share/receive knowledge
-/// with peers. OFF by default (`[gossip] enabled`). When on, binds a TCP
-/// listener, runs heartbeat, and (optionally) LAN multicast discovery.
+/// Start the gossip node (federation). OFF by default (`[gossip] enabled`).
 async fn start_gossip(
 	cfg: &crate::config::Config,
 	g: &SharedGraph,
@@ -1026,9 +847,6 @@ async fn start_gossip(
 	let network_id = cfg.gossip.effective_network_id(&network_id);
 	let node =
 		crate::gossip::node::Node::new(&cfg.gossip.addr, &network_id, cfg.gossip.peers.clone());
-	// Wire the configured ledger cap. Without this `config.graph.max_ledger_entries`
-	// was dead — the routing/thought ledger always used the hardcoded
-	// DEFAULT_LEDGER_CAP regardless of config.
 	node.ledger.set_max_entries(cfg.graph.max_ledger_entries);
 	let deps = Arc::new(crate::gossip::handler::Deps {
 		graph: g.clone(),
@@ -1054,8 +872,7 @@ async fn start_gossip(
 	}
 }
 
-/// Autonomous maintenance tick: pulses the root (heat decay + stigmergy GC of
-/// cold nodes) and re-enqueues clustering on a timer so an idle daemon still
+/// Pulse the root and re-enqueue clustering on a timer so an idle daemon still
 /// decays, merges, and evicts. `interval_secs = 0` disables it.
 fn spawn_maintenance_tick(
 	cfg: &crate::config::Config,
@@ -1073,11 +890,8 @@ fn spawn_maintenance_tick(
 	tokio::spawn(async move {
 		loop {
 			tokio::time::sleep(every).await;
-			// Before the tick mutates and persists, adopt any rows a concurrent CLI
-			// write committed under us. Without this the tick would cluster/pulse a
-			// stale graph and the per-kern persist would write those stale kerns over
-			// the newer on-disk ones — the data-loss path. Reloading first keeps the
-			// daemon a faithful mirror of committed state.
+			// Must run before the tick mutates and persists: adopt concurrent CLI
+			// writes, or per-kern persist writes stale kerns over newer disk rows.
 			reconcile_if_stale(&g_tick, &cfg_tick);
 			let root_id = {
 				let g = read_recovered(&g_tick);
@@ -1088,9 +902,8 @@ fn spawn_maintenance_tick(
 				crate::tick::pulse::pulse(&q_tick, &mut g, &root_id, 1.0);
 			}
 			crate::tick::enqueue_all(&q_tick, &g_tick);
-			// Periodic snapshot: bound the crash-loss window for any mutation whose
-			// event-driven save never ran (task crashed pre-Persist, SIGTERM before
-			// the shutdown flush) to one tick interval.
+			// Bound the crash-loss window for mutations whose event-driven save
+			// never ran (crash pre-Persist, SIGTERM pre-flush) to one interval.
 			snapshot_if_dirty(&g_tick, &cfg_tick, &mut last_snap_epoch);
 		}
 	});
@@ -1102,15 +915,11 @@ mod entry_point_tests {
 
 	#[test]
 	fn daemon_subcommand_exists() {
-		// Regression guard: confirms Commands::Daemon compiles.
 		let _ = Commands::Daemon;
 	}
 
-	// LMDB forbids opening one env twice per process, so a single-process test can
-	// not stand up two real Stores on one dir to play "daemon vs CLI". Instead the
-	// "external writer" commits THROUGH the daemon graph's own store handle (the
-	// same env), advancing the on-disk epoch while leaving the daemon graph's RAM
-	// and `flushed_epoch` stale — exactly the divergence a second process produces.
+	// LMDB forbids double-opening one env per process, so the "external writer"
+	// commits THROUGH the daemon graph's own store handle — same divergence.
 	#[cfg(test)]
 	fn commit_extra_kern_via_store(
 		g: &std::sync::Arc<parking_lot::RwLock<super::GraphGnn>>,
@@ -1132,9 +941,6 @@ mod entry_point_tests {
 
 	#[test]
 	fn save_graph_guarded_refuses_stale_flush_then_reloads_committed_data() {
-		// The reported data-loss path: a daemon loaded an ~empty store, the CLI grew
-		// it on disk, and the daemon's next flush wiped the CLI's rows. The guarded
-		// save must instead refuse to overwrite and reload the committed graph.
 		use parking_lot::RwLock;
 		use std::sync::Arc;
 
@@ -1147,16 +953,16 @@ mod entry_point_tests {
 			..Default::default()
 		};
 
-		// Daemon boots against the ~empty store; its graph records the loaded epoch.
 		let g = Arc::new(RwLock::new(super::load_graph(&cfg)));
-		assert_eq!(read_recovered(&g).flushed_epoch(), 0, "fresh load at epoch 0");
+		assert_eq!(
+			read_recovered(&g).flushed_epoch(),
+			0,
+			"fresh load at epoch 0"
+		);
 
-		// A second writer (the CLI) commits a populated kern, advancing the epoch.
 		let root_id = read_recovered(&g).root.id.clone();
 		commit_extra_kern_via_store(&g, Kern::new("cli-kern", &root_id));
 
-		// The daemon flushes its stale, smaller snapshot. It must NOT drop cli-kern;
-		// instead it refuses, reloads, and adopts the committed graph.
 		super::save_graph_guarded(&g, &cfg);
 
 		assert!(
@@ -1173,7 +979,10 @@ mod entry_point_tests {
 			.unwrap()
 			.load_one_kern("cli-kern")
 			.unwrap();
-		assert!(on_disk.is_some(), "the externally committed kern survives on disk");
+		assert!(
+			on_disk.is_some(),
+			"the externally committed kern survives on disk"
+		);
 	}
 
 	#[test]
@@ -1196,7 +1005,6 @@ mod entry_point_tests {
 			"nothing committed yet -> no reload"
 		);
 
-		// External writer grows the store through the shared handle.
 		let root_id = read_recovered(&g).root.id.clone();
 		commit_extra_kern_via_store(&g, Kern::new("late", &root_id));
 
@@ -1204,7 +1012,10 @@ mod entry_point_tests {
 			super::reconcile_if_stale(&g, &cfg),
 			"store advanced -> reload"
 		);
-		assert!(read_recovered(&g).loaded("late").is_some(), "adopted the new kern");
+		assert!(
+			read_recovered(&g).loaded("late").is_some(),
+			"adopted the new kern"
+		);
 		assert!(
 			!super::reconcile_if_stale(&g, &cfg),
 			"already reconciled -> no second reload"
@@ -1213,9 +1024,6 @@ mod entry_point_tests {
 
 	#[test]
 	fn do_persist_skips_overwriting_a_kern_when_the_graph_is_stale() {
-		// The per-kern persist path is a second wipe vector: the daemon's stigmergy
-		// tick persists individual kerns. A stale daemon must NOT write its older
-		// copy of a kern over the newer on-disk one a CLI committed.
 		use parking_lot::RwLock;
 		use std::sync::Arc;
 
@@ -1228,18 +1036,16 @@ mod entry_point_tests {
 			..Default::default()
 		};
 
-		// Daemon loads the empty store (flushed_epoch = 0).
 		let g = Arc::new(RwLock::new(super::load_graph(&cfg)));
 		let root_id = read_recovered(&g).root.id.clone();
 
-		// A CLI writer commits a populated kern "k", advancing the store epoch.
 		let mut k = Kern::new("k", &root_id);
-		k.entities
-			.insert("e".into(), mk_entity("e", "durable fact", 1.0, EntityKind::Claim));
+		k.entities.insert(
+			"e".into(),
+			mk_entity("e", "durable fact", 1.0, EntityKind::Claim),
+		);
 		commit_extra_kern_via_store(&g, k);
 
-		// The stale daemon holds its OWN, emptier copy of "k" and the tick tries to
-		// persist it. The guard must skip the write so disk keeps the CLI's entity.
 		write_recovered(&g)
 			.kerns
 			.insert("k".into(), Kern::new("k", &root_id));
@@ -1260,10 +1066,7 @@ mod entry_point_tests {
 
 	#[test]
 	fn periodic_snapshot_closes_the_unflushed_mutation_crash_window() {
-		// The durability primitive itself: prove the crash-loss window exists
-		// without the interval snapshot, then that snapshot_if_dirty closes it.
-		// "Crash" = drop every handle with NO shutdown flush (kill -9 / SIGTERM
-		// semantics), then reopen the same data dir.
+		// "Crash" = drop every handle with NO shutdown flush, then reopen the dir.
 		use parking_lot::RwLock;
 		use std::sync::Arc;
 
@@ -1276,7 +1079,6 @@ mod entry_point_tests {
 			..Default::default()
 		};
 
-		// BEFORE: a mutation with no flush dies with the process.
 		{
 			let g = Arc::new(RwLock::new(super::load_graph(&cfg)));
 			let root_id = read_recovered(&g).root.id.clone();
@@ -1290,7 +1092,6 @@ mod entry_point_tests {
 			);
 		}
 
-		// AFTER: the interval snapshot makes the same mutation durable.
 		{
 			let g = Arc::new(RwLock::new(super::load_graph(&cfg)));
 			let mut last = read_recovered(&g).mutation_epoch();
@@ -1320,11 +1121,8 @@ mod entry_point_tests {
 
 	#[test]
 	fn cluster_migrated_entities_survive_a_crash_after_the_spawn_persists() {
-		// The destructive half of the old window: do_cluster moved entities out of
-		// the parent and Persist(parent) rewrote the parent row WITHOUT them, while
-		// the spawned child holding them was never persisted — a crash then erased
-		// the entities from disk even though an earlier flush had them. The child
-		// Persist enqueued by do_cluster must land them on disk before the crash.
+		// Old destructive window: Persist(parent) rewrote the row WITHOUT the
+		// migrated entities while the spawned child holding them went unpersisted.
 		use parking_lot::RwLock;
 		use std::sync::Arc;
 
@@ -1355,12 +1153,10 @@ mod entry_point_tests {
 				k.entities.insert(id.clone(), e);
 			}
 			write_recovered(&g).register(k);
-			// Everything durable before the re-shard (the state a running daemon has
-			// after its per-job ingest flush).
+			// Everything durable before the re-shard (post-ingest-flush daemon state).
 			super::save_graph_guarded(&g, &cfg);
 
-			// Run the cluster pass synchronously: spawns the child, migrates the
-			// entities, and processes the enqueued Persist tasks.
+			// tick_sync spawns the child, migrates entities, runs enqueued Persists.
 			crate::tick::tick_sync(&g, "k", None, None, None);
 			let child_exists = {
 				let gg = read_recovered(&g);
@@ -1372,7 +1168,7 @@ mod entry_point_tests {
 				!parent.children.is_empty()
 			};
 			assert!(child_exists, "precondition: a child kern was spawned");
-		} // crash: no shutdown flush
+		}
 
 		let g = super::load_graph(&cfg);
 		for id in &entity_ids {
@@ -1386,9 +1182,6 @@ mod entry_point_tests {
 
 	#[test]
 	fn apply_graph_config_spills_to_disk_when_threshold_enabled() {
-		// Regression: load_dir rebuilds with the DEFAULT threshold; apply_graph_config
-		// must rebuild again once the configured threshold is set, or a configured
-		// disk_threshold never engages at startup (the entity index stays in-RAM).
 		use crate::base::constants::KERN_CAP_DISABLED;
 		use crate::base::graph::GraphGnn;
 		use crate::base::types::{Entity, EntityStatus, Kern};
@@ -1414,13 +1207,12 @@ mod entry_point_tests {
 			);
 		}
 		g.kerns.insert("k".into(), kern);
-		g.rebuild_index(); // mimics load_dir's rebuild under the default threshold
+		g.rebuild_index();
 		assert!(
 			matches!(g.entity_idx, VectorBackend::Resident(_)),
 			"default load stays in-RAM"
 		);
 
-		// Enabled threshold -> apply_graph_config must rebuild and spill.
 		let cfg = GraphConfig {
 			max_kerns: KERN_CAP_DISABLED,
 			max_ledger_entries: 10_000,
@@ -1432,7 +1224,6 @@ mod entry_point_tests {
 			"configured threshold spills at startup"
 		);
 
-		// Disabled threshold -> no spill, no redundant rebuild side effects.
 		let mut g2 = GraphGnn::new();
 		g2.data_dir = dir.path().to_string_lossy().into_owned();
 		let cfg_off = GraphConfig {

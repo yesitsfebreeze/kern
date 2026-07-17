@@ -21,18 +21,12 @@ pub struct ReasonHit {
 	pub score: f64,
 }
 
-/// Weight on the raw content-index score when a node is found in BOTH indices.
+/// Blend weights for a node found in BOTH indices; sum to 1.0 (GNN trusted more).
 const CONTENT_BLEND: f64 = 0.4;
-/// Weight on the GNN re-embedding score in the same case. Larger than
-/// [`CONTENT_BLEND`] because the learned re-embedding is trusted more; the two
-/// sum to 1.0.
 const GNN_BLEND: f64 = 0.6;
 
-/// Merge content-index (`primary`) and GNN-index (`gnn`) hits into a single
-/// ranked entity list. A node present in both blends
-/// `CONTENT_BLEND*content + GNN_BLEND*gnn`; a node in only one keeps that score.
-/// Shared by [`search_all_unlocked`] and [`search_all_filtered`] so the fusion +
-/// ranking lives in exactly one place.
+/// Merge content (`primary`) and GNN hits into one ranked list: in both → blend,
+/// in one → keep that score. The single fusion point for both search_all variants.
 fn merge_hits(primary: Vec<HnswHit>, gnn: Vec<HnswHit>, k: usize) -> Vec<EntityHit> {
 	use std::collections::hash_map::Entry;
 	let mut scores: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
@@ -41,17 +35,12 @@ fn merge_hits(primary: Vec<HnswHit>, gnn: Vec<HnswHit>, k: usize) -> Vec<EntityH
 	}
 	for h in gnn {
 		match scores.entry(h.id) {
-			// Present in BOTH the content and GNN indices: blend, trusting the GNN
-			// re-embedding more. PRESENCE in the content map — not the score's sign —
-			// decides the blend. The `score` is a cosine similarity in [-1, 1]
-			// (`1.0 - cosine_distance`), so a content hit with a zero or negative
-			// similarity must still blend; the old `*entry > 0.0` proxy silently
-			// dropped those content scores by mistaking them for "absent".
+			// PRESENCE in the content map — not the score's sign — decides the blend:
+			// scores are cosine similarities in [-1, 1], so zero/negative still blend.
 			Entry::Occupied(mut e) => {
 				let blended = CONTENT_BLEND * *e.get() + GNN_BLEND * h.score;
 				e.insert(blended);
 			}
-			// GNN-only hit: keep its score as-is.
 			Entry::Vacant(e) => {
 				e.insert(h.score);
 			}
@@ -61,10 +50,8 @@ fn merge_hits(primary: Vec<HnswHit>, gnn: Vec<HnswHit>, k: usize) -> Vec<EntityH
 		return Vec::new();
 	}
 	let mut ranked: Vec<_> = scores.into_iter().collect();
-	// Score descending, ties broken by id ascending. The id tiebreak makes the
-	// order a deterministic total order (the source is a HashMap, whose iteration
-	// order is not stable across runs), so which equal-score hits survive the
-	// `truncate(k)` boundary is reproducible — same convention as fuse::rrf.
+	// Score desc, id-asc tiebreak: deterministic total order over a HashMap source,
+	// so the `truncate(k)` boundary is reproducible (same convention as fuse::rrf).
 	ranked.sort_by(|a, b| cmp_rank(a.1, &a.0, b.1, &b.0));
 	ranked.truncate(k);
 	ranked.into_iter().map(EntityHit::from).collect()
@@ -88,13 +75,8 @@ pub fn search_all_unlocked(g: &GraphGnn, vec: &[f32], k: usize) -> Vec<EntityHit
 	merge_hits(primary, gnn, k)
 }
 
-/// Filtered variant of [`search_all_unlocked`]: only entities whose id passes
-/// `keep` are returned, with the filter applied DURING the ANN traversal (see
-/// [`crate::base::hnsw::HnswIndex::search_filtered`]). Post-filtering an
-/// unfiltered top-k yields fewer than `k` when matches are sparse; this returns
-/// a full `k` matching hits. `keep` is built at the retrieval layer from a
-/// `QueryOptions` filter (see `score::matches_filter`), keeping this base-layer
-/// function free of any retrieval dependency.
+/// [`search_all_unlocked`] restricted to ids passing `keep`, filtered DURING the
+/// ANN traversal so sparse matches still fill `k` (see `HnswIndex::search_filtered`).
 pub fn search_all_filtered(
 	g: &GraphGnn,
 	vec: &[f32],
@@ -178,8 +160,7 @@ pub fn find_reason(g: &GraphGnn, id: &str) -> Option<(Reason, String)> {
 mod tests {
 	use super::*;
 
-	// Build a non-trivial entity index directly (no kerns needed: the filtered
-	// search operates on the index + the id predicate).
+	// No kerns needed: filtered search operates on the index + the id predicate.
 	fn populated() -> GraphGnn {
 		let mut g = GraphGnn::new();
 		for i in 0..60 {
@@ -207,15 +188,10 @@ mod tests {
 
 	#[test]
 	fn merge_blends_a_nonpositive_content_hit_present_in_both() {
-		// Regression: cosine similarity is in [-1, 1], so a content hit can score
-		// <= 0 and still be a legitimate top-k result. When the same id also appears
-		// in the GNN list it must BLEND, not have its content score discarded. The
-		// old `*entry > 0.0` presence proxy overwrote it with the raw GNN score.
 		let primary = vec![hh("z", 0.0), hh("n", -0.4)];
 		let gnn = vec![hh("z", 0.5), hh("n", 0.5)];
 		let out = merge_hits(primary, gnn, 10);
 		let score_of = |id: &str| out.iter().find(|h| h.entity_id == id).map(|h| h.score);
-		// Blended, NOT overwritten by the raw 0.5 GNN score.
 		assert_eq!(
 			score_of("z"),
 			Some(CONTENT_BLEND * 0.0 + GNN_BLEND * 0.5),
@@ -230,7 +206,6 @@ mod tests {
 
 	#[test]
 	fn merge_keeps_single_index_hits_and_blends_shared_positive() {
-		// content-only keeps content score; gnn-only keeps gnn score; shared blends.
 		let out = merge_hits(
 			vec![hh("c", 0.9), hh("both", 0.8)],
 			vec![hh("g", 0.7), hh("both", 0.6)],
@@ -273,7 +248,6 @@ mod tests {
 		let hits = search_reasons_all_unlocked(&g, &[1.0, 0.0], 5);
 		assert!(!hits.is_empty(), "reason search returns hits");
 		assert_eq!(hits[0].reason_id, "r_x", "closest reason ranks first");
-		// Empty index OR empty query -> empty, no panic.
 		assert!(search_reasons_all_unlocked(&GraphGnn::new(), &[1.0, 0.0], 5).is_empty());
 		assert!(search_reasons_all_unlocked(&g, &[], 5).is_empty());
 	}
@@ -281,9 +255,8 @@ mod tests {
 	#[test]
 	fn find_entity_resolves_through_the_ref_indirection_path() {
 		use crate::base::types::{Entity, EntityRef, Kern};
-		// Entity "real" lives in kern "kb". Kern "ka" only holds a *ref* under a
-		// different key ("alias") pointing at it. Looking up "alias" must miss the
-		// direct-entity paths and resolve via kern.refs -> ref_kern.entities.
+		// "alias" exists only as a ref in ka pointing at "real" in kb, so lookup
+		// must miss the direct paths and resolve via kern.refs -> ref_kern.entities.
 		let mut g = GraphGnn::new();
 		let mut kb = Kern::new("kb", "");
 		kb.entities.insert(
@@ -310,14 +283,11 @@ mod tests {
 			kern_id, "kb",
 			"returns the entity's home kern, not the ref's"
 		);
-		// A bogus id hits none of the three paths -> None.
 		assert!(find_entity(&g, "nope").is_none());
 	}
 
 	#[test]
 	fn unfiltered_equals_filtered_with_always_true() {
-		// search_all_filtered with a tautological predicate returns the same id set
-		// as the plain search, confirming the filtered path is a faithful superset.
 		let g = populated();
 		let q = vec![0.5, 0.5, 0.2];
 		let plain: std::collections::HashSet<String> = search_all_unlocked(&g, &q, 10)

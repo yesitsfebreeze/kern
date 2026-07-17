@@ -41,22 +41,17 @@ pub struct QueryOptions {
 	pub before: Option<SystemTime>,
 	pub min_conf: f64,
 	pub valid_at: Option<SystemTime>,
-	/// Bi-temporal WORLD-TIME point query: keep only entities whose
-	/// `[valid_from, valid_to)` window covers this instant. Distinct from
-	/// `valid_at` (which gates the TTL-expiry `valid_until`): `as_of` asks "what
-	/// was true at time T", surfacing the revision that held then.
+	/// Bi-temporal WORLD-TIME point query: keep entities whose `[valid_from,
+	/// valid_to)` covers this instant — distinct from `valid_at`, which gates TTL expiry.
 	pub as_of: Option<SystemTime>,
-	/// Include Superseded entities reachable by walking `Supersedes` chains back
-	/// from active hits. Not a per-entity filter (the ANN never holds superseded
-	/// entities); the retrieval/tool layer does the chain walk and flags them.
+	/// Include Superseded entities via `Supersedes` chain walks from active hits —
+	/// a tool-layer walk, not a per-entity filter (the ANN never holds superseded entities).
 	pub include_history: bool,
 }
 
 impl QueryOptions {
-	/// Whether any metadata filter is set. `sort`/`ascending` are presentation,
-	/// not filters, so they are excluded. When this is false, [`matches_filter`]
-	/// accepts every entity, so callers can take the cheaper unfiltered ANN path
-	/// instead of filtering during traversal.
+	/// Whether any metadata filter is set — `sort`/`ascending` are presentation,
+	/// not filters. False lets callers take the cheaper unfiltered ANN path.
 	pub fn is_active(&self) -> bool {
 		!self.source.is_empty()
 			|| self.kind.is_some()
@@ -107,10 +102,8 @@ pub fn filter_delivery<T: Scored>(cfg: &RetrievalConfig, results: &mut Vec<T>) {
 	if results.iter().any(|r| r.score() >= floor) {
 		results.retain(|r| r.score() >= floor);
 	}
-	// When MMR is enabled it diversifies this pool and performs the final cut
-	// to `max_deliver_results` itself, so keep a larger candidate pool here —
-	// otherwise we would truncate to the delivery cap first and MMR's
-	// `len() <= max_deliver_results` guard would make it a no-op (dead code).
+	// With MMR on, keep the larger MMR pool — truncating to the delivery cap here
+	// would make MMR's len-guard a no-op (see filter_delivery_keeps_mmr_pool_when_mmr_enabled).
 	let cap = if cfg.mmr_enabled {
 		cfg.mmr_pool_size.max(cfg.max_deliver_results)
 	} else {
@@ -119,12 +112,8 @@ pub fn filter_delivery<T: Scored>(cfg: &RetrievalConfig, results: &mut Vec<T>) {
 	results.truncate(cap);
 }
 
-/// Whether `entity` passes the metadata filters in `opts` (source/kind/scheme/
-/// confidence/time validity). Sort and `ascending` are presentation, not
-/// filters, so they are not considered here. Single source of truth shared by
-/// post-filtering ([`apply_query_options`], which trims an already-retrieved
-/// result set) and pre-filtered ANN search (a `keep` predicate handed to
-/// `search_all_filtered`, which filters during the index traversal).
+/// The single filter predicate shared by post-filtering ([`apply_query_options`])
+/// and pre-filtered ANN search (`search_all_filtered`) — the two must never diverge.
 pub fn matches_filter(entity: &Entity, opts: &QueryOptions) -> bool {
 	if !opts.source.is_empty() && entity.source.system() != opts.source {
 		return false;
@@ -143,7 +132,7 @@ pub fn matches_filter(entity: &Entity, opts: &QueryOptions) -> bool {
 		return false;
 	}
 	// `since`/`before` gate on `created_at`; an entity with no timestamp is not
-	// excluded by either bound (matches the previous `is_none_or` semantics).
+	// excluded by either bound.
 	if let Some(since) = opts.since {
 		if entity.created_at.is_some_and(|t| t < since) {
 			return false;
@@ -161,8 +150,6 @@ pub fn matches_filter(entity: &Entity, opts: &QueryOptions) -> bool {
 			return false;
 		}
 	}
-	// `as_of`: bi-temporal point query — keep only entities whose world-time
-	// window `[valid_from, valid_to)` covers the instant.
 	if let Some(as_of) = opts.as_of {
 		if !entity.is_valid_at(as_of) {
 			return false;
@@ -174,8 +161,6 @@ pub fn matches_filter(entity: &Entity, opts: &QueryOptions) -> bool {
 pub fn apply_query_options<T: Scored>(results: &mut Vec<T>, opts: &QueryOptions) {
 	results.retain(|r| matches_filter(r.entity(), opts));
 
-	// Sort each field ascending, then flip for descending. `dir` keeps the
-	// asc/desc branch in one place instead of per-field if/else.
 	let asc = opts.ascending;
 	let dir = |ord: std::cmp::Ordering| if asc { ord } else { ord.reverse() };
 	match opts.sort {
@@ -212,11 +197,8 @@ pub fn commit_access_with_half_life(results: &mut [ScoredEntity], half_life_secs
 	}
 }
 
-/// The single access-stamp: bump the CRDT access counter, set `accessed_at`,
-/// and deposit query heat. Shared by [`commit_access`] (which stamps the
-/// ephemeral result copies handed back to the caller) and
-/// [`commit_access_ids`] (which stamps the live graph entities so the stamp
-/// actually persists).
+/// The single access-stamp: bump the CRDT counter, set `accessed_at`, deposit
+/// heat. Shared by [`commit_access`] (result copies) and [`commit_access_ids`] (live graph).
 fn stamp_access(e: &mut Entity, now: SystemTime, half_life_secs: u64) {
 	let replica = if e.producer_id.is_empty() {
 		"local"
@@ -239,22 +221,19 @@ pub fn commit_access_ids(g: &mut GraphGnn, ids: &[String]) {
 	commit_access_ids_with_half_life(g, ids, HeatConfig::default().half_life_secs);
 }
 
-/// Stamp the LIVE graph entities named by `ids` with an access. `commit_access`
-/// only mutates the cloned entities inside a query's result set, so without this
-/// the hot graph never records an access and the stigmergy GC's `accessed_at`
-/// staleness clock never advances (making self-compaction inert on a standalone
-/// node). The query path used to do this inline under a brief write lock; it now
-/// defers it to a `CommitAccess` tick task so queries take ONLY a read lock. Goes
-/// through `kerns` directly — NOT `get_mut` — because an access stamp must not bump
-/// the mutation epoch: it would invalidate the whole query cache on every query.
-/// Same convention as the heat deposits in `tick::pulse`.
+/// Stamp the LIVE entities (`commit_access` only touches result copies). Goes through
+/// `kerns` directly, NOT `get_mut`: an access stamp must not bump the mutation epoch (see note).
 pub fn commit_access_ids_with_half_life(g: &mut GraphGnn, ids: &[String], half_life_secs: u64) {
 	let now = SystemTime::now();
 	for id in ids {
 		let Some(kern_id) = g.kern_of_entity(id).map(str::to_string) else {
 			continue;
 		};
-		if let Some(e) = g.kerns.get_mut(&kern_id).and_then(|k| k.entities.get_mut(id)) {
+		if let Some(e) = g
+			.kerns
+			.get_mut(&kern_id)
+			.and_then(|k| k.entities.get_mut(id))
+		{
 			stamp_access(e, now, half_life_secs);
 		}
 	}
@@ -334,9 +313,7 @@ mod query_filter_tests {
 	#[test]
 	fn matches_filter_is_the_per_entity_predicate() {
 		let fact_file = ent("a", EntityKind::Fact, file_src("/a")).entity;
-		// Default (no filter) matches anything.
 		assert!(matches_filter(&fact_file, &QueryOptions::default()));
-		// Kind filter.
 		assert!(matches_filter(
 			&fact_file,
 			&QueryOptions {
@@ -351,7 +328,6 @@ mod query_filter_tests {
 				..Default::default()
 			}
 		));
-		// Scheme filter.
 		assert!(matches_filter(
 			&fact_file,
 			&QueryOptions {
@@ -381,7 +357,6 @@ mod query_filter_tests {
 				..Default::default()
 			}
 		));
-		// Combined filters must all pass.
 		assert!(matches_filter(
 			&fact_file,
 			&QueryOptions {
@@ -402,7 +377,6 @@ mod query_filter_tests {
 		// Open window: valid_from = 100 (via created_at), valid_to = None.
 		e.created_at = Some(t(100));
 
-		// Before the window opens -> excluded.
 		assert!(!matches_filter(
 			&e,
 			&QueryOptions {
@@ -410,7 +384,6 @@ mod query_filter_tests {
 				..Default::default()
 			}
 		));
-		// At/after valid_from with an open upper bound -> included.
 		assert!(matches_filter(
 			&e,
 			&QueryOptions {
@@ -465,9 +438,7 @@ mod query_filter_tests {
 
 	#[test]
 	fn filter_delivery_keeps_mmr_pool_when_mmr_enabled() {
-		// Regression: previously truncated straight to max_deliver_results,
-		// which made MMR's len-guard a no-op. With MMR on, keep the pool so
-		// MMR has candidates to diversify and does the final cut itself.
+		// Regression: truncating straight to max_deliver_results made MMR's len-guard a no-op.
 		let cfg = RetrievalConfig::default(); // mmr on, pool 50, cap 25
 		let mut results: Vec<ScoredEntity> = (0..60)
 			.map(|i| ent(&format!("e{i}"), EntityKind::Fact, file_src("/x")))
@@ -489,15 +460,15 @@ mod query_filter_tests {
 		assert_eq!(results.len(), cfg.max_deliver_results);
 	}
 
-	// ---- commit_access_ids ---------------------------------------------------
-
 	#[test]
 	fn commit_access_ids_stamps_the_live_entity_without_bumping_the_epoch() {
 		use crate::base::types::Kern;
 		let mut g = GraphGnn::new();
 		let mut k = Kern::new("k", "");
-		k.entities
-			.insert("a".into(), ent("a", EntityKind::Claim, file_src("/a")).entity);
+		k.entities.insert(
+			"a".into(),
+			ent("a", EntityKind::Claim, file_src("/a")).entity,
+		);
 		g.kerns.insert("k".into(), k);
 		g.index_entity("a", "k");
 		let epoch_before = g.mutation_epoch();
@@ -523,8 +494,6 @@ mod query_filter_tests {
 		let mut g = GraphGnn::new();
 		commit_access_ids(&mut g, &["ghost".to_string()]);
 	}
-
-	// ---- qbst / apply_boosts -----------------------------------------------
 
 	#[test]
 	fn qbst_zero_access_and_no_recency_is_zero() {

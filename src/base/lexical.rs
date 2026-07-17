@@ -38,12 +38,8 @@ impl LexicalIndex {
 		}
 	}
 
-	/// Update the BM25 `k1`/`b` scoring parameters. These are read at QUERY time
-	/// (`search_filtered`), so no re-indexing is needed. Wired from
-	/// `config.retrieval.bm25_k1`/`bm25_b` at daemon load — without this the
-	/// configured values were dead and BM25 always used the hardcoded construction
-	/// defaults. Guards against nonsensical inputs (negative `k1`, `b` outside
-	/// `[0,1]`, NaN) that would corrupt the score formula.
+	/// Update BM25 `k1`/`b`. Read at QUERY time, so no re-indexing; nonsensical
+	/// inputs (negative `k1`, `b` outside `[0,1]`, NaN) are clamped or ignored.
 	pub fn set_bm25_params(&self, k1: f32, b: f32) {
 		let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
 		if k1.is_finite() {
@@ -68,12 +64,8 @@ impl LexicalIndex {
 		self.search_filtered(query, k, &|_| true)
 	}
 
-	/// Like [`search`](Self::search) but drops hits whose entity id fails `keep`
-	/// BEFORE the top-`k` truncation. BM25 scores every doc containing a query
-	/// token, so filtering pre-truncation returns a full `k` *matching* hits — no
-	/// over-fetch, and none of the post-filtering fewer-than-k loss. `keep` is built
-	/// at the retrieval layer from a `QueryOptions` filter (`score::matches_filter`),
-	/// keeping this base-layer index free of any retrieval dependency.
+	/// [`search`](Self::search) with `keep` applied BEFORE the top-`k` truncation,
+	/// so a sparse filter still returns a full `k` matching hits.
 	pub fn search_filtered(
 		&self,
 		query: &str,
@@ -116,9 +108,8 @@ impl LexicalIndex {
 				score: s,
 			})
 			.collect();
-		// Score descending, ties broken by entity_id ascending so the set that
-		// survives `truncate(k)` is reproducible across runs (the source is a
-		// HashMap with unstable iteration order) — same convention as fuse::rrf.
+		// Score desc, id-asc tiebreak so the `truncate(k)` boundary is reproducible
+		// (HashMap source; same convention as fuse::rrf).
 		hits.retain(|h| keep(&h.entity_id));
 		hits.sort_by(|a, b| crate::base::util::cmp_rank(a.score, &a.entity_id, b.score, &b.entity_id));
 		hits.truncate(k);
@@ -126,11 +117,8 @@ impl LexicalIndex {
 	}
 
 	pub fn rebuild_from_graph(&self, g: &GraphGnn) {
-		// Single write acquisition for the whole rebuild: clear, then insert every
-		// entity under the SAME guard. The previous version dropped the lock after
-		// clearing and re-acquired it once per entity via self.insert(), which on a
-		// large graph meant thousands of lock round-trips (and a window where the
-		// index was visibly empty to concurrent readers).
+		// One write guard for the whole rebuild so concurrent readers never observe
+		// a half-cleared index.
 		let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
 		inner.postings.clear();
 		inner.doc_len.clear();
@@ -155,10 +143,8 @@ impl LexicalIndex {
 	}
 }
 
-/// Tokenize `text`, then upsert `entity_id`'s postings under an already-held
-/// write guard (no locking). Removing any prior version first makes it an
-/// idempotent upsert. Shared by `insert` (locks, single doc) and
-/// `rebuild_from_graph` (one lock, every doc).
+/// Upsert `entity_id`'s postings under an already-held write guard (no locking);
+/// removing any prior version first makes it idempotent.
 fn inner_insert(inner: &mut Inner, entity_id: &str, text: &str) {
 	let tokens = tokenize(text);
 	inner_remove(inner, entity_id);
@@ -199,9 +185,8 @@ fn inner_remove(inner: &mut Inner, entity_id: &str) {
 	}
 }
 
-/// Split `text` into lowercased, stemmed terms on any non-alphanumeric
-/// boundary. There is no stopword list — common words still index (BM25's idf
-/// already down-weights them), so a query for a rare term isn't diluted.
+/// Lowercased, stemmed terms split on non-alphanumeric boundaries. No stopword
+/// list — BM25's idf already down-weights common words.
 fn tokenize(text: &str) -> Vec<String> {
 	let mut out = Vec::new();
 	let mut cur = String::new();
@@ -221,16 +206,8 @@ fn tokenize(text: &str) -> Vec<String> {
 	out
 }
 
-/// Naive suffix-stripping stemmer: strip the FIRST matching suffix from a fixed
-/// ordered list, and only when the remaining stem stays longer than 2 chars.
-///
-/// Deliberately crude, with known failure modes: no irregular-form handling, so
-/// "mice"/"ran"/"better" are left as-is and never match their singular/base; and
-/// first-match ordering can over-strip ("ties" -> "t" via `ies`). It exists only
-/// to collapse the common regular English inflections (plurals, -ing/-ed/-ly)
-/// enough to lift lexical recall; a precise Porter/Snowball stemmer would add a
-/// dependency for marginal gain at this layer. There is also no stopword removal
-/// (see `tokenize`).
+/// Strip the FIRST matching suffix, only when the stem stays > 2 chars. Traps:
+/// irregular forms left as-is; first-match order can over-strip ("ties" -> "t").
 fn stem(t: &str) -> String {
 	let s = t;
 	for suf in &["ing", "edly", "ed", "ly", "ies", "es", "s"] {
@@ -276,7 +253,6 @@ mod tests {
 			.into_iter()
 			.map(|h| h.score)
 			.collect();
-		// k1/b are query-time params: changing them re-scores with no re-indexing.
 		idx.set_bm25_params(2.5, 0.0); // drop length normalisation, raise tf saturation
 		let tuned: Vec<f32> = idx
 			.search("alpha", 10)
@@ -288,14 +264,12 @@ mod tests {
 			"new k1/b change BM25 scores without re-indexing"
 		);
 
-		// Nonsensical inputs are clamped, not applied raw (would corrupt the formula).
 		idx.set_bm25_params(-5.0, 9.0);
 		let hits = idx.search("alpha", 10);
 		assert!(
 			!hits.is_empty() && hits.iter().all(|h| h.score.is_finite()),
 			"clamped params keep scores finite: {hits:?}"
 		);
-		// NaN is ignored entirely (previous valid values retained → still finite).
 		idx.set_bm25_params(f32::NAN, f32::NAN);
 		assert!(
 			idx.search("alpha", 10).iter().all(|h| h.score.is_finite()),
@@ -323,14 +297,12 @@ mod tests {
 	#[test]
 	fn search_filtered_drops_nonmatching_before_truncation() {
 		let idx = LexicalIndex::new_in_ram(1.2, 0.75);
-		// All five docs match the query term; only the "keep_" ones pass the keep.
 		idx.insert("drop_a", "rust rust rust"); // high tf -> tops an unfiltered search
 		idx.insert("drop_b", "rust rust");
 		idx.insert("keep_1", "rust");
 		idx.insert("keep_2", "rust ownership");
 		idx.insert("drop_c", "rust borrow");
 
-		// Unfiltered top-1 is a high-tf drop doc.
 		let top1 = idx.search("rust", 1);
 		assert!(
 			top1[0].entity_id.starts_with("drop_"),
@@ -338,8 +310,6 @@ mod tests {
 			top1[0].entity_id
 		);
 
-		// Filtered top-1: higher-scoring non-matching docs are removed BEFORE the
-		// truncate, so a matching doc is returned — not an empty/fewer-than-1 result.
 		let keep = |id: &str| id.starts_with("keep_");
 		let f = idx.search_filtered("rust", 1, &keep);
 		assert_eq!(f.len(), 1, "still a full k=1 after filtering");
@@ -349,7 +319,6 @@ mod tests {
 			f[0].entity_id
 		);
 
-		// k beyond the match count returns exactly the matches.
 		let want: std::collections::HashSet<String> =
 			["keep_1", "keep_2"].iter().map(|s| s.to_string()).collect();
 		let got: std::collections::HashSet<String> = idx
@@ -359,7 +328,6 @@ mod tests {
 			.collect();
 		assert_eq!(got, want, "filtered to all matches");
 
-		// search delegates to search_filtered with an always-true keep: unchanged.
 		assert_eq!(
 			idx.search("rust", 10).len(),
 			5,
@@ -383,9 +351,9 @@ mod tests {
 	fn insert_is_an_idempotent_upsert() {
 		let idx = LexicalIndex::new_in_ram(1.2, 0.75);
 		idx.insert("d1", "alpha beta");
-		idx.insert("d1", "alpha beta"); // re-insert same id must not double-count
+		idx.insert("d1", "alpha beta");
 		assert_eq!(idx.doc_count(), 1, "re-inserting an id keeps one document");
-		idx.insert("d1", "gamma"); // upsert to new text -> old terms gone
+		idx.insert("d1", "gamma");
 		assert!(
 			idx.search("alpha", 10).is_empty(),
 			"stale terms removed on upsert"
@@ -425,7 +393,6 @@ mod tests {
 				..Default::default()
 			},
 		);
-		// Empty-statement entity must be skipped, not indexed as a zero-len doc.
 		k.entities.insert(
 			"e3".into(),
 			Entity {

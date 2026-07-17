@@ -2,20 +2,13 @@ use serde_json::value::RawValue;
 
 use super::{err_resp, ok, Response, ERR_INVALID_REQ, ERR_NOT_FOUND};
 
-// Tool names the `research` prompt body steers the model toward. Kept as named
-// constants — not inline string literals buried in the format! — so they have a
-// single definition, and guarded by the `research_prompt_names_are_real_tools`
-// test: a rename in `tools.rs` fails that test instead of silently shipping a
-// prompt that tells the model to call a tool that no longer exists.
+// Tool names the `research` prompt body references; guarded by the
+// `research_prompt_names_are_real_tools` test against renames in `tools.rs`.
 const QUERY_TOOL: &str = "query";
 const INGEST_TOOL: &str = "ingest";
 
-/// MCP prompt catalogue advertised to clients.
-///
-/// To add a prompt: append its definition here AND add a matching arm in
-/// [`handle_prompt_get`] keyed on the same `name`. Keep any tool names the
-/// prompt body references as `const` (see [`QUERY_TOOL`]) and add them to the
-/// guard test so the two never drift.
+/// MCP prompt catalogue. To add a prompt: append here AND add a matching arm in
+/// [`handle_prompt_get`]; keep referenced tool names as consts (see the guard test).
 pub fn prompt_definitions() -> Vec<serde_json::Value> {
 	vec![serde_json::json!({
 		"name": "research",
@@ -90,7 +83,6 @@ mod tests {
 		serde_json::value::to_raw_value(&v).unwrap()
 	}
 
-	/// Pull the prompt message text out of a successful response.
 	fn message_text(resp: &Response) -> String {
 		resp.result.as_ref().expect("result present")["messages"][0]["content"]["text"]
 			.as_str()
@@ -152,9 +144,6 @@ mod tests {
 		);
 	}
 
-	/// Guard against silent drift: the tool names the `research` prompt tells the
-	/// model to call must actually exist in `tool_definitions()`. If a tool is
-	/// renamed in `tools.rs` without updating the constants here, this fails.
 	#[test]
 	fn research_prompt_names_are_real_tools() {
 		let names: Vec<String> = crate::mcp::tools::tool_definitions()

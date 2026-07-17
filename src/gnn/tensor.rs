@@ -65,8 +65,7 @@ impl Tensor {
 		}
 	}
 
-	/// Set every element to `v` in place — keeps the existing allocation/shape,
-	/// unlike re-assigning a fresh `Tensor::zeros`.
+	/// In-place — keeps the existing allocation, unlike assigning fresh `zeros`.
 	pub fn fill(&mut self, v: f64) {
 		self.data.iter_mut().for_each(|x| *x = v);
 	}
@@ -84,12 +83,8 @@ impl Tensor {
 		Self::rand_with(rows, cols, scale, &mut rng)
 	}
 
-	/// Box-Muller normal init using a caller-supplied RNG.
-	///
-	/// Use this for reproducible weight init in tests. Pass a seeded
-	/// `rand::rngs::StdRng` (or any `RngCore`) to make initialization
-	/// deterministic. Production callers should use [`Tensor::rand`],
-	/// which draws from system entropy via `rand::rng()`.
+	/// Box-Muller normal init with a caller-supplied RNG — seed it for
+	/// deterministic tests; production uses [`Tensor::rand`] (system entropy).
 	pub fn rand_with<R: rand::Rng>(rows: usize, cols: usize, scale: f64, rng: &mut R) -> Self {
 		use rand::RngExt;
 		let data: Vec<f64> = (0..rows * cols)
@@ -171,10 +166,6 @@ impl Tensor {
 	}
 
 	/// Row count at or above which `matmul` parallelizes across rows with rayon.
-	/// Below this, the per-task scheduling overhead outweighs the gain on the
-	/// small matrices kern multiplies (per-kern GNN layers are tens of rows), so
-	/// the serial triple-loop wins. An empirical breakpoint, not a hard limit;
-	/// retune if layer widths grow substantially.
 	const MATMUL_PAR_THRESHOLD: usize = 64;
 
 	pub fn matmul(&self, other: &Tensor) -> Result<Tensor, TensorError> {
@@ -362,7 +353,6 @@ mod tests {
 		let r = Tensor::new(1, 2, vec![10.0, 20.0]).unwrap();
 		let out = m.add_row_vec(&r).unwrap();
 		assert_eq!(out.data, vec![11.0, 22.0, 13.0, 24.0]);
-		// Wrong-width row is rejected.
 		let bad = Tensor::new(1, 3, vec![0.0, 0.0, 0.0]).unwrap();
 		assert!(matches!(
 			m.add_row_vec(&bad),

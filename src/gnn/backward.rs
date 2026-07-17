@@ -3,9 +3,8 @@ use crate::gnn::dropout::Dropout;
 use crate::gnn::graph::Graph;
 use crate::gnn::tensor::Tensor;
 
-/// Multiply an incoming gradient by the activation's analytic derivative,
-/// evaluated at the pre-activation values. Exact (no finite-difference bias at
-/// kinks) and half the activation evaluations of a central difference.
+/// Incoming gradient times the activation's analytic derivative at the
+/// pre-activation values — exact, no finite-difference bias at kinks.
 pub fn act_deriv_mul(act: Activation, d_out: &Tensor, pre_act: &Tensor) -> Tensor {
 	let mut out = Tensor::zeros(d_out.rows, d_out.cols);
 	for (i, &x) in pre_act.data.iter().enumerate() {
@@ -14,8 +13,6 @@ pub fn act_deriv_mul(act: Activation, d_out: &Tensor, pre_act: &Tensor) -> Tenso
 	out
 }
 
-/// Sum of squares of a single tensor row. Shared by the L2-norm forward and
-/// backward passes so the per-row reduction lives in one place.
 fn row_sum_sq(t: &Tensor, row: usize) -> f64 {
 	let mut sum_sq = 0.0;
 	for j in 0..t.cols {
@@ -48,10 +45,8 @@ pub fn l2_norm_backward(pre_norm: &Tensor, d_out: &Tensor) -> Tensor {
 			continue;
 		}
 		let inv_norm = 1.0 / sum_sq.sqrt();
-		// Tangent-space projection: dL/dx = (d_out - x̂·(d_out·x̂)) / ‖x‖, where
-		// x̂ = x/‖x‖. The dot is with the NORMALIZED row x̂ — dotting with the raw
-		// `pre_norm` here drops a 1/‖x‖ factor and inflates the gradient (verified
-		// against a numeric central difference).
+		// dL/dx = (d_out - x̂·(d_out·x̂)) / ‖x‖: dot with the NORMALIZED x̂ — raw
+		// `pre_norm` drops a 1/‖x‖ factor (see l2_norm_backward_matches_numeric_gradient).
 		let mut dot_val = 0.0;
 		for j in 0..pre_norm.cols {
 			let x_hat = pre_norm.at(i, j) * inv_norm;
@@ -95,9 +90,7 @@ mod tests {
 
 	#[test]
 	fn relu_backward_is_exact_no_kink_bias() {
-		// Pre-activations straddling zero, incoming grad all 1.0. With the old
-		// central-difference, x=+/-1e-6 leaked ~0.5; the analytic derivative
-		// gates exactly: 0 where x<=0, pass-through where x>0.
+		// Deriv gates exactly: 0 where x <= 0 (including 0.0), pass-through above.
 		let pre = Tensor {
 			data: vec![-2.0, -1e-6, 0.0, 1e-6, 3.0],
 			rows: 1,
@@ -130,10 +123,6 @@ mod tests {
 
 	#[test]
 	fn l2_norm_backward_matches_numeric_gradient() {
-		// loss = sum(l2_normalize_rows(x)); d_out is all-ones. The analytic
-		// backward must match a central finite-difference of the loss w.r.t. each
-		// input element (the projection `(I - x̂x̂ᵀ)/‖x‖` is easy to get subtly
-		// wrong, so pin it against numerics).
 		let x = Tensor {
 			data: vec![0.5, -0.2, 0.1, -0.4, 0.6, 0.2],
 			rows: 2,
@@ -164,8 +153,6 @@ mod tests {
 
 	#[test]
 	fn l2_norm_backward_zero_row_yields_zero_grad() {
-		// A zero row has no defined direction; forward and backward both skip it,
-		// so its gradient stays zero (no NaN from a 1/0 norm).
 		let x = Tensor {
 			data: vec![0.0, 0.0, 3.0, 4.0],
 			rows: 2,
@@ -186,8 +173,7 @@ mod tests {
 }
 
 /// Numeric gradient checks for the GNN math-critical paths: layer backward
-/// passes (vs central finite differences) and core tensor ops. Purely additive
-/// coverage — no production behaviour change.
+/// passes (vs central finite differences) and core tensor ops.
 #[cfg(test)]
 mod gnn_math_tests {
 	use crate::gnn::activation::Activation;
@@ -216,9 +202,8 @@ mod gnn_math_tests {
 		(g, x)
 	}
 
-	/// Compare analytic param gradients (backward with d_out = ones, so the
-	/// scalar loss is sum(output)) against central finite differences over
-	/// every parameter element. Init-agnostic: holds for any weights.
+	/// Analytic param grads (d_out = ones, loss = sum(output)) vs central finite
+	/// differences over every parameter element. Init-agnostic.
 	fn assert_grad_matches_numeric(layer: &mut dyn BackwardGraphLayer, g: &Graph, x: &Tensor) {
 		const H: f64 = 1e-6;
 		let out = layer.forward_graph(g, x);
@@ -254,13 +239,8 @@ mod gnn_math_tests {
 		}
 	}
 
-	/// Compare the analytic INPUT gradient (the tensor `backward_graph` returns —
-	/// dL/d(input features) for the scalar loss `sum(output)`) against central
-	/// finite differences over every input element. This is the gradient that
-	/// chains to the PREVIOUS layer in a stacked model (`Model::backward` feeds it
-	/// back as the next layer's `d_out`). The param-gradient check above never
-	/// exercises it, and every `model.rs` test is single-layer, so without this the
-	/// layer-to-layer gradient flow is unverified.
+	/// The INPUT gradient `backward_graph` returns vs central finite differences —
+	/// the gradient `Model::backward` chains into the PREVIOUS layer's `d_out`.
 	fn assert_input_grad_matches_numeric(layer: &mut dyn BackwardGraphLayer, g: &Graph, x: &Tensor) {
 		const H: f64 = 1e-6;
 		let out = layer.forward_graph(g, x);
@@ -294,7 +274,7 @@ mod gnn_math_tests {
 
 	#[test]
 	fn gcn_linear_input_grad_matches_numeric() {
-		// d_input = Aᵀ·(d_out·Wᵀ): the layer-chaining gradient, previously unchecked.
+		// d_input = Aᵀ·(d_out·Wᵀ): the layer-chaining gradient.
 		let (g, x) = tiny_graph();
 		let mut rng = rand::rngs::StdRng::seed_from_u64(23);
 		let mut l = GCNLayer::with_rng(4, 3, None, false, 0.0, &mut rng);
@@ -319,8 +299,6 @@ mod gnn_math_tests {
 
 	#[test]
 	fn gcn_relu_backward_matches_numeric() {
-		// End-to-end check of the analytic ReLU derivative (see the
-		// finite-difference-derivative fix).
 		let (g, x) = tiny_graph();
 		let mut rng = rand::rngs::StdRng::seed_from_u64(11);
 		let mut l = GCNLayer::with_rng(4, 3, Some(Activation::Relu), false, 0.0, &mut rng);

@@ -1,7 +1,5 @@
-//! Wire-format payload types and trust-boundary validation: the serde shapes
-//! exchanged over MCP / RPC, plus the validators that reject out-of-range `conf`
-//! or internal-only `EntityKind`s before they enter the graph. Bad inputs surface
-//! as structured [`WireError`]s — never silently saturated or coerced.
+//! Wire-format payload types and trust-boundary validators (MCP / RPC shapes).
+//! Bad inputs surface as structured [`WireError`]s — never silently coerced.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -16,28 +14,18 @@ pub const WIRE_CONF_MIN: f64 = 0.0;
 /// Inclusive upper bound for any caller-supplied `conf` value on the wire.
 pub const WIRE_CONF_MAX: f64 = 1.0;
 
-/// Errors produced when validating an inbound wire payload at the trust
-/// boundary. We never silently saturate or coerce — bad inputs surface as
-/// structured errors so client bugs are loud, not hidden.
+/// Trust-boundary validation errors for inbound wire payloads.
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum WireError {
-	/// `conf` arrived outside the wire-acceptable range `[0.0, 1.0]`.
 	#[error("conf {0} out of range [0.0..=1.0]")]
 	ConfOutOfRange(f64),
-	/// A `EntityKind` arrived on the wire that callers must never produce.
-	/// `Document` and `Superseded` are internal-only state transitions.
 	#[error("thought kind {0:?} is internal-only and not accepted on the wire")]
 	InternalKindOnWire(EntityKind),
-	/// `Fact`-tier promotion was requested by a non-`USER_SOURCE` / non-`AGENT_SOURCE`
-	/// caller. Fact production is gated to trusted, pinned sources.
 	#[error("fact-tier conf requires trusted source (got source={0:?})")]
 	FactFromUntrustedSource(String),
 }
 
-/// Validate a caller-supplied `conf` value at the wire boundary.
-///
-/// Returns the value unchanged if it is in `[WIRE_CONF_MIN, WIRE_CONF_MAX]`,
-/// otherwise [`WireError::ConfOutOfRange`].
+/// Validate caller-supplied `conf` at the wire boundary — NaN is rejected too.
 pub fn validate_wire_conf(conf: f64) -> Result<f64, WireError> {
 	if conf.is_nan() || !(WIRE_CONF_MIN..=WIRE_CONF_MAX).contains(&conf) {
 		return Err(WireError::ConfOutOfRange(conf));
@@ -45,11 +33,8 @@ pub fn validate_wire_conf(conf: f64) -> Result<f64, WireError> {
 	Ok(conf)
 }
 
-/// Validate a caller-supplied `EntityKind` at the wire boundary.
-///
-/// Only `Claim` and `Fact` are wire-acceptable; the remaining kinds
-/// (`Document`, `Question`, `Answer`, `Conclusion`) are internal lifecycle
-/// states produced by ingest / synthesis pipelines, not by clients.
+/// Only `Claim` and `Fact` are wire-acceptable; the rest are internal lifecycle
+/// states produced by ingest / synthesis, never by clients.
 pub fn validate_wire_kind(kind: EntityKind) -> Result<EntityKind, WireError> {
 	match kind {
 		EntityKind::Claim | EntityKind::Fact => Ok(kind),
@@ -59,11 +44,8 @@ pub fn validate_wire_kind(kind: EntityKind) -> Result<EntityKind, WireError> {
 	}
 }
 
-/// Confirm the caller is permitted to produce a `Fact`-tier thought.
-///
-/// `Fact` promotion (conf >= 1.0) is restricted to callers pinned to either
-/// [`USER_SOURCE`] or [`AGENT_SOURCE`]. The MCP entrypoint always pins to
-/// `AGENT_SOURCE`; this guard backstops any future caller path.
+/// `Fact` promotion (conf >= 1.0) is restricted to [`USER_SOURCE`] /
+/// [`AGENT_SOURCE`]; backstops any future caller path beyond MCP.
 pub fn validate_fact_source(source: &str) -> Result<(), WireError> {
 	if source == USER_SOURCE || source == AGENT_SOURCE {
 		Ok(())
@@ -138,9 +120,6 @@ pub struct IngestFailure {
 	pub error: String,
 }
 
-/// serde `skip_serializing_if` predicate: true when `v` equals its type's
-/// default (0 for integers). Generic so one helper serves every numeric wire
-/// field — replaces the former per-type `is_zero` / `is_zero_i64` pair.
 fn is_zero<T: Default + PartialEq>(v: &T) -> bool {
 	*v == T::default()
 }
@@ -441,8 +420,7 @@ mod wire_validation_tests {
 
 	#[test]
 	fn conf_inclusive_bounds_accepted() {
-		// The range is documented as inclusive [0.0, 1.0]; pin both endpoints so a
-		// future `<`/`>` typo can't silently reject a valid boundary value.
+		// Pin both inclusive endpoints so a `<`/`>` typo can't reject them.
 		assert_eq!(validate_wire_conf(0.0), Ok(0.0));
 		assert_eq!(validate_wire_conf(1.0), Ok(1.0));
 		assert_eq!(validate_wire_conf(0.5), Ok(0.5));
@@ -451,14 +429,11 @@ mod wire_validation_tests {
 	#[test]
 	fn normal_on_wire_allowed() {
 		assert_eq!(validate_wire_kind(EntityKind::Claim), Ok(EntityKind::Claim));
-		// Fact is the other wire-acceptable kind.
 		assert_eq!(validate_wire_kind(EntityKind::Fact), Ok(EntityKind::Fact));
 	}
 
 	#[test]
 	fn answer_and_conclusion_on_wire_rejected() {
-		// The remaining internal-only kinds (beyond Document/Question already
-		// covered) must also be refused at the trust boundary.
 		assert_eq!(
 			validate_wire_kind(EntityKind::Answer),
 			Err(WireError::InternalKindOnWire(EntityKind::Answer))
@@ -479,7 +454,6 @@ mod wire_validation_tests {
 
 	#[test]
 	fn fact_source_rejects_untrusted() {
-		// The Fact-tier source gate (live backstop on the MCP ingest path).
 		assert!(matches!(
 			validate_fact_source("stranger"),
 			Err(WireError::FactFromUntrustedSource(_))

@@ -2,16 +2,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::base::constants::INGEST_DEDUP_THRESHOLD;
 
-/// Serde-deserialized (`kern.toml`) ingest tuning. Mirrors the runtime
-/// [`ingest::Config`](crate::ingest::Config) knobs (which additionally carries
-/// `ttl_secs`); both default to the shared `INGEST_*` constants in
-/// `base::constants` so the two layers cannot drift.
+/// `[ingest]`: serde twin of the runtime [`ingest::Config`](crate::ingest::Config);
+/// both default to the shared `INGEST_*` constants in `base::constants`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IngestConfig {
-	/// Cosine-similarity floor in `[0.0, 1.0]`: a new vector whose nearest
-	/// neighbour scores at or above this is merged as a duplicate of that entity
-	/// instead of inserted. Higher → stricter "same thought" (fewer merges).
+	/// Cosine floor in `[0,1]`: a nearest neighbour at or above this is merged as
+	/// a duplicate instead of inserted. Higher → fewer merges.
 	pub dedup_threshold: f64,
 }
 
@@ -24,10 +21,8 @@ impl Default for IngestConfig {
 }
 
 impl IngestConfig {
-	/// Reject an out-of-range ingest configuration (dedup threshold outside
-	/// `[0,1]`). Delegates to the single canonical range check on the runtime
-	/// [`ingest::Config`](crate::ingest::Config) — mapping these serde fields onto
-	/// it — so the two config layers can never validate differently.
+	/// Delegates to the runtime [`ingest::Config`](crate::ingest::Config) check so
+	/// the two config layers can never validate differently.
 	pub fn validate(&self) -> Result<(), String> {
 		crate::ingest::Config {
 			dedup_threshold: self.dedup_threshold,

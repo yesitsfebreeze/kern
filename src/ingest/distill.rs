@@ -1,7 +1,5 @@
-//! LLM-gated distillation of a raw conversation into durable claims.
-//!
-//! Pure-ish: the only side effect is the injected LLM call. The caller
-//! (intake) turns each `Claim` into an ingested thought.
+//! LLM-gated distillation of a raw conversation into durable claims. Pure-ish:
+//! the only side effect is the injected LLM call.
 
 /// One durable, reusable piece of knowledge extracted from a conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,18 +8,12 @@ pub struct Claim {
 	pub text: String,
 	/// Descriptor key (the typed-memory taxonomy). One of `DESCRIPTORS`.
 	pub descriptor: String,
-	/// OPTIONAL bi-temporal world-time hint: when the statement says the claim
-	/// became true ("since March", "as of v2"), the distiller may emit an ISO8601
-	/// date the ingest path stamps onto the entity's `valid_from`. Parsed
-	/// leniently — garbage or an absent field yields `None` (falls back to the
-	/// ingestion time).
+	/// Optional bi-temporal world-time hint (ISO8601), stamped onto `valid_from`.
+	/// Parsed leniently — garbage or absent yields `None` (ingestion time).
 	pub valid_from: Option<std::time::SystemTime>,
 }
 
 /// The typed-memory taxonomy. Mirrors the descriptors seeded into the kern.
-///
-/// Covers semantic + episodic knowledge plus `procedural` (Letta/MemGPT-style
-/// "how we do X" — learned workflows, rules, and conventions, not just facts).
 pub const DESCRIPTORS: [&str; 7] = [
 	"preference",
 	"decision",
@@ -32,15 +24,8 @@ pub const DESCRIPTORS: [&str; 7] = [
 	"procedural",
 ];
 
-/// Extract durable claims from `conversation`.
-///
-/// Returns `Some([])` when the conversation is empty or the LLM responded but
-/// produced no parseable claims (a genuine "nothing worth keeping" reply, e.g.
-/// `"[]"` or prose). Returns `None` when the LLM call produced *no output at
-/// all* — the daemon's `complete_func` returns an empty string on any error,
-/// so an empty raw response signals a transient outage. The caller leaves such
-/// a delta in the intake to retry rather than archiving it, so an outage never
-/// loses captured knowledge.
+/// `Some([])` = the LLM responded but nothing parseable/worth keeping (archive).
+/// `None` = no output at all (transient outage — caller must retry, not archive).
 pub fn distill(conversation: &str, llm: &dyn Fn(&str) -> String) -> Option<Vec<Claim>> {
 	if conversation.trim().is_empty() {
 		return Some(Vec::new());
@@ -68,17 +53,13 @@ markdown.\n\nCONVERSATION:\n{conversation}\n"
 	);
 	let raw = llm(&prompt);
 	if raw.trim().is_empty() {
-		// LLM call failed (no output) — signal retry, do not archive.
 		return None;
 	}
 	Some(parse_claims(&raw))
 }
 
-/// Parse claims from the first contiguous `[..]` span in `raw` (first `[`
-/// to last `]`), tolerant of surrounding prose. A lone nested array
-/// (`[[...]]`) is unwrapped. Malformed JSON or multiple sibling top-level
-/// arrays fail gracefully to an empty vec. The JSON field `kind` maps to
-/// `Claim::descriptor`, falling back to `"fact"` when missing or unknown.
+/// Parse the first-`[`-to-last-`]` span, tolerant of surrounding prose. A lone
+/// nested `[[...]]` is unwrapped; malformed JSON and an unknown `kind` fail soft.
 pub(crate) fn parse_claims(raw: &str) -> Vec<Claim> {
 	let (start, end) = match (raw.find('['), raw.rfind(']')) {
 		(Some(s), Some(e)) if e > s => (s, e),
@@ -91,9 +72,7 @@ pub(crate) fn parse_claims(raw: &str) -> Vec<Claim> {
 			return Vec::new();
 		}
 	};
-	// LLMs sometimes wrap the array once more: `[[...]]`. Unwrap a lone
-	// nested array so its claims are not silently dropped. `mem::take` moves the
-	// inner vec out (leaving an empty array behind) instead of cloning it.
+	// Unwrap a lone `[[...]]` wrapper (LLM quirk).
 	if items.len() == 1 {
 		if let Some(inner) = items[0].as_array_mut() {
 			items = std::mem::take(inner);
@@ -120,9 +99,7 @@ pub(crate) fn parse_claims(raw: &str) -> Vec<Claim> {
 		} else {
 			"fact".to_string()
 		};
-		// Lenient temporal hint: parse an ISO8601 `valid_from` if present and
-		// well-formed; ignore anything else (absent field, relative phrase the LLM
-		// failed to normalize, garbage) so a bad hint never blocks a good claim.
+		// A bad `valid_from` hint never blocks a good claim — ignore it.
 		let valid_from = it
 			.get("valid_from")
 			.and_then(|v| v.as_str())
@@ -160,8 +137,6 @@ mod tests {
 
 	#[test]
 	fn procedural_kind_maps_through() {
-		// The Letta-style procedural scope must survive parsing, not fall back
-		// to "fact".
 		let llm = stub(r#"[{"text":"Always run cargo test before committing","kind":"procedural"}]"#);
 		let claims = distill("c", &llm).expect("some");
 		assert_eq!(claims.len(), 1);
@@ -190,8 +165,6 @@ mod tests {
 
 	#[test]
 	fn empty_llm_response_signals_retry() {
-		// An empty raw response means the LLM call failed; distill must return
-		// None so the caller leaves the delta in the intake for retry.
 		let llm = stub("");
 		assert!(distill("a real conversation worth keeping", &llm).is_none());
 	}
@@ -204,8 +177,6 @@ mod tests {
 
 	#[test]
 	fn genuine_empty_array_is_some_empty() {
-		// A successful "nothing worth keeping" reply ("[]") is NOT a failure:
-		// distill returns Some([]) so the delta is archived, not retried.
 		let llm = stub("[]");
 		assert_eq!(distill("a real conversation", &llm), Some(Vec::new()));
 	}
@@ -220,7 +191,6 @@ mod tests {
 
 	#[test]
 	fn valid_from_hint_is_parsed_when_present_and_ignored_when_garbage() {
-		// A well-formed ISO date is parsed onto the claim.
 		let good = stub(
 			r#"[{"text":"we moved to spaces","kind":"decision","valid_from":"2026-03-01T00:00:00Z"}]"#,
 		);
@@ -231,7 +201,6 @@ mod tests {
 			"a valid ISO valid_from is parsed"
 		);
 
-		// Garbage / relative phrase the LLM failed to normalize -> ignored, None.
 		let garbage = stub(r#"[{"text":"x","kind":"fact","valid_from":"since March"}]"#);
 		assert_eq!(
 			distill("c", &garbage).expect("some")[0].valid_from,
@@ -239,7 +208,6 @@ mod tests {
 			"an unparseable valid_from is ignored, not fatal"
 		);
 
-		// Absent field -> None (the common case).
 		let absent = stub(r#"[{"text":"y","kind":"fact"}]"#);
 		assert_eq!(distill("c", &absent).expect("some")[0].valid_from, None);
 	}
@@ -270,17 +238,11 @@ mod tests {
 
 	#[test]
 	fn multiple_sibling_arrays_fail_gracefully_to_empty() {
-		// Only a LONE nested array (`[[...]]`, len 1) is unwrapped. Two siblings
-		// must never be silently merged:
-		//  - `[..] [..]` — parse spans first '[' to last ']', so the whole thing is
-		//    invalid JSON (two arrays) -> empty vec.
 		let two_siblings = stub(r#"[{"text":"a","kind":"fact"}] [{"text":"b","kind":"fact"}]"#);
 		assert!(
 			distill("c", &two_siblings).expect("some").is_empty(),
 			"sibling arrays are not merged — invalid JSON spans to empty",
 		);
-		//  - `[[..],[..]]` — one array of two arrays (len 2, so no unwrap); each
-		//    element is an Array with no `text` field -> all skipped -> empty.
 		let array_of_arrays = stub(r#"[[{"text":"a","kind":"fact"}],[{"text":"b","kind":"fact"}]]"#);
 		assert!(
 			distill("c", &array_of_arrays).expect("some").is_empty(),

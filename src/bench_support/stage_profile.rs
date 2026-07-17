@@ -1,8 +1,5 @@
-//! Per-stage profiling leg for the retrieval harness — the stage-level companion
-//! to [`latency`](super::latency)'s whole-path percentiles. Runs the (LLM-free)
-//! graph phase through [`retrieve_profiled`](crate::retrieval::answer::retrieve_profiled)
-//! and aggregates each stage's mean/p50/p95 (ms) plus its share of the total, so a
-//! config/index change can be attributed to the stage it moved.
+//! Per-stage profiling leg for the retrieval harness: runs the LLM-free graph phase
+//! through `retrieve_profiled` and aggregates each stage's mean/p50/p95 and share.
 
 use std::collections::BTreeMap;
 
@@ -29,10 +26,8 @@ pub struct StageProfileReport {
 	stages: Vec<StageStats>,
 }
 
-/// Run every query `iters` times (after `warmup` untimed passes) through the
-/// profiled graph phase, collecting each stage's per-run timing. Stages are keyed
-/// by label and aggregated across all queries and iterations. The ordering of the
-/// output follows first-seen stage order so the table reads seed → chains.
+/// Run every query `iters` times (after `warmup` untimed passes), aggregating by
+/// stage label. Output follows first-seen stage order so the table reads seed → chains.
 pub fn measure_stage_profile(
 	g: &GraphGnn,
 	cfg: &RetrievalConfig,
@@ -83,7 +78,10 @@ pub fn measure_stage_profile(
 				if !samples.contains_key(&c.label) {
 					order.push(c.label.clone());
 				}
-				samples.entry(c.label.clone()).or_default().push(c.elapsed_ms);
+				samples
+					.entry(c.label.clone())
+					.or_default()
+					.push(c.elapsed_ms);
 			}
 		}
 	}
@@ -193,8 +191,7 @@ mod tests {
 			"per-stage percentiles are monotonic"
 		);
 		let share_sum: f64 = r.stages.iter().map(|s| s.share).sum();
-		// Stage means sum to roughly the mean total (checkpoint gaps == total), so
-		// shares sum to ~1.0 barring the tiny inter-stage slack the Profiler leaves.
+		// Checkpoint gaps sum to the total, so shares sum to ~1.0 barring Profiler slack.
 		assert!(
 			(0.5..=1.5).contains(&share_sum),
 			"stage shares sum near 1.0, got {share_sum}"

@@ -136,9 +136,7 @@ pub(crate) fn dispatch(server: &dyn McpServer, frame: &Value) -> Option<Value> {
 	}
 }
 
-/// Map an [`McpError`] to its JSON-RPC `(code, message)`: an explicit `Rpc`
-/// carries its own code; anything else collapses to a generic -32000 server
-/// error. Shared by the `tools/call` and `handle_method` error paths.
+/// `Rpc` carries its own JSON-RPC code; every other arm collapses to -32000.
 fn rpc_code_message(e: McpError) -> (i64, String) {
 	match e {
 		McpError::Rpc { code, message } => (code, message),
@@ -175,8 +173,8 @@ mod tests {
 	use super::*;
 	use std::io::Cursor;
 
-	// Local mock over this crate's own McpServer (a cross-crate test-utils server
-	// would link a different McpServer instance under trnsprt's dev-dep cycle).
+	// Local mock, not test-utils::AdderServer: trnsprt's dev-dep cycle
+	// (trnsprt -> test-utils -> trnsprt) makes that a *different* McpServer here.
 	struct Mock;
 	impl McpServer for Mock {
 		fn tools_list(&self) -> Vec<ToolSchema> {
@@ -243,7 +241,6 @@ mod tests {
 
 	#[test]
 	fn serve_rw_maps_a_tool_rpc_error_to_its_code() {
-		// Exercises rpc_code_message: an Rpc error keeps its own code (-32601).
 		let frames = run(&[
 			r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nope","arguments":{}}}"#,
 		]);

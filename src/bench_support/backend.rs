@@ -1,14 +1,5 @@
-//! Pluggable vector backend for the Qdrant head-to-head baseline — Phase 1 of
-//! `docs/superpowers/specs/2026-06-12-qdrant-baseline-harness-design.md`.
-//!
-//! A [`VectorBackend`] indexes pre-embedded [`Doc`]s and answers vector queries,
-//! so the same corpus + queries can be scored against kern and (later,
-//! feature-gated) Qdrant through *identical* `ndcg`/latency code. The embeddings
-//! are computed ONCE by the caller and fed to every backend, so any recall gap is
-//! the index — not the embedder (the confound this session proved dominates).
-//!
-//! This module is the abstraction + kern's reference implementation; the Qdrant
-//! adapter and the multi-backend `compare` harness are later phases.
+//! Pluggable vector backend for the Qdrant head-to-head baseline. Embeddings are
+//! computed ONCE by the caller, so any recall gap is the index — not the embedder.
 
 use crate::base::graph::GraphGnn;
 use crate::base::math::cosine;
@@ -16,8 +7,7 @@ use crate::base::search::{search_all_filtered, search_all_unlocked};
 use crate::base::types::{Entity, EntityKind, Kern};
 use crate::base::util::cmp_rank;
 
-/// A pre-embedded corpus document. `vector` is kern-native `f32`; a future Qdrant
-/// adapter converts to `f32` at its own boundary so both index the same values.
+/// A pre-embedded corpus document. `vector` is kern-native `f32`.
 #[derive(Debug, Clone)]
 pub struct Doc {
 	pub id: String,
@@ -32,8 +22,7 @@ pub struct QueryHit {
 	pub score: f64,
 }
 
-/// A vector index that can be A/B'd against kern in the baseline harness. Both
-/// `index` and `query` see the same `Doc`s/vectors as every other backend.
+/// A vector index that can be A/B'd against kern in the baseline harness.
 pub trait VectorBackend {
 	fn name(&self) -> &str;
 	fn index(&mut self, docs: &[Doc]);
@@ -44,8 +33,6 @@ pub trait VectorBackend {
 	fn vector_bytes(&self) -> usize;
 }
 
-/// kern's own vector index (HNSW over `entity_idx`) — the reference backend the
-/// Qdrant column is measured against.
 #[derive(Default)]
 pub struct KernBackend {
 	graph: GraphGnn,
@@ -109,10 +96,8 @@ impl VectorBackend for KernBackend {
 	}
 }
 
-/// Exact brute-force vector search (full scan, cosine) — the ground-truth backend.
-/// Comparing kern (approximate HNSW) against this measures how much recall kern's
-/// ANN gives up versus exact nearest-neighbour, the "keep the DiskANN recall@k
-/// edge" check. O(n) per query, so it is a baseline, not a contender.
+/// Exact brute-force cosine scan — the ground-truth recall ceiling for kern's ANN.
+/// O(n) per query: a baseline, not a contender.
 #[derive(Default)]
 pub struct BruteForceBackend {
 	docs: Vec<Doc>,
@@ -202,7 +187,6 @@ mod tests {
 			hits[0].score >= hits[1].score && hits[1].score >= hits[2].score,
 			"sorted desc"
 		);
-		// kind filter applies to the exact scan too.
 		let f = b.query(&[1.0, 0.0], 5, Some(EntityKind::Fact));
 		assert!(
 			!f.is_empty() && f.iter().all(|h| h.id == "a"),

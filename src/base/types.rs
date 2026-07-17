@@ -18,18 +18,13 @@ pub enum ChunkPartKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum EntityKind {
-	/// Verified high-confidence claim, immutable.
+	/// Verified high-confidence claim; immutable (GC-immune while Active).
 	Fact = 0,
-	/// Default unverified statement.
 	#[default]
 	Claim = 1,
-	/// Source artifact (file body, ticket body, session slice, agent blob).
 	Document = 2,
-	/// Open inquiry awaiting an answer.
 	Question = 3,
-	/// Resolution to a Question.
 	Answer = 4,
-	/// Synthesized stance over many Claims.
 	Conclusion = 5,
 }
 
@@ -46,7 +41,6 @@ impl EntityKind {
 		}
 	}
 
-	/// Parse a lower-case label. Returns `None` on unknown input.
 	pub fn parse(s: &str) -> Option<Self> {
 		match s {
 			"fact" => Some(EntityKind::Fact),
@@ -60,10 +54,8 @@ impl EntityKind {
 	}
 }
 
-/// Lifecycle flag, orthogonal to [`EntityKind`].
-///
-/// `Superseded` migrated here from the old `ThoughtKind` enum: a Fact that
-/// gets superseded retains `kind = Fact` but transitions `status = Superseded`.
+/// Lifecycle flag, orthogonal to [`EntityKind`]: a Fact that gets superseded
+/// retains `kind = Fact` but transitions `status = Superseded`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum EntityStatus {
@@ -111,14 +103,9 @@ pub struct Acl {
 	pub groups: Vec<String>,
 }
 
-/// Typed source value object. Each variant is one URI scheme.
-///
-/// Schemes:
-/// - `file://<path>` — filesystem document.
-/// - `ticket://<system>/<id>[#section]` — issue tracker artifact.
-/// - `session://<id>[#slice]` — agent/repl session slice.
-/// - `agent://<name>` — output produced by an agent.
-/// - `inline://<hash>` — caller-supplied inline text.
+/// Typed source value object — one URI scheme per variant:
+/// `file://<path>`, `ticket://<system>/<id>[#section]`, `session://<id>[#slice]`,
+/// `agent://<name>`, `inline://<hash>`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Source {
 	File {
@@ -162,8 +149,7 @@ impl Default for Source {
 }
 
 impl Source {
-	/// Stable URI scheme tag — `"file"`, `"ticket"`, `"session"`, `"agent"`,
-	/// `"inline"`. Used by the MCP query tool's `scheme` filter.
+	/// Stable tag — the MCP query tool's `scheme` filter matches on it.
 	pub fn scheme(&self) -> &'static str {
 		match self {
 			Source::File { .. } => "file",
@@ -174,7 +160,6 @@ impl Source {
 		}
 	}
 
-	/// Parse `"file"`/`"ticket"`/... into the matching scheme tag string.
 	pub fn parse_scheme(s: &str) -> Option<&'static str> {
 		match s {
 			"file" => Some("file"),
@@ -302,27 +287,17 @@ pub struct Entity {
 	pub valid_until: Option<SystemTime>,
 	pub producer_id: String,
 	pub unlinked_count: i32,
-	/// Set when the thought's text is edited in place (wiki-style). A dirty
-	/// entity has a stale `vector`/`gnn_vector` until the reevaluation sweep
-	/// re-embeds it and clears the flag. Persistent so an interrupted
-	/// reevaluation resumes after restart.
+	/// Dirty = `vector`/`gnn_vector` are stale until the reevaluation sweep
+	/// re-embeds and clears it. Persistent so an interrupted sweep resumes.
 	#[serde(default)]
 	pub dirty: bool,
-	/// Bi-temporal WORLD-TIME window (Zep-style "supersede, don't delete").
+	/// Bi-temporal WORLD-TIME window: `valid_from`/`valid_to` bracket when the
+	/// claim was true (`None` = fall back to `created_at` / still valid);
+	/// `invalidated_at` is TRANSACTION time.
 	///
-	/// `valid_from` is when the claim became true in the world; `None` falls back
-	/// to `created_at`. `valid_to` is when it stopped being true (the successor's
-	/// `valid_from`, or the supersede instant); `None` means still valid.
-	/// `invalidated_at` is the TRANSACTION-time stamp of when kern learned the
-	/// claim was superseded; `None` means it never was.
-	///
-	/// These are `#[serde(skip)]` on purpose: keeping them out of `Entity`'s
-	/// bincode stream leaves the embedded on-disk/gossip layout byte-identical to
-	/// pre-temporal snapshots (no wire break, no silent decode loss). The primary
-	/// store persists them out-of-band via `StoredKern`'s temporal side-map (same
-	/// pattern as the int8 vector side-map); the cold tier and gossip carry only
-	/// the always-serialized `status`/`superseded_by`, which is the essential
-	/// "this is superseded" signal — the timestamps are a node-local refinement.
+	/// `serde(skip)` is load-bearing: it keeps the bincode layout byte-identical
+	/// to pre-temporal snapshots. The store persists these via `StoredKern`'s
+	/// temporal side-map instead.
 	#[serde(skip)]
 	pub valid_from: Option<SystemTime>,
 	#[serde(skip)]
@@ -375,9 +350,8 @@ impl Entity {
 		self.valid_from.or(self.created_at)
 	}
 
-	/// Whether this entity's bi-temporal window `[valid_from, valid_to)` covers
-	/// `instant` (half-open: `valid_from` inclusive, `valid_to` exclusive). An
-	/// unknown lower bound never excludes; an open `valid_to` means still valid.
+	/// Half-open `[valid_from, valid_to)`. An unknown lower bound never excludes;
+	/// an open `valid_to` means still valid.
 	pub fn is_valid_at(&self, instant: SystemTime) -> bool {
 		if let Some(from) = self.valid_from_or_created() {
 			if instant < from {
@@ -392,10 +366,8 @@ impl Entity {
 		true
 	}
 
-	/// Stamp this entity as invalidated by a successor at `at`: record the
-	/// transaction-time (`invalidated_at`) and close the world-time window
-	/// (`valid_to`), unless already closed. The `status`/`superseded_by`
-	/// transition is the caller's (it also evicts from the ANN indices).
+	/// Stamps the clocks only — the caller still owns the `status`/`superseded_by`
+	/// transition and the ANN eviction.
 	pub fn stamp_invalidated(&mut self, at: SystemTime, valid_to: SystemTime) {
 		self.invalidated_at = Some(at);
 		if self.valid_to.is_none() {
@@ -470,7 +442,6 @@ pub struct Reason {
 }
 
 impl Reason {
-	/// Replace the edge's text in place and mark it dirty for reevaluation.
 	pub fn set_text(&mut self, text: String) {
 		self.text = text;
 		self.dirty = true;
@@ -523,9 +494,7 @@ pub struct Kern {
 	pub last_access: Option<SystemTime>,
 }
 
-/// Wall-clock nonce (nanoseconds since the epoch) that keeps generated kern ids
-/// unique across rapid successive creations. Isolated here so the only
-/// non-deterministic input to id derivation is a single, named call.
+/// The single non-deterministic input to kern-id derivation.
 fn now_nanos() -> u128 {
 	SystemTime::now()
 		.duration_since(SystemTime::UNIX_EPOCH)
@@ -533,17 +502,12 @@ fn now_nanos() -> u128 {
 		.as_nanos()
 }
 
-/// Derive an unnamed kern's id from its parent and a uniqueness nonce. Pure —
-/// split out of `new_unnamed` so the id scheme is deterministic for a fixed
-/// `(parent_id, nonce)` and can be unit-tested without mocking the clock (the
-/// public ctor supplies `now_nanos()`).
+/// Pure: deterministic for a fixed `(parent_id, nonce)`.
 fn unnamed_kern_id(parent_id: &str, nonce_nanos: u128) -> String {
 	util::content_hash(&format!("{parent_id}{nonce_nanos}"))
 }
 
-/// Derive a named child's id from parent, anchor name, and nonce. Pure (see
-/// `unnamed_kern_id`); the name is folded into the hash so two anchors with
-/// different names under the same parent never collide.
+/// Pure; the name is folded in so two anchors under one parent never collide.
 fn named_child_kern_id(parent_id: &str, name: &str, nonce_nanos: u128) -> String {
 	util::content_hash(&format!("{parent_id}{name}{nonce_nanos}"))
 }
@@ -570,10 +534,8 @@ impl Kern {
 		k
 	}
 
-	/// A named child of `parent_id` carrying an anchor vector. An **anchor** is
-	/// exactly this: a named kern directly under the root. `vec` may be empty
-	/// (the `generic` catch-all), in which case similarity routing never matches
-	/// it. Default radii come from the kern routing constants.
+	/// An **anchor** is exactly this: a named kern directly under the root. An
+	/// empty `vec` (the `generic` catch-all) never matches similarity routing.
 	pub fn new_named_child(parent_id: &str, root_id: &str, name: &str, vec: Vec<f32>) -> Self {
 		let mut k = Self::new(named_child_kern_id(parent_id, name, now_nanos()), parent_id);
 		k.root_id = root_id.to_string();
@@ -632,9 +594,8 @@ impl Kern {
 	}
 }
 
-/// Shared test fixture: a minimal `Active` inline entity with the given
-/// heat and kind. Used by tests across the base/retrieval/gossip modules
-/// so the 25-field `Entity` literal lives in exactly one place.
+/// Shared test fixture: a minimal `Active` inline entity — the one place the
+/// 25-field `Entity` literal lives.
 #[cfg(test)]
 pub(crate) fn mk_entity(id: &str, text: &str, heat: f64, kind: EntityKind) -> Entity {
 	let mut e = Entity {
@@ -721,7 +682,6 @@ mod tests {
 
 	#[test]
 	fn conf_mean_and_variance_handle_a_zero_total_prior() {
-		// alpha = beta = 0 is a degenerate prior: mean falls back to 0.5, var to 0.
 		let e = Entity {
 			conf_alpha: 0.0,
 			conf_beta: 0.0,
@@ -792,22 +752,17 @@ mod tests {
 
 	#[test]
 	fn kern_id_derivation_is_deterministic_and_input_sensitive() {
-		// Deterministic for a fixed (parent, nonce) — the property that the bare
-		// SystemTime::now() call previously made un-testable.
 		assert_eq!(unnamed_kern_id("p", 42), unnamed_kern_id("p", 42));
 		assert_eq!(
 			named_child_kern_id("p", "code", 9),
 			named_child_kern_id("p", "code", 9)
 		);
-		// The nonce disambiguates rapid successive creations under one parent.
 		assert_ne!(unnamed_kern_id("p", 1), unnamed_kern_id("p", 2));
-		// Parent and anchor name both feed the hash.
 		assert_ne!(unnamed_kern_id("a", 7), unnamed_kern_id("b", 7));
 		assert_ne!(
 			named_child_kern_id("p", "code", 9),
 			named_child_kern_id("p", "docs", 9)
 		);
-		// Ids are non-empty content hashes.
 		assert!(!unnamed_kern_id("p", 0).is_empty());
 		assert!(!named_child_kern_id("p", "x", 0).is_empty());
 	}

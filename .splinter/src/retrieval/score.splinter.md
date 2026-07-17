@@ -1,0 +1,8 @@
+# src/retrieval/score.rs — commentary
+
+- `commit_access_ids_with_half_life`: history — the query path used to stamp accesses inline under a brief write lock; deferred to the `CommitAccess` tick task so the interactive query path never takes a write lock. Without the live write-back, self-compaction is inert on a standalone node (the GC staleness clock never advances).
+- `matches_filter`: the "no timestamp is not excluded by since/before" rule deliberately preserved the pre-refactor `is_none_or` semantics.
+Second-pass migration:
+
+- `commit_access_ids_with_half_life` epoch invariant (resolves the `(see note)` on its doc comment): the write goes `g.kerns.get_mut(kern_id)` -> `k.entities.get_mut(id)`, deliberately NOT through `GraphGnn::get_mut`, because `get_mut` bumps the global mutation epoch. That epoch is what invalidates `retrieval::cache::QueryCache` (any bump flushes every entry). An access stamp is a *read* side effect — bumping the epoch for it would make every served query invalidate the cache that just served it, so the cache could never hit and the ~30 s LLM path would be paid on every repeat query. The bypass is sound because access stamps (CRDT counter, `accessed_at`, heat deposit) do not change any content a cached result rendered.
+- `filter_delivery` MMR interaction (backs the inline `filter_delivery_keeps_mmr_pool_when_mmr_enabled` pointer): with MMR enabled the larger `mmr_pool_size` is kept rather than truncating to `max_deliver_results` here. Truncating to the delivery cap at this stage would leave MMR nothing to choose among — its len-guard would no-op and diversification would silently become a pass-through, which is exactly the regression the named test pins.

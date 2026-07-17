@@ -1,7 +1,5 @@
 //! TCP wire transport for gossip: length-prefixed bincode framing plus the
-//! dial-and-send / dial-and-roundtrip helpers. Kept separate from `node.rs`'s
-//! networking policy (heartbeat / broadcast / forward) so the framing layer can
-//! evolve — and be tested — independently of peer-selection logic.
+//! dial-and-send / dial-and-roundtrip helpers.
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -25,9 +23,8 @@ pub(super) async fn encode_msg(
 	Ok(())
 }
 
-/// Read one length-prefixed frame and bincode-decode it. Returns `None` on any
-/// I/O error, a decode failure, or a length prefix over `GOSSIP_MAX_FRAME_BYTES`
-/// (rejected before allocating or reading the body).
+/// Read one length-prefixed frame and bincode-decode it. `None` on I/O or decode
+/// failure, or a prefix over `GOSSIP_MAX_FRAME_BYTES` — rejected before allocating.
 pub(super) async fn decode_msg(stream: &mut TcpStream) -> Option<GossipMessage> {
 	let mut len_buf = [0u8; 4];
 	stream.read_exact(&mut len_buf).await.ok()?;
@@ -119,8 +116,7 @@ mod tests {
 		});
 
 		let mut client = TcpStream::connect(&addr).await.unwrap();
-		// Declare a length one byte over the cap; decode must bail on the length
-		// prefix alone, before allocating or reading any body bytes.
+		// One byte over cap: decode must bail on the prefix alone, no body sent.
 		let oversized = (GOSSIP_MAX_FRAME_BYTES as u32 + 1).to_be_bytes();
 		client.write_all(&oversized).await.unwrap();
 		client.flush().await.unwrap();

@@ -5,14 +5,8 @@ use serde_json::Value;
 use crate::server::{dispatch, McpServer};
 use crate::transport::Transport;
 
-/// In-process [`Transport`]: a synchronous loopback that runs an [`McpServer`]
-/// directly in the caller's thread. Writing a newline-delimited JSON-RPC request
-/// dispatches it immediately and buffers the reply for the next read — no socket,
-/// no async, no separate process.
-///
-/// For TESTS and local-dev embedding ONLY. It is single-threaded and unbounded
-/// (the request/response buffers grow with traffic), with no backpressure or
-/// cancellation. Use the HTTP or local-socket transports for real deployments.
+/// In-process [`Transport`]: a synchronous loopback running an [`McpServer`] in
+/// the caller's thread. TESTS and local-dev only — unbounded, no backpressure.
 pub struct InProcTransport {
 	server: Box<dyn McpServer>,
 	req_buf: Vec<u8>,
@@ -58,9 +52,7 @@ impl Read for InProcTransport {
 		if self.killed {
 			return Ok(0);
 		}
-		// Bulk copy out of the ring buffer instead of popping byte-by-byte. The
-		// VecDeque may straddle its internal wrap, so copy each contiguous slice in
-		// turn, then drop the consumed prefix.
+		// The `VecDeque` may straddle its wrap point — copy both contiguous slices.
 		let n = self.resp_buf.len().min(buf.len());
 		if n == 0 {
 			return Ok(0);
@@ -114,9 +106,8 @@ mod tests {
 	use super::*;
 	use serde_json::json;
 
-	// Local mock over this crate's own McpServer (not test-utils::AdderServer):
-	// trnsprt's dev-dep cycle (trnsprt -> test-utils -> trnsprt) makes a cross-crate
-	// server impl a different trait instance in trnsprt's own unit-test build.
+	// Local mock, not test-utils::AdderServer: trnsprt's dev-dep cycle
+	// (trnsprt -> test-utils -> trnsprt) makes that a *different* McpServer here.
 	struct EchoServer;
 	impl McpServer for EchoServer {
 		fn tools_list(&self) -> Vec<crate::ToolSchema> {
@@ -162,8 +153,6 @@ mod tests {
 
 	#[test]
 	fn tiny_reads_reassemble_the_full_frame_across_the_ring() {
-		// A 4-byte buffer forces many reads, exercising the bulk-copy path and any
-		// wrap in the response ring buffer.
 		let mut t = InProcTransport::new(Box::new(EchoServer));
 		write_line(
 			&mut t,

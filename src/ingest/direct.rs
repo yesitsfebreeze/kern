@@ -1,18 +1,5 @@
-//! Durable direct-ingest lane.
-//!
-//! The MCP `ingest` tool's fire-and-forget path used to hand a job to the
-//! in-RAM worker channel and ack `"queued"` — any daemon exit (watchdog
-//! `exit(101)`, crash, operator stop) silently vaporized every queued job
-//! after the ack. Observed live: 5 acked ingests lost to one restart.
-//!
-//! This lane reuses the capture intake's proven durability shape instead:
-//! the payload is serialized to `<intake>/direct/<doc_id>.json` (atomic
-//! tmp+rename, content-hash named so re-submitting the same text is
-//! idempotent) BEFORE the ack — which becomes `"accepted"` — and the drain
-//! cycle replays it through the canonical `Worker` with its ORIGINAL
-//! source/kind/confidence, archiving the file only on a non-`Failed`
-//! outcome. Unlike the `.txt` capture lane there is NO distill step: an
-//! explicit ingest payload is ingested as-is.
+//! Durable direct-ingest lane (MCP `ingest`): payload persisted BEFORE the
+//! `"accepted"` ack, replayed as-is through the Worker (no distill).
 
 use std::path::Path;
 
@@ -23,9 +10,8 @@ use crate::ingest::Worker;
 
 use serde::{Deserialize, Serialize};
 
-/// One durable direct-ingest payload: the post-clamp job parameters exactly
-/// as the worker should see them. Serialized as serde_json (name-based — the
-/// bincode positional law does not apply to this file format).
+/// The post-clamp job parameters exactly as the worker sees them. Serialized as
+/// serde_json (name-based — the bincode positional law does not apply here).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectJob {
 	pub text: String,
@@ -35,12 +21,8 @@ pub struct DirectJob {
 	pub confidence: f64,
 }
 
-/// Persist `job` into `<direct_dir>/<doc_id>.json` atomically (tmp + rename),
-/// creating the directory if needed. Returns the doc_id (content hash of the
-/// text — the same id the worker will commit under on a fresh placement).
-/// Content-hash naming makes re-submitting identical text idempotent. The tmp
-/// file is pid-tagged so two concurrent writers can't clobber each other's
-/// half-written payload (same shape as the capture hook's offsets write).
+/// Atomic persist (pid-tagged tmp + rename) into `<direct_dir>/<doc_id>.json`;
+/// content-hash naming makes identical re-submits idempotent. Returns the doc_id.
 pub fn intake_direct(direct_dir: &Path, job: &DirectJob) -> std::io::Result<String> {
 	std::fs::create_dir_all(direct_dir)?;
 	let doc_id = util::content_hash(&job.text);
@@ -50,8 +32,7 @@ pub fn intake_direct(direct_dir: &Path, job: &DirectJob) -> std::io::Result<Stri
 	std::fs::write(&tmp, payload)?;
 	if let Err(e) = std::fs::rename(&tmp, &dst) {
 		let _ = std::fs::remove_file(&tmp);
-		// The destination already existing (concurrent identical intake) is
-		// success — the payload IS on disk under the right name.
+		// dst already existing (concurrent identical intake) is success.
 		if !dst.exists() {
 			return Err(e);
 		}
@@ -59,12 +40,8 @@ pub fn intake_direct(direct_dir: &Path, job: &DirectJob) -> std::io::Result<Stri
 	Ok(doc_id)
 }
 
-/// Drain every `*.json` direct job under `direct_dir`: replay through
-/// `worker.run` with the original parameters, archive into
-/// `<direct_dir>/done/` on any non-`Failed` outcome (a `Deduped` merge is
-/// success), leave the file for retry on `Failed`. Returns the number of
-/// files archived. An unparseable payload is archived rather than retried —
-/// it can never succeed, and retrying it forever would wedge the lane.
+/// Replay every `*.json` job; archive on any non-`Failed` outcome (`Deduped` is
+/// success), leave `Failed` for retry. An unparseable payload archives as poison.
 pub async fn drain_direct_once(
 	direct_dir: &Path,
 	worker: &Worker,
@@ -166,17 +143,14 @@ mod tests {
 			.collect();
 		assert_eq!(files.len(), 1, "one file per unique payload");
 
-		// No tmp residue and the payload round-trips.
 		let raw = std::fs::read_to_string(files[0].path()).unwrap();
 		let back: DirectJob = serde_json::from_str(&raw).expect("valid json payload");
 		assert_eq!(back.text, "a durable fact");
 		assert_eq!(back.confidence, 0.7);
 	}
 
-	/// A direct job is replayed through a REAL worker (embeddings from a local
-	/// /api/embed stub), lands in the graph with its original parameters, and
-	/// the intake file is archived. No distill step is involved — the payload
-	/// must arrive verbatim, not as extracted claims.
+	/// End-to-end through a REAL worker (local /api/embed stub): the payload must
+	/// arrive verbatim (no distill) and the intake file is archived.
 	#[tokio::test]
 	async fn drain_direct_once_ingests_and_archives_end_to_end() {
 		let app = axum::Router::new().route(
@@ -218,9 +192,8 @@ mod tests {
 		server.abort();
 	}
 
-	/// Embed endpoint down -> the job FAILS -> the intake file must remain for
-	/// the next drain cycle. This is the whole point of the lane: a transient
-	/// outage (or a daemon death before the drain) never loses an acked ingest.
+	/// Embed down → job fails → the file must remain: a transient outage or
+	/// daemon death never loses an acked ingest (the point of the lane).
 	#[tokio::test]
 	async fn drain_direct_once_leaves_failed_job_for_retry() {
 		let embedder = crate::llm::Client::new_embed_only("http://127.0.0.1:1", "m");

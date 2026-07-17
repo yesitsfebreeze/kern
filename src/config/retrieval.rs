@@ -45,11 +45,8 @@ pub struct RetrievalConfig {
 	pub weights_reason: ModeWeights,
 	pub weights_hybrid: ModeWeights,
 	pub rrf_k: f64,
-	/// Weighted-RRF multiplier for the query-INDEPENDENT seed lists (global
-	/// importance + PageRank) relative to the query-relevant dense/lexical lists
-	/// (which stay 1.0). `< 1.0` down-weights global priors so a
-	/// popular-but-irrelevant entity can't match a query-relevant hit; `1.0`
-	/// recovers plain unweighted RRF.
+	/// Weighted-RRF multiplier on the query-INDEPENDENT seed lists (importance +
+	/// PageRank); `< 1.0` down-weights global priors, `1.0` is plain RRF.
 	pub rrf_global_weight: f64,
 	pub dedup_by_section: bool,
 	pub mmr_enabled: bool,
@@ -59,10 +56,8 @@ pub struct RetrievalConfig {
 	pub rerank_pool_size: usize,
 	pub hyde_enabled: bool,
 	pub hyde_min_query_tokens: usize,
-	/// Weight on the hypothetical-document vector when HyDE fuses it with the
-	/// raw query vector: `fused = query*(1-w) + hypo*w`, then L2-normalized.
-	/// `0.5` is the symmetric blend (original behavior); higher trusts the
-	/// generated hypo more, lower stays closer to the literal query.
+	/// HyDE fusion weight: `fused = query*(1-w) + hypo*w`, then L2-normalized.
+	/// Higher trusts the generated hypo more; `0.5` is the symmetric blend.
 	pub hyde_fusion_weight: f64,
 	pub lexical_enabled: bool,
 	pub bm25_k1: f64,
@@ -79,8 +74,8 @@ pub struct RetrievalConfig {
 	/// Semantic query cache: number of answered queries retained before LRU
 	/// eviction. `0` disables the cache.
 	pub query_cache_cap: usize,
-	/// Cosine floor for a semantic cache hit. High (≈0.97) so only paraphrases
-	/// and re-asks share an entry, never merely topical neighbours.
+	/// Cosine floor for a semantic cache hit; high (≈0.97) so only paraphrases
+	/// share an entry, never merely topical neighbours.
 	pub query_cache_theta: f64,
 }
 
@@ -124,11 +119,6 @@ impl Default for RetrievalConfig {
 			rrf_global_weight: 0.5,
 			dedup_by_section: true,
 			mmr_enabled: true,
-			// Relevance-dominant (standard MMR region ~0.7). 0.45 over-diversified:
-			// on the workload trace it suppressed legitimate multi-relevant cluster
-			// hits below rank 10 (recall@10 0.925 -> 1.0, NDCG@10 0.928 -> 0.999 at
-			// 0.75; `just bench-workload`, sweep 2026-07-16). Ingest-time dedup
-			// (cosine 0.95) already handles true duplicates.
 			mmr_lambda: 0.75,
 			mmr_pool_size: 50,
 			rerank_enabled: true,
@@ -155,9 +145,8 @@ impl Default for RetrievalConfig {
 }
 
 impl RetrievalConfig {
-	/// Check cross-field invariants on a loaded config. Returns a list of
-	/// human-readable problems (empty = valid) so a caller can warn-and-continue or
-	/// reject as it sees fit. Cheap structural sanity check, not a tuning oracle.
+	/// Cross-field invariants; returns all problems (empty = valid). Structural
+	/// sanity check, not a tuning oracle.
 	pub fn validate(&self) -> Vec<String> {
 		let mut errs = Vec::new();
 
@@ -184,8 +173,7 @@ impl RetrievalConfig {
 			("mmr_lambda", self.mmr_lambda),
 			("hyde_fusion_weight", self.hyde_fusion_weight),
 			// bm25_b is BM25's length-normalisation weight; outside [0,1] the score
-			// term `1 - b + b*dl/avgdl` goes negative or over-normalises. Now that the
-			// field is wired into the lexical index (was dead before), range-check it.
+			// term `1 - b + b*dl/avgdl` goes negative or over-normalises.
 			("bm25_b", self.bm25_b),
 		] {
 			if !(0.0..=1.0).contains(&v) {
@@ -205,9 +193,6 @@ impl RetrievalConfig {
 			));
 		}
 
-		// Fields whose out-of-range value silently breaks retrieval (no graceful
-		// fallback, and no valid use of the bad value — unlike e.g.
-		// important_min_cosine > 1.0, which is a deliberate "disable").
 		if self.rrf_k < 0.0 {
 			// fuse::rrf scores 1/(rrf_k + rank), rank >= 1: a negative rrf_k drives
 			// the denominator to <= 0, inverting or NaN-ing the fusion.
@@ -280,8 +265,6 @@ mod tests {
 
 	#[test]
 	fn out_of_range_bm25_params_are_flagged() {
-		// bm25_k1/bm25_b are now wired into the lexical index, so invalid values must
-		// be caught at config load rather than silently clamped at query time.
 		let bad_b = RetrievalConfig {
 			bm25_b: 2.0,
 			..Default::default()
@@ -303,7 +286,6 @@ mod tests {
 
 	#[test]
 	fn retrieval_breaking_values_are_flagged() {
-		// Each silently breaks every query if it slips through unvalidated.
 		let neg_rrf = RetrievalConfig {
 			rrf_k: -1.0,
 			..Default::default()
@@ -334,7 +316,7 @@ mod tests {
 			"max_deliver_results 0"
 		);
 
-		// rrf_k == 0 is valid (1/(0+rank) is well-defined RRF), so it must NOT flag.
+		// rrf_k == 0 is valid RRF, must NOT flag.
 		let zero_rrf = RetrievalConfig {
 			rrf_k: 0.0,
 			..Default::default()

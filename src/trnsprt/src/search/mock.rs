@@ -1,14 +1,7 @@
-// Mock returns explicit `impl Future` to mirror the trait surface; async-fn
-// rewrite adds no value in a test double.
+// Mock mirrors the trait's explicit `impl Future` surface.
 #![allow(clippy::manual_async_fn)]
-//! In-memory [`SearchSvc`] handler for tests and downstream slice
-//! development (palette UI, preview pane).
-//!
-//! Returns canned hits and previews from a small, hand-curated corpus.
-//! Honours `cancel_token` semantics: only the **highest** token seen so
-//! far yields a `fresh: true` response — every older in-flight request
-//! is reported as stale. Production kern wiring may use the same flag
-//! to suppress out-of-order frame application in the palette.
+//! In-memory [`SearchSvc`] handler for tests. `cancel_token`: only the highest
+//! token seen yields `fresh: true`; older in-flight requests report stale.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -19,8 +12,7 @@ use super::dto::{
 };
 use super::svc::SearchSvc;
 
-/// Mock implementation of [`SearchSvc`]. Cheap to clone — internal
-/// state is `Arc`-shared, so multiple handles observe the same
+/// Mock [`SearchSvc`]. State is `Arc`-shared, so all clones observe the same
 /// cancel-token watermark.
 #[derive(Clone, Default)]
 pub struct MockSearchServer {
@@ -29,8 +21,7 @@ pub struct MockSearchServer {
 
 #[derive(Default)]
 struct MockState {
-	/// Highest `cancel_token` seen across all `search` calls so far.
-	/// Atomic so concurrent calls update it monotonically.
+	/// Highest `cancel_token` seen; atomic so concurrent calls bump monotonically.
 	high_water: AtomicU64,
 }
 
@@ -85,14 +76,8 @@ impl MockSearchServer {
 		]
 	}
 
-	/// Filter the canned corpus by facets + free-text substring match.
-	/// Trivial — production code would invoke kern's fused index.
-	///
-	/// Facets are AND-ed across the list; within each `Facet` the
-	/// `scheme` and `kind` axes are also AND-ed when both are set. The
-	/// facet predicate runs BEFORE the substring scan so the result set
-	/// is bounded by the most specific filter first — matters for
-	/// downstream tests that assert facet semantics on small corpora.
+	/// Facets AND across the list; within each `Facet` the `scheme`/`kind`
+	/// axes also AND when both are set.
 	fn filter(query: &str, facets: &[Facet], k: u32) -> Vec<EntityRef> {
 		let q = query.to_lowercase();
 		let mut hits: Vec<EntityRef> = Self::corpus()
@@ -106,7 +91,6 @@ impl MockSearchServer {
 				q.is_empty() || e.label.to_lowercase().contains(&q) || e.snippet.to_lowercase().contains(&q)
 			})
 			.collect();
-		// Highest score first — mirrors fused-rank order.
 		hits.sort_by(|a, b| {
 			b.score
 				.partial_cmp(&a.score)
@@ -121,10 +105,8 @@ impl SearchSvc for MockSearchServer {
 	fn search(&self, req: SearchReq) -> impl ::core::future::Future<Output = SearchRes> + Send {
 		let state = self.inner.clone();
 		async move {
-			// Update high-water mark; treat absent token as 0.
 			let token = req.cancel_token.unwrap_or(0);
 			let prev = state.high_water.fetch_max(token, Ordering::SeqCst);
-			// After fetch_max, the stored value is max(prev, token).
 			let high = prev.max(token);
 			let fresh = token >= high; // == when token==high; >= so absent tokens still fresh
 			SearchRes {
@@ -140,16 +122,12 @@ impl SearchSvc for MockSearchServer {
 	) -> impl ::core::future::Future<Output = NeighborsRes> + Send {
 		async move {
 			let _depth = req.depth.min(3);
-			// Return everything from the corpus that isn't `req.entity_id`.
-			// Filter by edge_kinds is a no-op in the mock unless caller
-			// explicitly asked for `Supports` only — exercised by tests.
 			let neighbors: Vec<EntityRef> = Self::corpus()
 				.into_iter()
 				.filter(|e| e.id != req.entity_id)
 				.collect();
-			// If caller restricted edge kinds and didn't include
-			// `Supports`, drop the Claim-class result to demonstrate
-			// filtering behaviour.
+			// Restricting kinds without `Supports` drops the Claim row — canned
+			// demo of edge-kind filtering.
 			let neighbors = if !req.edge_kinds.is_empty() && !req.edge_kinds.contains(&EdgeKind::Supports)
 			{
 				neighbors
@@ -248,7 +226,6 @@ mod facet_filter_tests {
 	#[tokio::test]
 	async fn kind_and_scheme_facet_intersect() {
 		let svc = MockSearchServer::new();
-		// Fact+inline matches the canned `e:fact:1` row only.
 		let res = svc
 			.search(req(vec![Facet {
 				kind: Some(EntityKindLite::Fact),
@@ -264,8 +241,6 @@ mod facet_filter_tests {
 	#[tokio::test]
 	async fn multiple_facets_are_anded() {
 		let svc = MockSearchServer::new();
-		// First facet narrows by kind, second by scheme — intersection
-		// must still return only the Fact+inline row.
 		let res = svc
 			.search(req(vec![
 				Facet {
@@ -283,8 +258,6 @@ mod facet_filter_tests {
 		assert_eq!(res.hits[0].scheme, "inline");
 	}
 
-	// ── cancellation / freshness ────────────────────────────────────────────
-
 	#[tokio::test]
 	async fn cancel_token_marks_the_older_request_stale() {
 		let svc = MockSearchServer::new();
@@ -294,21 +267,16 @@ mod facet_filter_tests {
 			k: 5,
 			cancel_token: Some(tok),
 		};
-		// The higher token bumps the high-water mark and is fresh.
 		assert!(
 			svc.search(sreq(2)).await.fresh,
 			"token 2 is high-water -> fresh"
 		);
-		// A lower token issued after is stale (1 < high-water 2).
 		assert!(
 			!svc.search(sreq(1)).await.fresh,
 			"token 1 < high-water -> stale"
 		);
-		// A still-higher token bumps again and is fresh.
 		assert!(svc.search(sreq(3)).await.fresh, "token 3 re-bumps -> fresh");
 	}
-
-	// ── neighbors edge-kind filter ──────────────────────────────────────────
 
 	#[tokio::test]
 	async fn neighbors_edge_kind_filter_drops_claim_when_supports_excluded() {
@@ -318,7 +286,6 @@ mod facet_filter_tests {
 			edge_kinds: kinds,
 			depth: 1,
 		};
-		// No restriction -> the Claim-class neighbour is present.
 		let all = svc.neighbors(nreq(vec![])).await;
 		assert!(
 			all
@@ -327,7 +294,6 @@ mod facet_filter_tests {
 				.any(|e| e.kind == EntityKindLite::Claim),
 			"Claim present unfiltered"
 		);
-		// Restrict to a non-Supports kind -> the Claim row is dropped.
 		let restricted = svc.neighbors(nreq(vec![EdgeKind::Contradicts])).await;
 		assert!(
 			restricted
@@ -336,7 +302,6 @@ mod facet_filter_tests {
 				.all(|e| e.kind != EntityKindLite::Claim),
 			"Claim dropped"
 		);
-		// Explicitly including Supports keeps it.
 		let with_supports = svc.neighbors(nreq(vec![EdgeKind::Supports])).await;
 		assert!(
 			with_supports
@@ -347,11 +312,8 @@ mod facet_filter_tests {
 		);
 	}
 
-	// ── preview variant dispatch ────────────────────────────────────────────
-
 	#[tokio::test]
 	async fn preview_dispatches_all_three_variants() {
-		// Guards against a future entity_id arm silently regressing a variant.
 		let svc = MockSearchServer::new();
 		assert!(matches!(
 			svc

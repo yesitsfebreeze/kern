@@ -2,10 +2,8 @@ use crate::gnn::tensor::Tensor;
 
 pub trait Optimizer {
 	fn step(&mut self, params: &mut [&mut Tensor], grads: &[&Tensor]);
-	/// Zero the gradient tensors PASSED IN — this clears the caller's `grads`
-	/// slice, NOT any gradient state owned by a model or by the optimizer. The
-	/// training loop hands the model's grad tensors here between steps; calling it
-	/// on unrelated tensors has no effect on the optimizer's momentum/Adam state.
+	/// Zeroes the gradient tensors PASSED IN — never model-owned grads nor the
+	/// optimizer's own momentum / Adam moment state.
 	fn zero_grad(&self, grads: &mut [Tensor]) {
 		for g in grads.iter_mut() {
 			for v in &mut g.data {
@@ -50,8 +48,6 @@ impl Optimizer for SGD {
 
 		for (i, (param, grad)) in params.iter_mut().zip(grads.iter()).enumerate() {
 			if self.momentum > 0.0 {
-				// Single pass: update velocity[j] then immediately apply it, instead
-				// of a second loop that re-indexed self.velocity[i] every element.
 				let (momentum, lr) = (self.momentum, self.lr);
 				let v = &mut self.velocity[i];
 				for (j, pj) in param.data.iter_mut().enumerate() {
@@ -105,8 +101,6 @@ impl Optimizer for Adam {
 		}
 		self.step_count += 1;
 		let t = self.step_count as f64;
-		// Bias-correction denominators are constant for the whole step; compute
-		// them once instead of re-running `powf` for every parameter element.
 		let bias_c1 = 1.0 - self.beta1.powf(t);
 		let bias_c2 = 1.0 - self.beta2.powf(t);
 
@@ -164,8 +158,6 @@ mod tests {
 
 	#[test]
 	fn adam_keeps_independent_moment_state_per_parameter() {
-		// Two params with OPPOSITE gradients in one step: each must move opposite
-		// (~ -lr*sign(g)) with no cross-contamination of m/v between the slots.
 		let mut p0 = scalar(0.0);
 		let mut p1 = scalar(0.0);
 		let g0 = scalar(2.0);
@@ -178,8 +170,6 @@ mod tests {
 
 	#[test]
 	fn sgd_momentum_velocity_is_independent_per_parameter() {
-		// Guards the single-pass momentum update: each param accumulates its own
-		// velocity, so opposite grads give opposite (and equal-magnitude) moves.
 		let mut p0 = scalar(0.0);
 		let mut p1 = scalar(0.0);
 		let g0 = scalar(1.0);

@@ -1,26 +1,5 @@
-//! `service!` proc macro for the typed-RPC stack in `trnsprt`.
-//!
-//! Generates a client + server loop from a trait declaration. The generated
-//! code references `::trnsprt::*` only — consumers depend on `trnsprt`
-//! (which re-exports this crate's macro and its runtime helpers).
-//!
-//! Input shape:
-//! ```ignore
-//! trnsprt::service! {
-//!     pub trait MemoryRpc {
-//!         async fn truncate_after(ts_ms: u64) -> Result<(), RpcError>;
-//!     }
-//! }
-//! ```
-//!
-//! Output:
-//! - The trait, verbatim, with `Send` bound on each async method.
-//! - `<Name>Client<C: Codec>` struct that owns a `Channel<C>` and an
-//!   atomic id counter; one async method per trait method that serialises
-//!   its named arguments via `serde_json::to_value`, sends a request
-//!   envelope, and awaits a reply with the matching id.
-//! - `serve_<snake>(channel, handler)` async function: loops reading
-//!   requests, dispatches to the handler, sends replies.
+//! `service!` proc macro: expands a trait decl into the trait, `<Name>Client<C>`,
+//! and `serve_<snake>(channel, handler)`. Emits `::trnsprt::*` paths only.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -87,8 +66,6 @@ fn expand(input: ItemTrait) -> syn::Result<TokenStream> {
 					ReturnType::Type(_, t) => (**t).clone(),
 				};
 
-				// Re-emit method into the trait with a `Send` bound on the
-				// returned future.
 				let arg_pats = args.iter().map(|(n, t)| quote! { #n: #t });
 				trait_items.push(quote! {
 						fn #name(&self, #( #arg_pats ),*)
@@ -114,9 +91,6 @@ fn expand(input: ItemTrait) -> syn::Result<TokenStream> {
 	let client_methods = methods.iter().map(client_method);
 	let server_arms = methods.iter().map(|m| server_arm(&trait_name, m));
 
-	// The Codec trait bound is identical on the client struct, its impl block, and
-	// the serve fn. Build it once and interpolate, so the five-trait clause is not
-	// copy-pasted three times (and stays in sync if it ever changes).
 	let codec_bound = quote! {
 			::trnsprt::typed::Codec<Frame = ::trnsprt::__private::serde_json::Value>
 					+ ::core::default::Default
@@ -359,26 +333,16 @@ fn to_snake(s: &str) -> String {
 mod tests {
 	use super::to_snake;
 
-	// `to_snake` derives the `serve_<snake>` fn name from the trait ident, so its
-	// output is part of the macro's public surface (a regression would rename the
-	// generated server fn and break every call site). `expand()` itself can't be
-	// unit-tested here — it returns a `proc_macro::TokenStream`, which only exists
-	// inside the compiler — so the generated client/server is proven to compile and
-	// round-trip by the consumer-crate integration tests (tests/search_rpc.rs and
-	// tests/kern_rpc.rs drive SearchSvcClient/serve_search_svc and KernRpcClient/
-	// serve_kern_rpc over real Channel pairs).
+	// `to_snake` names the generated `serve_<snake>` fn, so its output is public
+	// surface. `expand()` is covered only by the consumer-crate integration tests.
 	#[test]
 	fn to_snake_lowercases_and_word_splits_on_interior_capitals() {
-		// The real trait idents this macro is used on.
 		assert_eq!(to_snake("MemoryRpc"), "memory_rpc");
 		assert_eq!(to_snake("KernRpc"), "kern_rpc");
 		assert_eq!(to_snake("SearchSvc"), "search_svc");
-		// A leading capital never produces a leading underscore (i == 0 guard).
 		assert_eq!(to_snake("Memory"), "memory");
 		assert_eq!(to_snake("X"), "x");
-		// Each interior capital starts a new word — consecutive caps each split.
 		assert_eq!(to_snake("ABC"), "a_b_c");
-		// Already-snake / lowercase input passes through untouched.
 		assert_eq!(to_snake("already_snake"), "already_snake");
 		assert_eq!(to_snake(""), "");
 	}

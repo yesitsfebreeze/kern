@@ -3,21 +3,8 @@ use crate::gnn::graph::Graph;
 use crate::gnn::layer::{Backward, Layer, LinearLayer};
 use crate::gnn::tensor::Tensor;
 
-/// A stack of graph layers plus an optional final linear projection, with an
-/// optional residual (skip) connection.
-///
-/// Contract:
-/// - [`forward`](Model::forward) runs each layer in order; when `residual` is set
-///   and a layer preserves its input shape, the input is added back to the output
-///   (the dims are checked before the add, so it never fails). `out_layer` is
-///   applied last if present. Each layer caches state for its backward pass, so a
-///   `forward` must precede the matching `backward`.
-/// - [`backward`](Model::backward) walks the layers in reverse, mirroring the
-///   residual add on the incoming gradient. Call [`zero_grads`](Model::zero_grads)
-///   before each backward to reset gradient accumulators.
-/// - [`parameters`](Model::parameters) / [`param_grads`](Model::param_grads) (and
-///   their `_mut` forms) expose the trainable tensors and their gradients in
-///   matching order for an optimizer to step.
+/// Graph-layer stack + optional final linear projection and residual skip.
+/// A `forward` must precede its `backward`; call `zero_grads` before each backward.
 pub struct Model {
 	pub layers: Vec<Box<dyn BackwardGraphLayer>>,
 	pub out_layer: Option<LinearLayer>,
@@ -197,8 +184,7 @@ mod tests {
 			"residual preserves the feature shape"
 		);
 
-		// Recompute the bare layer output with the same seed; residual output must
-		// equal layer_out + input element-wise.
+		// Same seed -> identical weights; residual out must equal layer_out + input.
 		let mut rng2 = StdRng::seed_from_u64(7);
 		let mut bare = GCNLayer::with_rng(4, 4, None, false, 0.0, &mut rng2);
 		let layer_out = bare.forward_graph(&g, &x);

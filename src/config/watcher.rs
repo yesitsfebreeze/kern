@@ -2,33 +2,19 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// Configuration for the optional kern-side filesystem watcher.
-///
-/// Slice O — file changes flow into kern as `Document` entities through
-/// `watcher::IngestSink`. The watcher is OFF by default; opt in via a
-/// `[watcher]` section in `.kern/kern.toml`:
-///
-/// ```toml
-/// [watcher]
-/// enabled = true
-/// roots = ["./src", "./docs"]
-/// ```
+/// `[watcher]`: filesystem changes in as `Document` entities. OFF by default.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WatcherConfig {
 	/// Master switch. False keeps the watcher dormant even if `roots` set.
 	pub enabled: bool,
-	/// Directory roots to watch (recursive). Empty defaults to cwd when
-	/// `enabled = true` — resolved by [`WatcherConfig::effective_roots`].
+	/// Recursive roots; empty defaults to cwd — see [`WatcherConfig::effective_roots`].
 	pub roots: Vec<String>,
 }
 
 impl WatcherConfig {
-	/// The directories the watcher should actually watch: the configured `roots`,
-	/// or — when `enabled` with no `roots` — a single fallback to `cwd`. Returns an
-	/// empty vec when the watcher is disabled, so the caller can treat "nothing to
-	/// watch" uniformly. `cwd` is injected (not read from the process) so the
-	/// documented "empty defaults to cwd" rule lives in one place and is unit-testable.
+	/// Configured `roots`, else `cwd` when enabled, else empty when disabled.
+	/// `cwd` is injected rather than read from the process, for testability.
 	pub fn effective_roots(&self, cwd: &Path) -> Vec<PathBuf> {
 		if !self.enabled {
 			return Vec::new();

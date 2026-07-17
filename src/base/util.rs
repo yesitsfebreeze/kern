@@ -1,11 +1,7 @@
 use sha2::{Digest, Sha256};
 
-/// Serde shim: in-memory `Vec<f32>` vectors serialized as the legacy `Vec<f64>`
-/// wire shape. bincode is positional and append-only, so narrowing a persisted
-/// `Vec<f64>` field to `Vec<f32>` would desync every existing store, cold-tier
-/// row, and gossip peer. This keeps the encoded bytes identical to the historic
-/// f64 layout (write: widen f32→f64; read: narrow f64→f32) so no FORMAT_V2 fork
-/// is needed and old data loads unchanged.
+/// Serde shim keeping in-memory `Vec<f32>` byte-identical to the legacy
+/// `Vec<f64>` wire shape (write: widen f32→f64; read: narrow f64→f32).
 pub mod vec_f64_compat {
 	use serde::{Deserialize, Deserializer, Serializer};
 
@@ -28,10 +24,8 @@ pub fn content_hash(s: &str) -> String {
 	hex::encode(hash)
 }
 
-/// Hand-rolled lowercase hex encoder. Deliberately NOT the `hex` crate:
-/// `content_hash` is the only hex consumer in kern, so a six-line local encoder
-/// keeps one extra crate (and its transitive surface) out of the supply chain
-/// for a single call site. If hex use ever spreads, switch to the crate.
+/// Hand-rolled lowercase hex encoder — not the `hex` crate: one call site
+/// (`content_hash`) does not justify the dependency. Switch if hex use spreads.
 mod hex {
 	const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
 
@@ -61,22 +55,13 @@ pub fn truncate(s: &str, max: usize) -> String {
 }
 
 /// Total order over `PartialOrd` values, treating incomparable pairs (NaN)
-/// as `Equal`. Replaces the `a.partial_cmp(&b).unwrap_or(Ordering::Equal)`
-/// idiom scattered across the sort/rank paths.
+/// as `Equal`.
 pub fn cmp_partial<T: PartialOrd>(a: &T, b: &T) -> std::cmp::Ordering {
 	a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
 }
 
-/// Deterministic ranking order for a top-k result set: higher `score` first,
-/// ties broken by `id` ascending. NaN/incomparable scores fall back to `Equal`
-/// (via [`cmp_partial`]). When the `id`s are unique this is a STRICT total order,
-/// which is what makes a `select_nth`/`truncate` top-k reproducible across runs
-/// despite HashMap/scan source order.
-///
-/// Single source of truth for the score-desc-id-asc tiebreak shared by
-/// `fuse::rrf`, `pagerank`, `search::merge_hits`, `LexicalIndex::search`, and
-/// `Store::cold_search`. Adding the tiebreak here once stops new ranking sites
-/// from silently regressing to nondeterministic source-order ties.
+/// Score desc, id asc — the single source of truth for the ranking tiebreak;
+/// use at every ranking site or top-k regresses to nondeterministic order.
 pub fn cmp_rank<S: PartialOrd>(
 	a_score: S,
 	a_id: &str,
@@ -86,11 +71,8 @@ pub fn cmp_rank<S: PartialOrd>(
 	cmp_partial(&b_score, &a_score).then_with(|| a_id.cmp(b_id))
 }
 
-/// Nearest-rank percentile of an ascending-SORTED slice. `p` is a fraction in
-/// `[0, 1]` (`0.95` = p95). `None` only for an empty slice; `p <= 0` -> first
-/// element, `p >= 1` -> last, otherwise the element at 1-based rank
-/// `ceil(p * len)`. Generic so latency/timing percentiles (`u128`, `f64`, …)
-/// share one implementation instead of re-deriving the index math per call site.
+/// Nearest-rank percentile of an ascending-SORTED slice; `p` is a fraction in
+/// `[0, 1]`. Element at 1-based rank `ceil(p * len)`; `None` only when empty.
 pub fn percentile_sorted<T: Copy>(sorted: &[T], p: f64) -> Option<T> {
 	if sorted.is_empty() {
 		return None;
@@ -105,9 +87,7 @@ pub fn percentile_sorted<T: Copy>(sorted: &[T], p: f64) -> Option<T> {
 	Some(sorted[rank.clamp(1, sorted.len()) - 1])
 }
 
-/// Wall-clock nanoseconds since the Unix epoch. Single source for the
-/// `SystemTime::now().duration_since(UNIX_EPOCH)` stamp used to mint
-/// gossip message ids.
+/// Wall-clock nanoseconds since the Unix epoch.
 pub fn now_nanos() -> u128 {
 	std::time::SystemTime::now()
 		.duration_since(std::time::UNIX_EPOCH)
@@ -115,9 +95,8 @@ pub fn now_nanos() -> u128 {
 		.as_nanos()
 }
 
-/// Build the LLM prompt asking why two entities are related. Single source
-/// for the prompt text and the 500-char truncation budget, shared by the
-/// link/enrich paths in commands, mcp, and tick.
+/// LLM prompt asking why two entities are related — single source for the
+/// prompt text and the 500-char truncation budget.
 pub fn explain_relationship_prompt(a: &str, b: &str) -> String {
 	format!(
 		"Write one sentence describing the specific connection between these two pieces of knowledge. \
@@ -168,7 +147,6 @@ mod tests {
 		);
 		assert_eq!(percentile_sorted(&xs, 0.95), Some(10.0));
 		assert_eq!(percentile_sorted::<f64>(&[], 0.5), None, "empty -> None");
-		// Generic over the element type (u128 nanos, the locomo latency case).
 		let ns: Vec<u128> = vec![10, 20, 30, 40, 50];
 		assert_eq!(percentile_sorted(&ns, 0.5), Some(30u128));
 		assert_eq!(percentile_sorted(&ns, 0.95), Some(50u128));
@@ -177,17 +155,13 @@ mod tests {
 	#[test]
 	fn cmp_rank_orders_by_score_desc_then_id_asc() {
 		use std::cmp::Ordering;
-		// Higher score ranks first regardless of id.
 		assert_eq!(cmp_rank(0.9_f64, "z", 0.1, "a"), Ordering::Less);
 		assert_eq!(cmp_rank(0.1_f64, "a", 0.9, "z"), Ordering::Greater);
-		// Equal score -> id ascending decides (a before b).
 		assert_eq!(cmp_rank(0.5_f64, "a", 0.5, "b"), Ordering::Less);
 		assert_eq!(cmp_rank(0.5_f64, "b", 0.5, "a"), Ordering::Greater);
-		// Fully equal -> Equal.
 		assert_eq!(cmp_rank(0.5_f64, "a", 0.5, "a"), Ordering::Equal);
-		// NaN score falls back to the id tiebreak rather than panicking.
+		// NaN falls back to the id tiebreak rather than panicking.
 		assert_eq!(cmp_rank(f64::NAN, "a", f64::NAN, "b"), Ordering::Less);
-		// Works for f32 scores too (lexical BM25 path).
 		assert_eq!(cmp_rank(2.0_f32, "a", 1.0_f32, "z"), Ordering::Less);
 	}
 
@@ -204,11 +178,11 @@ mod tests {
 
 	#[test]
 	fn short_id_caps_at_12_chars_and_is_boundary_safe() {
-		assert_eq!(short_id("0123456789abcdef"), "0123456789ab"); // 16 -> first 12
-		assert_eq!(short_id("abc"), "abc"); // shorter than 12 -> whole
-		assert_eq!(short_id("0123456789ab"), "0123456789ab"); // exactly 12 -> whole
-																												// Multibyte: slicing must land on a char boundary, never panic.
-		let s = short_id("ααααααααααααββ"); // each α is 2 bytes
+		assert_eq!(short_id("0123456789abcdef"), "0123456789ab");
+		assert_eq!(short_id("abc"), "abc");
+		assert_eq!(short_id("0123456789ab"), "0123456789ab");
+		// Multibyte: slicing must land on a char boundary, never panic.
+		let s = short_id("ααααααααααααββ");
 		assert_eq!(s.chars().count(), 12);
 	}
 
@@ -290,9 +264,6 @@ mod vec_f64_compat_tests {
 
 	#[test]
 	fn shimmed_f32_encodes_byte_identically_to_legacy_f64() {
-		// bincode is positional: the shim's whole contract is that the encoded
-		// bytes are indistinguishable from the historic Vec<f64> layout, so old
-		// readers and new readers interoperate with no format version bump.
 		let legacy = Legacy {
 			name: "e".into(),
 			v: vec![0.5, -1.25, 3.0],
@@ -305,14 +276,14 @@ mod vec_f64_compat_tests {
 		};
 		let lb = bincode::serde::encode_to_vec(&legacy, cfg()).unwrap();
 		let cb = bincode::serde::encode_to_vec(&current, cfg()).unwrap();
-		assert_eq!(lb, cb, "wire bytes must match the legacy f64 layout exactly");
+		assert_eq!(
+			lb, cb,
+			"wire bytes must match the legacy f64 layout exactly"
+		);
 	}
 
 	#[test]
 	fn legacy_f64_bytes_decode_into_f32_with_following_fields_intact() {
-		// A pre-migration store row (f64 vectors) must decode into the f32
-		// in-memory shape, and the fields AFTER the vector must not shift —
-		// that positional integrity is what a mis-sized decode would corrupt.
 		let legacy = Legacy {
 			name: "old-row".into(),
 			v: vec![0.1, -0.2, 0.3],
@@ -321,7 +292,10 @@ mod vec_f64_compat_tests {
 		let bytes = bincode::serde::encode_to_vec(&legacy, cfg()).unwrap();
 		let (cur, _): (Current, _) = bincode::serde::decode_from_slice(&bytes, cfg()).unwrap();
 		assert_eq!(cur.name, "old-row");
-		assert_eq!(cur.tail, 42, "field after the vector decodes at the right offset");
+		assert_eq!(
+			cur.tail, 42,
+			"field after the vector decodes at the right offset"
+		);
 		for (got, want) in cur.v.iter().zip([0.1f32, -0.2, 0.3]) {
 			assert!((got - want).abs() < 1e-7, "{got} vs {want}");
 		}
@@ -329,7 +303,6 @@ mod vec_f64_compat_tests {
 
 	#[test]
 	fn f32_round_trip_is_lossless() {
-		// f32 -> f64 (encode) -> f32 (decode) is exact for every f32 value.
 		let current = Current {
 			name: "rt".into(),
 			v: vec![0.1f32, f32::MIN_POSITIVE, 12345.678, -0.0, 1.0e-30],

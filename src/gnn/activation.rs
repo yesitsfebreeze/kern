@@ -52,10 +52,8 @@ pub fn leaky_relu_deriv(alpha: f64, x: f64) -> f64 {
 	}
 }
 
-// GELU via the tanh approximation (the GPT/BERT formulation): the exact erf form
-// has no std primitive, and this approximation is what modern GNN/Transformer
-// stacks use in practice. `gelu_deriv` is the exact derivative OF THIS
-// approximation, so forward/backward stay consistent.
+// GELU via the tanh approximation (GPT/BERT form); `gelu_deriv` is the exact
+// derivative OF THIS approximation, so forward/backward stay consistent.
 const SQRT_2_OVER_PI: f64 = 0.797_884_560_802_865_4; // sqrt(2/π)
 const GELU_C: f64 = 0.044_715;
 
@@ -74,11 +72,8 @@ pub fn gelu_deriv(x: f64) -> f64 {
 	0.5 * (1.0 + t) + 0.5 * x * sech2 * d_inner
 }
 
-/// An activation function paired with its analytic derivative.
-///
-/// Layers store this instead of a bare `fn(f64) -> f64` so the backward pass
-/// uses the exact derivative (`deriv`) rather than a finite-difference
-/// approximation, which is both biased at kinks (ReLU/leaky at x≈0) and slower.
+/// An activation paired with its analytic derivative — backward uses `deriv`,
+/// never a finite difference.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Activation {
 	Relu,
@@ -118,8 +113,6 @@ mod tests {
 
 	#[test]
 	fn relu_deriv_is_exact_at_and_near_kink() {
-		// No finite-difference smear: exactly 0 for x<=0, 1 for x>0, even at
-		// magnitudes a central difference (EPS 1e-5) would have blurred to ~0.5.
 		assert_eq!(Activation::Relu.deriv(-2.0), 0.0);
 		assert_eq!(Activation::Relu.deriv(-1e-6), 0.0);
 		assert_eq!(Activation::Relu.deriv(0.0), 0.0);
@@ -136,8 +129,6 @@ mod tests {
 
 	#[test]
 	fn smooth_derivs_match_central_difference() {
-		// For smooth activations the analytic derivative must agree with a
-		// central finite difference (the thing we replaced) to high precision.
 		const H: f64 = 1e-6;
 		for &act in &[Activation::Sigmoid, Activation::Tanh] {
 			for &x in &[-2.3, -0.5, 0.0, 0.7, 1.9] {
@@ -157,21 +148,17 @@ mod tests {
 		assert_eq!(Activation::Relu.forward(2.0), 2.0);
 		assert!((Activation::LeakyRelu(0.1).forward(-3.0) - (-0.3)).abs() < 1e-12);
 		assert!((Activation::Tanh.forward(0.0)).abs() < 1e-12);
-		// Tanh is exposed through the enum and equals the bare method.
 		assert!((Activation::Tanh.forward(0.7) - 0.7_f64.tanh()).abs() < 1e-12);
 	}
 
 	#[test]
 	fn gelu_basic_properties_and_exact_derivative() {
-		// gelu(0)=0; large positive ~ identity; large negative ~ 0.
 		assert!((Activation::Gelu.forward(0.0)).abs() < 1e-12);
 		assert!(
 			(Activation::Gelu.forward(5.0) - 5.0).abs() < 0.01,
 			"gelu(5) ~ 5"
 		);
 		assert!(Activation::Gelu.forward(-5.0).abs() < 0.01, "gelu(-5) ~ 0");
-		// Its analytic deriv matches a central finite difference (the deriv is the
-		// exact derivative of the tanh-approx forward, so they agree tightly).
 		const H: f64 = 1e-6;
 		for &x in &[-2.3, -0.5, 0.0, 0.7, 1.9] {
 			let numeric = (Activation::Gelu.forward(x + H) - Activation::Gelu.forward(x - H)) / (2.0 * H);

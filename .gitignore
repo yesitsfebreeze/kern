@@ -29,6 +29,11 @@ ghpages/.kern/
 # packaged landing-page artifact (ghpages/ is the source)
 ghpages.zip
 
+# splinter index is derived; only the durable per-file notes are committed
+.splinter/**
+!.splinter/**/
+!.splinter/**/*.splinter.md
+
 # local tooling / vaults (not part of the product)
 /.claude
 /.obsidian

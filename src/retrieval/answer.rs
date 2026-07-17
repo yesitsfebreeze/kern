@@ -34,8 +34,7 @@ pub fn query(
 }
 
 /// As [`query`], but returns the stage-level [`crate::profile::Profile`] so
-/// callers (`kern profile`) can render the timing breakdown instead of only
-/// logging it at debug level.
+/// callers (`kern profile`) can render the timing breakdown.
 #[allow(clippy::too_many_arguments)]
 pub fn query_profiled(
 	g: &GraphGnn,
@@ -78,20 +77,16 @@ pub fn query_profiled(
 	)
 }
 
-/// Output of the lock-scoped graph phase: the scored results, their path chains,
-/// and the chains pre-rendered to text. `chain_text` is materialized here, while
-/// the graph lock is held, so the answer prompt can be built afterward without
-/// touching the graph again — letting the caller release the lock before the LLM.
+/// Output of the lock-scoped graph phase. `chain_text` is pre-rendered while the
+/// lock is held so the answer prompt needs no graph access afterward.
 pub struct Retrieved {
 	pub results: Vec<ScoredEntity>,
 	pub chains: Vec<PathChain>,
 	pub chain_text: String,
 }
 
-/// Hybrid seed fusion: blend `dense_seeds` with lexical, importance, and
-/// (optional) personalized-PageRank hits via weighted RRF. Query-relevant lists
-/// (dense, lexical) get weight 1.0; query-independent priors (importance,
-/// PageRank) get `cfg.rrf_global_weight` so they bias without diluting relevance.
+/// Hybrid seed fusion via weighted RRF. Query-relevant lists (dense, lexical)
+/// weigh 1.0; query-independent priors (importance, PageRank) get `cfg.rrf_global_weight` (see note).
 fn fuse_hybrid_seeds(
 	g: &GraphGnn,
 	cfg: &RetrievalConfig,
@@ -103,8 +98,8 @@ fn fuse_hybrid_seeds(
 ) -> Vec<crate::base::search::EntityHit> {
 	let lex_hits = seed::seed_lexical(lex, g, query_text, cfg.seed_k * 4, opts);
 	let pr_hits = if cfg.pagerank_enabled {
-		// Personalize the teleport at the query's seed entities (dense + lexical) —
-		// query-independent importance is excluded so PageRank stays query-aware.
+		// Teleport personalized at dense + lexical seeds only — importance is
+		// query-independent and would make PageRank query-blind.
 		let ppr_seeds: Vec<crate::base::search::EntityHit> =
 			dense_seeds.iter().chain(lex_hits.iter()).cloned().collect();
 		pagerank::pagerank(
@@ -127,13 +122,8 @@ fn fuse_hybrid_seeds(
 	fuse::rrf(&lists, &weights, cfg.rrf_k, cfg.seed_k.max(1) * 2)
 }
 
-/// The graph-only half of retrieval: seed → expand → merge → score → diversify,
-/// plus rendering the path chains to text. **No LLM, no answer synthesis** — so a
-/// caller can hold the graph lock for exactly this (sub-millisecond) phase and run
-/// the expensive HyDE/rerank/answer LLM stages lock-free. Holding the read lock
-/// across a multi-second LLM call is what let a single slow `answer:true` query
-/// starve every worker (blocking writers pile up behind the long-held read lock)
-/// and trip the 30s watchdog; scoping the lock to this function removes that.
+/// The graph-only half of retrieval: seed → expand → merge → score → diversify.
+/// **No LLM** — callers hold the graph lock for exactly this sub-millisecond phase.
 #[allow(clippy::too_many_arguments)]
 pub fn retrieve(
 	g: &GraphGnn,
@@ -147,11 +137,8 @@ pub fn retrieve(
 	retrieve_profiled(g, cfg, qvec, query_text, mode, opts, w).0
 }
 
-/// As [`retrieve`], but returns a [`crate::profile::Profile`] splitting the graph
-/// phase into its per-stage timings (seed_dense → fuse_hybrid → expand → merge →
-/// boosts+filter → mmr → chains). This is the single implementation; [`retrieve`]
-/// delegates and drops the profile. The bench's `--profile` leg uses it to see
-/// which graph stage dominates the sub-millisecond path.
+/// As [`retrieve`], but returns per-stage timings. This is the single
+/// implementation; [`retrieve`] delegates and drops the profile.
 #[allow(clippy::too_many_arguments)]
 pub fn retrieve_profiled(
 	g: &GraphGnn,
@@ -165,10 +152,8 @@ pub fn retrieve_profiled(
 	let mut prof = Profiler::new("retrieve");
 	let lexical = g.lexical();
 	let lex_ref = lexical.as_deref();
-	// The query-independent importance scan is O(N-entities) and feeds two
-	// consumers in Hybrid mode: the dense-seed merge below AND its own RRF list in
-	// `fuse_hybrid_seeds`. Run it ONCE here and thread it into both, instead of
-	// scanning the whole entity set twice per query.
+	// The O(N) importance scan feeds both the dense-seed merge and the RRF list in
+	// `fuse_hybrid_seeds` — run once here, threaded into both.
 	let important = seed::seed_important(g, cfg, qvec, opts);
 	let dense_seeds = seed::seed_with_important(g, cfg, qvec, cfg.seed_k, mode, opts, &important);
 	prof.checkpoint("seed_dense");
@@ -201,14 +186,8 @@ pub fn retrieve_profiled(
 	prof.checkpoint("merge");
 
 	score::apply_boosts(cfg, &mut results);
-	// Apply an active metadata filter BEFORE the delivery-pool truncation. Graph
-	// expansion can flood `results` with non-matching neighbours of the (filtered)
-	// seeds, and filter_delivery truncates to the pool cap by score — so filtering
-	// only afterwards (in apply_query_options) lets those non-matching entities crowd
-	// matching ones out of the cap, a fewer-than-k loss the seed-level filtering
-	// alone does not prevent. Filtering first means the truncation only drops a
-	// non-matching tail. apply_query_options below still runs for its sort (its
-	// retain is then a no-op).
+	// An active filter must run BEFORE filter_delivery's pool truncation, or expansion's
+	// non-matching neighbours crowd matching entities out of the cap (see note).
 	if let Some(o) = opts {
 		if o.is_active() {
 			results.retain(|r| score::matches_filter(r.entity, o));
@@ -225,8 +204,6 @@ pub fn retrieve_profiled(
 	diversify::mmr(cfg, qvec, &mut results);
 	prof.checkpoint("mmr");
 
-	// Only the delivery survivors are cloned out of the graph — every earlier
-	// stage worked on borrowed entities.
 	let results: Vec<ScoredEntity> = results.into_iter().map(ScoredRef::to_owned).collect();
 	prof.checkpoint("materialize");
 
@@ -242,9 +219,8 @@ pub fn retrieve_profiled(
 	)
 }
 
-/// Build the answer prompt and run the LLM. Takes the pre-rendered `chain_text`
-/// (and the results' own entity copies) so it needs no graph access — callable
-/// after the graph lock is released. Empty when there is no query or no LLM.
+/// Build the answer prompt and run the LLM — no graph access, callable after
+/// the lock is released. Empty when there is no query or no LLM.
 pub fn synthesize(
 	chain_text: &str,
 	scored: &[ScoredEntity],
@@ -263,12 +239,8 @@ pub fn synthesize(
 	}
 }
 
-/// Retrieval against an `RwLock<GraphGnn>` that holds the read lock for **only**
-/// the graph phase. HyDE, rerank, and answer synthesis — every multi-second LLM
-/// call — run with the lock released, so a slow cloud model can no longer pin the
-/// read lock long enough to starve writers and trip the watchdog. The daemon's
-/// MCP query path uses this; the plain [`query`]/[`query_profiled`] still serve
-/// the one-shot CLI, which holds no long-lived lock.
+/// Retrieval holding the read lock for **only** the graph phase; every LLM call
+/// runs unlocked. Daemon MCP path; the plain [`query`] serves the one-shot CLI.
 #[allow(clippy::too_many_arguments)]
 pub fn query_locked(
 	graph: &parking_lot::RwLock<GraphGnn>,
@@ -285,26 +257,18 @@ pub fn query_locked(
 	// HyDE LLM call — graph-free, so do it before taking any lock.
 	let fused_qvec = hyde::expand_query(cfg, llm, embedder_fn, query_vec, query_text);
 
-	// Lock held for exactly the graph phase (sub-millisecond). Capture the
-	// mutation epoch under the SAME lock so the result and its version stamp are
-	// consistent: if a write lands during the lock-free LLM phase below, the epoch
-	// advances and a cache entry stamped with this (now-stale) epoch will miss —
-	// preserving the never-serve-stale guarantee despite releasing the lock.
+	// Epoch captured under the SAME lock as retrieval: a write during the lock-free
+	// LLM phase leaves the cache stamp born stale → miss, never a stale serve.
 	let (mut retrieved, epoch) = {
 		let g = crate::base::locks::read_recovered(graph);
 		let r = retrieve(&g, cfg, &fused_qvec, query_text, mode, opts.as_ref(), w);
 		(r, g.mutation_epoch())
 	};
 
-	// LLM stages run with the lock released.
 	rerank::llm_rerank(cfg, llm, query_text, &mut retrieved.results);
 	score::commit_access(&mut retrieved.results);
-	// The live-graph access write-back (accessed_at/heat/access_count) is NOT done
-	// here — that would need a WRITE lock on the interactive query path. It is
-	// deferred to a `CommitAccess` tick task the caller enqueues from the returned
-	// result ids (see `mcp::Server::tool_query`), so `query_locked` takes ONLY a
-	// read lock. The write-back deliberately skips the epoch bump, so `epoch` stays
-	// valid for the caller's cache stamp regardless of when the tick runs it.
+	// Live-graph access write-back is deferred to a CommitAccess tick task (see
+	// mcp::Server::tool_query) so this path takes ONLY a read lock (see note).
 	let answer = synthesize(&retrieved.chain_text, &retrieved.results, query_text, llm);
 
 	(
@@ -326,9 +290,8 @@ pub fn build_answer_prompt(
 	answer_prompt_from(&format_chains(g, chains), scored, query_text)
 }
 
-/// Assemble the answer prompt from a pre-rendered `chain_text` and the scored
-/// results' own entity copies — no graph access, so it runs after the lock is
-/// released. [`build_answer_prompt`] is the graph-taking convenience wrapper.
+/// Assemble the answer prompt from pre-rendered `chain_text` — no graph access.
+/// [`build_answer_prompt`] is the graph-taking convenience wrapper.
 pub fn answer_prompt_from(chain_text: &str, scored: &[ScoredEntity], query_text: &str) -> String {
 	let mut prompt = String::from("Context from knowledge graph:\n\n");
 	if !chain_text.is_empty() {
@@ -407,9 +370,6 @@ pub fn refine_edges(g: &mut GraphGnn, chains: &[PathChain], llm: &LlmFunc) {
 				let response = llm(&prompt);
 				if let Ok(new_score) = response.trim().parse::<f64>() {
 					let clamped = new_score.clamp(0.0, 1.0);
-					// O(1) write-back: find_reason already told us the owning kern, so
-					// update it directly instead of an O(N_kerns) all_ids() rescan per
-					// refined edge (which made the loop O(R * K)).
 					if let Some(kern) = g.get_mut(&kern_id) {
 						if let Some(r) = kern.reasons.get_mut(node_id) {
 							r.score = clamped;
@@ -526,11 +486,6 @@ mod tests {
 
 	#[test]
 	fn query_locked_is_read_only_and_defers_the_access_stamp() {
-		// Post step-2: query_locked takes ONLY a read lock. The live-graph access
-		// stamp (accessed_at/access_count/heat) is no longer written inline — it is
-		// deferred to a CommitAccess tick task the caller enqueues from the result
-		// ids. So a bare query_locked must leave the LIVE entity untouched; the
-		// caller surfaces the ids to stamp via the returned result set.
 		use crate::base::accept;
 		use parking_lot::RwLock;
 

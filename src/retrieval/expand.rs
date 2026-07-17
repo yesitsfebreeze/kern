@@ -19,9 +19,8 @@ pub struct ScoredEntity {
 	pub score: f64,
 }
 
-/// A scored entity borrowed from the graph. The retrieve pipeline works on
-/// these (no clones) and materialises owned [`ScoredEntity`]s only for the few
-/// results that survive the delivery cut.
+/// A scored entity borrowed from the graph — the pipeline works on these, cloning
+/// to owned [`ScoredEntity`] only for delivery survivors.
 #[derive(Debug, Clone, Copy)]
 pub struct ScoredRef<'a> {
 	pub entity: &'a Entity,
@@ -37,8 +36,8 @@ impl ScoredRef<'_> {
 	}
 }
 
-/// Uniform view over [`ScoredEntity`] (owned) and [`ScoredRef`] (borrowed) so
-/// the scoring/diversify stages run on either without cloning entities.
+/// Uniform view over owned [`ScoredEntity`] and borrowed [`ScoredRef`] so the
+/// scoring/diversify stages run on either without cloning.
 pub trait Scored {
 	fn entity(&self) -> &Entity;
 	fn score(&self) -> f64;
@@ -74,12 +73,8 @@ pub struct ExpandResult<'a> {
 	pub chains: Vec<PathChain>,
 }
 
-/// Assigns a dense `u32` to each distinct entity id seen during one [`expand`]
-/// run so the hot beam walk keys `visited`/`results` on integers (cheap hash, no
-/// per-touch `String` clone) instead of on the id strings. The id is cloned into
-/// an `Rc<str>` exactly once — the first time it is interned — and every later
-/// touch is a `u32` lookup. Ids are borrowed back out via [`name`](Self::name)
-/// only to resolve the surviving results and to materialise path chains.
+/// Assigns a dense `u32` to each distinct entity id in one [`expand`] run: the id
+/// clones into an `Rc<str>` once (on intern), every later touch is a `u32` lookup.
 #[derive(Default)]
 struct Interner {
 	idx: HashMap<Rc<str>, u32>,
@@ -102,19 +97,15 @@ impl Interner {
 		&self.names[i as usize]
 	}
 
-	/// A cheap owned handle to id `i` (a refcount bump). The beam holds the current
-	/// item's name as an `Rc<str>` rather than a `&str` borrow so it can keep
-	/// mutating the interner (eager-interning neighbours) in the same loop.
+	/// Owned handle to id `i` (a refcount bump) — held as `Rc<str>` not `&str` so
+	/// the loop can keep mutating the interner (interning neighbours) meanwhile.
 	fn name_rc(&self, i: u32) -> Rc<str> {
 		Rc::clone(&self.names[i as usize])
 	}
 }
 
-/// One node of the beam's path forest. Rather than each frontier item carrying a
-/// cloned `Vec<String>` of its whole walk, every enqueued node stores just the
-/// entity it reached, the edge it arrived by, and the index of its parent node.
-/// A seed root has no edge (`rid == ""`) and no parent ([`NO_PARENT`]); a chain
-/// is materialised to owned strings only for the popped nodes that get recorded.
+/// One node of the beam's path forest. A seed root has no edge (`rid == ""`) and
+/// no parent ([`NO_PARENT`]).
 struct ChainNode<'g> {
 	ent: u32,
 	rid: &'g str,
@@ -123,17 +114,16 @@ struct ChainNode<'g> {
 
 const NO_PARENT: u32 = u32::MAX;
 
-/// One frontier entry: the interned entity id, its beam score, and the index of
-/// its [`ChainNode`] in the arena. The payload never participates in ordering.
+/// One frontier entry. The payload (interned id, arena index) never participates
+/// in ordering; only `score` does.
 struct BeamNode {
 	ent: u32,
 	score: f64,
 	chain: u32,
 }
 
-/// Binary max-heap over [`BeamNode`]s keyed on `score`. Hand-rolled (rather than
-/// `BinaryHeap`) so the beam owns an interned `u32`/arena payload that stays out
-/// of the ordering; only `score` sifts. `score` is assumed finite.
+/// Binary max-heap over [`BeamNode`]s keyed on `score` (assumed finite).
+/// Hand-rolled so the u32/arena payload stays out of the ordering.
 #[derive(Default)]
 struct Beam {
 	items: Vec<BeamNode>,
@@ -181,9 +171,8 @@ impl Beam {
 	}
 }
 
-/// Walk `node`'s parent chain and materialise it as the `[seed, rid, ent, rid,
-/// ent, …]` id list [`PathChain`] carries, matching the order the previous
-/// per-item `Vec<String>` chain accumulated.
+/// Walk `node`'s parent chain into the `[seed, rid, ent, rid, ent, …]` id list
+/// [`PathChain`] carries.
 fn materialize_chain(arena: &[ChainNode], interner: &Interner, mut node: u32) -> Vec<String> {
 	let mut nodes: Vec<String> = Vec::new();
 	loop {
@@ -352,12 +341,8 @@ pub fn score_neighbor(
 	w.content * content_score + w.reason * reason_score + w.edge * edge_score
 }
 
-/// Resolve an entity and its owning kern, returning both by reference (no clone
-/// on the hot retrieval path). Two-pass by design: first the O(1) hot path via
-/// the `kern_of_entity` index when the entity lives in a loaded kern; then a full
-/// scan over all loaded kerns as a fallback for orphans whose index entry is
-/// missing or stale (e.g. an entity migrated between kerns before the index
-/// caught up). `None` only if the id is absent from every loaded kern.
+/// Resolve an entity and its owning kern by reference. Two-pass: O(1) via the
+/// `kern_of_entity` index, then a full scan as fallback for stale/missing index entries.
 fn find_entity_and_kern<'a>(g: &'a GraphGnn, id: &str) -> Option<(&'a Entity, &'a Kern)> {
 	if let Some(kid) = g.kern_of_entity(id) {
 		if let Some(kern) = g.loaded(kid) {

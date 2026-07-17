@@ -1,6 +1,5 @@
-//! Background tick scheduler — the autonomic loop behind self-organization:
-//! clusters thoughts, spawns/evicts child kerns, runs GNN propagation, decays
-//! heat (`pulse`), and drives stigmergy cold-GC (spill-before-drop).
+//! Background tick scheduler — the autonomic loop: clusters thoughts,
+//! spawns/evicts child kerns, GNN propagation, heat decay, cold-GC.
 
 pub mod cluster;
 pub mod gnn_propagate;
@@ -24,15 +23,10 @@ use cluster::{cohesion, is_core_cluster, vector_cluster, Cluster};
 use gnn_propagate::do_gnn_propagate;
 use queue::{task, task_extra, Queue, Task, TaskKind};
 use tasks::{
-	do_classify_contradiction, do_commit_access, do_disk_consolidate, do_enrich, do_name,
-	do_persist, do_reembed, do_resolve, do_seed_questions, BroadcastQuestionFunc, EmbedFunc, LlmFunc,
+	do_classify_contradiction, do_commit_access, do_disk_consolidate, do_enrich, do_name, do_persist,
+	do_reembed, do_resolve, do_seed_questions, BroadcastQuestionFunc, EmbedFunc, LlmFunc,
 };
 
-/// Long-lived dependencies the tick worker carries across every task it
-/// processes: the LLM / embed / broadcast hooks plus the GNN, tick, and
-/// cold-tier config. Bundled so `start` and `process_task` take one context
-/// instead of eight positional args (and drop their `too_many_arguments` allows).
-/// All hooks are cheap `Arc` clones; the configs are small value types.
 pub struct TickContext {
 	pub llm: Option<LlmFunc>,
 	pub embed: Option<EmbedFunc>,
@@ -63,7 +57,9 @@ fn process_task(q: &Queue, g: &Arc<RwLock<GraphGnn>>, t: &Task, ctx: &TickContex
 	match t.kind {
 		TaskKind::Cluster => do_cluster(q, g, &t.kern_id, &ctx.tick_cfg, llm, embed),
 		TaskKind::SeedQuestions => do_seed_questions(q, g, &t.extra, llm),
-		TaskKind::ClassifyContradiction => do_classify_contradiction(q, g, &t.kern_id, &t.extra, llm, embed),
+		TaskKind::ClassifyContradiction => {
+			do_classify_contradiction(q, g, &t.kern_id, &t.extra, llm, embed)
+		}
 		TaskKind::Name => do_name(q, g, &t.kern_id, &ctx.tick_cfg, llm, embed),
 		TaskKind::Enrich => do_enrich(q, g, &t.kern_id, &t.extra, llm, embed),
 		TaskKind::ResolveQuestion => do_resolve(q, g, &t.kern_id, &t.extra, ctx.broadcast_q.as_ref()),
@@ -86,16 +82,13 @@ fn do_cluster(
 ) {
 	let mut graph = write_recovered(g);
 
-	// Phase 1: cluster the thoughts and decide which clusters spin out.
 	let (clusters, spawn_indices) = match graph.kerns.get(kern_id) {
 		Some(kern) => select_spawn_clusters(kern, tick_cfg.max_cluster_sample),
 		None => return,
 	};
 
-	// Phase 2: spawn child kerns and migrate the selected clusters into them.
 	let spawned_children = spawn_child_clusters(&mut graph, kern_id, &clusters, &spawn_indices);
 
-	// Phase 3: gather follow-up work (enrich edges, resolve open questions).
 	let (enrich_jobs, question_jobs) = match graph.kerns.get(kern_id) {
 		Some(kern) => collect_follow_up_jobs(kern),
 		None => {
@@ -104,7 +97,6 @@ fn do_cluster(
 		}
 	};
 
-	// Phase 4: reap empty unnamed children, reparenting any strays.
 	let evicted = evict_empty_children(&mut graph, kern_id);
 
 	let is_unnamed = graph
@@ -115,7 +107,6 @@ fn do_cluster(
 
 	drop(graph);
 
-	// Phase 5: enqueue the follow-up tasks discovered above (lock released).
 	if is_unnamed && llm.is_some() {
 		q.enqueue(task(TaskKind::Name, kern_id));
 	}
@@ -131,43 +122,30 @@ fn do_cluster(
 	let did_structural_work =
 		!spawned_children.is_empty() || evicted || !enrich_jobs.is_empty() || !question_jobs.is_empty();
 	if !spawned_children.is_empty() || evicted {
-		// Children BEFORE the parent: a spawned child exists only in RAM until its
-		// Persist runs, while Persist(parent) writes the parent row WITHOUT the
-		// migrated entities. Parent-first + crash erased those entities from disk
-		// entirely (the child row was never written); child-first + crash merely
-		// leaves them duplicated in the stale parent row until the next persist.
+		// Persist children BEFORE the parent: parent-first + crash erases the
+		// migrated entities from disk; child-first merely duplicates them briefly.
 		for child_id in &spawned_children {
 			q.enqueue(task(TaskKind::Persist, child_id));
 		}
 		q.enqueue(task(TaskKind::Persist, kern_id));
 	}
-	// Skip GNN propagation when the cluster pass produced no structural change — the previous gnn_vector state is still valid.
+	// No structural change -> previous gnn_vector state still valid; skip GNN.
 	if did_structural_work {
 		q.enqueue(task(TaskKind::GnnPropagate, kern_id));
 	}
 }
 
-/// Phase 1 — cluster the kern's thoughts and pick which clusters are dense and
-/// off-core enough to spin out into their own child kern. Pure read over `kern`;
-/// returns every cluster plus the indices selected for spawning.
+/// Phase 1 — pure read: cluster the kern's thoughts, pick the spawn indices.
 fn select_spawn_clusters(
 	kern: &crate::base::types::Kern,
 	max_sample: usize,
 ) -> (Vec<Cluster>, Vec<usize>) {
-	// UNNAMED KERNS NEVER SPAWN. A fresh child is by construction one cohesive
-	// cluster, and `do_cluster` spawns grandchildren (phase 2) before the Name
-	// task is even enqueued (phase 5) — so an unnamed kern that may spawn
-	// descends one level per pass, unboundedly (observed live: tens of
-	// thousands of empty unnamed kerns). An unnamed kern also has an empty
-	// `anchor_vec`, so the `is_core_cluster` skip below cannot protect it.
-	// Holding its thoughts until Name succeeds is loss-free: nothing is moved,
-	// dropped, or evicted, and the named kern splits off-core clusters normally.
+	// UNNAMED KERNS NEVER SPAWN — else each pass descends one level unboundedly
+	// (see select_spawn_clusters_never_spawns_from_an_unnamed_kern).
 	if !kern.is_named() {
 		return (Vec::new(), Vec::new());
 	}
 
-	// `vector_cluster` requires `&[&Entity]`; materialize a Vec of refs because
-	// `kern.entities` is a HashMap and produces an iterator, not a slice.
 	let entities: Vec<_> = kern.entities.values().collect();
 	let clusters = vector_cluster(&entities, max_sample);
 
@@ -183,8 +161,7 @@ fn select_spawn_clusters(
 	(clusters, spawn_indices)
 }
 
-/// Phase 2 — spawn one unnamed child kern per selected cluster and move that
-/// cluster's thoughts out of the parent into it. Returns the new child ids.
+/// Phase 2 — one unnamed child per selected cluster; members move out of the parent.
 fn spawn_child_clusters(
 	graph: &mut GraphGnn,
 	kern_id: &str,
@@ -193,13 +170,8 @@ fn spawn_child_clusters(
 ) -> Vec<String> {
 	let mut spawned_children = Vec::new();
 	for i in spawn_indices {
-		// One DISTINCT child per cluster. Using `get_or_spawn_unnamed_child` here was
-		// a bug: it reuses the parent's first unnamed child, so every selected cluster
-		// collapsed into the SAME kern (and `spawned_children` carried that id N times,
-		// enqueuing N duplicate Cluster/Persist tasks for it). `spawn_unnamed_child`
-		// always creates a fresh child, so each cohesive cluster materialises as its
-		// own sub-kern — the documented intent and what Phase 5's per-child task
-		// enqueue assumes.
+		// One DISTINCT child per cluster: never `get_or_spawn_unnamed_child` — it
+		// reuses the first unnamed child, collapsing every cluster into one kern.
 		let child_id = crate::base::accept::spawn_unnamed_child(graph, kern_id);
 		for m in &clusters[*i].members {
 			let entity_id = m.id.clone();
@@ -218,9 +190,7 @@ fn spawn_child_clusters(
 	spawned_children
 }
 
-/// Phase 3 — collect follow-up work from the kern's edges: un-enriched real
-/// edges (both endpoints still present) need an Enrich pass; dangling Question
-/// edges (`to` empty) need resolution. Pure read; returns `(enrich, question)`.
+/// Phase 3 — pure read; returns (un-enriched real edges, dangling Question edges).
 fn collect_follow_up_jobs(kern: &crate::base::types::Kern) -> (Vec<String>, Vec<String>) {
 	use crate::base::types::ReasonKind;
 
@@ -244,9 +214,7 @@ fn collect_follow_up_jobs(kern: &crate::base::types::Kern) -> (Vec<String>, Vec<
 	(enrich_jobs, question_jobs)
 }
 
-/// Phase 4 — reap child kerns that are empty AND unnamed: reparent any stray
-/// thoughts back to `kern_id`, deregister the child, and prune it from the
-/// parent's child list. Returns whether any child was evicted.
+/// Phase 4 — reap empty AND unnamed children, reparenting strays; true if any evicted.
 fn evict_empty_children(graph: &mut GraphGnn, kern_id: &str) -> bool {
 	let children_ids = match graph.kerns.get(kern_id) {
 		Some(k) => k.children.clone(),
@@ -395,7 +363,6 @@ mod tests {
 				..Default::default()
 			},
 		);
-		// Real edge a->b (both endpoints present) -> enrich; dangling question -> resolve.
 		add_reason(
 			&mut k,
 			Reason {
@@ -440,7 +407,6 @@ mod tests {
 				..Default::default()
 			},
 		);
-		// b is absent, so a->b is not enrichable.
 		add_reason(
 			&mut k,
 			Reason {
@@ -506,11 +472,6 @@ mod tests {
 
 	#[test]
 	fn spawn_child_clusters_creates_a_distinct_child_per_cluster() {
-		// Regression: spawn_child_clusters used get_or_spawn_unnamed_child, which
-		// REUSES the parent's first unnamed child — so two selected clusters
-		// collapsed into ONE kern (and `spawned_children` carried that id twice,
-		// enqueuing duplicate Cluster/Persist tasks). Each cluster must materialise
-		// as its OWN child, with no cross-contamination of members.
 		let mut g = GraphGnn::new();
 		let pid = "p".to_string();
 		let mut parent = Kern::new(&pid, "");
@@ -580,13 +541,6 @@ mod tests {
 
 	#[test]
 	fn select_spawn_clusters_never_spawns_from_an_unnamed_kern() {
-		// Regression: the unnamed-split runaway. A freshly spawned child is by
-		// construction one cohesive cluster, and `do_cluster` spawns grandchildren
-		// (phase 2) BEFORE its Name task runs (phase 5) — so an unnamed kern that
-		// may spawn descends one level per tick pass forever (observed live:
-		// tens of thousands of empty unnamed kerns). An unnamed kern has no
-		// anchor_vec, so the is_core_cluster skip cannot protect it; it must not
-		// spawn at all until named.
 		let mut kern = Kern::new("k", "");
 		assert!(!kern.is_named(), "precondition: kern is unnamed");
 		for i in 0..crate::base::constants::KERN_MIN_CLUSTER_SIZE {
@@ -610,9 +564,6 @@ mod tests {
 
 	#[test]
 	fn select_spawn_clusters_still_spawns_off_core_cluster_from_named_kern() {
-		// Counterpart guard: the unnamed gate must not disable legitimate splits.
-		// A NAMED kern with a cohesive cluster orthogonal to its anchor still
-		// spins that cluster out.
 		let mut kern = Kern::new("k", "");
 		kern.anchor_text = "named".into();
 		kern.anchor_vec = vec![1.0, 0.0];
@@ -640,10 +591,6 @@ mod tests {
 
 	#[test]
 	fn do_cluster_persists_each_spawned_child_before_the_parent() {
-		// Crash-loss guard: the spawned child holds the migrated entities and exists
-		// only in RAM until persisted, while Persist(parent) rewrites the parent row
-		// WITHOUT them. Each child needs its own Persist, ordered before the
-		// parent's so a crash between the two duplicates instead of destroys.
 		let q = Queue::new(64);
 		let mut g = GraphGnn::new();
 		let mut kern = Kern::new("k", "");
@@ -693,9 +640,7 @@ mod tests {
 
 	#[test]
 	fn do_cluster_skips_gnn_when_no_structural_work() {
-		// Root kern with a single thought: below KERN_MIN_CLUSTER_SIZE so nothing
-		// spawns, no edges so no enrich/question, no children so no eviction —
-		// did_structural_work is false, so no GnnPropagate should be enqueued.
+		// One thought, no edges, no children -> no structural work of any kind.
 		let q = Queue::new(64);
 		let mut g = GraphGnn::new();
 		let root_id = g.root.id.clone();

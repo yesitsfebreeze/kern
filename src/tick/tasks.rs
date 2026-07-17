@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
+use crate::base::accept::{
+	classify_prompt, parse_contradiction, supersede_by_contradiction, ContradictionClass,
+};
 use crate::base::constants::{
 	DEFAULT_SEED_K, KERN_INNER_RADIUS, KERN_OUTER_RADIUS, PROVENANCE_SCORE,
 	QUESTION_RESOLVE_THRESHOLD,
-};
-use crate::base::accept::{
-	classify_prompt, parse_contradiction, supersede_by_contradiction, ContradictionClass,
 };
 use crate::base::graph::GraphGnn;
 use crate::base::locks::{read_recovered, write_recovered};
@@ -27,10 +27,8 @@ use super::queue::{task, task_extra, Queue, TaskKind};
 pub use crate::types::{EmbedFunc, LlmFunc};
 pub type BroadcastQuestionFunc = Arc<dyn Fn(&str, &str, &[f32], &str) + Send + Sync>;
 
-/// Strip a leading `Theme:`/`Name:`/`Label:` label (a few case variants) that the
-/// naming LLM sometimes prepends, returning the trimmed remainder. Only the first
-/// matching prefix is removed. Pure, so the parsing is unit-testable apart from
-/// `do_name`'s graph/LLM plumbing.
+/// Strip one leading `Theme:`/`Name:`/`Label:` label the naming LLM sometimes
+/// prepends; only the first matching prefix is removed.
 fn strip_name_prefixes(raw: &str) -> String {
 	let mut name = raw.trim().to_string();
 	for pfx in &["Theme:", "Name:", "Label:", "theme:", "name:"] {
@@ -43,15 +41,7 @@ fn strip_name_prefixes(raw: &str) -> String {
 }
 
 /// Seed up to 3 dangling Question edges for a freshly ingested entity.
-///
-/// Relocated from the ingest worker's `place_chunks` (where it was one
-/// BLOCKING reason-LLM call per placed chunk on the commit path — measured
-/// live: a one-line sync ingest queued 69.7 minutes behind LLM-bound jobs).
-/// The ingest worker now enqueues a `SeedQuestions` tick task per placed
-/// chunk via its defer hook, and the tick — which already serializes LLM
-/// work off the interactive path — runs this. Locks: text + root id read
-/// under one read guard, the LLM call runs UNLOCKED, edges written under one
-/// write guard (same discipline as `do_name`).
+/// Lock order: snapshot under a read guard, LLM UNLOCKED, one write guard.
 pub fn do_seed_questions(
 	q: &Queue,
 	g: &Arc<RwLock<GraphGnn>>,
@@ -122,18 +112,8 @@ pub fn do_seed_questions(
 	q.enqueue(task(TaskKind::Persist, &root_id));
 }
 
-/// Classify a recorded `Rephrase` near-duplicate as UPDATE/CONTRADICTION vs
-/// merely RELATED, and on the former run bi-temporal supersedence.
-///
-/// This is the background half of contradiction-driven invalidation: the ingest
-/// worker (which carries no reason-LLM) records a same-kind, different-text
-/// near-dup as a `Rephrase` edge and defers HERE via its dedup hook. The classify
-/// LLM runs UNLOCKED (do_enrich discipline); on `Supersede` the new phrasing is
-/// embedded, materialized as a fresh Active revision, and the stored claim is
-/// invalidated (status/superseded_by/valid_to/invalidated_at + ANN eviction +
-/// `Supersedes` edge). Fail open at every step — no LLM, no embedder, an
-/// ambiguous reply, or an already-superseded/edited target all leave the
-/// `Rephrase` edge exactly as the worker recorded it (today's behavior).
+/// Classify a recorded `Rephrase` near-dup; on CONTRADICTION run bi-temporal
+/// supersedence. LLM runs UNLOCKED; fail open at every step (edge left as recorded).
 pub fn do_classify_contradiction(
 	q: &Queue,
 	g: &Arc<RwLock<GraphGnn>>,
@@ -147,7 +127,6 @@ pub fn do_classify_contradiction(
 		_ => return,
 	};
 
-	// Snapshot the rephrase pair under a read guard.
 	let (old_id, old_text, new_text, old_kind, old_source, confidence) = {
 		let graph = read_recovered(g);
 		let kern = match graph.loaded(kern_id) {
@@ -178,14 +157,12 @@ pub fn do_classify_contradiction(
 		return;
 	}
 
-	// Reason-LLM classification (unlocked). Fail open to Related.
 	if parse_contradiction(&llm(&classify_prompt(&old_text, &new_text)))
 		!= ContradictionClass::Supersede
 	{
 		return;
 	}
 
-	// Embed the new revision (unlocked network I/O).
 	let vec = match embed(&new_text) {
 		Ok(v) if !v.is_empty() => v,
 		_ => return,
@@ -194,19 +171,19 @@ pub fn do_classify_contradiction(
 	if new_id == old_id {
 		return;
 	}
-	// Same single-source Entity builder as the ingest path (kind carried from the
-	// stored claim; no external_id — this is a contradiction, not a re-ingest).
-	let new_thought = build_chunk_entity(&new_text, &vec, old_kind, &old_source, "", confidence, None);
+	let new_thought =
+		build_chunk_entity(&new_text, &vec, old_kind, &old_source, "", confidence, None);
 
-	// Re-validate under the write guard (another tick may have superseded or
-	// removed this pair in between), then run supersedence and retire the now-stale
-	// Rephrase edge (it became a Supersedes edge).
+	// Re-validate under the write guard — another tick may have superseded or
+	// removed this pair while we were unlocked.
 	{
 		let mut graph = write_recovered(g);
 		let still_pending = graph
 			.loaded(kern_id)
 			.map(|k| {
-				k.reasons.get(rid).is_some_and(|r| r.kind == ReasonKind::Rephrase)
+				k.reasons
+					.get(rid)
+					.is_some_and(|r| r.kind == ReasonKind::Rephrase)
 					&& k.entities.get(&old_id).is_some_and(|e| !e.is_superseded())
 			})
 			.unwrap_or(false);
@@ -218,8 +195,7 @@ pub fn do_classify_contradiction(
 			if let Some(k) = graph.get_mut(kern_id) {
 				remove_reason(k, rid);
 			}
-			// Index the materialized revision for lexical/hybrid recall, like the
-			// ingest commit path does after `accept`.
+			// Mirror the ingest commit path: index the revision for lexical recall.
 			if let Some(lex) = graph.lexical() {
 				lex.insert(&new_id, &new_text);
 			}
@@ -230,10 +206,8 @@ pub fn do_classify_contradiction(
 	q.enqueue(task(TaskKind::GnnPropagate, kern_id));
 }
 
-/// Under a read lock, decide how to name an unnamed kern: cluster its entities,
-/// pick the largest cohesive cluster, and return its anchor `(prompt, centroid
-/// id, parent id)`. `None` when the kern is gone, already named, or has no
-/// cohesive cluster worth naming.
+/// Read-locked: anchor `(prompt, centroid id, parent id)` from the largest
+/// cohesive cluster; `None` when gone, already named, or nothing cohesive.
 fn naming_prompt(
 	g: &Arc<RwLock<GraphGnn>>,
 	kern_id: &str,
@@ -307,9 +281,6 @@ pub fn do_name(
 			}
 		}
 
-		// Emergent promotion: a dense cluster that crystallized inside the
-		// `generic` catch-all becomes a first-class anchor directly under the
-		// root, so future matching memories route to it instead of generic.
 		crate::base::accept::promote_to_root_if_generic(&mut graph, kern_id)
 	};
 
@@ -410,10 +381,7 @@ pub fn do_resolve(
 	rid: &str,
 	bq: Option<&BroadcastQuestionFunc>,
 ) {
-	// Phase 1 (read guard): snapshot the question vector and run the read-only
-	// whole-graph ANN search. The search is the expensive part — holding only a
-	// read guard here lets other ticks read/write concurrently instead of
-	// serializing every daemon operation behind one resolve.
+	// The ANN search is the expensive part — run it under a read guard only.
 	let top_hit = {
 		let graph = read_recovered(g);
 		let kern = match graph.loaded(kern_id) {
@@ -435,9 +403,8 @@ pub fn do_resolve(
 			.map(|h| h.entity_id)
 	};
 
-	// Phase 2a (write guard, mutation only): resolved locally. The read guard
-	// was dropped, so re-validate under the write guard — another tick could
-	// have resolved or removed this question in between.
+	// Re-validate under the write guard — another tick could have resolved or
+	// removed this question while the read guard was dropped.
 	if let Some(entity_id) = top_hit {
 		{
 			let mut graph = write_recovered(g);
@@ -459,8 +426,7 @@ pub fn do_resolve(
 		return;
 	}
 
-	// Phase 2b (read guard): unresolved locally — snapshot the question and
-	// broadcast it to peers. Read-only, so no write guard needed.
+	// Unresolved locally — broadcast the question to peers.
 	let broadcast_data = if bq.is_some() {
 		let graph = read_recovered(g);
 		graph.loaded(kern_id).and_then(|kern| {
@@ -482,19 +448,14 @@ pub fn do_resolve(
 	}
 }
 
-/// Fold the disk-backed entity index's in-RAM delta into a fresh DiskANN snapshot
-/// and reset it (see [`GraphGnn::consolidate_disk_index`]). Graph-global — the
-/// task carries no kern. No-op when the entity index is not disk-backed.
+/// Fold the disk index's in-RAM delta into a fresh DiskANN snapshot (see
+/// [`GraphGnn::consolidate_disk_index`]). Graph-global; no-op when not disk-backed.
 pub fn do_disk_consolidate(g: &Arc<RwLock<GraphGnn>>) {
 	write_recovered(g).consolidate_disk_index();
 }
 
-/// Deferred live-graph access write-back for a completed query. `extra` is the
-/// newline-joined entity ids the query returned (see `queue::task_commit_access`);
-/// the MCP query path enqueues this instead of taking a write lock inline, so the
-/// interactive query path stays read-only. Takes ONE write guard and stamps each
-/// live entity (accessed_at/access_count/heat) WITHOUT bumping the mutation epoch,
-/// so the query cache is not invalidated (see `score::commit_access_ids`).
+/// Deferred access write-back (`extra` = newline-joined entity ids). Stamps live
+/// entities WITHOUT bumping the mutation epoch (see `score::commit_access_ids`).
 pub fn do_commit_access(g: &Arc<RwLock<GraphGnn>>, extra: &str) {
 	let ids: Vec<String> = extra
 		.lines()
@@ -513,11 +474,8 @@ pub fn do_persist(g: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
 		Some(s) => s,
 		None => return,
 	};
-	// Stale-write guard: if another writer (a CLI direct-write, a second daemon)
-	// advanced the store past what this graph last reconciled to, our in-RAM kern
-	// may be older than the committed on-disk one — a per-kern overwrite here would
-	// silently drop the newer rows. Skip; the daemon's maintenance tick reloads
-	// from disk (reconcile_if_stale) and re-persists from the reconciled graph.
+	// Stale-write guard: if another writer advanced the store, a per-kern overwrite
+	// would drop newer rows — skip; reconcile_if_stale reloads and re-persists.
 	if store.read_epoch() > graph.flushed_epoch() {
 		tracing::debug!(
 			target: "kern.persist",
@@ -528,9 +486,8 @@ pub fn do_persist(g: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
 		);
 		return;
 	}
-	// The root carries authoritative fields (purpose/descriptors/radii) that
-	// live on `graph.root`, not the map entry — persist it through the same
-	// merge `save_all` uses so a root Persist task can't drop them.
+	// Root authoritative fields live on `graph.root`, not the map entry — persist
+	// through the same merge `save_all` uses so they can't be dropped.
 	if kern_id == graph.root.id {
 		let _ = store.save_one_kern(&crate::base::persist::merged_root(&graph));
 		return;
@@ -542,13 +499,11 @@ pub fn do_persist(g: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
 	let _ = store.save_one_kern(kern);
 }
 
-/// Re-embed every dirty entity (and recompute dirty reason vectors) in `kern_id`,
-/// then clear the flag and rebuild the index. The dirty flag is the durable
-/// source of truth — set on edit, cleared here once the stale vector is replaced.
+/// Re-embed dirty entities/reasons in `kern_id` and rebuild the index. The dirty
+/// flag is durable truth — set on edit, cleared only once the vector is replaced.
 pub fn do_reembed(g: &Arc<RwLock<GraphGnn>>, kern_id: &str, embed: Option<&EmbedFunc>) {
 	let Some(embed) = embed else { return };
 
-	// Snapshot dirty entity (id, text) under a read guard.
 	let dirty_ents: Vec<(String, String)> = {
 		let g = read_recovered(g);
 		let Some(k) = g.kerns.get(kern_id) else {
@@ -561,7 +516,7 @@ pub fn do_reembed(g: &Arc<RwLock<GraphGnn>>, kern_id: &str, embed: Option<&Embed
 			.collect()
 	};
 
-	// Embed outside the lock (network I/O).
+	// Embed outside the lock — network I/O.
 	let mut new_vecs: Vec<(String, Vec<f32>)> = Vec::new();
 	for (id, text) in &dirty_ents {
 		if let Ok(v) = embed(text) {
@@ -571,7 +526,6 @@ pub fn do_reembed(g: &Arc<RwLock<GraphGnn>>, kern_id: &str, embed: Option<&Embed
 		}
 	}
 
-	// Are there dirty reasons to recompute too?
 	let has_dirty_reasons = {
 		let g = read_recovered(g);
 		g.kerns
@@ -584,7 +538,6 @@ pub fn do_reembed(g: &Arc<RwLock<GraphGnn>>, kern_id: &str, embed: Option<&Embed
 		return;
 	}
 
-	// Write back under a write guard.
 	{
 		let mut g = write_recovered(g);
 		let Some(k) = g.kerns.get_mut(kern_id) else {
@@ -597,8 +550,6 @@ pub fn do_reembed(g: &Arc<RwLock<GraphGnn>>, kern_id: &str, embed: Option<&Embed
 				e.dirty = false;
 			}
 		}
-		// Recompute dirty reason vectors as the mean of their (now-updated)
-		// endpoint vectors; clear the flag.
 		let endpoint = |k: &crate::base::types::Kern, id: &str| -> Option<Vec<f32>> {
 			k.entities
 				.get(id)
@@ -621,10 +572,8 @@ pub fn do_reembed(g: &Arc<RwLock<GraphGnn>>, kern_id: &str, embed: Option<&Embed
 				_ => None,
 			};
 			if let Some(r) = k.reasons.get_mut(&rid) {
-				// Recomputed the edge vector — correction recorded, clear dirty. When
-				// an endpoint isn't embedded yet (cold/unembedded) `nv` is None: leave
-				// the edge dirty so a later sweep retries once both endpoints have
-				// vectors, rather than pinning a stale vector.
+				// `nv` None (an endpoint not yet embedded): leave the edge dirty so a
+				// later sweep retries, rather than pinning a stale vector.
 				if let Some(v) = nv {
 					r.vector = v;
 					r.dirty = false;
@@ -645,11 +594,6 @@ mod tests {
 
 	#[test]
 	fn do_seed_questions_adds_question_edges_for_the_entity() {
-		// Question seeding moved OFF the ingest commit path (it was one blocking
-		// reason-LLM call per placed chunk inside the worker — measured live: a
-		// one-line sync ingest queued 69.7 minutes behind LLM-bound jobs). The
-		// tick owns it now: read the entity text, ask the LLM, attach dangling
-		// Question edges to the root kern — same shape the resolver consumes.
 		let mut g = GraphGnn::new();
 		let root = g.root.id.clone();
 		let mut e = Entity {
@@ -697,9 +641,8 @@ mod tests {
 		);
 	}
 
-	/// Build a graph carrying one entity `old` and a pending Rephrase edge from it
-	/// to `new_text` (as the ingest dedup path records). Returns `(graph, root_id,
-	/// rephrase_reason_id)`.
+	/// One entity `old` plus a pending Rephrase edge to `new_text` (as the ingest
+	/// dedup path records). Returns `(graph, root_id, rephrase_reason_id)`.
 	fn graph_with_rephrase(
 		old_text: &str,
 		new_text: &str,
@@ -743,17 +686,26 @@ mod tests {
 		let gg = g.read();
 		let kern = gg.kerns.get(&root).unwrap();
 		let old = kern.entities.get("old").unwrap();
-		assert!(old.is_superseded(), "old is superseded on a CONTRADICTION verdict");
+		assert!(
+			old.is_superseded(),
+			"old is superseded on a CONTRADICTION verdict"
+		);
 		assert!(old.invalidated_at.is_some(), "old stamped invalidated");
 		let new_id = util::content_hash("the deadline is April");
-		assert!(kern.entities.contains_key(&new_id), "new revision materialized");
+		assert!(
+			kern.entities.contains_key(&new_id),
+			"new revision materialized"
+		);
 		assert_eq!(old.superseded_by, new_id);
 		assert!(
 			!kern.reasons.contains_key(&rid),
 			"the Rephrase edge is retired once it becomes a Supersedes edge"
 		);
 		assert!(
-			kern.reasons.values().any(|r| r.kind == ReasonKind::Supersedes),
+			kern
+				.reasons
+				.values()
+				.any(|r| r.kind == ReasonKind::Supersedes),
 			"a Supersedes edge now links the revisions"
 		);
 	}
@@ -780,7 +732,6 @@ mod tests {
 
 	#[test]
 	fn classify_contradiction_is_a_noop_without_llm() {
-		// Fail open: no reason-LLM configured must mean no behavior change.
 		let (g, root, rid) = graph_with_rephrase("a", "b");
 		let q = Queue::new(16);
 		do_classify_contradiction(&q, &g, &root, &rid, None, None);
@@ -794,9 +745,7 @@ mod tests {
 	fn do_seed_questions_is_a_noop_without_llm_or_entity() {
 		let g = Arc::new(RwLock::new(GraphGnn::new()));
 		let q = Queue::new(16);
-		// No LLM -> noop.
 		do_seed_questions(&q, &g, "e1", None);
-		// LLM but unknown entity -> noop (no panic, no edges).
 		let llm: LlmFunc = Arc::new(|_p: &str| "Q?".to_string());
 		do_seed_questions(&q, &g, "missing", Some(&llm));
 		let gg = g.read();
@@ -809,9 +758,6 @@ mod tests {
 
 	#[test]
 	fn do_commit_access_stamps_the_live_entities_from_the_id_list() {
-		// The deferred access write-back: query_locked no longer stamps inline, it
-		// hands the retrieved ids to this task, which stamps the LIVE graph under one
-		// write guard without bumping the mutation epoch.
 		let mut g = GraphGnn::new();
 		let kid = "k1".to_string();
 		let mut kern = Kern::new(kid.clone(), "");
@@ -831,8 +777,15 @@ mod tests {
 
 		let gg = g.read();
 		let live = gg.kerns.get(&kid).unwrap().entities.get("a").unwrap();
-		assert!(live.accessed_at.is_some(), "the deferred stamp reached the live entity");
-		assert_eq!(live.access_count.value(), 1, "live access counter bumped by the tick");
+		assert!(
+			live.accessed_at.is_some(),
+			"the deferred stamp reached the live entity"
+		);
+		assert_eq!(
+			live.access_count.value(),
+			1,
+			"live access counter bumped by the tick"
+		);
 		assert_eq!(
 			gg.mutation_epoch(),
 			epoch_before,
@@ -867,7 +820,6 @@ mod tests {
 		let mut g = GraphGnn::new();
 		let kid = "k1".to_string();
 		let mut kern = Kern::new(kid.clone(), "");
-		// Two already-embedded (non-dirty) entities and one dirty edge between them.
 		kern.entities.insert(
 			"a".into(),
 			Entity {
@@ -913,10 +865,6 @@ mod tests {
 
 	#[test]
 	fn do_resolve_links_question_to_nearest_entity_above_threshold() {
-		// A pending Question whose vector matches an indexed entity should be
-		// resolved to that entity (kind flips to Similarity, `to` is filled).
-		// Exercises the read-search / write-mutate split: search runs under a
-		// read guard, the mutation re-validates under a write guard.
 		let mut g = GraphGnn::new();
 		let kid = "k1".to_string();
 		let mut kern = Kern::new(kid.clone(), "");
@@ -966,8 +914,6 @@ mod tests {
 
 	#[test]
 	fn do_resolve_ignores_non_question_or_already_linked() {
-		// Guard clauses: a non-Question, or a Question already linked, is left
-		// untouched (and never takes the write guard).
 		let mut g = GraphGnn::new();
 		let kid = "k1".to_string();
 		let mut kern = Kern::new(kid.clone(), "");
@@ -1018,9 +964,7 @@ mod tests {
 			"caching layer"
 		);
 		assert_eq!(strip_name_prefixes("Label:x"), "x");
-		// No known prefix -> trimmed verbatim.
 		assert_eq!(strip_name_prefixes("  plain phrase "), "plain phrase");
-		// Only the first prefix is stripped.
 		assert_eq!(strip_name_prefixes("Theme: Name: nested"), "Name: nested");
 	}
 }

@@ -50,15 +50,8 @@ impl Weights {
 	}
 }
 
-/// Build the dense seed set for retrieval: vector ANN over the query (or
-/// reason-vector ANN in [`Mode::Reason`]) merged with query-independent
-/// "important" entities (high cosine to the query AND either a Fact or
-/// frequently-accessed), then truncated to `max(k, cfg.seed_k)`.
-///
-/// This is the dense + importance core only. The lexical seed layer
-/// ([`seed_lexical`]) and PageRank are blended on top by the caller
-/// (`answer::retrieve`) for Hybrid mode, so they are intentionally not threaded
-/// through here.
+/// Dense seed set: vector ANN (reason-vector ANN in [`Mode::Reason`]) merged with
+/// "important" entities. Lexical/PageRank blend on top in `answer::retrieve`, not here (see note).
 pub fn seed(
 	g: &GraphGnn,
 	cfg: &RetrievalConfig,
@@ -71,12 +64,8 @@ pub fn seed(
 	seed_with_important(g, cfg, query_vec, k, mode, opts, &important)
 }
 
-/// The dense-seed core of [`seed`], but with the query-independent `important`
-/// list supplied by the caller instead of scanned here. Hybrid retrieval needs
-/// the same importance scan a second time (as its own RRF list in
-/// `fuse_hybrid_seeds`), so the caller runs the O(N) scan ONCE and threads the
-/// result into both consumers. [`seed`] is the wrapper that scans then delegates
-/// for callers that don't reuse the list.
+/// [`seed`] with the `important` list supplied by the caller — Hybrid retrieval
+/// needs it twice and runs the O(N) scan once.
 pub fn seed_with_important(
 	g: &GraphGnn,
 	cfg: &RetrievalConfig,
@@ -88,13 +77,8 @@ pub fn seed_with_important(
 ) -> Vec<EntityHit> {
 	let mut hits = match mode {
 		Mode::Reason => seed_by_reason(g, query_vec, k),
-		// Filter DURING the ANN traversal when a filter is active: a sparse filter
-		// then still yields k matching dense hits, instead of post-filtering an
-		// unfiltered top-k down to fewer-than-k (the post-filtering coverage bug).
-		// With no active filter this is the unchanged unfiltered path, so unfiltered
-		// queries are byte-identical. The `keep` predicate resolves each candidate
-		// id to its entity BY REFERENCE (no clone) and reuses `score::matches_filter`
-		// — the same predicate the post-filter applies — so the two never diverge.
+		// Filter DURING the ANN traversal so a sparse filter still yields k matching
+		// hits (not an unfiltered top-k post-filtered to fewer); `keep` IS the post-filter predicate.
 		_ => match opts {
 			Some(o) if o.is_active() => {
 				let keep = matches_keep(g, o);
@@ -108,10 +92,8 @@ pub fn seed_with_important(
 	hits
 }
 
-/// A `keep(id)` predicate that resolves an entity id to its entity BY REFERENCE
-/// and applies [`matches_filter`] — the single filter shared by the dense ANN
-/// search, the lexical search, and the post-filter, so a filtered seed can never
-/// diverge from what the post-filter would have kept.
+/// `keep(id)` predicate applying [`matches_filter`] by reference — the single
+/// filter shared by dense ANN, lexical, and post-filter, so they never diverge.
 fn matches_keep<'a>(g: &'a GraphGnn, opts: &'a QueryOptions) -> impl Fn(&str) -> bool + 'a {
 	move |id: &str| {
 		g.kern_of_entity(id)
@@ -128,9 +110,8 @@ pub fn seed_lexical(
 	k: usize,
 	opts: Option<&QueryOptions>,
 ) -> Vec<EntityHit> {
-	// Filter BEFORE the BM25 top-k truncation when a filter is active, so a sparse
-	// filter still yields k matching lexical hits (no fewer-than-k). No active
-	// filter -> the unchanged unfiltered search.
+	// Filter BEFORE the BM25 top-k truncation, so a sparse filter still yields k
+	// matching lexical hits (no fewer-than-k).
 	let raw = match opts {
 		Some(o) if o.is_active() => lex.search_filtered(query_text, k, &matches_keep(g, o)),
 		_ => lex.search(query_text, k),
@@ -177,11 +158,8 @@ pub fn seed_important(
 	let kerns = g.all();
 	let min_cos = cfg.important_min_cosine;
 	let access_threshold = cfg.important_access_threshold;
-	// When a filter is active, importance must respect it at the SOURCE: otherwise
-	// non-matching important entities (Facts / frequently-accessed) crowd the merged
-	// seed and truncate matching ones out before the post-filter ever runs. The
-	// check is cheap (field comparisons) and runs BEFORE the cosine, so non-matching
-	// entities also skip the dot product.
+	// Importance must respect an active filter at the SOURCE: non-matching important
+	// entities would crowd the merged seed and truncate matching ones out pre-post-filter.
 	let active_filter = opts.filter(|o| o.is_active());
 	let mut hits: Vec<EntityHit> = kerns
 		.par_iter()
@@ -274,10 +252,10 @@ mod tests {
 	#[test]
 	fn seed_important_applies_cosine_and_access_gates() {
 		let g = graph_with(vec![
-			ent("hot", vec![1.0, 0.0], 10, false), // accessed + aligned -> in
-			ent("cold", vec![1.0, 0.0], 0, false), // aligned but not accessed/fact -> out
-			ent("fact", vec![1.0, 0.0], 0, true),  // a Fact bypasses the access gate -> in
-			ent("off", vec![0.0, 1.0], 10, false), // accessed but cosine 0 < 0.5 -> out
+			ent("hot", vec![1.0, 0.0], 10, false),
+			ent("cold", vec![1.0, 0.0], 0, false),
+			ent("fact", vec![1.0, 0.0], 0, true),
+			ent("off", vec![0.0, 1.0], 10, false),
 		]);
 		let hits = seed_important(&g, &cfg(), &[1.0, 0.0], None);
 		let ids: std::collections::HashSet<&str> = hits.iter().map(|h| h.entity_id.as_str()).collect();
@@ -295,12 +273,9 @@ mod tests {
 
 	#[test]
 	fn seed_important_respects_an_active_filter_at_source() {
-		// Two aligned, qualifying important entities — one Fact, one accessed Claim.
-		// A kind=Fact filter must drop the Claim at the source (not leave it to be
-		// post-filtered), so only the Fact survives. A None filter keeps both.
 		let g = graph_with(vec![
-			ent("the_fact", vec![1.0, 0.0], 0, true), // Fact, aligned -> in
-			ent("the_claim", vec![1.0, 0.0], 10, false), // accessed Claim, aligned -> in (unfiltered)
+			ent("the_fact", vec![1.0, 0.0], 0, true),
+			ent("the_claim", vec![1.0, 0.0], 10, false),
 		]);
 		let both = seed_important(&g, &cfg(), &[1.0, 0.0], None);
 		assert_eq!(both.len(), 2, "no filter keeps both important entities");
@@ -320,11 +295,8 @@ mod tests {
 
 	#[test]
 	fn active_kind_filter_seeds_matches_post_filtering_would_miss() {
-		// 30 Claims identical to the query (cosine 1.0) bury 3 Facts (cosine ~0.994)
-		// below any unfiltered top-k. Importance is disabled (an impossible
-		// min_cosine) to isolate the dense seed. Without filtering, the dense top-k
-		// is all Claims, so a kind=Fact post-filter would surface ZERO Facts.
-		// Filtering during traversal returns the Facts instead — the fewer-than-k fix.
+		// 30 Claims at cosine 1.0 bury 3 Facts (~0.994) below any unfiltered top-k;
+		// min_cosine 1.5 disables importance to isolate the dense seed (see note).
 		let mut g = GraphGnn::new();
 		let mut k = Kern::new("kx", "");
 		for i in 0..30 {
@@ -345,7 +317,6 @@ mod tests {
 		};
 		let q = [1.0, 0.0];
 
-		// Unfiltered: the dense top-k is dominated by the closer Claims; no Facts.
 		let unfiltered = seed(&g, &cfg, &q, 5, Mode::Content, None);
 		assert!(
 			unfiltered.iter().all(|h| h.entity_id.starts_with("claim")),
@@ -353,7 +324,6 @@ mod tests {
 			unfiltered.iter().map(|h| &h.entity_id).collect::<Vec<_>>()
 		);
 
-		// kind=Fact: filtered traversal surfaces the Facts the post-filter would miss.
 		let opts = QueryOptions {
 			kind: Some(EntityKind::Fact),
 			..Default::default()
@@ -368,8 +338,6 @@ mod tests {
 
 	#[test]
 	fn unfiltered_seed_is_unchanged_when_opts_is_inactive() {
-		// A None filter and a present-but-empty filter must both take the unfiltered
-		// path and return an identical seed (the is_active() gate).
 		let mut g = GraphGnn::new();
 		let mut k = Kern::new("kx", "");
 		for i in 0..6 {
@@ -404,11 +372,8 @@ mod tests {
 
 	#[test]
 	fn seed_important_is_deterministic_at_scale() {
-		// The fuse_hybrid optimization computes seed_important ONCE and threads the
-		// result into both the dense-seed merge and the RRF list. That is only sound
-		// if the scan is deterministic across calls — otherwise the two consumers
-		// would see different lists than the old compute-twice code. Exercise the
-		// parallel scan over a large entity set and assert two calls are identical.
+		// fuse_hybrid runs the scan ONCE for two consumers — sound only if the
+		// parallel scan is deterministic across calls.
 		let mut g = GraphGnn::new();
 		let mut k = Kern::new("kx", "");
 		for i in 0..3000 {
@@ -426,7 +391,11 @@ mod tests {
 		let q = [0.6f32, 0.8];
 		let a = seed_important(&g, &cfg, &q, None);
 		let b = seed_important(&g, &cfg, &q, None);
-		assert!(a.len() > 50, "the scan surfaces a non-trivial set: {}", a.len());
+		assert!(
+			a.len() > 50,
+			"the scan surfaces a non-trivial set: {}",
+			a.len()
+		);
 		assert_eq!(a.len(), b.len(), "same count across calls");
 		for (x, y) in a.iter().zip(b.iter()) {
 			assert_eq!(x.entity_id, y.entity_id, "same id order across calls");
@@ -444,7 +413,7 @@ mod tests {
 			EntityHit {
 				entity_id: "x".into(),
 				score: 0.8,
-			}, // same id -> pooled into one
+			},
 			EntityHit {
 				entity_id: "y".into(),
 				score: 0.3,

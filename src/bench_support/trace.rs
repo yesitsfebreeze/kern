@@ -6,16 +6,13 @@ use std::path::{Path, PathBuf};
 pub struct TraceDoc {
 	pub id: String,
 	pub text: String,
-	/// Optional entity kind (`"fact"` | `"claim"` | …, parsed by
-	/// [`EntityKind::parse`](crate::base::types::EntityKind::parse); defaults to
-	/// `Claim`). Lets a trace mix kinds so a `filter_kind` query can be scored
-	/// against a corpus where the relevant docs are a filtered minority.
+	/// Optional entity kind ([`EntityKind::parse`](crate::base::types::EntityKind::parse),
+	/// defaults to `Claim`) so a trace can mix kinds for `filter_kind` queries.
 	#[serde(default)]
 	pub kind: Option<String>,
 }
 
-/// One query probe: the query text, the document ids that count as relevant
-/// (`expected_ids`, used to score recall), and the retrieval `mode` to run it in.
+/// One query probe. `expected_ids` are the docs that count as relevant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceQuery {
 	pub id: String,
@@ -25,10 +22,8 @@ pub struct TraceQuery {
 	/// defaults to `"hybrid"` via [`default_mode`].
 	#[serde(default = "default_mode")]
 	pub mode: String,
-	/// Optional entity-kind filter (`"fact"` | `"claim"` | …, parsed by
-	/// [`EntityKind::parse`](crate::base::types::EntityKind::parse)). When set, the
-	/// query runs with that metadata filter so the bench exercises — and scores —
-	/// the filtered retrieval path end-to-end, not just unfiltered recall.
+	/// Optional entity-kind filter ([`EntityKind::parse`](crate::base::types::EntityKind::parse)).
+	/// When set, the query runs the filtered retrieval path end-to-end.
 	#[serde(default)]
 	pub filter_kind: Option<String>,
 }
@@ -37,23 +32,8 @@ fn default_mode() -> String {
 	"hybrid".to_string()
 }
 
-/// A retrieval benchmark trace: a named corpus of documents plus the queries to
-/// run against it after ingest. Deserialized from a JSON file by [`load`].
-///
-/// Expected JSON schema:
-/// ```json
-/// {
-///   "name": "my-trace",
-///   "docs": [
-///     { "id": "d1", "text": "the borrow checker rejects aliased mutable refs" }
-///   ],
-///   "queries": [
-///     { "id": "q1", "query": "borrow checker", "expected_ids": ["d1"], "mode": "hybrid" }
-///   ]
-/// }
-/// ```
-/// Every field is required except each query's `mode`, which defaults to
-/// `"hybrid"` when omitted. See the round-trip test below for a minimal fixture.
+/// A retrieval benchmark trace: named corpus + queries, deserialized by [`load`].
+/// All JSON fields required except each query's `mode` (defaults to `"hybrid"`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Trace {
 	pub name: String,
@@ -83,7 +63,6 @@ mod tests {
 
 	#[test]
 	fn trace_json_round_trips_and_mode_defaults_to_hybrid() {
-		// Minimal fixture matching the documented schema; q2 omits `mode`.
 		let json = r#"{
 			"name": "t1",
 			"docs": [{ "id": "d1", "text": "the borrow checker" }],
@@ -102,7 +81,6 @@ mod tests {
 			"omitted mode defaults to hybrid"
 		);
 
-		// Serialize → parse again yields the same structure (round-trip stable).
 		let round = serde_json::to_string(&t).expect("serialize");
 		let t2: Trace = serde_json::from_str(&round).expect("re-parse");
 		assert_eq!(t2.queries[1].expected_ids, vec!["d1".to_string()]);

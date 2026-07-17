@@ -1,20 +1,5 @@
-//! Disk-resident Vamana (DiskANN-style) ANN index.
-//!
-//! A single-layer proximity graph built with α-pruning (RobustPrune), persisted
-//! as three files under an index directory and searched with a memory-mapped
-//! beam walk — so query-time RSS is the OS page cache for the touched vectors,
-//! not the whole corpus. This is the on-disk counterpart to the in-memory
-//! [`crate::base::hnsw::HnswIndex`]; see `docs/kern/diskann-disk-index.md`.
-//!
-//! **Status:** self-contained and tested, but **not yet wired into the live
-//! search path**. Wiring it into the daemon's hot graph is a separate,
-//! reviewed step — the live memory store's integrity is untouched until then.
-//!
-//! Layout (`<dir>/`):
-//! - `meta.bin`   — bincode `Meta { dim, count, r, entry, ids }`.
-//! - `vectors.bin`— `count × dim` `f32` LE, fixed stride; memory-mapped.
-//! - `graph.bin`  — `count × r` `u32` LE adjacency, padded with `SENTINEL`;
-//!   memory-mapped.
+//! Disk-resident Vamana (DiskANN-style) ANN index: an α-pruned proximity graph
+//! persisted as three mmap'd files. NOT yet wired into the live search path.
 
 use std::collections::HashSet;
 use std::io;
@@ -32,7 +17,6 @@ fn le_u32(c: &[u8]) -> u32 {
 	u32::from_le_bytes([c[0], c[1], c[2], c[3]])
 }
 
-/// Build/search parameters. Defaults follow common DiskANN guidance.
 #[derive(Debug, Clone, Copy)]
 pub struct Params {
 	/// Max out-degree of the graph.
@@ -72,8 +56,7 @@ fn graph_path(dir: &Path) -> PathBuf {
 	dir.join("graph.bin")
 }
 
-/// Cosine distance on `f32` slices (`1 - cos`); smaller = closer. Mismatched or
-/// zero-norm inputs yield the max distance `1.0`.
+/// `1 - cos`; mismatched or zero-norm inputs yield the max distance `1.0`.
 fn cos_dist(a: &[f32], b: &[f32]) -> f32 {
 	if a.len() != b.len() {
 		return 1.0;
@@ -92,10 +75,8 @@ fn cos_dist(a: &[f32], b: &[f32]) -> f32 {
 	1.0 - dot / (na.sqrt() * nb.sqrt())
 }
 
-/// Greedy beam search over an abstract graph. `dist` returns the distance from
-/// the (fixed) query to node `i`; `neighbors` returns node `i`'s out-edges.
-/// Returns `(beam, visited)`: `beam` is the final candidate list sorted nearest
-/// first; `visited` is every node expanded (used by construction's RobustPrune).
+/// Greedy beam search. Returns `(beam, visited)`: `beam` sorted nearest first,
+/// `visited` every node expanded (feeds construction's RobustPrune).
 fn greedy(
 	entry: u32,
 	beam_l: usize,
@@ -107,7 +88,6 @@ fn greedy(
 	let mut visited: HashSet<u32> = HashSet::new();
 
 	loop {
-		// Closest not-yet-expanded node in the beam.
 		let next = beam
 			.iter()
 			.filter(|(_, id)| !visited.contains(id))
@@ -131,8 +111,7 @@ fn greedy(
 }
 
 /// RobustPrune: choose ≤ `r` out-neighbours for `p` from `candidates`, dropping
-/// any candidate occluded by a closer-to-`p` one under the α test. `vec_at`
-/// fetches a node's vector.
+/// any candidate occluded by a closer-to-`p` one under the α test.
 fn robust_prune(
 	p: u32,
 	candidates: &[u32],
@@ -186,8 +165,6 @@ pub fn build_and_save(
 	std::fs::create_dir_all(dir)?;
 	let count = items.len();
 	let dim = items.first().map(|(_, v)| v.len()).unwrap_or(0);
-	// Drop any vector whose dimension disagrees with the first — a mixed-dim
-	// index is undefined. (Callers feed one embedding model's output.)
 	let ids: Vec<String> = items.iter().map(|(id, _)| id.clone()).collect();
 	let vectors: Vec<Vec<f32>> = items.iter().map(|(_, v)| v.clone()).collect();
 	let vec_at = |i: u32| vectors[i as usize].clone();
@@ -212,18 +189,15 @@ pub fn build_and_save(
 			*slot = nbrs.into_iter().collect();
 		}
 
-		// Two passes: α = 1.0 then the configured α.
 		let mut order: Vec<usize> = (0..count).collect();
 		for &alpha in &[1.0f32, params.alpha] {
-			// Fisher–Yates with the seeded RNG.
 			for i in (1..count).rev() {
 				let j = rng.random_range(0..=i);
 				order.swap(i, j);
 			}
 			for &p in &order {
 				let pv = vectors[p].clone();
-				// Scope the immutable borrow of `adj` (via `neighbors`) to the
-				// greedy walk so the back-edge updates below can mutate it.
+				// Block scopes the borrow of `adj` so the back-edge updates can mutate it.
 				let visited = {
 					let mut dist = |i: u32| cos_dist(&pv, &vectors[i as usize]);
 					let neighbors = |i: u32| adj[i as usize].clone();
@@ -231,7 +205,6 @@ pub fn build_and_save(
 				};
 				let pruned = robust_prune(p as u32, &visited, params.r, alpha, &vec_at);
 				adj[p] = pruned.clone();
-				// Add back-edges, re-pruning over-full neighbours.
 				for &j in &pruned {
 					let ju = j as usize;
 					if !adj[ju].contains(&(p as u32)) {
@@ -277,6 +250,8 @@ fn medoid(vectors: &[Vec<f32>]) -> u32 {
 	best
 }
 
+/// Layout under `dir/`: `meta.bin` bincode `Meta`; `vectors.bin` `count×dim` f32
+/// LE, fixed stride; `graph.bin` `count×r` u32 LE, `SENTINEL`-padded.
 #[allow(clippy::too_many_arguments)] // serializer: grouping the on-disk fields into a struct is churn for no gain
 fn write_files(
 	dir: &Path,
@@ -392,9 +367,7 @@ impl DiskIndex {
 		self.count == 0
 	}
 
-	/// The id of every vector in the index, in build order. Used by the
-	/// `VectorBackend::Disk` overlay to count live (non-tombstoned) vectors and,
-	/// later, to fold the in-RAM delta back into a rebuilt snapshot.
+	/// The id of every vector in the index, in build order.
 	pub fn ids(&self) -> &[String] {
 		&self.ids
 	}
@@ -416,9 +389,8 @@ impl DiskIndex {
 			.collect()
 	}
 
-	/// Approximate `k` nearest neighbours to `query`. `search_l` is the beam
-	/// width (≥ `k`; larger trades latency for recall). Returns `(id, distance)`
-	/// nearest first.
+	/// Approximate `k` nearest neighbours; `search_l` is the beam width (≥ `k`).
+	/// Returns `(id, distance)` nearest first.
 	pub fn search(&self, query: &[f32], k: usize, search_l: usize) -> Vec<(String, f32)> {
 		if self.count == 0 || k == 0 || query.len() != self.dim {
 			return Vec::new();
@@ -434,11 +406,8 @@ impl DiskIndex {
 			.collect()
 	}
 
-	/// Like [`search`](Self::search) but returns [`HnswHit`]s carrying a cosine
-	/// *similarity* score (`1.0 - distance`), matching the convention of
-	/// [`crate::base::hnsw::HnswIndex::search`]. This lets disk-resident and
-	/// in-RAM hits fuse in one ranking (see `base::search::merge_hits`). Nearest
-	/// first. The `f32` on-disk distance is widened to `f64` to match `HnswHit`.
+	/// [`search`](Self::search) as [`HnswHit`]s with a cosine *similarity* score
+	/// (`1.0 - distance`), so disk and in-RAM hits fuse in one ranking.
 	pub fn search_hits(&self, query: &[f32], k: usize, search_l: usize) -> Vec<HnswHit> {
 		self
 			.search(query, k, search_l)
@@ -450,12 +419,8 @@ impl DiskIndex {
 			.collect()
 	}
 
-	/// Filtered variant of [`search_hits`](Self::search_hits): only ids passing
-	/// `keep` are returned. The candidate pool is widened to `search_l.max(k)`
-	/// before filtering so a sparse filter still yields up to `k` survivors
-	/// (post-filtering a fixed top-`k` would under-return). Recall under a very
-	/// selective `keep` scales with `search_l` — widen it when the filter is
-	/// rare. Mirrors `base::search::search_all_filtered`'s full-`k` contract.
+	/// [`search_hits`](Self::search_hits) restricted to ids passing `keep`; the
+	/// pool widens to `search_l.max(k)` first so a sparse filter still fills `k`.
 	pub fn search_hits_filtered(
 		&self,
 		query: &[f32],
@@ -561,9 +526,6 @@ mod tests {
 
 	#[test]
 	fn search_hits_returns_cosine_similarity_nearest_first() {
-		// search_hits must convert on-disk distance -> cosine similarity
-		// (1 - dist), so scores DESCEND (nearest first) and an indexed point
-		// scores ~1.0 against itself — the convention base::search fuses on.
 		let dir = tempfile::tempdir().unwrap();
 		let items = rand_items(200, 16, 1);
 		build_and_save(dir.path(), &items, Params::default()).unwrap();
@@ -577,7 +539,6 @@ mod tests {
 			"self-similarity ~1.0, got {}",
 			hits[0].score
 		);
-		// Scores are non-increasing (distances were non-decreasing).
 		for w in hits.windows(2) {
 			assert!(w[0].score >= w[1].score, "scores must descend: {:?}", hits);
 		}
@@ -590,8 +551,7 @@ mod tests {
 		build_and_save(dir.path(), &items, Params::default()).unwrap();
 		let idx = DiskIndex::open(dir.path()).unwrap();
 
-		// Keep only even-numbered ids ("e0","e2",...). Widen search_l so the
-		// sparse filter still yields a full k.
+		// search_l widened so the sparse even-id filter still yields a full k.
 		let even = |id: &str| {
 			id.trim_start_matches('e')
 				.parse::<usize>()
@@ -606,7 +566,6 @@ mod tests {
 			"every id passes the predicate"
 		);
 
-		// Filtered ids are a subset of a wide unfiltered candidate set.
 		let wide: HashSet<String> = idx
 			.search_hits(q, 128, 128)
 			.into_iter()
@@ -617,7 +576,6 @@ mod tests {
 			"filtered hits are drawn from the unfiltered candidate pool"
 		);
 
-		// Reject-all -> empty; k==0 -> empty.
 		assert!(idx.search_hits_filtered(q, 10, 64, &|_| false).is_empty());
 		assert!(idx.search_hits_filtered(q, 0, 64, &even).is_empty());
 	}
@@ -627,7 +585,6 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let items = rand_items(10, 8, 3);
 		build_and_save(dir.path(), &items, Params::default()).unwrap();
-		// Truncate vectors.bin → open must fail, not read out of bounds.
 		std::fs::write(vectors_path(dir.path()), b"short").unwrap();
 		assert!(DiskIndex::open(dir.path()).is_err());
 	}

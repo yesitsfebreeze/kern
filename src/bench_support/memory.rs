@@ -1,11 +1,5 @@
-//! Vector-storage footprint estimate for a built graph — the dominant memory cost
-//! of a vector DB and the headline capacity number ("N vectors of D dims cost X").
-//! Reports the in-memory f32 cost and the int8-quantized equivalent, so the
-//! scalar-quantization saving (a kern moat) is a concrete ratio, not a claim.
-//!
-//! Scope: the vector PAYLOAD only. It excludes the HNSW graph structure, entity
-//! text/metadata, and allocator overhead, so it is a lower bound on process RSS,
-//! not a measurement of it. (Portable + deterministic, unlike RSS.)
+//! Vector-storage footprint estimate for a built graph: f32 vs int8. PAYLOAD only —
+//! excludes HNSW structure, text/metadata, allocator — so it is a lower bound on RSS.
 
 use crate::base::graph::GraphGnn;
 
@@ -21,8 +15,7 @@ pub struct MemoryReport {
 }
 
 impl MemoryReport {
-	/// float bytes / int8 bytes — the scalar-quantization compression ratio
-	/// (`size_of::<f32>()` = 4 when every entity shares one dim). 0 if no vectors.
+	/// float bytes / int8 bytes; 0 when there are no vectors.
 	pub fn quant_ratio(&self) -> f64 {
 		if self.int8_vector_bytes == 0 {
 			0.0
@@ -32,8 +25,6 @@ impl MemoryReport {
 	}
 }
 
-/// Estimate the vector-payload memory of `g`: `vectors * dim * 4` for f32 and
-/// `vectors * dim * 1` for the int8 scalar-quantized equivalent.
 pub fn estimate_memory(g: &GraphGnn) -> MemoryReport {
 	let mut entities = 0;
 	let mut vectors = 0;

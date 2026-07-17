@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-/// Kind of filesystem change.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum WatchKind {
 	Created,
@@ -11,12 +10,7 @@ pub enum WatchKind {
 }
 
 /// Single coalesced filesystem event emitted by [`crate::FileWatcher`].
-///
-/// `path` is the canonical path the event concerns. For `Renamed`, `path`
-/// equals `to` (the new location); the rename payload also carries `from`.
-/// Build via [`WatchEvent::new`] so that invariant is enforced rather than left
-/// to each caller. Derives `Hash` so events can be used as `HashMap`/`HashSet`
-/// keys (e.g. for dedup) without downstream boilerplate.
+/// Invariant: for `Renamed`, `path == to` — build via [`WatchEvent::new`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WatchEvent {
 	pub path: PathBuf,
@@ -25,10 +19,7 @@ pub struct WatchEvent {
 }
 
 impl WatchEvent {
-	/// Construct an event, enforcing the `Renamed` invariant: `path` is always the
-	/// NEW location (`to`). For other kinds `path` is used as given. Centralising
-	/// it here means a caller can't accidentally emit a `Renamed` whose `path`
-	/// points at the old location.
+	/// For `Renamed` the `path` argument is overridden with `to`.
 	pub fn new(path: PathBuf, kind: WatchKind, ts: SystemTime) -> Self {
 		let path = match &kind {
 			WatchKind::Renamed { to, .. } => to.clone(),
@@ -44,8 +35,6 @@ mod tests {
 
 	#[test]
 	fn renamed_event_path_is_forced_to_the_new_location() {
-		// Even when the caller passes the OLD path, `new` overrides it with `to`,
-		// pinning the documented `path == to` invariant in code.
 		let ev = WatchEvent::new(
 			PathBuf::from("/old.txt"),
 			WatchKind::Renamed {

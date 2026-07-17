@@ -1,28 +1,19 @@
-//! `[gossip]` config: opt-in federation that lets a kern daemon share knowledge
-//! with same-network peers over TCP + LAN multicast discovery. OFF by default —
-//! a lone daemon never opens a gossip socket or announces itself. Enable it per
-//! project only when you want several daemons (sharing one `network_id`) to pool
-//! memory.
+//! `[gossip]`: opt-in federation over TCP + LAN multicast discovery. OFF by
+//! default — a lone daemon opens no socket and never announces itself.
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GossipConfig {
-	/// Master switch for federation. OFF by default: when false the daemon
-	/// runs no gossip node, no listener, and no discovery (the historical
-	/// behavior). Turn on per project to share knowledge with peers.
+	/// Master switch for federation; false runs no node, listener, or discovery.
 	pub enabled: bool,
-	/// TCP bind address for the gossip listener. A fixed port lets peers
-	/// dial in; `:0` picks an ephemeral port (discovery still advertises it).
+	/// TCP bind address for the gossip listener; `:0` picks an ephemeral port.
 	pub addr: String,
-	/// LAN multicast peer discovery: advertise this node and auto-add peers
-	/// announcing the same network id.
+	/// LAN multicast discovery: advertise, and auto-add same-network-id peers.
 	pub discovery: bool,
-	/// Discovery network id shared by the nodes to pool. When unset, the
-	/// graph's generated per-daemon UUID is announced — unique per daemon, so
-	/// independent daemons never auto-pair. Set the same value (any non-empty
-	/// string without ':') on each daemon to pool them intentionally.
+	/// Discovery id shared by the daemons to pool. Unset announces the graph's
+	/// per-daemon UUID, so independent daemons never auto-pair.
 	pub network_id: Option<String>,
 	/// UDP port for discovery announce/listen.
 	pub discovery_port: u16,
@@ -31,9 +22,8 @@ pub struct GossipConfig {
 }
 
 impl GossipConfig {
-	/// The network id to announce on discovery: the configured `network_id`
-	/// when valid, else the graph's `generated` one. A ':' would corrupt the
-	/// `kern:<id>:<addr>` announce wire format, so such ids are rejected.
+	/// The id to announce: the configured `network_id` when valid, else
+	/// `generated`. A ':' would corrupt the `kern:<id>:<addr>` announce format.
 	pub fn effective_network_id(&self, generated: &str) -> String {
 		match self.network_id.as_deref() {
 			Some(id) if !id.is_empty() && !id.contains(':') => id.to_string(),
@@ -70,8 +60,6 @@ mod tests {
 	#[test]
 	fn default_is_disabled_with_expected_field_values() {
 		let c = GossipConfig::default();
-		// Federation is OFF by default — a fresh daemon must never open a socket or
-		// announce itself without an explicit opt-in.
 		assert!(!c.enabled, "gossip is disabled by default");
 		assert_eq!(c.addr, "0.0.0.0:7400");
 		assert!(

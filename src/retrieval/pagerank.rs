@@ -2,9 +2,8 @@ use crate::base::graph::GraphGnn;
 use crate::base::search::EntityHit;
 use std::collections::HashMap;
 
-/// Personalization/teleport distribution over the `n` nodes: seed scores
-/// (clamped non-negative) normalized to sum 1. With no usable seeds, falls back
-/// to uniform — i.e. global (non-personalized) PageRank.
+/// Teleport distribution: seed scores (clamped >= 0) normalized to sum 1; no
+/// usable seeds falls back to uniform — global (non-personalized) PageRank.
 fn teleport_vector(seeds: &[EntityHit], id_to_idx: &HashMap<String, usize>, n: usize) -> Vec<f64> {
 	let mut tele = vec![0.0f64; n];
 	let mut seed_sum = 0.0;
@@ -28,14 +27,8 @@ fn teleport_vector(seeds: &[EntityHit], id_to_idx: &HashMap<String, usize>, n: u
 	tele
 }
 
-/// PageRank over the entity graph.
-///
-/// `seeds` is the personalization (teleport) distribution: when non-empty the
-/// teleport vector is built from the seed entities weighted by their scores,
-/// yielding query-Personalized PageRank (HippoRAG 2 — seed teleport at
-/// query-linked entities for multi-hop / associative recall). When `seeds` is
-/// empty (or none of the seeds exist in the graph) the teleport is uniform,
-/// recovering global query-independent PageRank.
+/// PageRank over the entity graph. Non-empty `seeds` personalize the teleport
+/// (query-personalized); empty/unknown seeds recover global PageRank.
 pub fn pagerank(
 	g: &GraphGnn,
 	seeds: &[EntityHit],
@@ -43,9 +36,6 @@ pub fn pagerank(
 	iters: usize,
 	top_k: usize,
 ) -> Vec<EntityHit> {
-	// The dense node index + adjacency are epoch-cached on the graph: retrieval
-	// runs many queries between writes, so the rebuild (String clones for every
-	// entity and edge) happens once per mutation instead of once per query.
 	let adj = g.entity_adjacency();
 	let ids = &adj.ids;
 	let n = ids.len();
@@ -59,9 +49,7 @@ pub fn pagerank(
 	let mut rank = tele.clone();
 	let mut next = vec![0.0f64; n];
 
-	// Stop early once the rank vector stops moving — `iters` is just an upper
-	// bound. Power iteration on a stochastic matrix converges geometrically, so a
-	// well-connected graph typically settles in far fewer than the cap.
+	// Stop early once the rank vector stops moving — `iters` is just an upper bound.
 	const CONVERGENCE_EPS: f64 = 1e-9;
 
 	for _ in 0..iters.max(1) {
@@ -88,8 +76,6 @@ pub fn pagerank(
 				next[ti] += share;
 			}
 		}
-		// L1 movement this step; once below epsilon the ranks have converged and
-		// further iterations only re-derive the same fixed point.
 		let delta: f64 = next
 			.iter()
 			.zip(rank.iter())
@@ -106,17 +92,11 @@ pub fn pagerank(
 		return Vec::new();
 	}
 	let mut scored: Vec<(usize, f64)> = rank.iter().copied().enumerate().collect();
-	// Rank order: score descending, ties broken by id ascending. Because `ids` are
-	// unique (deduped above), this is a STRICT total order — no two distinct
-	// entries compare Equal — so a top-k partition followed by sorting only those k
-	// yields exactly the same result as a full sort + take.
+	// Score desc, id asc — unique ids make this a STRICT total order, so the
+	// top-k partition + sorting only the survivors equals a full sort + take.
 	let cmp = |a: &(usize, f64), b: &(usize, f64)| {
 		crate::base::util::cmp_rank(a.1, &ids[a.0], b.1, &ids[b.0])
 	};
-	// Partition the top-k into [0, take) in O(n) average instead of fully sorting
-	// all n entities in O(n log n). pagerank runs per query over the entire entity
-	// graph, so this matters as the graph grows toward Qdrant scale; the final
-	// sort then orders only the k survivors.
 	if take < scored.len() {
 		scored.select_nth_unstable_by(take - 1, &cmp);
 		scored.truncate(take);
@@ -228,9 +208,7 @@ mod tests {
 
 	#[test]
 	fn top_k_partition_matches_full_sort_prefix() {
-		// Distinct in-degrees -> distinct ranks. A top_k=3 query must return the
-		// exact same first three (id and score) as the full ranking, proving the
-		// select_nth_unstable_by partition agrees with a full sort + take.
+		// Distinct in-degrees -> distinct ranks; top-3 must equal the full ranking's prefix.
 		let mut g = GraphGnn::new();
 		let mut k = Kern::new("k", "");
 		let nodes = ["A", "B", "C", "D", "E", "F", "G", "H"];
@@ -266,10 +244,8 @@ mod tests {
 
 	#[test]
 	fn ties_break_by_id_ascending_under_top_k() {
-		// No edges -> uniform rank -> every node ties. With top_k=1 the partition
-		// must still resolve the tie by id ascending ("A"), not by hash/insertion
-		// order. This is the case that would break if the comparator were not a
-		// strict total order through select_nth_unstable_by.
+		// No edges -> all ranks tie; top_k=1 must resolve by id ascending — breaks
+		// if the comparator is not a strict total order through select_nth_unstable_by.
 		let mut g = GraphGnn::new();
 		let mut k = Kern::new("k", "");
 		for id in ["C", "A", "B"] {
@@ -300,12 +276,10 @@ mod tests {
 
 		let global = pagerank(&g, &[], 0.85, 200, 4);
 		let gscore = |id: &str| global.iter().find(|h| h.entity_id == id).unwrap().score;
-		// Symmetric components: A and X tie globally.
 		assert!((gscore("A") - gscore("X")).abs() < 1e-6, "A,X symmetric");
 
 		let seeded = pagerank(&g, &[hit("Y", 1.0)], 0.85, 200, 4);
 		let sscore = |id: &str| seeded.iter().find(|h| h.entity_id == id).unwrap().score;
-		// Seeding Y pushes mass into the X-component (Y and its target X).
 		assert!(sscore("X") > gscore("X"), "seeded X must beat global X");
 		assert!(sscore("X") > sscore("A"), "seeded X-component outranks A");
 		let sum: f64 = seeded.iter().map(|h| h.score).sum();

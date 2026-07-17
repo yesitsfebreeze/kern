@@ -1,21 +1,9 @@
-//! Deterministic hash-based embedding STUB — benchmarks only.
-//!
-//! Maps text to a fixed-[`DIM`] vector by feature-hashing each token into signed
-//! slots, then L2-normalizing. It is NOT a semantic embedder: there is no
-//! learned model, so cosine similarity reflects token *overlap*, not meaning.
-//! The bench harness (`build.rs`, `replay.rs`) uses it to exercise the
-//! retrieval/index path at scale without a live Ollama embedder. Never wire this
-//! into production retrieval.
+//! Deterministic feature-hashing embedding STUB — benchmarks only. Not a semantic
+//! embedder: cosine reflects token *overlap*, not meaning. Never wire into production.
 
 use crate::base::util::content_hash;
 
-// 512 (not 64): each token deposits 4 signed values, so a ~10-token document
-// writes ~40 slots. Into 64 that is ~40% collisions, which drowned the
-// token-overlap signal and made the dense leg near-noise (mean recall@10 0.45
-// on synthetic.json). At 512 collisions drop below ~8%, so cosine faithfully
-// tracks token overlap and the harness reaches recall@10 1.0 — i.e. retrieval
-// surfaces every token-overlapping relevant doc, with no residual hashing
-// artifact. Still bench-only; never a substitute for a real semantic model.
+// 512, not smaller: fewer dims collide enough to drown the token-overlap signal.
 pub const DIM: usize = 512;
 
 pub fn embed(text: &str) -> Vec<f32> {
@@ -34,8 +22,6 @@ pub fn embed(text: &str) -> Vec<f32> {
 			v[slot] += sign;
 		}
 	}
-	// Shared primitive — same L2 normalization the retrieval path uses; no local
-	// re-implementation (was a duplicate of base::math::l2_normalize).
 	crate::base::math::l2_normalize(&mut v);
 	v
 }
@@ -70,7 +56,11 @@ mod tests {
 	fn output_is_unit_length() {
 		let v = embed("the quick brown fox");
 		assert_eq!(v.len(), DIM);
-		let norm = v.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+		let norm = v
+			.iter()
+			.map(|&x| (x as f64) * (x as f64))
+			.sum::<f64>()
+			.sqrt();
 		assert!((norm - 1.0).abs() < 1e-9, "L2 norm ~1, got {norm}");
 	}
 
@@ -94,7 +84,6 @@ mod tests {
 	#[test]
 	fn identical_token_sets_match_and_disjoint_sets_diverge() {
 		let base = embed("alpha beta gamma");
-		// Same tokens, different order -> identical vector (sum is order-free).
 		let same = embed("gamma alpha beta");
 		let diff = embed("delta epsilon zeta");
 		assert!(

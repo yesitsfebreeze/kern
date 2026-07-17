@@ -47,10 +47,8 @@ pub fn build_gnn_snapshot(kern: &Kern, cfg: &GnnConfig) -> Option<GnnSnapshot> {
 		if !t.has_vector() {
 			continue;
 		}
-		// Superseded entities are never searchable (excluded from entity_idx /
-		// gnn_entity_idx), so propagating GNN re-embeddings over them is useless work
-		// that would also RE-INSERT them into gnn_entity_idx via `apply_gnn_updates`,
-		// undoing the supersede index-removal. Exclude them from the propagation set.
+		// Superseded entities are excluded: propagating would RE-INSERT them into
+		// gnn_entity_idx via `apply_gnn_updates`, undoing the supersede removal.
 		if t.status == EntityStatus::Superseded {
 			continue;
 		}
@@ -74,9 +72,6 @@ pub fn build_gnn_snapshot(kern: &Kern, cfg: &GnnConfig) -> Option<GnnSnapshot> {
 	let mut gg = Graph::new();
 	for id in &ids {
 		let t = &kern.entities[id];
-		// The feature matrix is materialized once below via gg.feature_matrix();
-		// node vectors are stored on the Graph, so no separate feat_data buffer.
-		// GNN tensor core stays f64 internally; widen once at the boundary.
 		let feat: Vec<f64> = t.vector.iter().map(|&x| x as f64).collect();
 		let _ = gg.add_node(id, feat);
 	}
@@ -84,15 +79,8 @@ pub fn build_gnn_snapshot(kern: &Kern, cfg: &GnnConfig) -> Option<GnnSnapshot> {
 	let mut pair_seen = HashSet::new();
 	let mut pos_edges: Vec<[usize; 2]> = Vec::new();
 
-	// GNN propagation is per-kern-local by design. Reasons whose `to`
-	// endpoint lives in a different kern (`to_kern_id` non-empty) are
-	// skipped: their target embedding is not in this kern's `feat_data`
-	// matrix, and `gnn_vector` is not federated by gossip
-	// (docs/kern/crdts-federation.md §7 lists it as explicitly excluded
-	// from CRDT replication). Local model, local edges. Commit a29ea34
-	// stamps `to_kern_id` more aggressively on `move_entity`, which
-	// increases the count of skipped reasons here — that's the intended
-	// outcome, not a regression.
+	// Cross-kern reasons (`to_kern_id` non-empty) are skipped by design — their
+	// target embedding is not in this kern's snapshot.
 	for r in kern.reasons.values() {
 		if !r.to_kern_id.is_empty() || r.to.is_empty() {
 			continue;
@@ -151,8 +139,6 @@ fn apply_gnn_updates(
 				continue;
 			}
 			if let Some(t) = kern.entities.get_mut(entity_id) {
-				// Narrow the f64 GNN output to the f32 entity representation once,
-				// here at the boundary.
 				let vec32: Vec<f32> = vec.iter().map(|&x| x as f32).collect();
 				let w = cosine_align(&t.vector, &vec32);
 				if w >= 0.5 {
@@ -179,12 +165,8 @@ fn apply_gnn_updates(
 	}
 }
 
-/// Map cosine similarity into a `[0,1]` "alignment" weight: identical → 1.0,
-/// opposite → 0.0, orthogonal or degenerate → 0.5 (neutral). Delegates the dot/
-/// norm math to [`crate::base::math::cosine`] (its SIMD path) instead of a second
-/// hand-rolled copy; a zero-norm there returns 0.0, which maps to the same 0.5
-/// neutral. The length guard stays here so a dimension mismatch is neutral rather
-/// than a partial zip.
+/// Cosine mapped into a `[0,1]` alignment weight: identical → 1.0, opposite → 0.0,
+/// orthogonal/degenerate (zero-norm, length mismatch) → 0.5 neutral.
 fn cosine_align(a: &[f32], b: &[f32]) -> f64 {
 	if a.is_empty() || b.is_empty() || a.len() != b.len() {
 		return 0.5;
@@ -226,7 +208,6 @@ mod tests {
 
 	#[test]
 	fn gnn_skipped_below_min_thoughts_default() {
-		// Card #30: a tiny graph must NOT train a GNN under the default floor.
 		let k = kern_with_n(3);
 		let cfg = GnnConfig::defaults(); // min_thoughts = 128
 		assert!(
@@ -237,7 +218,6 @@ mod tests {
 
 	#[test]
 	fn gnn_runs_when_floor_lowered() {
-		// Lowering the floor re-enables training, proving it's the floor gating.
 		let k = kern_with_n(3);
 		let mut cfg = GnnConfig::defaults();
 		cfg.min_thoughts = 2;
@@ -249,10 +229,7 @@ mod tests {
 
 	#[test]
 	fn superseded_entities_excluded_from_gnn_snapshot() {
-		// A superseded entity is not searchable, so it must not enter GNN
-		// propagation — apply_gnn_updates would otherwise re-insert it into
-		// gnn_entity_idx, undoing accept::supersede's index removal, and re-embedding
-		// it is wasted work. Supersede a LEAF (e3) so e0->e1->e2 stay connected.
+		// Supersede a LEAF (e3) so e0->e1->e2 stay connected.
 		let mut k = kern_with_n(4);
 		k.entities.get_mut("e3").unwrap().status = EntityStatus::Superseded;
 		let mut cfg = GnnConfig::defaults();
@@ -283,7 +260,6 @@ mod tests {
 			(cosine_align(&[1.0, 0.0], &[0.0, 1.0]) - 0.5).abs() < 1e-6,
 			"orthogonal -> 0.5"
 		);
-		// Degenerate inputs are neutral (0.5), not a panic or partial zip.
 		assert_eq!(cosine_align(&[], &[]), 0.5, "empty -> 0.5");
 		assert_eq!(
 			cosine_align(&[1.0, 2.0], &[1.0]),

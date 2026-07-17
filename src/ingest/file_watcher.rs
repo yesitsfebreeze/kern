@@ -1,15 +1,5 @@
-//! Slice O — kern-side filesystem watcher sink.
-//!
-//! Bridges `src/watcher` events into kern's canonical ingest path.
-//! A `KernFileWatcherSink` implements [`watcher::IngestSink`]; on every
-//! `IngestRecord` it builds a `Document` job (kind = `EntityKind::Document`,
-//! `Source::File { path }`) and forwards through `Worker::enqueue` so the
-//! existing embed → `place_document` pipeline runs unchanged. There is no
-//! duplication of placement / dedup logic — same shape as slice K's
-//! `WorkerSink`.
-//!
-//! `run` constructs a `FileWatcher` + `IngestPipeline` and pumps events
-//! into the sink until the watcher drops (channel close).
+//! Bridges `src/watcher` events into kern's canonical ingest path: each
+//! `IngestRecord` becomes a `Document` job through `Worker::enqueue`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,9 +10,8 @@ use watcher::{FileWatcher, IgnoreRules, IngestPipeline, IngestRecord, IngestSink
 use crate::base::types::{EntityKind, Source};
 use crate::ingest::{Config as IngestRunConfig, Worker};
 
-/// Strip the `file://` (or `file:///`) prefix produced by
-/// `watcher::pipeline::file_uri`. Returns the input unchanged when no
-/// prefix is present (defensive — kern still accepts plain paths).
+/// Strip the `file://`/`file:///` prefix from `watcher::pipeline::file_uri`;
+/// input without a prefix passes through unchanged (defensive).
 fn strip_file_uri(uri: &str) -> String {
 	if let Some(rest) = uri.strip_prefix("file:///") {
 		// Empty authority. Windows `file:///C:/foo` → `C:/foo`; POSIX `file:///abs`
@@ -31,8 +20,7 @@ fn strip_file_uri(uri: &str) -> String {
 	}
 	if let Some(rest) = uri.strip_prefix("file://") {
 		// Non-empty authority: `file://host/path`. Per RFC 8089 the local path is
-		// everything from the first '/', so DROP the host (`file://host/p` -> `/p`)
-		// instead of the old behaviour that smuggled `host` into the path.
+		// everything from the first '/', so DROP the host (`file://host/p` -> `/p`).
 		return match rest.find('/') {
 			Some(i) => rest[i..].to_string(),
 			None => String::new(), // bare `file://host` with no path
@@ -41,10 +29,8 @@ fn strip_file_uri(uri: &str) -> String {
 	uri.to_string()
 }
 
-/// Kern-side sink for filesystem ingest events. Forwards each record through
-/// the shared `Worker`, never touching `place_document` directly. Cheap to
-/// clone (only an `Arc<Worker>` inside) — the `IngestPipeline` takes its
-/// sink by value, so we hand it a clone and keep the `Arc` for callers.
+/// Forwards each filesystem ingest record through the shared `Worker`. Cheap to
+/// clone (one `Arc`) — the `IngestPipeline` takes its sink by value.
 #[derive(Clone)]
 pub struct KernFileWatcherSink {
 	worker: Arc<Worker>,
@@ -82,8 +68,8 @@ impl IngestSink for KernFileWatcherSink {
 
 		let descriptor = language_hint.unwrap_or_default();
 
-		// Fire-and-forget; `place_document`'s vector-similarity dedup keeps
-		// the entity count stable when the same file is re-ingested.
+		// Fire-and-forget; `place_document`'s dedup keeps the entity count
+		// stable when the same file is re-ingested.
 		self.worker.enqueue(
 			content,
 			source,
@@ -95,10 +81,8 @@ impl IngestSink for KernFileWatcherSink {
 	}
 }
 
-/// Spawn the watcher event pump. Runs until the underlying `FileWatcher`
-/// channel closes (i.e. the watcher is dropped or its background task
-/// exits). Returns on success once the stream ends; surfaces watcher
-/// construction errors to the caller.
+/// Watcher event pump: runs until the `FileWatcher` channel closes; surfaces
+/// watcher construction errors to the caller.
 pub async fn run(
 	roots: Vec<PathBuf>,
 	ignore: IgnoreRules,
@@ -127,8 +111,8 @@ mod tests {
 	use crate::base::util;
 	use crate::crdt::GCounter;
 
-	/// Test sink that bypasses the embed-backed `Worker` and writes directly
-	/// into a graph so kern tests stay hermetic.
+	/// Bypasses the embed-backed `Worker`, writing directly into a graph so
+	/// tests stay hermetic.
 	#[derive(Clone)]
 	struct DirectFileSink {
 		graph: Arc<RwLock<GraphGnn>>,
@@ -224,7 +208,6 @@ mod tests {
 	fn strip_file_uri_handles_windows_and_posix() {
 		assert_eq!(strip_file_uri("file:///C:/foo/bar.rs"), "C:/foo/bar.rs");
 		assert_eq!(strip_file_uri("file:///abs/posix.rs"), "abs/posix.rs");
-		// Non-empty authority: the host is dropped, the path keeps its leading slash.
 		assert_eq!(strip_file_uri("file://host/p.rs"), "/p.rs");
 		assert_eq!(
 			strip_file_uri("file://host"),
@@ -234,8 +217,6 @@ mod tests {
 		assert_eq!(strip_file_uri("plain/path.rs"), "plain/path.rs");
 	}
 
-	/// Unit: a single record passed to the kern-shaped sink yields a
-	/// `Document` entity with `Source::File { path = stripped uri }`.
 	#[tokio::test]
 	async fn sink_ingest_produces_file_document() {
 		let g = Arc::new(RwLock::new(GraphGnn::new()));
@@ -253,10 +234,8 @@ mod tests {
 		assert_eq!(paths[0], "tmp/hello.rs");
 	}
 
-	/// Integration: real `FileWatcher` + sink → creating a file produces an
-	/// entity with the expected source path. We drive the pipeline manually
-	/// (same as `pipeline::handle`) so the test doesn't need to wire the
-	/// kern startup path.
+	/// Real `FileWatcher` + sink; the pipeline is driven manually so the test
+	/// doesn't wire the kern startup path.
 	#[tokio::test]
 	async fn watcher_pipeline_creates_document_for_new_file() {
 		let dir = tempdir().expect("tempdir");
@@ -274,8 +253,7 @@ mod tests {
 		let target = root.join("note.md");
 		std::fs::write(&target, "hello watcher").expect("write file");
 
-		// Drain debounced events for up to ~2s, feeding them through the
-		// pipeline. We stop as soon as the graph reflects the ingest.
+		// Drain debounced events until the graph reflects the ingest (<= ~2s).
 		let deadline = std::time::Instant::now() + Duration::from_secs(2);
 		while std::time::Instant::now() < deadline {
 			match timeout(Duration::from_millis(200), fw.next_event()).await {
@@ -304,11 +282,8 @@ mod tests {
 		);
 	}
 
-	/// Idempotency: feeding the same `IngestRecord` twice keeps the entity
-	/// count stable. With the test sink, identical text → identical
-	/// `content_hash` id → `accept` collapses to a single entity (matches
-	/// production where `place_document`'s `find_duplicate` returns the
-	/// existing id).
+	/// Same record twice → one entity: identical text → identical content-hash
+	/// id, matching production's `find_duplicate` dedup.
 	#[tokio::test]
 	async fn duplicate_ingest_is_idempotent() {
 		let g = Arc::new(RwLock::new(GraphGnn::new()));

@@ -1,7 +1,5 @@
-//! Int8 / scalar quantisation of embedding **vectors**: store each f32 dimension
-//! as one signed byte (4× smaller) for the on-disk and in-memory search index,
-//! keeping the original f32 vector for rescoring. This is vector quantisation for
-//! the index — not LLM-model quantisation.
+//! Vector quantisation for the search index (int8 / 1-bit sign), original f32
+//! kept for rescoring — not LLM-model quantisation.
 
 use serde::{Deserialize, Serialize};
 
@@ -13,10 +11,7 @@ pub enum QuantizationMode {
 	#[default]
 	None = 0,
 	Int8 = 1,
-	/// 1-bit sign quantisation: one bit per dimension (8 dims/byte), ranked by
-	/// Hamming distance for candidate generation and rescored with the retained
-	/// f32 vector. ~32× smaller index vectors than f32. In-memory only — the
-	/// on-disk projection (`StoredVec`) stays int8.
+	/// In-memory only — the on-disk projection (`StoredVec`) stays int8.
 	Binary = 2,
 }
 
@@ -25,10 +20,8 @@ impl QuantizationMode {
 		match s.trim().to_ascii_lowercase().as_str() {
 			"none" | "f32" | "f64" | "off" => Some(Self::None),
 			"int8" | "i8" => Some(Self::Int8),
-			// `Binary` is deliberately NOT user-selectable yet: pure 1-bit Hamming
-			// measures recall@10 ~0.33 (see `binary_recall_tracks_f64`), below int8's
-			// 0.75. It is wired + tested internally (`with_mode`) but stays out of the
-			// config surface until int8-rescore lifts recall to a usable floor.
+			// Binary deliberately not user-selectable: recall floor too low without
+			// rescore (see `binary_recall_tracks_f64`).
 			_ => None,
 		}
 	}
@@ -41,9 +34,7 @@ impl QuantizationMode {
 		}
 	}
 
-	/// Storage cost per vector dimension, for size estimates only. Narrow `f32`
-	/// because it feeds display/back-of-envelope math — keeping it narrow
-	/// avoids a silent widening at the (printf-style) call sites.
+	/// Size estimates only.
 	pub fn bytes_per_dim(self) -> f32 {
 		match self {
 			Self::None => 4.0,
@@ -64,9 +55,7 @@ pub struct QuantizedVec {
 	/// Packed sign bits for `Binary` mode (8 dims/byte), empty otherwise.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub b: Vec<u8>,
-	/// True dimension count for `Binary` mode (the packed last byte is padded, so
-	/// `b.len() * 8` over-counts). Zero for other modes. Safe to add: `QuantizedVec`
-	/// is in-memory only and never persisted (see `store::StoredVec`).
+	/// True dim for `Binary` — the padded last byte makes `b.len() * 8` over-count.
 	#[serde(default)]
 	pub dim_bits: usize,
 }
@@ -90,14 +79,7 @@ impl QuantizedVec {
 	pub fn decode(&self) -> Vec<f32> {
 		match self.mode {
 			QuantizationMode::None => self.f.clone(),
-			QuantizationMode::Int8 => self
-				.q
-				.iter()
-				.map(|&qi| (qi as f32) * self.scale)
-				.collect(),
-			// Reconstruct ±1.0 per sign bit. Coarse by design: the search path
-			// rescores with the retained f32 vector, so this is only a fallback
-			// (e.g. the `_` arm of `quantized_cosine_distance`).
+			QuantizationMode::Int8 => self.q.iter().map(|&qi| (qi as f32) * self.scale).collect(),
 			QuantizationMode::Binary => (0..self.dim_bits)
 				.map(|i| {
 					if self.b[i / 8] & (1 << (i % 8)) != 0 {
@@ -155,7 +137,7 @@ fn encode_int8(v: &[f32]) -> QuantizedVec {
 	}
 }
 
-/// Pack each dimension into one sign bit (1 iff `x >= 0.0`), 8 dims/byte.
+/// One sign bit per dim, `1` iff `x >= 0.0` — zero counts as positive.
 fn encode_binary(v: &[f32]) -> QuantizedVec {
 	let mut b = vec![0u8; v.len().div_ceil(8)];
 	for (i, &x) in v.iter().enumerate() {
@@ -173,11 +155,8 @@ fn encode_binary(v: &[f32]) -> QuantizedVec {
 	}
 }
 
-/// Cosine-distance estimate from two sign-bit vectors via Hamming distance.
-/// For sign-random vectors the probability two dimensions disagree is `θ/π`,
-/// so `θ ≈ π · hamming/dim` and the estimated cosine is `cos(θ)`. Returns a
-/// distance `1 - cos(θ)` in `[0, 2]`, matching the scale of the float/int8 paths,
-/// and is monotone in Hamming distance (all that candidate-gen ranking needs).
+/// Hamming-based cosine-distance estimate in `[0, 2]` (same scale as the
+/// float/int8 paths), monotone in Hamming distance.
 fn binary_cosine_distance(a: &QuantizedVec, b: &QuantizedVec) -> f64 {
 	let dim = a.dim_bits.min(b.dim_bits);
 	if dim == 0 || a.b.len() != b.b.len() {
@@ -209,9 +188,6 @@ pub fn float_cosine_distance(a: &[f32], b: &[f32]) -> f64 {
 	if a.is_empty() || b.is_empty() || a.len() != b.len() {
 		return 1.0;
 	}
-	// Delegate the dot/norm work to the shared `base::math` cosine kernel, which
-	// runtime-selects an AVX2+FMA path and falls back to scalar. A zero-norm input
-	// returns similarity 0.0 there, giving distance 1.0 here.
 	1.0 - crate::base::math::cosine(a, b)
 }
 
@@ -370,11 +346,6 @@ mod tests {
 
 	#[test]
 	fn mixed_mode_exactly_matches_the_decoded_float_distance() {
-		// The `< 1e-2` check above only proves the result is SMALL (and can't be
-		// tighter — int8 is lossy, so a same-content mixed pair never reaches < eps).
-		// The precise contract is that the fallback arm decodes BOTH operands and
-		// delegates to float_cosine_distance — so the result must equal that exactly,
-		// and be the same whichever operand is the quantized one (order-symmetric).
 		let int8 = QuantizedVec::encode(&[1.0, -2.0, 3.0, 0.5], QuantizationMode::Int8);
 		let none = QuantizedVec::encode(&[1.0, -2.0, 3.0, 0.5], QuantizationMode::None);
 		let expected = float_cosine_distance(&int8.decode(), &none.decode());
@@ -411,8 +382,6 @@ mod tests {
 		);
 		assert_eq!(QuantizationMode::parse("bogus"), None);
 		assert_eq!(QuantizationMode::Int8.as_str(), "int8");
-		// Binary is intentionally NOT parseable from config yet (pure 1-bit recall
-		// ~0.33 < int8 0.75), but its display + size accounting are defined.
 		assert_eq!(
 			QuantizationMode::parse("binary"),
 			None,
@@ -424,7 +393,6 @@ mod tests {
 
 	#[test]
 	fn binary_packs_one_sign_bit_per_dim() {
-		// >=0 -> 1, <0 -> 0. 10 dims -> 2 bytes (ceil(10/8)), dim_bits records 10.
 		let v = vec![1.0f32, -1.0, 0.0, -0.5, 2.0, -3.0, 0.1, -0.1, 5.0, -5.0];
 		let qv = QuantizedVec::encode(&v, QuantizationMode::Binary);
 		assert_eq!(
@@ -433,9 +401,7 @@ mod tests {
 			"dim_bits is the true dimension, not b.len()*8"
 		);
 		assert_eq!(qv.b.len(), 2, "10 dims pack into ceil(10/8)=2 bytes");
-		// bit i set iff v[i] >= 0: indices 0,2,4,6,8 set in byte 0/1.
-		// byte0 bits {0,2,4,6} = 0b01010101 = 0x55; byte1 bit {8->bit0} = 0b01 = 0x01.
-		assert_eq!(qv.b[0], 0b0101_0101, "low byte sign pattern");
+		assert_eq!(qv.b[0], 0b0101_0101, "bit i set iff v[i] >= 0");
 		assert_eq!(qv.b[1], 0b0000_0001, "high byte: only dim 8 (>=0) set");
 	}
 
@@ -452,7 +418,6 @@ mod tests {
 
 	#[test]
 	fn binary_distance_zero_for_identical_and_monotone_in_angle() {
-		// Identical sign patterns -> Hamming 0 -> distance 0.
 		let a = QuantizedVec::encode(&[1.0, 1.0, 1.0, 1.0], QuantizationMode::Binary);
 		let b = QuantizedVec::encode(&[1.0, 1.0, 1.0, 1.0], QuantizationMode::Binary);
 		assert!(
@@ -460,14 +425,12 @@ mod tests {
 			"identical signs -> 0"
 		);
 
-		// Opposed sign patterns -> Hamming = dim -> cos(pi) = -1 -> distance 2.
 		let c = QuantizedVec::encode(&[-1.0, -1.0, -1.0, -1.0], QuantizationMode::Binary);
 		assert!(
 			(quantized_cosine_distance(&a, &c) - 2.0).abs() < 1e-12,
 			"all bits differ -> 2"
 		);
 
-		// Half the bits differ -> Hamming/dim = 0.5 -> cos(pi/2)=0 -> distance 1.
 		let d = QuantizedVec::encode(&[1.0, 1.0, -1.0, -1.0], QuantizationMode::Binary);
 		assert!(
 			(quantized_cosine_distance(&a, &d) - 1.0).abs() < 1e-12,
@@ -475,52 +438,53 @@ mod tests {
 		);
 	}
 
-	/// The AVX2 int8 dot/norm kernel must agree bit-for-bit with the scalar
-	/// reference across random vectors and the edge cases that stress the widen +
-	/// pairwise-madd path: lengths spanning the 16-wide chunk boundary and its
-	/// tail, and extreme i8 values (±127 and -128, which encode never emits but the
-	/// kernel must still handle identically to scalar).
+	/// -128 is included although encode never emits it — the kernel must still
+	/// match scalar on it.
 	#[cfg(target_arch = "x86_64")]
 	#[test]
 	fn int8_avx2_dot_norms_match_scalar_reference() {
 		if !is_x86_feature_detected!("avx2") {
-			return; // no SIMD on this host; scalar path already exercised elsewhere
+			return;
 		}
-		// Cheap deterministic LCG so the test needs no rng dependency.
+		// Deterministic LCG so the test needs no rng dependency.
 		let mut state = 0x2545_f491_4f6c_dd1d_u64;
 		let mut next_i8 = || {
 			state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
 			(state >> 33) as i8
 		};
-		// Lengths around the chunk boundary (16) plus a longer multi-chunk case.
 		for &len in &[0usize, 1, 7, 15, 16, 17, 31, 33, 64, 100] {
 			let a: Vec<i8> = (0..len).map(|_| next_i8()).collect();
 			let b: Vec<i8> = (0..len).map(|_| next_i8()).collect();
 			let scalar = int8_dot_norms_scalar(&a, &b);
 			// SAFETY: guarded by the runtime avx2 feature check above; a.len()==b.len().
 			let simd = unsafe { int8_dot_norms_avx2(&a, &b) };
-			assert_eq!(scalar, simd, "len {len}: avx2 {simd:?} vs scalar {scalar:?}");
+			assert_eq!(
+				scalar, simd,
+				"len {len}: avx2 {simd:?} vs scalar {scalar:?}"
+			);
 		}
-		// Extreme lanes: all +127, all -128, and a mix, over a chunk+tail length.
 		for pattern in [
 			vec![127i8; 20],
 			vec![-128i8; 20],
-			(0..20).map(|i| if i % 2 == 0 { 127 } else { -128 }).collect(),
+			(0..20)
+				.map(|i| if i % 2 == 0 { 127 } else { -128 })
+				.collect(),
 		] {
 			let scalar = int8_dot_norms_scalar(&pattern, &pattern);
 			// SAFETY: avx2 checked above; equal-length inputs.
 			let simd = unsafe { int8_dot_norms_avx2(&pattern, &pattern) };
-			assert_eq!(scalar, simd, "extreme lanes: avx2 {simd:?} vs scalar {scalar:?}");
+			assert_eq!(
+				scalar, simd,
+				"extreme lanes: avx2 {simd:?} vs scalar {scalar:?}"
+			);
 		}
 	}
 
 	#[test]
 	fn binary_hamming_ranking_tracks_true_cosine() {
-		// The point of binary candidate-gen: closer-by-cosine must rank nearer-by-Hamming.
-		// query ~ near shares more sign bits than query ~ far.
 		let query = vec![1.0f32, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
-		let near = vec![1.0f32, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, -1.0]; // 1 sign flip
-		let far = vec![-1.0f32, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0]; // 4 sign flips
+		let near = vec![1.0f32, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, -1.0];
+		let far = vec![-1.0f32, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0];
 		let q = QuantizedVec::encode(&query, QuantizationMode::Binary);
 		let n = QuantizedVec::encode(&near, QuantizationMode::Binary);
 		let f = QuantizedVec::encode(&far, QuantizationMode::Binary);

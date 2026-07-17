@@ -1,15 +1,5 @@
-//! Claude-Code capture intake.
-//!
-//! The CC `Stop` hook drops plain-text conversation deltas into the intake
-//! directory. This task drains them: each delta is distilled into durable
-//! `Claim`s (LLM), each claim is ingested through the canonical `Worker`,
-//! and the consumed file is archived to `<intake>/done/` — but ONLY once every
-//! claim has ingested successfully. If ingest fails (e.g. the embed endpoint
-//! is down) the delta is left in the intake and retried on the next drain, so
-//! a transient LLM outage never loses captured knowledge.
-//!
-//! The daemon is the single graph owner, so ingest happens in-process with
-//! no CLI race.
+//! Claude-Code capture intake: drain dropped conversation deltas, distill, ingest.
+//! A delta is archived ONLY once every claim ingested — an outage never loses it.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,10 +11,8 @@ use crate::ingest::outcome::OutcomeStatus;
 use crate::ingest::Worker;
 use crate::types::LlmFunc;
 
-/// Read + distill one delta file into `(stem, claims)`. The stem is the file
-/// name without extension (used as the session id for provenance). Returns
-/// `None` on read failure OR when distillation got no output from the LLM (a
-/// transient outage) — in both cases the file is left in place for retry.
+/// Read + distill one delta into `(stem, claims)`; the stem becomes the session
+/// id. `None` on read failure OR no LLM output — the file stays in place for retry.
 pub fn extract_claims(path: &Path, llm: &dyn Fn(&str) -> String) -> Option<(String, Vec<Claim>)> {
 	let text = match std::fs::read_to_string(path) {
 		Ok(t) => t,
@@ -59,9 +47,8 @@ pub fn archive(path: &Path, done_dir: &Path) {
 	}
 }
 
-/// Archive `path` iff every claim ingested successfully (`results` all true),
-/// or there were no claims at all. Returns whether the file was archived.
-/// A delta with any failed claim is left in the intake for a later retry.
+/// Archive `path` iff every claim ingested (or there were none); any failed
+/// claim leaves the delta in the intake for a later retry.
 pub fn finalize(path: &Path, done_dir: &Path, results: &[bool]) -> bool {
 	if results.iter().all(|&ok| ok) {
 		archive(path, done_dir);
@@ -71,11 +58,7 @@ pub fn finalize(path: &Path, done_dir: &Path, results: &[bool]) -> bool {
 	}
 }
 
-/// Delete archived deltas under `done_dir` whose mtime is older than `max_age`.
-/// The graph is the durable copy after ingest, so the archive is only a
-/// transient audit trail; sweeping it each drain cycle bounds disk/inode
-/// growth on a daemon that runs indefinitely. `now` is injected for testing.
-/// Returns the number of files removed.
+/// Delete archived deltas older than `max_age`; `now` is injected for testing.
 pub fn prune_done(done_dir: &Path, max_age: Duration, now: SystemTime) -> usize {
 	let entries = match std::fs::read_dir(done_dir) {
 		Ok(e) => e,
@@ -102,11 +85,8 @@ pub fn prune_done(done_dir: &Path, max_age: Duration, now: SystemTime) -> usize 
 	removed
 }
 
-/// Distill + ingest one `*.txt` delta, archiving it into `done/` iff every claim
-/// committed. Returns whether the file was archived. A non-`.txt` path, a read
-/// failure, an LLM outage (no distill output), or any failed claim leaves the
-/// delta in the intake for the next cycle to retry — so transient outages never
-/// drop captured knowledge.
+/// Distill + ingest one `*.txt` delta, archiving iff every claim committed. Any
+/// read/LLM/claim failure leaves it for the next cycle — outages never drop knowledge.
 async fn drain_entry(
 	path: &Path,
 	done: &Path,
@@ -128,18 +108,10 @@ async fn drain_entry(
 			section: String::new(),
 			title: format!("claude://{}", c.descriptor),
 		};
-		// Carry the distilled world-time hint onto this claim's ingest config.
 		let mut claim_cfg = cfg.clone();
 		claim_cfg.valid_from = c.valid_from;
 		let outcome = worker
-			.run(
-				c.text,
-				src,
-				EntityKind::Claim,
-				c.descriptor,
-				0.6,
-				claim_cfg,
-			)
+			.run(c.text, src, EntityKind::Claim, c.descriptor, 0.6, claim_cfg)
 			.await;
 		let ok = !matches!(outcome.status, OutcomeStatus::Failed);
 		if !ok {
@@ -150,13 +122,8 @@ async fn drain_entry(
 	finalize(path, done, &results)
 }
 
-/// Process one drain cycle: [`drain_entry`] every delta in `intake_dir`, then
-/// prune `done/` of entries older than `done_retention`. Returns the number of
-/// deltas archived.
-///
-/// Split out of [`run`]'s poll loop so the full intake→distill→ingest→archive
-/// path is unit-testable without spawning the never-returning loop. `now` is
-/// injected for the prune step's age comparison.
+/// One drain cycle: [`drain_entry`] every delta, drain the direct lane, prune
+/// both `done/` dirs. Returns the number of deltas archived.
 async fn drain_once(
 	intake_dir: &Path,
 	done: &Path,
@@ -179,20 +146,14 @@ async fn drain_once(
 			archived += 1;
 		}
 	}
-	// The durable direct-ingest lane shares this drain cycle: MCP `ingest`
-	// payloads accepted under `<intake>/direct/` replay through the same worker
-	// (verbatim — no distill) and archive into `direct/done/` on success.
 	archived += super::direct::drain_direct_once(&intake_dir.join("direct"), worker, cfg).await;
 	prune_done(done, done_retention, now);
 	prune_done(&intake_dir.join("direct").join("done"), done_retention, now);
 	archived
 }
 
-/// Daemon loop. Drains `intake_dir` immediately on startup, then every
-/// `interval`, via [`drain_once`]: for each `*.txt` delta — distill, ingest each
-/// claim through `worker` (awaiting the outcome), and archive the file only if
-/// all claims committed. Each cycle also prunes archived deltas older than
-/// `done_retention` so `done/` stays bounded.
+/// Daemon loop: [`drain_once`] immediately on startup, then every `interval`;
+/// each cycle prunes archives older than `done_retention` so `done/` stays bounded.
 pub async fn run(
 	intake_dir: PathBuf,
 	worker: Arc<Worker>,
@@ -207,8 +168,8 @@ pub async fn run(
 		dedup_threshold,
 		..Default::default()
 	};
-	// Drain first, sleep after — a delta dropped before the daemon started is
-	// processed on the first cycle instead of waiting a full `interval`.
+	// Drain first, sleep after — a delta dropped before startup is processed on
+	// the first cycle instead of waiting a full `interval`.
 	loop {
 		drain_once(
 			&intake_dir,
@@ -287,9 +248,7 @@ mod tests {
 
 	#[test]
 	fn extract_returns_none_on_llm_outage() {
-		// LLM outage: complete_func returns "". A non-empty delta must NOT be
-		// archived as done — extract_claims returns None so run() leaves it in
-		// the intake for retry. Regression guard for the data-loss bug.
+		// Regression: an outage once archived the delta unread (data loss).
 		let dir = tempdir().unwrap();
 		let delta = dir.path().join("sess-outage.txt");
 		std::fs::write(&delta, "user: remember my API key lives in vault X").unwrap();
@@ -300,8 +259,7 @@ mod tests {
 
 	#[test]
 	fn extract_returns_some_on_genuine_no_claims() {
-		// LLM responded "[]" (nothing worth keeping) — this is success, so the
-		// delta should be archivable: extract_claims returns Some([]).
+		// "[]" (nothing worth keeping) is success — Some([]), archivable.
 		let dir = tempdir().unwrap();
 		let delta = dir.path().join("sess-empty.txt");
 		std::fs::write(&delta, "user: hi\nassistant: hello").unwrap();
@@ -346,10 +304,8 @@ mod tests {
 		assert!(!done.join("sess-3.txt").exists());
 	}
 
-	/// End-to-end drive of one drain cycle (the body of `run`'s forever loop):
-	/// a seeded delta is distilled, every claim ingested through a REAL Worker,
-	/// and the file archived on success — with no network (embeddings come from a
-	/// local /api/embed stub) and no spawning of the never-returning loop.
+	/// One drain cycle end-to-end: delta distilled, claims through a REAL Worker,
+	/// file archived — no network (local /api/embed stub), no forever loop.
 	#[tokio::test]
 	async fn drain_once_ingests_a_delta_and_archives_it_end_to_end() {
 		use crate::base::graph::GraphGnn;
@@ -366,8 +322,7 @@ mod tests {
 		let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
 		let embedder = crate::llm::Client::new_embed_only(&format!("http://{addr}"), "m");
-		// Mock LLM: returns a one-claim array. distill parses it; the chunk splitter
-		// receives the same string and falls back to heuristic splitting.
+		// One-claim mock; the chunk splitter falls back to heuristic splitting.
 		let llm: LlmFunc =
 			Arc::new(|_p: &str| r#"[{"text":"the API key lives in vault X","kind":"fact"}]"#.to_string());
 		let graph = Arc::new(RwLock::new(GraphGnn::new()));

@@ -1,19 +1,5 @@
-//! `SearchSvc` — typed-RPC surface for search.
-//!
-//! Layout:
-//! - [`dto`] — wire types ([`SearchReq`], [`PreviewRes`], ...).
-//! - [`svc`] — `service!` invocation that emits [`SearchSvc`],
-//!   [`SearchSvcClient`], and [`serve_search_svc`].
-//! - [`mock`] — in-memory [`MockSearchServer`] for tests and
-//!   downstream slices (palette UI, preview pane).
-//!
-//! Crate-internal `service!` invocation is in [`svc`]; consumers
-//! re-export the generated trait/client/serve fn from this module.
-//!
-//! NB: `svc.rs` is **macro-generated surface** — `SearchSvcClient` and
-//! `serve_search_svc` are expanded in place by the `service!` macro from the
-//! trait. To change the RPC, edit the trait in `svc.rs`; never hand-edit the
-//! generated client/server shapes (they have no separate file).
+//! `SearchSvc` — typed-RPC surface for search. Client + serve fn are macro-
+//! expanded in place: edit the trait in `svc.rs`, there is no generated file.
 
 pub mod dto;
 pub mod mock;

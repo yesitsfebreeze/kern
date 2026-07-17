@@ -28,9 +28,8 @@ impl LinearLayer {
 		Self::with_rng(in_features, out_features, &mut rng)
 	}
 
-	/// Construct a `LinearLayer` with deterministic weight init from a
-	/// seeded RNG. Bias is zero-initialized (no RNG draw). Use this
-	/// constructor in tests so loss-decrease assertions are reproducible.
+	/// Deterministic weight init from a seeded RNG — use in tests asserting on
+	/// training dynamics so the run does not depend on system entropy.
 	pub fn with_rng<R: rand::Rng>(in_features: usize, out_features: usize, rng: &mut R) -> Self {
 		let scale = (2.0 / (in_features + out_features) as f64).sqrt();
 		let weight = Tensor::rand_with(in_features, out_features, scale, rng);
@@ -46,10 +45,8 @@ impl LinearLayer {
 		}
 	}
 
-	/// Fallible backward pass. Returns [`GnnError::MissingForwardState`] when
-	/// invoked before a successful `forward` (or after reset) instead of
-	/// panicking, and bubbles tensor shape errors as [`GnnError::Tensor`]. The
-	/// infallible [`Backward::backward`] delegates here.
+	/// Fallible backward — errors instead of panicking when `forward` has not run.
+	/// The infallible [`Backward::backward`] delegates here.
 	pub fn try_backward(&mut self, d_out: &Tensor) -> Result<Tensor, GnnError> {
 		let input = self
 			.last_input
@@ -103,7 +100,6 @@ impl Backward for LinearLayer {
 	}
 
 	fn zero_grads(&mut self) {
-		// In place — keeps the allocations, just zeroes them.
 		self.d_weight.fill(0.0);
 		self.d_bias.fill(0.0);
 	}
@@ -123,7 +119,7 @@ mod tests {
 	#[test]
 	fn forward_projects_to_out_features_width() {
 		let mut l = layer(4, 3);
-		let y = l.forward(&Tensor::zeros(2, 4)); // 2 samples x 4 features
+		let y = l.forward(&Tensor::zeros(2, 4));
 		assert_eq!((y.rows, y.cols), (2, 3), "n_samples x out_features");
 	}
 
@@ -178,7 +174,6 @@ mod tests {
 			GnnError::MissingForwardState(_)
 		));
 
-		// The infallible trait method degrades to a zero gradient of input shape.
 		let z = l.backward(&d_out);
 		assert_eq!(
 			(z.rows, z.cols),

@@ -1,0 +1,5 @@
+# src/mcp/tools_query.rs — commentary
+
+- `tool_schemas`: schema is co-located with the `tool_query` handler so the two can't silently drift; aggregated by `tools::tool_definitions`.
+- `tool_query` (answer cache): only the answer path is worth caching — it fires HyDE + synthesis (tens of seconds); pure vector retrieval is already sub-millisecond. Only unfiltered, default-sorted queries are cacheable because a filter or non-default sort changes the result set/order while the query vector stays the same (enforced by `query_is_cacheable`). The cache `tag` is the retrieval mode, keeping the three modes from colliding on one entry.
+- `base_entity_json`: defined once so the kern_rpc-consumed contract has a single source of truth — the envelope tests build on this same fn instead of a hand-mirrored copy that could silently drift. The kind/scheme/status echo exists so `kern_rpc::query` can build `EntityRef` without a second graph lookup (landed as Slice Z, along with `envelope_shape_tests`).

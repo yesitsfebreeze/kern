@@ -7,22 +7,12 @@ use crate::transport::Transport;
 use crate::types::{ToolResult, ToolSchema};
 use crate::PROTOCOL_VERSION;
 
-/// Cap on consecutive frames whose `id` doesn't match the in-flight request
-/// before [`Client::request`] gives up. Bounds the read loop so a peer flooding
-/// unrelated frames (or a wire desync) can't spin forever; in normal use only a
-/// handful of notifications are skipped before the matching reply arrives.
+/// Bounds [`Client::request`]'s read loop so a peer flooding unrelated frames
+/// (or a wire desync) can't spin forever.
 const MAX_UNMATCHED_FRAMES: usize = 1024;
 
-/// Blocking MCP client over a newline-delimited JSON-RPC wire.
-///
-/// Each request is one `{jsonrpc, id, method, params}` object serialized to a
-/// single line (no embedded newlines — [`Client::send`] rejects them) and
-/// flushed; the matching reply is the line whose `id` equals the request's.
-/// Fully SYNCHRONOUS: [`Client::request`] blocks reading frames off the transport
-/// until it sees that id, so a `Client` has at most one in-flight request and is
-/// not meant for concurrent calls from multiple threads. Notifications carry no
-/// `id` and expect no reply. `rx_buf` retains bytes read past a frame boundary
-/// for the next [`Client::recv`].
+/// Blocking MCP client over a newline-delimited JSON-RPC wire. At most one
+/// in-flight request — [`Client::request`] blocks until its id comes back.
 pub struct Client {
 	transport: Box<dyn Transport>,
 	next_id: AtomicU64,

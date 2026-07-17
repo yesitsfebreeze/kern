@@ -2,9 +2,8 @@ use crate::gnn::model::Model;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// On-disk weight format version. Bump when `WeightFile`/`TensorRecord` change
-/// shape so old files are rejected (see [`PersistError::VersionMismatch`]) rather
-/// than silently mis-decoded; add an explicit migration path at the same time.
+/// On-disk weight format version. Bump on any `WeightFile`/`TensorRecord` shape
+/// change (old files rejected, not mis-decoded) and add a migration path.
 pub const WEIGHT_FILE_VERSION: u32 = 1;
 
 #[derive(Debug, Error)]
@@ -90,10 +89,8 @@ pub fn unmarshal_weights(model: &mut Model, data: &[u8]) -> Result<(), PersistEr
 				file: (rec.rows, rec.cols),
 			});
 		}
-		// `rec.rows`/`rec.cols`/`rec.data` are independent deserialized fields, so a
-		// corrupt file can declare a matching shape yet carry a data vector of the
-		// wrong length. `copy_from_slice` PANICS on a length mismatch, so validate
-		// here and surface a clean error instead of crashing the daemon on load.
+		// Shape and data are independent fields: a corrupt file can match shape yet
+		// carry a wrong-length data vec, and `copy_from_slice` PANICS on that.
 		if rec.data.len() != param.data.len() {
 			return Err(PersistError::DataLenMismatch {
 				idx: i,
@@ -142,8 +139,7 @@ mod tests {
 		let src = small_model(1);
 		let bytes = marshal_weights(&src).expect("marshal");
 
-		// A differently-seeded model has the same architecture but different
-		// weights; unmarshal must overwrite them to match `src` exactly.
+		// Same architecture, different weights — unmarshal must overwrite them all.
 		let mut dst = small_model(999);
 		unmarshal_weights(&mut dst, &bytes).expect("unmarshal");
 
@@ -165,8 +161,6 @@ mod tests {
 
 	#[test]
 	fn unmarshal_rejects_a_future_version_before_checking_params() {
-		// Empty params would also be a count mismatch — but the version guard runs
-		// first, so this surfaces as VersionMismatch.
 		let wf = WeightFile {
 			version: WEIGHT_FILE_VERSION + 1,
 			params: Vec::new(),
@@ -183,10 +177,6 @@ mod tests {
 
 	#[test]
 	fn unmarshal_rejects_a_corrupt_data_length_without_panicking() {
-		// A file with the right version, param count and per-param shape, but one
-		// record's `data` vector is the wrong length (it still bincode-decodes).
-		// Without the length guard `copy_from_slice` would panic on load; the guard
-		// must turn it into a clean DataLenMismatch error.
 		let model = small_model(1);
 		let records: Vec<TensorRecord> = model
 			.parameters()
@@ -195,7 +185,6 @@ mod tests {
 			.map(|(i, p)| TensorRecord {
 				rows: p.rows,
 				cols: p.cols,
-				// Truncate the first param's data by one element; shape still matches.
 				data: if i == 0 {
 					p.data[..p.data.len() - 1].to_vec()
 				} else {

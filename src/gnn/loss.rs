@@ -80,8 +80,8 @@ mod tests {
 
 	#[test]
 	fn link_prediction_aligned_positive_edge_has_lower_loss_than_opposed() {
-		let aligned = Tensor::new(2, 2, vec![3.0, 0.0, 3.0, 0.0]).unwrap(); // dot +9
-		let opposed = Tensor::new(2, 2, vec![3.0, 0.0, -3.0, 0.0]).unwrap(); // dot -9
+		let aligned = Tensor::new(2, 2, vec![3.0, 0.0, 3.0, 0.0]).unwrap();
+		let opposed = Tensor::new(2, 2, vec![3.0, 0.0, -3.0, 0.0]).unwrap();
 		let pos = [[0usize, 1usize]];
 		assert!(
 			link_prediction_loss(&aligned, &pos, &[]) < link_prediction_loss(&opposed, &pos, &[]),
@@ -91,8 +91,6 @@ mod tests {
 
 	#[test]
 	fn link_prediction_grad_matches_numerical_gradient() {
-		// The analytic grad must match a central finite-difference of the loss —
-		// the strongest check for the file's most complex math.
 		let emb = Tensor::new(3, 2, vec![0.5, -0.2, 0.1, 0.3, -0.4, 0.6]).unwrap();
 		let pos = [[0usize, 1usize], [1, 2]];
 		let neg = [[0usize, 2usize]];

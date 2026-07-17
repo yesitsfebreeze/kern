@@ -1,0 +1,3 @@
+# src/lib.rs — commentary
+
+Second-pass migration: the crate `//!` header was a five-bullet responsibility list (memory / retrieval / llm / ingest / rpc). It is now two lines; the per-module `///` one-liners on each `pub mod` already carry the same map and are the rustdoc surface, so the bullets were pure duplication. Kern is a daemon (`kern --daemon`) exposing its surface over MCP stdio and HTTP; responsibilities: memory = CRDT-replicated knowledge graph with gossip sync, retrieval = vector + BM25 hybrid search, llm = provider-agnostic dispatch with quantisation support, ingest = file-watcher pipeline feeding the retrieval index, rpc = typed MCP service layer for external clients.

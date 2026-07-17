@@ -1,20 +1,12 @@
-use std::collections::{HashMap, VecDeque};
 use parking_lot::Mutex;
+use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 use crate::base::constants::{GOSSIP_SEEN_SET_CAP, GOSSIP_SEEN_TTL};
 use crate::base::locks::lock_recovered;
 
-/// Loop-suppression set for gossip message ids.
-///
-/// Membership is O(1) via a `HashMap<id, expiry>`. A parallel insertion-order
-/// `VecDeque` lets us reclaim memory in O(1) amortised: because the TTL is a
-/// constant, expiry is monotonic in insertion order, so expired entries always
-/// sit at the front. Live entries are only ever evicted under a genuine flood
-/// of more than `GOSSIP_SEEN_SET_CAP` distinct ids within one TTL window
-/// (oldest-first), which bounds memory; normal traffic never hits the cap and
-/// never evicts a still-live id (unlike the previous fixed ring, which
-/// overwrote by slot position regardless of expiry).
+/// Loop-suppression set for gossip message ids. The constant TTL makes expiry
+/// monotonic in insertion order, so expired entries always sit at the deque front.
 pub struct SeenSet {
 	inner: Mutex<SeenInner>,
 }
@@ -34,8 +26,7 @@ impl SeenSet {
 		}
 	}
 
-	/// Record `id` and report whether it was already seen and still live (the
-	/// caller should then suppress the message). O(1) amortised.
+	/// Record `id`; `true` means already seen and live — suppress the message.
 	pub fn add_and_check(&self, id: &str) -> bool {
 		self.add_and_check_at(id, Instant::now())
 	}
@@ -44,7 +35,6 @@ impl SeenSet {
 	fn add_and_check_at(&self, id: &str, now: Instant) -> bool {
 		let mut inner = lock_recovered(&self.inner);
 
-		// O(1) membership: already seen and not yet expired.
 		if let Some(&expires) = inner.live.get(id) {
 			if expires > now {
 				return true;
@@ -81,10 +71,8 @@ impl SeenSet {
 		self.inner.lock().live.len()
 	}
 
-	/// Length of the insertion-order `VecDeque`. In a settled state it equals
-	/// [`len`](Self::len) — every live id has exactly one order entry and expired
-	/// originals are reclaimed, not left as stale duplicates. Exposed so tests can
-	/// assert the two structures stay in lock-step.
+	/// Order-deque length; equals [`len`](Self::len) in a settled state (no stale
+	/// dupes). Exposed so tests can assert the two structures stay in lock-step.
 	#[cfg(test)]
 	fn len_order(&self) -> usize {
 		self.inner.lock().order.len()
@@ -127,9 +115,8 @@ mod tests {
 		let s = SeenSet::new();
 		let t0 = Instant::now();
 		assert!(!s.add_and_check_at("a", t0));
-		// Still live just before TTL.
+		// Still live just before TTL; expired past TTL -> treated as new again.
 		assert!(s.add_and_check_at("a", t0 + GOSSIP_SEEN_TTL - Duration::from_millis(1)));
-		// Expired past TTL -> treated as new again, and reclaimed.
 		let past = t0 + GOSSIP_SEEN_TTL + Duration::from_secs(1);
 		assert!(!s.add_and_check_at("a", past));
 		assert!(s.add_and_check_at("a", past), "re-recorded after expiry");
@@ -156,13 +143,10 @@ mod tests {
 	fn count_is_bounded_under_flood_recent_id_survives() {
 		let s = SeenSet::new();
 		let t0 = Instant::now();
-		// Flood more than CAP distinct ids within the same instant (all live).
 		for i in 0..(GOSSIP_SEEN_SET_CAP + 500) {
 			s.add_and_check_at(&format!("f{i}"), t0);
 		}
 		assert!(s.len() <= GOSSIP_SEEN_SET_CAP, "count must stay bounded");
-		// The most recently inserted id is still live (recent entries survive;
-		// only the oldest are evicted under flood).
 		let last = format!("f{}", GOSSIP_SEEN_SET_CAP + 499);
 		assert!(
 			s.add_and_check_at(&last, t0),
@@ -176,23 +160,19 @@ mod tests {
 		let t0 = Instant::now();
 		assert!(!s.add_and_check_at("a", t0), "first sight");
 
-		// Let it expire, then re-record well past the original TTL.
 		let past = t0 + GOSSIP_SEEN_TTL + Duration::from_secs(1);
 		assert!(
 			!s.add_and_check_at("a", past),
 			"expired id is treated as new again"
 		);
 
-		// FRESH TTL: the id is still live almost a full TTL after the RE-insert
-		// (measured from `past`, not from the original `t0`).
+		// Fresh TTL is measured from `past`, not from the original `t0`.
 		let near = past + GOSSIP_SEEN_TTL - Duration::from_millis(1);
 		assert!(
 			s.add_and_check_at("a", near),
 			"re-inserted id carries a fresh TTL"
 		);
 
-		// The expired original was reclaimed from the VecDeque, not left as a stale
-		// duplicate — so the two structures stay in lock-step at exactly one entry.
 		assert_eq!(s.len(), 1, "one live entry for the single id");
 		assert_eq!(
 			s.len_order(),

@@ -10,14 +10,8 @@ use crate::base::heat::{self, HeatConfig};
 
 use super::queue::{task, Queue, TaskKind};
 
-/// Last unix-seconds at which `maybe_enqueue_stigmergy_gc` actually fanned
-/// out a sweep. Single-flighted via `compare_exchange` so concurrent pulses
-/// can never double-enqueue.
-///
-/// The *timing decision* lives in the pure [`should_run_gc`] (which takes
-/// `now`/`last`/`interval` as args and is unit-tested directly), so this global
-/// is only a thin single-flight latch — tests exercise the GC-cadence logic via
-/// `should_run_gc` and never touch this static, keeping them parallel-safe.
+/// Last unix-seconds a GC sweep fanned out; single-flighted via
+/// `compare_exchange` so concurrent pulses can never double-enqueue.
 static LAST_GC_AT_SECS: AtomicU64 = AtomicU64::new(0);
 
 pub fn pulse(q: &Queue, g: &mut GraphGnn, kern_id: &str, strength: f64) {
@@ -28,8 +22,7 @@ pub fn pulse(q: &Queue, g: &mut GraphGnn, kern_id: &str, strength: f64) {
 		strength,
 		HeatConfig::default().half_life_secs,
 	);
-	// Below-threshold pulses are no-ops by contract; don't enqueue GC work
-	// either. The next above-threshold pulse will trigger the sweep.
+	// Below-threshold pulses are no-ops by contract — no GC fan-out either.
 	if strength >= PULSE_THRESHOLD {
 		maybe_enqueue_stigmergy_gc(q, g);
 		maybe_enqueue_reembed(q, g);
@@ -37,11 +30,8 @@ pub fn pulse(q: &Queue, g: &mut GraphGnn, kern_id: &str, strength: f64) {
 	}
 }
 
-/// Pure decision: should `maybe_enqueue_stigmergy_gc` fan out a sweep now?
-/// Returns true iff `interval` has fully elapsed since the last sweep.
-/// `now_secs == 0` (callers couldn't read the clock) returns false.
-/// `last_secs > now_secs` (clock skew) returns false — refuse to sweep on a
-/// regressed clock to avoid amplifying time travel.
+/// True iff `interval` has fully elapsed since the last sweep. `now_secs == 0`
+/// (unreadable clock) and `last_secs > now_secs` (skew) both refuse to sweep.
 pub fn should_run_gc(now_secs: u64, last_secs: u64, interval: Duration) -> bool {
 	if now_secs == 0 || last_secs > now_secs {
 		return false;
@@ -49,10 +39,8 @@ pub fn should_run_gc(now_secs: u64, last_secs: u64, interval: Duration) -> bool 
 	now_secs - last_secs >= interval.as_secs()
 }
 
-/// Single-flight guard around `should_run_gc`: at most one pulse per
-/// `STIGMERGY_GC_INTERVAL` enqueues `StigmergyGc` for every kern. Pending
-/// per-kern dedup is owned by `Queue::enqueue` via the existing TaskKey
-/// map, so a slow handler can't pile up duplicates either.
+/// Single-flight around `should_run_gc`: at most one pulse per interval fans out
+/// `StigmergyGc` for every kern. Per-kern pending dedup is owned by `Queue::enqueue`.
 fn maybe_enqueue_stigmergy_gc(q: &Queue, g: &GraphGnn) {
 	let now_secs = SystemTime::now()
 		.duration_since(UNIX_EPOCH)
@@ -77,9 +65,8 @@ fn maybe_enqueue_stigmergy_gc(q: &Queue, g: &GraphGnn) {
 /// consolidation, single-flighted by `compare_exchange` like [`LAST_GC_AT_SECS`].
 static LAST_CONSOLIDATE_AT_SECS: AtomicU64 = AtomicU64::new(0);
 
-/// Pure decision: enqueue a disk consolidation now? Only when the delta has grown
-/// past `min_delta` AND `interval` has elapsed since the last one (delegated to
-/// [`should_run_gc`] so the clock-skew / zero-clock guards are shared).
+/// Delta grew past `min_delta` AND interval elapsed (via [`should_run_gc`],
+/// sharing its clock-skew / zero-clock guards).
 pub fn should_consolidate(
 	now_secs: u64,
 	last_secs: u64,
@@ -90,9 +77,8 @@ pub fn should_consolidate(
 	delta_len >= min_delta && should_run_gc(now_secs, last_secs, interval)
 }
 
-/// Single-flight, interval-gated enqueue of a graph-global `DiskConsolidate` when
-/// the disk index's in-RAM delta has grown enough to be worth a snapshot rebuild.
-/// Cheap early-out when not disk-backed (`pending_disk_delta_len` is 0).
+/// Single-flight, interval-gated `DiskConsolidate` enqueue; cheap early-out when
+/// not disk-backed (`pending_disk_delta_len` is 0).
 fn maybe_enqueue_disk_consolidate(q: &Queue, g: &GraphGnn) {
 	let delta = g.pending_disk_delta_len();
 	if delta < DISK_CONSOLIDATE_MIN_DELTA {
@@ -122,9 +108,8 @@ fn maybe_enqueue_disk_consolidate(q: &Queue, g: &GraphGnn) {
 	q.enqueue(task(TaskKind::DiskConsolidate, ""));
 }
 
-/// Enqueue a `Reembed` sweep for every kern that has a dirty (edited) thought or
-/// reason, so edits made directly in the graph get re-embedded even without an
-/// explicit trigger (e.g. after a restart). Dedup is owned by `Queue::enqueue`.
+/// Enqueue `Reembed` for every kern with a dirty thought/reason, so edits re-embed
+/// even without an explicit trigger (e.g. after a restart).
 fn maybe_enqueue_reembed(q: &Queue, g: &GraphGnn) {
 	for (kern_id, k) in g.kerns.iter() {
 		let dirty = k.entities.values().any(|e| e.dirty) || k.reasons.values().any(|r| r.dirty);
@@ -233,22 +218,18 @@ mod tests {
 	#[test]
 	fn should_consolidate_gates_on_both_delta_size_and_interval() {
 		let iv = Duration::from_secs(100);
-		// Interval elapsed but delta below the floor -> no (not worth a rebuild).
 		assert!(
 			!should_consolidate(200, 50, iv, 9, 10),
 			"delta < min_delta -> no"
 		);
-		// Delta big enough but interval not elapsed -> no (don't thrash rebuilds).
 		assert!(
 			!should_consolidate(100, 50, iv, 100, 10),
 			"interval not elapsed -> no"
 		);
-		// Both conditions met -> yes.
 		assert!(
 			should_consolidate(150, 50, iv, 10, 10),
 			"delta>=min and interval elapsed -> yes"
 		);
-		// Shares should_run_gc's clock guards.
 		assert!(
 			!should_consolidate(0, 0, iv, 1000, 10),
 			"unreadable clock never consolidates"
@@ -257,8 +238,7 @@ mod tests {
 
 	#[test]
 	fn pulse_decays_below_threshold_before_reaching_the_child() {
-		// At exactly the threshold the parent pulses, but one decay (×PULSE_DECAY)
-		// drops the child below it, so no child Cluster task is enqueued.
+		// Exactly the threshold: parent pulses; one ×PULSE_DECAY drops the child below.
 		let kerns = cluster_kerns_after_pulse(PULSE_THRESHOLD);
 		assert!(kerns.contains(&"p".to_string()), "parent clusters");
 		assert!(

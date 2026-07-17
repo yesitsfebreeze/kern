@@ -1,14 +1,5 @@
-//! Live LoCoMo eval driver (#36).
-//!
-//! Drives the real kern pipeline end-to-end against ollama: each dialogue's
-//! sessions go through capture→distill→ingest (the canonical `Worker`), then
-//! every QA probe is answered via `retrieval::answer::query` and scored.
-//! Per-category quality (token-F1, ROUGE-L, LLM-judge; abstention for the
-//! adversarial category), retrieved-context size as a token-efficiency proxy,
-//! and query latency (p50/p95) are aggregated into an [`EvalReport`].
-//!
-//! All numeric scoring lives in the pure, unit-tested [`super::locomo`] module;
-//! this module is the orchestration + I/O around it.
+//! Live LoCoMo eval driver (#36): capture→distill→ingest→query end-to-end
+//! against ollama. All numeric scoring lives in the pure [`super::locomo`].
 
 use super::locomo::{self, Sample};
 use crate::base::graph::GraphGnn;
@@ -56,7 +47,6 @@ pub struct CatAgg {
 	pub abstain_correct: usize,
 }
 
-/// Aggregated result of a run.
 #[derive(serde::Serialize)]
 pub struct EvalReport {
 	pub per_category: BTreeMap<u8, CatAgg>,
@@ -83,7 +73,6 @@ impl EvalReport {
 		}
 	}
 
-	/// Human-readable summary table.
 	pub fn summary(&self) -> String {
 		let mut out = String::new();
 		out.push_str(&format!(
@@ -144,23 +133,17 @@ impl EvalReport {
 	}
 }
 
-/// Run the full eval and return the aggregated report.
 pub async fn run_eval(cfg: &EvalConfig) -> Result<EvalReport, String> {
 	let samples = locomo::load(&cfg.dataset_path)?;
 	let take = cfg.max_samples.unwrap_or(samples.len());
 
-	// Answerer + embedder share one client (reason endpoint = answerer).
-	// `for_eval`: reason calls run on GPU (they are the workload, not
-	// background distillation) and sampling is seeded for multi-seed runs.
 	let client = LlmClient::new(
 		Endpoint::new(&cfg.base_url, &cfg.answer_model, ""),
 		Endpoint::default(),
 		Endpoint::new(&cfg.base_url, &cfg.embed_model, ""),
 	)
 	.for_eval(cfg.seed);
-	// Judge at temperature 0: it is the measurement instrument — verdicts
-	// must not carry sampling noise. The answerer/distiller keep the model
-	// default; the seed makes that sampling reproducible per run.
+	// Judge at temperature 0: verdicts must not carry sampling noise.
 	let judge = LlmClient::new(
 		Endpoint::new(&cfg.base_url, &cfg.judge_model, ""),
 		Endpoint::default(),
@@ -226,10 +209,8 @@ pub async fn run_eval(cfg: &EvalConfig) -> Result<EvalReport, String> {
 	Ok(report)
 }
 
-/// LoCoMo-specific distill: extracts durable personal facts from social dialogue.
-/// Uses the same wire protocol as `distill` (returns None on LLM outage, Some([])
-/// when nothing is worth keeping) but prompts for personal/episodic knowledge
-/// instead of coding-assistant knowledge.
+/// LoCoMo-specific distill: personal/episodic facts instead of coding knowledge.
+/// Same contract as `distill`: None on LLM outage, Some([]) when nothing to keep.
 fn distill_locomo(conversation: &str, llm: &dyn Fn(&str) -> String) -> Option<Vec<distill::Claim>> {
 	if conversation.trim().is_empty() {
 		return Some(Vec::new());
@@ -259,7 +240,6 @@ DIALOGUE:\n{conversation}\n"
 }
 
 /// Distill each session and ingest every claim through the canonical worker.
-/// Returns the number of claims ingested.
 async fn ingest_sample(worker: &Worker, llm: &LlmFunc, sample: &Sample, icfg: &Config) -> usize {
 	let mut total = 0;
 	for session in &sample.sessions {
@@ -280,7 +260,6 @@ async fn ingest_sample(worker: &Worker, llm: &LlmFunc, sample: &Sample, icfg: &C
 				section: String::new(),
 				title: format!("locomo://{}", c.descriptor),
 			};
-			// The capture intake ingests every distilled claim as `EntityKind::Claim`.
 			let _ = worker
 				.run(
 					c.text,
@@ -297,11 +276,6 @@ async fn ingest_sample(worker: &Worker, llm: &LlmFunc, sample: &Sample, icfg: &C
 	total
 }
 
-/// Read-only shared dependencies for the eval loop: the answerer+embedder client,
-/// the judge client, the distill/answer LLM closure, the sync embed closure, and
-/// retrieval config. Built once in [`run_eval`] and borrowed by [`eval_sample`]
-/// so it takes a context plus the per-sample inputs instead of nine positional
-/// args (and drops its `too_many_arguments` allow).
 struct EvalContext<'a> {
 	client: &'a LlmClient,
 	judge: &'a LlmClient,
@@ -310,11 +284,8 @@ struct EvalContext<'a> {
 	rcfg: &'a RetrievalConfig,
 }
 
-/// Answer + score every QA probe for one sample, in two phases: first answer
-/// everything (answerer + embedder resident on GPU), then judge everything
-/// (judge model resident). The answerer and judge cannot share an 8 GB GPU,
-/// so interleaving them pays a model reload per probe; batching pays one
-/// swap per sample.
+/// Two phases — answer everything, then judge everything: the answerer and judge
+/// cannot share an 8 GB GPU, so interleaving would pay a model reload per probe.
 async fn eval_sample(
 	ctx: &EvalContext<'_>,
 	graph: &Arc<RwLock<GraphGnn>>,
@@ -389,8 +360,7 @@ async fn eval_sample(
 	}
 }
 
-/// Synchronously resolve an embed call from inside the multi-thread runtime via
-/// the shared [`crate::llm::block_on_in_place`] bridge.
+/// Synchronously resolve an embed call from inside the multi-thread runtime.
 fn block_on_embed(client: &LlmClient, text: &str) -> Result<Vec<f32>, String> {
 	let client = client.clone();
 	let text = text.to_string();
@@ -406,7 +376,6 @@ mod tests {
 
 	#[test]
 	fn percentile_nearest_rank() {
-		// Uses the shared base::util::percentile_sorted; same values as before.
 		let v = [10u128, 20, 30, 40, 50];
 		assert_eq!(crate::base::util::percentile_sorted(&v, 0.50), Some(30));
 		assert_eq!(crate::base::util::percentile_sorted(&v, 0.95), Some(50));
@@ -453,7 +422,6 @@ mod tests {
 
 	#[test]
 	fn distill_locomo_llm_outage_returns_none() {
-		// Empty LLM response = outage signal → None so caller skips the session
 		let llm = |_: &str| String::new();
 		assert_eq!(distill_locomo("Alice: Hi there!", &llm), None);
 	}
@@ -472,7 +440,6 @@ mod tests {
 
 	#[test]
 	fn distill_locomo_malformed_json_returns_empty_claims() {
-		// parse_claims is graceful: bad JSON → empty vec, not None
 		let llm = |_: &str| "not json at all".to_string();
 		let claims = distill_locomo("Alice: Hi.", &llm).expect("Some result");
 		assert!(
@@ -507,13 +474,8 @@ mod tests {
 		crate::test_support::spawn_http(app).await.0
 	}
 
-	/// Live-path coverage for ingest_sample: a real Worker (its own async pipeline)
-	/// ingests every distilled claim. The mock LLM is role-aware — distill prompts
-	/// carry the "DIALOGUE:" marker and receive a claims JSON array, while the chunk
-	/// splitter's prompts get an empty string and fall back to heuristic splitting —
-	/// and embeddings come from a local /api/embed stub, so no network/ollama is
-	/// touched. Asserts the claim is both counted and flows through the Worker into
-	/// the shared graph.
+	/// Mock LLM is role-aware: "DIALOGUE:" prompts get a claims JSON array, the
+	/// chunk splitter's get "" (heuristic fallback); embeds come from a local stub.
 	#[tokio::test]
 	async fn ingest_sample_distills_and_flows_claims_through_the_worker() {
 		let embed_url = serve_embed().await;
@@ -551,7 +513,6 @@ mod tests {
 		let claims = ingest_sample(&worker, &llm, &sample, &icfg).await;
 		assert_eq!(claims, 1, "the single distilled claim is counted");
 
-		// The claim flowed through the canonical Worker into the shared graph.
 		let g = crate::base::locks::read_recovered(&graph);
 		let entities: usize = g.all().iter().map(|k| k.entities.len()).sum();
 		assert!(

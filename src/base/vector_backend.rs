@@ -1,14 +1,5 @@
-//! The vector-index seam behind [`GraphGnn`](super::graph::GraphGnn)'s entity,
-//! GNN, and reason indices.
-//!
-//! A backend is either [`Resident`](VectorBackend::Resident) — an in-memory
-//! [`HnswIndex`], the historical behavior for a resident-sized set — or
-//! [`Disk`](VectorBackend::Disk): a memory-mapped Vamana snapshot plus a small
-//! in-RAM delta for post-snapshot writes, the path that keeps a huge resident
-//! set off the heap (see `docs/superpowers/plans/2026-06-12-diskann-wiring.md`).
-//! Every method mirrors the matching [`HnswIndex`] signature, so the
-//! `base::search` call sites never learn which backend they hit; the routing
-//! decision lives entirely in [`GraphGnn::rebuild_index`].
+//! The vector-index seam behind `GraphGnn`'s indices: in-memory HNSW or mmap'd
+//! Vamana snapshot + in-RAM delta. Every method mirrors [`HnswIndex`].
 
 use std::collections::HashSet;
 
@@ -17,19 +8,10 @@ use super::hnsw::{HnswHit, HnswIndex};
 use super::util::cmp_rank;
 use crate::quant::QuantizationMode;
 
-/// A vector index the graph searches and mutates.
 pub enum VectorBackend {
-	/// In-memory HNSW — the index for a resident-sized set, mutated in place.
 	Resident(HnswIndex),
-	/// A disk-resident Vamana `snapshot` (immutable, memory-mapped) overlaid with
-	/// an in-RAM `delta` of post-snapshot writes and a `tombstones` set.
-	///
-	/// Invariant (so a search never double-counts or serves a stale vector):
-	/// - `insert(id, v)` writes `v` to `delta` AND tombstones `id` — the tombstone
-	///   shadows any now-stale copy of `id` in the snapshot.
-	/// - `delete(id)` removes `id` from `delta` AND tombstones it.
-	/// - A search reads `snapshot` MINUS tombstones, unioned with `delta`. Because
-	///   every delta id is tombstoned, no id is served from both halves.
+	/// Immutable mmap'd `snapshot` + in-RAM `delta`. Invariant: every delta id is
+	/// tombstoned, so search (snapshot − tombstones ∪ delta) never serves an id twice.
 	Disk {
 		snapshot: DiskIndex,
 		delta: HnswIndex,
@@ -38,16 +20,11 @@ pub enum VectorBackend {
 }
 
 impl VectorBackend {
-	/// A fresh resident (in-memory HNSW) backend — the default for a new or
-	/// rebuilt index. Mirrors [`HnswIndex::with_mode`].
 	pub fn resident(m: usize, ef_construction: usize, quant_mode: QuantizationMode) -> Self {
 		Self::Resident(HnswIndex::with_mode(m, ef_construction, quant_mode))
 	}
 
-	/// A disk-backed backend over `snapshot`, starting with an empty delta and no
-	/// tombstones. The delta uses `quant_mode` so its in-RAM scoring matches the
-	/// resident index. (The snapshot is built by
-	/// [`GraphGnn::build_entity_disk_index`](super::graph::GraphGnn::build_entity_disk_index).)
+	/// The delta uses `quant_mode` so its in-RAM scoring matches a resident index's.
 	pub fn disk(snapshot: DiskIndex, quant_mode: QuantizationMode) -> Self {
 		Self::Disk {
 			snapshot,
@@ -56,9 +33,8 @@ impl VectorBackend {
 		}
 	}
 
-	/// Number of live (searchable) vectors. For [`Disk`](Self::Disk) this is the
-	/// non-tombstoned snapshot vectors plus the delta — an O(snapshot) count, not
-	/// a hot-path call.
+	/// Live (searchable) vector count. For [`Disk`](Self::Disk) this is an
+	/// O(snapshot) scan — not a hot-path call.
 	pub fn len(&self) -> usize {
 		match self {
 			Self::Resident(h) => h.len(),
@@ -77,9 +53,8 @@ impl VectorBackend {
 		}
 	}
 
-	/// Number of post-snapshot writes buffered in the disk `delta` (0 when not
-	/// disk-backed). Drives the consolidation trigger: a large delta means the
-	/// in-RAM overlay has grown and the snapshot should be rebuilt.
+	/// Post-snapshot writes buffered in the disk `delta` (0 when not disk-backed);
+	/// drives the consolidation trigger.
 	pub fn pending_delta_len(&self) -> usize {
 		match self {
 			Self::Resident(_) => 0,
@@ -87,10 +62,8 @@ impl VectorBackend {
 		}
 	}
 
-	/// Whether the index holds no vectors at all. For [`Disk`](Self::Disk) this is
-	/// the cheap structural check (snapshot and delta both empty); a fully
-	/// tombstoned-but-non-empty snapshot still reports non-empty, which only costs
-	/// a search that returns nothing — the guard's purpose is preserved.
+	/// Cheap structural check: a fully tombstoned but non-empty snapshot still
+	/// reports non-empty, which only costs a search returning nothing.
 	pub fn is_empty(&self) -> bool {
 		match self {
 			Self::Resident(h) => h.is_empty(),
@@ -100,21 +73,18 @@ impl VectorBackend {
 		}
 	}
 
-	/// Insert or replace the vector for `id`.
 	pub fn insert(&mut self, id: String, vec: Vec<f32>) {
 		match self {
 			Self::Resident(h) => h.insert(id, vec),
 			Self::Disk {
 				delta, tombstones, ..
 			} => {
-				// Tombstone shadows any stale snapshot copy; delta holds the live one.
 				tombstones.insert(id.clone());
 				delta.insert(id, vec);
 			}
 		}
 	}
 
-	/// Remove `id` from the index (no-op if absent).
 	pub fn delete(&mut self, id: &str) {
 		match self {
 			Self::Resident(h) => h.delete(id),
@@ -127,8 +97,6 @@ impl VectorBackend {
 		}
 	}
 
-	/// Approximate top-`k` nearest neighbours to `vec` (cosine-similarity
-	/// [`HnswHit`]s, nearest first). `ef` is the beam width.
 	pub fn search(&self, vec: &[f32], k: usize, ef: usize) -> Vec<HnswHit> {
 		match self {
 			Self::Resident(h) => h.search(vec, k, ef),
@@ -144,8 +112,6 @@ impl VectorBackend {
 		}
 	}
 
-	/// Filtered top-`k` search: only ids passing `keep` are returned, filtered
-	/// during traversal so sparse matches behind non-matches stay reachable.
 	pub fn search_filtered(
 		&self,
 		vec: &[f32],
@@ -169,11 +135,8 @@ impl VectorBackend {
 	}
 }
 
-/// Merge two hit lists into one ranked top-`k`. Ids are deduped (keeping the
-/// higher score — a defensive guard; the `Disk` invariant already prevents an id
-/// from appearing in both halves), then ordered by score descending with an
-/// id-ascending tiebreak so the `truncate(k)` boundary is deterministic — the
-/// same convention as `base::search::merge_hits`.
+/// Dedupe keeping the higher score (defensive — the `Disk` invariant already
+/// prevents overlap), then rank score-desc/id-asc so `truncate(k)` is deterministic.
 fn union_rank(a: Vec<HnswHit>, b: Vec<HnswHit>, k: usize) -> Vec<HnswHit> {
 	use std::collections::hash_map::Entry;
 	let mut by_id: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
@@ -222,8 +185,6 @@ mod tests {
 
 	#[test]
 	fn disk_backend_finds_an_insert_made_after_the_snapshot() {
-		// Snapshot covers e0..e50; a NEW entity e999 is inserted post-snapshot.
-		// A query at e999's vector must surface it from the delta.
 		let (snap, _tmp) = snapshot_over(0..50);
 		let mut be = VectorBackend::disk(snap, QuantizationMode::None);
 		be.insert("e999".into(), vec_of(999));
@@ -237,8 +198,6 @@ mod tests {
 
 	#[test]
 	fn disk_backend_excludes_a_tombstoned_snapshot_id() {
-		// e10 is in the snapshot; deleting it must hide it from search even though
-		// the immutable snapshot still physically contains it.
 		let (snap, _tmp) = snapshot_over(0..50);
 		let mut be = VectorBackend::disk(snap, QuantizationMode::None);
 		be.delete("e10");
@@ -251,9 +210,6 @@ mod tests {
 
 	#[test]
 	fn disk_union_top_hit_matches_a_single_index_over_the_whole_corpus() {
-		// Split a corpus across snapshot (e0..40) and delta (e40..80). The union's
-		// nearest hit for an indexed query must equal that query point — i.e. the
-		// disk+delta union ranks like one index over the full corpus.
 		let (snap, _tmp) = snapshot_over(0..40);
 		let mut be = VectorBackend::disk(snap, QuantizationMode::None);
 		for i in 40..80 {
@@ -272,7 +228,6 @@ mod tests {
 
 	#[test]
 	fn disk_len_counts_live_vectors_after_delete_and_insert() {
-		// 50 in snapshot, delete one (live snapshot 49), insert one new (delta 1).
 		let (snap, _tmp) = snapshot_over(0..50);
 		let mut be = VectorBackend::disk(snap, QuantizationMode::None);
 		assert_eq!(be.len(), 50, "fresh snapshot len");

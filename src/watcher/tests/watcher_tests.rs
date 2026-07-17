@@ -1,9 +1,5 @@
-//! Integration tests for the watcher crate.
-//!
-//! Filesystem-event tests are inherently racy on Windows; we use generous
-//! timeouts and tolerate platform variation in *which* events fire (e.g.
-//! Windows often reports a Modified before a Created on first write) by
-//! asserting on observed *kinds* across a window rather than exact ordering.
+//! Watcher integration tests. Filesystem events are racy (especially Windows):
+//! assert on observed *kinds* within a budget, never exact ordering or counts.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -35,13 +31,8 @@ async fn collect_events(w: &mut FileWatcher, budget: Duration) -> Vec<WatchEvent
 	out
 }
 
-/// Poll for events until `done(&events)` holds or `budget` expires, returning
-/// everything collected so far. Unlike [`collect_events`] (which always drains
-/// the full budget — required for *negative* assertions), this early-exits the
-/// instant the predicate is satisfied, so fast machines don't pay a fixed
-/// worst-case sleep while slow CI still gets the whole budget. Use it for
-/// *presence* assertions to replace the `sleep(fixed); collect_events(budget)`
-/// pattern.
+/// Early-exits once `done(&events)` holds — use for *presence* assertions.
+/// [`collect_events`] drains the full budget, required for *negative* assertions.
 async fn collect_until(
 	w: &mut FileWatcher,
 	budget: Duration,
@@ -86,10 +77,8 @@ async fn create_modify_delete_cycle_emits_expected_events() {
 	tokio::time::sleep(Duration::from_millis(150)).await;
 	tokio::fs::remove_file(&file).await.unwrap();
 
-	// We require *at least* a Created (or Modified — Windows often collapses
-	// the initial write into Modified) and a Deleted. The platform decides
-	// whether the second write becomes a separate Modified or is folded
-	// into the first event by debouncing. Early-exit once both are seen.
+	// Windows often collapses the initial write into Modified — accept either;
+	// debouncing decides whether the second write survives as its own event.
 	let want = |evs: &[WatchEvent]| {
 		has_kind(evs, &file, |k| {
 			matches!(k, WatchKind::Created | WatchKind::Modified)
@@ -123,9 +112,7 @@ async fn debounce_collapses_rapid_modifies_to_one_event() {
 	let mut w = FileWatcher::new(vec![root.clone()], IgnoreRules::empty()).unwrap();
 	tokio::time::sleep(Duration::from_millis(100)).await;
 
-	// 5 modifies inside the 50 ms debounce window. We use `set_len` to bump
-	// content cheaply; on Windows a write+close burst produces several raw
-	// notify events per syscall — that's exactly what we want to coalesce.
+	// 5 writes inside one 50 ms debounce window.
 	for i in 0..5u8 {
 		tokio::fs::write(&file, [b'x', b'0' + i]).await.unwrap();
 		tokio::time::sleep(Duration::from_millis(5)).await;
@@ -137,8 +124,7 @@ async fn debounce_collapses_rapid_modifies_to_one_event() {
 	let events = collect_events(&mut w, Duration::from_millis(500)).await;
 	let for_file: Vec<_> = events.iter().filter(|e| e.path == file).collect();
 
-	// Coalesced should be a single event for `file`. We allow up to 2 to
-	// tolerate the case where the debouncer flushes mid-burst on slow CI.
+	// Allow 2: the debouncer can flush mid-burst on slow CI.
 	assert!(
 		!for_file.is_empty() && for_file.len() <= 2,
 		"expected 1-2 coalesced events for {file:?}, got {}: {events:?}",
@@ -193,9 +179,8 @@ async fn rename_within_root_emits_renamed_or_delete_create_pair() {
 	let dst = root.join("new.txt");
 	tokio::fs::rename(&src, &dst).await.unwrap();
 
-	// Two valid shapes per `translate`: a single `Renamed { from, to }` when the
-	// platform reports `Modify(Name(Both))`, or a `Deleted(src)` + `Created(dst)`
-	// pair when it splits the rename into From/To halves. Accept either.
+	// Platforms report either one `Renamed` (`Name(Both)`) or a `Deleted` +
+	// `Created` pair (`From`/`To` halves); both shapes are valid per `translate`.
 	let saw_rename = |evs: &[WatchEvent]| {
 		let renamed = evs
 			.iter()
@@ -213,8 +198,6 @@ async fn rename_within_root_emits_renamed_or_delete_create_pair() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watches_multiple_roots_simultaneously() {
-	// One FileWatcher rooted at two independent trees must surface events from
-	// both, not just the first registered root.
 	let tmp_a = TempDir::new().unwrap();
 	let tmp_b = TempDir::new().unwrap();
 	let root_a = tmp_a.path().to_path_buf();
@@ -242,8 +225,6 @@ async fn watches_multiple_roots_simultaneously() {
 		"expected a create/modify event under each root, saw {events:?}"
 	);
 }
-
-// -- IngestPipeline tests --------------------------------------------------
 
 #[derive(Default, Clone)]
 struct CapturingSink {

@@ -39,20 +39,15 @@ fn level_tag_is_three_letter_code_per_variant() {
 
 #[test]
 fn global_sink_installs_once_then_routes_log() {
-	// This is the ONLY test that touches the process-global SINK OnceLock; the
-	// others use a local `Sink::new()`. That keeps this assertion deterministic
-	// across the shared test process: no other test can have set it first, so
-	// the pre-install state is observably the eprintln-fallback branch.
+	// The ONLY test allowed to touch the process-global SINK OnceLock; a second
+	// toucher in the shared test process would make the pre-install assert racy.
 	assert!(sink().is_none(), "no global sink before first install");
 
 	let s = Sink::new();
 	assert!(install_sink(s.clone()).is_ok(), "first install succeeds");
 
-	// Second install is rejected (OnceLock::set returns Err with the sink back).
 	assert!(install_sink(Sink::new()).is_err(), "double install errors");
 
-	// With a sink installed, log() routes into it instead of eprintln. Drive one
-	// call through the renamed `klog!` macro (format args) and one direct.
 	crate::klog!(Level::Warn, "unit", "n={}", 7);
 	log(Level::Error, "unit", "boom");
 	let snap = s.snapshot();
@@ -67,9 +62,7 @@ fn global_sink_installs_once_then_routes_log() {
 #[test]
 fn concurrent_pushes_are_thread_safe_and_stay_capped() {
 	use std::thread;
-	// `Sink` is `Clone` (shared `Arc<Mutex<..>>`), so every thread pushes into
-	// the same ring. 8*500 = 4000 pushes >> MAX_ENTRIES exercises eviction under
-	// contention; the assertion is that we neither panic/deadlock nor exceed cap.
+	// 8*500 = 4000 pushes >> MAX_ENTRIES exercises eviction under contention.
 	let s = Sink::new();
 	let handles: Vec<_> = (0..8u8)
 		.map(|t| {

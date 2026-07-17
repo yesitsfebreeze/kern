@@ -8,9 +8,7 @@ use crate::base::util::{explain_relationship_prompt, short_id, truncate};
 
 use super::{load_graph, save_graph, with_graph, Client, Endpoint};
 
-/// Resolve a thought by exact id, then fall back to a unique id-prefix scan over
-/// every kern. Display/lookup helper for `cmd_get` — lives here, not in the
-/// dispatch/server module, since it is purely a graph read concern.
+/// Exact-id lookup, else the first id-prefix match across every kern.
 fn find_entity_by_prefix(g: &GraphGnn, id: &str) -> Option<(Entity, String)> {
 	if let Some(pair) = find_entity(g, id) {
 		return Some(pair);
@@ -25,8 +23,6 @@ fn find_entity_by_prefix(g: &GraphGnn, id: &str) -> Option<(Entity, String)> {
 	None
 }
 
-/// Pretty-print a kern and its children recursively (indented tree of thoughts
-/// and edge counts). Display helper for `cmd_list`.
 fn print_kern(kern: &Kern, g: &GraphGnn, depth: usize) {
 	let indent = "  ".repeat(depth);
 	let label = if kern.anchor_text.is_empty() {
@@ -61,8 +57,8 @@ pub(super) fn cmd_get(cfg: &crate::config::Config, id: &str) {
 	let (thought, kern_id) = match find_entity_by_prefix(&g, id) {
 		Some(pair) => pair,
 		None => {
-			// Lazy rehydrate: a thought evicted by stigmergy GC was spilled to
-			// the cold tier (in the store) before being dropped from the hot graph.
+			// Cold-tier fallback: stigmergy GC spills evicted thoughts to the store
+			// before dropping them from the hot graph.
 			if let Some(e) = g.store().and_then(|s| s.cold_get(id).ok().flatten()) {
 				println!("ID:     {}", e.id);
 				println!("Kind:   {:?}", e.kind);
@@ -122,12 +118,8 @@ pub(super) fn cmd_forget(cfg: &crate::config::Config, id: &str) {
 	});
 }
 
-/// Remove a non-fact thought and report how many incident edges went with it.
-/// Facts are immutable and refused. Returns the edge delta on success, or a
-/// static reason on rejection (unknown id / fact).
-///
-/// Pure graph mutation — no IO — so the fact-guard and edge bookkeeping are
-/// unit-testable apart from `cmd_forget`'s graph load/save wrapper.
+/// Remove a non-fact thought; returns how many incident edges went with it.
+/// Facts are immutable and refused.
 fn forget_entity(g: &mut GraphGnn, id: &str) -> Result<usize, &'static str> {
 	let (thought, kern_id) = find_entity(g, id).ok_or("thought not found")?;
 	if thought.is_fact() {
@@ -205,10 +197,6 @@ pub(super) async fn cmd_link(
 		..Default::default()
 	};
 
-	// Single mutable borrow of the owning kern. If it has vanished (shouldn't
-	// happen — from_kern_id came from find_entity above), fail loudly instead of
-	// the previous silent path that saved an unchanged graph yet still printed
-	// "linked", reporting a success that never happened.
 	let Some(kern) = g.kerns.get_mut(&from_kern_id) else {
 		eprintln!(
 			"link failed: kern {} no longer present",
@@ -228,9 +216,6 @@ pub(super) async fn cmd_link(
 	);
 }
 
-/// Choose the vector stored on a new link edge: the embedded reason text when an
-/// embedding was produced, otherwise the midpoint of the two endpoint vectors.
-/// Pure — no IO — so the fallback policy is unit-testable apart from `cmd_link`.
 fn link_vector(reason_embed: Option<Vec<f32>>, from_vec: &[f32], to_vec: &[f32]) -> Vec<f32> {
 	reason_embed.unwrap_or_else(|| average_vec(from_vec, to_vec))
 }
@@ -254,13 +239,8 @@ pub(super) fn cmd_degrade(cfg: &crate::config::Config, id: &str) {
 	});
 }
 
-/// Down-weight every reason edge incident to `id` in kern `kern_id`: each edge's
-/// score is cut by a geometric schedule (`BASE * POW^i`, so the i-th edge is
-/// penalised less than the first), and any edge that would fall below
-/// `DEGRADE_MIN_THRESHOLD` is removed outright. Returns `(decayed, removed)`.
-///
-/// Pure graph mutation — no IO — so the decay/removal policy is unit-testable in
-/// isolation from `cmd_degrade`'s graph load/save wrapper.
+/// Cut each incident edge's score by a geometric schedule (`BASE * POW^i`);
+/// edges falling below `DEGRADE_MIN_THRESHOLD` are removed. `(decayed, removed)`.
 fn degrade_entity_reasons(g: &mut GraphGnn, kern_id: &str, id: &str) -> (usize, usize) {
 	let rids: Vec<String> = match g.kerns.get(kern_id) {
 		Some(kern) => crate::base::reason::collect_reason_ids(kern, id),
@@ -313,9 +293,8 @@ mod tests {
 	fn degrade_decays_survivors_and_removes_below_threshold() {
 		let mut g = GraphGnn::new();
 		let mut k = Kern::new("kx", "");
-		// a->b is healthy (score 1.0); a->c is already weak (score 0.0).
-		// With BASE=0.15 the first-applied decay alone pushes 0.0 below the 0.05
-		// floor, so a->c is removed while a->b survives, merely decayed.
+		// With BASE=0.15 the first decay pushes a->c (0.0) below the 0.05 floor;
+		// a->b (1.0) merely decays.
 		add_reason(&mut k, edge("a", "b", 1.0));
 		add_reason(&mut k, edge("a", "c", 0.0));
 		g.kerns.insert("kx".into(), k);
@@ -388,13 +367,12 @@ mod tests {
 		for (from, to) in edges {
 			add_reason(&mut k, edge(from, to, 1.0));
 		}
-		g.register(k); // populates entity_kern so find_entity hits the fast path
+		g.register(k);
 		g
 	}
 
 	#[test]
 	fn forget_removes_thought_and_reports_edge_delta() {
-		// a is linked to b and c; forgetting a must drop a and its two incident edges.
 		let mut g = graph_with(
 			&[
 				("a", EntityKind::Claim),
@@ -428,14 +406,11 @@ mod tests {
 
 	#[test]
 	fn find_entity_by_prefix_resolves_a_unique_prefix() {
-		// cmd_get's fallback: no exact id match, but a unique id-prefix does.
 		let g = graph_with(&[("abc123def", EntityKind::Claim)], &[]);
 		let (hit, kern_id) = find_entity_by_prefix(&g, "abc12").expect("prefix resolves");
 		assert_eq!(hit.id, "abc123def");
 		assert_eq!(kern_id, "kx");
-		// An exact id still resolves (the fast path before the prefix scan).
 		assert!(find_entity_by_prefix(&g, "abc123def").is_some());
-		// A prefix that matches nothing yields None, not a panic.
 		assert!(find_entity_by_prefix(&g, "zzz").is_none());
 	}
 }

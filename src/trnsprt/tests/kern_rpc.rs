@@ -1,12 +1,5 @@
-//! Integration tests for `KernRpc`.
-//!
-//! Covers
-//! - end-to-end client/server roundtrip on `InprocAdapter` +
-//!   `JsonEnvelopeCodec` for every RPC method,
-//! - DTO bincode + JSON serde roundtrips (extends what the unit tests
-//!   in `kern_rpc::dto` already exercise),
-//! - cancellation race on `query`: a newer keystroke supersedes an
-//!   older one, mirroring `SearchSvc::search` semantics.
+//! Integration tests for `KernRpc`: end-to-end client/server roundtrip on
+//! `InprocAdapter` + `JsonEnvelopeCodec`, plus the cancellation race on `query`.
 
 use std::sync::Arc;
 
@@ -33,9 +26,6 @@ fn spawn_mock_server() -> (
 	(client, handle, mock)
 }
 
-/// Build a `QueryReq` with the common fields, leaving mode/answer/kind/source at
-/// their `Default` (empty) — collapses the repeated empty-string boilerplate the
-/// query tests would otherwise spell out per call.
 fn query_req(text: &str, k: u32, cancel_token: Option<u64>) -> QueryReq {
 	QueryReq {
 		text: text.into(),
@@ -115,7 +105,6 @@ async fn link_then_neighbors_walks_the_edge() {
 		.expect("neighbors rpc");
 	assert!(n2.neighbors.iter().any(|e| e.id == b));
 
-	// Filtering by an edge kind that wasn't used drops the neighbour.
 	let none = client
 		.neighbors(NeighborsReq {
 			entity_id: b,
@@ -131,8 +120,6 @@ async fn link_then_neighbors_walks_the_edge() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn ingest_with_descriptor_succeeds() {
-	// Exercises the non-None `descriptor` branch on IngestReq through the wire:
-	// the field must serialize, deserialize, and be accepted by the server.
 	let (client, handle, _mock) = spawn_mock_server();
 
 	let res = client
@@ -157,8 +144,6 @@ async fn ingest_with_descriptor_succeeds() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cancellation_marks_older_keystroke_as_stale() {
-	// Mirrors `SearchSvc` cancellation semantics: a newer search bumps
-	// the high-water mark, an older one comes back fresh=false.
 	let (client, handle, _mock) = spawn_mock_server();
 
 	let newer = client

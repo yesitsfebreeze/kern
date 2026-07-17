@@ -1,10 +1,5 @@
-//! Shared graph health aggregation.
-//!
-//! Both the REPL `health` command and the MCP `health` tool/resource need the
-//! same roll-up over the loaded graph (kern/entity/reason counts, unnamed-kern
-//! count, root anchor names). Keeping the loop in one place stops the two
-//! surfaces from drifting; each caller layers its own extras on top (the REPL
-//! adds queue depth, the MCP surface adds descriptor count).
+//! Shared graph health aggregation — one roll-up over the loaded graph, used by
+//! both the REPL `health` command and the MCP `health` tool/resource.
 
 use crate::base::graph::GraphGnn;
 

@@ -11,13 +11,8 @@ struct Wire {
 	killed: bool,
 }
 
-/// One client-side end of the in-memory pipe, with a deliberate directional
-/// asymmetry: its `Read` impl drains `from_server` (server → client), while its
-/// `Write` impl appends to `to_server` (client → server). `PipeTransport` holds
-/// two `ClientEnd`s over the SAME [`Wire`] and uses only each one's matching half
-/// — `reader` for [`Read`], `writer` for [`Write`]. The split is purely which
-/// trait method gets called; a `ClientEnd` driven through the opposite trait
-/// would silently touch the wrong buffer.
+/// One client end of the in-memory pipe. Directional: `Read` drains `from_server`,
+/// `Write` appends to `to_server` — drive each end only through its matching trait.
 struct ClientEnd(Arc<Mutex<Wire>>);
 
 impl Read for ClientEnd {
@@ -125,10 +120,8 @@ impl McpServer for AdderServer {
 				message: format!("unknown tool: {name}"),
 			});
 		}
-		// Strict params: both operands are required and must be integers. A
-		// missing or non-integer arg is a -32602 (Invalid params) Rpc error
-		// rather than a silent default-to-zero, so callers can exercise the
-		// argument-validation error path.
+		// A missing or non-integer arg is a -32602 Rpc error, never a silent
+		// default-to-zero — tests rely on exercising this validation path.
 		let a = args
 			.get("a")
 			.and_then(Value::as_i64)
@@ -157,8 +150,6 @@ mod tests {
 
 	#[test]
 	fn push_reply_is_readable_through_the_transport_reader() {
-		// Server -> client direction: a reply pushed via the handle shows up on the
-		// transport's Read half.
 		let (mut transport, handle) = new_pipe();
 		handle.push_reply(&reply_result(1, json!({ "ok": true })));
 
@@ -172,8 +163,6 @@ mod tests {
 
 	#[test]
 	fn writes_through_the_transport_writer_are_drained_as_frames() {
-		// Client -> server direction: bytes written to the transport's Write half
-		// are recovered as parsed JSON frames by the handle.
 		let (mut transport, handle) = new_pipe();
 		let mut line =
 			serde_json::to_string(&json!({ "jsonrpc": "2.0", "id": 7, "method": "ping" })).unwrap();

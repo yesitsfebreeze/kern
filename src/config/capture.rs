@@ -1,19 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-/// Configuration for Claude-Code memory capture + recall.
+/// Claude-Code memory capture + recall. ON by default.
 ///
-/// ON by default. Disable via `[capture] enabled = false` in `.kern/kern.toml`:
-///
-/// ```toml
-/// [capture]
-/// enabled = false
-/// ```
-///
-/// `dir` and `digest_path` are intentionally **cwd-relative and independent
-/// of `data_dir`**: the Claude-Code hooks (`kern-capture.mjs`,
-/// `kern-recall.mjs`) resolve these paths from the session cwd and have no
-/// knowledge of kern's `data_dir`. Do not derive them from `data_dir` — that
-/// would break the hook contract.
+/// `dir` and `digest_path` MUST stay cwd-relative and independent of `data_dir`:
+/// the Claude-Code hooks resolve them from the session cwd — deriving from
+/// `data_dir` breaks the hook contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CaptureConfig {
@@ -29,27 +20,14 @@ pub struct CaptureConfig {
 	pub digest_secs: u64,
 	/// Max thoughts included in the digest.
 	pub digest_k: usize,
-	/// Trust floor for digest inclusion: posterior confidence mean
-	/// (`conf_mean`, the Beta-Bernoulli expectation) a claim must clear to be
-	/// re-injected into the SessionStart digest. The digest is a persistent
-	/// re-injection surface — a poisoned/low-trust claim that lands here is
-	/// replayed into every future session. Gating it here quarantines
-	/// low-trust and repeatedly-contradicted claims (whose `conf_beta` has
-	/// grown, dragging the mean down) out of that surface. Set to `0.0` to
-	/// disable the gate. Default `0.35`. `f64` to match `build_digest`'s threshold
-	/// and the `conf_mean` it is compared against — no cast (and no silent f32→f64
-	/// rounding) at the call sites.
+	/// Trust floor (`conf_mean`) a claim must clear to re-enter the digest;
+	/// `0.0` disables the gate.
 	pub digest_min_trust: f64,
-	/// Approximate token budget for the digest body. Claims are added best-first
-	/// (heat × confidence) until this many tokens are used, trimmed greedily —
-	/// context rot means attention degrades with length, so a tight budget beats
-	/// a long dump. `digest_k` still caps item count. `0` disables the token cap.
-	/// Default `1500`.
+	/// Approximate token budget for the digest body (best-first by heat ×
+	/// confidence); `0` disables the token cap. `digest_k` still caps item count.
 	pub digest_token_budget: usize,
-	/// Retention window, in seconds, for archived deltas under `<dir>/done/`.
-	/// The graph is the durable copy after ingest; the archive is only a
-	/// transient audit trail, so it is swept each drain cycle and entries older
-	/// than this are deleted to bound disk/inode growth. Default 7 days.
+	/// Retention window (seconds) for archived deltas under `<dir>/done/` — a
+	/// transient audit trail swept each drain cycle (the graph is durable).
 	pub done_retention_secs: u64,
 }
 
@@ -70,10 +48,8 @@ impl Default for CaptureConfig {
 }
 
 impl CaptureConfig {
-	/// Reject knobs that would busy-loop the capture tasks. A zero poll/digest
-	/// interval makes the intake-drain / digest-rebuild loop spin with no delay.
-	/// Only enforced when `enabled` — a dormant capture with zero intervals is
-	/// harmless because the tasks never run.
+	/// Reject zero poll/digest intervals that busy-loop the tasks. Only enforced
+	/// when `enabled` — dormant capture never runs the loops.
 	pub fn validate(&self) -> Result<(), String> {
 		if self.enabled {
 			if self.poll_secs == 0 {
@@ -102,8 +78,7 @@ mod tests {
 		assert_eq!(c.digest_k, 40);
 		assert_eq!(c.digest_min_trust, 0.35);
 		assert_eq!(c.digest_token_budget, 1500);
-		// Assert the concrete VALUE (not the same 7*24*60*60 expression as the
-		// default), so a silent change to the computed literal is caught.
+		// Concrete value (not the default's expression) to catch a silent change.
 		assert_eq!(c.done_retention_secs, 604_800, "7 days in seconds");
 	}
 
@@ -137,7 +112,6 @@ mod tests {
 		};
 		assert!(zero_digest.validate().unwrap_err().contains("digest_secs"));
 
-		// Disabled with zero intervals is accepted — the loops never start.
 		let disabled_zero = CaptureConfig {
 			enabled: false,
 			poll_secs: 0,

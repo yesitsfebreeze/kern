@@ -94,7 +94,11 @@ mod tests {
 		let out = expand_query(&cfg, Some(&llm), Some(&embed), &qv, "cat");
 		// fused (0.5,0.5) -> L2-normalized: equal components, unit norm.
 		assert!((out[0] - out[1]).abs() < 1e-6);
-		let norm = out.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+		let norm = out
+			.iter()
+			.map(|&x| (x as f64) * (x as f64))
+			.sum::<f64>()
+			.sqrt();
 		assert!((norm - 1.0).abs() < 1e-6, "fused vector is L2-normalized");
 	}
 
@@ -133,9 +137,6 @@ mod tests {
 
 	#[test]
 	fn empty_hypo_vec_returns_query_without_fusing() {
-		// Dimension-0 edge: embed returns Ok(vec![]). The len/empty guard must
-		// short-circuit to the original query rather than fuse against a 0-d
-		// vector (which would zip to nothing and yield an empty result).
 		let cfg = RetrievalConfig::default();
 		let llm: LlmFunc = Arc::new(|_: &str| "answer".to_string());
 		let embed: EmbedFunc = Arc::new(|_: &str| Ok(vec![])); // 0-dim

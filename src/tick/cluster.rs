@@ -11,16 +11,8 @@ pub struct Cluster {
 	pub members: Vec<Entity>,
 }
 
-/// Greedy single-pass clustering: walk the thoughts in order, and for each
-/// not-yet-assigned thought start a new cluster seeded by it, pulling in every
-/// remaining thought whose cosine to the **seed** clears `KERN_COHESION_THRESHOLD`.
-///
-/// Note the centroid is fixed at the seed vector and does NOT evolve as members
-/// join — so clusters are biased toward the seed's direction rather than the
-/// emergent group mean, and membership depends on iteration order. This is a
-/// deliberate speed/simplicity trade for the tick path; a k-means-style evolving
-/// centroid would be more balanced but multi-pass. `max_sample` caps the working
-/// set so a huge kern can't make this O(n^2) blow up.
+/// Greedy single-pass clustering by cosine to the SEED — the centroid never
+/// evolves, so membership is seed-biased and order-dependent; `max_sample` caps the O(n²).
 pub fn vector_cluster(thoughts: &[&Entity], max_sample: usize) -> Vec<Cluster> {
 	let mut all: Vec<&Entity> = thoughts
 		.iter()
@@ -145,13 +137,8 @@ pub fn compute_centroid(members: &[Entity]) -> Vec<f32> {
 	centroid
 }
 
-/// Build the LLM prompt that asks for a one-phrase anchor label for a cluster.
-///
-/// For clusters larger than `MAX_SAMPLES`, only the thoughts nearest the
-/// centroid are included — the most representative members, which also bounds
-/// prompt-eval cost. The instruction demands the model reply with ONLY the
-/// phrase (no prefix, no trailing punctuation) so the response can be used
-/// verbatim as the anchor text; the sampled thoughts follow as a `- ` list.
+/// LLM prompt for a one-phrase cluster anchor label; the reply is used VERBATIM
+/// as anchor text. Big clusters sample the `MAX_SAMPLES` thoughts nearest the centroid.
 pub fn anchor_prompt(c: &Cluster) -> String {
 	const MAX_SAMPLES: usize = 10;
 	let members = if c.members.len() > MAX_SAMPLES {
@@ -175,7 +162,6 @@ pub fn anchor_prompt(c: &Cluster) -> String {
 	use std::fmt::Write as _;
 	let mut sb = String::from("Summarize the core theme of these related thoughts in one concise phrase. Reply with ONLY the phrase, no prefix, no punctuation at the end:\n\n");
 	for t in members {
-		// writeln! into a String is infallible; the Result is discarded.
 		let _ = writeln!(sb, "- {}", t.text());
 	}
 	sb
@@ -266,7 +252,6 @@ mod tests {
 
 	#[test]
 	fn centroid_thought_picks_member_in_dominant_direction() {
-		// Two vectors point at [1,0], one at [0,1]; centroid leans toward [1,0].
 		let c = Cluster {
 			members: vec![
 				ent("a", vec![1.0, 0.0]),
@@ -296,7 +281,6 @@ mod tests {
 
 	#[test]
 	fn best_cluster_prefers_larger_cohesive_cluster() {
-		// Both clusters are internally cohesive (identical members); the larger wins.
 		let small = Cluster {
 			members: vec![ent("a", vec![1.0, 0.0]), ent("b", vec![1.0, 0.0])],
 		};

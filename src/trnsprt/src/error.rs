@@ -2,47 +2,27 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum McpError {
-	/// Transport-level I/O failure on the underlying pipe/socket (broken pipe,
-	/// EOF mid-frame, connection reset). Connection-level and retryable — see
-	/// [`is_transient`](Self::is_transient).
 	#[error("mcp transport i/o: {0}")]
 	Io(#[from] std::io::Error),
-	/// The peer spoke malformed MCP: a missing required field, a frame containing
-	/// an embedded newline, non-UTF-8 bytes, etc. A wire-format violation — distinct
-	/// from [`Rpc`](Self::Rpc), which is a *well-formed* error response.
+	/// Wire-format violation — distinct from [`Rpc`](Self::Rpc), which is a
+	/// *well-formed* error response.
 	#[error("mcp protocol: {0}")]
 	Protocol(String),
-	/// JSON (de)serialisation of a frame body failed.
 	#[error("mcp json: {0}")]
 	Json(#[from] serde_json::Error),
-	/// A well-formed JSON-RPC error response from the server — the call reached the
-	/// peer and it replied `{ error: { code, message } }`. Application-level, NOT a
-	/// transport fault; `code` follows JSON-RPC conventions (e.g. `-32601`
-	/// method-not-found, `-32602` invalid-params).
+	/// Well-formed JSON-RPC error reply — application-level, NOT a transport
+	/// fault. `code` follows JSON-RPC conventions (`-32601`, `-32602`, ...).
 	#[error("mcp rpc error {code}: {message}")]
 	Rpc { code: i64, message: String },
-	/// A call targeted a [`ServerId`](crate::ServerId) not present in the registry.
 	#[error("unknown mcp server: {0}")]
 	UnknownServer(String),
-	/// Tried to register a [`ServerId`](crate::ServerId) that is already registered
-	/// (ids must be unique within a registry).
 	#[error("mcp server already registered: {0}")]
 	DuplicateServer(String),
-	/// The child MCP server process is not running (never started, or has exited).
-	/// Connection-level — a supervisor may respawn it and retry.
 	#[error("mcp child process not running")]
 	NotRunning,
 }
 
 impl McpError {
-	/// Whether retrying the operation could plausibly succeed. `true` only for
-	/// connection-level faults — [`Io`](Self::Io) (a pipe hiccup / reset) and
-	/// [`NotRunning`](Self::NotRunning) (the child can be respawned and the call
-	/// re-sent). [`Protocol`](Self::Protocol), [`Json`](Self::Json),
-	/// [`Rpc`](Self::Rpc), [`UnknownServer`](Self::UnknownServer), and
-	/// [`DuplicateServer`](Self::DuplicateServer) are deterministic given the same
-	/// input, so a retry just reproduces them. Lets callers gate retries on one
-	/// predicate instead of matching every arm.
 	pub fn is_transient(&self) -> bool {
 		matches!(self, McpError::Io(_) | McpError::NotRunning)
 	}

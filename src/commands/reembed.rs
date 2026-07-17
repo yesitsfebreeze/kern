@@ -1,8 +1,5 @@
-//! `kern reembed`: re-embed the entire graph with the configured embedding
-//! model. The embedding dimension is locked into the graph on first ingest, so
-//! switching models (e.g. nomic-embed-text 768-d -> qwen3-embedding) requires
-//! re-embedding every stored vector. Run this AFTER changing `[embed] model`
-//! in kern.toml and with the daemon stopped (it writes the graph directly).
+//! `kern reembed`: re-embed every stored vector after an `[embed] model` change
+//! (dim locks at first ingest). Daemon stopped — this writes the graph directly.
 
 use std::collections::HashMap;
 
@@ -14,14 +11,12 @@ const BATCH: usize = 64;
 
 pub(super) async fn cmd_reembed(cfg: &crate::config::Config, embed_url: &str, embed_model: &str) {
 	let mut g = load_graph(cfg);
-	// Embed-only client (reason/answer unused here).
 	let client = Client::new(
 		Endpoint::default(),
 		Endpoint::default(),
 		Endpoint::new(embed_url, embed_model, &cfg.embed.key),
 	);
 
-	// Collect every entity's text, graph-wide, in a stable order.
 	let mut ids: Vec<String> = Vec::new();
 	let mut texts: Vec<String> = Vec::new();
 	for kern in g.kerns.values() {
@@ -44,8 +39,8 @@ pub(super) async fn cmd_reembed(cfg: &crate::config::Config, embed_url: &str, em
 		}
 	};
 
-	// Assign new vectors. gnn_vector is re-seeded from the raw embed; the GNN
-	// tick refines it later (a stale-dimension gnn_vector would break its index).
+	// gnn_vector is re-seeded from the raw embed; the GNN tick refines it later
+	// (a stale-dimension gnn_vector would break its index).
 	for kern in g.kerns.values_mut() {
 		for e in kern.entities.values_mut() {
 			if let Some(v) = new_vecs.get(&e.id) {
@@ -74,9 +69,6 @@ pub(super) async fn cmd_reembed(cfg: &crate::config::Config, embed_url: &str, em
 			println!("reembed: cold tier done ({n} entities)");
 			println!("reembed: complete — model is now '{embed_model}'");
 		}
-		// Hot graph is already on the new model; cold failed and was left intact.
-		// Report exactly what is stale so the operator can re-run, rather than
-		// printing a misleading "complete".
 		Err(e) => eprintln!(
 			"reembed: {e}\nreembed: hot graph is on '{embed_model}' but the cold tier still \
 			 uses the old model — re-run once the embed endpoint is healthy"
@@ -109,16 +101,8 @@ async fn embed_all(
 	Ok(out)
 }
 
-/// Re-embed spilled cold-tier entities too — otherwise their old-dimension
-/// vectors mismatch the query and cold search silently drops them.
-///
-/// Atomic: vectors are reassigned in memory and only committed if EVERY batch
-/// succeeds, so any failure leaves the cold tier fully unchanged (never a
-/// partial-dimension mix that would corrupt cold search). On failure the error
-/// names the offending batch and exactly how many cold entities were left
-/// un-re-embedded, so the caller can report a precise partial-success state
-/// instead of a generic abort. `Ok(n)` is the number of cold entities
-/// re-embedded — `0` when there is no store or nothing is cold.
+/// Re-embed cold-tier entities too — old-dim vectors silently drop from cold
+/// search. Atomic: commits only if EVERY batch succeeds. `Ok(n)` = count done.
 async fn reembed_cold(
 	store: Option<std::sync::Arc<crate::base::store::Store>>,
 	client: &crate::llm::Client,
@@ -160,9 +144,8 @@ async fn reembed_cold(
 		}
 	}
 
-	// Write the re-embedded entities back in one transaction (latest-wins per id).
-	// A crash mid-commit leaves the OLD rows intact — LMDB never exposes a partial
-	// transaction.
+	// One transaction (latest-wins per id): a crash mid-commit leaves the OLD
+	// rows intact — LMDB never exposes a partial transaction.
 	store
 		.cold_put_all(&cold)
 		.map_err(|e| format!("cold write-back failed: {e}; cold tier left unchanged"))?;
@@ -175,9 +158,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn embed_all_errs_when_server_returns_a_mismatched_vector_count() {
-		// Stub /api/embed that always returns exactly ONE embedding regardless of
-		// how many inputs are sent, so a 2-input batch trips embed_all's count guard
-		// (vs.len() != chunk.len()).
+		// Stub always returns ONE embedding, so a 2-input batch trips the count guard.
 		let app = axum::Router::new().route(
 			"/api/embed",
 			axum::routing::post(|| async {
@@ -206,8 +187,7 @@ mod tests {
 		use crate::base::store::Store;
 		use crate::base::types::Entity;
 
-		// Stub returns ONE embedding regardless of input count, so the (2-entity)
-		// cold batch trips the count guard and reembed_cold must bail.
+		// Stub returns ONE embedding, so the 2-entity cold batch trips the count guard.
 		let app = axum::Router::new().route(
 			"/api/embed",
 			axum::routing::post(|| async {
@@ -218,7 +198,6 @@ mod tests {
 
 		let dir = tempfile::tempdir().unwrap();
 		let store = std::sync::Arc::new(Store::open(&dir.path().to_string_lossy()).unwrap());
-		// Seed two cold entities carrying a recognizable OLD vector.
 		let old = vec![9.0, 9.0];
 		let seed = vec![
 			Entity {
@@ -239,8 +218,6 @@ mod tests {
 			.await
 			.expect_err("a mismatched cold batch must surface a partial-failure error");
 
-		// Precise partial-success reporting: names how many were left stale + that
-		// the tier is untouched.
 		assert!(
 			err.contains("2 of 2"),
 			"names the stale entity count: {err}"
@@ -250,7 +227,6 @@ mod tests {
 			"states the cold tier is untouched: {err}"
 		);
 
-		// Atomicity: the cold tier still holds the ORIGINAL vectors, never the stub's.
 		let after = store.cold_all().unwrap();
 		assert_eq!(after.len(), 2);
 		assert!(

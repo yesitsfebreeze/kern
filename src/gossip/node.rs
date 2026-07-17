@@ -72,9 +72,6 @@ impl Node {
 		read_recovered(&self.peers).clone()
 	}
 
-	/// Current peer count without cloning the list. Used by the peer-exchange
-	/// loop's capacity break, which only needs the length — `peer_list().len()`
-	/// would clone the whole `Vec<String>` (every address) on each iteration.
 	pub fn peer_count(&self) -> usize {
 		read_recovered(&self.peers).len()
 	}

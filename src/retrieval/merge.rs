@@ -4,18 +4,13 @@ use crate::base::search::EntityHit;
 use crate::retrieval::expand::{find_entity_ref_in_graph, ScoredRef};
 use std::collections::HashMap;
 
-/// Fuse the seed list and the expansion beam into one ranked result set.
-///
-/// Each entity's scores from both sources are pooled with log-sum-exp
-/// ([`OnlineSoftmax::finalize`]), so an entity surfaced via *both* paths earns a
-/// `+ln(count)` corroboration boost over an otherwise-equal entity seen once.
-/// This is intentional: multi-path agreement is positive evidence of relevance.
-/// A lone observation is unchanged (`x + ln(1) = x`). The merged value is a
-/// relevance magnitude (it may exceed 1.0) that `score::apply_boosts` then
-/// scales by confidence and adjusts with additive boosts — it is never treated
-/// as a probability. Switch `finalize()` to `running_max()` only if
-/// best-score-wins (no corroboration) is explicitly wanted.
-pub fn merge<'a>(g: &'a GraphGnn, seeds: &[EntityHit], beam: Vec<ScoredRef<'a>>) -> Vec<ScoredRef<'a>> {
+/// Fuse the seed list and the expansion beam; scores pool with log-sum-exp, so an
+/// entity in *both* earns `+ln(count)`. A magnitude, not a probability — may exceed 1.0.
+pub fn merge<'a>(
+	g: &'a GraphGnn,
+	seeds: &[EntityHit],
+	beam: Vec<ScoredRef<'a>>,
+) -> Vec<ScoredRef<'a>> {
 	let mut scores: HashMap<&str, OnlineSoftmax> = HashMap::new();
 	let mut thoughts: HashMap<&str, ScoredRef<'a>> = HashMap::new();
 
@@ -48,11 +43,7 @@ pub fn merge<'a>(g: &'a GraphGnn, seeds: &[EntityHit], beam: Vec<ScoredRef<'a>>)
 		})
 		.collect();
 
-	// Score descending, then entity id ascending as a stable tie-break (shared
-	// `cmp_rank` convention, same as pagerank). Without the secondary key, entities
-	// tied on the merged score kept whatever order the `thoughts` HashMap iterated,
-	// which varies per process (RandomState) — enough to wobble a rank-boundary
-	// result run-to-run. The id key makes the final ranking deterministic.
+	// Score desc, id asc — deterministic tie-break; HashMap order varies per process.
 	results.sort_by(|a, b| crate::base::util::cmp_rank(a.score, &a.entity.id, b.score, &b.entity.id));
 	results
 }
@@ -79,9 +70,8 @@ mod tests {
 
 	#[test]
 	fn entity_seen_in_both_sources_outranks_one_seen_once() {
-		// `a` is surfaced by both the beam and the seeds; `b` only by the beam,
-		// at the same raw score. Log-sum-exp gives `a` a +ln(2) corroboration
-		// boost, so it must score strictly higher and sort first.
+		// `a` in both beam and seeds, `b` only in the beam at the same raw score:
+		// `a` earns +ln(2) and sorts first.
 		let g = GraphGnn::new();
 		let (ea, eb) = (ent("a"), ent("b"));
 		let beam = vec![scored(&ea, 0.5), scored(&eb, 0.5)];
@@ -96,7 +86,6 @@ mod tests {
 			a.score,
 			b.score
 		);
-		// finalize(0.5, 0.5) = 0.5 + ln 2; finalize(0.5) = 0.5.
 		assert!((a.score - (0.5 + std::f64::consts::LN_2)).abs() < 1e-9);
 		assert!((b.score - 0.5).abs() < 1e-9);
 		assert_eq!(out[0].entity.id, "a", "higher score sorts first");
@@ -104,9 +93,7 @@ mod tests {
 
 	#[test]
 	fn seed_absent_from_graph_and_beam_is_silently_skipped() {
-		// `ghost` is neither in the beam nor resolvable via find_entity_ref_in_graph
-		// (empty graph), so it must not appear in the results rather than panic or
-		// surface a bare id.
+		// `ghost` is neither in the beam nor the (empty) graph — dropped, not surfaced as a bare id.
 		let g = GraphGnn::new();
 		let eb = ent("b");
 		let beam = vec![scored(&eb, 0.5)];
@@ -120,8 +107,7 @@ mod tests {
 
 	#[test]
 	fn seed_only_entity_is_pulled_from_the_graph() {
-		// A seed not in the beam but present in the graph is resolved via
-		// find_entity_ref_in_graph and included (exercises the Some branch).
+		// A seed absent from the beam but present in the graph is resolved and included.
 		let mut g = GraphGnn::new();
 		let mut k = Kern::new("kx", "");
 		k.entities.insert("c".into(), ent("c"));

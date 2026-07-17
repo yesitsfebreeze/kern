@@ -12,9 +12,8 @@ use tokio::task::JoinHandle;
 use crate::event::{WatchEvent, WatchKind};
 use crate::ignore_rules::IgnoreRules;
 
-/// Per-path debounce window. notify on Windows fires a burst of events for a
-/// single logical edit (write/metadata/close); 50 ms is wide enough to
-/// coalesce those without making interactive saves feel laggy.
+/// Per-path debounce window: wide enough to coalesce the multi-event burst
+/// Windows notify fires per logical edit, short enough for interactive saves.
 const DEBOUNCE: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Error)]
@@ -26,10 +25,6 @@ pub enum WatcherError {
 }
 
 /// Cross-platform recursive filesystem watcher with per-path debouncing.
-///
-/// Drop the watcher to stop the background coalescer task; the underlying
-/// notify watcher is dropped first which closes its raw-event channel and
-/// causes the coalescer loop to exit cleanly.
 pub struct FileWatcher {
 	// Drop order matters: drop `_notify` first so the std channel closes,
 	// then `_task` joins on its own.
@@ -39,8 +34,7 @@ pub struct FileWatcher {
 }
 
 impl FileWatcher {
-	/// Create a watcher rooted at every entry in `roots` (recursive). Events
-	/// matching `ignore` are dropped before debouncing.
+	/// Events matching `ignore` are dropped before debouncing.
 	pub fn new(roots: Vec<PathBuf>, ignore: IgnoreRules) -> Result<Self, WatcherError> {
 		let (raw_tx, raw_rx) = std_mpsc::channel::<notify::Result<Event>>();
 		let mut notify_watcher = notify::recommended_watcher(move |res| {
@@ -62,14 +56,11 @@ impl FileWatcher {
 		})
 	}
 
-	/// Receive the next coalesced event. Returns `None` once the watcher is
-	/// dropped or its background task exits.
+	/// `None` once the watcher is dropped or its background task exits.
 	pub async fn next_event(&mut self) -> Option<WatchEvent> {
 		self.rx.recv().await
 	}
 
-	/// Borrow the underlying receiver for callers that want to plumb it into
-	/// `tokio_stream::wrappers::UnboundedReceiverStream` themselves.
 	pub fn receiver(&mut self) -> &mut mpsc::UnboundedReceiver<WatchEvent> {
 		&mut self.rx
 	}
@@ -83,9 +74,7 @@ fn spawn_coalescer(
 	tokio::task::spawn_blocking(move || coalesce_loop(raw_rx, out_tx, ignore))
 }
 
-/// Per-path pending entry: the *latest* event seen for `path` that has not
-/// yet been emitted. We replace on every new event, so the result is "last
-/// write wins" within the debounce window.
+/// Latest un-emitted event per path — last write wins within the debounce window.
 struct Pending {
 	event: WatchEvent,
 	deadline: Instant,
@@ -124,9 +113,7 @@ fn coalesce_loop(
 			Ok(Err(err)) => {
 				tracing::warn!(?err, "notify error");
 			}
-			Err(std_mpsc::RecvTimeoutError::Timeout) => {
-				// fall through to flush
-			}
+			Err(std_mpsc::RecvTimeoutError::Timeout) => {}
 			Err(std_mpsc::RecvTimeoutError::Disconnected) => {
 				flush_all(&mut pending, &out_tx);
 				return;
@@ -148,9 +135,6 @@ fn next_timeout(pending: &HashMap<PathBuf, Pending>) -> Option<Duration> {
 
 fn flush_due(pending: &mut HashMap<PathBuf, Pending>, out_tx: &mpsc::UnboundedSender<WatchEvent>) {
 	let now = Instant::now();
-	// Collect only the due keys (the borrow checker forbids removing from
-	// `pending` while iterating it). Just the `PathBuf` keys are cloned — never
-	// the `Pending` values — so this stays cheap on a large pending set.
 	let due: Vec<PathBuf> = pending
 		.iter()
 		.filter(|(_, v)| v.deadline <= now)
@@ -170,11 +154,7 @@ fn flush_all(pending: &mut HashMap<PathBuf, Pending>, out_tx: &mpsc::UnboundedSe
 }
 
 /// Convert a raw notify event into zero, one, or two [`WatchEvent`]s.
-///
-/// Most kinds map 1:1. `Modify(Name(Both))` (debouncer-style rename with
-/// both endpoints) becomes a single `Renamed`; `From`/`To` halves are
-/// emitted as `Deleted` / `Created` respectively, matching what the user
-/// would observe if rename endpoints straddle the watch root.
+/// `Name(Both)` → one `Renamed`; lone `From`/`To` halves → `Deleted`/`Created`.
 fn translate(ev: Event, ignore: &IgnoreRules) -> Vec<WatchEvent> {
 	let ts = SystemTime::now();
 	let paths = ev.paths;
@@ -272,14 +252,11 @@ mod tests {
 			}
 			other => panic!("expected Renamed, got {other:?}"),
 		}
-		// `path` is the new location (what downstream ingest reads).
 		assert_eq!(out[0].path, PathBuf::from("/new.txt"));
 	}
 
 	#[test]
 	fn translate_rename_both_with_wrong_arity_is_not_a_rename() {
-		// Real filesystems can deliver a Both event with fewer than 2 paths;
-		// it must degrade to Modified (never a Renamed, never a panic).
 		let kind = EventKind::Modify(ModifyKind::Name(RenameMode::Both));
 		let out = translate(ev(kind, &["/only.txt"]), &IgnoreRules::empty());
 		assert_eq!(out.len(), 1);

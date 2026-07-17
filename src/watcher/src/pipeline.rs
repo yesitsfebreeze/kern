@@ -5,8 +5,7 @@ use tokio::sync::mpsc;
 use crate::event::{WatchEvent, WatchKind};
 
 /// Hard cap on the size of files we read into an [`IngestRecord`]. Anything
-/// larger is silently skipped — the search index is for source-shaped text,
-/// not blobs.
+/// larger is silently skipped.
 pub const MAX_INGEST_BYTES: u64 = 1024 * 1024;
 
 /// Payload handed to a downstream sink. `source_uri` is always a `file://`
@@ -18,21 +17,15 @@ pub struct IngestRecord {
 	pub language_hint: Option<String>,
 }
 
-/// Downstream consumer. Implemented by the kern wiring (slice F) — this
-/// crate must NOT depend on kern.
+/// Downstream consumer. Implemented by the kern wiring — this crate must
+/// NOT depend on kern.
 #[async_trait::async_trait]
 pub trait IngestSink: Send + Sync + 'static {
 	async fn ingest(&self, record: IngestRecord);
 }
 
-/// Drives a stream of [`WatchEvent`]s into an [`IngestSink`].
-///
-/// * `Created` / `Modified` → read file (≤ [`MAX_INGEST_BYTES`]) → ingest.
-/// * `Deleted` → no read; ignored at this layer (kern handles deletion via
-///   a separate call path; slice E only does *content* ingest).
-/// * `Renamed { from, to }` → treated as `Created(to)`.
-/// * Files larger than `MAX_INGEST_BYTES` or with non-UTF-8 content are
-///   skipped silently (logged at `debug`).
+/// Drives [`WatchEvent`]s into an [`IngestSink`]. `Deleted` is ignored at this
+/// layer (kern deletes via a separate path); oversize/non-UTF-8 files skip at `debug`.
 pub struct IngestPipeline<S: IngestSink> {
 	sink: S,
 }
@@ -42,7 +35,6 @@ impl<S: IngestSink> IngestPipeline<S> {
 		Self { sink }
 	}
 
-	/// Consume events from `rx` until the channel closes.
 	pub async fn run(self, mut rx: mpsc::UnboundedReceiver<WatchEvent>) {
 		while let Some(ev) = rx.recv().await {
 			if let Some(rec) = build_record(&ev).await {
@@ -51,7 +43,6 @@ impl<S: IngestSink> IngestPipeline<S> {
 		}
 	}
 
-	/// Process a single event. Exposed for tests and synchronous callers.
 	pub async fn handle(&self, ev: WatchEvent) {
 		if let Some(rec) = build_record(&ev).await {
 			self.sink.ingest(rec).await;
@@ -128,9 +119,8 @@ mod tests {
 	use std::path::PathBuf;
 	use std::time::SystemTime;
 
-	// All file_uri cases below use paths that don't exist on disk, so
-	// `canonicalize` fails and the deterministic string-normalisation fallback
-	// runs — making the expected output stable across machines.
+	// file_uri cases use paths that don't exist on disk: `canonicalize` fails, so
+	// the deterministic string-normalisation fallback runs on every machine.
 
 	#[test]
 	fn file_uri_unix_absolute_path_gets_three_slashes() {
@@ -142,9 +132,8 @@ mod tests {
 
 	#[test]
 	fn file_uri_strips_windows_unc_prefix() {
-		// `\\?\C:\..` is what Windows canonicalize returns; the `//?/` prefix is
-		// stripped and the drive path becomes `file:///C:/..`. (Backslashes are
-		// literal chars on Unix, so the string ops are identical cross-platform.)
+		// `\\?\C:\..` is what Windows canonicalize returns; backslashes are literal
+		// chars on Unix, so the string ops are identical cross-platform.
 		assert_eq!(
 			file_uri(Path::new(r"\\?\C:\foo\bar.rs")),
 			"file:///C:/foo/bar.rs"
@@ -167,8 +156,6 @@ mod tests {
 
 	#[tokio::test]
 	async fn renamed_with_non_utf8_from_reads_the_to_path() {
-		// build_record uses the `to` endpoint of a rename; a non-UTF-8 `from`
-		// path must not affect it (the from is never read or stringified).
 		let dir = tempfile::tempdir().unwrap();
 		let to = dir.path().join("renamed.rs");
 		tokio::fs::write(&to, "fn main() {}").await.unwrap();

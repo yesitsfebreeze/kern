@@ -1,11 +1,5 @@
-//! Codec trait + concrete implementations.
-//!
-//! A `Codec` is the wire format. Its API mirrors `tokio_util::codec`:
-//! `encode(frame, &mut BytesMut)` writes one frame's bytes into `dst`,
-//! `decode(&mut BytesMut)` tries to extract one frame from `src`. A
-//! blanket impl below converts any `Codec` into the matching
-//! `tokio_util::codec::{Encoder, Decoder}` so codecs compose directly
-//! with `FramedRead`/`FramedWrite`.
+//! Codec = the wire format. API mirrors `tokio_util::codec`: `encode` writes
+//! one frame into `dst`, `decode` tries to extract one frame from `src`.
 
 use bytes::BytesMut;
 use serde_json::Value;
@@ -19,19 +13,11 @@ pub trait Codec: Send + 'static {
 	fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Frame>, CodecError>;
 }
 
-// ---- Bridge to `tokio_util::codec` ------------------------------------------
-//
-// We can't write a generic blanket `impl<T: Codec> Encoder<T::Frame> for T`
-// without orphan-rule grief, so each concrete `Codec` impl below also gets
-// an explicit `Encoder` + `Decoder` impl that just delegates to the trait.
+// No blanket `impl<T: Codec> Encoder<T::Frame> for T` without orphan-rule
+// grief — each concrete codec carries delegating `Encoder`/`Decoder` impls.
 
-/// Line-delimited JSON envelope.
-///
-/// Frames are `serde_json::Value`. Each frame is encoded as the JSON text
-/// of the value followed by a `\n`. Decoding scans for the next `\n` in
-/// the buffer. The envelope shape (`{ id, method, params }` /
-/// `{ id, result|error }`) is owned by the caller — this codec only
-/// shuttles `Value`s.
+/// Line-delimited JSON envelope: each frame is a `Value`'s JSON text + `\n`.
+/// The envelope shape is the caller's — this codec only shuttles `Value`s.
 #[derive(Default)]
 pub struct JsonEnvelopeCodec;
 
@@ -55,9 +41,8 @@ impl Codec for JsonEnvelopeCodec {
 	}
 
 	fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Frame>, CodecError> {
-		// Loop (not recursion) over leading blank lines: a buffer of N
-		// consecutive newlines previously recursed N deep and could blow the
-		// stack. Each iteration consumes one line; an empty one is skipped.
+		// Loop, NOT recursion, over leading blank lines — N consecutive newlines
+		// once recursed N deep (see json_many_consecutive_newlines_do_not_overflow).
 		loop {
 			let Some(pos) = src.iter().position(|&b| b == b'\n') else {
 				return Ok(None);
@@ -94,20 +79,13 @@ impl Decoder for JsonEnvelopeCodec {
 	}
 }
 
-/// Length-delimited bincode (bincode 2 standard config).
-///
-/// Frames are `Vec<u8>` payloads — the caller bincode-encodes their typed
-/// envelope into bytes before handing it to the codec. (We could be more
-/// clever and parameterise on the frame type, but Phase 1 only needs the
-/// JSON codec; this is here as a placeholder for hot-path hops.)
+/// Length-delimited bincode (bincode 2 standard config). Frames are `Vec<u8>`
+/// — the caller bincode-encodes their typed envelope first.
 #[derive(Default)]
 pub struct BincodeCodec;
 
-/// Hard cap on a single bincode frame (64 MiB). Bounds the buffer the framing
-/// layer will grow waiting for a frame: without it, a malformed or malicious
-/// 4-byte header claiming up to `u32::MAX` (~4 GiB) makes the reader buffer that
-/// much before `decode` ever yields, an OOM/DoS vector. Encode rejects oversized
-/// frames too, so we never emit one we'd refuse to decode.
+/// 64 MiB frame cap — without it a bogus 4-byte header claiming ~4 GiB makes
+/// the reader buffer that much before yielding (OOM/DoS). Encode rejects too.
 pub const MAX_FRAME_LEN: usize = 64 * 1024 * 1024;
 
 impl BincodeCodec {
@@ -140,8 +118,7 @@ impl Codec for BincodeCodec {
 		let mut len_buf = [0u8; 4];
 		len_buf.copy_from_slice(&src[..4]);
 		let len = u32::from_be_bytes(len_buf) as usize;
-		// Reject before waiting for / reserving the buffer — a bogus length must
-		// fail fast, not stall the reader into buffering gigabytes.
+		// Reject before reserving the buffer — fail fast on a bogus length.
 		if len > MAX_FRAME_LEN {
 			return Err(CodecError::Decode(format!(
 				"frame length {len} exceeds max {MAX_FRAME_LEN}"
@@ -176,18 +153,14 @@ mod tests {
 	use super::*;
 	use serde_json::json;
 
-	// `encode`/`decode` are ambiguous at call sites because both the `Codec`
-	// trait and tokio_util's `Encoder`/`Decoder` are in scope for these types.
-	// These generic shims are bound only by `Codec`, so they resolve to the
-	// trait methods unambiguously and keep the tests readable.
+	// Both `Codec` and tokio_util's `Encoder`/`Decoder` are in scope, making
+	// method calls ambiguous; these shims bind only `Codec`.
 	fn enc<C: Codec>(c: &mut C, frame: C::Frame, b: &mut BytesMut) -> Result<(), CodecError> {
 		c.encode(frame, b)
 	}
 	fn dec<C: Codec>(c: &mut C, b: &mut BytesMut) -> Result<Option<C::Frame>, CodecError> {
 		c.decode(b)
 	}
-
-	// ---- JsonEnvelopeCodec --------------------------------------------------
 
 	#[test]
 	fn json_roundtrip_single_frame() {
@@ -196,7 +169,6 @@ mod tests {
 		enc(&mut c, json!({"id": 1, "method": "ping"}), &mut buf).unwrap();
 		let got = dec(&mut c, &mut buf).unwrap().expect("one frame");
 		assert_eq!(got, json!({"id": 1, "method": "ping"}));
-		// Buffer fully consumed; nothing more to decode.
 		assert!(dec(&mut c, &mut buf).unwrap().is_none());
 	}
 
@@ -223,8 +195,7 @@ mod tests {
 
 	#[test]
 	fn json_many_consecutive_newlines_do_not_overflow() {
-		// Regression: the old recursive blank-line skip blew the stack on a
-		// buffer of many newlines. The loop handles 100k blanks in O(n) flat.
+		// Regression oracle: the old recursive blank-line skip blew the stack.
 		let mut c = JsonEnvelopeCodec::new();
 		let mut bytes = vec![b'\n'; 100_000];
 		bytes.extend_from_slice(b"{\"v\":42}\n");
@@ -247,8 +218,6 @@ mod tests {
 		);
 	}
 
-	// ---- BincodeCodec -------------------------------------------------------
-
 	#[test]
 	fn bincode_roundtrip_and_multi_frame() {
 		let mut c = BincodeCodec::new();
@@ -263,10 +232,9 @@ mod tests {
 	#[test]
 	fn bincode_partial_header_and_partial_payload_yield_none() {
 		let mut c = BincodeCodec::new();
-		// Fewer than 4 header bytes -> None.
 		let mut buf = BytesMut::from(&[0u8, 0u8][..]);
 		assert!(dec(&mut c, &mut buf).unwrap().is_none());
-		// Full header (len=5) but only 2 payload bytes -> None, header untouched.
+		// Full header (len=5) but only 2 payload bytes -> None, buffer intact.
 		let mut buf = BytesMut::new();
 		buf.extend_from_slice(&5u32.to_be_bytes());
 		buf.extend_from_slice(&[1, 2]);
@@ -278,7 +246,6 @@ mod tests {
 	fn bincode_decode_rejects_oversized_length_header() {
 		let mut c = BincodeCodec::new();
 		let mut buf = BytesMut::new();
-		// A header claiming > MAX_FRAME_LEN must fail fast, not buffer/alloc it.
 		buf.extend_from_slice(&((MAX_FRAME_LEN as u32) + 1).to_be_bytes());
 		let err = dec(&mut c, &mut buf).unwrap_err();
 		assert!(
@@ -291,8 +258,6 @@ mod tests {
 	fn bincode_encode_rejects_oversized_frame() {
 		let mut c = BincodeCodec::new();
 		let mut buf = BytesMut::new();
-		// Symmetric with decode's cap: a frame past MAX_FRAME_LEN is refused and
-		// nothing is written, so we never emit a frame we'd later reject.
 		let oversized = vec![0u8; MAX_FRAME_LEN + 1];
 		let err = enc(&mut c, oversized, &mut buf).unwrap_err();
 		assert!(

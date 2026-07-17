@@ -1,8 +1,5 @@
-/// The full MCP tool catalogue, assembled from each handler module so a tool's
-/// schema lives next to the `tool_*` impl that serves it — schema and handler
-/// can no longer silently drift across files. Order is intentional (asserted in
-/// `definitions_are_well_formed_and_complete`): query, then the mutators, then
-/// the admin tools.
+/// The full MCP tool catalogue. Order is intentional (asserted in
+/// `definitions_are_well_formed_and_complete`).
 pub fn tool_definitions() -> Vec<serde_json::Value> {
 	let mut defs = super::tools_query::tool_schemas();
 	defs.extend(super::tools_mutate::tool_schemas());
@@ -61,8 +58,7 @@ mod tests {
 		let any_of = query["inputSchema"]["anyOf"]
 			.as_array()
 			.expect("query schema declares an anyOf branch");
-		// The schema must offer exactly the text-or-id alternatives that
-		// tool_query enforces at runtime ("either text or id is required").
+		// Must mirror tool_query's runtime "either text or id is required" guard.
 		let required: Vec<&str> = any_of
 			.iter()
 			.filter_map(|b| b["required"][0].as_str())
@@ -80,8 +76,7 @@ mod tests {
 	#[test]
 	fn mutation_tools_declare_their_required_fields() {
 		let defs = tool_definitions();
-		// Each mutating tool's runtime handler rejects missing core args; the
-		// schema's `required` must list them so clients fail fast instead.
+		// `required` must mirror each handler's runtime rejects, so clients fail fast.
 		let want: &[(&str, &[&str])] = &[
 			("ingest", &["text"]),
 			("link", &["from", "to"]),

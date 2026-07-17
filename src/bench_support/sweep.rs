@@ -16,11 +16,9 @@ pub struct SweepRow {
 /// A single tunable the bench harness can sweep over a list of values.
 #[derive(Debug, Clone, Copy)]
 pub enum SweepParam {
-	/// Reciprocal-rank-fusion constant `k` in `1/(k + rank)`. Larger flattens the
-	/// rank-weight curve so later ranks contribute relatively more. Typically 10–60.
+	/// Reciprocal-rank-fusion constant `k` in `1/(k + rank)`. Typically 10–60.
 	RrfK,
 	/// Minimum blended score in `[0.0, 1.0]` a hit must clear to be delivered.
-	/// Higher trims the tail (precision over recall).
 	MinDeliverScore,
 	/// MMR relevance-vs-diversity tradeoff in `[0.0, 1.0]`: 1.0 = pure relevance,
 	/// 0.0 = pure diversity.

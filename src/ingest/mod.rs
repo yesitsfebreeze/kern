@@ -1,26 +1,13 @@
-//! Ingest pipeline: turn raw text into placed, deduplicated graph entities.
-//!
-//! Everything is driven by [`Worker`] (an async mpsc actor — see [`worker`]),
-//! which runs each document through:
-//! 1. [`split`] — chunk the document into statement-sized pieces (LLM-assisted,
-//!    with a heuristic fallback).
-//! 2. [`embed`] — vectorize the document and each chunk via the embed endpoint.
-//! 3. [`place`] — insert each piece into the owning kern, consulting [`dedup`]
-//!    first so a near-duplicate vector merges into the existing entity instead of
-//!    spawning a divergent one. [`outcome`] reports per-document success /
-//!    partial / failure.
-//!
-//! Ambient document sources that feed the Worker: [`intake`] (the
-//! Claude-Code Stop-hook intake) and [`file_watcher`]; [`distill`] extracts
-//! durable claims from conversation text.
+//! Ingest pipeline: raw text → placed, deduplicated graph entities. [`Worker`]
+//! drives [`split`] → [`embed`] → [`place`]; [`outcome`] reports status.
 
-pub mod intake;
 pub mod config;
 pub mod dedup;
 pub mod direct;
 pub mod distill;
 pub mod embed;
 pub mod file_watcher;
+pub mod intake;
 pub mod outcome;
 pub mod place;
 pub mod split;
@@ -29,16 +16,11 @@ pub mod worker;
 pub use crate::types::LlmFunc;
 pub use config::Config;
 pub use outcome::{FailureReport, Outcome, OutcomeStatus};
-pub use worker::Worker;
-// Crate-internal: `Job` is the Worker's mpsc message (pub(crate)); re-exported
-// here so in-crate producers use `ingest::Job` consistently with `ingest::Worker`
-// rather than reaching into `ingest::worker::Job`.
 pub(crate) use worker::Job;
+pub use worker::Worker;
 
-/// Test-only embedder: a 256-dim one-hot unit vector derived from `seed`'s
-/// content hash. Two distinct seeds almost certainly land in different slots,
-/// so cosine similarity is ~0 and `commit_entity`'s dedup check (similarity >
-/// threshold) is dodged. Production paths use real embeddings.
+/// Test-only embedder: 256-dim one-hot from the content hash — distinct seeds
+/// land in different slots (cosine ~0), so the dedup check is dodged.
 #[cfg(test)]
 pub(crate) fn stub_one_hot(seed: &str) -> Vec<f32> {
 	let h = crate::base::util::content_hash(seed);

@@ -10,14 +10,11 @@ use crate::gnn::optim::Adam;
 use crate::gnn::persist::{marshal_weights, unmarshal_weights};
 use crate::gnn::tensor::Tensor;
 
-/// Single source of truth for GnnConfig field defaults, shared by the runtime
-/// [`GnnConfig::defaults`] and the serde `crate::config::GnnConfig`
-/// default so the two layers cannot drift.
+/// Single source of truth for the GnnConfig defaults — both [`GnnConfig::defaults`]
+/// and the serde `crate::config::GnnConfig` must read them from here, never re-literal.
 pub const DEFAULT_SELF_WEIGHT: f64 = 0.6;
 pub const DEFAULT_MIN_WEIGHT: f64 = 0.01;
-/// Skip GNN training below this many entities: a multi-layer GNN over a
-/// handful of nodes only overfits, and the noisy gnn_vector then pollutes
-/// ranking via gnn_entity_idx. Small graphs fall back to the
+/// Skip GNN training below this many entities; small graphs fall back to the
 /// vector+BM25+PageRank+reason-edge path.
 pub const DEFAULT_MIN_THOUGHTS: usize = 128;
 pub const DEFAULT_TRAIN_EPOCHS: usize = 24;
@@ -55,7 +52,7 @@ pub struct GnnSnapshot {
 	pub features: Tensor,
 	pub graph: Graph,
 	pub pos_edges: Vec<[usize; 2]>,
-	pub weights: Vec<u8>, // persisted model state
+	pub weights: Vec<u8>,
 }
 
 pub struct PropagationResult {
@@ -193,9 +190,8 @@ fn has_nan_or_inf(v: &[f64]) -> bool {
 mod tests {
 	use super::*;
 
-	/// Build a tiny connected snapshot: `n` nodes, `dim` features, a path of
-	/// positive edges. Enough for `run_learned_propagation` to train without
-	/// any persistence or LLM dependency.
+	/// `n` nodes over `dim` features joined in a path — the minimum connected
+	/// shape `run_learned_propagation` can train on.
 	fn tiny_snapshot(n: usize, dim: usize) -> GnnSnapshot {
 		let mut graph = Graph::new();
 		for i in 0..n {

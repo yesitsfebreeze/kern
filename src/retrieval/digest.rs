@@ -1,20 +1,16 @@
-//! Recall digest: a markdown snapshot of the kern's purpose plus its
-//! hottest thoughts, written to disk for the Claude-Code SessionStart hook
-//! to inject. Pure builder + a thin file writer; no live query path.
+//! Recall digest: markdown snapshot of purpose + hottest thoughts, written for
+//! the Claude-Code SessionStart hook. Pure builder + thin writer; no live query path.
 
 use crate::base::graph::GraphGnn;
 use crate::base::types::{Entity, EntityKind, EntityStatus};
 
-/// Rough token estimate for budgeting: ~4 chars/token (OpenAI/BGE-class
-/// tokenizers average close to this for English). Deliberately cheap — the
-/// digest only needs an approximate budget, not exact tokenization.
+/// ~4 chars/token — the digest only needs an approximate budget.
 fn est_tokens(s: &str) -> usize {
 	s.len() / 4 + 1
 }
 
-/// Normalized key for cheap near-duplicate detection: lowercase, whitespace
-/// collapsed, capped length. Two claims that restate the same fact collapse to
-/// the same key so only the first (hottest) is kept.
+/// Near-duplicate key: restatements of the same fact collapse to one key, so
+/// only the first (hottest) survives.
 fn dedup_key(s: &str) -> String {
 	let norm: String = s
 		.split_whitespace()
@@ -24,22 +20,8 @@ fn dedup_key(s: &str) -> String {
 	norm.chars().take(80).collect()
 }
 
-/// Render the digest markdown: purpose header + the highest-value active
-/// claims, best first.
-///
-/// Curation (card #49):
-/// - **Ranking** is `heat * conf_mean`, not heat alone, so a hot but
-///   low-confidence claim sinks below a warm, well-corroborated one.
-/// - **`min_trust`** is a posterior-confidence floor (`Entity::conf_mean`):
-///   claims below it are quarantined out of the digest. The digest is replayed
-///   into every future session — the persistent re-injection surface for
-///   memory-poisoning — so gating keeps low-trust / repeatedly-contradicted
-///   claims off it. Pass `0.0` to disable the gate.
-/// - **`token_budget`** caps the body by an approximate token count (context
-///   rot: attention degrades with length), trimmed greedily; `k` remains a hard
-///   upper bound on item count. Pass `0` to disable the token cap.
-/// - **Diversity**: near-duplicate claims (same normalized text) are skipped so
-///   restatements don't waste the budget.
+/// Digest markdown: purpose header + active claims ranked by `heat * conf_mean`.
+/// `min_trust` / `token_budget` of 0 disable those gates; `k` stays a hard item cap (see note).
 pub fn build_digest(graph: &GraphGnn, k: usize, min_trust: f64, token_budget: usize) -> String {
 	let mut out = String::from("# kern memory\n\n");
 	let anchors: Vec<String> = crate::base::accept::root_anchor_ids(graph)
@@ -67,8 +49,6 @@ pub fn build_digest(graph: &GraphGnn, k: usize, min_trust: f64, token_budget: us
 		.collect();
 	ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-	// Greedy select: cap by item count (k) AND token budget, skipping
-	// near-duplicate restatements.
 	let mut bullets: Vec<&str> = Vec::new();
 	let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 	let mut tokens = 0usize;
@@ -80,7 +60,7 @@ pub fn build_digest(graph: &GraphGnn, k: usize, min_trust: f64, token_budget: us
 			continue;
 		};
 		if !seen.insert(dedup_key(s)) {
-			continue; // near-duplicate of an already-selected claim
+			continue;
 		}
 		let t = est_tokens(s);
 		if token_budget > 0 && !bullets.is_empty() && tokens + t > token_budget {
@@ -99,8 +79,7 @@ pub fn build_digest(graph: &GraphGnn, k: usize, min_trust: f64, token_budget: us
 		}
 	}
 
-	// Append the connections section (capped at 1/3 of the remaining budget so it
-	// doesn't crowd out the entity bullets).
+	// Connections get 1/3 of the remaining budget so they don't crowd the bullets.
 	let conn_budget = if token_budget > 0 {
 		let used = est_tokens(&out);
 		(token_budget.saturating_sub(used)) / 3
@@ -112,13 +91,8 @@ pub fn build_digest(graph: &GraphGnn, k: usize, min_trust: f64, token_budget: us
 	out
 }
 
-/// Build the `## Connections` markdown section: the top enriched relationship
-/// edges (the specific logical connections between entities), ranked by the
-/// heat×confidence of their from-entity, deduped, and trimmed to `conn_budget`
-/// approximate tokens. Only Similarity/Provenance/Ratification edges (the
-/// semantically meaningful ones) are included — structural kinds like
-/// Spawn/Supersedes carry no explanatory prose. Returns the section with its
-/// leading newline + header, or an empty string when nothing qualifies/fits.
+/// The `## Connections` section: top enriched SEMANTIC edges ranked by from-entity
+/// heat×conf — structural kinds (Spawn/Supersedes) carry no prose and are excluded.
 fn build_connections(graph: &GraphGnn, conn_budget: usize) -> String {
 	if conn_budget == 0 {
 		return String::new();
@@ -127,8 +101,7 @@ fn build_connections(graph: &GraphGnn, conn_budget: usize) -> String {
 	let mut conn_tokens = 0usize;
 	let mut conn_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-	// Build entity map once: id → (display_text, heat×conf). Avoids an
-	// O(N×M) nested kerns scan per reason during scoring and formatting.
+	// Built once: id → (display, heat×conf), shared by scoring and formatting.
 	let entity_cache: std::collections::HashMap<&str, (String, f64)> = graph
 		.kerns
 		.values()
@@ -241,7 +214,6 @@ mod tests {
 	#[test]
 	fn digest_has_anchor_and_hottest_first_capped() {
 		let mut g = GraphGnn::default();
-		// A named anchor (root child) should surface in the digest header.
 		crate::base::accept::add_anchor(&mut g, "durable facts", vec![1.0, 0.0, 0.0]);
 		let root_id = g.root.id.clone();
 		let kern = g.kerns.get_mut(&root_id).expect("root kern");
@@ -317,7 +289,6 @@ mod tests {
 		);
 		assert!(gated.contains("trusted cool claim"), "trusted claim kept");
 
-		// Gate off: poisoned claim re-injected (hottest first).
 		let ungated = build_digest(&g, 10, 0.0, 0);
 		assert!(
 			ungated.contains("poisoned hot claim"),
@@ -399,7 +370,6 @@ mod tests {
 		let mut g = GraphGnn::default();
 		let root_id = g.root.id.clone();
 		let kern = g.kerns.get_mut(&root_id).expect("root kern");
-		// Hotter but low-confidence vs cooler but high-confidence.
 		let mut hot_lowconf = mk_entity("h", "hot but shaky", 10.0, EntityKind::Claim);
 		hot_lowconf.conf_alpha = 1.0;
 		hot_lowconf.conf_beta = 3.0; // conf_mean 0.25 → score 2.5
@@ -411,7 +381,6 @@ mod tests {
 		kern.entities.insert("h".into(), hot_lowconf);
 		kern.entities.insert("w".into(), warm_trusted);
 
-		// k=1, no gate: heat*conf picks the warm trusted claim over the hot shaky one.
 		let md = build_digest(&g, 1, 0.0, 0);
 		assert!(
 			md.contains("warm and solid"),
@@ -446,9 +415,8 @@ mod tests {
 
 	#[test]
 	fn connection_entity_display_truncates_on_char_boundary() {
-		// Regression: the connection-label cache sliced entity text at raw byte
-		// 39, which panicked when a multibyte char straddled the boundary (e.g.
-		// '→' at bytes 38..41). Build an entity whose 40th boundary lands mid-char.
+		// Regression: slicing at raw byte 39 panicked when a multibyte char
+		// straddled the boundary ('→' at bytes 38..41).
 		let mut g = GraphGnn::default();
 		let root_id = g.root.id.clone();
 		let kern = g.kerns.get_mut(&root_id).expect("root kern");
@@ -473,7 +441,6 @@ mod tests {
 				..Default::default()
 			},
 		);
-		// Must not panic on the char boundary; truncated label ends with the ellipsis.
 		let md = build_digest(&g, 10, 0.0, 0);
 		assert!(
 			md.contains("## Connections"),

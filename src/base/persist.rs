@@ -1,15 +1,6 @@
-// SLICE A NOTE — Entity rename is a clean break. The on-disk bincode layout
-// changed (`Thought` -> `Entity`, `ThoughtKind` -> `EntityKind` + `EntityStatus`,
-// `SourceRef` -> typed `Source` enum, `Kern.thoughts` -> `Kern.entities`,
-// `created_at` moved off `Source` onto `Entity`). Old saved DBs are NOT
-// migrated — they must be regenerated. CLAUDE.md mandates "no compat".
-//
-// ENCRYPTION-AT-REST POSTURE: snapshots are written as PLAINTEXT bincode
-// (`atomic_write` below does a tmp-write + fsync + atomic rename — durability,
-// not confidentiality). This layer intentionally does no encryption. Protecting
-// the `.kern` data dir is a DEPLOYMENT-layer concern (full-disk / volume
-// encryption, filesystem ACLs); do not store secrets in kern expecting the file
-// layer to guard them.
+//! Store-backed graph load/flush, plus the legacy file-per-shard reader kept for
+//! `kern migrate`. Snapshots are PLAINTEXT — durability, not confidentiality.
+
 use super::graph::{migrate_root_id, GraphGnn};
 use super::store::bincode_cfg;
 use super::types::Kern;
@@ -42,8 +33,7 @@ pub enum PersistError {
 	},
 }
 
-/// Append a literal suffix to a path (whole filename, not the extension).
-/// Stays in the same directory so a subsequent `rename` is atomic.
+/// Append a literal suffix to the whole filename, not the extension.
 fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
 	let mut p = path.as_os_str().to_owned();
 	p.push(suffix);
@@ -66,7 +56,6 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<(), PersistError> {
 		f.sync_all()?;
 	}
 	if let Err(source) = fs::rename(&tmp, path) {
-		// best-effort cleanup; surface original rename error
 		let _ = fs::remove_file(&tmp);
 		return Err(PersistError::TmpRename {
 			tmp,
@@ -131,15 +120,8 @@ pub fn load_kern(dir: &str, id: &str) -> Result<Kern, PersistError> {
 	Ok(kern)
 }
 
-/// DEPRECATION HORIZON: this is legacy-read scaffolding, not a permanent
-/// migration. It backfills `created_at` for entities decoded from old file
-/// shards that predate the field. It silently mutates loaded data on every
-/// restart, which is acceptable ONLY because it is part of the file-shard
-/// *reader* that the redb-`Store` migration is retiring: per
-/// `docs/superpowers/plans/2026-06-10-redb-store.md` (Step 1), `load_kern` /
-/// `load_dir` / `backfill_created_at` move into `migrate.rs::read_legacy_dir`
-/// and this whole path is deleted once stores are the only on-disk format.
-/// Do NOT extend it — new fields use serde `#[serde(default)]`, not a backfill.
+/// Legacy-read scaffolding: backfills `created_at` for entities from old shards
+/// that predate the field. Do NOT extend — new fields use `#[serde(default)]`.
 fn backfill_created_at(kern: &mut Kern) {
 	let now = std::time::SystemTime::now();
 	for t in kern.entities.values_mut() {
@@ -149,10 +131,8 @@ fn backfill_created_at(kern: &mut Kern) {
 	}
 }
 
-/// Load the graph from the embedded LMDB store under `dir`. Opens the store once
-/// and binds it to the returned graph for the lazy-load / persist paths. An empty
-/// or root-less store yields a fresh graph bound to the (now-open) store, so the
-/// very first run on a new project persists correctly.
+/// Load the graph from the LMDB store under `dir`, binding the opened store to the
+/// returned graph. An empty or root-less store yields a fresh graph, still bound.
 pub fn load_dir(dir: &str) -> Result<GraphGnn, crate::base::store::StoreError> {
 	use crate::base::store::Store;
 	use std::sync::Arc;
@@ -161,22 +141,16 @@ pub fn load_dir(dir: &str) -> Result<GraphGnn, crate::base::store::StoreError> {
 	graph_from_store(store, dir)
 }
 
-/// Rebuild a graph from an ALREADY-OPEN store handle, reusing its LMDB env. This is
-/// how a live graph reloads after another writer advanced the store: opening a
-/// second `Store` on the same dir would be a same-process double-open of the LMDB
-/// env (forbidden — it corrupts the lock and can SIGSEGV), so reload paths must
-/// thread the existing handle through here, NOT call [`load_dir`] again. Returns
-/// `None` for an in-memory graph (no store bound).
+/// Rebuild from an ALREADY-OPEN store handle. Reload paths MUST come through here,
+/// never [`load_dir`]: a same-process double-open of the LMDB env can SIGSEGV.
 pub fn reload_from_disk(old: &GraphGnn) -> Option<GraphGnn> {
 	let store = old.store()?;
 	let dir = old.data_dir.clone();
 	graph_from_store(store, &dir).ok()
 }
 
-/// Shared body of [`load_dir`] / [`reload_from_disk`]: scan every kern from the
-/// (already-open) store, rebuild the graph, rebind the SAME store handle, and stamp
-/// the loaded epoch so the stale-flush guard knows what generation this graph is
-/// consistent with.
+/// Shared body of [`load_dir`] / [`reload_from_disk`]: rebuild from the store, rebind
+/// the SAME handle, and stamp the loaded epoch for the stale-flush guard.
 fn graph_from_store(
 	store: std::sync::Arc<crate::base::store::Store>,
 	dir: &str,
@@ -216,9 +190,8 @@ fn graph_from_store(
 	Ok(g)
 }
 
-/// Legacy file-per-shard reader, retained solely for the one-shot `kern migrate`
-/// path (see `crate::base::migrate`). New loads go through the store-backed
-/// [`load_dir`]. Reads every `<id>.kern` bincode shard under `dir`.
+/// Legacy `<id>.kern` shard reader, retained solely for the one-shot `kern migrate`
+/// path. New loads go through the store-backed [`load_dir`].
 pub fn load_legacy_dir(dir: &str) -> Result<GraphGnn, PersistError> {
 	sweep_stale_tmp(Path::new(dir));
 	let mut root = load_kern(dir, "root")?;
@@ -234,12 +207,6 @@ pub fn load_legacy_dir(dir: &str) -> Result<GraphGnn, PersistError> {
 
 	let unloaded = std::collections::HashSet::new();
 
-	// Enumerate sibling shard ids first (cheap directory walk), then decode them
-	// in parallel. A real graph can hold hundreds of thousands of `.kern` files;
-	// a sequential read+bincode-decode of each one made `load_dir` an O(shards)
-	// multi-minute hang that blocked every CLI command and the daemon's startup
-	// reap. The decode is pure CPU+IO per file with no cross-shard state, so it
-	// fans out cleanly across rayon's pool — wall time drops by ~core count.
 	let ids: Vec<String> = fs::read_dir(dir)?
 		.filter_map(Result::ok)
 		.filter_map(|entry| {
@@ -269,9 +236,8 @@ pub fn load_legacy_dir(dir: &str) -> Result<GraphGnn, PersistError> {
 			Ok(k) => {
 				kerns.insert(k.id.clone(), k);
 			}
-			// A corrupt/unreadable sibling must not vanish silently: warn so the
-			// orphaned data is visible rather than producing a quietly truncated
-			// graph. The root is loaded above and still hard-errors.
+			// A corrupt sibling must not vanish silently — warn rather than
+			// truncate. The root is loaded above and still hard-errors.
 			Err((id, e)) => {
 				skipped += 1;
 				tracing::warn!(target: "kern.persist", kern = %id, error = %e, "skipping corrupt/unreadable kern file");
@@ -298,11 +264,8 @@ pub fn load_legacy_dir(dir: &str) -> Result<GraphGnn, PersistError> {
 	Ok(g)
 }
 
-/// The canonical on-disk root kern: the in-memory map entry overlaid with the
-/// authoritative root-only fields from `g.root` (id, root_id, purpose, radii,
-/// descriptors). Both `save_all` and the tick worker's per-kern persist write
-/// the root through this, so a `Persist` task targeting the root can never
-/// clobber those fields with a stale map entry.
+/// The canonical on-disk root: the map entry overlaid with the authoritative
+/// root-only fields from `g.root`, so a root persist can't clobber them.
 pub fn merged_root(g: &GraphGnn) -> Kern {
 	let root_id = g.root.id.clone();
 	let mut merged = g
@@ -316,19 +279,14 @@ pub fn merged_root(g: &GraphGnn) -> Kern {
 	merged.anchor_vec = g.root.anchor_vec.clone();
 	merged.inner_radius = g.root.inner_radius;
 	merged.outer_radius = g.root.outer_radius;
-	// g.root is authoritative for descriptors — REPLACE, don't union. A union (the
-	// old `insert` loop) re-added any descriptor still present on the stale map-root
-	// base, so a removal on g.root (e.g. `descriptor rm`) never persisted.
+	// REPLACE, don't union: a union re-adds descriptors from the stale map base,
+	// so a removal on g.root (`descriptor rm`) never persists.
 	merged.descriptors = g.root.descriptors.clone();
 	merged
 }
 
-/// Persist a graph's kerns (with the authoritative root overlay) into an explicit
-/// store. Shared by [`save_all`] (the graph's own store) and the copy commands
-/// (`compress` / `register`) that write into a *different* destination store.
-/// Clones the kern map once to apply the `merged_root` overlay; this is the
-/// full-persist path (shutdown / explicit save / copy), not the hot per-kern
-/// `do_persist`, so the transient clone is fine.
+/// Persist a graph's kerns (root overlay applied) into an explicit store — the
+/// graph's own, or a different destination for `compress` / `register`.
 pub fn save_graph_into(
 	store: &crate::base::store::Store,
 	g: &GraphGnn,
@@ -339,18 +297,14 @@ pub fn save_graph_into(
 	Ok(())
 }
 
-/// The store's current write epoch, or 0 for an in-memory graph. A flusher reads
-/// this once after a load/flush and passes it back as `expected` to
-/// [`flush_guarded`] so it can tell whether anyone else has written since.
+/// The store's current write epoch, or 0 for an in-memory graph. Pass it back as
+/// `expected` to [`flush_guarded`] to detect a writer that moved the store since.
 pub fn current_epoch(g: &GraphGnn) -> u64 {
 	g.store().map(|s| s.read_epoch()).unwrap_or(0)
 }
 
-/// Stale-safe full flush of `g` to its own store (see [`crate::base::store::Store::flush_guarded`]).
-/// `expected` is the epoch the caller last observed; the flush is refused (no
-/// write) if the on-disk epoch has moved past it, so a stale daemon can never
-/// overwrite a graph the CLI grew underneath it. An in-memory graph (no store)
-/// reports a no-op `Flushed` at the same epoch.
+/// Stale-safe full flush of `g` to its own store: refused, with no write, if the
+/// on-disk epoch has moved past `expected`. In-memory graphs report a no-op flush.
 pub fn flush_guarded(
 	g: &GraphGnn,
 	expected: u64,
@@ -365,12 +319,8 @@ pub fn flush_guarded(
 	}
 }
 
-/// A persist-ready snapshot captured under the caller's read guard: the open store
-/// handle plus the cloned kern map (root overlay already applied) and the metadata
-/// the LMDB write needs. Cloning the map HERE — while the read lock is held for only
-/// as long as the clone takes — lets the caller DROP the graph lock before the LMDB
-/// transaction runs, so a multi-second flush no longer pins the read lock against
-/// writers (the whole point of [`snapshot_for_flush`] + [`flush_snapshot`]).
+/// Everything the LMDB write needs, cloned under the caller's read guard so the
+/// graph lock can be DROPPED before the flush transaction runs.
 pub struct FlushSnapshot {
 	store: std::sync::Arc<crate::base::store::Store>,
 	kerns: HashMap<String, Kern>,
@@ -378,10 +328,8 @@ pub struct FlushSnapshot {
 	quant_mode: QuantizationMode,
 }
 
-/// Clone the flush snapshot out of `g`. Call this while holding the read guard; the
-/// returned snapshot owns everything the flush needs, so the guard can be dropped
-/// before [`flush_snapshot`] runs the LMDB transaction. `None` for an in-memory
-/// graph (no store bound — nothing to flush).
+/// Clone the flush snapshot out of `g`. Call while holding the read guard — the
+/// guard can then be dropped before [`flush_snapshot`] runs.
 pub fn snapshot_for_flush(g: &GraphGnn) -> Option<FlushSnapshot> {
 	let store = g.store()?;
 	let mut kerns = g.map().clone();
@@ -394,11 +342,8 @@ pub fn snapshot_for_flush(g: &GraphGnn) -> Option<FlushSnapshot> {
 	})
 }
 
-/// Run the guarded LMDB flush of a previously captured [`FlushSnapshot`] with NO
-/// graph lock held. The disk-epoch comparison stays INSIDE the store's write txn
-/// (`Store::flush_guarded`), so `expected` (the graph's `flushed_epoch` at capture
-/// time) still detects another writer that advanced the store since — the
-/// multi-writer safety net is unchanged; only the graph lock is released earlier.
+/// Run the guarded flush of a captured [`FlushSnapshot`] with NO graph lock held.
+/// The epoch check stays inside the store's write txn, so `expected` still holds.
 pub fn flush_snapshot(
 	snap: &FlushSnapshot,
 	expected: u64,
@@ -408,10 +353,8 @@ pub fn flush_snapshot(
 		.flush_guarded(&snap.kerns, &snap.network_id, snap.quant_mode, expected)
 }
 
-/// Persist the whole graph to its own store in one atomic transaction. No-op for
-/// an in-memory graph (no store bound). The store's `save_all_kerns` prunes any
-/// kern row not in the live set, so a deregistered kern can't resurrect —
-/// replacing the old on-disk orphan-file reconcile.
+/// Persist the whole graph to its own store in one transaction; no-op if in-memory.
+/// `save_all_kerns` prunes rows outside the live set, so no kern can resurrect.
 pub fn save_all(g: &GraphGnn) -> Result<(), crate::base::store::StoreError> {
 	match g.store() {
 		Some(store) => save_graph_into(&store, g),
@@ -419,10 +362,8 @@ pub fn save_all(g: &GraphGnn) -> Result<(), crate::base::store::StoreError> {
 	}
 }
 
-/// Copy the graph at `src` into a fresh store at `out_dir`, recording
-/// `target_mode` as the in-memory index quantization. On-disk vectors are always
-/// int8 now (the store's size win), so `target_mode` controls only the HNSW index
-/// mode the next load rebuilds with, not the durable vector form.
+/// Copy the graph at `src` into a fresh store at `out_dir`. On-disk vectors are
+/// always int8; `target_mode` sets only the HNSW mode the next load rebuilds with.
 pub fn compress_dir(
 	src: &str,
 	out_dir: &str,
@@ -459,12 +400,10 @@ mod tests {
 
 	#[test]
 	fn atomic_write_cleans_tmp_and_errors_when_rename_fails() {
-		// Force the rename half to fail by making the destination an existing
-		// DIRECTORY (renaming a file onto a dir errors on every platform). The
-		// tmp file must be cleaned up and the original rename error surfaced.
+		// Renaming a file onto an existing DIRECTORY errors on every platform.
 		let dir = tempdir().unwrap();
 		let dst = dir.path().join("target");
-		fs::create_dir(&dst).unwrap(); // dst is a directory, not a file
+		fs::create_dir(&dst).unwrap();
 
 		let err = atomic_write(&dst, b"payload").unwrap_err();
 		assert!(matches!(err, PersistError::TmpRename { .. }), "got {err:?}");
@@ -486,12 +425,10 @@ mod tests {
 	#[test]
 	fn merged_root_overlays_authoritative_fields_over_stale_map_entry() {
 		let mut g = GraphGnn::new();
-		// Stale root entry in the map: empty purpose/descriptors.
 		let mut stale = g.root.clone();
 		stale.anchor_text = String::new();
 		stale.descriptors.clear();
 		g.register(stale);
-		// Authoritative values live on g.root.
 		g.root.anchor_text = "guiding purpose".to_string();
 		g.root
 			.descriptors
@@ -515,7 +452,6 @@ mod tests {
 		g.root.descriptors.insert("k".to_string(), "v".to_string());
 
 		fs::create_dir_all(&g.data_dir).unwrap();
-		// This is what do_persist(root) and save_all now write for the root.
 		save_kern(&g.data_dir, &merged_root(&g)).unwrap();
 
 		let reloaded = load_kern(&g.data_dir, &g.root.id).unwrap();
@@ -525,10 +461,8 @@ mod tests {
 
 	#[test]
 	fn named_kern_with_anchor_vec_round_trips() {
-		// Guards the bincode-positional assumption behind the purpose->anchor
-		// rename: anchor_text/anchor_vec must survive save/load unchanged. If a
-		// future edit reorders Kern's fields, the decoded values shift and this
-		// fails — catching live-graph corruption before it ships.
+		// Guards bincode's positional layout: reordering `Kern`'s fields shifts
+		// every decoded value and corrupts live graphs.
 		let dir = tempdir().unwrap();
 		let d = dir.path().to_string_lossy().to_string();
 		let mut k = Kern::new("anchor-work", "root");
@@ -552,7 +486,6 @@ mod tests {
 		let d = dir.path().to_string_lossy().to_string();
 		save_kern(&d, &Kern::new("root", "")).unwrap();
 		save_kern(&d, &Kern::new("child1", "root")).unwrap();
-		// A corrupt sibling that fails to decode.
 		fs::write(format!("{d}/bad.kern"), b"not a valid bincode kern").unwrap();
 
 		let g = load_legacy_dir(&d).expect("load_legacy_dir tolerates a corrupt sibling");
@@ -565,9 +498,8 @@ mod tests {
 
 	#[test]
 	fn load_dir_loads_every_sibling() {
-		// Parity guard for the parallel decode: a graph with many sibling kerns
-		// must come back complete and order-independent. Mixes a corrupt sibling
-		// in so the skip path is exercised concurrently with the happy path.
+		// Parity guard for the parallel decode: complete and order-independent,
+		// with a corrupt sibling mixed in so the skip path runs concurrently.
 		let dir = tempdir().unwrap();
 		let d = dir.path().to_string_lossy().to_string();
 		save_kern(&d, &Kern::new("root", "")).unwrap();
@@ -577,7 +509,6 @@ mod tests {
 		fs::write(format!("{d}/bad.kern"), b"not a valid bincode kern").unwrap();
 
 		let g = load_legacy_dir(&d).expect("load_legacy_dir loads a large sibling set");
-		// root + 64 children, corrupt one skipped.
 		assert_eq!(g.map().len(), 65, "root + 64 children all present");
 		for i in 0..64 {
 			assert!(g.loaded(&format!("child{i}")).is_some(), "child{i} loaded");

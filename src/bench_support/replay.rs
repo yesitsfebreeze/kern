@@ -13,7 +13,6 @@ pub struct QueryReport {
 	pub ranked_ids: Vec<String>,
 	pub expected_ids: Vec<String>,
 	pub ndcg10: f64,
-	/// Recall@10: coverage of the expected ids in the top-10, order-insensitive.
 	pub recall10: f64,
 }
 
@@ -52,9 +51,7 @@ pub fn replay(g: &GraphGnn, cfg: &RetrievalConfig, trace: &Trace) -> ReplayRepor
 fn run_one(g: &GraphGnn, cfg: &RetrievalConfig, q: &TraceQuery) -> QueryReport {
 	let mode = Mode::parse(&q.mode);
 	let qvec = embed::embed(&q.query);
-	// An optional kind filter makes the bench run the FILTERED retrieval path
-	// (post-filtering today; the place to A/B filtered-ANN wiring). An unparseable
-	// kind falls back to no filter rather than silently scoring the wrong thing.
+	// An unparseable kind falls back to no filter, not a wrong-scoring silent match.
 	let opts = q
 		.filter_kind
 		.as_deref()
@@ -103,11 +100,8 @@ mod tests {
 		}
 	}
 
-	/// End-to-end: build a graph from a tiny trace, replay a query whose text
-	/// matches one doc, and assert that doc is retrieved with positive nDCG.
-	/// Uses the deterministic bench embedder, so no LLM/network needed. We assert
-	/// recall + positive ranking quality rather than an exact rank-1, because the
-	/// full retrieval pipeline (graph expansion, MMR, GNN blend) reorders results.
+	/// Asserts recall + positive ranking quality rather than exact rank-1: the full
+	/// pipeline (graph expansion, MMR, GNN blend) reorders results.
 	#[test]
 	fn replay_retrieves_relevant_doc_with_positive_ndcg() {
 		let trace = Trace {
@@ -140,8 +134,6 @@ mod tests {
 			"expected positive ranking quality, got {}",
 			report.mean_ndcg10
 		);
-		// The relevant doc is among only 3 results, so it is within the top-10 ->
-		// full recall. (Coverage assertion, distinct from the ordering NDCG asserts.)
 		assert_eq!(
 			report.mean_recall10, 1.0,
 			"the single expected doc is retrieved within k -> recall@10 = 1.0"
@@ -154,11 +146,8 @@ mod tests {
 
 	#[test]
 	fn replay_applies_the_kind_filter_end_to_end() {
-		// build_graph inserts every doc as a Claim, so a `fact` filter matches
-		// NOTHING: the filtered query must score recall@10 = 0, proving the filter
-		// runs through the full retrieve -> post-filter path. The same query with no
-		// filter (or kind=claim) retrieves the relevant doc, confirming it is the
-		// filter — not a broken query — that zeroed recall.
+		// Every doc is a Claim, so a `fact` filter must zero recall while no-filter /
+		// kind=claim restores it — proving it is the filter, not a broken query.
 		let docs = vec![
 			doc("d1", "rust ownership and the borrow checker"),
 			doc("d2", "graph neural network message passing"),
@@ -196,13 +185,8 @@ mod tests {
 
 	#[test]
 	fn filtered_query_recovers_a_minority_kind_buried_by_the_majority() {
-		// 15 Claims + 2 Facts share identical text, so all are equally relevant by
-		// vector and lexical score. The expected docs are the 2 Facts. With ties
-		// broken by id ascending, every "c*" Claim sorts before the "fact*" docs,
-		// burying both Facts past the top-10 -> an UNFILTERED query scores
-		// recall@10 = 0. A kind=fact filter seeds only Facts (dense + importance +
-		// lexical all filter at source), so both are retrieved -> recall@10 = 1.0.
-		// End-to-end proof of the filtered-seed win on a fewer-than-k scenario.
+		// 15 Claims + 2 Facts share identical text; id-ascending ties bury the Facts
+		// past top-10 unfiltered.
 		let text = "rust ownership and the borrow checker semantics";
 		let mut docs: Vec<TraceDoc> = (0..15).map(|i| doc(&format!("c{i:02}"), text)).collect();
 		docs.push(doc_kind("fact0", text, "fact"));
@@ -235,11 +219,8 @@ mod tests {
 
 	#[test]
 	fn filtered_query_survives_delivery_pool_truncation() {
-		// Like the buried-minority test but with 60 Claims (> the ~50 delivery cap),
-		// so filter_delivery truncates BEFORE the filter could run. Identical text
-		// connects every doc, so expansion floods the pool with non-matching Claims.
-		// If the filter is applied only after truncation, the id-trailing Facts get
-		// cut and recall@10 collapses. A correct order keeps recall@10 = 1.0.
+		// 60 Claims (> the ~50 delivery cap): if the filter runs only AFTER
+		// truncation, the id-trailing Facts get cut and recall@10 collapses.
 		let text = "rust ownership and the borrow checker semantics".to_string();
 		let mut docs: Vec<TraceDoc> = (0..60).map(|i| doc(&format!("c{i:03}"), &text)).collect();
 		docs.push(doc_kind("fact0", &text, "fact"));

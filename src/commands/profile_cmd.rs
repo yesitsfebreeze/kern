@@ -52,8 +52,7 @@ pub(super) async fn cmd_profile(cfg: &crate::config::Config, text: &str, no_llm:
 		Endpoint::new(&cfg.embed.url, &cfg.embed.model, &cfg.embed.key),
 	);
 
-	// Cold vs warm split: the first embed may pay an Ollama model (re)load,
-	// the second is the steady-state cost every later stage actually sees.
+	// First embed may pay a model (re)load; the second is the steady-state cost.
 	let t = Instant::now();
 	let qvec = match llm_client.embed(text).await {
 		Ok(v) => v,
@@ -95,8 +94,6 @@ pub(super) async fn cmd_profile(cfg: &crate::config::Config, text: &str, no_llm:
 			eprintln!("no reason endpoint configured; skipping llm stages");
 		}
 	} else {
-		// One complete-closure shared by the profiled query and distill (was two
-		// complete_func() calls). The embed closure comes from the shared factory.
 		let llm_fn: crate::retrieval::LlmFunc = Arc::new(llm_client.complete_func());
 		let embed_fn: crate::retrieval::EmbedFunc = super::embed_fn(&llm_client);
 
@@ -140,14 +137,9 @@ mod tests {
 	use super::*;
 	use serde_json::{json, Value};
 
-	/// The no-LLM path must run end-to-end without panicking on an empty graph:
-	/// load → cold/warm embed → vector search → the three no-LLM query modes →
-	/// digest build. The reason/answer endpoints are never touched (no_llm=true),
-	/// so only `/api/embed` is stubbed; everything downstream runs on a fresh,
-	/// empty graph backed by a temp data dir.
+	/// Only `/api/embed` is stubbed — no_llm=true never touches reason/answer.
 	#[tokio::test]
 	async fn cmd_profile_no_llm_path_does_not_panic() {
-		// Stub Ollama-native /api/embed: any input -> a fixed 3-dim embedding.
 		let app = axum::Router::new().route(
 			"/api/embed",
 			axum::routing::post(|_body: axum::Json<Value>| async move {
@@ -156,8 +148,6 @@ mod tests {
 		);
 		let (embed_url, _server) = crate::test_support::spawn_http(app).await;
 
-		// Isolated empty data dir so load_graph yields a fresh graph (and Store::open
-		// has a real directory to bind).
 		let dir = std::env::temp_dir().join(format!("kern_profile_smoke_{}", std::process::id()));
 		std::fs::create_dir_all(&dir).unwrap();
 
@@ -167,7 +157,6 @@ mod tests {
 		};
 		cfg.embed.url = embed_url;
 
-		// no_llm=true → the reason/answer stages are skipped entirely.
 		cmd_profile(&cfg, "smoke test query", true).await;
 
 		let _ = std::fs::remove_dir_all(&dir);

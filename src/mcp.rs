@@ -1,6 +1,5 @@
-//! MCP server surface: the tool / prompt / resource handlers that expose kern
-//! over MCP (stdio + SSE/HTTP), built on the shared `tools::dispatch` core so the
-//! tool set has a single source of truth.
+//! MCP server surface: tool / prompt / resource handlers exposing kern over
+//! MCP (stdio + SSE/HTTP).
 
 pub mod prompt;
 pub mod resources;
@@ -52,9 +51,7 @@ pub struct Server {
 	pub save_fn: Arc<dyn Fn() + Send + Sync>,
 	pub task_q: Option<Arc<tick::queue::Queue>>,
 	pub cfg: Arc<Config>,
-	/// Semantic cache over answered queries. Shared, so it is wrapped in a
-	/// `Mutex`; lookups/inserts are brief (a linear scan of a small bounded
-	/// ring). See [`crate::retrieval::cache`].
+	/// Semantic cache over answered queries; see [`crate::retrieval::cache`].
 	pub cache: Arc<Mutex<QueryCache>>,
 }
 

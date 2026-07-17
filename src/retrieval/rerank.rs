@@ -3,11 +3,8 @@ use crate::config::RetrievalConfig;
 use crate::retrieval::expand::ScoredEntity;
 use crate::retrieval::LlmFunc;
 
-/// Hard ceiling on candidates packed into one rerank prompt, independent of the
-/// configured `rerank_pool_size`. Each candidate contributes ~300 chars; without
-/// this cap a large configured pool (or result set) would balloon the prompt and
-/// blow the model's context window and latency budget. 32 is ample headroom for
-/// relevance reranking — the tail beyond it keeps its original order anyway.
+/// Hard prompt ceiling overriding `rerank_pool_size` — each candidate is ~300
+/// chars, so a large configured pool would blow the context window (see note).
 const MAX_RERANK_CANDIDATES: usize = 32;
 
 pub fn llm_rerank(
@@ -23,7 +20,6 @@ pub fn llm_rerank(
 		Some(f) => f,
 		None => return,
 	};
-	// Bound the rerank window by the result count AND the prompt-size cap.
 	let pool = cfg
 		.rerank_pool_size
 		.min(results.len())
@@ -82,7 +78,7 @@ pub fn parse_ranking(response: &str, pool: usize) -> Option<Vec<usize>> {
 	let list = arr.as_array()?;
 	let mut out = Vec::with_capacity(list.len());
 	for v in list {
-		// Accept integer JSON (1) or whole-number float JSON (1.0); reject fractions (1.5).
+		// Accept 1 or 1.0 (models emit both); reject fractions like 1.5.
 		let i = v
 			.as_i64()
 			.or_else(|| v.as_f64().filter(|f| f.fract() == 0.0).map(|f| f as i64))? as usize;
@@ -126,7 +122,6 @@ mod tests {
 
 	#[test]
 	fn llm_rerank_reorders_head_by_returned_ranking() {
-		// Mock returns [2,0,1]: c,a,b. The original order is a,b,c.
 		let llm: LlmFunc = Arc::new(|_p: &str| "[2,0,1]".to_string());
 		let mut results = vec![
 			scored("a", "alpha", 0.9),
@@ -143,7 +138,6 @@ mod tests {
 
 	#[test]
 	fn llm_rerank_keeps_tail_beyond_pool_in_place() {
-		// pool=2: only a,b are reranked; c,d keep their original positions after.
 		let llm: LlmFunc = Arc::new(|_p: &str| "[1,0]".to_string());
 		let mut results = vec![
 			scored("a", "a", 0.9),
@@ -177,8 +171,6 @@ mod tests {
 
 	#[test]
 	fn llm_rerank_caps_candidates_in_prompt_regardless_of_pool_size() {
-		// rerank_pool_size is huge and there are 40 results, but the prompt must
-		// list at most MAX_RERANK_CANDIDATES candidates.
 		let seen = Arc::new(Mutex::new(String::new()));
 		let captured = seen.clone();
 		let llm: LlmFunc = Arc::new(move |p: &str| {
@@ -206,12 +198,10 @@ mod tests {
 	fn llm_rerank_disabled_or_no_llm_is_a_noop() {
 		let llm: LlmFunc = Arc::new(|_p: &str| "[1,0]".to_string());
 		let mut results = vec![scored("a", "a", 0.9), scored("b", "b", 0.8)];
-		// Disabled in config.
 		let mut disabled = cfg(2);
 		disabled.rerank_enabled = false;
 		llm_rerank(&disabled, Some(&llm), "q", &mut results);
 		assert_eq!(ids(&results), vec!["a", "b"]);
-		// No llm handle.
 		llm_rerank(&cfg(2), None, "q", &mut results);
 		assert_eq!(ids(&results), vec!["a", "b"]);
 	}
@@ -228,7 +218,6 @@ mod tests {
 
 	#[test]
 	fn filters_out_of_range_indices() {
-		// 5 >= pool(2) is dropped; 0 kept.
 		assert_eq!(parse_ranking("[5,0]", 2), Some(vec![0]));
 	}
 
@@ -250,13 +239,12 @@ mod tests {
 
 	#[test]
 	fn whole_number_floats_accepted() {
-		// Some LLMs emit [1.0, 0.0, 2.0] instead of [1, 0, 2] — still valid.
 		assert_eq!(parse_ranking("[1.0, 0.0, 2.0]", 3), Some(vec![1, 0, 2]));
 	}
 
 	#[test]
 	fn fractional_float_discards_ranking() {
-		// 1.5 is not a valid index — bail the whole ranking (don't trust partial).
+		// A fractional index invalidates the WHOLE ranking — never trust a partial parse.
 		assert_eq!(parse_ranking("[1.5, 0]", 3), None);
 	}
 }

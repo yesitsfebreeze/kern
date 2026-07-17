@@ -1,24 +1,12 @@
-//! Minimal time parsing for the base layer.
-//!
-//! A dependency-free RFC3339 reader used by the retrieval/MCP filter path
-//! (`since` / `before` / `valid_at`). Lives in `base` rather than `mcp` because
-//! it has no MCP coupling and any transport/CLI layer needs the same parse.
+//! Minimal time parsing for the base layer: a dependency-free RFC3339 reader
+//! used by the retrieval/MCP filter path (`since` / `before` / `valid_at`).
 
-/// Parse the fixed-offset `YYYY-MM-DDTHH:MM:SS` prefix of an RFC3339 timestamp
-/// into a [`SystemTime`](std::time::SystemTime). The timezone suffix (`Z` /
-/// `±hh:mm`) and sub-second fraction are ignored — callers only need
-/// second-granularity wall-clock instants for filter bounds.
-///
-/// Returns `Err(())` for any malformed input (short-after-trim, non-ASCII /
-/// multi-byte in the fixed slice region, non-numeric fields, or a pre-epoch
-/// result) rather than panicking — the input is reachable from untrusted MCP
-/// `since`/`before`/`valid_at` arguments.
+/// Parse the `YYYY-MM-DDTHH:MM:SS` prefix of an RFC3339 timestamp; timezone and
+/// sub-second fraction are ignored. Malformed input is `Err(())`, never a panic.
 pub(crate) fn parse_rfc3339(s: &str) -> Result<std::time::SystemTime, ()> {
 	let s = s.trim();
-	// All fixed-offset slices below read bytes 0..19. Validate length AFTER
-	// trimming and require those bytes to be ASCII so the slicing can never
-	// panic on a short-after-trim or multi-byte UTF-8 input (reachable from
-	// untrusted MCP `since`/`before`/`valid_at` args).
+	// The fixed slices below read bytes 0..19: length must be checked AFTER the
+	// trim and those bytes must be ASCII, or the str slicing panics.
 	if s.len() < 19 || !s.as_bytes()[..19].is_ascii() {
 		return Err(());
 	}
@@ -71,11 +59,8 @@ mod tests {
 
 	#[test]
 	fn multibyte_in_slice_region_is_err_not_panic() {
-		// 'é' (2 bytes) inside the first 19 bytes would put a str slice on a
-		// non-char-boundary; must return Err, not panic.
-		assert_eq!(parse_rfc3339("20é6-06-05T09:00:00Z"), Err(()));
-		// Multibyte right at a split point.
-		assert_eq!(parse_rfc3339("2026-06-05T09:00:0😀"), Err(()));
+		assert_eq!(parse_rfc3339("20é6-06-05T09:00:00Z"), Err(())); // 'é' = 2 bytes
+		assert_eq!(parse_rfc3339("2026-06-05T09:00:0😀"), Err(())); // at a split point
 	}
 
 	#[test]

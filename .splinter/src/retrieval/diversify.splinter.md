@@ -1,0 +1,4 @@
+# src/retrieval/diversify.rs — commentary
+
+- `mmr` optimization: the naive form re-scans every selected item for every candidate each round — O(pool * target^2) cosines. The shipped form precomputes sim_q once (pure function of fixed inputs) and maintains max_sim incrementally (one fold pass per pick), costing O(pool * target). Output is provably byte-identical to the naive form: the per-round argmax over `lambda*sim_q - (1-lambda)*max_sim` is unchanged, max over a set is order-independent for f64, swap_remove keeps the pool's evolving order matching a plain remove-and-rescan, and output order stays the `selected` push-order. The equivalence is pinned by `mmr_is_byte_identical_to_naive_reference` against `mmr_reference` (the pre-optimization body kept verbatim as an oracle — do not simplify it).
+- `max_sim` floor at 0.0 matches the old `fold(0.0, max)`; the skip of vector-less chosen items matches the old code's empty-selected branch.

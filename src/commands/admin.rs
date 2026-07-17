@@ -33,8 +33,6 @@ pub(super) fn cmd_compress(src: &str, mode_str: &str, out: Option<&str>) {
 
 pub(super) fn cmd_health(cfg: &crate::config::Config) {
 	let g = load_graph(cfg);
-	// Headline counts via the shared roll-up (same one repl::do_health and the
-	// MCP health tool use), so the aggregation logic lives in exactly one place.
 	let h = crate::base::health::graph_health_stats(&g);
 
 	println!("data_dir:    {}", g.data_dir);
@@ -63,25 +61,16 @@ pub(super) fn cmd_health(cfg: &crate::config::Config) {
 	}
 }
 
-/// Offline compaction: reap empty unnamed kerns, persist the result, then shrink
-/// the on-disk env. Run with the daemon stopped — it loads from disk, GCs, and
-/// saves, so a live daemon would race and re-persist the bloated in-memory graph.
-/// Cheap, idempotent, safe to re-run. The daemon also reaps on startup; this
-/// command is the one-shot full clean (reap + file shrink) without the daemon.
-///
-/// The reap deletes rows but LMDB never returns freed pages to the OS, so the
-/// `data.mdb` file stays at its high-water mark (4 GiB on a runaway-bloated graph)
-/// until it is rewritten. We drop the graph's env handle, then [`compact_dir`]
-/// rewrites the live data into a fresh, gap-free file.
+/// Offline compaction: reap empty kerns, persist, shrink the env. Daemon must
+/// be stopped — a live daemon would race and re-persist the bloated graph.
 pub(super) fn cmd_gc(cfg: &crate::config::Config) {
 	let mut g = load_graph(cfg);
 	let (before, reaped, after) = g.gc_empty_kerns_counted();
 	save_graph(&g);
 	println!("gc: reaped {reaped} empty kerns ({before} -> {after})");
 
-	// Drop the graph FIRST so its env handle is released, then compact. `compact_dir`
-	// opens its own env and closes it deterministically via `prepare_for_closing().wait()`
-	// — a plain drop is lazy on Windows and would leave data.mdb mmap'd past the swap.
+	// Drop the graph FIRST to release its env handle: compact_dir closes its own
+	// env deterministically — a lazy drop on Windows leaves data.mdb mmap'd.
 	drop(g);
 	match crate::base::store::compact_dir(&cfg.data_dir) {
 		Ok((old, new)) => println!(
@@ -116,7 +105,6 @@ pub(super) fn cmd_compact(cfg: &crate::config::Config) {
 	}
 }
 
-/// Terse human-readable byte size for the gc/compact reports.
 fn human_bytes(n: u64) -> String {
 	const U: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
 	let mut v = n as f64;
@@ -281,9 +269,8 @@ mod cmd_tests {
 	#[test]
 	fn descriptor_add_then_remove_persists_through_the_graph() {
 		let (_dir, cfg) = temp_cfg();
-		// A custom key, NOT one of the defaults that load_graph re-injects on every
-		// load (e.g. "code") — otherwise Rm would appear to "fail" as the default
-		// descriptor is re-added on the next load.
+		// A custom key, NOT a default load_graph re-injects on every load (e.g.
+		// "code") — else Rm would appear to fail on the next load.
 		let key = "custom_test_kind";
 
 		cmd_descriptor(
@@ -311,16 +298,13 @@ mod cmd_tests {
 	#[test]
 	fn cmd_health_runs_on_a_fresh_graph_without_panicking() {
 		let (_dir, cfg) = temp_cfg();
-		// Exercises the load -> graph_health_stats roll-up -> per-kern print path.
-		// The contract under test is "does not panic on an empty/new data dir".
 		cmd_health(&cfg);
 	}
 }
 
 pub(super) fn cmd_register(cfg: &crate::config::Config, path: &str) {
-	// Copy the graph at `path` into THIS cwd's store. The loaded graph is bound to
-	// the source store, so we write into a freshly opened destination store rather
-	// than relying on `save_graph` (which would write back to the source).
+	// The loaded graph is bound to the SOURCE store, so write into a freshly
+	// opened destination store — save_graph would write back to the source.
 	match crate::base::persist::load_dir(path) {
 		Ok(g) => match crate::base::store::Store::open(&cfg.data_dir) {
 			Ok(dest) => {

@@ -2,9 +2,8 @@ use super::graph::GraphGnn;
 use super::types::{Kern, Reason, ReasonKind};
 use std::collections::HashSet;
 
-/// All reason (edge) ids incident to `entity_id` in this kern — outgoing
-/// (`by_from`) followed by incoming (`by_to`). Single source for the
-/// edge-collection step shared by retrieval, the MCP tools, and the CLI.
+/// All reason ids incident to `entity_id` — outgoing (`by_from`) then incoming
+/// (`by_to`). Single edge-collection source for retrieval, MCP, and the CLI.
 pub(crate) fn collect_reason_ids(kern: &Kern, entity_id: &str) -> Vec<String> {
 	let mut ids = Vec::new();
 	if let Some(from_ids) = kern.by_from.get(entity_id) {
@@ -16,12 +15,8 @@ pub(crate) fn collect_reason_ids(kern: &Kern, entity_id: &str) -> Vec<String> {
 	ids
 }
 
-/// Walk `Supersedes` chains BACKWARD from `entity_id` (an active head), returning
-/// every superseded ancestor revision's id. A `Supersedes` edge points
-/// new -> old, so following the outgoing edges of a head reaches the revision it
-/// replaced, transitively. This is how a bi-temporal `include_history` query
-/// reaches the Superseded revisions the ANN deliberately no longer holds. The
-/// `seen` set makes a cyclic/self-referential chain terminate.
+/// Every superseded ancestor of an active head: `Supersedes` edges point new -> old,
+/// so the walk follows outgoing edges. `seen` terminates cyclic chains.
 pub fn superseded_ancestors(g: &GraphGnn, entity_id: &str) -> Vec<String> {
 	let mut out = Vec::new();
 	let mut seen: HashSet<String> = HashSet::new();
@@ -52,12 +47,8 @@ pub fn add_reason(kern: &mut Kern, reason: Reason) {
 	let id = reason.id.clone();
 	let from = reason.from.clone();
 	let to = reason.to.clone();
-	// Index the adjacency lists only when the id is NEW. `reasons` is a map
-	// (idempotent), but `by_from`/`by_to` are Vecs: re-adding the same edge id
-	// (idempotent re-observe — Rephrase edges, move_entity round-trips,
-	// re-ingest) would otherwise append a duplicate id, double-counting it in
-	// `collect_reason_ids` and leaving a stale entry after `remove_reason`
-	// (which removes only the first occurrence).
+	// Index adjacency only for NEW ids: `by_from`/`by_to` are Vecs, so re-adding
+	// the same edge id would append a duplicate and leave a stale entry on remove.
 	let is_new = kern.reasons.insert(id.clone(), reason).is_none();
 	if !is_new {
 		return;
@@ -79,45 +70,8 @@ pub fn remove_reason(kern: &mut Kern, id: &str) {
 	}
 }
 
-/// Relocates an entity (and its outgoing reasons) from `from_kern_id` to
-/// `to_kern_id`, keeping every reverse-map index in sync.
-///
-/// # Cross-kern reason policy (outgoing-only)
-///
-/// The `Reason` data model tracks cross-kern targets via `to_kern_id` only —
-/// there is no `from_kern_id` mirror. A move must therefore preserve the
-/// invariant that the kern hosting a reason also hosts its `from` endpoint:
-///
-/// - **Outgoing reasons** (`r.from == E`): travel with the entity to the
-///   destination kern. If the `to` endpoint is a third entity `X` still
-///   living in the source kern, stamp `r.to_kern_id = from_kern_id` so the
-///   reason knows its target lives elsewhere. Self-loops (`r.from == r.to
-///   == E`) move with both endpoints intact and need no stamp.
-/// - **Incoming reasons** (`r.to == E`, `r.from != E`): stay in the source
-///   kern (their `from` endpoint has not moved). Stamp `r.to_kern_id =
-///   to_kern_id` so the source-kern reason knows its target now lives in
-///   the destination.
-///
-/// In both directions, stamping is skipped if `to_net_id` is already set
-/// — that flag means the target lives on a remote node, and a local move
-/// must not overwrite the remote-target annotation with a local kern id.
-///
-/// Cascade order (single pass, no lock re-acquisition):
-/// 1. If `from_kern_id == to_kern_id`, the move is a silent no-op.
-/// 2. The entity is removed from the source kern's `entities` map. If it
-///    is not present, the call is a silent no-op (matches `remove_entity`).
-/// 3. Outgoing reasons are detached from the source kern (`reasons`,
-///    `by_from`, `by_to`), stamped per the policy above, and reattached to
-///    the destination kern via `add_reason`. Incoming reasons stay in the
-///    source kern's maps and are stamped in place.
-/// 4. The entity is inserted into the destination kern.
-/// 5. `entity_kern` is repointed to `to_kern_id` via `index_entity`. Only
-///    relocated (outgoing) reasons have `reason_kern` repointed via
-///    `index_reason`; incoming reasons' `reason_kern` stays at the source.
-///
-/// HNSW indices (`entity_idx`, `gnn_entity_idx`, `reason_idx`) and the
-/// lexical index key on entity/reason id only and are unaffected by a
-/// move; they are intentionally left untouched.
+/// Relocate an entity and its OUTGOING reasons (a kern hosts a reason iff it
+/// hosts its `from`); incoming stay put. `to_net_id` set ⇒ never stamp over it.
 pub fn move_entity(g: &mut GraphGnn, from_kern_id: &str, to_kern_id: &str, entity_id: &str) {
 	if from_kern_id == to_kern_id {
 		return;
@@ -133,16 +87,8 @@ pub fn move_entity(g: &mut GraphGnn, from_kern_id: &str, to_kern_id: &str, entit
 		None => return,
 	};
 
-	// Partition reasons touching `entity_id` into outgoing (move) vs incoming
-	// (stay). A self-loop `from == to == E` is treated as outgoing: both
-	// endpoints land in the destination kern, so no stamping is needed.
 	let (outgoing_rids, incoming_rids) = reasons_touching(src, entity_id);
 
-	// Stamp incoming reasons in place: their `from` stays in the source kern,
-	// but `to == E` now lives in `to_kern_id`. Only stamp when neither
-	// cross-kern nor cross-net annotation is present — a non-empty
-	// `to_net_id` means the reason already points at a remote node and
-	// stamping a local kern id over it would lie about target location.
 	for rid in &incoming_rids {
 		if let Some(reason) = src.reasons.get_mut(rid) {
 			if reason.to_kern_id.is_empty() && reason.to_net_id.is_empty() {
@@ -151,7 +97,6 @@ pub fn move_entity(g: &mut GraphGnn, from_kern_id: &str, to_kern_id: &str, entit
 		}
 	}
 
-	// Detach outgoing reasons from source maps.
 	let mut moved_reasons = Vec::with_capacity(outgoing_rids.len());
 	for rid in &outgoing_rids {
 		if let Some(reason) = src.reasons.remove(rid) {
@@ -170,11 +115,6 @@ pub fn move_entity(g: &mut GraphGnn, from_kern_id: &str, to_kern_id: &str, entit
 
 	let moved_ids: Vec<String> = moved_reasons.iter().map(|r| r.id.clone()).collect();
 	for mut reason in moved_reasons {
-		// Stamp `to_kern_id = from_kern_id` when the `to` endpoint is a
-		// third entity left behind in the source kern. Skip self-loops
-		// (`to == entity_id`, which has moved with us), already-stamped
-		// reasons, and reasons whose `to_net_id` flags a remote node —
-		// a remote target stays remote regardless of the local move.
 		if !reason.to.is_empty()
 			&& reason.to != entity_id
 			&& reason.to_kern_id.is_empty()
@@ -192,20 +132,8 @@ pub fn move_entity(g: &mut GraphGnn, from_kern_id: &str, to_kern_id: &str, entit
 	}
 }
 
-/// Removes an entity from the given kern and cascades the deletion through
-/// every retrieval index that referenced it.
-///
-/// Cascade order (single pass, no lock re-acquisition):
-/// 1. Fact entities are immune — early return preserving today's behaviour.
-/// 2. All reasons sourced at or pointing to the entity are dropped from
-///    `kern.reasons`, `kern.by_from`, `kern.by_to`, and from
-///    `g.reason_idx` plus the `reason_kern` reverse map.
-/// 3. The entity is dropped from `kern.entities`, from `g.entity_idx` and
-///    `g.gnn_entity_idx`, and from the `entity_kern` reverse map.
-/// 4. If a lexical index is installed it is purged for the entity id.
-///
-/// Infallible: a missing entity, missing kern, or empty index is a silent
-/// no-op, matching the previous `&mut Kern` signature semantics.
+/// Remove an entity and cascade through every index that referenced it. Active
+/// Facts are immune (Superseded facts are not); anything missing is a silent no-op.
 pub fn remove_entity(g: &mut GraphGnn, kern_id: &str, id: &str) {
 	let kern = match g.kerns.get_mut(kern_id) {
 		Some(k) => k,
@@ -213,8 +141,7 @@ pub fn remove_entity(g: &mut GraphGnn, kern_id: &str, id: &str) {
 	};
 
 	if let Some(t) = kern.entities.get(id) {
-		// Active Facts are immune to removal (durable knowledge). A SUPERSEDED fact
-		// is invalidated history, not live knowledge, so it loses immunity — the
+		// A SUPERSEDED fact is invalidated history, not durable knowledge — the
 		// bi-temporal GC spills it to the cold tier and drops it here.
 		if t.is_fact() && !t.is_superseded() {
 			return;
@@ -246,10 +173,8 @@ pub fn remove_entity(g: &mut GraphGnn, kern_id: &str, id: &str) {
 	}
 }
 
-/// Partition the reasons in `kern` that touch `entity_id` into
-/// `(outgoing, incoming)`: outgoing = edges sourced at the entity (`by_from`);
-/// incoming = edges pointing at it (`by_to`) that are not already outgoing, so a
-/// self-loop counts once, as outgoing. Both lists are owned rid clones.
+/// Partition the reasons touching `entity_id` into `(outgoing, incoming)` rid
+/// clones; a self-loop counts once, as outgoing.
 fn reasons_touching(kern: &Kern, entity_id: &str) -> (Vec<String>, Vec<String>) {
 	let outgoing: Vec<String> = kern.by_from.get(entity_id).cloned().unwrap_or_default();
 	let mut incoming = Vec::new();
@@ -263,16 +188,8 @@ fn reasons_touching(kern: &Kern, entity_id: &str) -> (Vec<String>, Vec<String>) 
 	(outgoing, incoming)
 }
 
-/// Remove the first occurrence of `s` from `vec` (if present).
-///
-/// The linear scan is intentional, not a missed optimization. `by_from`/`by_to`
-/// values are an entity's adjacency list — its edge degree — which the daemon
-/// keeps small: clustering caps a kern at a bounded entity count and edges are
-/// pruned by decay/gc, so a list is tens of ids, not thousands. At that size a
-/// `Vec` scan beats a `HashSet` on cache locality and avoids per-edge hashing.
-/// `by_from`/`by_to` are also `Kern` fields serialized (serde) into the bincode
-/// shards, so swapping `Vec<String>` for `HashSet<String>` is a persisted-format
-/// change to weigh against the (nonexistent) hot-path win — not worth it.
+/// Remove the first occurrence of `s`. Linear scan intentional: adjacency lists
+/// stay tens of ids, and swapping the serde-persisted `Vec` is a format change.
 fn remove_string_from_vec(vec: Option<&mut Vec<String>>, s: &str) {
 	if let Some(v) = vec {
 		if let Some(pos) = v.iter().position(|x| x == s) {
@@ -290,8 +207,7 @@ mod tests {
 
 	#[test]
 	fn superseded_ancestors_walks_the_supersedes_chain_backward() {
-		// Chain: newest -> mid -> old (each Supersedes edge points new->old). Walking
-		// back from the active head must reach every superseded revision.
+		// Chain: newest -> mid -> old (each Supersedes edge points new->old).
 		let mut g = GraphGnn::new();
 		let root = g.root.id.clone();
 		for id in ["newest", "mid", "old"] {
@@ -335,8 +251,6 @@ mod tests {
 
 	#[test]
 	fn add_reason_is_idempotent_on_adjacency() {
-		// Card #56: re-adding the same edge id must NOT duplicate it in the
-		// by_from/by_to adjacency lists.
 		let mut k = Kern::new("k", "");
 		add_reason(&mut k, edge("a", "b"));
 		add_reason(&mut k, edge("a", "b")); // same content-hash id
@@ -353,13 +267,11 @@ mod tests {
 			Some(1),
 			"no dup in by_to"
 		);
-		// collect_reason_ids returns the edge exactly once.
 		assert_eq!(collect_reason_ids(&k, "a"), vec!["a->b".to_string()]);
 	}
 
 	#[test]
 	fn remove_after_reobserve_fully_clears_adjacency() {
-		// With the idempotent add, a single remove leaves no stale dangling id.
 		let mut k = Kern::new("k", "");
 		add_reason(&mut k, edge("a", "b"));
 		add_reason(&mut k, edge("a", "b")); // re-observe
@@ -375,8 +287,6 @@ mod tests {
 			"no dangling edge id"
 		);
 	}
-
-	// ---- move_entity --------------------------------------------------------
 
 	#[test]
 	fn move_entity_relocates_outgoing_and_stamps_cross_kern_targets() {
@@ -440,8 +350,6 @@ mod tests {
 		assert!(g.kerns.get("k").unwrap().entities.contains_key("E"));
 	}
 
-	// ---- remove_entity ------------------------------------------------------
-
 	#[test]
 	fn remove_entity_cascades_through_reasons_and_hnsw_indices() {
 		let mut g = GraphGnn::new();
@@ -473,7 +381,6 @@ mod tests {
 			collect_reason_ids(k, "b").is_empty(),
 			"b left with no dangling edges"
 		);
-		// HNSW purge: a gone (b stays); both reasons gone.
 		assert_eq!(
 			g.entity_idx.len(),
 			1,

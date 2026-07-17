@@ -1,16 +1,5 @@
 //! `retrieval_bench` — replay a retrieval trace and report NDCG@10, optionally
-//! sweeping one [`SweepParam`] over a list of values.
-//!
-//! The `--trace` file is JSON of the shape:
-//! ```json
-//! {
-//!   "name": "my-trace",
-//!   "docs":    [ { "id": "d1", "text": "..." } ],
-//!   "queries": [ { "id": "q1", "query": "...", "expected_ids": ["d1"], "mode": "hybrid" } ]
-//! }
-//! ```
-//! `docs` seed the graph; each `query` is scored against its `expected_ids` using
-//! its declared `mode`. `--mode <m>` restricts the run to queries with that mode.
+//! sweeping one [`SweepParam`] over a list of values. Trace format: [`trace::Trace`].
 
 use clap::Parser;
 use kern::bench_support::build::build_graph;
@@ -237,8 +226,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			println!("mean recall@10: {:.4}", report.mean_recall10);
 		}
 		Some(name) => {
-			// Validate up front so the user gets a clear message instead of an empty
-			// parse result or a bare "required" after the fact.
 			if args.values.trim().is_empty() {
 				return Err(
 					"--values is required for a sweep (comma-separated numbers, e.g. --values 10,20,40)"

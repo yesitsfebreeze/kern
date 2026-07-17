@@ -4,10 +4,8 @@ use trnsprt::{
 	Client, InProcTransport, LiveServer, McpError, Registry, ServerId, ToolSchema, PROTOCOL_VERSION,
 };
 
-/// In-process round-trip latency budget. The transport is a direct function
-/// call (no IO/syscalls), so per-call overhead should be well under a
-/// millisecond; 5 ms is a deliberately loose regression ceiling that still
-/// catches an accidental blocking call or per-call allocation on the hot path.
+/// Loose ceiling — catches an accidental blocking call or per-call allocation on
+/// the hot path, not real latency (the transport is a direct function call).
 const PER_CALL_CEILING: std::time::Duration = std::time::Duration::from_millis(5);
 /// Calls averaged in the latency probe to smooth scheduler/timer noise.
 const LATENCY_ITERS: u32 = 100;
@@ -193,12 +191,10 @@ fn inproc_transport_call_latency_under_ceiling() {
 
 #[test]
 fn inproc_call_tool_missing_argument_is_invalid_params() {
-	// AdderServer requires both operands; omitting one surfaces a -32602
-	// (Invalid params) Rpc error through the in-process transport + client.
 	let mut client = Client::new(Box::new(InProcTransport::new(Box::new(AdderServer))));
 	client.initialize("kern", "test").expect("initialize");
 	let err = client
-		.call_tool("add", &json!({ "a": 1 })) // missing "b"
+		.call_tool("add", &json!({ "a": 1 }))
 		.expect_err("missing argument must error");
 	assert!(
 		matches!(err, McpError::Rpc { code: -32602, .. }),
@@ -208,9 +204,6 @@ fn inproc_call_tool_missing_argument_is_invalid_params() {
 
 #[test]
 fn registry_register_inproc_rejects_duplicate_server_id() {
-	// Public-API coverage of the duplicate-id guard (registry.rs unit tests
-	// cover the same path with a local MockServer; this exercises it through
-	// the integration crate's public Registry surface with AdderServer).
 	let mut reg = Registry::new();
 	let id = ServerId::new("dup");
 	reg

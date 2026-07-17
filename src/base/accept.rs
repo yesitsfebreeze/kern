@@ -17,17 +17,13 @@ pub struct AcceptResult {
 const MAX_ACCEPT_DEPTH: usize = 64;
 
 pub fn accept(g: &mut GraphGnn, kern_id: &str, thought: Entity, doc_id: &str) -> AcceptResult {
-	// The dedup search is invariant in `thought.vector`: it scans entities
-	// graph-wide (independent of the routing cursor) and routing only reads or
-	// spawns empty child kerns, so the result cannot change during descent.
-	// Compute it once here instead of re-running it on every loop iteration and
-	// again in `commit_entity` (previously up to 65 identical HNSW searches).
+	// Dedup scans graph-wide and routing only reads or spawns empty kerns, so
+	// the result cannot change during descent — safe to compute once.
 	let is_dup = is_duplicate(g, &thought.vector);
 	let target_id = route_entity(g, kern_id, &thought, is_dup);
 	commit_entity(g, &target_id, thought, doc_id, is_dup)
 }
 
-/// Whether `vector` is within the dedup threshold of an existing entity.
 fn is_duplicate(g: &GraphGnn, vector: &[f32]) -> bool {
 	let hits = search_all_unlocked(g, vector, 1);
 	!hits.is_empty() && hits[0].score > DEFAULT_DEDUP_THRESHOLD
@@ -36,7 +32,6 @@ fn is_duplicate(g: &GraphGnn, vector: &[f32]) -> bool {
 fn route_entity(g: &mut GraphGnn, kern_id: &str, thought: &Entity, is_dup: bool) -> String {
 	let mut current_id = kern_id.to_string();
 
-	// A duplicate is committed in the starting kern; no descent needed.
 	if is_dup {
 		return current_id;
 	}
@@ -51,10 +46,8 @@ fn route_entity(g: &mut GraphGnn, kern_id: &str, thought: &Entity, is_dup: bool)
 			continue;
 		}
 
-		// The root is a pure dispatcher: it never gates on its own (possibly
-		// stale) anchor. An entity that matched no named anchor at the root
-		// falls through to the `generic` catch-all rather than committing onto
-		// the root itself.
+		// The root is a pure dispatcher: a no-anchor-match falls through to the
+		// `generic` catch-all, never commits onto the root itself.
 		if current_id == g.root.id {
 			let generic_id = get_or_spawn_generic_child(g, &current_id);
 			if generic_id != current_id {
@@ -153,9 +146,8 @@ fn commit_entity(
 	}
 }
 
-/// Mint a reason edge `from -> to` of `kind`, attach it to `kern_id`, and index
-/// it (vector into `reason_idx` when non-empty, id into the reason index).
-/// Returns the new reason id. Shared commit tail of every `add_*_reason`.
+/// Mint, attach, and index a reason edge `from -> to`; returns its id.
+/// Shared commit tail of every `add_*_reason`.
 fn commit_reason(
 	g: &mut GraphGnn,
 	kern_id: &str,
@@ -307,9 +299,8 @@ fn supersede(
 			}
 		}
 		if found.is_none() {
-			// Resolve the owning kern through the entity index (O(1)) instead of an
-			// O(kerns × entities) scan over g.all(); `get` auto-loads it if the kern
-			// was evicted, so this also finds entities the all() scan would miss.
+			// `get` auto-loads the owning kern if it was evicted, so this also
+			// finds entities a loaded-only scan would miss.
 			if let Some(kid) = g.kern_of_entity(&old_id).map(|s| s.to_string()) {
 				if let Some(kern) = g.get(&kid) {
 					if let Some(t) = kern.entities.get(&old_id) {
@@ -340,13 +331,8 @@ fn supersede(
 		}
 	}
 
-	// A superseded entity is never a valid retrieval result — `score::matches_filter`
-	// / the `status != Superseded` retain in `retrieval::score` always drop it. Left
-	// in the ANN indices it would still be RETURNED by candidate generation, occupy
-	// top-k slots, and then be filtered downstream — costing active hits
-	// (fewer-than-k recall loss, the same class fixed for kind filters) and index
-	// memory on data that can never surface. Remove it from the search indices here;
-	// it stays in `kern.entities` (Superseded) so the supersede chain/history holds.
+	// A superseded entity is never a valid retrieval result — evict from the ANN
+	// indices; it stays in `kern.entities` so the supersede chain holds.
 	g.entity_idx.delete(&old_id);
 	g.gnn_entity_idx.delete(&old_id);
 
@@ -367,9 +353,8 @@ fn supersede(
 	)]
 }
 
-/// Outcome of the background contradiction classifier: does the incoming
-/// near-duplicate REPLACE the stored claim (an update or a contradiction), or is
-/// it merely RELATED (keep today's rephrase behavior)?
+/// Background contradiction classifier outcome: does the incoming near-duplicate
+/// REPLACE the stored claim, or is it merely RELATED?
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContradictionClass {
 	Supersede,
@@ -387,11 +372,8 @@ UPDATE, CONTRADICTION, or RELATED.\n\nOLD: {old_text}\nNEW: {new_text}\n"
 	)
 }
 
-/// Parse the classifier's reply. `UPDATE`/`CONTRADICTION` map to
-/// [`ContradictionClass::Supersede`]; anything else — `RELATED`, an empty reply,
-/// or garbage — maps to [`ContradictionClass::Related`], so an ambiguous or
-/// failed classification fails OPEN to today's rephrase behavior. When the reply
-/// mentions `RELATED` at all, it is treated as Related (the conservative choice).
+/// `UPDATE`/`CONTRADICTION` → Supersede; anything else, or any `RELATED` mention,
+/// fails OPEN to Related — today's rephrase behavior, the conservative choice.
 pub fn parse_contradiction(raw: &str) -> ContradictionClass {
 	let up = raw.trim().to_uppercase();
 	let supersede = up.contains("CONTRADICT") || up.contains("UPDATE");
@@ -402,13 +384,9 @@ pub fn parse_contradiction(raw: &str) -> ContradictionClass {
 	}
 }
 
-/// Contradiction-driven supersedence for near-duplicate claims that do NOT share
-/// an `external_id` (so the same-source [`supersede`] never fires). The incoming
-/// revision was WITHHELD at dedup (only a `Rephrase` edge recorded it), so this
-/// materializes `new_thought` as Active, then marks `old_id` Superseded with the
-/// bi-temporal stamps and evicts it from the ANN indices — the mirror of
-/// [`supersede`] for the no-shared-id case. Returns the `Supersedes` reason id(s);
-/// a no-op (empty vec) if the old entity is gone or already superseded.
+/// Mirror of [`supersede`] for near-duplicates with NO shared `external_id`:
+/// materializes the dedup-withheld `new_thought`, supersedes `old_id` (no-op if
+/// it is gone or already superseded). Returns the `Supersedes` reason id(s).
 pub fn supersede_by_contradiction(
 	g: &mut GraphGnn,
 	kern_id: &str,
@@ -441,7 +419,6 @@ pub fn supersede_by_contradiction(
 		.map(|k| k.root_id.clone())
 		.unwrap_or_default();
 
-	// Materialize the new revision as Active (dedup had withheld it).
 	let mut new_thought = new_thought;
 	new_thought.root_id = root_id;
 	if new_thought.has_vector() {
@@ -452,8 +429,6 @@ pub fn supersede_by_contradiction(
 	}
 	g.index_entity(&new_id, kern_id);
 
-	// Flip + stamp the old revision, then evict it from the search indices (it can
-	// never be a valid hit again) while keeping it as Superseded history.
 	let now = std::time::SystemTime::now();
 	if let Some(kern) = g.get_mut(&old_kern_id) {
 		if let Some(old) = kern.entities.get_mut(old_id) {
@@ -482,11 +457,8 @@ pub fn supersede_by_contradiction(
 }
 
 pub fn get_or_spawn_unnamed_child(g: &mut GraphGnn, kern_id: &str) -> String {
-	// Use `get` (auto-loads from disk), NOT `loaded` (in-memory only): under the
-	// kern-load cap an existing unnamed child may be evicted to disk. Checking
-	// only loaded kerns made this spawn a fresh unnamed child every call once the
-	// cap started evicting — a runaway that filled the graph to `max_kerns`
-	// unnamed kerns. Auto-loading finds and reuses the existing child instead.
+	// Use `get` (auto-loads), NOT `loaded`: an evicted child would otherwise be
+	// respawned every call — the runaway that filled the graph with unnamed kerns.
 	let children = g
 		.get(kern_id)
 		.map(|k| k.children.clone())
@@ -501,10 +473,8 @@ pub fn get_or_spawn_unnamed_child(g: &mut GraphGnn, kern_id: &str) -> String {
 	spawn_unnamed_child(g, kern_id)
 }
 
-/// Always create a FRESH unnamed child of `kern_id` — no reuse. Use when each call
-/// needs its OWN distinct child (e.g. the tick spawns one child per discovered
-/// cluster). For a single reusable holding-pen child (the placement-reject path),
-/// use [`get_or_spawn_unnamed_child`], which reuses the existing one.
+/// Always creates a FRESH unnamed child — one per call (the tick: one per cluster).
+/// For the single reusable holding-pen child use [`get_or_spawn_unnamed_child`].
 pub fn spawn_unnamed_child(g: &mut GraphGnn, kern_id: &str) -> String {
 	let root_id = g
 		.get(kern_id)
@@ -519,15 +489,11 @@ pub fn spawn_unnamed_child(g: &mut GraphGnn, kern_id: &str) -> String {
 	child_id
 }
 
-/// Find the parent's permanent `generic` catch-all child, creating it if
-/// absent. Generic carries an empty `anchor_vec` so similarity routing never
-/// matches it; it is named, hence immortal (never GC'd).
+/// Find or create the parent's permanent `generic` catch-all child. Its empty
+/// `anchor_vec` means similarity routing never matches it; named, hence immortal.
 pub(crate) fn get_or_spawn_generic_child(g: &mut GraphGnn, parent_id: &str) -> String {
-	// Use `get` (auto-loads from disk), NOT `loaded` (in-memory only): the generic
-	// child is named/immortal but can still be SPILLED to disk under the kern-load
-	// cap. Checking only loaded kerns would then spawn a duplicate `generic` every
-	// call once eviction kicks in — the same runaway `get_or_spawn_unnamed_child`
-	// already guards against. Auto-loading finds and reuses the existing one.
+	// Use `get` (auto-loads), NOT `loaded`: even the immortal generic child can
+	// spill to disk — same duplicate-spawn runaway as get_or_spawn_unnamed_child.
 	let children = g
 		.get(parent_id)
 		.map(|k| k.children.clone())
@@ -552,12 +518,8 @@ pub(crate) fn get_or_spawn_generic_child(g: &mut GraphGnn, parent_id: &str) -> S
 	child_id
 }
 
-/// Create a named child of the root carrying `vec` as its routing vector — i.e.
-/// a new anchor. Shared by the CLI `anchor add` and the MCP `anchor` tool.
-/// One anchor per name: if a root anchor with the same (trimmed,
-/// case-insensitive) name already exists, its routing vector is updated in
-/// place instead of minting a sibling — the live root carried the same anchor
-/// string twice before this guard.
+/// Create a named root child carrying `vec` as its routing vector (an anchor).
+/// One anchor per name: a same-normalized-name anchor is updated in place.
 pub(crate) fn add_anchor(g: &mut GraphGnn, name: &str, vec: Vec<f32>) {
 	if let Some(existing) = find_anchor_by_name(g, name) {
 		if let Some(k) = g.get_mut(&existing) {
@@ -587,11 +549,8 @@ fn find_anchor_by_name(g: &GraphGnn, name: &str) -> Option<String> {
 	})
 }
 
-/// Does the root already carry an anchor equivalent to (`name`, `vec`)?
-/// Equivalent = same normalized name, OR routing vectors near-parallel
-/// (cosine ≥ `ANCHOR_DEDUP_THRESHOLD`). The duplicate-anchor guard for
-/// promotion: the naming LLM rephrases one concept many ways, and every
-/// rephrasing used to mint a fresh root anchor.
+/// Duplicate-anchor guard for promotion: same normalized name, OR near-parallel
+/// routing vectors (cosine ≥ `ANCHOR_DEDUP_THRESHOLD`).
 fn equivalent_anchor_exists(g: &GraphGnn, name: &str, vec: &[f32]) -> bool {
 	if find_anchor_by_name(g, name).is_some() {
 		return true;
@@ -610,9 +569,8 @@ fn equivalent_anchor_exists(g: &GraphGnn, name: &str, vec: &[f32]) -> bool {
 	})
 }
 
-/// The root's user-facing anchors — its named children excluding the `generic`
-/// catch-all — read from the authoritative kern map (runtime mutations land
-/// there, not on the `g.root` snapshot field).
+/// The root's named children excluding `generic`, read from the kern map —
+/// runtime mutations land there, not on the `g.root` snapshot field.
 pub(crate) fn root_anchor_ids(g: &GraphGnn) -> Vec<String> {
 	let root = g.root.id.clone();
 	let children = g
@@ -629,10 +587,8 @@ pub(crate) fn root_anchor_ids(g: &GraphGnn) -> Vec<String> {
 		.collect()
 }
 
-/// Promote a kern to a first-class anchor under the root if it currently sits
-/// directly under the `generic` catch-all. Called after the tick names a dense
-/// generic cluster: the freshly-named kern graduates from generic to root level
-/// so future matching memories route straight to it. Returns whether it moved.
+/// Promote a kern sitting directly under `generic` to a root anchor (the tick
+/// calls this after naming a dense cluster). Returns whether it moved.
 pub(crate) fn promote_to_root_if_generic(g: &mut GraphGnn, kern_id: &str) -> bool {
 	let parent_id = match g.loaded(kern_id) {
 		Some(k) => k.parent.clone(),
@@ -645,12 +601,6 @@ pub(crate) fn promote_to_root_if_generic(g: &mut GraphGnn, kern_id: &str) -> boo
 	if !under_generic {
 		return false;
 	}
-	// Duplicate-anchor guard: if the root already carries an equivalent anchor
-	// (same normalized name, or near-parallel routing vector), do NOT promote —
-	// the kern stays named under generic and the existing anchor keeps catching
-	// matching memories. Loss-free: nothing is moved or merged. Without this,
-	// every LLM rephrasing of one concept minted another root anchor (observed
-	// live: 9+ for a single concept, including an exact-string duplicate).
 	let (cand_name, cand_vec) = match g.loaded(kern_id) {
 		Some(k) => (k.anchor_text.clone(), k.anchor_vec.clone()),
 		None => return false,
@@ -673,9 +623,8 @@ pub(crate) fn promote_to_root_if_generic(g: &mut GraphGnn, kern_id: &str) -> boo
 	true
 }
 
-/// Demote a named root anchor and reparent its kern under `generic`, so its
-/// existing memories fall back to the catch-all. Returns whether an anchor of
-/// that name was found and removed.
+/// Demote a named root anchor and reparent its kern under `generic`. Returns
+/// whether an anchor of that name was found.
 pub(crate) fn remove_anchor(g: &mut GraphGnn, name: &str) -> bool {
 	let root = g.root.id.clone();
 	let generic = get_or_spawn_generic_child(g, &root);
@@ -718,8 +667,6 @@ fn route_to_child_id(children: &[String], g: &GraphGnn, vec: &[f32]) -> Option<S
 			best_id = Some(id.clone());
 		}
 	}
-	// Floor: an entity only enters a named anchor if it clears ACCEPT_FLOOR.
-	// Otherwise the caller routes it to the generic catch-all.
 	if best_p < ACCEPT_FLOOR {
 		return None;
 	}
@@ -753,9 +700,6 @@ mod tests {
 
 	#[test]
 	fn unnamed_child_reused_when_evicted_by_load_cap() {
-		// Regression: under the kern-load cap, the unnamed child is evicted to
-		// disk; `get_or_spawn_unnamed_child` must reload and REUSE it, not spawn
-		// a fresh one each call (which previously ran the graph away to the cap).
 		let dir = tempfile::tempdir().unwrap();
 		let mut g = GraphGnn::new();
 		g.data_dir = dir.path().to_string_lossy().into_owned();
@@ -770,15 +714,11 @@ mod tests {
 			let id = get_or_spawn_unnamed_child(&mut g, &root);
 			assert_eq!(id, first, "must reuse the evicted unnamed child");
 		}
-		// Exactly one unnamed child ever created (root + 1), no runaway.
 		assert_eq!(g.count(), 2, "no runaway kern creation under the cap");
 	}
 
 	#[test]
 	fn generic_child_reused_when_evicted_by_load_cap() {
-		// Same eviction regression for the named `generic` catch-all: get_or_spawn
-		// must reload + REUSE it (via get(), not loaded()), not duplicate it once the
-		// cap spills it to disk.
 		let dir = tempfile::tempdir().unwrap();
 		let mut g = GraphGnn::new();
 		g.data_dir = dir.path().to_string_lossy().into_owned();
@@ -802,14 +742,8 @@ mod tests {
 
 	#[test]
 	fn unnamed_child_not_duplicated_when_non_root_parent_evicts() {
-		// Gap in `unnamed_child_reused_when_evicted_by_load_cap`: there the parent is
-		// the ROOT, which the load cap never evicts. The empty-kern bloat that grew a
-		// real daemon to 178k kerns came from DEEP trees, where the parent is itself a
-		// non-root kern the cap spills to disk AFTER its unnamed child is linked.
-		// Reuse must then survive a round-trip through disk for the PARENT too:
-		// `unload` persists the parent's `children` before dropping it, so the
-		// reloaded parent still points at the child and no fresh one is spawned. This
-		// locks "don't create useless data" for the exact scenario behind the bloat.
+		// Deep-tree variant: the PARENT itself evicts after linking the child;
+		// `unload` must persist its `children` so reuse survives the round-trip.
 		let dir = tempfile::tempdir().unwrap();
 		let mut g = GraphGnn::new();
 		g.data_dir = dir.path().to_string_lossy().into_owned();
@@ -841,7 +775,6 @@ mod tests {
 				"reuse the unnamed child even when the non-root parent evicted"
 			);
 		}
-		// root + parent + exactly one unnamed child. No per-call runaway.
 		assert_eq!(
 			g.count(),
 			3,
@@ -851,10 +784,6 @@ mod tests {
 
 	#[test]
 	fn supersede_drops_the_old_entity_from_the_search_index() {
-		// A superseded entity is filtered from results downstream, so leaving it in
-		// the ANN index only wastes top-k candidate slots (fewer-than-k recall loss)
-		// and memory. supersede must remove it from the search index while keeping it
-		// in the kern as Superseded history.
 		let mut g = GraphGnn::new();
 		let kid = g.root.id.clone();
 		let old = Entity {
@@ -872,7 +801,6 @@ mod tests {
 		g.index_entity("old", &kid);
 		g.set_source_entry("ext1".into(), kid.clone());
 
-		// Searchable before supersede.
 		let before: Vec<String> = search_all_unlocked(&g, &[1.0, 0.0], 5)
 			.into_iter()
 			.map(|h| h.entity_id)
@@ -884,7 +812,6 @@ mod tests {
 
 		supersede(&mut g, &kid, "new", &[1.0, 0.0], "ext1");
 
-		// Gone from the ANN index...
 		let after: Vec<String> = search_all_unlocked(&g, &[1.0, 0.0], 5)
 			.into_iter()
 			.map(|h| h.entity_id)
@@ -893,7 +820,6 @@ mod tests {
 			!after.contains(&"old".to_string()),
 			"superseded entity removed from search index"
 		);
-		// ...but retained as Superseded history for the chain.
 		let kern = g.loaded(&kid).unwrap();
 		let old_e = kern
 			.entities
@@ -907,12 +833,8 @@ mod tests {
 		assert_eq!(old_e.superseded_by, "new", "supersede chain preserved");
 	}
 
-	/// The orphan-shard leak that grew the data dir to 347k files was empty,
-	/// unnamed kerns left behind by routing. The accept path must NEVER leave
-	/// one: a duplicate must short-circuit before any spawn, and a spawned
-	/// unnamed child must always receive the committed entity. Exercise dup,
-	/// anchor-match, generic-fallthrough, and near-anchor reject in one batch and
-	/// assert zero empty unnamed kerns survive.
+	/// Accept must NEVER leave an empty unnamed kern behind — the orphan-shard
+	/// data-dir leak (see note). Exercises dup, anchor-match, fallthrough, reject.
 	#[test]
 	fn accept_never_leaves_empty_unnamed_kern() {
 		let (mut g, root, _anchor) = graph_with_anchor();
@@ -941,9 +863,6 @@ mod tests {
 
 	#[test]
 	fn supersede_stamps_both_temporal_clocks() {
-		// The same-source supersede path must record WHEN kern learned of the
-		// supersedence (invalidated_at) and close the old world-time window
-		// (valid_to = the successor's valid_from).
 		let mut g = GraphGnn::new();
 		let kid = g.root.id.clone();
 		let old = Entity {
@@ -995,9 +914,6 @@ mod tests {
 
 	#[test]
 	fn contradiction_supersede_materializes_new_and_invalidates_old() {
-		// The no-shared-external_id path: the incoming revision was withheld at
-		// dedup, so supersede_by_contradiction must INSERT it as Active, flip the
-		// old one to Superseded (stamped + evicted from ANN), and link them.
 		let mut g = GraphGnn::new();
 		let kid = g.root.id.clone();
 		let old = Entity {
@@ -1024,13 +940,15 @@ mod tests {
 		assert_eq!(rids.len(), 1, "one Supersedes edge minted");
 
 		let kern = g.loaded(&kid).unwrap();
-		assert!(kern.entities.contains_key("new"), "new revision materialized");
+		assert!(
+			kern.entities.contains_key("new"),
+			"new revision materialized"
+		);
 		let old_e = kern.entities.get("old").unwrap();
 		assert_eq!(old_e.status, EntityStatus::Superseded);
 		assert_eq!(old_e.superseded_by, "new");
 		assert!(old_e.invalidated_at.is_some(), "old stamped invalidated");
 
-		// Old is gone from the ANN, new is searchable.
 		let hits: Vec<String> = search_all_unlocked(&g, &[1.0, 0.0], 5)
 			.into_iter()
 			.map(|h| h.entity_id)
@@ -1043,7 +961,6 @@ mod tests {
 	fn contradiction_supersede_is_a_noop_on_missing_or_already_superseded() {
 		let mut g = GraphGnn::new();
 		let kid = g.root.id.clone();
-		// Missing old -> no-op.
 		let new = Entity {
 			id: "new".into(),
 			vector: vec![1.0, 0.0],
@@ -1060,9 +977,11 @@ mod tests {
 			ContradictionClass::Supersede
 		);
 		assert_eq!(parse_contradiction("RELATED"), ContradictionClass::Related);
-		// Ambiguous / empty / garbage all fail open to Related.
 		assert_eq!(parse_contradiction(""), ContradictionClass::Related);
-		assert_eq!(parse_contradiction("I'm not sure"), ContradictionClass::Related);
+		assert_eq!(
+			parse_contradiction("I'm not sure"),
+			ContradictionClass::Related
+		);
 		assert_eq!(
 			parse_contradiction("this is an update but they are RELATED"),
 			ContradictionClass::Related,
@@ -1145,7 +1064,6 @@ mod tests {
 		let root = g.root.id.clone();
 		add_anchor(&mut g, "work", vec![1.0, 0.0, 0.0]);
 		assert!(anchor_names(&g).contains(&"work".to_string()));
-		// A matching entity routes into the new anchor.
 		let r = accept(&mut g, &root, ent("e", vec![1.0, 0.0, 0.0]), "");
 		assert!(
 			g.loaded(&r.placed_in)
@@ -1169,10 +1087,7 @@ mod tests {
 
 	#[test]
 	fn promote_skips_when_root_has_equivalent_anchor_by_name() {
-		// Regression: anchor proliferation. The naming LLM phrases the same
-		// concept differently each pass, and promotion never checked existing
-		// anchors — observed live: 9+ root anchors for one concept including a
-		// byte-identical duplicate. An exact (trimmed, case-insensitive) name
+		// Anchor-proliferation regression (see note): an exact normalized-name
 		// match must block promotion; the kern stays named under generic.
 		let mut g = GraphGnn::new();
 		let root = g.root.id.clone();
@@ -1206,9 +1121,6 @@ mod tests {
 
 	#[test]
 	fn promote_skips_when_root_anchor_vec_is_near_duplicate() {
-		// Same concept, different phrasing: the anchor VECTORS are near-parallel
-		// even when the names differ. Cosine >= the anchor-dedup threshold must
-		// block promotion; an orthogonal concept still promotes.
 		let mut g = GraphGnn::new();
 		let root = g.root.id.clone();
 		add_anchor(&mut g, "parentless sessions", vec![1.0, 0.0, 0.0]);
@@ -1230,7 +1142,6 @@ mod tests {
 			"vector-equivalent anchor exists -> no promotion"
 		);
 
-		// Orthogonal direction: a genuinely new concept still promotes.
 		let fresh = Kern::new_named_child(&generic, &root_net, "shader pipelines", vec![0.0, 0.0, 1.0]);
 		let fresh_id = fresh.id.clone();
 		g.register(fresh);
@@ -1243,8 +1154,6 @@ mod tests {
 
 	#[test]
 	fn add_anchor_updates_existing_same_name_instead_of_minting_duplicate() {
-		// Regression: the live root carried the SAME anchor string twice —
-		// add_anchor never checked for an existing anchor of that name.
 		let mut g = GraphGnn::new();
 		add_anchor(&mut g, "work", vec![1.0, 0.0, 0.0]);
 		add_anchor(&mut g, "work", vec![0.0, 1.0, 0.0]);

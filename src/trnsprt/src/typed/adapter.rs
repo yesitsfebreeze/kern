@@ -1,8 +1,5 @@
-//! `Adapter` trait + concrete implementations (TCP, async stdio, in-proc).
-//!
-//! An adapter delivers raw bytes. It splits into an `AsyncRead` half and
-//! an `AsyncWrite` half so a `Channel` can frame both directions
-//! independently.
+//! `Adapter` (TCP, async stdio, in-proc) delivers raw bytes, splitting into
+//! `AsyncRead`/`AsyncWrite` halves so a `Channel` frames each direction.
 
 use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll};
@@ -21,8 +18,6 @@ pub trait Adapter: Send + 'static {
 	fn split(self: Box<Self>) -> (DynRead, DynWrite);
 }
 
-// ---------------------------------------------------------------- TcpAdapter
-
 pub struct TcpAdapter {
 	stream: TcpStream,
 }
@@ -37,8 +32,7 @@ impl TcpAdapter {
 		Ok(Self { stream })
 	}
 
-	/// Bind a listener for server-side use — the counterpart to [`connect`].
-	/// Pair with [`accept`] so callers don't hand-roll a `TcpListener` + wrap.
+	/// Server-side counterpart to [`connect`]; pair with [`accept`].
 	pub async fn bind(addr: &str) -> Result<tokio::net::TcpListener, AdapterError> {
 		Ok(tokio::net::TcpListener::bind(addr).await?)
 	}
@@ -57,15 +51,9 @@ impl Adapter for TcpAdapter {
 	}
 }
 
-// ---------------------------------------------------------- AsyncStdioAdapter
-
-/// Adapter that wraps a `tokio::process::Child`'s stdin/stdout. NEW —
-/// distinct from the legacy synchronous `ChildStdio`. On `split` the `Child`
-/// moves into the writer half (`WriterWithChild`), whose `Drop` calls
-/// `start_kill` — a `tokio::process::Child` does NOT kill on drop by default (it
-/// detaches), so without that the dropped writer would orphan the subprocess.
-/// (No `Drop` on the adapter itself: `split` moves its fields out, which a `Drop`
-/// type forbids; the adapter is always split immediately in practice.)
+/// Wraps a `tokio::process::Child`'s stdin/stdout. On `split` the `Child` moves
+/// into the writer, whose `Drop` calls `start_kill`: tokio's Child detaches on
+/// drop, so without this the dropped writer would orphan the subprocess.
 pub struct AsyncStdioAdapter {
 	stdin: ChildStdin,
 	stdout: ChildStdout,
@@ -92,17 +80,13 @@ impl AsyncStdioAdapter {
 
 impl Adapter for AsyncStdioAdapter {
 	fn split(self: Box<Self>) -> (DynRead, DynWrite) {
-		// Leak the child handle into the writer side via a struct that
-		// owns both. Cleaner than dropping it on the floor: when the
-		// writer is dropped, so is the child, killing any orphan.
 		struct WriterWithChild {
 			inner: ChildStdin,
 			child: Child,
 		}
 		impl Drop for WriterWithChild {
 			fn drop(&mut self) {
-				// tokio Child detaches on drop; kill it so closing the writer can't
-				// leave an orphaned MCP subprocess behind.
+				// Kill so closing the writer can't orphan the MCP subprocess.
 				let _ = self.child.start_kill();
 			}
 		}
@@ -135,10 +119,7 @@ impl Adapter for AsyncStdioAdapter {
 	}
 }
 
-// ------------------------------------------------------------- InprocAdapter
-
-/// Pair of in-process byte channels for tests. `pair()` returns two
-/// adapters whose reads/writes are connected: bytes written to `a` arrive
+/// Pair of in-process byte channels for tests: bytes written to `a` arrive
 /// when `b` reads, and vice versa.
 pub struct InprocAdapter {
 	reader: InprocReader,
@@ -246,8 +227,6 @@ mod tests {
 
 	#[tokio::test]
 	async fn inproc_reader_drains_leftover_across_small_reads() {
-		// One 5-byte write, then read it back two bytes at a time so the reader's
-		// `leftover` buffer is exercised (a chunk larger than the read buffer).
 		let (a, b) = InprocAdapter::pair();
 		let (_ar, mut aw) = Box::new(a).split();
 		let (mut br, _bw) = Box::new(b).split();

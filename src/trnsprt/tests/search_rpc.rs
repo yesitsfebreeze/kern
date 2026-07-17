@@ -1,12 +1,5 @@
-//! Integration tests for `SearchSvc`.
-//!
-//! Covers
-//! - end-to-end client/server roundtrip on `InprocAdapter` +
-//!   `JsonEnvelopeCodec` (the typed-RPC stack hardcodes its frame type
-//!   to `serde_json::Value`; bincode-serializability of the DTOs is
-//!   exercised in unit tests inside `search::dto`),
-//! - cancellation race: a newer search supersedes an older one — the
-//!   stale response surfaces with `fresh: false`.
+//! Integration tests for `SearchSvc`: end-to-end client/server roundtrip on
+//! `InprocAdapter` + `JsonEnvelopeCodec`, plus the cancellation race.
 
 use std::sync::Arc;
 
@@ -75,7 +68,6 @@ async fn neighbors_respects_edge_kind_filter() {
 		.iter()
 		.any(|e| e.kind == EntityKindLite::Claim));
 
-	// Restricting to References excludes the Claim-class neighbour.
 	let restricted = client
 		.neighbors(NeighborsReq {
 			entity_id: "e:fact:1".into(),
@@ -117,7 +109,6 @@ async fn preview_returns_file_variant_for_document() {
 async fn preview_returns_non_file_variants_for_non_document_entities() {
 	let (client, handle, _mock) = spawn_mock_server();
 
-	// An edge entity -> Edge variant (not File).
 	match client
 		.preview(PreviewReq {
 			entity_id: "e:edge:1".into(),
@@ -128,7 +119,6 @@ async fn preview_returns_non_file_variants_for_non_document_entities() {
 		PreviewRes::Edge { .. } => {}
 		other => panic!("expected Edge variant, got {other:?}"),
 	}
-	// Any other non-document entity -> generic Text body.
 	match client
 		.preview(PreviewReq {
 			entity_id: "e:claim:1".into(),
@@ -147,9 +137,6 @@ async fn preview_returns_non_file_variants_for_non_document_entities() {
 async fn search_with_unmatched_scheme_returns_no_hits_not_an_error() {
 	let (client, handle, _mock) = spawn_mock_server();
 
-	// The scheme axis is an exact-match filter, so a scheme that no corpus
-	// entity carries yields an empty result set — but the RPC must still
-	// SUCCEED (graceful, fresh), not surface an error or panic.
 	let res = client
 		.search(SearchReq {
 			query: String::new(),
@@ -182,8 +169,6 @@ async fn kinds_returns_all_seven_canonical_variants() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cancellation_marks_older_keystroke_as_stale() {
-	// Issue search(token=2) first; it bumps the high-water mark to 2.
-	// A subsequent search(token=1) is older and must come back stale.
 	let (client, handle, _mock) = spawn_mock_server();
 
 	let newer = client
@@ -208,7 +193,6 @@ async fn cancellation_marks_older_keystroke_as_stale() {
 		.expect("older search");
 	assert!(!older.fresh, "older keystroke must be reported stale");
 
-	// A still-newer request bumps the watermark again and is fresh.
 	let newest = client
 		.search(SearchReq {
 			query: "rust".into(),

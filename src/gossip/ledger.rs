@@ -1,6 +1,6 @@
+use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use parking_lot::RwLock;
 use std::time::Instant;
 
 use crate::base::constants::{LEDGER_ROUTING_TTL, LEDGER_THOUGHT_TTL};
@@ -13,14 +13,8 @@ struct Entry {
 	expires: Instant,
 }
 
-/// A capped routing table with O(log n) soonest-expiry eviction. `map` is the
-/// lookup index (key → entry); `by_expiry` mirrors it keyed by `(expiry, key)`
-/// so the soonest-expiring entry is `by_expiry`'s first element — found and
-/// removed in O(log n) instead of the old O(n) min-scan. The `(Instant, String)`
-/// key makes eviction order total and deterministic even when two entries share
-/// an `Instant`. INVARIANT: every mutation touches both structures in lockstep,
-/// so `by_expiry` never holds a stale `(expiry, key)` for a removed/overwritten
-/// entry.
+/// Capped table: `map` for lookup, `by_expiry` mirrored by `(expiry, key)` for
+/// soonest-expiry eviction. INVARIANT: every mutation touches both in lockstep.
 #[derive(Default)]
 struct Index {
 	map: HashMap<String, Entry>,
@@ -28,9 +22,8 @@ struct Index {
 }
 
 impl Index {
-	/// Insert or overwrite `key`, first evicting soonest-expiring entries so the
-	/// map stays within `cap`. Overwriting drops the prior expiry-index entry
-	/// first, so it neither goes stale nor spuriously evicts another entry.
+	/// Overwriting drops the prior expiry-index entry BEFORE the cap check, so
+	/// it neither goes stale nor spuriously evicts another entry.
 	fn insert(&mut self, key: String, addr: String, expires: Instant, cap: usize) {
 		if let Some(old) = self.map.remove(&key) {
 			self.by_expiry.remove(&(old.expires, key.clone()));
@@ -46,22 +39,13 @@ impl Index {
 		self.map.insert(key, Entry { addr, expires });
 	}
 
-	/// Address for `key` iff present and not past its TTL as of `now`.
 	fn lookup(&self, key: &str, now: Instant) -> Option<String> {
 		self.map.get(key).and_then(|e| live_addr(e, now))
 	}
 }
 
-/// TTL'd routing hints learned from gossip: "which peer can serve X". Two
-/// independent maps, each capped and evicted by soonest-expiry:
-/// - `entities`: thought id -> peer address (where to fetch a specific thought),
-///   TTL [`LEDGER_THOUGHT_TTL`].
-/// - `routing`: kern id -> peer address (which peer owns/serves a kern's sphere),
-///   TTL [`LEDGER_ROUTING_TTL`].
-///
-/// All entries are advisory and expire: a [`lookup_thought`](Ledger::lookup_thought)
-/// or [`lookup_routing`](Ledger::lookup_routing) past the TTL returns `None` (the
-/// stale entry is simply ignored, swept lazily on the next capacity eviction).
+/// Advisory TTL'd routing hints learned from gossip ("which peer serves X"):
+/// `entities` = thought id -> addr, `routing` = kern id -> addr.
 pub struct Ledger {
 	entities: RwLock<Index>,
 	routing: RwLock<Index>,
@@ -85,15 +69,11 @@ impl Ledger {
 		self.max_entries.load(Ordering::Relaxed)
 	}
 
-	/// Record that thought `id` can be fetched from `addr`, valid for
-	/// [`LEDGER_THOUGHT_TTL`]. May evict the soonest-expiring entry if at capacity.
 	pub fn put_thought(&self, id: &str, addr: &str) {
 		let expires = Instant::now() + LEDGER_THOUGHT_TTL;
 		write_recovered(&self.entities).insert(id.to_string(), addr.to_string(), expires, self.cap());
 	}
 
-	/// Record that kern `kern_id` is served by `addr`, valid for
-	/// [`LEDGER_ROUTING_TTL`]. May evict the soonest-expiring entry if at capacity.
 	pub fn put_routing(&self, kern_id: &str, addr: &str) {
 		let expires = Instant::now() + LEDGER_ROUTING_TTL;
 		write_recovered(&self.routing).insert(
@@ -104,20 +84,15 @@ impl Ledger {
 		);
 	}
 
-	/// Peer address for thought `id`, or `None` if unknown or past its TTL.
 	pub fn lookup_thought(&self, id: &str) -> Option<String> {
 		read_recovered(&self.entities).lookup(id, Instant::now())
 	}
 
-	/// Peer address serving kern `kern_id`, or `None` if unknown or past its TTL.
 	pub fn lookup_routing(&self, kern_id: &str) -> Option<String> {
 		read_recovered(&self.routing).lookup(kern_id, Instant::now())
 	}
 }
 
-/// The shared liveness check behind both lookups: return the entry's address iff
-/// it has not yet expired as of `now`. Pulled out as a free fn so the TTL
-/// semantics are unit-testable without waiting on a real wall-clock TTL.
 fn live_addr(e: &Entry, now: Instant) -> Option<String> {
 	(e.expires > now).then(|| e.addr.clone())
 }
@@ -156,9 +131,7 @@ mod tests {
 			addr: "peer".into(),
 			expires: base + Duration::from_secs(10),
 		};
-		// Querying before the deadline yields the address.
 		assert_eq!(live_addr(&e, base), Some("peer".to_string()));
-		// Querying past the deadline yields None.
 		assert_eq!(live_addr(&e, base + Duration::from_secs(20)), None);
 	}
 
@@ -168,15 +141,14 @@ mod tests {
 		l.set_max_entries(2);
 		l.put_routing("a", "1");
 		l.put_routing("b", "2");
-		l.put_routing("c", "3"); // at cap -> evicts the soonest-expiring of a/b
+		l.put_routing("c", "3");
 
 		let live = ["a", "b", "c"]
 			.iter()
 			.filter(|k| l.lookup_routing(k).is_some())
 			.count();
 		assert_eq!(live, 2, "cap=2 holds at most two entries");
-		// "a" was inserted first, so it has the soonest expiry (and, on an equal
-		// Instant, the lexicographically smallest key) — it is the one evicted.
+		// "a" inserted first -> soonest expiry (lexicographic tie-break on equal Instant).
 		assert_eq!(
 			l.lookup_routing("a"),
 			None,
@@ -188,14 +160,11 @@ mod tests {
 
 	#[test]
 	fn overwriting_a_key_does_not_evict_another_entry() {
-		// Regression: the old evict-then-insert path ran eviction while at cap even
-		// when the put was an overwrite, so re-putting "a" could evict "b". The
-		// expiry-index path removes the prior "a" first, so "b" survives.
 		let l = Ledger::new();
 		l.set_max_entries(2);
 		l.put_routing("a", "1");
 		l.put_routing("b", "2");
-		l.put_routing("a", "1b"); // overwrite — must not displace "b"
+		l.put_routing("a", "1b");
 		assert_eq!(
 			l.lookup_routing("b"),
 			Some("2".to_string()),

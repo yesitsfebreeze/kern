@@ -1,5 +1,23 @@
 # Changelog
 
+- 2026-07-17 — Commentary lives in splinter notes, not in source. The whole
+  tree was swept: informational comments (rationale, history, design
+  narrative) migrated into per-file `.splinter/**/*.splinter.md` notes —
+  durable agent memory that survives re-splits, committed via a gitignore
+  carve-out — and inline comments remain only where load-bearing (safety,
+  lock ordering, invariants, units, workarounds with a reason). Pure noise
+  (restating code, section banners, commented-out code) deleted outright.
+  Going forward new commentary follows the same split: sidecar note by
+  default, inline only for constraints code cannot express. Tradeoff:
+  rationale now lives one hop from the code and needs splinter (or the raw
+  `.splinter/` tree) to read — accepted, because sidecar notes survive
+  rewrites while inline comments rot with the line they sit on. Upstream
+  behavior amendment (comments-last-resort gains the sidecar rule) is staged
+  in `.scratch/oracle-behavior-amend.md`; this session's write-scope hook
+  blocks `/home/feb/dev/oracle`, so applying it is a user step. Decided by:
+  comments-last-resort, delete-superseded.
+  Supersedes: inline design-narrative comments across `src/`.
+
 - 2026-07-17 — The capture drop-dir is named the **intake**; the interim
   print-queue-style working name it shipped under is scrubbed from the
   entire tree — code (`ingest::intake`, `intake_direct`, tracing target

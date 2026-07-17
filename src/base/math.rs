@@ -105,11 +105,13 @@ pub fn average_vec(a: &[f32], b: &[f32]) -> Vec<f32> {
 }
 
 /// L2-normalize `v` in place to unit Euclidean norm. A zero vector (norm 0) is
-/// left unchanged rather than producing NaNs from a divide-by-zero. General
-/// vector utility — lives here beside the other `base::math` primitives so every
-/// retrieval/fusion path shares one implementation.
+/// left unchanged rather than producing NaNs from a divide-by-zero.
 pub fn l2_normalize(v: &mut [f32]) {
-	let norm = v.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt() as f32;
+	let norm = v
+		.iter()
+		.map(|&x| (x as f64) * (x as f64))
+		.sum::<f64>()
+		.sqrt() as f32;
 	if norm > 0.0 {
 		for x in v.iter_mut() {
 			*x /= norm;
@@ -191,17 +193,8 @@ impl OnlineSoftmax {
 		self.m
 	}
 
-	/// Log-sum-exp of all observed scores: `m + ln(s)`.
-	///
-	/// This is deliberately a *pooling* operator, not a max. A single
-	/// observation is the identity (`x + ln(1) = x`), but an item observed `k`
-	/// times at the same score `x` finalizes to `x + ln(k)` — a corroboration
-	/// boost rewarding entities surfaced via multiple retrieval paths (e.g. both
-	/// the seed list and the beam in `retrieval::merge`). The result is a
-	/// relevance magnitude, not a probability, so values above 1.0 are expected
-	/// and fine; downstream only ranks by it and applies a multiplicative
-	/// confidence plus additive boosts. Use [`running_max`](Self::running_max)
-	/// instead when best-score-wins (no corroboration) is wanted.
+	/// Log-sum-exp (`m + ln(s)`) — deliberately pooling, not max: `k` equal scores
+	/// finalize to `x + ln(k)`, a corroboration boost. Do NOT swap for `running_max`.
 	pub fn finalize(&self) -> f64 {
 		if self.is_empty() {
 			return f64::NEG_INFINITY;
@@ -260,7 +253,6 @@ mod cosine_tests {
 
 	#[test]
 	fn zero_norm_inputs_return_zero_not_nan() {
-		// na == 0 or nb == 0 short-circuits before the divide, so no NaN.
 		assert_eq!(cosine(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
 		assert_eq!(cosine(&[1.0, 1.0], &[0.0, 0.0]), 0.0);
 		assert_eq!(cosine(&[0.0, 0.0], &[0.0, 0.0]), 0.0);
@@ -268,19 +260,16 @@ mod cosine_tests {
 
 	#[test]
 	fn mismatched_lengths_compare_the_shared_prefix() {
-		// n = min(len) = 2; the extra dim on the longer vector is ignored.
 		let c = cosine(&[1.0, 0.0, 9.0], &[1.0, 0.0]);
 		assert!(
 			(c - 1.0).abs() < 1e-6,
 			"shared prefix is identical -> 1.0, got {c}"
 		);
-		// Empty slice -> n = 0 -> both norms 0 -> 0.0 (no panic).
 		assert_eq!(cosine(&[], &[1.0, 2.0]), 0.0);
 	}
 
-	/// On a machine with AVX2+FMA the public `cosine` takes the SIMD path; assert
-	/// it agrees with the scalar reference across lengths that exercise BOTH the
-	/// 8-wide chunk loop and the unchecked tail (e.g. 17 = 2*8 + 1).
+	/// Lengths exercise BOTH the 8-wide chunk loop and the unchecked tail
+	/// (e.g. 17 = 2*8 + 1).
 	#[cfg(target_arch = "x86_64")]
 	#[test]
 	fn avx2_path_matches_scalar_reference() {
@@ -307,10 +296,14 @@ mod l2_normalize_tests {
 
 	#[test]
 	fn scales_to_unit_norm() {
-		let mut v = vec![3.0f32, 4.0]; // norm 5
+		let mut v = vec![3.0f32, 4.0];
 		l2_normalize(&mut v);
 		assert!((v[0] - 0.6).abs() < 1e-6 && (v[1] - 0.8).abs() < 1e-6);
-		let norm = v.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+		let norm = v
+			.iter()
+			.map(|&x| (x as f64) * (x as f64))
+			.sum::<f64>()
+			.sqrt();
 		assert!((norm - 1.0).abs() < 1e-6);
 	}
 
@@ -355,9 +348,8 @@ mod online_softmax_tests {
 
 	#[test]
 	fn corroborated_item_can_outrank_higher_single_observation() {
-		// Intentional pooling: an item seen twice at 0.8 (0.8 + ln2 ~= 1.49)
-		// outranks an item seen once at 0.9. Pins the design decision so a
-		// future switch to running_max is a deliberate, test-breaking change.
+		// Pins the pooling design: a switch to running_max is a deliberate,
+		// test-breaking change.
 		let mut corroborated = OnlineSoftmax::new();
 		corroborated.update(0.8);
 		corroborated.update(0.8);

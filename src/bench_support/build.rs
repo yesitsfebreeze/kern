@@ -1,6 +1,5 @@
 //! Benchmark graph construction: turn a replay `Trace`'s documents into a
-//! `GraphGnn` with similarity edges. Kept separate from the replay/scoring loop
-//! (`replay.rs`) so each module owns a single responsibility — build vs measure.
+//! `GraphGnn` with similarity edges. The replay/scoring loop lives in `replay.rs`.
 
 use crate::base::graph::GraphGnn;
 use crate::base::math::{average_vec, cosine, reason_id};
@@ -10,27 +9,20 @@ use crate::base::types::*;
 use super::embed;
 use super::trace::Trace;
 
-/// Build a benchmark graph from a trace: insert each document as a Claim entity,
-/// seed pairwise similarity edges, then build the ANN index.
 pub fn build_graph(trace: &Trace) -> GraphGnn {
 	let mut g = GraphGnn::new();
 	let root_id = g.root.id.clone();
 	insert_docs(&mut g, &root_id, trace);
 	seed_similarity_edges(&mut g, &root_id, trace);
 	g.rebuild_index();
-	// Populate the BM25 lexical index from the docs, mirroring the real load path
-	// (graph.rs builds it via rebuild_from_graph). Without this the index exists but
-	// is empty, so "hybrid" trace queries silently fall back to dense-only — and the
-	// bench's deterministic stub embedder is not semantic, so the lexical leg (and
-	// any hybrid recall number) would be a fiction.
+	// Populate the BM25 index as the real load path does; empty, "hybrid" queries
+	// silently fall back to dense-only (see build_graph_populates_a_searchable_lexical_index).
 	if let Some(lex) = g.lexical() {
 		lex.rebuild_from_graph(&g);
 	}
 	g
 }
 
-/// Insert every trace document into the root kern as a Claim entity carrying the
-/// deterministic bench embedding of its text.
 fn insert_docs(g: &mut GraphGnn, root_id: &str, trace: &Trace) {
 	for doc in &trace.docs {
 		let vec = embed::embed(&doc.text);
@@ -58,20 +50,12 @@ fn insert_docs(g: &mut GraphGnn, root_id: &str, trace: &Trace) {
 	}
 }
 
-/// Cosine floor for a similarity edge. A REAL graph's reason-edges connect
-/// genuinely related entities; a near-orthogonal pair (cosine ~0.1) is not
-/// "related". A loose floor wires almost every pair together, and that dense
-/// graph lets graph expansion's corroboration boost promote well-connected
-/// central nodes over the direct best match — which tanks ranking (NDCG) without
-/// changing recall. 0.5 keeps only substantively-similar pairs, matching a
-/// realistic edge density (NDCG@10 on synthetic.json: 0.54 at 0.1 -> ~1.0 here).
+/// Cosine floor for a similarity edge. A looser floor densifies the graph and
+/// tanks ranking (NDCG) without changing recall.
 const SIMILARITY_EDGE_FLOOR: f64 = 0.5;
 
-/// Seed similarity edges between every pair of documents whose cosine clears
-/// [`SIMILARITY_EDGE_FLOOR`]. O(n^2) on purpose: the full pairwise edge set is
-/// cheaper and more faithful than approximating it via the ANN index. The pair
-/// scan borrows each vector once and runs on all cores, so 10k-doc traces build
-/// in seconds instead of the former per-pair double-clone crawl.
+/// Seed similarity edges for every pair clearing [`SIMILARITY_EDGE_FLOOR`].
+/// O(n^2) on purpose (see pairwise_seeding_matches_ann_top_k_1k).
 fn seed_similarity_edges(g: &mut GraphGnn, root_id: &str, trace: &Trace) {
 	use rayon::prelude::*;
 
@@ -82,7 +66,12 @@ fn seed_similarity_edges(g: &mut GraphGnn, root_id: &str, trace: &Trace) {
 		.map(|d| {
 			(
 				d.id.as_str(),
-				kern.entities.get(&d.id).expect("inserted above").vector.as_slice(),
+				kern
+					.entities
+					.get(&d.id)
+					.expect("inserted above")
+					.vector
+					.as_slice(),
 			)
 		})
 		.collect();
@@ -123,10 +112,8 @@ mod tests {
 	use crate::bench_support::trace::{Trace, TraceDoc};
 	use std::collections::HashSet;
 
-	/// A 1000-doc synthetic trace: 40 clusters of 3 near-identical docs (8 shared
-	/// tokens + 1 unique each, so siblings sit at cosine ~0.89 > FLOOR) buried among
-	/// 880 unrelated singles (disjoint vocab, cosine ~0). The only >FLOOR pairs are
-	/// the 40*(3 choose 2)=120 intra-cluster edges.
+	/// 1000 docs: 40 clusters of 3 near-identical docs (siblings cosine ~0.89 >
+	/// FLOOR) among 880 unrelated singles — the only >FLOOR pairs are 120 edges.
 	fn thousand_doc_clustered_trace() -> Trace {
 		let mut docs = Vec::new();
 		for c in 0..40 {
@@ -154,7 +141,6 @@ mod tests {
 		}
 	}
 
-	/// The reason ids the pairwise seeder actually produced, read off the built graph.
 	fn pairwise_edge_ids(g: &GraphGnn) -> HashSet<String> {
 		let root = g.root.id.clone();
 		g.kerns
@@ -166,10 +152,8 @@ mod tests {
 			.collect()
 	}
 
-	/// The edge set an ANN top-k seeder WOULD produce from the same built graph:
-	/// probe each doc's neighbourhood in the entity index, then apply the exact
-	/// cosine + floor (identical decision and score to the pairwise scan). Mirrors
-	/// the rejected ANN approach so the two sets can be diffed.
+	/// The edge set an ANN top-k seeder WOULD produce: probe each doc's index
+	/// neighbourhood, then apply the same exact cosine + floor as the pairwise scan.
 	fn ann_top_k_edge_ids(g: &GraphGnn, trace: &Trace) -> HashSet<String> {
 		const NEIGHBOR_K: usize = 64;
 		const NEIGHBOR_EF: usize = 256;
@@ -181,12 +165,20 @@ mod tests {
 			.map(|d| {
 				(
 					d.id.as_str(),
-					kern.entities.get(&d.id).expect("inserted").vector.as_slice(),
+					kern
+						.entities
+						.get(&d.id)
+						.expect("inserted")
+						.vector
+						.as_slice(),
 				)
 			})
 			.collect();
-		let pos: std::collections::HashMap<&str, usize> =
-			vecs.iter().enumerate().map(|(i, (id, _))| (*id, i)).collect();
+		let pos: std::collections::HashMap<&str, usize> = vecs
+			.iter()
+			.enumerate()
+			.map(|(i, (id, _))| (*id, i))
+			.collect();
 		let mut ids = HashSet::new();
 		for (i, (_, vec)) in vecs.iter().enumerate() {
 			for h in g.entity_idx.search(vec, NEIGHBOR_K, NEIGHBOR_EF) {
@@ -207,12 +199,8 @@ mod tests {
 		ids
 	}
 
-	/// Durable decision record for closing the "ANN top-k edge seeding" task
-	/// no-change: at 1k docs the ANN top-k edge set is byte-identical to the
-	/// exhaustive pairwise set the bench actually uses. Prints the shared
-	/// fingerprint captured in `traces/edge-seeding-equivalence-1k.md`. See that
-	/// file for the timing numbers that make ANN a net regression despite the
-	/// equivalence.
+	/// Decision record: ANN top-k seeding was rejected — identical edge set, net
+	/// slower. Do not "optimize" the O(n^2) scan away without re-running this.
 	#[test]
 	fn pairwise_seeding_matches_ann_top_k_1k() {
 		let trace = thousand_doc_clustered_trace();
@@ -221,9 +209,14 @@ mod tests {
 		let pairwise = pairwise_edge_ids(&g);
 		let ann = ann_top_k_edge_ids(&g, &trace);
 
-		assert_eq!(pairwise.len(), 120, "40 clusters x (3 choose 2) = 120 edges");
 		assert_eq!(
-			pairwise, ann,
+			pairwise.len(),
+			120,
+			"40 clusters x (3 choose 2) = 120 edges"
+		);
+		assert_eq!(
+			pairwise,
+			ann,
 			"ANN top-k must recover exactly the pairwise edge set at 1k \
 			 (pairwise {} vs ann {}, missing {:?}, extra {:?})",
 			pairwise.len(),
@@ -241,14 +234,15 @@ mod tests {
 				.collect::<Vec<_>>()
 				.join("\n"),
 		);
-		println!("EDGE-ARTIFACT docs=1000 edges={} fingerprint={fingerprint}", pairwise.len());
+		println!(
+			"EDGE-ARTIFACT docs=1000 edges={} fingerprint={fingerprint}",
+			pairwise.len()
+		);
 	}
 
 	#[test]
 	fn build_graph_populates_a_searchable_lexical_index() {
-		// Regression for the empty-lexical-index bug: a built graph's BM25 index must
-		// return the token-overlapping doc, so "hybrid" trace queries actually use it
-		// instead of silently falling back to dense-only.
+		// Regression for the empty-lexical-index bug.
 		let trace = Trace {
 			name: "t".into(),
 			docs: vec![

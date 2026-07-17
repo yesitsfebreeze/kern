@@ -1,12 +1,5 @@
-//! Normalized Discounted Cumulative Gain (NDCG@k) for the retrieval bench.
-//!
-//! Relevance is **binary**: an id has gain 1 iff it appears in `expected_ids`,
-//! else 0 — there are no graded judgments. DCG@k sums each top-k hit's gain
-//! discounted by rank, `Σ rel_i / log2(i + 2)` (0-indexed position `i`, so the
-//! first slot's discount is `log2(2) = 1`). IDCG@k is the DCG of the ideal
-//! ranking — every relevant id packed at the top, capped at `k`. NDCG = DCG/IDCG
-//! ∈ [0, 1]: 1.0 means every expected id that *can* fit within `k` is ranked
-//! above every non-relevant one.
+//! NDCG@k for the retrieval bench. Relevance is binary (gain 1 iff in
+//! `expected_ids`); NDCG = DCG/IDCG ∈ [0,1] — see the note for the formula.
 
 use std::collections::HashSet;
 
@@ -34,13 +27,8 @@ pub fn ndcg_at_k(ranked_ids: &[String], expected_ids: &[String], k: usize) -> f6
 	dcg / idcg
 }
 
-/// Recall@k: the fraction of the expected (relevant) ids that appear *anywhere*
-/// in the top-`k` retrieved — `|expected ∩ ranked[..k]| / |expected|` ∈ [0, 1].
-/// Unlike NDCG this ignores order within the top-k: it measures coverage (did we
-/// surface the relevant items at all), which is the headline metric for the
-/// Qdrant-parity bench (aspiration.md Tier-0). Both sides are de-duplicated, so a
-/// repeated id in the ranked list can never push recall above 1.0. Note: when
-/// `|expected| > k`, even a perfect retriever cannot reach 1.0 (only `k` slots).
+/// Recall@k: `|expected ∩ ranked[..k]| / |expected|` ∈ [0,1], order-insensitive
+/// coverage. Both sides de-duplicated; when `|expected| > k`, 1.0 is unreachable.
 pub fn recall_at_k(ranked_ids: &[String], expected_ids: &[String], k: usize) -> f64 {
 	if expected_ids.is_empty() || k == 0 {
 		return 0.0;
@@ -74,9 +62,6 @@ mod tests {
 
 	#[test]
 	fn partial_hit_matches_the_formula() {
-		// ranked [a, x, b], expected {a, b}, k=3.
-		// DCG  = 1/log2(2) + 1/log2(4) = 1.0 + 0.5 = 1.5  (a@0, b@2)
-		// IDCG = 1/log2(2) + 1/log2(3) = 1.0 + 0.63093 = 1.63093  (2 ideal hits)
 		let r = ndcg_at_k(&ids(&["a", "x", "b"]), &ids(&["a", "b"]), 3);
 		let expected = 1.5 / (1.0 + 1.0 / 3.0_f64.log2());
 		assert!((r - expected).abs() < 1e-9, "got {r}, want {expected}");
@@ -84,7 +69,6 @@ mod tests {
 
 	#[test]
 	fn rank_position_matters() {
-		// Same single hit, earlier position scores strictly higher.
 		let high = ndcg_at_k(&ids(&["a", "x", "y"]), &ids(&["a"]), 3);
 		let low = ndcg_at_k(&ids(&["x", "y", "a"]), &ids(&["a"]), 3);
 		assert!((high - 1.0).abs() < 1e-9, "hit at rank 0 -> 1.0");
@@ -102,26 +86,20 @@ mod tests {
 
 	#[test]
 	fn k_caps_both_dcg_and_idcg() {
-		// expected has 3 ids but k=1: only the top slot counts, and IDCG is also
-		// capped at 1 hit, so a top-1 relevant result is a perfect 1.0.
 		let r = ndcg_at_k(&ids(&["a", "b", "c"]), &ids(&["a", "b", "c"]), 1);
 		assert!((r - 1.0).abs() < 1e-9, "got {r}");
 	}
 
 	#[test]
 	fn recall_counts_coverage_ignoring_order() {
-		// All relevant ids found within k -> 1.0, regardless of WHERE they land
-		// (the order-insensitivity that distinguishes recall from NDCG).
 		assert_eq!(
 			recall_at_k(&ids(&["x", "y", "a", "b"]), &ids(&["a", "b"]), 4),
 			1.0
 		);
-		// Half the relevant set found -> 0.5.
 		assert_eq!(
 			recall_at_k(&ids(&["a", "x", "y"]), &ids(&["a", "b"]), 3),
 			0.5
 		);
-		// No overlap -> 0.0.
 		assert_eq!(recall_at_k(&ids(&["x", "y"]), &ids(&["a", "b"]), 2), 0.0);
 	}
 
@@ -133,7 +111,6 @@ mod tests {
 			(r - 1.0 / 3.0).abs() < 1e-9,
 			"k caps reachable recall, got {r}"
 		);
-		// A repeated relevant id in the ranked list must not inflate recall past 1.0.
 		assert_eq!(recall_at_k(&ids(&["a", "a"]), &ids(&["a"]), 2), 1.0);
 	}
 

@@ -65,9 +65,6 @@ fn forward_child_stderr<R: std::io::Read>(stderr: R, source: &str) {
 }
 
 fn classify_child_log_level(line: &str) -> logsink::Level {
-	// Case-insensitive so a child logging "error", "Error" or "ERROR" all map to
-	// Error (previously only upper-case "ERROR" / lower-case "error:" matched, so
-	// "Error: boom" slipped through as Info).
 	let upper = line.to_ascii_uppercase();
 	if upper.contains("ERROR") {
 		logsink::Level::Error
@@ -128,7 +125,6 @@ mod tests {
 			classify_child_log_level("just some info"),
 			Level::Info
 		));
-		// Error wins over warn when both appear.
 		assert!(matches!(
 			classify_child_log_level("WARN then ERROR"),
 			Level::Error
@@ -144,9 +140,6 @@ mod tests {
 
 	#[test]
 	fn child_stdio_round_trips_a_line_through_an_echo_child() {
-		// A trivial echo child: read one line from stdin, write it to stdout, exit.
-		// `cat` on unix; a one-line PowerShell readline on windows — both portable
-		// enough to verify the spawn -> write -> read -> kill cycle.
 		#[cfg(unix)]
 		let mut t = ChildStdio::spawn("cat", &[]).expect("spawn cat");
 		#[cfg(windows)]

@@ -1,11 +1,5 @@
-//! Multi-backend comparison harness — Phase 1b of the Qdrant-baseline SPEC
-//! (`docs/superpowers/specs/2026-06-12-qdrant-baseline-harness-design.md`).
-//!
-//! Index one [`Corpus`] into every [`VectorBackend`] and score each backend's
-//! rankings through the **same** `ndcg` functions plus mean per-query latency, so
-//! the resulting [`BackendReport`]s are directly comparable. When a feature-gated
-//! `QdrantBackend` is added, it slots in here with zero metric-code changes — the
-//! whole point of the seam.
+//! Multi-backend comparison harness: index one [`Corpus`] into every
+//! [`VectorBackend`], score all through the same `ndcg` + latency code.
 
 use std::time::Instant;
 
@@ -15,8 +9,6 @@ use super::backend::{Doc, VectorBackend};
 use super::embed;
 use super::ndcg;
 
-/// A query against the corpus: the pre-embedded query vector, the expected
-/// relevant ids (ground truth), and an optional kind filter.
 #[derive(Debug, Clone)]
 pub struct CompareQuery {
 	pub id: String,
@@ -32,14 +24,7 @@ pub struct Corpus {
 }
 
 impl Corpus {
-	/// A deterministic synthetic corpus for SCALE testing the comparison harness.
-	/// `n_docs` documents each draw 8 tokens from a shared vocabulary (so vectors
-	/// overlap and ANN recall is non-trivial, not a toy orthogonal set), and
-	/// `n_queries` queries each take a 4-token subset of one target doc's tokens —
-	/// so the target is the intended best match but real overlap from other docs
-	/// makes recall discriminating. Embedded once via the bench embedder, so it
-	/// drives any [`VectorBackend`] identically. `seed` makes it reproducible
-	/// (no `rand`).
+	/// Deterministic for a given `seed`.
 	pub fn synthetic(n_docs: usize, n_queries: usize, seed: u64) -> Self {
 		let vocab: Vec<String> = (0..200).map(|i| format!("term{i}")).collect();
 		let mut s = seed | 1; // xorshift needs a non-zero state
@@ -90,7 +75,6 @@ impl Corpus {
 	}
 }
 
-/// One backend's scored result — the row in the head-to-head table.
 #[derive(Debug, Clone)]
 pub struct BackendReport {
 	pub name: String,
@@ -100,13 +84,10 @@ pub struct BackendReport {
 	pub vector_bytes: usize,
 }
 
-/// `k` for recall@k / NDCG@k in the baseline.
 pub const K: usize = 10;
 
-/// Index `corpus` into each backend, run every query, and score recall@[`K`] /
-/// NDCG@[`K`] via the shared [`ndcg`] functions plus mean per-query latency. The
-/// metric code is identical for every backend, so any difference between rows is
-/// the index/fusion — not the measurement.
+/// Index, query, and score every backend through identical metric code, so any
+/// difference between rows is the index/fusion — not the measurement.
 pub fn compare(backends: &mut [Box<dyn VectorBackend>], corpus: &Corpus) -> Vec<BackendReport> {
 	let mut out = Vec::with_capacity(backends.len());
 	for b in backends.iter_mut() {
@@ -189,15 +170,12 @@ mod tests {
 
 	#[test]
 	fn synthetic_corpus_drives_a_scale_comparison() {
-		// 500 docs / 50 queries: a non-trivial scale where recall is meaningful and
-		// the harness exercises real ANN traversal (not a 4-doc toy).
+		// 500 docs: enough to exercise real ANN traversal, not a 4-doc toy.
 		let corpus = Corpus::synthetic(500, 50, 42);
 		assert_eq!(corpus.docs.len(), 500);
 		assert_eq!(corpus.queries.len(), 50);
 		let mut backends: Vec<Box<dyn VectorBackend>> = vec![Box::new(KernBackend::new())];
 		let r = compare(&mut backends, &corpus);
-		// The target shares the query's tokens, so it should land in the top-10 for
-		// a substantial fraction of queries (discriminating, not trivially perfect).
 		assert!(
 			r[0].mean_recall10 > 0.3,
 			"scale recall@10 should be substantial, got {}",
@@ -208,9 +186,6 @@ mod tests {
 
 	#[test]
 	fn kern_ann_recall_tracks_exact_brute_force() {
-		// Brute force is exact NN ground truth (the ceiling); kern is approximate
-		// HNSW. On this scale kern's recall@10 should track exact closely -- the
-		// "keep the DiskANN recall@k edge" check, now measured by two real backends.
 		let corpus = Corpus::synthetic(300, 40, 99);
 		let mut kern: Vec<Box<dyn VectorBackend>> = vec![Box::new(KernBackend::new())];
 		let mut brute: Vec<Box<dyn VectorBackend>> = vec![Box::new(BruteForceBackend::new())];
@@ -246,8 +221,7 @@ mod tests {
 		hits as f64 / queries.len() as f64
 	}
 
-	// Build a GraphGnn whose entity index is spilled to a DiskANN snapshot
-	// (disk_threshold = 0 forces the spill), exercising the real rebuild_index
+	// disk_threshold = 0 forces the spill, so this exercises the real rebuild_index
 	// routing rather than DiskIndex in isolation.
 	fn disk_backed_graph(docs: &[Doc], dir: &std::path::Path) -> crate::base::graph::GraphGnn {
 		use crate::base::graph::GraphGnn;
@@ -268,17 +242,14 @@ mod tests {
 			);
 		}
 		g.kerns.insert("k".to_string(), kern);
-		g.set_disk_threshold(0); // any non-empty corpus spills
+		g.set_disk_threshold(0);
 		g.rebuild_index();
 		g
 	}
 
 	#[test]
 	fn disk_spilled_path_recall_tracks_the_in_ram_index() {
-		// I7 regression: a disk-backed graph (entity_idx spilled to a DiskANN
-		// snapshot) must find the target doc in its top-10 about as often as the
-		// in-RAM HNSW over the same corpus — the disk tier must not silently lose
-		// recall as the spill path evolves.
+		// I7 regression: the disk tier must not silently lose recall vs the in-RAM HNSW.
 		let corpus = Corpus::synthetic(300, 40, 99);
 
 		let mut kern = KernBackend::new();
@@ -333,9 +304,7 @@ mod tests {
 
 	#[test]
 	fn identical_backends_produce_identical_quality_and_memory() {
-		// The apples-to-apples guarantee: two identical backends over one corpus
-		// must score identically, so the harness itself adds no per-backend bias.
-		// (Latency is wall-clock and excluded.)
+		// Latency is wall-clock and deliberately excluded.
 		let mut backends: Vec<Box<dyn VectorBackend>> =
 			vec![Box::new(KernBackend::new()), Box::new(KernBackend::new())];
 		let r = compare(&mut backends, &corpus());

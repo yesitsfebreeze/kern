@@ -36,22 +36,14 @@ struct HnswNode {
 	layers: Vec<Vec<u32>>,
 }
 
-/// A frontier entry: an internal slot id and its distance to the query. `Copy`
-/// (a `u32` + `f64`) so the beam heaps never clone a `String` per hop.
 #[derive(Clone, Copy)]
 struct Candidate {
 	id: u32,
 	dist: f64,
 }
 
-/// In-memory HNSW.
-///
-/// The hot path is pure `u32`: a contiguous node arena (`nodes`), `Vec<u32>`
-/// adjacency per layer, and beam heaps carrying slot ids. Strings only cross the
-/// boundary at the public API surface, via `slot_of` (id → slot) and `id_of`
-/// (slot → id). Deleted slots are recycled through `free`; a delete scrubs the
-/// slot out of every adjacency list first, so a reused slot can never resurrect
-/// a stale edge.
+/// In-memory HNSW. Ids map to internal `u32` slots via `slot_of`/`id_of`;
+/// deleted slots are recycled through `free`.
 pub struct HnswIndex {
 	m: usize,
 	m0: usize,
@@ -139,8 +131,6 @@ impl HnswIndex {
 		&self.id_of[slot as usize]
 	}
 
-	/// Claim a slot for `id`/`node`, reusing a freed one when available so the
-	/// arena stays compact under insert/delete churn.
 	fn alloc_slot(&mut self, id: String, node: HnswNode) -> u32 {
 		if let Some(slot) = self.free.pop() {
 			self.nodes[slot as usize] = Some(node);
@@ -170,7 +160,11 @@ impl HnswIndex {
 		self.nodes[slot as usize] = None;
 		self.free.push(slot);
 		if self.ep == Some(slot) {
-			self.ep = self.nodes.iter().position(|n| n.is_some()).map(|i| i as u32);
+			self.ep = self
+				.nodes
+				.iter()
+				.position(|n| n.is_some())
+				.map(|i| i as u32);
 		}
 	}
 
@@ -318,17 +312,8 @@ impl HnswIndex {
 			.collect()
 	}
 
-	/// Filtered nearest-neighbour search: return up to `k` hits whose id passes
-	/// `keep`, ranked by distance. Unlike post-filtering (search k, then drop the
-	/// non-matches — which yields *fewer* than k whenever matches are sparse in
-	/// the top-k), this filters DURING traversal: non-matching nodes are still
-	/// walked for navigation so matches hidden behind them are reachable, but only
-	/// matching nodes enter the result set. This is the filtered-vector-search
-	/// guarantee a dedicated vector DB provides.
-	///
-	/// Cost note: when matches are sparse the frontier stays open longer (the
-	/// result set never fills to `ef`), so the worst case approaches a full graph
-	/// walk. The `visited` set bounds it to O(nodes).
+	/// Up to `k` hits whose id passes `keep`, filtered DURING traversal so matches
+	/// hidden behind non-matching nodes stay reachable. Worst case O(nodes).
 	pub fn search_filtered(
 		&self,
 		vec: &[f32],
@@ -344,8 +329,7 @@ impl HnswIndex {
 		}
 		let query = Query::new(vec, self.quant_mode);
 		let ef = ef.max(k);
-		// Upper layers are pure navigation — no filter, just descend to a good
-		// entry point for the filtered beam at layer 0.
+		// Upper layers are unfiltered navigation; only the layer-0 beam filters.
 		for l in (1..=self.max_layer).rev() {
 			ep = self.greedy_nearest(ep, &query, l);
 		}
@@ -360,11 +344,8 @@ impl HnswIndex {
 			.collect()
 	}
 
-	/// Beam search whose navigation frontier (`candidates`) includes every visited
-	/// node, but whose result set (`results`) admits only nodes passing `keep`.
-	/// The frontier keeps expanding while the result set is under `ef` OR a
-	/// neighbour is closer than the current worst match, so matches behind walls
-	/// of non-matching nodes are still found.
+	/// Frontier admits every visited node; results admit only `keep` matches, so
+	/// matches behind walls of non-matching nodes are still found.
 	fn beam_search_filtered(
 		&self,
 		ep: u32,
@@ -378,7 +359,10 @@ impl HnswIndex {
 		let mut results = MaxHeap::new();
 		let mut visited = vec![false; self.nodes.len()];
 
-		let seed = Candidate { id: ep, dist: ep_dist };
+		let seed = Candidate {
+			id: ep,
+			dist: ep_dist,
+		};
 		candidates.push(seed);
 		visited[ep as usize] = true;
 		if keep(self.id_str(ep)) {
@@ -386,8 +370,6 @@ impl HnswIndex {
 		}
 
 		while let Some(c) = candidates.pop() {
-			// If the matching set is full and the nearest frontier node is farther
-			// than the worst match, no closer match can exist — stop.
 			if results.len() >= ef {
 				if let Some(worst) = results.peek() {
 					if c.dist > worst.dist {
@@ -412,9 +394,6 @@ impl HnswIndex {
 					continue;
 				}
 				let d = self.distance_to_query(nb, query);
-				// Explore (navigate through) this node if the result set isn't full
-				// yet, or it could beat the worst match. Non-matching nodes are still
-				// pushed to the frontier — that is how we reach matches behind them.
 				let worst = results.peek().map(|w| w.dist);
 				let explore = results.len() < ef || worst.is_none_or(|w| d < w);
 				if explore {
@@ -437,11 +416,8 @@ impl HnswIndex {
 		out
 	}
 
-	/// Layer assignment as a pure function of the id (FNV-1a → uniform (0,1] →
-	/// the standard exponential level draw). Id-stable by construction: the same
-	/// id lands on the same level in every build, on every run, under any insert
-	/// order or delete/insert churn — the property an RNG keyed on insert
-	/// position cannot give.
+	/// Id-stable layer assignment (FNV-1a of the id → exponential level draw):
+	/// the same id lands on the same level under any insert order or churn.
 	fn level_for(&self, id: &str) -> usize {
 		let mut h: u64 = 0xcbf2_9ce4_8422_2325;
 		for &b in id.as_bytes() {
@@ -515,7 +491,10 @@ impl HnswIndex {
 		let mut results = MaxHeap::new();
 		let mut visited = vec![false; self.nodes.len()];
 
-		let seed = Candidate { id: ep, dist: ep_dist };
+		let seed = Candidate {
+			id: ep,
+			dist: ep_dist,
+		};
 		candidates.push(seed);
 		results.push(seed);
 		visited[ep as usize] = true;
@@ -565,10 +544,8 @@ impl HnswIndex {
 		out
 	}
 
-	/// Canonical hash of the full graph structure: entry point, max layer, and
-	/// every live node in id order with its per-layer adjacency (as ids, so the
-	/// digest is independent of slot numbering). Equal digests = identical
-	/// graphs; the determinism tests assert on it.
+	/// Canonical hash of the graph structure, in ids so it is independent of slot
+	/// numbering. Equal digests = identical graphs; determinism tests assert on it.
 	pub fn structure_digest(&self) -> String {
 		let mut slots: Vec<u32> = self.slot_of.values().copied().collect();
 		slots.sort_by(|a, b| self.id_of[*a as usize].cmp(&self.id_of[*b as usize]));
@@ -625,11 +602,8 @@ fn is_ambiguous(candidates: &[Candidate], k: usize, epsilon: f64) -> bool {
 	(worst.dist - best.dist) < epsilon
 }
 
-/// Sift order for [`Heap`]: `prefer(a, b)` is true when candidate `a` belongs
-/// ABOVE `b` (nearer the root). `Min` keeps the smallest distance on top, `Max`
-/// the largest; equal distances break on slot id so the order is strict and
-/// pop order never depends on push order. A zero-sized type parameter, so the
-/// comparison monomorphizes with no per-operation branch.
+/// Sift order for [`Heap`]: `prefer(a, b)` = `a` belongs above `b`. Equal
+/// distances break on slot id so pop order never depends on push order.
 trait HeapOrder {
 	fn prefer(a: Candidate, b: Candidate) -> bool;
 }
@@ -722,9 +696,7 @@ mod tests {
 	use std::collections::HashSet;
 
 	impl HnswIndex {
-		/// Physical arena size (live + freed slots). A `delete` followed by an
-		/// `insert` should recycle a slot rather than grow this, which the
-		/// slot-reuse test asserts.
+		/// Physical arena size (live + freed slots).
 		fn arena_slots(&self) -> usize {
 			self.nodes.len()
 		}
@@ -735,7 +707,8 @@ mod tests {
 				.as_ref()
 				.expect("live node")
 				.layers
-				.len() - 1
+				.len()
+				- 1
 		}
 	}
 
@@ -743,7 +716,6 @@ mod tests {
 		(0..dim).map(|_| rng.random::<f32>() * 2.0 - 1.0).collect()
 	}
 
-	/// Exact nearest-by-cosine ground truth for the recall assertions.
 	fn brute_force_topk(vecs: &[(String, Vec<f32>)], q: &[f32], k: usize) -> HashSet<String> {
 		let mut scored: Vec<(String, f64)> = vecs
 			.iter()
@@ -762,9 +734,6 @@ mod tests {
 
 	#[test]
 	fn node_level_depends_only_on_id_not_insert_order() {
-		// A node's layer count must be a function of its id alone, not of how many
-		// inserts preceded it — otherwise any change in arrival order (HashMap
-		// iteration upstream, delete/insert churn) reshapes the whole graph.
 		let corpus = random_corpus(41, 300, 16);
 		let mut fwd = HnswIndex::new(16, 128);
 		let mut rev = HnswIndex::new(16, 128);
@@ -785,8 +754,6 @@ mod tests {
 
 	#[test]
 	fn identical_insert_sequence_builds_identical_graph() {
-		// Two indexes fed the same (id, vec) sequence must be structurally equal —
-		// full adjacency, entry point, and max layer, compared by hash.
 		let corpus = random_corpus(42, 300, 16);
 		let build = || {
 			let mut idx = HnswIndex::new(16, 128);
@@ -826,10 +793,6 @@ mod tests {
 
 	#[test]
 	fn delete_then_insert_reuses_slot_and_search_stays_correct() {
-		// Slot recycling: delete a batch, insert the same number of fresh ids, and
-		// require (a) the arena did NOT grow — the freed slots were reused — and
-		// (b) search still returns the exact nearest over the live set, proving a
-		// recycled slot carries no stale edge from its former occupant.
 		let dim = 24;
 		let corpus = random_corpus(3, 200, dim);
 		let mut idx = HnswIndex::new(16, 128);
@@ -838,7 +801,6 @@ mod tests {
 		}
 		let slots_before = idx.arena_slots();
 
-		// Live set tracked alongside the index for the brute-force ground truth.
 		let mut live: Vec<(String, Vec<f32>)> = corpus.clone();
 		let mut rng = rand::rngs::StdRng::seed_from_u64(1234);
 		for i in 0..40 {
@@ -864,7 +826,6 @@ mod tests {
 			let q = rand_vec(&mut qrng, dim);
 			let truth = brute_force_topk(&live, &q, k);
 			let got: HashSet<String> = idx.search(&q, k, 128).into_iter().map(|h| h.id).collect();
-			// No result may be a deleted id.
 			assert!(
 				got.iter().all(|id| live.iter().any(|(lid, _)| lid == id)),
 				"a recycled/deleted id leaked into results"
@@ -877,10 +838,6 @@ mod tests {
 
 	#[test]
 	fn recall_matches_brute_force() {
-		// The whole point of an ANN index is that its top-k closely tracks the
-		// exact top-k. Build a corpus, query it, and require high overlap with the
-		// brute-force ground truth. This is the recall number we must beat Qdrant
-		// on — without it, the index is unmeasured.
 		let dim = 32;
 		let corpus = random_corpus(7, 300, dim);
 		let mut idx = HnswIndex::new(16, 128);
@@ -903,9 +860,6 @@ mod tests {
 
 	#[test]
 	fn search_order_matches_brute_force_on_separated_corpus() {
-		// On a well-separated seeded corpus the ANN top-k must equal the exact
-		// brute-force top-k in the SAME order — the strong guarantee that the u32
-		// arena rewrite preserves ranking, not just set overlap.
 		let dim = 48;
 		let corpus = random_corpus(2024, 400, dim);
 		let mut idx = HnswIndex::new(24, 200);
@@ -929,8 +883,7 @@ mod tests {
 				matched += 1;
 			}
 		}
-		// A high ef makes exact ordering the overwhelmingly common case; allow a
-		// couple of near-ties to differ without failing.
+		// High ef makes exact order the norm; allow a couple of near-ties to differ.
 		assert!(
 			matched >= queries - 2,
 			"exact-order match on separated corpus: {matched}/{queries}"
@@ -939,10 +892,6 @@ mod tests {
 
 	#[test]
 	fn search_filtered_matches_brute_force_over_subset() {
-		// Filtered search must equal brute-force ranking restricted to the matching
-		// subset — proving it filters DURING traversal (k matches returned), not
-		// after (which would drop below k whenever matches are sparse in the raw
-		// top-k). Keep is "even-indexed vector id".
 		let dim = 16;
 		let corpus = random_corpus(21, 240, dim);
 		let mut idx = HnswIndex::new(16, 128);
@@ -994,8 +943,6 @@ mod tests {
 
 	#[test]
 	fn search_filtered_finds_single_rare_match() {
-		// One matching node among many non-matching ones must still be found —
-		// the navigation walks through the non-matches to reach it.
 		let dim = 16;
 		let corpus = random_corpus(8, 200, dim);
 		let mut idx = HnswIndex::new(16, 128);
@@ -1015,10 +962,6 @@ mod tests {
 
 	#[test]
 	fn int8_recall_tracks_f64() {
-		// int8 quantization cuts vector memory 8x (the Qdrant-parity move). It must
-		// not wreck retrieval: an int8 index's top-k must closely match the f64
-		// index's top-k on the same corpus. Proves the quantized path is usable,
-		// not just present.
 		let dim = 32;
 		let corpus = random_corpus(13, 300, dim);
 		let mut f64_idx = HnswIndex::new(16, 128);
@@ -1054,11 +997,6 @@ mod tests {
 
 	#[test]
 	fn binary_recall_tracks_f64() {
-		// 1-bit sign quantization cuts vector memory ~64x but is far coarser than
-		// int8: each dimension keeps only its sign. The honest bar is therefore
-		// lower than int8's 0.75 — this test MEASURES the recall floor of pure
-		// Hamming candidate-gen (no rescore yet) so the tradeoff is a number, not a
-		// guess. Binary must still recover a substantial fraction of the f64 top-k.
 		let dim = 32;
 		let corpus = random_corpus(13, 300, dim);
 		let mut f64_idx = HnswIndex::new(16, 128);
@@ -1086,12 +1024,8 @@ mod tests {
 			total += f.intersection(&b).count() as f64 / k as f64;
 		}
 		let agreement = total / queries as f64;
-		// Measured ~0.33 at dim=32 (run 2026-06-12). Pure 1-bit Hamming WITHOUT
-		// rescore loses ~2/3 of the f64 top-k — this number is the whole point of
-		// the test: it proves int8-rescore is REQUIRED before binary is a usable
-		// mode (hence it stays out of `QuantizationMode::parse`). The floor locks
-		// the measured behaviour; the rescore phase must raise both, then this
-		// asserts the lifted floor.
+		// The 0.30 floor locks the measured no-rescore behaviour; rescore must lift
+		// it before Binary becomes user-selectable (numbers in the splinter note).
 		assert!(
 			agreement >= 0.30,
 			"binary vs f64 top-{k} agreement below floor: {agreement:.3}"
@@ -1101,17 +1035,14 @@ mod tests {
 	#[test]
 	fn is_ambiguous_flags_short_results_and_tight_spreads() {
 		let c = |dist: f64| Candidate { id: 0, dist };
-		// Fewer than k candidates -> ambiguous (must widen to look harder).
 		assert!(
 			is_ambiguous(&[c(0.1)], 3, 0.05),
 			"short result set is ambiguous"
 		);
-		// Top-k spread below epsilon -> ambiguous (results too close to trust).
 		assert!(
 			is_ambiguous(&[c(0.10), c(0.11), c(0.12)], 3, 0.05),
 			"tight spread is ambiguous"
 		);
-		// Spread at/above epsilon -> NOT ambiguous (clear winners, stop widening).
 		assert!(
 			!is_ambiguous(&[c(0.10), c(0.30), c(0.50)], 3, 0.05),
 			"wide spread is decisive"
@@ -1121,9 +1052,7 @@ mod tests {
 	#[test]
 	fn search_adaptive_finds_the_true_nearest_by_widening_from_a_small_ef() {
 		let mut idx = HnswIndex::new(8, 64);
-		// 20 near-identical decoys around the query plus one exact match: a small
-		// ef_start gives an ambiguous top-k, so search_adaptive must widen to recover
-		// the exact match (the recall guarantee that justifies the adaptive search).
+		// Near-identical decoys make the small-ef top-k ambiguous, forcing a widen.
 		for i in 0..20 {
 			idx.insert(format!("c{i}"), vec![1.0, 0.02 * (i as f32 + 1.0), 0.0]);
 		}

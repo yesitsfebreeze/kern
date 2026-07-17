@@ -17,9 +17,8 @@ pub struct Deps {
 	pub graph: Arc<RwLock<GraphGnn>>,
 	pub node: Arc<Node>,
 	pub queue: Option<Arc<tick::queue::Queue>>,
-	/// Persist hook. Federation mutations (remote scope inject, counter
-	/// merges, question resolution) call this so federated knowledge survives
-	/// a restart instead of living only in memory.
+	/// Persist hook — every federation mutation must call this so federated
+	/// knowledge survives a restart instead of living only in memory.
 	pub save: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 }
 
@@ -49,11 +48,8 @@ pub fn new_handler(d: Arc<Deps>) -> Handler {
 	})
 }
 
-/// Periodically broadcast this node's root-kern scope (purpose vector +
-/// radii) so peers become aware of the knowledge it holds and can route
-/// questions / fetch content to it. The outbound counterpart to
-/// `handle_sphere`: without it a node only ever receives. Runs until the
-/// node's stop signal fires.
+/// Periodically broadcast this node's root-kern scope so peers can route
+/// questions / fetches to it — the outbound counterpart to `handle_sphere`.
 pub fn start_announce(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 	let mut stop = node.stop_rx.clone();
 	tokio::spawn(async move {
@@ -95,11 +91,8 @@ pub fn start_announce(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 	});
 }
 
-/// Periodically broadcast this node's hottest LOCAL entities so peers can
-/// merge the actual thought content (not just scope) into a per-network
-/// phantom kern via `base::merge::merge_remote_entity`. The outbound
-/// counterpart to `handle_entity_sync`. Never re-broadcasts entities living
-/// in `remote-*` kerns (received data). Runs until the node's stop signal.
+/// Periodically broadcast this node's hottest LOCAL entities — the outbound
+/// counterpart to `handle_entity_sync`. Never re-broadcasts `remote-*` kerns.
 pub fn start_entity_sync(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 	let mut stop = node.stop_rx.clone();
 	tokio::spawn(async move {
@@ -261,14 +254,8 @@ fn handle_peer_exchange(d: &Deps, msg: GossipMessage) {
 	}
 }
 
-/// Validate an inbound CRDT delta, returning the slot value to merge or `None`
-/// to drop it.
-///
-/// `value` is the sender's ABSOLUTE total for its `replica` slot (not an
-/// increment): merging it via the GCounter per-slot `max` is therefore
-/// commutative, idempotent and convergent regardless of delivery order or
-/// duplication. Empty ids and zero are dropped (no-ops), and values above
-/// [`GOSSIP_CRDT_DELTA_MAX`] are rejected to bound a peer pinning a slot.
+/// `value` is the sender's ABSOLUTE slot total (max-merged), not an increment.
+/// Values above [`GOSSIP_CRDT_DELTA_MAX`] are rejected to bound slot pinning.
 fn validated_delta_value(replica: &str, object_id: &str, value: u64) -> Option<u64> {
 	if replica.is_empty() || object_id.is_empty() {
 		return None;
@@ -318,33 +305,15 @@ fn handle_crdt_delta(d: &Deps, msg: GossipMessage) {
 			}
 		}
 	}
-	// The Deps contract lists counter merges among the federation mutations that
-	// must survive a restart, but this handler previously dropped the change in
-	// memory. Persist on a real change only (an idempotent re-delta merges to a
-	// no-op), and only after dropping the write guard above — the save closure
-	// read-locks the graph, so persisting while holding the write lock deadlocks.
+	// Persist only after dropping the write guard — the save closure read-locks
+	// the graph (deadlock otherwise) — and only on a real change.
 	if changed {
 		d.persist();
 	}
 }
 
-/// Merge entity bodies a peer shared into a per-network phantom kern via the
-/// content-addressed CRDT join. Ignores our own data echoed back and empty
-/// network ids. Persists only when the merge actually changed the graph.
-///
-/// Threat model (see also `base::merge::merge_remote_entity`): a remote peer
-/// cannot hijack or alter a local-origin entity or another network's entity —
-/// the merge is scoped to this peer's own `remote-{net}-{kern}` phantom kern and
-/// rejects ids owned elsewhere — and cannot grow the graph without bound (the
-/// phantom kern is capped by `GOSSIP_REMOTE_KERN_ENTITY_CAP`). What is NOT yet
-/// verified is the *content↔id binding* of an accepted body: a peer may store an
-/// arbitrary body under any id within its own (network-isolated, capped) phantom
-/// kern. True content verification is impossible here without either the
-/// original creating text or a signature — the entity id is the sha256 of the
-/// original text, but `ingest::dedup` refines `statements` in place afterwards,
-/// so the id is not re-derivable from the transmitted body. The robust fix is
-/// signed gossip payloads (a federation-auth effort, tracked with the CRDT
-/// ownership-auth item); until then the cap + scope above are the accepted bound.
+/// Merge peer entity bodies into a per-network phantom kern. Content↔id binding
+/// is NOT verified — network scoping + `GOSSIP_REMOTE_KERN_ENTITY_CAP` bound it.
 fn handle_entity_sync(d: &Deps, msg: GossipMessage) {
 	let payload = match &msg.payload {
 		GossipPayload::EntitySync(p) => p,
@@ -354,7 +323,6 @@ fn handle_entity_sync(d: &Deps, msg: GossipMessage) {
 		return;
 	}
 	let mut g = write_recovered(&d.graph);
-	// Ignore our own data echoed back.
 	if payload.network_id == g.network_id {
 		return;
 	}
@@ -391,9 +359,8 @@ fn inject_remote_scope(g: &mut GraphGnn, sphere: &SpherePayload, _origin: &str) 
 	}
 }
 
-/// Create (unregistered) a per-network phantom kern parented under the local
-/// root, with the federation `root_id` stamped. Callers fill in scope/content and
-/// then `register` it. Shared by `inject_remote_scope` and `handle_entity_sync`.
+/// Unregistered phantom kern parented under the local root, federation
+/// `root_id` stamped; callers fill in scope/content and then `register`.
 fn new_phantom_kern(g: &GraphGnn, phantom_id: &str) -> Kern {
 	let mut k = Kern::new(phantom_id, &g.root.id);
 	k.root_id = g.root.root_id.clone();
@@ -405,8 +372,6 @@ fn resolve_question_from_peer(d: &Deps, reason_id: &str, sphere: &SpherePayload,
 		return;
 	}
 
-	// One read acquisition: pull the reason, its owning kern, and our network id
-	// together instead of locking for find_reason and again for network_id.
 	let (reason, kern_id, local_net) = {
 		let g = read_recovered(&d.graph);
 		match crate::base::search::find_reason(&g, reason_id) {
@@ -532,7 +497,6 @@ mod tests {
 
 	#[test]
 	fn delta_validation_rejects_oversized_value() {
-		// A peer trying to pin a slot toward u64::MAX is dropped.
 		assert_eq!(
 			validated_delta_value("r1", "obj", GOSSIP_CRDT_DELTA_MAX + 1),
 			None
@@ -542,9 +506,6 @@ mod tests {
 
 	#[test]
 	fn peer_exchange_caps_at_max_peers() {
-		// A flood of distinct peers in one exchange must not grow the table past
-		// GOSSIP_MAX_PEERS — the loop breaks on peer_count() (the cheap length read
-		// that replaced the per-iteration peer_list().clone()).
 		let g = Arc::new(RwLock::new(GraphGnn::new()));
 		let d = mk_deps(g);
 		let peers: Vec<String> = (0..100).map(|i| format!("10.0.0.{i}:7400")).collect();
@@ -611,9 +572,7 @@ mod tests {
 			delta_msg(CrdtTarget::ThoughtAccessCount, "e", "peerR", 7),
 		);
 
-		let merged = g.read().kerns["k"].entities["e"]
-			.access_count
-			.value();
+		let merged = g.read().kerns["k"].entities["e"].access_count.value();
 		assert_eq!(merged, 7, "the remote replica's count is merged in");
 		assert_eq!(
 			calls.load(Ordering::SeqCst),
@@ -629,8 +588,6 @@ mod tests {
 		let calls = Arc::new(AtomicUsize::new(0));
 		let d = mk_deps_with_save(g.clone(), calls.clone());
 
-		// Same replica + value twice: the second max-join is a no-op, so only the
-		// first (changing) merge persists — no needless fsync on idempotent redelta.
 		handle_crdt_delta(
 			&d,
 			delta_msg(CrdtTarget::ThoughtAccessCount, "e", "peerR", 5),
@@ -646,8 +603,8 @@ mod tests {
 		);
 	}
 
-	/// A graph holding one OPEN question reason ("r1", to empty) in kern "kq".
-	/// Returns the graph and the local network id.
+	/// One OPEN question reason ("r1", empty `to`) in kern "kq"; returns the
+	/// graph and the local network id.
 	fn graph_with_open_question() -> (Arc<RwLock<GraphGnn>>, String) {
 		let mut g = GraphGnn::new();
 		let net = g.network_id.clone();

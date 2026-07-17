@@ -1,17 +1,7 @@
-// Mock returns explicit `impl Future` to mirror the trait surface; async-fn
-// rewrite adds no value in a test double.
+// Mock mirrors the trait's explicit `impl Future` surface.
 #![allow(clippy::manual_async_fn)]
-//! In-memory [`KernRpc`] handler for tests and downstream slice
-//! development.
-//!
-//! The mock keeps a tiny in-memory store of `EntityRef`s plus a list of
-//! `Reason` edges. `query` does a substring scan over labels, `ingest`
-//! appends a fresh row, `link` records an edge, `neighbors` returns
-//! every other entity in the corpus filtered by edge kind.
-//!
-//! Honours `cancel_token` semantics on `query`: only the highest token
-//! seen yields `fresh: true`. Older in-flight requests come back with
-//! `fresh: false` so palette frames can suppress stale frames.
+//! In-memory [`KernRpc`] handler for tests. `query` honours `cancel_token`:
+//! only the highest token seen yields `fresh: true`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -59,8 +49,7 @@ impl MockKernServer {
 		format!("mock:{prefix}:{n}")
 	}
 
-	/// Seed the mock with one hit so `query` returns something useful
-	/// without requiring an `ingest` first. Used by integration tests.
+	/// Seed one hit so `query` returns something without a prior `ingest`.
 	pub fn seed(&self, label: &str, kind: EntityKindLite) -> String {
 		let id = self.next_id("seed");
 		let mut g = self.inner.entities.lock().unwrap();
@@ -89,10 +78,8 @@ impl KernRpc for MockKernServer {
 			let high = prev.max(token);
 			let fresh = token >= high;
 			let q = req.text.to_lowercase();
-			// Parse the optional `kind` (lower-case label) into the lite
-			// enum so we can compare on equal terms with `EntityRef.kind`.
-			// An unrecognised string disables the kind filter rather than
-			// silently dropping every hit.
+			// Unrecognised `kind` disables the filter, never "match nothing"
+			// (see unrecognised_kind_string_disables_kind_filter).
 			let kind_filter = EntityKindLite::from_label(&req.kind);
 			let scheme_filter = if req.source.is_empty() {
 				None
@@ -100,10 +87,6 @@ impl KernRpc for MockKernServer {
 				Some(req.source.as_str())
 			};
 			let g = state.entities.lock().unwrap();
-			// Apply facet filters BEFORE the substring label match so the
-			// result count is bounded by the most specific predicate
-			// first. AND across (kind, scheme) — both must hold when
-			// either is set.
 			let mut hits: Vec<EntityRef> = g
 				.iter()
 				.filter(|e| kind_filter.is_none_or(|k| k == e.r#ref.kind))
@@ -148,8 +131,7 @@ impl KernRpc for MockKernServer {
 					edges: vec![],
 				},
 			};
-			// Touch `req.descriptor`/`req.conf`/`req.source` to silence
-			// unused warnings when DTO fields don't drive the mock.
+			// Silence unused warnings for DTO fields the mock ignores.
 			let _ = (&req.descriptor, req.conf, &req.source);
 			state.entities.lock().unwrap().push(entity);
 			IngestRes {
@@ -169,8 +151,7 @@ impl KernRpc for MockKernServer {
 				to: req.to_id,
 				kind: req.reason_kind,
 			};
-			// `text` isn't stored in the mock — assert it via a debug
-			// attribute instead so callers can still log it.
+			// `text` isn't stored in the mock.
 			let _ = req.text;
 			state.edges.lock().unwrap().push(edge);
 			LinkRes { reason_id: next_id }
@@ -183,17 +164,10 @@ impl KernRpc for MockKernServer {
 	) -> impl ::core::future::Future<Output = NeighborsRes> + Send {
 		let state = self.inner.clone();
 		async move {
-			// `depth` is clamped but NOT traversed: the mock only ever returns
-			// direct (depth-1) neighbours regardless of the requested depth. The
-			// clamp documents the server's intended ceiling; multi-hop expansion
-			// is intentionally out of scope for the test double (see the
-			// `neighbors_returns_only_direct_edges_regardless_of_depth` test).
+			// `depth` is clamped but NOT traversed — the mock is depth-1 only.
 			let _depth = req.depth.min(3);
 			let entities = state.entities.lock().unwrap();
 			let edges = state.edges.lock().unwrap();
-			// Index entities by id once so the per-edge endpoint lookup is O(1)
-			// instead of an O(n) linear scan — keeps `neighbors` near-linear in
-			// edge count even on a large seeded corpus.
 			let by_id: std::collections::HashMap<&str, &EntityRef> = entities
 				.iter()
 				.map(|e| (e.r#ref.id.as_str(), &e.r#ref))
@@ -267,23 +241,18 @@ mod facet_filter_tests {
 	use crate::kern_rpc::dto::SourceLite;
 	use crate::kern_rpc::IngestReq;
 
-	/// Seed a mixed corpus of N=4 entities spanning two kinds and two
-	/// schemes so both filter axes are exercised.
+	/// 4 entities = 2 kinds x 2 schemes, so both filter axes are exercised.
 	async fn seeded() -> MockKernServer {
 		let mock = MockKernServer::new();
-		// Fact + file scheme.
 		mock
 			.query_ingest("fact-file alpha", EntityKindLite::Fact, "file")
 			.await;
-		// Fact + inline scheme.
 		mock
 			.query_ingest("fact-inline beta", EntityKindLite::Fact, "inline")
 			.await;
-		// Claim + file scheme.
 		mock
 			.query_ingest("claim-file gamma", EntityKindLite::Claim, "file")
 			.await;
-		// Claim + inline scheme.
 		mock
 			.query_ingest("claim-inline delta", EntityKindLite::Claim, "inline")
 			.await;
@@ -366,9 +335,6 @@ mod facet_filter_tests {
 
 	#[tokio::test]
 	async fn unrecognised_kind_string_disables_kind_filter() {
-		// Guards against silently eating every hit when callers pass a
-		// typo'd kind label — the filter must degrade to "no kind
-		// constraint" rather than "match nothing".
 		let mock = seeded().await;
 		let res = mock.query(req("notakind", "")).await;
 		assert_eq!(res.hits.len(), 4);
@@ -386,15 +352,11 @@ mod facet_filter_tests {
 
 	#[tokio::test]
 	async fn neighbors_returns_only_direct_edges_regardless_of_depth() {
-		// Documents the mock's depth behaviour: `depth` is clamped to 3 but never
-		// traversed — only direct (depth-1) neighbours come back. A deeper
-		// request does NOT pull transitive nodes.
 		use crate::kern_rpc::{EdgeKind, LinkReq, NeighborsReq};
 		let mock = MockKernServer::new();
 		let a = mock.seed("a", EntityKindLite::Claim);
 		let b = mock.seed("b", EntityKindLite::Claim);
 		let c = mock.seed("c", EntityKindLite::Claim);
-		// a -> b -> c chain.
 		let _ = mock
 			.link(LinkReq {
 				from_id: a.clone(),

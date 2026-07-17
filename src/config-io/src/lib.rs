@@ -1,8 +1,5 @@
-// Generic TOML load/save/layer for per-binary configs.
-// User scope: <XDG_CONFIG>/kern/<bin>.toml
-// Project scope: <cwd>/.kern/<bin>.toml
-// Section-level merge: project TOML overrides whole sections; missing
-// sections fall through to user, then defaults.
+// Generic TOML load/save/layer for per-binary configs. User scope
+// <XDG_CONFIG>/kern/<bin>.toml, project scope <cwd>/.kern/<bin>.toml.
 
 use std::path::{Path, PathBuf};
 
@@ -61,11 +58,8 @@ pub fn load_layered<T: DeserializeOwned + Default>(
 
 fn read_value(path: &Path) -> Result<toml::Value, Error> {
 	match std::fs::read_to_string(path) {
-		// Parse as a document TABLE, not a bare `toml::Value`. A bare-value
-		// parse misreads a leading `[section]` header as an array literal
-		// ("unexpected content"), so any real config file starting with a
-		// section would fail to load. Parsing into `toml::Table` treats the
-		// input as a document.
+		// Parse as a document `toml::Table` — a bare-`Value` parse misreads a leading
+		// `[section]` header as an array (see read_value_parses_leading_section_header).
 		Ok(text) => text
 			.parse::<toml::Table>()
 			.map(toml::Value::Table)
@@ -77,13 +71,8 @@ fn read_value(path: &Path) -> Result<toml::Value, Error> {
 	}
 }
 
-/// Shallow, **section-level** merge of `over` onto `base`: each TOP-LEVEL key in
-/// `over` REPLACES the same key in `base` wholesale — there is NO recursive,
-/// per-field merge. So a project `[embed]` table entirely replaces the user
-/// `[embed]` table; a field the user set but the project omits is LOST, not
-/// inherited. This is intentional (a project either owns a section or it does
-/// not), but it surprises callers who expect a deep merge — keep a whole section
-/// in one scope. Top-level keys present in only one of the two are kept as-is.
+/// Section-level merge: a top-level key in `over` REPLACES `base`'s wholesale — NO
+/// deep merge, so user fields the project omits are LOST. Keep a section in one scope.
 fn merge_sections(base: toml::Value, over: toml::Value) -> toml::Value {
 	match (base, over) {
 		(toml::Value::Table(mut a), toml::Value::Table(b)) => {
@@ -100,11 +89,6 @@ fn merge_sections(base: toml::Value, over: toml::Value) -> toml::Value {
 mod tests {
 	use super::*;
 
-	/// Regression: a document whose first line is a `[section]` header must
-	/// parse as a table, not be misread as an array literal. Before the fix,
-	/// `read_value` used `parse::<toml::Value>()` which failed on any real
-	/// config file (every project `.kern/*.toml`), silently disabling
-	/// project-scope config.
 	#[test]
 	fn read_value_parses_leading_section_header() {
 		let dir = std::env::temp_dir().join(format!("cfgio_rv_{}", std::process::id()));
@@ -138,9 +122,6 @@ mod tests {
 
 	#[test]
 	fn load_layered_project_section_wholly_replaces_user_section() {
-		// Section-level (not deep) override: the user sets two keys in [embed];
-		// the project overrides the section with ONE key. The project key wins AND
-		// the user's other key is dropped (the whole section is replaced).
 		let dir = std::env::temp_dir().join(format!("cfgio_ovr_{}", std::process::id()));
 		std::fs::create_dir_all(&dir).unwrap();
 		let user = dir.join("user.toml");
@@ -167,8 +148,6 @@ mod tests {
 
 	#[test]
 	fn load_layered_keeps_sections_present_in_only_one_scope() {
-		// A section that exists only in user survives (the project does not replace
-		// what it omits); a project-only section is added alongside.
 		let dir = std::env::temp_dir().join(format!("cfgio_keep_{}", std::process::id()));
 		std::fs::create_dir_all(&dir).unwrap();
 		let user = dir.join("user.toml");
@@ -202,7 +181,6 @@ mod tests {
 		}
 
 		let dir = std::env::temp_dir().join(format!("cfgio_rt_{}", std::process::id()));
-		// Nested path that does not exist yet — save() must create the parents.
 		let p = dir.join("nested").join("demo.toml");
 		let original = Demo {
 			name: "kern".into(),

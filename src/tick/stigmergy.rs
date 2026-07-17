@@ -1,9 +1,5 @@
-//! Autonomic cold-path garbage collection for the stigmergy substrate.
-//!
-//! Implements the loop promised in `docs/kern/stigmergy-self-improving.md`:
-//! "unused pheromone evaporates → thought cools → automatic garbage collection
-//! via `forget()`". This module is the `forget()` half — the heat-decay half
-//! lives in `tick::pulse`.
+//! Cold-path GC — the `forget()` half of evaporate → cool → forget; the
+//! heat-decay half lives in `tick::pulse`.
 
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -16,21 +12,11 @@ use crate::base::locks::write_recovered;
 use crate::base::reason::remove_entity;
 use crate::base::types::{Entity, EntityKind};
 
-/// Pure cold-GC predicate: `true` iff `entity` should be dropped — its pheromone
-/// has fully evaporated (`heat < COLD_HEAT_THRESHOLD`), it is genuinely abandoned
-/// (`now - last_touch > COLD_GC_AGE`), and it is not a durable kind (`Fact` /
-/// `Document` are never auto-forgotten). The staleness clock reads `accessed_at`,
-/// falling back to `created_at` for entities never queried since ingest — so
-/// old-but-never-accessed thoughts still become evictable. An entity with
-/// neither timestamp is preserved; a future timestamp (clock skew) is not
-/// stale. Split out from [`run_gc`]'s lock/store plumbing so the policy is
-/// unit-testable in isolation.
+/// Cold-GC predicate: cold + stale + non-durable. Staleness reads `accessed_at`,
+/// else `created_at`; no timestamp at all or a future clock (skew) preserves.
 fn is_cold_victim(entity: &Entity, now: SystemTime) -> bool {
-	// Durable kinds (Fact/Document) are immune to auto-forgetting — UNLESS they
-	// have been superseded. A bi-temporally invalidated fact is history, not live
-	// knowledge: it loses its immunity so it can migrate to the cold tier via the
-	// normal spill-before-drop path (invalidated ≠ deleted — the cold tier keeps
-	// it). An ACTIVE fact stays immune.
+	// Fact/Document are immune UNLESS superseded — an invalidated fact is history
+	// and may spill to the cold tier (invalidated ≠ deleted; the cold tier keeps it).
 	if !entity.is_superseded() && matches!(entity.kind, EntityKind::Fact | EntityKind::Document) {
 		return false;
 	}
@@ -46,24 +32,8 @@ fn is_cold_victim(entity: &Entity, now: SystemTime) -> bool {
 	}
 }
 
-/// Stigmergic cold-path GC for one kern.
-///
-/// Policy: a thought is dropped iff **all** of the following hold:
-///
-/// 1. `heat < COLD_HEAT_THRESHOLD` (pheromone has fully evaporated).
-/// 2. `now - (accessed_at | created_at) > COLD_GC_AGE` (not just transiently
-///    quiet — actually abandoned).
-/// 3. `kind` is neither `Fact` nor `Document` (durable kinds per
-///    `docs/kern/safety-architecture.md`; never auto-forgotten).
-///
-/// Removal goes through `base::reason::remove_entity`, which is the same
-/// path used by the explicit `forget` command and which cascades edge
-/// cleanup. We acquire the write guard exactly once for the whole kern —
-/// no per-thought lock toggling.
-///
-/// Thoughts never queried since ingest fall back to `created_at` for the
-/// staleness clock; only a thought with neither timestamp is preserved
-/// unconditionally.
+/// Cold GC for one kern; victim policy in [`is_cold_victim`]. One write guard
+/// for the whole kern; removal cascades edge cleanup via `remove_entity`.
 pub fn run_gc(graph: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
 	let mut g = write_recovered(graph);
 	let kern = match g.kerns.get(kern_id) {
@@ -83,23 +53,15 @@ pub fn run_gc(graph: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
 		return;
 	}
 
-	// Spill each victim to the cold tier before the hot drop, so eviction never
-	// loses data. `cold_spill` self-caps the tier (drops oldest past
-	// COLD_MAX_ENTRIES), so no separate compaction pass is needed. The store
-	// handle is cloned out (ref-counted) so we can keep mutating the graph under
-	// the single write guard.
+	// Spill-before-drop: eviction never loses data. The store handle is cloned
+	// out so the graph can keep mutating under the single write guard.
 	let store = g.store();
 	let kept = evict_victims(&mut g, kern_id, &victims, |e| match &store {
-		// A thought is only safe to drop once it is durably in the cold store.
 		Some(s) => s.cold_spill(e).is_ok(),
-		// No cold store bound: a pure in-memory graph has nowhere to spill, so
-		// dropping is the intended bound on memory (nothing to persist).
+		// No cold store bound: dropping IS the intended memory bound, not a bug.
 		None => true,
 	});
 	if kept > 0 {
-		// Fail-soft kept these hot rather than dropping them unpersisted. Surface
-		// it: a persistently failing cold store would otherwise silently let hot
-		// memory grow with no signal that GC is stalled on a broken store.
 		tracing::warn!(
 			target: "kern.stigmergy",
 			kern = %kern_id,
@@ -109,13 +71,8 @@ pub fn run_gc(graph: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
 	}
 }
 
-/// Drop each victim from the hot graph, but only after `spill` confirms it is
-/// durably persisted (`spill` returns `true`). If a spill fails the thought is
-/// kept hot and retried on the next GC pass — we never drop an unpersisted
-/// thought, even if the cold store is transiently erroring. Returns the number
-/// of victims kept because their spill failed (0 in the healthy path). Split out
-/// from [`run_gc`] so the drop-iff-persisted invariant is unit-testable without a
-/// failing store.
+/// Drop each victim only after `spill` returns true (durably persisted); a failed
+/// spill keeps the thought hot for the next pass. Returns the kept count.
 fn evict_victims(
 	g: &mut GraphGnn,
 	kern_id: &str,
@@ -131,7 +88,6 @@ fn evict_victims(
 			.cloned();
 		if let Some(e) = victim {
 			if !spill(&e) {
-				// Spill failed → leave the thought in the hot tier for retry.
 				kept += 1;
 				continue;
 			}
@@ -170,8 +126,6 @@ mod tests {
 
 	#[test]
 	fn evict_keeps_victim_hot_when_spill_fails() {
-		// The data-loss guard: if the cold spill does not durably succeed, the
-		// thought must stay in the hot tier (retried next pass), never dropped.
 		let mut g = graph_with_cold_claim("victim");
 		let kept = evict_victims(&mut g, "k", &["victim".to_string()], |_| false);
 		assert_eq!(kept, 1, "the failed-spill victim is counted as kept");
@@ -228,20 +182,17 @@ mod tests {
 		use crate::base::types::EntityStatus;
 		let now = SystemTime::now();
 		let old = now - (COLD_GC_AGE + Duration::from_secs(1));
-		// An ACTIVE stale Fact stays immune.
 		assert!(
 			!is_cold_victim(&ent(EntityKind::Fact, 0.0, Some(old)), now),
 			"active Fact is immune even when stale"
 		);
-		// The SAME Fact, once superseded, loses immunity and is collectible.
 		let mut superseded = ent(EntityKind::Fact, 0.0, Some(old));
 		superseded.status = EntityStatus::Superseded;
 		assert!(
 			is_cold_victim(&superseded, now),
 			"a superseded (invalidated) Fact is no longer immune"
 		);
-		// But a superseded fact that is still hot/recent is preserved by the normal
-		// policy — losing immunity means "subject to GC", not "force-evicted".
+		// Losing immunity means "subject to GC", not "force-evicted".
 		let mut fresh_superseded = ent(EntityKind::Fact, 0.0, Some(now));
 		fresh_superseded.status = EntityStatus::Superseded;
 		assert!(
@@ -296,17 +247,14 @@ mod tests {
 	#[test]
 	fn recent_untouched_or_clock_skewed_is_preserved() {
 		let now = SystemTime::now();
-		// Cold but just accessed -> not yet abandoned.
 		assert!(
 			!is_cold_victim(&ent(EntityKind::Claim, 0.0, Some(now)), now),
 			"recently accessed"
 		);
-		// No accessed_at AND no created_at -> no staleness clock, preserved.
 		assert!(
 			!is_cold_victim(&ent(EntityKind::Claim, 0.0, None), now),
 			"no timestamps at all"
 		);
-		// accessed_at in the future (clock skew) -> not stale.
 		let future = now + Duration::from_secs(3600);
 		assert!(
 			!is_cold_victim(&ent(EntityKind::Claim, 0.0, Some(future)), now),
@@ -318,18 +266,15 @@ mod tests {
 	fn created_at_seeds_the_staleness_clock_for_never_accessed_thoughts() {
 		let now = SystemTime::now();
 		let old = now - (COLD_GC_AGE + Duration::from_secs(1));
-		// Ingested long ago, never queried -> evictable.
 		let mut stale = ent(EntityKind::Claim, 0.0, None);
 		stale.created_at = Some(old);
 		assert!(
 			is_cold_victim(&stale, now),
 			"old-but-never-queried is a victim"
 		);
-		// Freshly ingested, never queried -> preserved.
 		let mut fresh = ent(EntityKind::Claim, 0.0, None);
 		fresh.created_at = Some(now);
 		assert!(!is_cold_victim(&fresh, now), "fresh ingest is preserved");
-		// A recent access overrides an old creation time.
 		let mut touched = ent(EntityKind::Claim, 0.0, Some(now));
 		touched.created_at = Some(old);
 		assert!(

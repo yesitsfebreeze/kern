@@ -1,0 +1,14 @@
+# src/base/util.rs — commentary
+
+- `cmp_rank`: the score-desc-id-asc tiebreak is shared by `fuse::rrf`, `pagerank`, `search::merge_hits`, `LexicalIndex::search`, and `Store::cold_search`; centralizing it here was what stopped new ranking sites from silently regressing to nondeterministic source-order ties.
+
+Second-pass migration:
+- `vec_f64_compat` (why the shim exists at all): bincode is positional and append-only, so narrowing a persisted `Vec<f64>` field to `Vec<f32>` would desync every existing store, cold-tier row, and gossip peer. Keeping the encoded bytes identical to the historic f64 layout means no FORMAT_V2 fork is needed and old data loads unchanged. The kept doc states only the mechanical contract.
+- `hex` module: `content_hash` is the only hex consumer in kern, so a six-line local encoder keeps one extra crate (and its transitive surface) out of the supply chain for a single call site.
+- `cmp_partial`: replaced the `a.partial_cmp(&b).unwrap_or(Ordering::Equal)` idiom scattered across the sort/rank paths.
+- `cmp_rank` (full derivation): NaN/incomparable scores fall back to `Equal` via `cmp_partial`. When the `id`s are unique the comparator is a STRICT total order, which is precisely what makes a `select_nth`/`truncate` top-k reproducible across runs despite HashMap/scan source order.
+- `percentile_sorted`: generic so latency/timing percentiles (`u128` nanos in the locomo path, `f64`, …) share one implementation instead of re-deriving the index math per call site. `p <= 0` -> first element, `p >= 1` -> last.
+- `now_nanos`: single source for the `SystemTime::now().duration_since(UNIX_EPOCH)` stamp used to mint gossip message ids.
+- `explain_relationship_prompt`: shared by the link/enrich paths in commands, mcp, and tick — one place for both the prompt text and the 500-char truncation budget.
+- test `short_id_caps_at_12_chars_and_is_boundary_safe`: deleted trailing data labels (16 -> first 12 / shorter -> whole / exactly 12 -> whole / each α is 2 bytes); kept the char-boundary trap. The multibyte fixture is 12 α (2 bytes each) + 2 β, so a naive byte slice at 12 would split a char and panic.
+- `vec_f64_compat_tests` essays deleted, contracts recorded here: (1) `shimmed_f32_encodes_byte_identically_to_legacy_f64` — the shim's whole contract is that encoded bytes are indistinguishable from the historic `Vec<f64>` layout, so old and new readers interoperate with no format version bump; (2) `legacy_f64_bytes_decode_into_f32_with_following_fields_intact` — a pre-migration row must decode into the f32 shape AND the fields after the vector must not shift; that positional integrity is what a mis-sized decode would corrupt (hence the `tail` field in the fixture); (3) `f32_round_trip_is_lossless` — f32 -> f64 (encode) -> f32 (decode) is exact for every f32 value.

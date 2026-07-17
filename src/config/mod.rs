@@ -1,8 +1,5 @@
-// Kern runtime config. One TOML file per scope:
-//   user:    <XDG_CONFIG>/kern/kern.toml
-//   project: <cwd>/.kern/kern.toml
-// Section-level merge: project sections replace user sections; missing
-// fields fall through to Default.
+// Kern runtime config: user <XDG_CONFIG>/kern/kern.toml overlaid by project
+// <cwd>/.kern/kern.toml. Section-level merge; missing fields fall to Default.
 
 mod answer;
 mod capture;
@@ -63,12 +60,8 @@ impl Default for Config {
 	}
 }
 
-/// Resolve a possibly-relative `data_dir` to an absolute path under `cwd`, so
-/// the instance pins the data location to the cwd it loaded from instead of
-/// re-resolving a relative path (e.g. `.kern/data` from the project kern.toml)
-/// against the process's live current_dir at every file op — which silently
-/// reads/writes an empty graph when the daemon was launched from the wrong
-/// directory. Absolute values pass through unchanged.
+/// Pin a relative `data_dir` to the load-time `cwd` — re-resolving against the
+/// live current_dir silently reads an empty graph from a wrong launch dir.
 fn anchor_data_dir(data_dir: &str, cwd: &Path) -> String {
 	let p = Path::new(data_dir);
 	if p.is_absolute() {
@@ -79,10 +72,8 @@ fn anchor_data_dir(data_dir: &str, cwd: &Path) -> String {
 }
 
 impl Config {
-	/// [`Default`], but with an explicit working directory instead of reading the
-	/// process-wide `current_dir()`. Deterministic for tests and for callers that
-	/// already know their root; `Config::default()` delegates here with the live
-	/// cwd. Only `data_dir` depends on `cwd`; every other field is a fixed baseline.
+	/// [`Default`] with an explicit cwd (deterministic for tests). Only
+	/// `data_dir` depends on `cwd`; every other field is a fixed baseline.
 	pub fn default_in(cwd: &Path) -> Self {
 		Self {
 			data_dir: cwd
@@ -108,8 +99,6 @@ impl Config {
 	}
 
 	pub fn load(cwd: &Path) -> Result<Self, config_io::Error> {
-		// kern owns its own paths. User scope: <XDG_CONFIG>/kern/kern.toml
-		// (absent is fine). Project scope: <cwd>/.kern/kern.toml.
 		let user = dirs::config_dir()
 			.unwrap_or_else(|| cwd.join(".kern"))
 			.join("kern")
@@ -120,23 +109,8 @@ impl Config {
 		Ok(cfg)
 	}
 
-	/// Resolve the directory this instance should anchor to (cwd, `data_dir`,
-	/// capture intake), walking up from `start` (inclusive) and returning the first
-	/// match in three tiers:
-	///
-	/// 1. Nearest ancestor containing a `.git` entry — the git repository root is
-	///    the canonical anchor, so every subdirectory of a repo shares one `.kern`
-	///    store instead of spawning a fresh one per launch cwd.
-	/// 2. Else nearest ancestor containing a `.kern` directory — a non-git project
-	///    tree that already carries a store.
-	/// 3. Else `start` itself.
-	///
-	/// `.git` is a directory in a normal clone but a *file* in a worktree or
-	/// submodule, so this tests for existence rather than `is_dir()` to catch every
-	/// repo-root shape without shelling out to `git`. The first (innermost) `.git`
-	/// wins: a project under a git-managed home directory still anchors to the
-	/// project root, not to `~`. Anchoring this way keeps the daemon from booting an
-	/// empty graph against a `.kern` that does not exist beside its accidental cwd.
+	/// Anchor dir: nearest ancestor with `.git` (innermost wins), else nearest
+	/// with `.kern`, else `start`. `.git` may be a FILE (worktree/submodule) — existence, not `is_dir()`.
 	pub fn resolve_root(start: &Path) -> PathBuf {
 		for anc in start.ancestors() {
 			if anc.join(".git").exists() {
@@ -158,16 +132,13 @@ impl Config {
 		if self.embed.model.is_empty() {
 			return Err("embed.model is required".into());
 		}
-		// Section invariants: each sub-config validates its own ranges. Prefix the
-		// section name so a bad value reports where it lives.
 		self.ingest.validate().map_err(|e| format!("ingest: {e}"))?;
 		self
 			.capture
 			.validate()
 			.map_err(|e| format!("capture: {e}"))?;
 		self.serve.validate().map_err(|e| format!("serve: {e}"))?;
-		// RetrievalConfig::validate accumulates issues into a Vec rather than
-		// short-circuiting; surface them all under the section prefix.
+		// RetrievalConfig::validate accumulates issues; surface them all.
 		let retrieval = self.retrieval.validate();
 		if !retrieval.is_empty() {
 			return Err(format!("retrieval: {}", retrieval.join("; ")));
@@ -175,12 +146,8 @@ impl Config {
 		Ok(())
 	}
 
-	/// Endpoint resolution precedence (applies to both URL and key):
-	/// `reason_*` uses `[reason]` when set, else falls back to `[embed]`; `answer_*`
-	/// uses `[answer]` when set, else falls back to the resolved `reason_*` (which in
-	/// turn falls back to embed). So a single-Ollama deployment can fill in only
-	/// `[embed]` and leave the reason/answer URLs empty — they all resolve to the
-	/// embed endpoint, with each section still free to override just the model.
+	/// Endpoint precedence (URL and key alike): `reason_*` falls back to
+	/// `[embed]`; `answer_*` falls back to the resolved `reason_*`.
 	pub fn reason_url(&self) -> &str {
 		if self.reason.url.is_empty() {
 			&self.embed.url
@@ -197,8 +164,6 @@ impl Config {
 		}
 	}
 
-	/// Answer endpoint, falling back to the reason endpoint when `[answer]` omits
-	/// a `url` — the common single-Ollama case where only the model differs.
 	pub fn answer_url(&self) -> &str {
 		if self.answer.url.is_empty() {
 			self.reason_url()
@@ -256,8 +221,6 @@ mod tests {
 
 	#[test]
 	fn resolve_root_anchors_at_git_root_when_no_kern() {
-		// A repo with a `.git` directory and no `.kern` anchors to the git root,
-		// so every subdir launch shares one store instead of creating its own.
 		let dir = tempfile::tempdir().unwrap();
 		let root = dir.path().canonicalize().unwrap();
 		std::fs::create_dir_all(root.join(".git")).unwrap();
@@ -269,8 +232,7 @@ mod tests {
 
 	#[test]
 	fn resolve_root_detects_git_as_a_file() {
-		// Worktrees and submodules store `.git` as a file, not a directory; the
-		// repo root must still be detected (existence check, not is_dir()).
+		// Worktrees/submodules store `.git` as a file — existence check, not is_dir().
 		let dir = tempfile::tempdir().unwrap();
 		let root = dir.path().canonicalize().unwrap();
 		std::fs::write(root.join(".git"), "gitdir: /elsewhere/.git/worktrees/x\n").unwrap();
@@ -282,8 +244,6 @@ mod tests {
 
 	#[test]
 	fn resolve_root_innermost_git_wins() {
-		// Nested repos (e.g. a project under a git-managed home dir): the nearest
-		// `.git` wins, so projects never collapse into the outer repo's store.
 		let dir = tempfile::tempdir().unwrap();
 		let outer = dir.path().canonicalize().unwrap();
 		std::fs::create_dir_all(outer.join(".git")).unwrap();
@@ -297,8 +257,7 @@ mod tests {
 
 	#[test]
 	fn resolve_root_prefers_git_root_over_deeper_kern() {
-		// Tier 1 (git root) beats tier 2 (a `.kern` deeper than the git root):
-		// the deeper store is bypassed in favour of the canonical repo anchor.
+		// Git root (tier 1) beats a deeper `.kern` (tier 2).
 		let dir = tempfile::tempdir().unwrap();
 		let root = dir.path().canonicalize().unwrap();
 		std::fs::create_dir_all(root.join(".git")).unwrap();
@@ -322,7 +281,6 @@ mod tests {
 			cfg.log_level, "info",
 			"baseline fields are independent of cwd"
 		);
-		// No process state read → two calls with the same cwd are identical.
 		assert_eq!(Config::default_in(cwd).data_dir, cfg.data_dir);
 	}
 
@@ -335,8 +293,7 @@ mod tests {
 		no_embed.embed.url = String::new();
 		assert!(no_embed.validate().unwrap_err().contains("embed.url"));
 
-		// A bad ingest knob now propagates through the top-level validate, tagged
-		// with its section.
+		// A bad sub-config knob propagates through the top-level validate, tagged.
 		let mut bad_ingest = Config::default_in(Path::new("x"));
 		bad_ingest.ingest.dedup_threshold = 2.0;
 		let err = bad_ingest.validate().unwrap_err();
@@ -345,8 +302,6 @@ mod tests {
 			"sub-config error is surfaced + tagged: {err}"
 		);
 
-		// Retrieval invariants are now aggregated too (previously orphaned): a
-		// retrieval-breaking value must surface through the top-level validate.
 		let mut bad_retr = Config::default_in(Path::new("x"));
 		bad_retr.retrieval.seed_k = 0;
 		let err = bad_retr.validate().unwrap_err();

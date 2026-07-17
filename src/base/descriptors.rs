@@ -1,9 +1,5 @@
-//! Default data-type descriptors.
-//!
-//! Descriptors map a source kind (the `SOURCE_*` tags in [`crate::base::constants`])
-//! to a natural-language extraction hint the distiller uses when ingesting that
-//! kind of content. These are *behaviour* (a builder + a registration helper),
-//! not pure data, so they live here rather than in `constants.rs`.
+//! Default data-type descriptors: one `SOURCE_*` kind (see
+//! [`crate::base::constants`]) → the distiller's extraction hint for it.
 
 use std::collections::HashMap;
 
@@ -13,7 +9,6 @@ use crate::base::constants::{
 	SOURCE_TEST,
 };
 
-/// The built-in descriptor set: one extraction hint per known source kind.
 pub fn default_descriptors() -> HashMap<String, String> {
 	let pairs: &[(&str, &str)] = &[
 		(SOURCE_CHAT, "A conversation turn between a user and an AI agent. Extract decisions made, questions asked, action items, and key information exchanged."),
@@ -38,8 +33,8 @@ pub fn default_descriptors() -> HashMap<String, String> {
 		.collect()
 }
 
-/// Insert any missing default descriptors into `descriptors`, leaving existing
-/// keys untouched. Returns how many were newly inserted (so the call is idempotent).
+/// Insert missing defaults only, leaving existing keys untouched. Returns the
+/// number newly inserted.
 pub fn register_default_descriptors(descriptors: &mut HashMap<String, String>) -> usize {
 	let defaults = default_descriptors();
 	let mut n = 0;
@@ -58,9 +53,8 @@ mod tests {
 
 	#[test]
 	fn default_descriptors_have_no_colliding_keys() {
-		// 15 distinct source kinds. A dropped count means two SOURCE_* consts
-		// resolved to the same string and one silently overwrote the other in
-		// the map (the AGENT_SOURCE/SOURCE_AGENT duplicate regression).
+		// A count below 15 means two SOURCE_* consts share a string and one
+		// silently overwrote the other (the AGENT_SOURCE/SOURCE_AGENT regression).
 		let d = default_descriptors();
 		assert_eq!(d.len(), 15, "every descriptor key must be unique");
 		assert!(
@@ -75,7 +69,6 @@ mod tests {
 		let n = register_default_descriptors(&mut m);
 		assert_eq!(n, 15);
 		assert_eq!(m.len(), 15);
-		// Idempotent: a second registration inserts nothing new.
 		assert_eq!(register_default_descriptors(&mut m), 0);
 	}
 }

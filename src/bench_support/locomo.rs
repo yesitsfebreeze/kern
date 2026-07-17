@@ -1,14 +1,5 @@
-//! LoCoMo eval corpus: loader + answer scorers (#36).
-//!
-//! Dataset: Maharana et al., ACL 2024 (arXiv 2402.17753),
-//! `snap-research/locomo` → `data/locomo10.json`. CC BY-NC 4.0 — supplied via a
-//! path (`KERN_LOCOMO_PATH`), never redistributed in-repo.
-//!
-//! This module is the pure half of the harness: parse the JSON into ordered
-//! sessions + QA, and score predicted answers (token-F1, ROUGE-L, abstention
-//! detection for the adversarial category). The live half — driving
-//! capture→distill→retrieve against ollama and the LLM-judge — lives in the
-//! `locomo_eval` binary.
+//! LoCoMo eval corpus: loader + answer scorers (#36) — the pure half of the eval
+//! harness. Dataset is CC BY-NC 4.0: supplied via a path, never redistributed.
 
 use std::collections::HashMap;
 
@@ -20,7 +11,6 @@ pub struct Turn {
 	pub text: String,
 }
 
-/// One dated session of turns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
 	/// 1-based session index parsed from the `session_N` key.
@@ -46,7 +36,6 @@ impl QaItem {
 	}
 }
 
-/// One LoCoMo dialogue: ordered sessions + its QA set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sample {
 	pub sample_id: String,
@@ -54,20 +43,16 @@ pub struct Sample {
 	pub qa: Vec<QaItem>,
 }
 
-/// Load + parse a LoCoMo dataset file.
 pub fn load(path: &str) -> Result<Vec<Sample>, String> {
 	let raw = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
 	parse_dataset(&raw)
 }
 
-/// Parse the LoCoMo JSON corpus into ordered samples.
 pub fn parse_dataset(json: &str) -> Result<Vec<Sample>, String> {
 	let raw: Vec<RawSample> = serde_json::from_str(json).map_err(|e| format!("locomo json: {e}"))?;
 	raw.into_iter().map(convert_sample).collect()
 }
 
-/// LoCoMo category label. 1=multi-hop, 2=temporal, 3=open-domain,
-/// 4=single-hop, 5=adversarial.
 pub fn category_name(cat: u8) -> &'static str {
 	match cat {
 		1 => "multi-hop",
@@ -196,9 +181,8 @@ pub fn judge_prompt(question: &str, gold: &str, pred: &str) -> String {
 	)
 }
 
-/// Parse a judge reply into a boolean verdict. `INCORRECT` wins over `CORRECT`
-/// (the latter is a substring of the former); anything unrecognized is treated
-/// as incorrect.
+/// `INCORRECT` wins over `CORRECT` (the latter is a substring of the former);
+/// anything unrecognized is treated as incorrect.
 pub fn parse_judge_verdict(raw: &str) -> bool {
 	let up = raw.to_uppercase();
 	if up.contains("INCORRECT") {
@@ -208,13 +192,8 @@ pub fn parse_judge_verdict(raw: &str) -> bool {
 	}
 }
 
-/// Length of the longest common subsequence of two token slices.
-///
-/// Rolling-row DP: `O(a.len() * b.len())` time, `O(b.len())` space. The
-/// quadratic product is fine because both inputs are *normalized-answer token
-/// lists* — for LoCoMo these are short (a handful to a few dozen tokens), and
-/// `rouge_l` never feeds document-length text here, so `m*n` stays tiny. If a
-/// future caller passes long sequences, cap the token count before calling.
+/// LCS length via rolling-row DP: `O(a*b)` time, `O(b)` space — sized for short
+/// normalized-answer token lists; cap the token count before passing long ones.
 fn lcs_len(a: &[String], b: &[String]) -> usize {
 	let mut dp = vec![0usize; b.len() + 1];
 	for ai in a {
@@ -231,8 +210,6 @@ fn lcs_len(a: &[String], b: &[String]) -> usize {
 	}
 	dp[b.len()]
 }
-
-// ── Raw deserialization shapes (the on-disk LoCoMo schema) ──────────────────
 
 #[derive(serde::Deserialize)]
 struct RawSample {
@@ -264,8 +241,6 @@ struct RawTurn {
 }
 
 fn convert_sample(raw: RawSample) -> Result<Sample, String> {
-	// Collect (index → date_time) and (index → turns) from the dynamic keys,
-	// then pair and sort by index.
 	let mut dates: HashMap<u32, String> = HashMap::new();
 	let mut turn_sets: HashMap<u32, Vec<Turn>> = HashMap::new();
 	for (key, val) in &raw.conversation {
@@ -387,11 +362,8 @@ mod tests {
 	fn parses_qa_answer_kinds() {
 		let qa = &parse_dataset(FIXTURE).unwrap()[0].qa;
 		assert_eq!(qa.len(), 3);
-		// string answer
 		assert_eq!(qa[0].answer.as_deref(), Some("8 May 2023"));
-		// integer answer coerced to string
 		assert_eq!(qa[1].answer.as_deref(), Some("3"));
-		// adversarial: no answer, has distractor
 		assert!(qa[2].answer.is_none());
 		assert!(qa[2].is_adversarial());
 		assert_eq!(
@@ -449,7 +421,6 @@ mod tests {
 		// "INCORRECT" contains "correct" — must not be read as a positive.
 		assert!(!parse_judge_verdict("INCORRECT"));
 		assert!(!parse_judge_verdict("This is incorrect"));
-		// unrecognized → incorrect
 		assert!(!parse_judge_verdict("maybe"));
 	}
 
@@ -470,7 +441,6 @@ mod tests {
 
 	#[test]
 	fn abstention_is_case_insensitive_and_position_independent() {
-		// pred is lowercased before matching, so casing of the marker is irrelevant.
 		assert!(
 			is_abstention("Cannot determine that from the context"),
 			"mixed-case 'Cannot'"
@@ -492,7 +462,6 @@ mod tests {
 
 	#[test]
 	fn rouge_l_all_article_string_normalizes_to_empty() {
-		// Every token is a stripped article -> empty normalized form.
 		assert_eq!(normalize_answer("the a an"), "");
 		// Empty vs empty is a vacuous match (1.0); empty vs content is 0.0 — the
 		// guard in rouge_l handles both without a divide-by-zero.

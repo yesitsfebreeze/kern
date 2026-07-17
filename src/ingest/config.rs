@@ -1,22 +1,16 @@
 use crate::base::constants::INGEST_DEDUP_THRESHOLD;
 
-/// Runtime ingest knobs threaded through the [`Worker`](crate::ingest::Worker)
-/// pipeline. Distinct from the serde-deserialized
-/// [`IngestConfig`](crate::config::IngestConfig): this runtime form carries
-/// `ttl_secs`. Both share the same default values via the `INGEST_*`
-/// constants in `base::constants`.
+/// Runtime ingest knobs. Distinct from the serde
+/// [`IngestConfig`](crate::config::IngestConfig): this form carries `ttl_secs`.
 #[derive(Debug, Clone)]
 pub struct Config {
-	/// Cosine-similarity floor in `[0.0, 1.0]`: a new vector whose nearest
-	/// neighbour scores at or above this is treated as a duplicate and merged
-	/// instead of inserted. Higher → fewer merges (stricter "same thought").
+	/// Cosine-similarity floor in `[0.0, 1.0]`; at or above it a new vector
+	/// merges into its nearest neighbour instead of inserting.
 	pub dedup_threshold: f64,
-	/// Optional time-to-live, in seconds, applied to ingested entities. `None`
-	/// means no expiry (the default).
+	/// Seconds; `None` = no expiry.
 	pub ttl_secs: Option<u64>,
-	/// Optional bi-temporal world-time start, set from a distilled `valid_from`
-	/// hint ("since March"). Stamped onto the ingested entity's `valid_from`;
-	/// `None` falls back to the ingestion time.
+	/// World-time start from a distilled `valid_from` hint; `None` falls back to
+	/// the ingestion time.
 	pub valid_from: Option<std::time::SystemTime>,
 }
 
@@ -31,8 +25,6 @@ impl Default for Config {
 }
 
 impl Config {
-	/// Reject an out-of-range configuration at construction time rather than
-	/// letting a bad knob surface as silently-wrong behaviour deep in ingest.
 	/// The dedup similarity floor must lie in `[0.0, 1.0]`.
 	pub fn validate(&self) -> Result<(), String> {
 		if !(0.0..=1.0).contains(&self.dedup_threshold) {
@@ -49,16 +41,11 @@ impl Config {
 mod tests {
 	use super::*;
 
-	/// The runtime `Config` and the serde `IngestConfig` describe the same knobs
-	/// at two layers; their defaults must agree. Both now source the shared
-	/// `INGEST_*` constants, so this guards against a future edit re-introducing a
-	/// divergent literal in one layer.
 	#[test]
 	fn runtime_and_serde_ingest_defaults_agree() {
 		let rt = Config::default();
 		let serde = crate::config::IngestConfig::default();
 		assert_eq!(rt.dedup_threshold, serde.dedup_threshold);
-		// And both trace back to the shared constants.
 		assert_eq!(rt.dedup_threshold, INGEST_DEDUP_THRESHOLD);
 	}
 

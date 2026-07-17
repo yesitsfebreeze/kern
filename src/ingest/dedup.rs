@@ -23,16 +23,8 @@ pub fn find_duplicate(
 		.map(|h| h.id)
 }
 
-/// Reinforce an existing near-duplicate entity with a fresh observation.
-///
-/// CRDT id invariant: an entity id is `content_hash(text)`, and `merge_entity`
-/// relies on "equal ids ⇒ identical immutable content" (it joins metadata only,
-/// never text). So this MUST NOT overwrite `statements`/`vector` under the
-/// existing id — doing so would leave `id = hash(old_text)` while the content is
-/// `new_text`, breaking the invariant and causing permanent divergence across
-/// federated replicas. A near-dup is corroborating evidence: reinforce
-/// confidence. If the new phrasing differs from the stored text, record it as a
-/// `Rephrase` edge rather than mutating the canonical text.
+/// Reinforce a near-dup. INVARIANT: never overwrite `statements`/`vector` under
+/// the existing id (= content_hash(text)) — differing phrasing → `Rephrase` edge.
 pub fn update_existing_entity(
 	graph: &Arc<RwLock<GraphGnn>>,
 	entity_id: &str,
@@ -65,11 +57,8 @@ pub fn update_existing_entity(
 		let reason = Reason {
 			id: rid.clone(),
 			from: entity_id.to_string(),
-			// A Rephrase is a LOCAL annotation on `from` itself — the alternate
-			// phrasing attaches to this one entity, there is no second endpoint to
-			// point at. So the cross-kern target fields are intentionally blank:
-			// `to` (no target entity), `to_kern_id`/`to_net_id` (no remote kern or
-			// federated network to resolve). A normal typed edge fills all three.
+			// Rephrase is a LOCAL annotation on `from` — no target, so the three
+			// cross-kern fields are intentionally blank (a normal edge fills them).
 			to: String::new(),
 			to_kern_id: String::new(),
 			to_net_id: String::new(),
@@ -83,10 +72,8 @@ pub fn update_existing_entity(
 		};
 		add_reason(kern, reason);
 
-		// Defer the contradiction classification to the tick (the worker carries no
-		// reason-LLM). Kind guard: a preference must not supersede a fact, so only a
-		// SAME-KIND near-dup is a supersede candidate. Fail open — no hook wired means
-		// the Rephrase edge just stands, exactly as before.
+		// Kind guard: only a SAME-KIND near-dup is a supersede candidate (a
+		// preference must not supersede a fact). Deferred to the tick; fail open.
 		if incoming_kind == old_kind {
 			if let Some(hook) = on_supersede_candidate {
 				hook(&kern_id, &rid);
@@ -115,8 +102,7 @@ mod tests {
 		g.kerns.get(&kid).unwrap().entities.get(id).unwrap().clone()
 	}
 
-	/// Graph holding one entity with an explicit vector, indexed into the ANN
-	/// index so `find_duplicate`'s `entity_idx.search` can return it.
+	/// One entity with an explicit vector, indexed so `find_duplicate` can hit it.
 	fn graph_with_vec_entity(id: &str, vec: Vec<f32>) -> Arc<RwLock<GraphGnn>> {
 		let mut g = GraphGnn::new();
 		let root = g.root.id.clone();
@@ -130,17 +116,13 @@ mod tests {
 	#[test]
 	fn find_duplicate_matches_above_threshold_and_skips_below() {
 		let graph = graph_with_vec_entity("e1", vec![1.0, 0.0, 0.0]);
-		// Identical vector -> cosine 1.0 >= threshold -> the existing id.
 		assert_eq!(
 			find_duplicate(&graph, &[1.0, 0.0, 0.0], 0.9).as_deref(),
 			Some("e1")
 		);
-		// Orthogonal vector -> cosine 0 < threshold -> not a duplicate.
 		assert_eq!(find_duplicate(&graph, &[0.0, 1.0, 0.0], 0.9), None);
-		// Near but below the bar: cos([0.9,0.1,0],[1,0,0]) ~= 0.994 — a 0.999
-		// threshold rejects it, guarding the `score >= threshold` ordering.
+		// cos([0.9,0.1,0],[1,0,0]) ~= 0.994: guards the `score >= threshold` bound.
 		assert_eq!(find_duplicate(&graph, &[0.9, 0.1, 0.0], 0.999), None);
-		// ...and the same near vector clears a 0.9 threshold.
 		assert_eq!(
 			find_duplicate(&graph, &[0.9, 0.1, 0.0], 0.9).as_deref(),
 			Some("e1")
@@ -158,7 +140,14 @@ mod tests {
 		let graph = graph_with_entity("e1", "the original claim");
 		let before = entity(&graph, "e1");
 
-		update_existing_entity(&graph, "e1", "the original claim", 1.0, EntityKind::Claim, None);
+		update_existing_entity(
+			&graph,
+			"e1",
+			"the original claim",
+			1.0,
+			EntityKind::Claim,
+			None,
+		);
 
 		let after = entity(&graph, "e1");
 		assert!(
@@ -167,7 +156,6 @@ mod tests {
 		);
 		assert_eq!(after.text(), "the original claim", "text untouched");
 		assert!(after.updated_at.is_some(), "updated_at bumped");
-		// No Rephrase edge for identical text.
 		let g = graph.read();
 		let kid = g.kern_of_entity("e1").unwrap();
 		let any_rephrase = g
@@ -182,14 +170,17 @@ mod tests {
 
 	#[test]
 	fn different_text_preserves_id_invariant_and_records_rephrase() {
-		// SECURITY/CORRECTNESS regression: a near-dup with DIFFERENT text must
-		// NOT mutate the stored text/vector under the content-hash id (that would
-		// make id != hash(content) and break CRDT convergence). The alternate
-		// phrasing is captured as a Rephrase edge instead.
 		let graph = graph_with_entity("e1", "the original claim");
 		let before = entity(&graph, "e1");
 
-		update_existing_entity(&graph, "e1", "a reworded version of the claim", 1.0, EntityKind::Claim, None);
+		update_existing_entity(
+			&graph,
+			"e1",
+			"a reworded version of the claim",
+			1.0,
+			EntityKind::Claim,
+			None,
+		);
 
 		let after = entity(&graph, "e1");
 		assert_eq!(after.id, "e1", "id unchanged");
@@ -221,8 +212,7 @@ mod tests {
 
 	#[test]
 	fn rephrase_edge_is_idempotent_under_repeat() {
-		// Re-observing the same alternate phrasing must not pile up duplicate
-		// edges — reason_id is content-addressed, so add_reason de-dupes.
+		// reason_id is content-addressed, so add_reason de-dupes repeat phrasings.
 		let graph = graph_with_entity("e1", "the original claim");
 		update_existing_entity(&graph, "e1", "reworded claim", 1.0, EntityKind::Claim, None);
 		update_existing_entity(&graph, "e1", "reworded claim", 1.0, EntityKind::Claim, None);

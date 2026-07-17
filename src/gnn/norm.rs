@@ -27,12 +27,8 @@ impl LayerNorm {
 		}
 	}
 
-	/// Fallible backward pass. Returns [`GnnError::MissingForwardState`] when
-	/// invoked before a successful `forward` (or after a reset) instead of
-	/// panicking. Mirrors [`LinearLayer::try_backward`](crate::gnn::layer::LinearLayer);
-	/// the infallible [`Backward::backward`] delegates here. `last_x_hat` stays an
-	/// `Option` to match the forward-state caching convention used by every other
-	/// gnn layer (linear/sage/gcn/gat/dropout).
+	/// Fallible backward — [`GnnError::MissingForwardState`] instead of a panic
+	/// when `forward` has not run. The infallible [`Backward::backward`] delegates here.
 	pub fn try_backward(&mut self, d_out: &Tensor) -> Result<Tensor, GnnError> {
 		let x_hat = self
 			.last_x_hat
@@ -119,7 +115,6 @@ impl Backward for LayerNorm {
 			Ok(t) => t,
 			Err(e) => {
 				tracing::error!(error = %e, "LayerNorm backward failed; returning zero gradient");
-				// dInput has the same shape as d_out (n_samples × dim).
 				Tensor::zeros(d_out.rows, d_out.cols)
 			}
 		}
@@ -167,7 +162,6 @@ mod tests {
 		let ln = LayerNorm::new(3);
 		let params = ln.parameters();
 		assert_eq!(params.len(), 2);
-		// gamma is ones, beta is zeros at init — confirms order + identity.
 		assert!(
 			params[0].data.iter().all(|&v| v == 1.0),
 			"param[0] is gamma (ones)"
@@ -178,7 +172,6 @@ mod tests {
 		);
 		assert_eq!((params[0].rows, params[0].cols), (1, 3));
 		assert_eq!((params[1].rows, params[1].cols), (1, 3));
-		// param_grads mirrors the same (gamma, beta) order and starts zeroed.
 		let grads = ln.param_grads();
 		assert_eq!(grads.len(), 2);
 		assert!(
@@ -199,7 +192,7 @@ mod tests {
 		// d_beta[j] += d_out (=1) each pass, so a single row of ones gives [1;3].
 		assert!(after_one.iter().all(|&v| (v - 1.0).abs() < 1e-12));
 
-		ln.backward(&d_out); // second pass accumulates onto the first
+		ln.backward(&d_out);
 		assert!(
 			ln.d_beta.data.iter().all(|&v| (v - 2.0).abs() < 1e-12),
 			"grads bleed across passes without a reset"
@@ -215,7 +208,6 @@ mod tests {
 			"zero_grads clears d_beta"
 		);
 
-		// After reset, a single backward equals exactly one pass — no residue.
 		ln.backward(&d_out);
 		assert!(
 			ln.d_beta
@@ -239,9 +231,6 @@ mod tests {
 
 	#[test]
 	fn backward_before_forward_returns_zero_gradient_not_panic() {
-		// The infallible Backward::backward used to `expect` (panic) when called
-		// before forward; it now delegates to try_backward and returns a correctly
-		// shaped zero gradient instead.
 		let mut ln = LayerNorm::new(3);
 		let d_out = Tensor::ones(2, 3);
 		let d_in = ln.backward(&d_out);
@@ -258,7 +247,6 @@ mod tests {
 
 	#[test]
 	fn try_backward_equals_the_infallible_backward_after_forward() {
-		// On the happy path the two entry points produce identical gradients.
 		let x = Tensor::new(2, 4, vec![0.5, -0.2, 0.1, 0.3, -0.4, 0.6, 0.2, -0.1]).unwrap();
 		let d_out = Tensor::ones(2, 4);
 

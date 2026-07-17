@@ -1,33 +1,14 @@
-//! Data transfer objects for [`KernRpc`](super::KernRpc).
-//!
-//! Mirror types — they intentionally do NOT depend on the `kern` crate.
-//! The kern side translates its richer internal types to and from these
-//! at the wire boundary. Many primitive types (`EntityKindLite`,
-//! `EntityStatusLite`, `EdgeKind`, `EntityRef`) are imported from the
-//! sibling [`search`](crate::search) module so the two services share
-//! the same wire vocabulary — a Card flowing out of `SearchSvc::search`
-//! can be drilled into via `KernRpc::neighbors` without a translation
-//! step.
-//!
-//! All DTOs derive `serde::{Serialize, Deserialize}` so they can be
-//! shuttled by either the line-delimited JSON envelope codec or the
-//! length-delimited bincode codec — the codec choice is per-channel.
+//! DTOs for [`KernRpc`](super::KernRpc) — mirror types that intentionally do
+//! NOT depend on the `kern` crate; kern translates at the wire boundary.
 
 use serde::{Deserialize, Serialize};
 
-// Shared with `SearchSvc`: same wire types so a search hit can flow
-// straight into a neighbors/preview call without a translation step.
 pub use crate::search::dto::{
 	EdgeKind, EntityKindLite, EntityRef, EntityStatusLite, NeighborsReq, NeighborsRes,
 };
 
-// ---- Source ---------------------------------------------------------------
-
-/// Lightweight mirror of `kern::Source`. One variant per URI scheme.
-///
-/// Each variant carries the minimum a caller needs to reconstruct the
-/// kern-side `Source` enum on the server. Optional fields collapse to
-/// the empty string on the wire (matches the kern-side `Default` impl).
+/// Lightweight mirror of `kern::Source`, one variant per URI scheme. Optional
+/// fields collapse to `""` on the wire (matches the kern-side `Default`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SourceLite {
 	File {
@@ -97,17 +78,13 @@ impl SourceLite {
 	}
 }
 
-// ---- query ----------------------------------------------------------------
-
-/// Retrieval mode tag forwarded to kern's existing query pipeline.
-/// Identical wire string to the MCP `query.mode` argument
-/// (`"hybrid"`, `"vector"`, `"lexical"`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct QueryReq {
 	pub text: String,
 	/// Number of hits to return. Server clamps to a sane maximum.
 	pub k: u32,
-	/// Retrieval mode. Empty string defaults to `"hybrid"`.
+	/// Same wire strings as MCP `query.mode` (`"hybrid"` | `"vector"` |
+	/// `"lexical"`); empty defaults to `"hybrid"`.
 	#[serde(default)]
 	pub mode: String,
 	/// If true, kern attempts an LLM-synthesised answer alongside hits.
@@ -126,11 +103,9 @@ pub struct QueryReq {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct QueryRes {
-	/// Ranked entity hits. Reuses [`EntityRef`] from `SearchSvc` so a
-	/// palette and a kern_rpc call render the same Card shape.
+	/// Ranked entity hits ([`EntityRef`] shared with `SearchSvc`).
 	pub hits: Vec<EntityRef>,
-	/// Optional LLM answer when `QueryReq.answer == true`. Empty when
-	/// no LLM is configured server-side.
+	/// LLM answer when requested; empty when no LLM is configured server-side.
 	#[serde(default)]
 	pub answer: String,
 	/// True iff this response was for the most-recent `cancel_token`
@@ -139,32 +114,26 @@ pub struct QueryRes {
 	pub fresh: bool,
 }
 
-/// `fresh` defaults to `true` (a missing field on the wire means "not stale").
-/// This needs a named fn because `#[serde(default = "...")]` takes a function
-/// *path*, not a literal — there is no `#[serde(default = true)]` form, and the
-/// derived `Default` for `bool` is `false`, which would be the wrong default here.
+/// Missing `fresh` on the wire means "not stale" — bool's derived `Default`
+/// (`false`) would invert that.
 fn default_true() -> bool {
 	true
 }
-
-// ---- ingest ---------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IngestReq {
 	pub text: String,
 	pub source: SourceLite,
 	pub kind: EntityKindLite,
-	/// Optional descriptor classifier passed through to the ingest
-	/// pipeline. Use `None` to skip descriptor routing.
+	/// Descriptor classifier for the ingest pipeline; `None` skips routing.
 	#[serde(default)]
 	pub descriptor: Option<String>,
 	/// Confidence in [0.0, 1.0]. Server clamps to its agent-source
 	/// ceiling (Fact tier requires user-source).
 	#[serde(default)]
 	pub conf: f64,
-	/// If true, block until ingest completes; otherwise queue and
-	/// return immediately with the content-hash doc id the worker will
-	/// commit the entity under — stable and resolvable on a later read.
+	/// If true, block until ingest commits; otherwise queue and return the
+	/// content-hash doc id immediately — stable and resolvable on a later read.
 	#[serde(default)]
 	pub sync: bool,
 }
@@ -184,29 +153,23 @@ impl Default for IngestReq {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct IngestRes {
-	/// Newly created entity id. When `sync=false` this is the
-	/// content-hash doc id the worker will commit the entity under,
-	/// returned before the pipeline has committed it.
+	/// New entity id; when `sync=false`, the content-hash doc id returned
+	/// before the pipeline has committed.
 	pub entity_id: String,
 	/// One of `"queued" | "ingested" | "duplicate" | "rejected"` —
 	/// matches kern's `ingest::outcome::Status::as_str`.
 	pub status: String,
-	/// Optional human-readable note from the pipeline (rejection
-	/// reason, dedup pointer, etc.).
+	/// Optional pipeline note (rejection reason, dedup pointer, etc.).
 	#[serde(default)]
 	pub message: String,
 }
-
-// ---- link -----------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LinkReq {
 	pub from_id: String,
 	pub to_id: String,
-	/// Reason edge kind. The kern_rpc server maps this to its
-	/// internal [`ReasonKind`](kern::base::types::ReasonKind) where a
-	/// 1:1 match exists; otherwise the closest semantic match is used
-	/// and the edge text carries the original kind-name as a hint.
+	/// Mapped server-side to kern's `ReasonKind`; non-1:1 kinds map to the
+	/// closest match, with the original kind-name kept in the edge text.
 	pub reason_kind: EdgeKind,
 	/// Free-text explanation of the relationship.
 	#[serde(default)]
@@ -229,14 +192,8 @@ pub struct LinkRes {
 	pub reason_id: String,
 }
 
-// ---- anchor ---------------------------------------------------------------
-
-/// Caller-context snapshot carried into a replicated fork.
-///
-/// `entity_id`/`source_uri` identify the addressable anchor (file path,
-/// Document id, etc.). `byte_range` is `[start, end)` over the underlying
-/// source bytes. `selection` carries the user's literal highlighted text
-/// when present (small enough to inline in opening context).
+/// Caller-context snapshot carried into a replicated fork. `byte_range` is
+/// `[start, end)` over the underlying source bytes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Anchor {
 	pub entity_id: String,
@@ -244,8 +201,6 @@ pub struct Anchor {
 	pub byte_range: (u64, u64),
 	pub selection: Option<String>,
 }
-
-// ---- forget --------------------------------------------------------------
 
 /// Hard-delete an entity by id. The id is matched by prefix server-side
 /// (matches the existing kern `tool_forget` semantics).
@@ -260,11 +215,8 @@ pub struct ForgetRes {
 	pub removed: bool,
 }
 
-// ---- degrade -------------------------------------------------------------
-
 /// Decay confidence on an entity by id (prefix-matched). Mirrors the
-/// kern `tool_degrade` MCP path. The legacy `strength` field on
-/// memory_rpc had no kern-side counterpart and is intentionally dropped.
+/// kern `tool_degrade` MCP path.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DegradeReq {
 	pub id: String,
@@ -276,9 +228,6 @@ pub struct DegradeRes {
 	pub applied: bool,
 }
 
-// ---- health --------------------------------------------------------------
-
-/// No request payload. The trait method takes no arguments.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HealthRes {
 	/// True when the daemon is up and the store is loaded.
@@ -294,11 +243,8 @@ pub struct HealthRes {
 	pub entities: u64,
 }
 
-// ---- anchor --------------------------------------------------------------
-
-/// Manage anchors (named top-level buckets the root routes into).
-/// `action` is "list" (default), "add", or "remove". `add` needs name+text;
-/// `remove` needs name.
+/// `action` is `"list"` (default), `"add"` (needs name+text), or
+/// `"remove"` (needs name).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AnchorReq {
 	pub action: String,
@@ -312,8 +258,6 @@ pub struct AnchorRes {
 	pub result: String,
 }
 
-// ---- descriptor ----------------------------------------------------------
-
 /// One of `"add"` or `"rm"`. Matches the existing kern descriptor CLI.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DescriptorReq {
@@ -326,11 +270,7 @@ pub struct DescriptorReq {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DescriptorRes {}
 
-// ---- pulse ---------------------------------------------------------------
-
-/// Fire a stigmergic pulse through the root kern. The legacy
-/// `query_id` field on memory_rpc was a Phase-1 holdover that the
-/// kern side ignored; dropped here.
+/// Fire a stigmergic pulse through the root kern.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PulseReq {
 	/// Pulse strength. `1.0` is the conventional default.
@@ -353,18 +293,8 @@ impl Default for PulseReq {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PulseRes {}
 
-// ---- call_tool -----------------------------------------------------------
-
-/// Generic MCP-style tool dispatch — escape hatch used by the
-/// `kern mcp` proxy subprocess to relay arbitrary stdio MCP
-/// `tools/call` requests to the singleton daemon over `kern.sock`
-/// without enumerating every tool as a typed RPC method.
-///
-/// `args` is the raw `tools/call.params.arguments` object the proxy
-/// receives on stdio. The server-side handler forwards it verbatim to
-/// the daemon's existing `mcp::Server::call_tool` and returns the full
-/// MCP `{ content, isError? }` envelope so the proxy can pipe it back
-/// to stdout unchanged.
+/// Generic MCP tool dispatch for the `kern mcp` proxy. `args` is the raw
+/// `tools/call.params.arguments` object, forwarded verbatim.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CallToolReq {
 	pub name: String,
@@ -379,23 +309,15 @@ pub struct CallToolRes {
 	pub envelope: serde_json::Value,
 }
 
-// ---- list_tools ----------------------------------------------------------
-
-/// No request payload — asks the daemon to enumerate its live MCP tool
-/// surface so the `kern mcp` proxy can reflect it (rather than serving a
-/// static snapshot that omits the mux comms tools).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ListToolsReq {}
 
 /// The daemon's live `tools/list`: each entry is a raw MCP tool-schema JSON
-/// object exactly as `mcp::Server::tools_list` advertises it (including the
-/// mux comms tools when the daemon hosts a pane registry).
+/// object exactly as `mcp::Server::tools_list` advertises it.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ListToolsRes {
 	pub tools: Vec<serde_json::Value>,
 }
-
-// ---- bincode + serde_json roundtrip smoke ---------------------------------
 
 #[cfg(test)]
 mod dto_serde_tests {
@@ -512,7 +434,6 @@ mod dto_serde_tests {
 			cancel_token: Some(99),
 		};
 
-		// JSON: the Some(n) cancel_token survives, as do the scalar fields.
 		let s = serde_json::to_string(&original).unwrap();
 		let back: QueryReq = serde_json::from_str(&s).unwrap();
 		assert_eq!(back.cancel_token, Some(99));
@@ -520,7 +441,6 @@ mod dto_serde_tests {
 		assert!(back.answer);
 		assert_eq!(back.kind, "fact");
 
-		// bincode: same payload over the length-delimited codec.
 		let cfg = bincode::config::standard();
 		let bytes = bincode::serde::encode_to_vec(&original, cfg).unwrap();
 		let (back2, _): (QueryReq, _) = bincode::serde::decode_from_slice(&bytes, cfg).unwrap();
@@ -528,7 +448,6 @@ mod dto_serde_tests {
 		assert_eq!(back2.mode, "hybrid");
 		assert_eq!(back2.source, "file");
 
-		// None path: the absent-token case round-trips as None, not Some(0).
 		let none_req = QueryReq {
 			cancel_token: None,
 			..Default::default()

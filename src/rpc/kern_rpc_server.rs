@@ -1,15 +1,6 @@
-//! Server-side implementation of the slice-J `KernRpc` typed surface.
-//!
-//! Wraps existing kern internals — the same `crate::mcp::Server::tool_*`
-//! methods the MCP `tools/call` dispatcher already uses — so a `kern_rpc`
-//! call and an MCP `tools/call` for the same operation produce identical
-//! kern-side state transitions.
-//!
-//! The MCP tool functions return a JSON envelope of the shape
-//! `{ "content": [{ "type": "text", "text": "<json string>" }] }` (or
-//! `{ "isError": true, ... }` on failure). This handler unwraps that
-//! envelope into the strongly-typed wire DTOs declared by
-//! [`trnsprt::kern_rpc`].
+//! `KernRpc` server: wraps the same `mcp::Server::tool_*` methods as MCP
+//! `tools/call` (identical state transitions), unwrapping the MCP envelope into
+//! the typed wire DTOs of [`trnsprt::kern_rpc`].
 
 use std::sync::Arc;
 
@@ -39,11 +30,8 @@ impl KernRpcHandler {
 	}
 }
 
-// ---- helpers --------------------------------------------------------------
-
-/// Unwrap the MCP `{ "content": [...] }` envelope to the inner JSON
-/// payload the tool emitted. Returns `Err(message)` for `isError`
-/// envelopes.
+/// Unwrap the MCP `{ "content": [...] }` envelope to the tool's inner JSON;
+/// `Err(message)` for `isError` envelopes.
 fn unwrap_tool_json(envelope: &Value) -> Result<Value, String> {
 	if envelope.get("isError").and_then(|v| v.as_bool()) == Some(true) {
 		let msg = envelope
@@ -63,10 +51,6 @@ fn unwrap_tool_json(envelope: &Value) -> Result<Value, String> {
 	serde_json::from_str(text).map_err(|e| format!("decode tool result: {e}"))
 }
 
-/// Read `v[key]` as an owned string, falling back to `default` when the
-/// field is missing or not a string. Collapses the
-/// `.get().and_then(as_str).unwrap_or().to_string()` chain repeated
-/// across the envelope-parsing paths below.
 fn str_field(v: &Value, key: &str, default: &str) -> String {
 	v.get(key)
 		.and_then(|x| x.as_str())
@@ -74,7 +58,6 @@ fn str_field(v: &Value, key: &str, default: &str) -> String {
 		.to_string()
 }
 
-/// Read `v[key]` as an `f32` score, defaulting to `0.0`.
 fn f32_field(v: &Value, key: &str) -> f32 {
 	v.get(key).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32
 }
@@ -93,16 +76,12 @@ fn entity_kind_from_lite(k: EntityKindLite) -> EntityKind {
 		EntityKindLite::Question => EntityKind::Question,
 		EntityKindLite::Answer => EntityKind::Answer,
 		EntityKindLite::Conclusion => EntityKind::Conclusion,
-		// The `Superseded` variant is a status (lifecycle) flag in
-		// kern's model, not a kind. Map it to the next-best kind
-		// and rely on the caller having set status=Superseded
-		// separately if they really meant it.
+		// `Superseded` is a status in kern's model, not a kind — map to the
+		// next-best kind; callers set status=Superseded separately.
 		EntityKindLite::Superseded => EntityKind::Claim,
 	}
 }
 
-/// Parse the lower-case status label echoed by the MCP `tool_query`
-/// envelope. Anything other than `"superseded"` is treated as Active.
 fn parse_status_label(s: &str) -> EntityStatusLite {
 	if s == "superseded" {
 		EntityStatusLite::Superseded
@@ -122,15 +101,8 @@ fn entity_kind_to_lite(k: EntityKind) -> EntityKindLite {
 	}
 }
 
-/// Decode the edge-kind discriminant the MCP `tool_query` envelope emits
-/// (`r.kind as i32`, a [`crate::base::types::ReasonKind`]) into the wire-side
-/// [`EdgeKind`]. The two enums are deliberately NOT 1:1: `ReasonKind` is kern's
-/// internal edge taxonomy (Similarity / Provenance / Question / Spawn /
-/// Supersedes / Ratification / Rephrase) while `EdgeKind` is the connected-index
-/// wire vocabulary, so this is a semantic projection, not a cast. Unknown or
-/// out-of-range ints fall back to the neutral `References`. Lives in the kern
-/// adapter rather than `src/trnsprt` because `ReasonKind` is kern-internal
-/// and cannot be referenced from the transport crate.
+/// Decode the envelope's `r.kind as i32` ([`crate::base::types::ReasonKind`])
+/// into [`EdgeKind`] — deliberately NOT 1:1, a semantic projection, not a cast.
 fn edge_kind_from_reason_int(kind: i32) -> EdgeKind {
 	match kind {
 		0 => EdgeKind::References,   // Similarity — generic semantic relatedness
@@ -144,9 +116,8 @@ fn edge_kind_from_reason_int(kind: i32) -> EdgeKind {
 	}
 }
 
-/// Stable tag string for an [`EdgeKind`]. Used as the `reason` argument
-/// to `tool_link` and as the wire-side description hint when no
-/// explicit text is supplied.
+/// Stable tag for an [`EdgeKind`], used as `tool_link`'s `reason` argument
+/// when no explicit text is supplied.
 fn edge_kind_tag(k: EdgeKind) -> &'static str {
 	match k {
 		EdgeKind::Answers => "answers",
@@ -161,8 +132,6 @@ fn edge_kind_tag(k: EdgeKind) -> &'static str {
 		EdgeKind::Consolidates => "consolidates",
 	}
 }
-
-// ---- KernRpc impl ---------------------------------------------------------
 
 impl KernRpc for KernRpcHandler {
 	fn query(&self, req: QueryReq) -> impl ::core::future::Future<Output = QueryRes> + Send {
@@ -197,11 +166,8 @@ impl KernRpc for KernRpcHandler {
 					let score = f32_field(e, "score");
 					let snippet = str_field(e, "text", "");
 					let label = label_from_snippet(&snippet);
-					// Slice Z: tool_query envelope echoes kind / scheme
-					// / status directly off the matched Entity, so no
-					// second graph read is needed per hit. Defaults
-					// mirror the legacy fallback when a field is
-					// missing (older envelopes / external clients).
+					// Envelope echoes kind/scheme/status off the matched Entity — no second
+					// graph read per hit; defaults cover older envelopes / external clients.
 					let kind = e
 						.get("kind")
 						.and_then(|v| v.as_str())
@@ -213,9 +179,6 @@ impl KernRpc for KernRpcHandler {
 						.and_then(|v| v.as_str())
 						.map(parse_status_label)
 						.unwrap_or(EntityStatusLite::Active);
-					// Extract enriched relationship edges from the MCP
-					// tool_query envelope so RPC callers see WHY entities
-					// are connected, not just THAT they are.
 					let edges: Vec<EdgeRef> = e
 						.get("edges")
 						.and_then(|v| v.as_array())
@@ -230,9 +193,6 @@ impl KernRpc for KernRpcHandler {
 									Some(EdgeRef {
 										from: str_field(edge, "from", ""),
 										to: str_field(edge, "to", ""),
-										// Decode the kern ReasonKind discriminant the
-										// envelope carries into the wire EdgeKind so
-										// callers see the actual relationship type.
 										kind: edge_kind_from_reason_int(
 											edge.get("kind").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
 										),
@@ -371,10 +331,8 @@ impl KernRpc for KernRpcHandler {
 	fn link(&self, req: LinkReq) -> impl ::core::future::Future<Output = LinkRes> + Send {
 		let kern = self.kern.clone();
 		async move {
-			// The MCP `link` tool stores the supplied free-text on the
-			// edge as-is. Prefix with the edge-kind tag when no text
-			// was provided so callers retain the kind hint after an
-			// LLM auto-fill round-trip.
+			// Prefix with the edge-kind tag when no text was given so callers keep
+			// the kind hint after an LLM auto-fill round-trip.
 			let reason_text = if req.text.is_empty() {
 				format!("[{}]", edge_kind_tag(req.reason_kind))
 			} else {
@@ -407,22 +365,16 @@ impl KernRpc for KernRpcHandler {
 	) -> impl ::core::future::Future<Output = NeighborsRes> + Send {
 		let kern = self.kern.clone();
 		async move {
-			// Re-use `tool_query`'s `id`-mode (returns `entity_detail`
-			// with edges) to source the depth-1 neighbour set. Only
-			// depth-1 is implemented; `req.depth` is intentionally not
-			// honored here (no multi-hop expansion), so we do not compute
-			// a misleading depth bound.
+			// Re-use `tool_query`'s id-mode for the depth-1 neighbour set.
+			// `req.depth` is intentionally not honored — only depth-1 is implemented.
 			let args = serde_json::json!({ "id": req.entity_id });
 			let env = kern.tool_query(&args);
 			let payload = match unwrap_tool_json(&env) {
 				Ok(v) => v,
 				Err(_) => return NeighborsRes::default(),
 			};
-			// Cap the neighbour set BEFORE the per-id detail fetch. The raw
-			// edge count is data-controlled (an entity can be linked to
-			// thousands), so without a cap the detail loop is an N+1
-			// latency/CPU amplification vector that repeatedly takes the
-			// read lock. MAX_NEIGHBORS bounds it to a constant.
+			// Cap BEFORE the per-id detail fetch: edge count is data-controlled, so
+			// the uncapped detail loop is an N+1 amplification vector.
 			let neighbour_ids = collect_neighbour_ids(&payload, &req.entity_id, MAX_NEIGHBORS);
 			let mut neighbors = Vec::with_capacity(neighbour_ids.len());
 			for id in neighbour_ids {
@@ -557,9 +509,8 @@ impl KernRpc for KernRpcHandler {
 	) -> impl ::core::future::Future<Output = CallToolRes> + Send {
 		let kern = self.kern.clone();
 		async move {
-			// Forward to the existing MCP `call_tool` dispatcher so the
-			// proxy in `kern mcp` can relay any stdio MCP `tools/call`
-			// request over kern.sock without enumerating every tool.
+			// Forward to the MCP `call_tool` dispatcher so the `kern mcp` proxy can
+			// relay any `tools/call` over kern.sock without enumerating every tool.
 			let envelope = match McpServer::call_tool(&*kern, &req.name, &req.args) {
 				Ok(tr) => serde_json::json!({
 						"content": tr.content,
@@ -583,9 +534,8 @@ impl KernRpc for KernRpcHandler {
 	) -> impl ::core::future::Future<Output = ListToolsRes> + Send {
 		let kern = self.kern.clone();
 		async move {
-			// Serialise the daemon's live `tools/list` (which appends the mux
-			// comms tools when a pane registry is present) back to raw JSON
-			// schemas so the proxy can advertise exactly what we expose.
+			// Serialise the daemon's live `tools/list` back to raw JSON schemas so
+			// the proxy advertises exactly what we expose.
 			let tools = McpServer::tools_list(&*kern)
 				.iter()
 				.filter_map(|s| serde_json::to_value(s).ok())
@@ -595,16 +545,12 @@ impl KernRpc for KernRpcHandler {
 	}
 }
 
-/// Upper bound on neighbours returned (and detail-fetched) by the
-/// `neighbors` RPC. The raw edge count is data-controlled, so this cap
-/// keeps the per-id detail loop O(1) in the entity's degree.
+/// Upper bound on neighbours returned/detail-fetched by `neighbors` — keeps
+/// the detail loop O(1) in the entity's (data-controlled) degree.
 const MAX_NEIGHBORS: usize = 64;
 
-/// Collect the distinct depth-1 neighbour ids from a `tool_query`
-/// `entity_detail` payload's `edges` array: take the *other* endpoint of
-/// each edge, skip empties and self-loops, dedup preserving first-seen
-/// order, and cap at `max`. Pure so it is unit-testable without standing
-/// up an `mcp::Server` graph.
+/// Distinct depth-1 neighbour ids from an `entity_detail` payload: the *other*
+/// endpoint per edge, skipping empties/self-loops, deduped first-seen, capped at `max`.
 fn collect_neighbour_ids(payload: &serde_json::Value, entity_id: &str, max: usize) -> Vec<String> {
 	let mut ids: Vec<String> = Vec::new();
 	let Some(edges) = payload.get("edges").and_then(|v| v.as_array()) else {
@@ -627,10 +573,8 @@ fn collect_neighbour_ids(payload: &serde_json::Value, entity_id: &str, max: usiz
 	ids
 }
 
-/// Look up an entity's kind / source-scheme / status via the kern
-/// graph. Returns kern-side defaults when the entity is missing so
-/// `query` results still surface (a missing entity row is possible
-/// during ingest race conditions).
+/// Kind/scheme/status via graph lookup, with kern-side defaults when the
+/// entity is missing (possible during ingest races) so results still surface.
 fn lookup_kind_scheme_status(
 	server: &Arc<crate::mcp::Server>,
 	id: &str,
@@ -655,17 +599,8 @@ fn lookup_kind_scheme_status(
 	}
 }
 
-// ---- listener -------------------------------------------------------------
-
-/// Accept loop over a pre-bound [`LocalListener`]. Caller (run_server)
-/// owns the singleton-aware bind so it can react to `BindOutcome::
-/// AlreadyRunning` by exiting 0 before any other daemon scaffolding
-/// spins up.
-///
-/// Per accept: spawn a task that wraps the local-socket adapter in a
-/// JSON-envelope `Channel` and runs the generated `serve_kern_rpc`
-/// service loop. Errors on a single connection are logged; they do not
-/// take the listener down.
+/// Accept loop over a pre-bound [`LocalListener`]; the caller owns the
+/// singleton-aware bind. Per-connection errors are logged, never fatal.
 pub async fn serve_kern_rpc_loop(mut listener: LocalListener, handler: KernRpcHandler) {
 	loop {
 		let adapter = match listener.accept().await {
@@ -687,10 +622,7 @@ pub async fn serve_kern_rpc_loop(mut listener: LocalListener, handler: KernRpcHa
 
 #[cfg(test)]
 mod envelope_parse_tests {
-	//! Slice Z: tool_query envelope echoes kind/scheme/status directly
-	//! off the matched Entity, eliminating the per-hit graph re-read in
-	//! `KernRpc::query`. These tests cover the lower-case label parsers
-	//! the query path uses to lift envelope strings into the typed
+	//! Label parsers lifting envelope strings into the typed
 	//! [`EntityKindLite`] / [`EntityStatusLite`] DTOs.
 	use super::*;
 
@@ -736,8 +668,6 @@ mod envelope_parse_tests {
 	#[test]
 	fn edge_kind_decode_projects_each_reason_kind() {
 		use crate::base::types::ReasonKind;
-		// The envelope carries `r.kind as i32`; decoding must surface a distinct,
-		// meaningful EdgeKind per ReasonKind rather than a blanket References.
 		let cases = [
 			(ReasonKind::Similarity, EdgeKind::References),
 			(ReasonKind::Provenance, EdgeKind::Derives),
@@ -770,9 +700,8 @@ mod envelope_parse_tests {
 
 #[cfg(test)]
 mod neighbors_cap_tests {
-	//! Card #44: the `neighbors` RPC must cap its fan-out at MAX_NEIGHBORS so
-	//! a high-degree entity can't drive an O(degree) N+1 detail loop. Covers
-	//! the pure id-collection helper (self/empty exclusion, dedup, cap).
+	//! Fan-out must cap at MAX_NEIGHBORS — a high-degree entity must not drive
+	//! an O(degree) N+1 detail loop.
 	use super::*;
 	use serde_json::json;
 
@@ -786,7 +715,6 @@ mod neighbors_cap_tests {
 
 	#[test]
 	fn caps_high_degree_fan_out() {
-		// 500 distinct neighbours -> at most MAX_NEIGHBORS returned.
 		let names: Vec<String> = (0..500).map(|i| format!("n{i}")).collect();
 		let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
 		let payload = payload_with_edges("center", &refs);
@@ -796,7 +724,6 @@ mod neighbors_cap_tests {
 
 	#[test]
 	fn excludes_self_and_empty_and_dedups() {
-		// edges include a self-loop, an empty endpoint, and a duplicate.
 		let payload = json!({ "edges": [
 				{ "from": "c", "to": "a" },
 				{ "from": "b", "to": "c" }, // other endpoint = b

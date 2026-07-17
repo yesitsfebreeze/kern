@@ -10,11 +10,8 @@ use crate::server::McpServer;
 use crate::transport::ChildStdio;
 use crate::types::{ServerId, ToolResult, ToolSchema};
 
-/// A connected MCP server: the [`Client`] that drives its transport plus the
-/// tool schema snapshot taken at connect time. The snapshot is what
-/// [`Registry::list_tools`] serves without a round-trip; call
-/// [`refresh_tools`](LiveServer::refresh_tools) to re-pull it after the server's
-/// tool set is known to have changed (schemas otherwise go stale silently).
+/// A connected MCP server + its connect-time tool snapshot. The snapshot goes
+/// stale silently — call [`refresh_tools`](LiveServer::refresh_tools).
 pub struct LiveServer {
 	pub(crate) client: Client,
 	pub(crate) tools: Vec<ToolSchema>,
@@ -39,13 +36,8 @@ impl LiveServer {
 	}
 }
 
-/// Owns every connected MCP server keyed by [`ServerId`] and routes tool calls to
-/// the right one. The `Registry` is the lifecycle owner: registering
-/// (`spawn_stdio` / `register_inproc`) performs the MCP `initialize` handshake and
-/// caches the server's tool schemas; the cache lives until `refresh_tools` re-pulls
-/// it or `remove` drops the server. Registration is idempotent-safe — a duplicate
-/// [`ServerId`] is rejected with [`McpError::DuplicateServer`] rather than
-/// silently replacing the live connection.
+/// Lifecycle owner for every connected MCP server, keyed by [`ServerId`]. A
+/// duplicate id errors — it never silently replaces the live connection.
 #[derive(Default)]
 pub struct Registry {
 	servers: HashMap<ServerId, LiveServer>,
@@ -128,7 +120,6 @@ mod tests {
 	use super::*;
 	use serde_json::json;
 
-	/// Minimal in-process MCP server: one `echo` tool that returns its args.
 	struct MockServer;
 
 	impl McpServer for MockServer {
@@ -160,12 +151,10 @@ mod tests {
 			.register_inproc(id.clone(), Box::new(MockServer))
 			.expect("registration performs the initialize handshake");
 
-		// The schema snapshot taken at connect time is served without a round-trip.
 		let tools = reg.list_tools(&id).expect("known server");
 		assert_eq!(tools.len(), 1);
 		assert_eq!(tools[0].name, "echo");
 
-		// A call routes through the in-process transport + client and back.
 		let out = reg
 			.call_tool(&id, "echo", &json!({ "x": 1 }))
 			.expect("echo call succeeds");

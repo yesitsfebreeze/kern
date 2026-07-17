@@ -10,9 +10,6 @@ use crate::base::util::explain_relationship_prompt;
 use crate::ingest;
 use crate::wire::{validate_fact_source, validate_wire_conf, validate_wire_kind};
 
-/// MCP schemas for the mutating tools, co-located with their `tool_ingest` /
-/// `tool_link` / `tool_forget` / `tool_degrade` handlers so schema and handler
-/// can't drift. Aggregated (in this order) by `tools::tool_definitions`.
 pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 	vec![
 		serde_json::json!({
@@ -101,10 +98,8 @@ struct IngestArgs {
 	kind: Option<EntityKind>,
 }
 
-/// Wire-boundary validation for an MCP ingest payload, run before any graph
-/// access (see docs/kern/safety-architecture.md): confidence range, typed kind,
-/// and the fact-tier source-trust guard — an agent caller can mint neither
-/// Fact-kind nor Fact-confidence entities. Returns the tool-error text on reject.
+/// Wire-boundary validation before any graph access: an agent caller can mint
+/// neither Fact-kind nor Fact-confidence entities (docs/kern/safety-architecture.md).
 fn validate_ingest_wire(p: &IngestArgs) -> Result<(), String> {
 	validate_wire_conf(p.conf).map_err(|e| e.to_string())?;
 	if let Some(k) = p.kind {
@@ -147,21 +142,13 @@ impl Server {
 			return tool_error("text is required");
 		}
 
-		// Wire-boundary validation: reject drift-via-mutation before any
-		// graph access. See docs/kern/safety-architecture.md.
 		if let Err(e) = validate_ingest_wire(&p) {
 			return tool_error(&e);
 		}
 
-		// MCP callers are agents by construction; clamp against AGENT_SOURCE
-		// regardless of what `p.source` claims. The wire `source` string remains
-		// descriptive metadata on `Source.system` but cannot escalate the
-		// caller to USER_SOURCE trust (which would unlock Fact-tier confidence).
+		// MCP callers are agents; clamp against AGENT_SOURCE regardless of what
+		// `p.source` claims — the wire string cannot escalate to USER_SOURCE trust.
 		let (conf, kind) = clamp_confidence(p.conf, AGENT_SOURCE);
-		// Map the (legacy) MCP ingest payload to a typed Source variant.
-		// Empty `source` collapses to Inline (no scheme); a scheme tag like
-		// "file"/"ticket"/"session"/"agent" routes to the matching variant;
-		// anything else is treated as a Ticket system descriptor.
 		let src = match p.source.as_str() {
 			"" | "inline" => Source::Inline {
 				hash: p.object_id,
@@ -224,14 +211,8 @@ impl Server {
 			}));
 		}
 
-		// Durable ack: persist the payload to the direct intake BEFORE
-		// acknowledging, so a daemon exit after the ack loses nothing — the
-		// next drain cycle replays it. The in-RAM enqueue path acked "queued"
-		// and then held the job only in a 64-slot channel; observed live: a
-		// daemon restart vaporized 5 acked ingests. Intake-first only when the
-		// drain loop actually runs (capture on + a reason endpoint configured
-		// — `spawn_capture` skips the loop otherwise); an undrained intake
-		// would be strictly worse than the RAM queue.
+		// Durable ack: persist to the direct intake BEFORE acknowledging, but only
+		// when the drain loop runs — an undrained intake is worse than the RAM queue.
 		let drain_runs = self.cfg.capture.enabled && !self.cfg.reason_url().is_empty();
 		if drain_runs {
 			let direct_dir = std::env::current_dir()
@@ -255,9 +236,8 @@ impl Server {
 					}));
 				}
 				Err(e) => {
-					// Fail-open: an intake-write failure (disk full, perms) must
-					// not reject knowledge — fall through to the RAM queue and
-					// say so in the journal.
+					// Fail-open: an intake-write failure must not reject knowledge —
+					// fall through to the RAM queue.
 					tracing::warn!(
 						target: "kern.ingest.direct",
 						error = %e,
@@ -398,7 +378,6 @@ impl Server {
 			let decay = crate::base::constants::DEGRADE_DECAY_BASE
 				* (crate::base::constants::DEGRADE_DECAY_POW).powi(i as i32);
 
-			// One mutable borrow of the kern per edge (was a get-then-get_mut pair).
 			let Some(kern) = g.kerns.get_mut(&kern_id) else {
 				continue;
 			};

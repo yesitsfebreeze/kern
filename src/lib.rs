@@ -1,13 +1,5 @@
-//! Kern — the knowledge and reasoning backend.
-//!
-//! Runs as a daemon (`kern --daemon`) and exposes its surface over MCP
-//! stdio and HTTP. Core responsibilities:
-//!
-//! * **memory** — CRDT-replicated knowledge graph with gossip sync
-//! * **retrieval** — vector + BM25 hybrid search over ingested content
-//! * **llm** — provider-agnostic LLM dispatch with quantisation support
-//! * **ingest** — file watcher pipeline that feeds the retrieval index
-//! * **rpc** — typed MCP service layer consumed by external MCP clients
+//! Kern — the knowledge and reasoning backend. Runs as a daemon
+//! (`kern --daemon`) and exposes its surface over MCP stdio and HTTP.
 
 /// Foundational types and daemon initialisation.
 pub mod base;

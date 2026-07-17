@@ -5,16 +5,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HeatConfig {
-	/// Heat half-life in **seconds**: the elapsed time over which an entity's
-	/// heat decays to half via [`decayed`]. Default one week.
+	/// Heat half-life in **seconds** — the span over which heat decays by half.
 	pub half_life_secs: u64,
-	/// Heat added per access (an entity being read/retrieved). A **dimensionless
-	/// heat unit**, not a ratio or duration — it is summed onto current heat by
-	/// [`deposit`], then decays over `half_life_secs`.
+	/// Heat added per access. A **dimensionless heat unit**, not a ratio or duration.
 	pub deposit_access: f32,
-	/// Heat added per graph traversal that passes through an entity. Same
-	/// dimensionless heat unit as `deposit_access`; lower by default because a
-	/// pass-through is weaker evidence of relevance than a direct access.
+	/// Heat added per traversal passing through an entity. Same unit as `deposit_access`.
 	pub deposit_traversal: f32,
 }
 
@@ -74,14 +69,12 @@ mod tests {
 
 	#[test]
 	fn decayed_none_since_returns_heat_unchanged() {
-		// No timestamp to decay from -> heat passes through untouched.
 		assert_eq!(decayed(3.0, None, SystemTime::now(), HL), 3.0);
 	}
 
 	#[test]
 	fn decayed_clock_skew_returns_heat_unchanged() {
-		// `since` is in the FUTURE relative to `now` -> duration_since is Err;
-		// rather than extrapolate, heat is returned as-is.
+		// `since` in the future -> `duration_since` is Err; never extrapolate.
 		let now = SystemTime::now();
 		let since = now + Duration::from_secs(60);
 		assert_eq!(decayed(4.0, Some(since), now, HL), 4.0);
@@ -90,13 +83,12 @@ mod tests {
 	#[test]
 	fn decayed_one_half_life_halves_the_heat() {
 		let since = SystemTime::UNIX_EPOCH;
-		let now = since + Duration::from_secs(HL); // exactly one half-life elapsed
+		let now = since + Duration::from_secs(HL);
 		let got = decayed(8.0, Some(since), now, HL);
 		assert!(
 			(got - 4.0).abs() < 1e-4,
 			"one half-life halves 8 -> ~4, got {got}"
 		);
-		// Two half-lives -> a quarter.
 		let now2 = since + Duration::from_secs(2 * HL);
 		let got2 = decayed(8.0, Some(since), now2, HL);
 		assert!(
@@ -107,8 +99,7 @@ mod tests {
 
 	#[test]
 	fn decayed_zero_half_life_is_clamped_to_one_second() {
-		// half_life_secs 0 would divide by zero; the .max(1.0) guard avoids NaN
-		// and just decays very fast over a 1s effective half-life.
+		// half_life_secs 0 would divide by zero; the `.max(1.0)` guard clamps it.
 		let since = SystemTime::UNIX_EPOCH;
 		let now = since + Duration::from_secs(10);
 		let got = decayed(8.0, Some(since), now, 0);
@@ -125,7 +116,7 @@ mod tests {
 	#[test]
 	fn deposit_adds_on_top_of_the_decayed_value() {
 		let since = SystemTime::UNIX_EPOCH;
-		let now = since + Duration::from_secs(HL); // 8 -> ~4 after decay
+		let now = since + Duration::from_secs(HL);
 		let got = deposit(8.0, Some(since), now, HL, 1.5);
 		assert!(
 			(got - 5.5).abs() < 1e-4,

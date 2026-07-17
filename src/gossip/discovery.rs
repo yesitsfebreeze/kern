@@ -9,11 +9,8 @@ use super::node::Node;
 
 const ANNOUNCE_PREFIX: &str = "kern:";
 
-/// Periodically announce this node on the discovery multicast group so same-LAN
-/// peers can find it with zero configuration. Every `GOSSIP_DISCOVERY_INTERVAL`
-/// it sends `kern:<network_id>:<tcp_addr>` to `GOSSIP_DISCOVERY_MULTICAST:port`
-/// from an ephemeral UDP socket. Counterpart to [`start_listen`]; the spawned
-/// task runs until the node's stop signal fires.
+/// Announce `kern:<network_id>:<tcp_addr>` on the discovery multicast group
+/// every `GOSSIP_DISCOVERY_INTERVAL` — zero-config LAN peering with [`start_listen`].
 pub fn start_broadcast(node: &Arc<Node>, port: u16) {
 	let node = node.clone();
 	let addr: SocketAddr = match format!("{GOSSIP_DISCOVERY_MULTICAST}:{port}").parse() {
@@ -42,9 +39,8 @@ pub fn start_broadcast(node: &Arc<Node>, port: u16) {
 	});
 }
 
-/// Listen for peer announcements on the discovery multicast group and add
-/// matching peers (same network id, not ourselves). Counterpart to
-/// `start_broadcast` — together they give zero-config LAN peering.
+/// Listen for multicast announcements and add matching peers (same network id,
+/// not ourselves) — the inbound half of [`start_broadcast`].
 pub fn start_listen(node: &Arc<Node>, port: u16) {
 	let node = node.clone();
 	tokio::spawn(async move {
@@ -62,8 +58,6 @@ pub fn start_listen(node: &Arc<Node>, port: u16) {
 		loop {
 			tokio::select! {
 				_ = stop.changed() => break,
-				// Awaited directly — no set_nonblocking + sleep-drain poll, and no
-				// blocking recv pinning a worker thread off the async executor.
 				r = socket.recv_from(&mut buf) => {
 					if let Ok((n, _src)) = r {
 						if let Ok(s) = std::str::from_utf8(&buf[..n]) {
@@ -80,10 +74,8 @@ pub fn start_listen(node: &Arc<Node>, port: u16) {
 	});
 }
 
-/// Parse `kern:<network_id>:<host>:<port>`. The network id is everything up to
-/// the first ':' (ids never contain one — enforced by
-/// `GossipConfig::effective_network_id`; generated ids are UUIDs), so
-/// operator-configured ids of any length work, not just 36-char UUIDs.
+/// Parse `kern:<network_id>:<host>:<port>`. The id is everything up to the first
+/// ':' — ids never contain one (enforced by `GossipConfig::effective_network_id`).
 pub fn parse_announce(s: &str) -> Option<(String, String)> {
 	let s = s.strip_prefix(ANNOUNCE_PREFIX)?;
 	let (network_id, tcp_addr) = s.split_once(':')?;
@@ -128,7 +120,6 @@ mod tests {
 
 	#[test]
 	fn parse_announce_rejects_missing_id_addr_separator() {
-		// No ':' after the id -> no addr at all.
 		assert!(parse_announce("kern:short").is_none());
 	}
 

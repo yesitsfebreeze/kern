@@ -13,21 +13,14 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use std::time::{Duration, SystemTime};
 
-/// Beta-Bernoulli prior params from a clamped `[0,1]` confidence:
-/// `Beta(1 + conf, 1 + (1 - conf))`. Single source for the parameterization
-/// shared by document- and chunk-entity construction.
+/// Beta-Bernoulli prior from a clamped `[0,1]` confidence:
+/// `Beta(1 + conf, 1 + (1 - conf))`.
 fn beta_params_from_confidence(conf: f32) -> (f32, f32) {
 	(1.0 + conf, 1.0 + (1.0 - conf))
 }
 
-/// Construct an Active entity carrying a single statement, with `confidence`
-/// mapped to Beta-Bernoulli params and a fresh creation timestamp.
-///
-/// This is the ONLY place the document- and chunk-ingest paths materialize an
-/// `Entity`, so the ~25 boilerplate default fields live in one spot. That matters
-/// beyond DRY: `Entity` is bincode-positional, so two near-identical literals
-/// drifting apart (a field added to one but not the other) would silently corrupt
-/// every persisted shard. Callers supply only what actually differs.
+/// The ONLY place the ingest paths materialize an `Entity`: two drifting literals
+/// would silently corrupt every persisted shard (`Entity` is bincode-positional).
 #[allow(clippy::too_many_arguments)]
 fn new_statement_entity(
 	id: String,
@@ -72,8 +65,6 @@ fn new_statement_entity(
 		producer_id: String::new(),
 		unlinked_count,
 		dirty: false,
-		// Fresh ingest: world-time validity opens now (falls back to created_at
-		// via `valid_from_or_created`), open-ended, never invalidated.
 		valid_from: None,
 		valid_to: None,
 		invalidated_at: None,
@@ -109,7 +100,6 @@ pub(crate) async fn place_document(
 		return (Some(existing_id), None);
 	}
 
-
 	let external_id = job.source.source_id().unwrap_or_default();
 	let valid_until = job
 		.config
@@ -127,8 +117,6 @@ pub(crate) async fn place_document(
 		valid_until,
 		unlinked,
 	);
-	// Distilled world-time hint ("since March"), if any — else falls back to
-	// created_at via `valid_from_or_created`.
 	thought.valid_from = job.config.valid_from;
 
 	let root_id = graph.read().root.id.clone();
@@ -213,10 +201,7 @@ pub(crate) fn place_chunks(
 		}
 
 		if !result.deduped {
-			// Question seeding is DEFERRED to the tick (`SeedQuestions` task) —
-			// it was a blocking reason-LLM call per chunk right here, which made
-			// the worker LLM-bound and starved every queued ingest (measured: a
-			// one-line sync ingest waited 69.7 minutes). The hook just enqueues.
+			// Question seeding is DEFERRED to the tick — the hook just enqueues.
 			if let Some(defer) = defer_questions {
 				defer(&result.entity_id);
 			}
@@ -253,10 +238,6 @@ pub fn chunk_source_id(source: &Source, index: usize) -> String {
 	format!("{}#chunk{}", source.section(), index)
 }
 
-// Question seeding RELOCATED to `tick::tasks::do_seed_questions` — the worker
-// defers it via `DeferQuestionsFn` so the reason-LLM never runs on the ingest
-// commit path. One implementation, one owner (the tick).
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -286,9 +267,8 @@ mod tests {
 		Arc::new(RwLock::new(GraphGnn::new()))
 	}
 
-	/// Total entities across every kern. `accept` routes new thoughts off the
-	/// root dispatcher into a spawned generic child, so a root-only count would
-	/// miss them — count graph-wide.
+	/// Graph-wide entity count: `accept` routes thoughts into spawned children,
+	/// so a root-only count would miss them.
 	fn total_entity_count(g: &Arc<RwLock<GraphGnn>>) -> usize {
 		let gg = g.read();
 		gg.all().iter().map(|k| k.entities.len()).sum()
@@ -335,7 +315,6 @@ mod tests {
 
 	#[test]
 	fn build_chunk_entity_clamps_out_of_range_confidence() {
-		// Above 1.0 clamps to 1.0 -> Beta(2,1); below 0 clamps to 0 -> Beta(1,2).
 		let hi = build_chunk_entity(
 			"x",
 			&[1.0],
@@ -362,9 +341,18 @@ mod tests {
 	fn place_chunks_inserts_each_distinct_nonempty_chunk() {
 		let g = empty_graph();
 		let chunks = vec!["alpha beta".to_string(), "gamma delta".to_string()];
-		// Orthogonal vectors so neither chunk dedups against the other.
+		// Orthogonal so neither chunk dedups against the other.
 		let vecs = vec![vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]];
-		let placed = place_chunks(&g, None, None, &job("doc", 1.0), &chunks, &vecs, "doc1", 0.95);
+		let placed = place_chunks(
+			&g,
+			None,
+			None,
+			&job("doc", 1.0),
+			&chunks,
+			&vecs,
+			"doc1",
+			0.95,
+		);
 		assert_eq!(placed, 2, "both distinct chunks placed");
 		assert_eq!(
 			total_entity_count(&g),
@@ -377,19 +365,24 @@ mod tests {
 	fn place_chunks_skips_empty_vectors() {
 		let g = empty_graph();
 		let chunks = vec!["a".to_string(), "b".to_string()];
-		// First chunk failed to embed (empty vec) — it must be skipped, not placed.
+		// Empty vec = the embed failed for that chunk.
 		let vecs = vec![Vec::new(), vec![1.0, 0.0]];
-		let placed = place_chunks(&g, None, None, &job("doc", 1.0), &chunks, &vecs, "doc1", 0.95);
+		let placed = place_chunks(
+			&g,
+			None,
+			None,
+			&job("doc", 1.0),
+			&chunks,
+			&vecs,
+			"doc1",
+			0.95,
+		);
 		assert_eq!(placed, 1, "only the chunk with a real vector is placed");
 		assert_eq!(total_entity_count(&g), 1);
 	}
 
 	#[test]
 	fn place_chunks_defers_question_seeding_via_the_hook() {
-		// Question seeding moved to the tick: instead of a blocking reason-LLM
-		// call per chunk, place_chunks hands each freshly placed entity id to
-		// the defer hook (which the daemon wires to enqueue a SeedQuestions
-		// tick task). The hook must fire once per placed, non-deduped chunk.
 		use std::sync::Mutex;
 		let g = empty_graph();
 		let chunks = vec!["the sky is blue".to_string()];
@@ -419,10 +412,10 @@ mod tests {
 	#[tokio::test]
 	async fn place_document_reports_failure_and_leaves_graph_untouched_on_embed_error() {
 		let g = empty_graph();
-		// Dead loopback endpoint: every embed attempt fails, so place_document must
-		// bail with a FailureReport before mutating the graph.
+		// Dead endpoint: place_document must bail before mutating the graph.
 		let embedder = LlmClient::new_embed_only("http://127.0.0.1:1", "test");
-		let (id, fail) = place_document(&g, &embedder, &job("a document", 1.0), "doc1", 0.95, None).await;
+		let (id, fail) =
+			place_document(&g, &embedder, &job("a document", 1.0), "doc1", 0.95, None).await;
 		assert!(
 			id.is_none(),
 			"no entity id is returned when embedding fails"

@@ -115,9 +115,7 @@ impl Graph {
 		}
 	}
 
-	/// Dense N×N directed adjacency. Private: only `normalized_adjacency` needs it,
-	/// and exposing the O(N^2) materialization would invite external misuse on the
-	/// sparse graphs kern actually builds. (`degree_matrix` was removed as dead.)
+	/// Dense N×N directed adjacency.
 	fn adjacency_matrix(&self) -> Tensor {
 		let n = self.nodes.len();
 		let mut adj = Tensor::zeros(n, n);
@@ -233,7 +231,7 @@ mod tests {
 		g.add_edge("a", "b", vec![]).unwrap();
 		g.add_self_loops();
 		let after_first = g.num_edges();
-		g.add_self_loops(); // re-running must add nothing
+		g.add_self_loops();
 		assert_eq!(
 			g.num_edges(),
 			after_first,
@@ -255,7 +253,6 @@ mod tests {
 		for id in ["a", "b", "c"] {
 			g.add_node(id, vec![1.0]).unwrap();
 		}
-		// Fully bidirectional triangle so every node has the same degree.
 		for (s, t) in [
 			("a", "b"),
 			("b", "a"),

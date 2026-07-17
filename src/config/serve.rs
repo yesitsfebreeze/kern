@@ -4,15 +4,14 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServeConfig {
-	/// HTTP RPC + MCP-over-HTTP bind address (the primary client-facing endpoint).
+	/// HTTP RPC + MCP-over-HTTP bind address.
 	pub addr: String,
-	/// Internal core typed-RPC socket — the kern_rpc surface used by sub-agents
-	/// and other in-host processes (not the public HTTP API).
+	/// Internal kern_rpc typed socket, not the public HTTP API.
 	pub core_addr: String,
-	/// Federation gossip bind address. **UDP** (discovery + state sync between
-	/// peer daemons) — distinct from the TCP listeners above.
+	/// Federation gossip bind address. **UDP** — its port lives in a separate
+	/// namespace from the TCP listeners above.
 	pub gossip: String,
-	/// MCP Server-Sent-Events streaming endpoint (push transport for MCP clients).
+	/// MCP SSE streaming endpoint.
 	pub mcp_sse: String,
 }
 
@@ -28,12 +27,8 @@ impl Default for ServeConfig {
 }
 
 impl ServeConfig {
-	/// Catch an obviously-broken layout before bind: two TCP listeners sharing a
-	/// port (which would make one fail at startup with a confusing OS error).
-	/// `gossip` is excluded — it is UDP, so its port lives in a separate
-	/// namespace and never clashes with the TCP endpoints. Empty (disabled),
-	/// port-0 (ephemeral), and unparseable addresses are skipped. Returns the
-	/// offending port + field names on conflict.
+	/// Reject two TCP listeners sharing a port. `gossip` is excluded (UDP);
+	/// empty, port-0, and unparseable addresses are skipped.
 	pub fn validate(&self) -> Result<(), String> {
 		let mut seen: HashMap<u16, &'static str> = HashMap::new();
 		for (name, addr) in [
@@ -82,7 +77,6 @@ mod tests {
 
 	#[test]
 	fn udp_gossip_sharing_a_tcp_port_is_allowed() {
-		// gossip is UDP; reusing a TCP port number is not a real conflict.
 		let cfg = ServeConfig {
 			addr: ":8080".into(),
 			gossip: ":8080".into(),

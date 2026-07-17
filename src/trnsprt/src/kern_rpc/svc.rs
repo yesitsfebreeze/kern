@@ -1,21 +1,5 @@
-//! `KernRpc` typed-RPC service definition.
-//!
-//! Driven by the `service!` proc macro from `trnsprt-macros`. Generates
-//! - the `KernRpc` trait (one method per RPC),
-//! - `KernRpcClient<C>` that owns a [`Channel`](crate::typed::Channel),
-//! - `serve_kern_rpc(channel, handler)` server loop.
-//!
-//! Sub-agents and other clients hold a `KernRpcClient`; kern (or
-//! a mock for tests) implements `KernRpc`. The service is a sibling to
-//! [`SearchSvc`](crate::search::SearchSvc) and intentionally shares
-//! several DTOs with it (`EntityRef`, `EntityKindLite`, `EdgeKind`,
-//! `NeighborsReq`/`Res`).
-//!
-//! Session/fork orchestration is intentionally **not** part of
-//! `KernRpc` — kern stays unaware of any client's session model.
-//!
-//! The macro-generated client + server plumbing is exercised end-to-end by
-//! `tests/kern_rpc.rs`.
+//! `KernRpc` service definition — the `service!` macro generates the trait,
+//! `KernRpcClient<C>`, and the `serve_kern_rpc(channel, handler)` loop.
 
 use super::dto::{
 	AnchorReq, AnchorRes, CallToolReq, CallToolRes, DegradeReq, DegradeRes, DescriptorReq,
@@ -49,17 +33,10 @@ crate::service! {
 				async fn descriptor(req: DescriptorReq) -> DescriptorRes;
 				/// Fire a stigmergic pulse through the root kern.
 				async fn pulse(req: PulseReq) -> PulseRes;
-				/// Generic MCP-style tool dispatch. Forwards the named tool's
-				/// arguments to the daemon's `mcp::Server::call_tool` and
-				/// returns the full MCP `{ content, isError? }` envelope. Used
-				/// by the `kern mcp` proxy subprocess so it can relay stdio
-				/// MCP `tools/call` requests over kern.sock without
-				/// enumerating each tool as a typed method.
+				/// Generic MCP tool dispatch via the daemon's `mcp::Server::call_tool`;
+				/// returns the full MCP `{ content, isError? }` envelope.
 				async fn call_tool(req: CallToolReq) -> CallToolRes;
-				/// Enumerate the daemon's live MCP tool schemas. Forwarded by the
-				/// `kern mcp` proxy so a pane's `tools/list` reflects what the
-				/// daemon actually exposes (e.g. the mux comms tools), not the
-				/// proxy's static catalogue.
+				/// Enumerate the daemon's live MCP tool schemas.
 				async fn list_tools(req: ListToolsReq) -> ListToolsRes;
 		}
 }

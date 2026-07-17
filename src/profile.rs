@@ -1,6 +1,5 @@
-//! Query-latency profiler (`kern profile`): a sequence of labelled
-//! [`Checkpoint`]s that splits a recall into graph-engine vs LLM
-//! (HyDE / answer / distill) stages, so the latency villain is visible.
+//! Query-latency profiler (`kern profile`): labelled [`Checkpoint`]s splitting a
+//! recall into graph-engine vs LLM (HyDE / answer / distill) stages.
 
 use std::time::Instant;
 
@@ -84,9 +83,7 @@ impl std::fmt::Display for Profile {
 	}
 }
 
-/// Render a set of profiles as an aligned ASCII timeline. Bars are scaled to
-/// the slowest profile; stage segments cycle fill characters so a bar's
-/// composition stays visible, and the per-stage numbers follow in parens.
+/// Render profiles as an aligned ASCII timeline; bars are scaled to the slowest.
 pub fn render_timeline(profiles: &[Profile], width: usize) -> String {
 	const FILLS: [char; 4] = ['█', '▓', '▒', '░'];
 	let max = profiles.iter().map(|p| p.total_ms).fold(0.0_f64, f64::max);
@@ -107,9 +104,8 @@ pub fn render_timeline(profiles: &[Profile], width: usize) -> String {
 			bar.extend(std::iter::repeat_n('█', n.max(1)));
 		} else {
 			for (i, c) in p.checkpoints.iter().enumerate() {
-				// Floor a positive stage to at least one cell: rounding alone
-				// drops a small-but-nonzero stage (e.g. the second-slowest) to a
-				// 0-width, invisible bar. A genuinely zero stage stays empty.
+				// Floor a positive stage to one cell: rounding alone makes a small
+				// stage invisible. A genuinely zero stage stays empty.
 				let n = if c.elapsed_ms > 0.0 {
 					(((c.elapsed_ms / max) * width as f64).round() as usize).max(1)
 				} else {
@@ -146,10 +142,7 @@ macro_rules! profile_block {
 	($name:expr, $code:block) => {{
 		let mut prof = $crate::profile::Profiler::new($name);
 		let result = { $code };
-		// Record the block body as a single stage so `finish()` yields a
-		// non-empty profile. The previous version finished the Profiler with
-		// ZERO checkpoints (and held a dead `start` Instant that was never read),
-		// so the logged profile carried no stage timing at all.
+		// Required: without a checkpoint `finish()` yields a stage-less profile.
 		prof.checkpoint("body");
 		tracing::debug!("{}", prof.finish());
 		result
@@ -178,7 +171,6 @@ mod tests {
 		assert_eq!(profile.checkpoints[0].label, "stage1");
 		assert_eq!(profile.checkpoints[1].label, "stage2");
 
-		// Each checkpoint should have elapsed time >= its sleep duration (within reason)
 		assert!(
 			profile.checkpoints[0].elapsed_ms >= 8.0,
 			"stage1 took {}",
@@ -257,7 +249,6 @@ mod tests {
 			lines[1].contains("a=60.0ms b=40.0ms"),
 			"stages listed: {out}"
 		);
-		// slow bar fills the full width, fast bar is ~2 cells
 		let slow_bar: usize = lines[1].chars().filter(|c| "█▓▒░".contains(*c)).count();
 		let fast_bar: usize = lines[0].chars().filter(|c| *c == '█').count();
 		assert_eq!(slow_bar, 20, "slow bar spans full width: {out}");
@@ -302,8 +293,6 @@ mod tests {
 
 	#[test]
 	fn profile_block_macro_returns_block_value_and_expands_clean() {
-		// Expanding the macro guards against the old dead-`start`/no-checkpoint
-		// regression; the macro must evaluate to the block's value.
 		let x = crate::profile_block!("unit", {
 			let a = 2;
 			a + 3

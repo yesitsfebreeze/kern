@@ -1,12 +1,5 @@
-//! Shared helpers for the trnsprt integration tests.
-//!
-//! The `spawn_mock_server` in each typed-RPC test (search_rpc, kern_rpc) is
-//! irreducibly type-specific — each builds a *different* generated client
-//! (`SearchSvcClient` vs `KernRpcClient`) over a different mock and `serve_*`
-//! fn, and the generated clients share no common trait, so the wrappers cannot
-//! collapse into one. What IS identical across them is the transport plumbing:
-//! an in-process adapter pair wired into two `JsonEnvelopeCodec` channels. That
-//! boilerplate lives here so the two tests stop copy-pasting it.
+//! Shared transport plumbing for the trnsprt integration tests. Each test keeps
+//! its own `spawn_mock_server` — generated clients share no trait, so it can't move here.
 
 use trnsprt::typed::{Channel, InprocAdapter, JsonEnvelopeCodec};
 

@@ -91,8 +91,7 @@ fn resource_health(server: &Server) -> String {
 	serde_json::to_string(&server.health_stats()).unwrap_or_default()
 }
 
-/// Cap for the `kern://local/thoughts` resource: it advertises "top thoughts
-/// by global rank", so return the highest-scoring slice rather than an
+/// Cap for `kern://local/thoughts`: the highest-scoring slice, never an
 /// unbounded full-graph dump.
 const TOP_THOUGHTS: usize = 50;
 
@@ -237,8 +236,6 @@ mod tests {
 		}
 	}
 
-	/// Insert kern "kx" holding entity "e1" with one incident edge e1->e2, so the
-	/// thought/reason handlers have a populated graph to render.
 	fn seed(server: &Server) {
 		let mut g = write_recovered(&server.graph);
 		let mut k = Kern::new("kx", "");

@@ -28,9 +28,8 @@ impl GCNLayer {
 		Self::with_rng(in_features, out_features, act, norm, drop_rate, &mut rng)
 	}
 
-	/// Construct a `GCNLayer` with deterministic weight init from a
-	/// seeded RNG. Use this in tests asserting on training dynamics so
-	/// the run is reproducible regardless of system entropy.
+	/// Deterministic weight init from a seeded RNG — use in tests asserting on
+	/// training dynamics so the run does not depend on system entropy.
 	pub fn with_rng<R: rand::Rng>(
 		in_features: usize,
 		out_features: usize,
@@ -57,11 +56,8 @@ impl GCNLayer {
 		}
 	}
 
-	/// Fallible backward pass. Returns [`GnnError::MissingForwardState`] when
-	/// invoked before a successful
-	/// `forward_graph` (instead of panicking) and bubbles tensor shape errors as
-	/// [`GnnError::Tensor`]. The infallible [`BackwardGraphLayer::backward_graph`]
-	/// delegates here.
+	/// Fallible backward — errors instead of panicking when `forward_graph` has
+	/// not run. The infallible [`BackwardGraphLayer::backward_graph`] delegates here.
 	pub fn try_backward_graph(&mut self, _g: &Graph, d_out: &Tensor) -> Result<Tensor, GnnError> {
 		let mut grad = d_out.clone();
 		if let Some(ref d) = self.drop {
@@ -179,9 +175,6 @@ mod tests {
 
 	#[test]
 	fn forward_graph_aggregates_then_projects_to_out_features() {
-		// No norm/dropout/activation -> output is a pure linear projection of the
-		// normalized-adjacency-aggregated features; assert shape + that the state
-		// backward needs is cached (independent of running backward).
 		let g = two_node_graph();
 		let feats = Tensor::new(2, 2, vec![1.0, 0.0, 0.0, 1.0]).unwrap();
 		let mut rng = StdRng::seed_from_u64(1);
@@ -216,7 +209,6 @@ mod tests {
 			layer.try_backward_graph(&g, &d_out).unwrap_err(),
 			GnnError::MissingForwardState(_)
 		));
-		// Infallible delegate degrades to a zero gradient of input shape (n x in).
 		let z = layer.backward_graph(&g, &d_out);
 		assert_eq!(
 			(z.rows, z.cols),

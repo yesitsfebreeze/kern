@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::base::locks::lock_recovered;
@@ -12,33 +12,23 @@ pub enum TaskKind {
 	Name,
 	Enrich,
 	ResolveQuestion,
-	/// Generate up to 3 dangling Question edges for a freshly placed entity
-	/// (`extra` = entity id). Enqueued by the ingest worker's defer hook so
-	/// the reason-LLM never blocks the commit path; dispatched to
-	/// `tasks::do_seed_questions`. (Replaces the long-dead no-op `Split`.)
+	/// Seed dangling Question edges for a placed entity (`extra` = entity id);
+	/// deferred so the reason-LLM never blocks the ingest commit path.
 	SeedQuestions,
-	/// Classify a recorded `Rephrase` near-dup (`kern_id` + `extra` = the rephrase
-	/// reason id) as UPDATE/CONTRADICTION vs RELATED, and on the former run
-	/// bi-temporal supersedence. Enqueued by the ingest worker's dedup defer hook
-	/// so the reason-LLM never blocks the commit path; dispatched to
-	/// `tasks::do_classify_contradiction`.
+	/// Classify a recorded `Rephrase` near-dup (`extra` = reason id) for bi-temporal
+	/// supersedence; deferred so the reason-LLM never blocks the commit path.
 	ClassifyContradiction,
 	Persist,
 	GnnPropagate,
-	/// Stigmergic cold-path garbage collection: drop thoughts whose pheromone
-	/// has fully evaporated (cold + stale + non-durable). Dispatched in
-	/// `tick::process_task` to `tick::stigmergy::run_gc`.
+	/// Cold-path GC: drop thoughts whose pheromone has fully evaporated.
 	StigmergyGc,
 	/// Re-embed dirty (edited) thoughts/reasons in a kern and clear the flag.
 	Reembed,
-	/// Fold the disk-backed entity index's in-RAM delta into a fresh DiskANN
-	/// snapshot and reset it. Graph-global (not per-kern); dispatched in
-	/// `tick::process_task` to `GraphGnn::consolidate_disk_index`.
+	/// Fold the disk index's in-RAM delta into a fresh DiskANN snapshot.
+	/// Graph-global (not per-kern).
 	DiskConsolidate,
-	/// Deferred live-graph access write-back for a completed query (`extra` =
-	/// newline-joined entity ids; `kern_id` empty). The MCP query path enqueues
-	/// this instead of taking a write lock inline, so queries stay read-only;
-	/// dispatched in `tick::process_task` to `score::commit_access_ids`.
+	/// Deferred access write-back for a completed query (`extra` = newline-joined
+	/// entity ids; `kern_id` empty), so queries stay read-only.
 	CommitAccess,
 }
 
@@ -70,8 +60,8 @@ pub struct Queue {
 	pending: Mutex<HashMap<TaskKey, bool>>,
 	inflight: std::sync::atomic::AtomicUsize,
 
-	/// Cumulative `(completed task count, total latency)` behind a single lock, so
-	/// the hot `record_task_latency` path takes one mutex instead of two.
+	/// Cumulative `(completed count, total latency)` behind one lock — the hot
+	/// `record_task_latency` path takes one mutex, not two.
 	stats: Mutex<(i64, Duration)>,
 }
 
@@ -107,9 +97,8 @@ impl Queue {
 			self
 				.inflight
 				.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-			// Roll back the pending marker too: otherwise a send failure (full
-			// channel) would leave this key flagged forever and dedup would block
-			// every future re-enqueue of the same task.
+			// Roll back the pending marker too — else a full-channel failure flags
+			// this key forever and dedup blocks every future re-enqueue.
 			lock_recovered(&self.pending).remove(&k);
 			return false;
 		}
@@ -164,9 +153,8 @@ pub fn task_extra(kind: TaskKind, kern_id: &str, extra: &str) -> Task {
 	}
 }
 
-/// A `CommitAccess` task carrying the retrieved entity ids to stamp, newline-joined
-/// in `extra` (`kern_id` empty — the write-back is graph-global). Entity ids are
-/// content hashes / doc ids and never contain a newline, so the join round-trips.
+/// `CommitAccess` task: ids newline-joined in `extra`. Entity ids never contain
+/// a newline, so the join round-trips.
 pub fn task_commit_access(ids: &[String]) -> Task {
 	Task {
 		kind: TaskKind::CommitAccess,
@@ -203,8 +191,7 @@ mod tests {
 
 	#[test]
 	fn full_channel_send_failure_rolls_back_pending() {
-		// Capacity 1: 'a' fills the channel; 'b' fails on try_send and must NOT be
-		// left stuck in pending (the regression this guards).
+		// Capacity 1: 'a' fills the channel so 'b' fails try_send.
 		let q = Queue::new(1);
 		assert!(q.enqueue(task(TaskKind::Cluster, "a")));
 		let b = task(TaskKind::Cluster, "b");
@@ -214,7 +201,6 @@ mod tests {
 			1,
 			"only 'a' remains pending; 'b' was rolled back"
 		);
-		// Free a slot, then 'b' can enqueue (its key was not blocked).
 		let mut rx = q.take_receiver().unwrap();
 		let _ = rx.try_recv();
 		assert!(q.enqueue(b), "b re-enqueues once a slot frees");

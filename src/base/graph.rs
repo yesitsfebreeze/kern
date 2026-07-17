@@ -10,40 +10,28 @@ use super::util;
 use super::vector_backend::VectorBackend;
 use crate::quant::QuantizationMode;
 
-/// Insert every entity/reason/source of `kern` into the cross-kern lookup
-/// maps and vector indices. Taken as disjoint `&mut` fields (not `&mut self`)
-/// so the caller can iterate `self.kerns` while filling the indices. Single
-/// source for the index-population loop shared by `rebuild_index` and the
-/// lazy-load path in `get`.
+/// Insert every entity/reason/source of `kern` into the cross-kern maps and
+/// vector indices. Disjoint `&mut` fields so callers can iterate `self.kerns`.
 #[allow(clippy::too_many_arguments)]
 fn index_kern_into(
 	kern: &Kern,
 	entity_kern: &mut HashMap<String, String>,
 	reason_kern: &mut HashMap<String, String>,
 	src_index: &mut HashMap<String, String>,
-	// `None` skips entity-vector insertion — used by `rebuild_index` when the
-	// entity index is a disk `snapshot` that ALREADY holds every resident entity
-	// (re-inserting would tombstone the whole snapshot into the delta). The reverse
-	// `entity_kern` map is still populated regardless. The lazy-load path passes
-	// `Some`, so a newly loaded kern's entities enter the live index (the delta,
-	// when disk-backed — correct, since they were not in the snapshot).
+	// `None` skips entity-vector inserts: a disk snapshot ALREADY holds every
+	// resident entity — re-inserting would tombstone it all into the delta.
 	mut entity_idx: Option<&mut VectorBackend>,
 	gnn_entity_idx: &mut VectorBackend,
 	reason_idx: &mut VectorBackend,
 ) {
-	// HNSW structure depends on insert order, so the index-population loops run
-	// in id order — never HashMap iteration order, which differs per instance
-	// and per process. Same content in, same graph out.
+	// HNSW structure depends on insert order — populate in id order, never HashMap
+	// order (differs per instance/process). Same content in, same graph out.
 	let mut entities: Vec<_> = kern.entities.values().collect();
 	entities.sort_by(|a, b| a.id.cmp(&b.id));
 	for t in entities {
 		entity_kern.insert(t.id.clone(), kern.id.clone());
-		// A Superseded entity can never be a retrieval result (`retrieval::score`
-		// drops it), so it must not enter the ANN search indices on load/rebuild —
-		// otherwise it burns top-k candidate slots and index memory only to be
-		// filtered downstream (the durable half of the supersede index-removal; the
-		// live transition is handled in `accept::supersede`). Its `entity_kern`
-		// mapping is kept so the supersede chain still resolves.
+		// Superseded entities can never be retrieval results, so they must not burn
+		// ANN slots; `entity_kern` is kept so the supersede chain still resolves.
 		let searchable = t.status != EntityStatus::Superseded;
 		if searchable && t.has_vector() {
 			if let Some(ei) = entity_idx.as_deref_mut() {
@@ -71,10 +59,8 @@ pub struct GraphGnn {
 	pub root: Kern,
 	pub network_id: String,
 	pub data_dir: String,
-	/// The embedded LMDB store backing this graph. `None` for an in-memory graph
-	/// (empty `data_dir`, e.g. tests). Opened once per load and shared so the
-	/// process holds a single LMDB env handle (LMDB forbids opening one env twice
-	/// in a process). Cheap to clone — it is reference-counted.
+	/// `None` for an in-memory graph. Opened once and shared — LMDB forbids
+	/// opening one env twice in a process. Cheap to clone (ref-counted).
 	store: Option<Arc<Store>>,
 	pub quant_mode: QuantizationMode,
 	pub gnn_entity_idx: VectorBackend,
@@ -86,45 +72,25 @@ pub struct GraphGnn {
 	entity_kern: HashMap<String, String>,
 	reason_kern: HashMap<String, String>,
 	lexical: Option<Arc<LexicalIndex>>,
-	/// Soft cap on the number of kerns held in memory at once. When `register`
-	/// would exceed this, the LRU (oldest `last_access`) non-root kern is
-	/// `unload`ed to disk. [`KERN_CAP_DISABLED`] disables the cap.
+	/// Soft cap on in-memory kerns: `register` unloads the LRU non-root kern when
+	/// exceeded. [`KERN_CAP_DISABLED`] disables the cap.
 	max_loaded_kerns: usize,
 	/// Resident searchable-entity count above which `rebuild_index` spills the
-	/// entity index to a disk-resident DiskANN snapshot (see
-	/// [`GraphConfig::disk_threshold`](crate::config::graph::GraphConfig)).
-	/// [`KERN_CAP_DISABLED`] (the default) means never spill.
+	/// entity index to a DiskANN snapshot. [`KERN_CAP_DISABLED`] = never spill.
 	disk_threshold: usize,
-	/// Monotonic graph-wide mutation counter, bumped on every content mutation:
-	/// a kern handed out mutably (`get_mut`), registered, or deregistered. The
-	/// query result cache stamps each entry with the epoch at creation and treats
-	/// the entry as valid only while the epoch is unchanged.
-	///
-	/// A *global* epoch rather than per-kern versions is deliberate and required
-	/// for soundness: HyDE rewrites the query before search, so retrieval reaches
-	/// kerns far from the raw query vector. A new memory landing in a kern the
-	/// previous run never touched would be invisible to any per-kern dependency
-	/// set, so that query would keep serving a result omitting it. Invalidating on
-	/// *any* mutation removes that hole — between writes the cache hits fully; a
-	/// write conservatively flushes it. Runtime-only (never serialised); the read/
-	/// query path takes `&GraphGnn` and so can never bump it — only mutations do.
+	/// Bumped on every content mutation; a query-cache entry is valid only while
+	/// it is unchanged. Must stay GLOBAL — per-kern versions are unsound under HyDE.
 	mutation_epoch: u64,
-	/// Store write-generation this graph is known consistent with — the on-disk
-	/// [`epoch`](crate::base::store) value at the last load or successful flush. The
-	/// persist paths compare it against the live on-disk epoch to detect that
-	/// ANOTHER writer (a stray CLI direct-write, a second daemon) committed since,
-	/// so a stale snapshot is never written over newer committed rows. The in-RAM
-	/// graph (no store) keeps this at 0. Runtime-only; never serialised.
+	/// Store write-generation at the last load/successful flush; persist paths
+	/// compare it against disk to detect another writer. Runtime-only.
 	flushed_epoch: u64,
-	/// Dense entity index + out-edge adjacency, built lazily by
-	/// [`entity_adjacency`](Self::entity_adjacency) and reused while the
-	/// `mutation_epoch` stamp matches. Runtime-only; never serialised.
+	/// Built lazily by [`entity_adjacency`](Self::entity_adjacency), reused while
+	/// the `mutation_epoch` stamp matches. Runtime-only.
 	adjacency_cache: parking_lot::RwLock<Option<(u64, Arc<EntityAdjacency>)>>,
 }
 
-/// Snapshot of the entity graph as dense indices: every distinct entity id gets
-/// an index into `ids`, and `out[i]` lists the indices entity `i` points at via
-/// its reasons (self-loops and edges touching unknown entities skipped).
+/// Entity graph as dense indices: `out[i]` lists what entity `i` points at via
+/// its reasons (self-loops and unknown-entity edges skipped).
 pub struct EntityAdjacency {
 	pub id_to_idx: HashMap<String, usize>,
 	pub ids: Vec<String>,
@@ -155,7 +121,11 @@ impl EntityAdjacency {
 				out[fi].push(ti);
 			}
 		}
-		Self { id_to_idx, ids, out }
+		Self {
+			id_to_idx,
+			ids,
+			out,
+		}
 	}
 }
 
@@ -197,16 +167,14 @@ impl GraphGnn {
 		}
 	}
 
-	/// The store write-generation this graph last loaded or flushed at. Persist
-	/// paths pass it to the stale-flush guard so they never overwrite rows a
-	/// concurrent writer committed after this graph's snapshot was taken.
+	/// The store write-generation this graph last loaded or flushed at, passed to
+	/// the stale-flush guard.
 	pub fn flushed_epoch(&self) -> u64 {
 		self.flushed_epoch
 	}
 
-	/// Record the store epoch this graph is now consistent with (after a load or a
-	/// successful guarded flush). Not a content mutation, so it does NOT bump the
-	/// query-cache `mutation_epoch`.
+	/// Record the store epoch this graph is now consistent with. Not a content
+	/// mutation, so it does NOT bump `mutation_epoch`.
 	pub fn set_flushed_epoch(&mut self, epoch: u64) {
 		self.flushed_epoch = epoch;
 	}
@@ -215,28 +183,25 @@ impl GraphGnn {
 		self.max_loaded_kerns = cap.max(1);
 	}
 
-	/// Set the resident-entity count above which the entity index spills to a disk
-	/// DiskANN snapshot on the next [`rebuild_index`](Self::rebuild_index).
-	/// [`KERN_CAP_DISABLED`] disables spilling. Takes effect on the next rebuild.
+	/// Resident-entity count above which the entity index spills to disk on the
+	/// next [`rebuild_index`](Self::rebuild_index). [`KERN_CAP_DISABLED`] disables it.
 	pub fn set_disk_threshold(&mut self, threshold: usize) {
 		self.disk_threshold = threshold;
 	}
 
-	/// Bind this graph to an open LMDB store. Called once after load so the
-	/// lazy-load / unload / deregister / persist paths share a single env handle.
+	/// Bind this graph to an open store, once after load, so all disk paths share
+	/// a single env handle.
 	pub fn set_store(&mut self, store: Arc<Store>) {
 		self.store = Some(store);
 	}
 
-	/// The store handle, if this graph is disk-backed. Cloned (ref-counted) so
-	/// callers can use it without holding a borrow on the graph.
+	/// The store handle, if disk-backed. Cloned so callers need no graph borrow.
 	pub fn store(&self) -> Option<Arc<Store>> {
 		self.store.clone()
 	}
 
-	/// Evict the oldest non-root kern by `last_access` while we are over the
-	/// soft cap. Errors during `unload` (persist failures) are swallowed —
-	/// the caller already accepted that we may degrade under pressure.
+	/// Evict the LRU non-root kern while over the soft cap. `unload` errors are
+	/// swallowed — degrading under pressure is accepted.
 	fn enforce_kern_cap(&mut self) {
 		if self.max_loaded_kerns == KERN_CAP_DISABLED {
 			return;
@@ -273,12 +238,8 @@ impl GraphGnn {
 		self.entity_kern.clear();
 		self.reason_kern.clear();
 
-		// Choose the entity backend. Above `disk_threshold` (and with a data_dir to
-		// write to) the entity vectors spill to a disk-resident DiskANN snapshot,
-		// keeping them off the heap; otherwise the historical in-RAM HNSW. The
-		// default threshold is the disabled sentinel, so this is a no-op for small
-		// deployments. A build/open failure falls back to the in-RAM index — the
-		// graph stays searchable, never broken, on a disk error.
+		// Above `disk_threshold` (with a data_dir) entity vectors spill to a DiskANN
+		// snapshot; a build/open failure falls back to in-RAM, still searchable.
 		let entity_count = self.resident_searchable_entity_count();
 		let spill = !self.data_dir.is_empty() && entity_count > self.disk_threshold;
 		self.entity_idx = match spill.then(|| self.build_entity_disk_snapshot()).flatten() {
@@ -286,10 +247,8 @@ impl GraphGnn {
 			None => VectorBackend::resident(16, 200, self.quant_mode),
 		};
 
-		// When the entity index is a disk snapshot it ALREADY holds every resident
-		// entity, so the populate loop must not re-insert them (that would tombstone
-		// the whole snapshot into the delta). `None` skips entity insertion while
-		// still filling the reverse maps and the gnn/reason indices.
+		// A disk snapshot already holds every resident entity — `None` skips the
+		// re-insert (which would tombstone it) but still fills the reverse maps.
 		let skip_entity_insert = matches!(self.entity_idx, VectorBackend::Disk { .. });
 		let mut kerns: Vec<&Kern> = self.kerns.values().collect();
 		kerns.sort_by(|a, b| a.id.cmp(&b.id));
@@ -306,10 +265,8 @@ impl GraphGnn {
 		}
 	}
 
-	/// Count of resident entities eligible for the entity index — non-Superseded
-	/// and vector-bearing, mirroring [`index_kern_into`]'s filter. Cheap (no
-	/// vector clones); drives the [`rebuild_index`](Self::rebuild_index) spill
-	/// decision.
+	/// Count of index-eligible resident entities (non-Superseded, vector-bearing),
+	/// mirroring [`index_kern_into`]'s filter. Drives the spill decision.
 	fn resident_searchable_entity_count(&self) -> usize {
 		self
 			.kerns
@@ -319,10 +276,8 @@ impl GraphGnn {
 			.count()
 	}
 
-	/// Collect every searchable resident entity's content vector as `(id, f32)`,
-	/// deduped by id and id-sorted (via `BTreeMap`) so the seeded Vamana build is
-	/// reproducible. Mirrors `entity_idx` membership exactly; entity vectors are
-	/// f32 end-to-end, so this is a plain clone.
+	/// Every searchable resident entity's vector as `(id, f32)`, id-sorted via
+	/// `BTreeMap` so the seeded Vamana build is reproducible.
 	fn collect_entity_items(&self) -> Vec<(String, Vec<f32>)> {
 		let mut items: std::collections::BTreeMap<String, Vec<f32>> = std::collections::BTreeMap::new();
 		for kern in self.kerns.values() {
@@ -335,10 +290,8 @@ impl GraphGnn {
 		items.into_iter().collect()
 	}
 
-	/// Snapshot every searchable resident entity into a disk-resident Vamana index
-	/// under `dir` (see [`collect_entity_items`](Self::collect_entity_items)).
-	/// Returns the number of vectors written. The build half of the DiskANN
-	/// integration; used by [`rebuild_index`](Self::rebuild_index) when spilling.
+	/// Snapshot every searchable resident entity into a Vamana index under `dir`,
+	/// returning the count written. The build half of the DiskANN spill.
 	pub fn build_entity_disk_index(&self, dir: &std::path::Path) -> std::io::Result<usize> {
 		super::diskann::build_and_save(
 			dir,
@@ -348,8 +301,7 @@ impl GraphGnn {
 	}
 
 	/// Build the entity snapshot under `<data_dir>/diskann/entity` and open it.
-	/// Returns `None` (logging a warning) on any build/open failure so the caller
-	/// can fall back to the in-RAM index rather than break the graph.
+	/// `None` (with a warning) on failure so the caller can fall back to in-RAM.
 	fn build_entity_disk_snapshot(&self) -> Option<super::diskann::DiskIndex> {
 		let dir = std::path::Path::new(&self.data_dir)
 			.join("diskann")
@@ -367,43 +319,23 @@ impl GraphGnn {
 		}
 	}
 
-	/// Rebuild the entity disk snapshot from the current resident entities and
-	/// reset the in-RAM delta and tombstones. No-op unless the entity index is
-	/// disk-backed. Without this the delta grows without bound on a long-running
-	/// daemon (every post-snapshot write buffers there); folding it back keeps the
-	/// resident overlay small. The source of truth is `self.kerns` — every delta
-	/// entity is also stored there — so this re-snapshots from kerns (identical
-	/// live membership, Superseded/forgotten ids naturally dropped), not from the
-	/// delta. A build failure falls back to a correct in-RAM rebuild.
-	///
-	/// COST: the full Vamana `build_and_save` runs inline, and the tick dispatcher
-	/// (`do_disk_consolidate`) holds the graph WRITE lock for its whole duration —
-	/// a maintenance pause that scales with the resident entity count, blocking all
-	/// reads/writes meanwhile. This matches the tick's serialized model (every task
-	/// holds the write lock), and it is gated to fire at most hourly and only past
-	/// `DISK_CONSOLIDATE_MIN_DELTA`, so it is rare; but on a very large corpus it is
-	/// a stop-the-world stall. A non-blocking two-phase consolidate (build outside
-	/// the lock against a transitional write-routing delta, swap under a brief lock)
-	/// is the planned follow-up — see the backlog in
-	/// `docs/superpowers/plans/2026-06-12-diskann-wiring.md`.
+	/// Re-snapshot the entity index from `self.kerns` and reset the delta; no-op
+	/// unless disk-backed. COST: the Vamana build runs under the graph WRITE lock.
 	pub fn consolidate_disk_index(&mut self) {
 		if !matches!(self.entity_idx, VectorBackend::Disk { .. }) {
 			return;
 		}
-		// Drop the old snapshot's mmap FIRST so the rebuild can overwrite its files
-		// (Windows locks memory-mapped files). A transient empty resident index
-		// stands in; the caller holds the graph write lock, so no search sees it.
+		// Drop the old mmap FIRST so the rebuild can overwrite its files (Windows
+		// locks mmapped files). The transient placeholder is safe under the write lock.
 		self.entity_idx = VectorBackend::resident(16, 200, self.quant_mode);
 		match self.build_entity_disk_snapshot() {
 			Some(snapshot) => self.entity_idx = VectorBackend::disk(snapshot, self.quant_mode),
-			// Build failed mid-consolidate: repopulate a correct in-RAM index so the
-			// graph is never left with the empty placeholder above.
 			None => self.rebuild_index(),
 		}
 	}
 
-	/// Post-snapshot writes currently buffered in the disk delta (0 if the entity
-	/// index is not disk-backed). Drives the consolidation cadence.
+	/// Writes buffered in the disk delta (0 if not disk-backed). Drives the
+	/// consolidation cadence.
 	pub fn pending_disk_delta_len(&self) -> usize {
 		self.entity_idx.pending_delta_len()
 	}
@@ -445,10 +377,8 @@ impl GraphGnn {
 			self.get(id);
 		}
 		if self.kerns.contains_key(id) {
-			// Conservatively bump: a caller asking for `&mut Kern` is presumed to
-			// mutate it. Over-bumping (a get_mut that changes nothing) only costs a
-			// cache flush; it never serves stale data. Heat/access updates run on
-			// result copies, not through here, so the read path never bumps.
+			// A `&mut Kern` is presumed to mutate; over-bumping only costs a cache
+			// flush, never stale data.
 			self.bump_mutation_epoch();
 		}
 		if let Some(k) = self.kerns.get_mut(id) {
@@ -459,21 +389,18 @@ impl GraphGnn {
 		}
 	}
 
-	/// Advance the graph-wide mutation epoch. The query cache compares the stamped
-	/// epoch against the live one to invalidate every entry on any change.
+	/// Advance the mutation epoch, invalidating every query-cache entry.
 	pub fn bump_mutation_epoch(&mut self) {
 		self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
 	}
 
-	/// Current graph mutation epoch. A query-cache entry is valid only while this
-	/// equals the epoch captured when the entry was stored.
+	/// Current mutation epoch; a cache entry is valid only while it matches.
 	pub fn mutation_epoch(&self) -> u64 {
 		self.mutation_epoch
 	}
 
-	/// The dense entity adjacency for this graph, cached across queries: rebuilt
-	/// only when the `mutation_epoch` has moved since the cached copy was built.
-	/// Reads take `&self`, so between writes concurrent readers share one Arc.
+	/// Dense entity adjacency, cached across queries and rebuilt only when
+	/// `mutation_epoch` moves. Reads take `&self`, so readers share one Arc.
 	pub fn entity_adjacency(&self) -> Arc<EntityAdjacency> {
 		let epoch = self.mutation_epoch;
 		{
@@ -562,12 +489,8 @@ impl GraphGnn {
 		}
 		self.kerns.remove(id);
 		self.unloaded.remove(id);
-		// Removal is a mutation too — flush the cache.
 		self.bump_mutation_epoch();
-		// Delete the on-disk row too, so a deregistered kern does not resurrect on
-		// the next load. (The old file-shard tier needed this because `load_dir`
-		// read every `*.kern` as live; the store reconciles on `save_all`, but an
-		// explicit delete keeps disk and memory in step immediately.)
+		// Delete the on-disk row so a deregistered kern does not resurrect on load.
 		if let Some(store) = &self.store {
 			let _ = store.delete_one_kern(id);
 		}
@@ -587,32 +510,12 @@ impl GraphGnn {
 		Ok(())
 	}
 
-	/// Reap unnamed kerns that hold no entities and no surviving children — the
-	/// residue of the historical unnamed-child spawn runaway (see
-	/// [`crate::base::accept::get_or_spawn_unnamed_child`]) which fragments the
-	/// graph to `max_kerns` near-empty kerns. Every retrieval seed, tick
-	/// `enqueue_all`, and `/graph` render is O(loaded kerns), so this bloat is a
-	/// flat tax on latency. Iterates leaf-first until stable, so an empty parent
-	/// of (now-removed) empty children is reaped in a later pass. Detaches each
-	/// victim from its parent's `children` first, leaving no dangling ref. The
-	/// root, named kerns, and any kern with entities or a non-empty descendant are
-	/// never touched. Returns the number removed.
+	/// Reap kerns that are pure structural residue. Liveness seeds at root/named/
+	/// entity-bearing kerns and flows UP the parent chain, so paths to data survive.
 	pub fn gc_empty_kerns(&mut self) -> usize {
 		let root_id = self.root.id.clone();
 
-		// Liveness reap. A kern is a *seed* of liveness if it is the root, is
-		// named (an anchor), or holds at least one entity. Liveness then flows UP
-		// the parent chain: every ancestor of a live kern is live, so the path
-		// from the root down to real data always survives. Every kern NOT marked
-		// live is pure structural residue and is reaped — even if it still has
-		// children.
-		//
-		// Dropping the old `children.is_empty()` leaf-first requirement is the
-		// whole point: the unnamed-child spawn runaway produced a *cyclic* forest
-		// of empty kerns where every node has children and no childless leaf ever
-		// exists, so the leaf-first reap could never start and left hundreds of
-		// thousands of empty shards on disk. The parent-walk is cycle-safe via the
-		// `live` visited-set: re-encountering an already-live id stops the walk.
+		// Cycle-safe via the `live` visited-set: re-encountering a live id stops.
 		let mut live: std::collections::HashSet<String> = std::collections::HashSet::new();
 		for k in self.kerns.values() {
 			if k.id != root_id && !k.is_named() && k.entities.is_empty() {
@@ -621,14 +524,14 @@ impl GraphGnn {
 			let mut cur = k.id.clone();
 			loop {
 				if !live.insert(cur.clone()) {
-					break; // already live → its ancestors are already marked
+					break; // ancestors already marked
 				}
 				let parent = match self.kerns.get(&cur) {
 					Some(pk) => pk.parent.clone(),
 					None => break,
 				};
 				if parent.is_empty() || parent == cur {
-					break; // reached root or a self-parent guard
+					break; // reached root or self-parent
 				}
 				cur = parent;
 			}
@@ -650,11 +553,7 @@ impl GraphGnn {
 			self.deregister(id);
 		}
 
-		// Drop every child ref pointing at a kern that no longer exists — the
-		// reaped victims AND any file deleted out-of-band. One linear pass over
-		// surviving children, keyed on a membership set: O(total children), not
-		// O(victims × children), which would explode when the root holds hundreds
-		// of thousands of dead child refs (the exact bloat this reaps).
+		// Scrub child refs pointing at kerns that no longer exist.
 		let existing: std::collections::HashSet<String> = self.kerns.keys().cloned().collect();
 		for k in self.kerns.values_mut() {
 			if !k.children.is_empty() {
@@ -664,9 +563,8 @@ impl GraphGnn {
 		removed
 	}
 
-	/// [`gc_empty_kerns`](Self::gc_empty_kerns) wrapped with the loaded-kern counts
-	/// either side, as `(before, reaped, after)` — the shape both the startup reap
-	/// and the offline `gc` command log.
+	/// [`gc_empty_kerns`](Self::gc_empty_kerns) plus the loaded-kern counts either
+	/// side, as `(before, reaped, after)`.
 	pub fn gc_empty_kerns_counted(&mut self) -> (usize, usize, usize) {
 		let before = self.kerns.len();
 		let reaped = self.gc_empty_kerns();
@@ -752,10 +650,6 @@ mod tests {
 
 	#[test]
 	fn rebuild_index_is_deterministic_across_instances() {
-		// Two graphs holding the same kerns/entities/reasons must rebuild into
-		// byte-identical HNSW structures, regardless of HashMap iteration order
-		// (which differs per instance and per process). This is the 10k-scale
-		// determinism gate: without it every rebuild is a different index.
 		use crate::base::types::Reason;
 		let vec_of = |i: usize, off: f64| -> Vec<f32> {
 			(0..8)
@@ -824,9 +718,6 @@ mod tests {
 
 	#[test]
 	fn rebuild_index_excludes_superseded_entities() {
-		// Superseded entities are always filtered from retrieval, so re-indexing them
-		// on load/rebuild only pollutes candidate generation. rebuild_index must skip
-		// them while keeping active entities searchable.
 		let mut g = GraphGnn::new();
 		let kid = g.root.id.clone();
 		if let Some(k) = g.get_mut(&kid) {
@@ -866,13 +757,8 @@ mod tests {
 
 	#[test]
 	fn disk_index_snapshot_mirrors_in_ram_membership_and_ranking() {
-		// I2: build_entity_disk_index must snapshot EXACTLY what entity_idx holds —
-		// active+vector-bearing entities, Superseded excluded — and a DiskIndex
-		// opened from it must rank consistently with the in-RAM HNSW (the snapshot
-		// is a faithful disk-resident substitute, the basis for later search
-		// routing). Vectors are well-separated (distinct per-dim frequencies) so the
-		// nearest-neighbour structure is unambiguous despite int8 quant noise in the
-		// in-RAM index vs raw f32 on disk.
+		// Vectors use distinct per-dim frequencies so the nearest-neighbour structure
+		// is unambiguous despite in-RAM int8 quant noise vs raw f32 on disk.
 		use crate::base::diskann::DiskIndex;
 		let mut g = GraphGnn::new();
 		let kid = g.root.id.clone();
@@ -893,7 +779,6 @@ mod tests {
 					},
 				);
 			}
-			// Superseded entity must never enter the snapshot.
 			k.entities.insert(
 				"dead".into(),
 				Entity {
@@ -957,9 +842,6 @@ mod tests {
 
 	#[test]
 	fn rebuild_index_spills_entity_index_to_disk_above_threshold() {
-		// I5: rebuild_index routes the entity index to a disk DiskANN snapshot once
-		// the resident searchable-entity count crosses disk_threshold, and search
-		// keeps working through it. gnn/reason stay in-RAM (entity-only spill here).
 		let dir = tempfile::tempdir().unwrap();
 		let mut g = GraphGnn::new();
 		g.data_dir = dir.path().to_string_lossy().into_owned();
@@ -978,14 +860,12 @@ mod tests {
 			}
 		}
 
-		// Default threshold (disabled): in-RAM index.
 		g.rebuild_index();
 		assert!(
 			matches!(g.entity_idx, VectorBackend::Resident(_)),
 			"default threshold keeps the in-RAM index"
 		);
 
-		// Above threshold: spill to disk, and the snapshot files must exist.
 		g.set_disk_threshold(10);
 		g.rebuild_index();
 		assert!(
@@ -1001,12 +881,9 @@ mod tests {
 				.exists(),
 			"on-disk snapshot written"
 		);
-		// gnn/reason remain resident in this increment.
 		assert!(matches!(g.gnn_entity_idx, VectorBackend::Resident(_)));
 		assert!(matches!(g.reason_idx, VectorBackend::Resident(_)));
 
-		// Parity across the boundary: an indexed query point ranks itself first via
-		// the disk-backed path, and the reverse entity_kern map is still populated.
 		let hits = crate::base::search::search_all_unlocked(&g, &vec8(7), 5);
 		assert_eq!(
 			hits.first().map(|h| h.entity_id.clone()),
@@ -1021,8 +898,6 @@ mod tests {
 
 	#[test]
 	fn rebuild_index_never_spills_without_a_data_dir() {
-		// In-memory graph (empty data_dir): there is nowhere to write a snapshot, so
-		// the entity index must stay resident even below a tiny threshold.
 		let mut g = GraphGnn::new();
 		let kid = g.root.id.clone();
 		if let Some(k) = g.get_mut(&kid) {
@@ -1048,8 +923,6 @@ mod tests {
 
 	#[test]
 	fn consolidate_folds_delta_into_snapshot_and_resets_it() {
-		// I6: post-snapshot writes buffer in the delta; consolidate re-snapshots
-		// from kerns, leaving the delta empty while keeping every entity searchable.
 		let dir = tempfile::tempdir().unwrap();
 		let mut g = GraphGnn::new();
 		g.data_dir = dir.path().to_string_lossy().into_owned();
@@ -1079,8 +952,7 @@ mod tests {
 			"fresh snapshot has an empty delta"
 		);
 
-		// Add entities AFTER the snapshot, mirroring the live path (source of truth
-		// AND the index/delta both get the write).
+		// Mirror the live path: source of truth AND the index/delta both get the write.
 		if let Some(k) = g.get_mut(&kid) {
 			for i in 100..115 {
 				k.entities.insert(
@@ -1114,7 +986,6 @@ mod tests {
 			"delta folded into the rebuilt snapshot"
 		);
 
-		// Both pre- and post-snapshot entities are searchable from the new snapshot.
 		let new_hit = crate::base::search::search_all_unlocked(&g, &vec8(108), 5);
 		assert_eq!(
 			new_hit.first().map(|h| h.entity_id.clone()),
@@ -1131,7 +1002,6 @@ mod tests {
 
 	#[test]
 	fn consolidate_is_a_noop_for_a_resident_index() {
-		// Never disk-backed: consolidate must not panic or change the backend.
 		let mut g = GraphGnn::new();
 		let kid = g.root.id.clone();
 		if let Some(k) = g.get_mut(&kid) {
@@ -1156,17 +1026,14 @@ mod tests {
 
 	#[test]
 	fn gc_reaps_cyclic_empty_kerns_with_children() {
-		// Reproduces the spawn-runaway shape: a cycle of empty unnamed kerns where
-		// every node has children and NO childless leaf exists. The old leaf-first
-		// reap could not start here and left them on disk forever.
+		// The spawn-runaway shape: a cycle of empty kerns with NO childless leaf —
+		// do NOT simplify to a leaf-first reap, which can never start here.
 		let mut g = GraphGnn::default();
 		let root_id = g.root.id.clone();
 
-		// Two empty unnamed kerns pointing at each other → a 2-cycle, no leaf.
 		g.register(empty_unnamed("A", &root_id, &["B"]));
 		g.register(empty_unnamed("B", "A", &["A"]));
 
-		// A named anchor (kept) and an entity-bearing kern (kept), both under root.
 		let mut named = Kern::new("N", &root_id);
 		named.anchor_text = "durable facts".into();
 		g.register(named);
@@ -1200,7 +1067,6 @@ mod tests {
 		assert!(g.loaded(&root_id).is_some(), "root kept");
 		assert_eq!(g.kerns.len(), before - 2);
 
-		// Root's child list no longer references the reaped kerns.
 		let root_children = &g.kerns.get(&root_id).unwrap().children;
 		assert!(
 			!root_children.contains(&"A".to_string()),

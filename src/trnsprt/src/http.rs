@@ -1,7 +1,5 @@
-//! MCP Streamable HTTP transport (2025 spec).
-//!
-//! `POST /mcp` — client request → JSON response.
-//! `GET  /mcp` — SSE stream for server-initiated notifications.
+//! MCP Streamable HTTP transport (2025 spec). `POST /mcp` — request → JSON
+//! response; `GET /mcp` — SSE stream for server-initiated notifications.
 
 use std::sync::Arc;
 
@@ -15,7 +13,6 @@ use axum::Router;
 use crate::server::{dispatch, error_response};
 use crate::McpServer;
 
-/// Serve MCP Streamable HTTP on `addr` (e.g. `"127.0.0.1:3001"`).
 pub async fn serve_http<S>(server: Arc<S>, addr: &str) -> std::io::Result<()>
 where
 	S: McpServer + Sync + 'static,
@@ -35,9 +32,8 @@ async fn handle_post<S: McpServer + Sync + 'static>(
 	headers: HeaderMap,
 	body: String,
 ) -> impl IntoResponse {
-	// Reject an explicit non-JSON Content-Type up front. A missing header is
-	// allowed (many MCP clients omit it) — the JSON parse below still rejects a
-	// non-JSON body with -32700, so this only hardens the mislabelled-payload case.
+	// A missing Content-Type is allowed (many MCP clients omit it); only an
+	// explicit non-JSON one is rejected.
 	if let Some(ct) = headers.get(axum::http::header::CONTENT_TYPE) {
 		let is_json = ct
 			.to_str()
@@ -87,12 +83,8 @@ mod tests {
 	use axum::http::header::CONTENT_TYPE;
 	use serde_json::{json, Value};
 
-	// Local mock instead of test-utils::AdderServer: trnsprt has a dev-dependency
-	// CYCLE (trnsprt -> test-utils -> trnsprt), so within trnsprt's own unit-test
-	// build, AdderServer impls a *different* McpServer instance than this harness
-	// sees. A mock over this crate's own trait sidesteps that. (The cross-crate
-	// AdderServer is still used by src/trnsprt/tests/integration.rs, a separate
-	// crate where both see the same trnsprt.)
+	// Local mock, not test-utils::AdderServer: trnsprt's dev-dep cycle
+	// (trnsprt -> test-utils -> trnsprt) makes that a *different* McpServer here.
 	struct MockServer;
 	impl McpServer for MockServer {
 		fn tools_list(&self) -> Vec<crate::ToolSchema> {
@@ -165,7 +157,6 @@ mod tests {
 		let server = Arc::new(MockServer);
 		let mut headers = HeaderMap::new();
 		headers.insert(CONTENT_TYPE, "text/plain".parse().unwrap());
-		// Body is valid JSON, but the mislabelled Content-Type is rejected up front.
 		let resp = handle_post(State(server), headers, "{}".into())
 			.await
 			.into_response();

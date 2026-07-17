@@ -8,16 +8,13 @@ use std::sync::Arc;
 use crate::retrieval;
 use crate::types::{EmbedFunc, LlmFunc};
 
-/// MCP schema for the `query` tool, co-located with its `tool_query` handler so
-/// the two cannot silently drift. Aggregated by `tools::tool_definitions`.
 pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 	vec![serde_json::json!({
 		"name": "query",
 		"description": "Search the knowledge graph. Returns scored thoughts and optionally an LLM answer. Requires at least one of `text` (semantic/lexical search) or `id` (direct lookup).",
 		"inputSchema": {
 			"type": "object",
-			// Mirrors tool_query's runtime guard ("either text or id is required"):
-			// a filter-only call with neither is rejected, so the schema says so too.
+			// Mirrors tool_query's runtime "either text or id is required" guard.
 			"anyOf": [
 				{"required": ["text"]},
 				{"required": ["id"]},
@@ -44,10 +41,8 @@ pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 
 use super::{tool_error, tool_result_json, Server};
 
-/// Parse an optional RFC3339 time filter from a query arg. An empty string
-/// means "no filter"; a non-empty but unparseable value is a hard error, so a
-/// typo'd time-bounded query fails loudly instead of silently returning the
-/// full unfiltered result set.
+/// Empty string = no filter; a non-empty unparseable value is a hard error so
+/// a typo'd time filter fails loudly instead of silently going unfiltered.
 fn parse_time_filter(field: &str, value: &str) -> Result<Option<std::time::SystemTime>, String> {
 	if value.is_empty() {
 		return Ok(None);
@@ -57,9 +52,6 @@ fn parse_time_filter(field: &str, value: &str) -> Result<Option<std::time::Syste
 		.map_err(|()| format!("invalid `{field}` timestamp: {value}"))
 }
 
-/// Translate the filter/sort fields of a parsed [`QueryArgs`] into a
-/// [`retrieval::score::QueryOptions`]. Returns the tool-error message (`Err`)
-/// for an unknown scheme or an unparseable `since`/`before`/`valid_at` filter.
 fn build_query_options(p: &QueryArgs) -> Result<retrieval::score::QueryOptions, String> {
 	let mut opts = retrieval::score::QueryOptions {
 		sort: retrieval::score::SortField::parse(&p.sort),
@@ -99,17 +91,12 @@ struct QueryArgs {
 	sort: String,
 	#[serde(default)]
 	ascending: bool,
-	/// Legacy free-form source-system filter (e.g. "github"). Matches
-	/// `Source::system()` for tickets and the synthesized scheme tag for
-	/// other variants. Prefer `scheme` for typed routing.
+	/// Legacy free-form source-system filter; prefer `scheme` for typed routing.
 	#[serde(default)]
 	source: String,
-	/// Typed entity-kind filter (`fact`, `claim`, `document`, `question`,
-	/// `answer`, `conclusion`). Unknown values yield an error.
 	#[serde(default)]
 	kind: Option<EntityKind>,
-	/// URI scheme filter on `Source` — one of `file`, `ticket`, `session`,
-	/// `agent`, `inline`. Unknown values yield an error.
+	/// URI scheme filter on `Source` (see `Source::parse_scheme`); unknown values error.
 	#[serde(default)]
 	scheme: Option<String>,
 	#[serde(default)]
@@ -161,20 +148,12 @@ impl Server {
 		let answer_on = p.answer;
 		let rcfg = &self.cfg.retrieval;
 
-		// Only the answer path is worth caching — it fires HyDE + synthesis (tens
-		// of seconds); pure vector retrieval is already sub-millisecond. And only
-		// unfiltered, default-sorted queries are cacheable, because a filter or a
-		// non-default sort changes the result set/order while the query vector
-		// stays the same. The `tag` (mode) keeps the three retrieval modes from
-		// colliding on one entry.
 		let cacheable = query_is_cacheable(answer_on, rcfg.query_cache_cap, &p);
 		let tag = mode as u64;
 		let text_hash = retrieval::cache::hash_text(&p.text);
 
-		// Exact-text fast path: a verbatim re-ask (same text, same mode, graph
-		// unchanged) returns the cached result WITHOUT even embedding the query —
-		// skipping the embedding round-trip on top of the LLM pipeline. `vec` stays
-		// `None` on this path; cold-tier fill below is guarded on it.
+		// Exact-text fast path: a verbatim re-ask skips even the embed round-trip.
+		// `vec` stays `None` here; cold-tier fill below is guarded on it.
 		let text_hit = if cacheable {
 			let g = crate::base::locks::read_recovered(&self.graph);
 			self
@@ -213,11 +192,8 @@ impl Server {
 
 			let (llm_arg, embed_arg) = answer_llm_args(answer_on, &llm_fn, &embed_fn);
 
-			// Semantic lookup: a paraphrase-close prior query (brief read lock for
-			// the epoch + cosine scan). On a miss, `query_locked` runs retrieval
-			// under its own short-lived lock and does HyDE/rerank/answer with the
-			// lock RELEASED — so a slow cloud LLM never pins the read lock long
-			// enough to starve writers and trip the 30s watchdog.
+			// `query_locked` runs HyDE/rerank/answer with the read lock RELEASED — a
+			// slow LLM must never pin it (starves writers, trips the 30s watchdog).
 			let cached = if cacheable {
 				let g = crate::base::locks::read_recovered(&self.graph);
 				self
@@ -242,21 +218,16 @@ impl Server {
 						Some(opts),
 					);
 					if cacheable {
-						// Stamp with the epoch captured at retrieval time (returned by
-						// query_locked), not the live epoch — a write during the LLM
-						// phase then correctly invalidates this entry on the next lookup.
+						// Stamp with the epoch captured at retrieval time, not the live one —
+						// a write during the LLM phase then invalidates this entry.
 						if let Ok(mut c) = self.cache.lock() {
 							c.insert(epoch, text_hash, vec.clone(), tag, fresh.clone());
 						}
 					}
-					// Deferred access write-back: query_locked took ONLY a read lock, so
-					// the live-graph access stamp (accessed_at/heat/access_count) is done
-					// off the hot path by a CommitAccess tick task. No task queue
-					// (embedded/bench) simply skips it — the stamp is advisory recency
-					// data, not correctness.
+					// query_locked took ONLY a read lock; the access stamp is committed off
+					// the hot path by a CommitAccess task (advisory, skipped without a queue).
 					if let Some(ref q) = self.task_q {
-						let ids: Vec<String> =
-							fresh.entities.iter().map(|s| s.entity.id.clone()).collect();
+						let ids: Vec<String> = fresh.entities.iter().map(|s| s.entity.id.clone()).collect();
 						if !ids.is_empty() {
 							q.enqueue(crate::tick::queue::task_commit_access(&ids));
 						}
@@ -276,18 +247,15 @@ impl Server {
 
 		let k = if p.k == 0 { rcfg.seed_k } else { p.k };
 
-		// Cold-tier recall: when the hot graph yields fewer than k, fill the
-		// remaining slots from the cold store (read-only; demoted thoughts
-		// stay findable without rehydrating into the hot graph).
+		// Cold-tier recall: below k, fill from the cold store read-only — demoted
+		// thoughts stay findable without rehydrating into the hot graph.
 		let mut scored: Vec<retrieval::expand::ScoredEntity> = result.entities.clone();
 		let mut cold_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-		// Cold-tier fill needs the query vector. On the exact-text fast path we
-		// skipped embedding (`vec` is `None`), so cold-tier is skipped too — the
-		// cached hot result already reflects what a verbatim re-ask returned.
+		// The exact-text fast path skipped embedding (`vec` None), so cold-tier
+		// fill is skipped too.
 		if let Some(ref vec) = vec {
 			if scored.len() < k {
-				// Clone the store handle out from under a brief read guard, then drop
-				// the guard before the cold scan.
+				// Clone the store handle under a brief read guard; drop it before the scan.
 				let store = crate::base::locks::read_recovered(&self.graph).store();
 				let have: std::collections::HashSet<String> =
 					scored.iter().map(|s| s.entity.id.clone()).collect();
@@ -305,10 +273,8 @@ impl Server {
 			}
 		}
 
-		// Bi-temporal history: walk Supersedes chains back from the active hits and
-		// append the reachable Superseded revisions (the ANN never holds them).
-		// They pass through the same `matches_filter`, so an `as_of`/kind/scheme
-		// constraint applies to history too, and are flagged `history:true`.
+		// Bi-temporal history: walk Supersedes chains back from the active hits (the
+		// ANN never holds Superseded rows); same `matches_filter`, flagged history:true.
 		let mut history_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 		if p.include_history {
 			let opts = match build_query_options(&p) {
@@ -316,8 +282,10 @@ impl Server {
 				Err(e) => return tool_error(&e),
 			};
 			let g = crate::base::locks::read_recovered(&self.graph);
-			let heads: Vec<(String, f64)> =
-				scored.iter().map(|s| (s.entity.id.clone(), s.score)).collect();
+			let heads: Vec<(String, f64)> = scored
+				.iter()
+				.map(|s| (s.entity.id.clone(), s.score))
+				.collect();
 			let mut have: std::collections::HashSet<String> =
 				scored.iter().map(|s| s.entity.id.clone()).collect();
 			for (head_id, head_score) in heads {
@@ -344,8 +312,7 @@ impl Server {
 			}
 		}
 
-		// History rows ride ALONGSIDE the top-k active hits rather than displacing
-		// them, so raise the cut by the number added.
+		// History rides ALONGSIDE the top-k, not displacing it — raise the cut.
 		let take_n = k + history_ids.len();
 		let entities: Vec<serde_json::Value> = {
 			let g = crate::base::locks::read_recovered(&self.graph);
@@ -353,16 +320,7 @@ impl Server {
 				.iter()
 				.take(take_n)
 				.map(|st| {
-					// Echo kind/scheme/status directly from the matched
-					// Entity so kern_rpc::query can build EntityRef without
-					// a second graph lookup. `kind` is the lower-case label
-					// (matches `EntityKindLite` serde repr), `scheme` is the
-					// stable `Source` URI tag, `status` is `"active"` or
-					// `"superseded"` mirroring `EntityStatusLite`.
-					// Collect enriched edges so callers can see the specific
-					// logical connections between this entity and its neighbours.
-					// Only include reasons that have been enriched (have text) to
-					// avoid surfacing empty or label-only placeholders.
+					// Only enriched reasons (have text) — skip label-only placeholders.
 					let edges: Vec<serde_json::Value> = g
 						.kern_of_entity(&st.entity.id)
 						.and_then(|kid| g.kerns.get(kid))
@@ -404,13 +362,8 @@ impl Server {
 	}
 }
 
-/// Select the optional LLM / embedder handles passed into
-/// [`retrieval::answer::query`] for a `query` tool call.
-///
-/// HyDE expansion, LLM rerank, and answer synthesis are all driven by the
-/// `llm` handle and only matter when the caller requested a synthesized
-/// `answer`. Gating them here keeps `answer:false` a fast pure-vector
-/// retrieval instead of firing several gemma-class generations per query.
+/// Gate the LLM/embedder handles on `answer:true` — `answer:false` stays a
+/// fast pure-vector retrieval (no HyDE / rerank / synthesis generations).
 fn answer_llm_args<'a>(
 	answer: bool,
 	llm: &'a LlmFunc,
@@ -457,11 +410,8 @@ fn entity_detail(
 	})
 }
 
-/// The core per-hit JSON shape emitted into `tool_query`'s `entities` array
-/// (id/score/conf/text/kind/scheme/status). `tool_query` overlays `cold` and any
-/// enriched `edges` on top. Defined ONCE so the kern_rpc-consumed contract has a
-/// single source of truth — the envelope tests build on this same fn instead of a
-/// hand-mirrored copy that could silently drift.
+/// Per-hit JSON shape for `tool_query`'s `entities` array. The kind/scheme/
+/// status labels are consumed directly by `kern_rpc::query` — do not drop them.
 pub(super) fn base_entity_json(
 	entity: &crate::base::types::Entity,
 	score: f64,
@@ -483,10 +433,8 @@ pub(super) fn base_entity_json(
 	})
 }
 
-/// Whether a `query` call is eligible for the semantic answer cache: only
-/// answer-on, cache-enabled, UNFILTERED, default-sorted queries qualify. Any
-/// filter or non-default sort changes the result set/order for the same query
-/// vector, so caching it would risk serving the wrong results for a later call.
+/// Only answer-on, cache-enabled, UNFILTERED, default-sorted queries cache —
+/// any filter/sort changes the result set/order for the same query vector.
 fn query_is_cacheable(answer: bool, cache_cap: usize, p: &QueryArgs) -> bool {
 	answer
 		&& cache_cap > 0
@@ -505,10 +453,8 @@ fn query_is_cacheable(answer: bool, cache_cap: usize, p: &QueryArgs) -> bool {
 
 #[cfg(test)]
 mod answer_gating_tests {
-	//! The `query` tool must not spend LLM calls (HyDE / rerank / answer
-	//! synthesis) unless `answer:true` was requested. Regression guard for
-	//! the unconditional-LLM bug that overran the MCP client timeout and
-	//! surfaced as `-32000 Connection closed`.
+	//! Regression guard: no LLM calls unless `answer:true` (the unconditional-LLM
+	//! bug overran the MCP client timeout as `-32000 Connection closed`).
 	use super::answer_llm_args;
 	use crate::types::{EmbedFunc, LlmFunc};
 	use std::sync::Arc;
@@ -534,12 +480,8 @@ mod answer_gating_tests {
 
 #[cfg(test)]
 mod envelope_shape_tests {
-	//! Slice Z: assert the per-hit JSON shape emitted into the
-	//! `entities` array of `tool_query`'s envelope carries `kind`,
-	//! `scheme`, and `status` strings. The kern_rpc::query handler
-	//! consumes these directly; if a future refactor drops them, the
-	//! handler silently falls back to defaults — these tests guard
-	//! against that regression at the source-of-truth level.
+	//! The envelope must carry kind/scheme/status labels — kern_rpc::query
+	//! silently falls back to defaults if a refactor drops them.
 	use super::base_entity_json as build_entity_json;
 	use crate::base::types::{ChunkPart, ChunkPartKind, Entity, EntityKind, EntityStatus, Source};
 
@@ -629,8 +571,7 @@ mod time_filter_tests {
 
 	#[test]
 	fn nonempty_malformed_is_hard_error() {
-		// Full-length but non-numeric year -> hard error naming the field, not a
-		// silent unfiltered query.
+		// Full-length but non-numeric year — must not parse.
 		let e = parse_time_filter("valid_at", "20XX-06-05T09:00:00Z").unwrap_err();
 		assert!(e.contains("valid_at"), "error names the field: {e}");
 	}
@@ -665,8 +606,6 @@ mod cacheable_tests {
 
 	#[test]
 	fn any_filter_or_nondefault_sort_disables_caching() {
-		// Each mutation alone must flip cacheable to false: a filter changes the
-		// result set and a sort changes the order, both for the same query vector.
 		type Mutator = fn(&mut QueryArgs);
 		let cases: Vec<(&str, Mutator)> = vec![
 			("source", |p| p.source = "github".into()),

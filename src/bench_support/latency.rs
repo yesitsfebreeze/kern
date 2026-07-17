@@ -1,15 +1,5 @@
-//! Performance measurement for the trace harness — the speed complement to
-//! [`replay`](super::replay)'s recall/NDCG quality scoring. Two views, both over
-//! the (LLM-free) graph retrieval path so index/config changes can be A/B'd:
-//!
-//! - [`measure_latency`] — single-reader p50/p95/p99 + mean over warmup+timed
-//!   iterations of each query.
-//! - [`measure_throughput`] — queries/sec with `threads` concurrent readers, which
-//!   exercises the read-only graph's concurrent-read scaling (the path the MCP
-//!   server and recall hooks share).
-//!
-//! These are kern-internal A/B numbers over a FIXED trace ("did a change move
-//! latency / throughput?"), not absolute SLAs and not yet a Qdrant baseline.
+//! Latency percentiles + concurrent-reader throughput over the LLM-free graph
+//! retrieval path. A/B numbers over a fixed trace, not absolute SLAs.
 
 use std::time::Instant;
 
@@ -33,9 +23,7 @@ pub struct LatencyReport {
 use crate::base::util::percentile_sorted;
 
 /// Time the retrieval path for every query in `trace`. The LLM/embedder hooks are
-/// `None`, so this measures only the graph/index work (the sub-ms path), never an
-/// LLM leg. The same `filter_kind` the recall harness uses is applied, so a
-/// filtered run measures the filtered traversal's cost.
+/// `None`, so this times only the graph/index work, never an LLM leg.
 pub fn measure_latency(
 	g: &GraphGnn,
 	cfg: &RetrievalConfig,
@@ -95,9 +83,7 @@ pub struct ThroughputReport {
 }
 
 /// Run the whole trace `per_thread_iters` times on each of `threads` concurrent
-/// readers and report queries/sec. The graph is shared `&GraphGnn` across scoped
-/// threads — retrieval never mutates it, so this measures honest concurrent-read
-/// scaling (a `RwLock` write would serialize; there is none on this path).
+/// readers. The graph is a shared `&GraphGnn` — retrieval never mutates it.
 pub fn measure_throughput(
 	g: &GraphGnn,
 	cfg: &RetrievalConfig,
