@@ -141,11 +141,7 @@ fn seed_by_reason(g: &GraphGnn, query_vec: &[f32], k: usize) -> Vec<EntityHit> {
 		}
 	}
 	let mut hits: Vec<EntityHit> = seen.into_iter().map(EntityHit::from).collect();
-	hits.sort_by(|a, b| {
-		b.score
-			.partial_cmp(&a.score)
-			.unwrap_or(std::cmp::Ordering::Equal)
-	});
+	hits.sort_by(|a, b| crate::base::util::cmp_rank(a.score, &a.entity_id, b.score, &b.entity_id));
 	hits
 }
 
@@ -189,11 +185,7 @@ pub fn seed_important(
 			})
 		})
 		.collect();
-	hits.sort_by(|a, b| {
-		b.score
-			.partial_cmp(&a.score)
-			.unwrap_or(std::cmp::Ordering::Equal)
-	});
+	hits.sort_by(|a, b| crate::base::util::cmp_rank(a.score, &a.entity_id, b.score, &b.entity_id));
 	hits
 }
 

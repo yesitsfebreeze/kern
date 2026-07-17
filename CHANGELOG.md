@@ -1,5 +1,18 @@
 # Changelog
 
+- 2026-07-17 — `seed_important` and `seed_by_reason` sorted by
+  `partial_cmp(...).unwrap_or(Equal)` with no id tiebreak, so equal-cosine
+  ties broke non-deterministically (parallel iteration order) — the same
+  class of bug fixed for HNSW in `af8724d`. Both now use
+  `crate::base::util::cmp_rank` (score desc, id asc), consistent with
+  `fuse::rrf`, `search::merge_hits`, `lexical::search_filtered`,
+  `store::cold_search`, and `vector_backend::union_rank`. The seed list order
+  feeds `truncate(seed_k)`, so deterministic tie-breaking makes which
+  entities survive the seed cut reproducible across runs on the same graph.
+  Added per-scope and per-function ratings as a splinter note on
+  `src/retrieval/seed.rs`.
+  Decided by: fix-bugs-on-sight. Supersedes: nothing.
+
 - 2026-07-17 — `Config::load` fallback path doubled the `kern/` segment when
   `dirs::config_dir()` returned `None`: the chain
   `.unwrap_or_else(|| cwd.join(".kern")).join("kern").join("kern.toml")`
