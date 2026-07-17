@@ -86,7 +86,11 @@ pub fn run_learned_propagation(
 	let mut model = Model::new(vec![l1, l2], None);
 
 	if !snap.weights.is_empty() {
-		let _ = unmarshal_weights(&mut model, &snap.weights);
+		// Fail open: a corrupt or version-stale snapshot must not kill the tick, but
+		// cold-starting silently would hide a GNN that never warm-starts again.
+		if let Err(e) = unmarshal_weights(&mut model, &snap.weights) {
+			tracing::error!(error = %e, "GNN weight load failed; cold-starting from fresh weights");
+		}
 	}
 
 	let pos = snap.pos_edges.clone();

@@ -226,21 +226,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			println!("mean recall@10: {:.4}", report.mean_recall10);
 		}
 		Some(name) => {
-			if args.values.trim().is_empty() {
-				return Err(
-					"--values is required for a sweep (comma-separated numbers, e.g. --values 10,20,40)"
-						.into(),
-				);
-			}
 			let param = SweepParam::parse(&name).ok_or_else(|| format!("unknown sweep param: {name}"))?;
 			let values: Vec<f64> = args
 				.values
 				.split(',')
+				.map(str::trim)
 				.filter(|s| !s.is_empty())
-				.map(|s| s.trim().parse::<f64>())
+				.map(|s| s.parse::<f64>())
 				.collect::<Result<_, _>>()?;
 			if values.is_empty() {
-				return Err("--values required for sweep".into());
+				return Err(
+					"--values is required for a sweep (comma-separated numbers, e.g. --values 10,20,40)"
+						.into(),
+				);
 			}
 			let rows = sweep(&g, &t, param, &values);
 			let csv = to_csv(&rows);

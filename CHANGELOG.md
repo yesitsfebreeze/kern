@@ -1,5 +1,21 @@
 # Changelog
 
+- 2026-07-17 — Fixed two defects surfaced by the comment sweep, where a
+  comment's claim and the code disagreed. `run_learned_propagation` discarded
+  `unmarshal_weights` errors with `let _ =`, so a corrupt or version-stale
+  snapshot silently cold-started the GNN every tick with no operator signal —
+  it now logs at error level and still falls open, because a bad snapshot must
+  not kill the tick. `retrieval_bench --values` validated twice: a pre-parse
+  emptiness check with a useful message, then a near-unreachable post-parse
+  check with a terse one; the pre-check is gone and the single post-parse check
+  carries the good message. Trimming before the empty-filter also fixes
+  `--values '   '`, which used to fail with a bare `ParseFloatError`. Verified
+  by running the binary: empty, whitespace-only, and comma-only input all
+  report the real error, a bad number still fails to parse, and a valid sweep
+  still runs. Decided by: fix-bugs-on-sight, fix-the-root.
+  Supersedes: the swallowed weight-load error and the duplicated `--values`
+  validation.
+
 - 2026-07-17 — Commentary lives in splinter notes, not in source. The whole
   tree was swept: informational comments (rationale, history, design
   narrative) migrated into per-file `.splinter/**/*.splinter.md` notes —
