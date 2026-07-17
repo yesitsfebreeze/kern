@@ -1,5 +1,152 @@
 # Changelog
 
+- 2026-07-17 — `gossip/seen.rs` first reclaim loop used a bare `.unwrap()`
+  on `VecDeque::pop_front` where every sibling invariant-guarded unwrap in
+  the tree uses `.expect("…checked above")`; the second loop right below it
+  already used the `let Some(…) = else { break }` form. Replaced with
+  `.expect("front checked non-empty above")` for consistency — same
+  invariant (the `front().is_some_and(…)` guard above proves non-empty),
+  now with a diagnostic message that survives a panic. Added per-scope and
+  per-function ratings as a splinter note on `src/gossip/seen.rs`.
+  Decided by: fix-bugs-on-sight. Supersedes: nothing.
+
+- 2026-07-17 — `kern ingest` could never hold more than ONE retrievable
+  thought: every CLI ingest silently superseded the previous one. Root cause is
+  a one-word conflation present since the initial commit —
+  `Source::Inline.hash` is an OBJECT ID (the MCP tool feeds its `object_id`
+  into it), but `cmd_ingest` passed `"user"`, the USER_SOURCE *trust* string
+  copied off the `clamp_confidence` call on the line above it. Every CLI ingest
+  therefore hashed to the SAME external id, and `accept()` supersedes any
+  entity sharing one: each new thought invalidated its predecessor and evicted
+  it from the ANN indices, leaving it in `kern.entities` (so `health` still
+  counted it) but unreachable from `query`/`search`. Two arbitrary `kern
+  ingest` runs are not revisions of one object, so the fix is no identity at
+  all — empty `hash` -> `source_id()` is `None` -> no supersede — which is
+  exactly what the MCP path already did with `object_id` unset. Found by
+  actually reading a graph instead of trusting `status=committed`: 3 CLI
+  ingests reported committed, `health` said `thoughts: 3`, and `search` returned
+  1. The tell had been on screen three times earlier in the session as a
+  "superseded by a newer version" chain between plainly unrelated facts, and was
+  read past each time. Proven: both regression tests fail on `hash: "user"`;
+  after the fix 3 unrelated CLI ingests each rank #1 for their own query
+  (0.65-0.73 vs ~0.3 for the others) and carry Similarity edges only, no
+  Supersedes. Scope: CLI only — the MCP ingest tool was never affected, and
+  passing a real `object_id` still supersedes, which is the intended update
+  semantics. Deduping identical text is unaffected: that is vector dedup, a
+  separate mechanism. Tradeoff: `kern ingest` now has no way to express "this
+  revises that" — correct, since it never had a coherent way to say WHICH
+  object, and the MCP tool's `object_id` is the honest place for
+  it. Decided by: fix-the-root, fix-bugs-on-sight, verify-before-claiming.
+  Supersedes: the `hash: "user"` inline source and any belief that a
+  `status=committed` ingest implies a retrievable thought.
+
+- 2026-07-17 — kern was doing NOTHING on WSL, silently, for weeks — found while
+  installing the new build, and fixed at the root. Evidence, not inference: 13
+  daemons on this machine, uptime since Jul 14, every one of them `thoughts: 0`.
+  Root cause is the zero-config promise colliding with WSL2 NAT networking —
+  Ollama runs as a Windows host process, kern's loopback default
+  (`http://localhost:11434`) resolves inside the WSL VM where nothing listens,
+  so every embed returned a transient connect error and ingest re-spooled the
+  job forever. Nothing crashed and nothing surfaced: the failure mode is an
+  empty graph. New `config::wsl` repoints loopback LLM endpoints (embed /
+  reason / answer) at the default-route gateway, but ONLY when all of: running
+  under WSL, the URL is loopback, loopback is dead, and the gateway is live —
+  probing loopback FIRST so mirrored-mode WSL2 and an in-distro Ollama keep
+  their loopback and pay no rewrite. An explicitly configured URL is never
+  second-guessed. Proven by controlled experiment in one scratch dir with no
+  config file: new binary `status=committed` (`thoughts: 1`), old binary
+  `status=failed`; then end-to-end on a real project through a live daemon
+  (`thoughts: 2, reasons: 2`) with granite4:3b resident at 100% GPU. Tradeoff:
+  `Config::load` now costs up to two 300 ms TCP probes on a WSL box whose
+  loopback is dead — paid once at startup, only on the default URL, and only on
+  the platform that would otherwise fail 100% of the time; non-WSL machines
+  exit on the `/proc/version` check before touching the network. Gateway comes
+  from `/proc/net/route` rather than `/etc/resolv.conf`'s nameserver, which
+  diverges under `generateResolvConf=false` or custom
+  DNS. Decided by: fix-the-root, verify-before-claiming, name-the-tradeoff.
+  Supersedes: the assumption that a loopback default is portable, and the
+  vLLM doc's WSL note as the only place this hazard was written down.
+
+- 2026-07-17 — A stock install is now two `ollama pull`s and no config file:
+  `DEFAULT_ANSWER_MODEL` aliases `DEFAULT_REASON_MODEL` (granite4:3b), so ONE
+  llm runner serves both LLM legs beside a separate embedder. The consolidation
+  paid for itself by dissolving the `num_gpu:0` reason pin rather than by
+  saving VRAM. Root cause found by measurement, not reading: Ollama does NOT
+  start a second runner when the same model tag arrives with a different
+  `num_gpu` — the first placement wins and later calls silently reuse it, so an
+  unconditional pin would have stranded the shared runner on the CPU and made
+  every `/ask` pay CPU inference. But the pin only ever existed to stop a
+  *distinct, larger* reason model evicting the answerer from an 8 GB card, and
+  one model cannot evict itself — so `Client::pins_reason_to_cpu` now pins only
+  when reason and answer resolve to different models or endpoints. Net effect,
+  verified end-to-end: stock kern loads granite4:3b at 100% GPU serving both
+  distillation and `/ask`, where the identical call previously ran 100% CPU;
+  ~2.9 GB llm + ~2.1 GB embedder fits an 8 GB card with headroom. Distillation
+  moved off the CPU entirely — a far bigger win than the model shrink.
+  Tradeoff, named: qwen3.5:4b answers modestly better than granite4:3b (more
+  complete, and granite sometimes restates context despite the prompt forbidding
+  it), so a small answer-polish dip buys the simpler install and the
+  GPU-resident reason leg; `[answer] model` restores the split and re-arms the
+  pin automatically. New `scripts/answer_bench.py` is the evidence (14 cases
+  incl. multi-hop, distractor, superseded, negation): granite is content-correct
+  on every case and 4/4 on declining when context lacks the fact — the leg's
+  real failure mode. Its scored 8/10 vs qwen3.5's 10/10 OVERSTATES the gap; two
+  "misses" were verified scorer false negatives (right answer, wrong phrasing
+  vs the gold string), which is also why the first version of that bench was
+  discarded: it saturated at 6/6 for both models and could not discriminate
+  until the hard cases were added. Embedder left ALONE and stays a separate
+  model: new `scripts/embed_bench.py` (retrieval recall, not similarity vibes)
+  measures the current qwen3-embedding:0.6b at 94% recall@1 / 100% recall@3 /
+  MRR 0.971 — already near ceiling, so "use a bigger embedder" was tested and
+  REJECTED: embeddinggemma (768 dim) beats both 1024-dim candidates on every
+  metric incl. separation margin (+0.192 vs +0.161), i.e. bigger is measurably
+  not better here, and mxbai-embed-large (1024 dim) has the WORST margin.
+  Switching the embedder default would force `kern reembed` over every existing
+  store — a migration this saturated 17-query bench cannot
+  justify. Decided by: verify-before-claiming, fix-the-root, name-the-tradeoff.
+  Supersedes: the unconditional `num_gpu:0` pin, the `qwen3.5:4b` answer
+  default, and the "OPPOSITE optimization targets" rationale for splitting
+  [answer] from [reason] (the knobs stay; only the defaults merge).
+
+- 2026-07-17 — `DEFAULT_REASON_MODEL` is now `granite4:3b` (was `qwen2.5:7b`),
+  chosen by measurement rather than reputation. New bench
+  (`scripts/distill_bench.py`) scores candidates on kern's OWN distill prompt —
+  8 conversations, 13 gold facts, recall by embedding cosine, all served
+  through Ollama at temperature 0 — because leaderboard rank does not measure
+  the task kern actually runs. granite4:3b ties the old 7B default on recall
+  (12/13 vs 11/13 at a 0.72 match threshold), emits ZERO over-extraction noise
+  against the baseline's 3, and never failed to produce parseable JSON (8/8),
+  at 2.1 GB instead of 4.7 GB. Rejected: llama3.2:3b (85%, noise 5, one parse
+  failure), phi4-mini (77%, one parse failure), qwen3.5:4b (85%, noise 4).
+  The win is bigger than VRAM suggests: serving pins reason to CPU
+  (`num_gpu:0`), so the reason leg always pays CPU inference and a 3B is ~2x a
+  7B there. The eval judge (`locomo_eval.rs --judge-model`) deliberately stays
+  on qwen2.5:7b — the judge is the measurement instrument, and this bench says
+  nothing about judging quality. Web research (constrained-decoding and
+  extraction-specialist literature) corroborated but did not decide it:
+  schema-constrained decoding is a validity fix, not a quality fix, so it
+  cannot recover recall a smaller model loses; parameter count is a weak
+  predictor of extraction quality in the 1.7B-32B range; and the tiny
+  extraction specialists (GLiNER 205-440M, Triplex 3.8B) fail kern's task
+  shape — GLiNER emits verbatim spans and cannot paraphrase a claim, Triplex
+  emits SPO triples under a non-commercial license. Tradeoff: 13 gold facts is
+  a small sample, so the one-fact recall edge is within noise — the honest
+  claim is "matches the 7B", carried by the robust signals (noise=0, format
+  8/8, stable across two match thresholds), not by the recall delta. Two
+  measurement bugs were found and fixed while establishing this: the bench let
+  a format failure skip a conversation BEFORE counting its gold facts
+  (rewarding unparseable output with a free pass — llama3.2 first scored a
+  phantom 100%), and cosine matching at a 0.62 threshold produced a verified
+  false positive (an unrelated postgres-overhead claim matched a "revisit if
+  sharding" gold fact at 0.655), so recall is an upper bound and rankings are
+  only trusted when they survive both 0.62 and 0.72. Left alone: `kind` label
+  accuracy is ~33% even for the 7B — kern's taxonomy has overlapping
+  categories (decision/project, fact/code-fact), a prompt problem that a
+  bigger model does not
+  fix. Decided by: verify-before-claiming, name-the-tradeoff, record-the-decision.
+  Supersedes: the `qwen2.5:7b` reason default and its "larger models are
+  sharper" framing in `docs/book/src/guides/memory-bank.md`.
+
 - 2026-07-17 — Fixed two defects surfaced by the comment sweep, where a
   comment's claim and the code disagreed. `run_learned_propagation` discarded
   `unmarshal_weights` errors with `let _ =`, so a corrupt or version-stale
@@ -15,6 +162,23 @@
   still runs. Decided by: fix-bugs-on-sight, fix-the-root.
   Supersedes: the swallowed weight-load error and the duplicated `--values`
   validation.
+
+- 2026-07-17 — The capture drop-dir is named the **intake**; the interim
+  print-queue-style working name it shipped under is scrubbed from the
+  entire tree — code (`ingest::intake`, `intake_direct`, tracing target
+  `kern.ingest.intake`), hook internals (`MAX_INTAKE_FILES`,
+  `intakeEvictions`), docs, agent briefs, and splinter notes, with no alias
+  or historical mention kept anywhere (git history remains the only record).
+  The MCP `ingest` durable ack status is now `"accepted"` (HTTP 202
+  semantics: persisted, processed later). On-disk layout untouched —
+  `.kern/capture/`, `direct/`, `done/` keep their names, so nothing
+  migrates. Tradeoff: any external client matching the old ack string
+  breaks, and future readers must consult git history to trace the old
+  vocabulary; accepted — the only shipped consumers (kern hooks) don't read
+  the ack, and the old name was never meant to ship.
+  Decided by: delete-superseded, name-the-tradeoff.
+  Supersedes: the previous capture-queue vocabulary everywhere (code,
+  hooks, docs).
 
 - 2026-07-17 — Commentary lives in splinter notes, not in source. The whole
   tree was swept: informational comments (rationale, history, design
@@ -34,22 +198,20 @@
   comments-last-resort, delete-superseded.
   Supersedes: inline design-narrative comments across `src/`.
 
-- 2026-07-17 — The capture drop-dir is named the **intake**; the interim
-  print-queue-style working name it shipped under is scrubbed from the
-  entire tree — code (`ingest::intake`, `intake_direct`, tracing target
-  `kern.ingest.intake`), hook internals (`MAX_INTAKE_FILES`,
-  `intakeEvictions`), docs, agent briefs, and splinter notes, with no alias
-  or historical mention kept anywhere (git history remains the only record).
-  The MCP `ingest` durable ack status is now `"accepted"` (HTTP 202
-  semantics: persisted, processed later). On-disk layout untouched —
-  `.kern/capture/`, `direct/`, `done/` keep their names, so nothing
-  migrates. Tradeoff: any external client matching the old ack string
-  breaks, and future readers must consult git history to trace the old
-  vocabulary; accepted — the only shipped consumers (kern hooks) don't read
-  the ack, and the old name was never meant to ship.
-  Decided by: delete-superseded, name-the-tradeoff.
-  Supersedes: the previous capture-queue vocabulary everywhere (code,
-  hooks, docs).
+- 2026-07-17 — vLLM (any local OpenAI-compat server) is now configurable with
+  the existing `[reason]/[answer]/[embed]` url/model/key fields — no new
+  config keys. Root cause was routing, not config: `is_local_ollama` matched
+  any localhost URL, so a local vLLM at `http://localhost:8000` was sent
+  Ollama-native `/api/*` calls it 404s. An explicit `/v1` suffix on the
+  configured URL now forces the OpenAI-compat path (`wants_native` in
+  `llm.rs`); bare local URLs keep the native path with its `num_gpu:0` /
+  `keep_alive` / `num_ctx` serving protections. Eval's `seed`/`temperature`
+  pins are now forwarded on the compat path too, so determinism survives a
+  vLLM backend. Tradeoff: URL-suffix convention over a new per-endpoint
+  `provider` key — zero config surface added, but the `/v1` marker is
+  implicit; documented on the config fields. Decided by:
+  builtin-before-built, fix-the-root, name-the-tradeoff. Decided by: the
+  pinned list's fix-bugs-on-sight for the mis-routing itself.
 
 - 2026-07-17 — Durability primitive: snapshots first; ROADMAP #4 closed. The
   primitive is `snapshot_if_dirty` on the maintenance tick — a

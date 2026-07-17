@@ -43,7 +43,7 @@ impl SeenSet {
 
 		// Reclaim expired entries from the front (expiry is monotonic).
 		while inner.order.front().is_some_and(|(_, exp)| *exp <= now) {
-			let (fid, fexp) = inner.order.pop_front().unwrap();
+			let (fid, fexp) = inner.order.pop_front().expect("front checked non-empty above");
 			// Skip stale duplicates left by a re-insert after expiry.
 			if inner.live.get(&fid) == Some(&fexp) {
 				inner.live.remove(&fid);
