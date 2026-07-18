@@ -41,6 +41,8 @@ struct RpcError {
 pub(crate) const ERR_INVALID_REQ: i32 = -32600;
 pub(crate) const ERR_NOT_FOUND: i32 = -32601;
 
+pub type PulseBroadcast = Arc<dyn Fn(&str, f64) + Send + Sync>;
+
 pub struct Server {
 	pub graph: Arc<RwLock<GraphGnn>>,
 	pub worker: Arc<ingest::Worker>,
@@ -49,6 +51,7 @@ pub struct Server {
 	pub task_q: Option<Arc<tick::queue::Queue>>,
 	pub cfg: Arc<Config>,
 	pub cache: Arc<Mutex<QueryCache>>,
+	pub broadcast_pulse: Option<PulseBroadcast>,
 }
 
 impl Server {

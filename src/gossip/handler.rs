@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use parking_lot::RwLock;
 
@@ -121,6 +122,49 @@ pub fn start_entity_sync(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 							id: format!("esync-{}-{}", node.addr(), stamp),
 							origin: node.addr(),
 							payload: GossipPayload::EntitySync(payload),
+						};
+						node.broadcast(msg);
+					}
+				}
+				_ = stop.changed() => break,
+			}
+		}
+	});
+}
+
+pub fn start_delta_flush(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
+	let mut stop = node.stop_rx.clone();
+	tokio::spawn(async move {
+		let mut interval = tokio::time::interval(GOSSIP_HEARTBEAT_INTERVAL);
+		loop {
+			tokio::select! {
+				_ = interval.tick() => {
+					let (deltas, kern_id) = {
+						let g = read_recovered(&graph);
+						(g.drain_pending_deltas(), g.root.id.clone())
+					};
+					for delta in deltas {
+						let target = match CrdtTarget::from_u8(delta.target) {
+							Some(t) => t,
+							None => continue,
+						};
+						let payload = CrdtDeltaPayload {
+							kern_id: kern_id.clone(),
+							object_id: delta.object_id,
+							target,
+							replica: delta.replica,
+							value: delta.value,
+							lamport: delta.lamport,
+							producer: delta.producer,
+							lww_value: delta.lww_value,
+							orset_delta: Vec::new(),
+						};
+						let stamp = crate::base::util::now_nanos();
+						let msg = GossipMessage {
+							kind: GossipKind::Delta,
+							id: format!("delta-{}-{}", node.addr(), stamp),
+							origin: node.addr(),
+							payload: GossipPayload::CrdtDelta(payload),
 						};
 						node.broadcast(msg);
 					}
@@ -262,18 +306,19 @@ fn handle_crdt_delta(d: &Deps, msg: GossipMessage) {
 		_ => return,
 	};
 
-	let value = match validated_delta_value(&delta.replica, &delta.object_id, delta.value) {
-		Some(v) => v,
-		None => return,
-	};
-	let mut incoming = GCounter::new();
-	incoming.increment(&delta.replica, value);
-
 	let mut changed = false;
 	{
 		let mut g = write_recovered(&d.graph);
+		g.observe_lamport(delta.lamport);
+
 		match delta.target {
 			CrdtTarget::ThoughtAccessCount => {
+				let value = match validated_delta_value(&delta.replica, &delta.object_id, delta.value) {
+					Some(v) => v,
+					None => return,
+				};
+				let mut incoming = GCounter::new();
+				incoming.increment(&delta.replica, value);
 				for kern_id in g.all_ids() {
 					if let Some(kern) = g.get_mut(&kern_id) {
 						if let Some(t) = kern.entities.get_mut(&delta.object_id) {
@@ -284,10 +329,71 @@ fn handle_crdt_delta(d: &Deps, msg: GossipMessage) {
 				}
 			}
 			CrdtTarget::ReasonTraversalCount => {
+				let value = match validated_delta_value(&delta.replica, &delta.object_id, delta.value) {
+					Some(v) => v,
+					None => return,
+				};
+				let mut incoming = GCounter::new();
+				incoming.increment(&delta.replica, value);
 				for kern_id in g.all_ids() {
 					if let Some(kern) = g.get_mut(&kern_id) {
 						if let Some(r) = kern.reasons.get_mut(&delta.object_id) {
 							changed = r.traversal_count.merge(&incoming);
+							break;
+						}
+					}
+				}
+			}
+			CrdtTarget::ReasonScore => {
+				let Some(score) = decode_lww::<f64>(&delta.lww_value) else {
+					return;
+				};
+				for kern_id in g.all_ids() {
+					if let Some(kern) = g.get_mut(&kern_id) {
+						if let Some(r) = kern.reasons.get_mut(&delta.object_id) {
+							if (delta.lamport, &delta.producer) > (r.score_lamport, &r.score_producer) {
+								r.score = score;
+								r.score_lamport = delta.lamport;
+								r.score_producer = delta.producer.clone();
+								changed = true;
+							}
+							break;
+						}
+					}
+				}
+			}
+			CrdtTarget::ValidUntil => {
+				let Some(valid) = decode_lww::<Option<SystemTime>>(&delta.lww_value) else {
+					return;
+				};
+				for kern_id in g.all_ids() {
+					if let Some(kern) = g.get_mut(&kern_id) {
+						if let Some(t) = kern.entities.get_mut(&delta.object_id) {
+							if (delta.lamport, &delta.producer) > (t.valid_until_lamport, &t.valid_until_producer)
+							{
+								t.valid_until = valid;
+								t.valid_until_lamport = delta.lamport;
+								t.valid_until_producer = delta.producer.clone();
+								changed = true;
+							}
+							break;
+						}
+					}
+				}
+			}
+			CrdtTarget::Statements => {
+				let Some(adds) = decode_lww::<Vec<String>>(&delta.orset_delta) else {
+					return;
+				};
+				for kern_id in g.all_ids() {
+					if let Some(kern) = g.get_mut(&kern_id) {
+						if let Some(t) = kern.entities.get_mut(&delta.object_id) {
+							for s in &adds {
+								if !t.statements.iter().any(|existing| existing == s) {
+									t.statements.push(s.clone());
+									changed = true;
+								}
+							}
 							break;
 						}
 					}
@@ -299,6 +405,12 @@ fn handle_crdt_delta(d: &Deps, msg: GossipMessage) {
 	if changed {
 		d.persist();
 	}
+}
+
+fn decode_lww<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
+	bincode::serde::decode_from_slice(bytes, bincode::config::standard())
+		.ok()
+		.map(|(v, _)| v)
 }
 
 // Content↔id binding is NOT verified — network scoping + GOSSIP_REMOTE_KERN_ENTITY_CAP bound it.
@@ -533,6 +645,10 @@ mod tests {
 				target,
 				replica: replica.to_string(),
 				value,
+				lamport: 0,
+				producer: String::new(),
+				lww_value: Vec::new(),
+				orset_delta: Vec::new(),
 			}),
 		}
 	}

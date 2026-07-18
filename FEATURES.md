@@ -39,8 +39,10 @@ What exists right now. States: `building` | `active`.
   outside `.kern/` projects. `active`
 - **Federation** — LAN gossip + content-addressed CRDT entity-body merge, no
   coordinator; reliable with manually seeded `peers`, multicast discovery only
-  within a shared `network_id`; Delta/Question/Pulse kinds and fetch RPC
-  handled on receipt but have no live senders; unauthenticated and unencrypted
+  within a shared `network_id`; Delta/Pulse/Question senders now live (Phase 1
+  of `docs/federation-integration-plan.md`); Lamport clock on `GraphGnn`,
+  OR-Set for `statements`, LWW-Register for `valid_until` and `Reason.score`
+  replace the old wall-clock max-join; unauthenticated and unencrypted
   (see `docs/FEDERATION-SECURITY.md`). Off by default. `building`
 - **Bench pipeline** — `retrieval_bench` binary, deterministic workload traces,
   single nextest pipeline (host and container), baselines in

@@ -8,8 +8,14 @@ fn worker_thread_count(available: Option<usize>) -> usize {
 }
 
 fn main() {
-	use tracing_subscriber::prelude::*;
-	let _ = tracing_subscriber::registry().try_init();
+	// Stderr, never stdout: `kern mcp --mcp-stdio` speaks JSON-RPC on stdout.
+	let _ = tracing_subscriber::fmt()
+		.with_env_filter(
+			tracing_subscriber::EnvFilter::try_from_default_env()
+				.unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+		)
+		.with_writer(std::io::stderr)
+		.try_init();
 
 	// Floor of 4: the blocking bridges (tick distill, ingest embed, keepalive)
 	// each pin a worker; fewer workers starves the time driver and wedges the hub.

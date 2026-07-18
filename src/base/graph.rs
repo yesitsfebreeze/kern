@@ -51,10 +51,22 @@ fn index_kern_into(
 	}
 }
 
+pub struct PendingDelta {
+	pub object_id: String,
+	pub target: u8,
+	pub replica: String,
+	pub value: u64,
+	pub lamport: u64,
+	pub producer: String,
+	pub lww_value: Vec<u8>,
+}
+
 pub struct GraphGnn {
 	pub root: Kern,
 	pub network_id: String,
 	pub data_dir: String,
+	lamport: std::sync::atomic::AtomicU64,
+	pending_deltas: parking_lot::Mutex<HashMap<(String, u8), PendingDelta>>,
 	// LMDB forbids opening one env twice in a process; opened once and shared.
 	store: Option<Arc<Store>>,
 	pub quant_mode: QuantizationMode,
@@ -132,6 +144,8 @@ impl GraphGnn {
 			root,
 			network_id,
 			data_dir: String::new(),
+			lamport: std::sync::atomic::AtomicU64::new(0),
+			pending_deltas: parking_lot::Mutex::new(HashMap::new()),
 			store: None,
 			quant_mode,
 			entity_idx: VectorBackend::resident(16, 200, quant_mode),
@@ -354,6 +368,39 @@ impl GraphGnn {
 		self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
 	}
 
+	pub fn bump_lamport(&self) -> u64 {
+		self
+			.lamport
+			.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+			+ 1
+	}
+
+	pub fn observe_lamport(&self, remote: u64) {
+		let mut current = self.lamport.load(std::sync::atomic::Ordering::SeqCst);
+		while remote > current {
+			match self.lamport.compare_exchange(
+				current,
+				remote + 1,
+				std::sync::atomic::Ordering::SeqCst,
+				std::sync::atomic::Ordering::SeqCst,
+			) {
+				Ok(_) => break,
+				Err(actual) => current = actual,
+			}
+		}
+	}
+
+	pub fn push_delta(&self, delta: PendingDelta) {
+		let key = (delta.object_id.clone(), delta.target);
+		self.pending_deltas.lock().insert(key, delta);
+	}
+
+	pub fn drain_pending_deltas(&self) -> Vec<PendingDelta> {
+		let mut deltas = self.pending_deltas.lock();
+		let drained: Vec<PendingDelta> = deltas.drain().map(|(_, v)| v).collect();
+		drained
+	}
+
 	pub fn mutation_epoch(&self) -> u64 {
 		self.mutation_epoch
 	}
@@ -553,6 +600,8 @@ impl GraphGnn {
 			root: root.clone(),
 			network_id,
 			data_dir,
+			lamport: std::sync::atomic::AtomicU64::new(0),
+			pending_deltas: parking_lot::Mutex::new(HashMap::new()),
 			store: None,
 			quant_mode,
 			entity_idx: VectorBackend::resident(16, 200, quant_mode),

@@ -277,6 +277,10 @@ pub struct Entity {
 	pub updated_at: Option<SystemTime>,
 	#[serde(default)]
 	pub valid_until: Option<SystemTime>,
+	#[serde(default)]
+	pub valid_until_lamport: u64,
+	#[serde(default)]
+	pub valid_until_producer: String,
 	pub producer_id: String,
 	pub unlinked_count: i32,
 	#[serde(default)]
@@ -412,6 +416,10 @@ pub struct Reason {
 	#[serde(with = "util::vec_f64_compat")]
 	pub vector: Vec<f32>,
 	pub score: f64,
+	#[serde(default)]
+	pub score_lamport: u64,
+	#[serde(default)]
+	pub score_producer: String,
 	#[serde(default)]
 	pub traversal_count: GCounter,
 	pub producer_id: String,
@@ -602,6 +610,8 @@ pub(crate) fn mk_entity(id: &str, text: &str, heat: f64, kind: EntityKind) -> En
 		heat_updated_at: None,
 		updated_at: None,
 		valid_until: None,
+		valid_until_lamport: 0,
+		valid_until_producer: String::new(),
 		producer_id: String::new(),
 		unlinked_count: 0,
 		dirty: false,

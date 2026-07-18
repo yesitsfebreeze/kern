@@ -218,6 +218,10 @@ impl Server {
 		crate::tick::pulse::pulse(q, &mut g, &root_id, strength);
 		drop(g);
 
+		if let Some(broadcast) = &self.broadcast_pulse {
+			broadcast(&root_id, strength);
+		}
+
 		tool_result_json(&serde_json::json!({"status": "pulsed", "strength": strength}))
 	}
 }
@@ -259,6 +263,7 @@ mod descriptor_tests {
 			task_q: None,
 			cfg: Arc::new(Config::default()),
 			cache: crate::retrieval::cache::QueryCache::default_shared(),
+			broadcast_pulse: None,
 		};
 		(server, counter)
 	}

@@ -140,6 +140,8 @@ mod tests {
 				heat_updated_at: None,
 				updated_at: None,
 				valid_until: None,
+				valid_until_lamport: 0,
+				valid_until_producer: String::new(),
 				producer_id: String::new(),
 				unlinked_count: 0,
 				dirty: false,

@@ -256,9 +256,26 @@ fn degrade_entity_reasons(g: &mut GraphGnn, kern_id: &str, id: &str) -> (usize, 
 				remove_reason(kern, rid);
 			}
 			removed += 1;
-		} else if let Some(kern) = g.kerns.get_mut(kern_id) {
-			if let Some(r) = kern.reasons.get_mut(rid) {
-				r.score -= decay;
+		} else {
+			let lamport = g.bump_lamport();
+			let producer = g.network_id.clone();
+			if let Some(kern) = g.kerns.get_mut(kern_id) {
+				if let Some(r) = kern.reasons.get_mut(rid) {
+					r.score -= decay;
+					r.score_lamport = lamport;
+					r.score_producer = producer.clone();
+					let lww_value =
+						bincode::serde::encode_to_vec(r.score, bincode::config::standard()).unwrap_or_default();
+					g.push_delta(crate::base::graph::PendingDelta {
+						object_id: rid.clone(),
+						target: 2,
+						replica: String::new(),
+						value: 0,
+						lamport,
+						producer,
+						lww_value,
+					});
+				}
 			}
 		}
 		decayed += 1;

@@ -17,12 +17,19 @@ Decisions ahead, ordered. Questions, not tasks.
    (0.4 content / 0.6 GNN), fragile across scales, while `fuse::rrf` already
    fuses the answer layer. Blocker: the baseline (1). Deciding behaviors:
    verify-before-claiming, delete-superseded.
-4. **What must federation prove before it earns senders?** Delta/Question/Pulse
-   and the fetch RPC are handled on receipt but never sent; transport is
-   unauthenticated and unencrypted; batch size, push vs. pull, and anti-entropy
-   are untuned. Blocker: a security stance for untrusted segments
-   (`docs/FEDERATION-SECURITY.md`) — none of the pinned behaviors decides it.
-   Deciding behavior: none yet — amend first.
+4. **What must federation prove before it earns senders?** The code audit is
+   done (`docs/federation-integration-plan.md`): every roadmap claim verified
+   against source — Delta/Question/Pulse have handlers but no senders, no
+   `AntiEntropy` wire variant, `crdt.rs` has only GCounter/PnCounter,
+   `statements` is never merged, `Reason.score` max-join is the wrong rule for
+   a non-monotonic field (degrade lowers, max-join loses it), transport is
+   raw TCP with cleartext UDP `network_id`. Four decisions gate the build:
+   (a) does `Reason.score` move to LWW-Register, or keep max-join for
+   monotonic trust signaling? (b) anti-entropy watermark shape — vector clock
+   or seen-set snapshot? (c) TLS cert authority — operator PKI or TOFU? (d)
+   does `network_id` derive from the cert or stay config-owned? Blocker: none —
+   the plan is additive to the existing wire enum and merge path. Deciding
+   behavior: none yet — amend first.
 5. **When does the LLM answer path get interactive?** Streaming, capped
    context, and warm-keeping shipped; speculative decode (draft → generator) is
    the open lever. Blocker: the baseline (1) for a before/after number.

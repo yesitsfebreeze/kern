@@ -98,6 +98,8 @@ pub fn do_seed_questions(
 				text: question,
 				vector: Vec::new(),
 				score: 0.5,
+				score_lamport: 0,
+				score_producer: String::new(),
 				traversal_count: crate::crdt::GCounter::new(),
 				producer_id: String::new(),
 			};

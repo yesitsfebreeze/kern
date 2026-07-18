@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -24,6 +25,7 @@ pub struct Node {
 	peers: RwLock<Vec<String>>,
 	seen: SeenSet,
 	pub ledger: Ledger,
+	lamport: AtomicU64,
 	handler: RwLock<Option<Handler>>,
 	fetch_handler: RwLock<Option<FetchHandler>>,
 	stop_tx: watch::Sender<bool>,
@@ -39,6 +41,7 @@ impl Node {
 			peers: RwLock::new(peers),
 			seen: SeenSet::new(),
 			ledger: Ledger::new(),
+			lamport: AtomicU64::new(0),
 			handler: RwLock::new(None),
 			fetch_handler: RwLock::new(None),
 			stop_tx,
@@ -56,6 +59,23 @@ impl Node {
 
 	pub fn addr(&self) -> String {
 		read_recovered(&self.addr).clone()
+	}
+
+	pub fn bump_lamport(&self) -> u64 {
+		self.lamport.fetch_add(1, Ordering::SeqCst) + 1
+	}
+
+	pub fn observe_lamport(&self, remote: u64) {
+		let mut current = self.lamport.load(Ordering::SeqCst);
+		while remote > current {
+			match self
+				.lamport
+				.compare_exchange(current, remote + 1, Ordering::SeqCst, Ordering::SeqCst)
+			{
+				Ok(_) => break,
+				Err(actual) => current = actual,
+			}
+		}
 	}
 
 	pub fn add_peer(&self, addr: &str) {

@@ -167,6 +167,8 @@ fn commit_reason(
 		text: String::new(),
 		vector: vec.clone(),
 		score,
+		score_lamport: 0,
+		score_producer: String::new(),
 		traversal_count: GCounter::new(),
 		producer_id: String::new(),
 	};

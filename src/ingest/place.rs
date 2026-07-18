@@ -60,6 +60,8 @@ fn new_statement_entity(
 		heat_updated_at: None,
 		updated_at: None,
 		valid_until,
+		valid_until_lamport: 0,
+		valid_until_producer: String::new(),
 		producer_id: String::new(),
 		unlinked_count,
 		dirty: false,
@@ -121,6 +123,24 @@ pub(crate) async fn place_document(
 
 	let lex = {
 		let mut g = graph.write();
+		let lamport = g.bump_lamport();
+		let producer = g.network_id.clone();
+		if thought.valid_until.is_some() && thought.valid_until_lamport == 0 {
+			thought.valid_until_lamport = lamport;
+			thought.valid_until_producer = producer.clone();
+			let lww_value =
+				bincode::serde::encode_to_vec(thought.valid_until, bincode::config::standard())
+					.unwrap_or_default();
+			g.push_delta(crate::base::graph::PendingDelta {
+				object_id: thought.id.clone(),
+				target: 3,
+				replica: String::new(),
+				value: 0,
+				lamport,
+				producer,
+				lww_value,
+			});
+		}
 		accept::accept(&mut g, &root_id, thought.clone(), "");
 		g.lexical()
 	};
@@ -190,6 +210,24 @@ pub(crate) fn place_chunks(
 
 		let (result, lex) = {
 			let mut g = graph.write();
+			let lamport = g.bump_lamport();
+			let producer = g.network_id.clone();
+			if thought.valid_until.is_some() && thought.valid_until_lamport == 0 {
+				thought.valid_until_lamport = lamport;
+				thought.valid_until_producer = producer.clone();
+				let lww_value =
+					bincode::serde::encode_to_vec(thought.valid_until, bincode::config::standard())
+						.unwrap_or_default();
+				g.push_delta(crate::base::graph::PendingDelta {
+					object_id: tid.clone(),
+					target: 3,
+					replica: String::new(),
+					value: 0,
+					lamport,
+					producer,
+					lww_value,
+				});
+			}
 			let r = accept::accept(&mut g, &root_id, thought, doc_id);
 			let l = g.lexical();
 			(r, l)

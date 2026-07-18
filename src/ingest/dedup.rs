@@ -67,6 +67,8 @@ pub fn update_existing_entity(
 			text: new_text.to_string(),
 			vector: Vec::new(),
 			score: 0.5,
+			score_lamport: 0,
+			score_producer: String::new(),
 			traversal_count: GCounter::new(),
 			producer_id: String::new(),
 		};

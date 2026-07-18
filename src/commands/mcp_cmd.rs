@@ -303,6 +303,7 @@ async fn run_standalone(cfg: &crate::config::Config) {
 			cfg.retrieval.query_cache_cap,
 			cfg.retrieval.query_cache_theta,
 		),
+		broadcast_pulse: None,
 	};
 	server.run_stdio();
 }

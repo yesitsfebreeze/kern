@@ -245,38 +245,55 @@ pub(crate) fn save_graph_guarded(
 	graph: &std::sync::Arc<parking_lot::RwLock<GraphGnn>>,
 	cfg: &crate::config::Config,
 ) {
-	let (snapshot, expected) = {
-		let g = read_recovered(graph);
-		(
-			crate::base::persist::snapshot_for_flush(&g),
-			g.flushed_epoch(),
-		)
-	};
-	let Some(snapshot) = snapshot else {
-		return;
-	};
-	let outcome = crate::base::persist::flush_snapshot(&snapshot, expected);
-	match outcome {
-		Ok(crate::base::store::FlushOutcome::Flushed { epoch }) => {
-			crate::base::locks::write_recovered(graph).set_flushed_epoch(epoch);
-		}
-		Ok(crate::base::store::FlushOutcome::RefusedStale {
-			disk_epoch,
-			expected,
-		}) => {
-			tracing::warn!(
-				target: "kern.persist",
+	const FLUSH_RETRIES: u32 = 5;
+	for attempt in 0..FLUSH_RETRIES {
+		let (snapshot, expected) = {
+			let g = read_recovered(graph);
+			(
+				crate::base::persist::snapshot_for_flush(&g),
+				g.flushed_epoch(),
+			)
+		};
+		let Some(snapshot) = snapshot else {
+			return;
+		};
+		let outcome = crate::base::persist::flush_snapshot(&snapshot, expected);
+		match outcome {
+			Ok(crate::base::store::FlushOutcome::Flushed { epoch }) => {
+				crate::base::locks::write_recovered(graph).set_flushed_epoch(epoch);
+				return;
+			}
+			Ok(crate::base::store::FlushOutcome::RefusedStale {
 				disk_epoch,
 				expected,
-				data_dir = %cfg.data_dir,
-				"refused to flush a stale snapshot — disk advanced under us (another writer); reloading from disk so live rows are not dropped"
-			);
-			let mut w = crate::base::locks::write_recovered(graph);
-			let fresh = reload_graph(cfg, &w);
-			*w = fresh;
+			}) => {
+				tracing::warn!(
+					target: "kern.persist",
+					disk_epoch,
+					expected,
+					attempt,
+					data_dir = %cfg.data_dir,
+					"refused to flush a stale snapshot — disk advanced under us (another writer); absorbing disk rows and retrying"
+				);
+				let mut w = crate::base::locks::write_recovered(graph);
+				let Some(fresh) = crate::base::persist::reload_from_disk(&w) else {
+					return;
+				};
+				let disk_epoch = fresh.flushed_epoch();
+				crate::base::merge::absorb_graph(&mut w, fresh);
+				w.set_flushed_epoch(disk_epoch);
+			}
+			Err(e) => {
+				eprintln!("save: {e}");
+				return;
+			}
 		}
-		Err(e) => eprintln!("save: {e}"),
 	}
+	tracing::warn!(
+		target: "kern.persist",
+		data_dir = %cfg.data_dir,
+		"flush still refused after {FLUSH_RETRIES} absorb-and-retry rounds; unflushed rows stay in memory until the next snapshot"
+	);
 }
 
 pub(crate) fn snapshot_if_dirty(
@@ -559,13 +576,22 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 	let tick_embed: crate::tick::tasks::EmbedFunc = embed_fn(&llm_client);
 
 	let registry = Arc::new(crate::store::Registry::new());
+	let shared_bq: Arc<parking_lot::RwLock<Option<crate::tick::tasks::BroadcastQuestionFunc>>> =
+		Arc::new(parking_lot::RwLock::new(None));
+	let bq_slot = shared_bq.clone();
+	let broadcast_q_wrapper: crate::tick::tasks::BroadcastQuestionFunc =
+		Arc::new(move |rid, from, vec, text| {
+			if let Some(f) = bq_slot.read().as_ref() {
+				f(rid, from, vec, text);
+			}
+		});
 	let entry = registry.open(
 		std::path::Path::new(&cfg.data_dir),
 		cfg,
 		llm_client.clone(),
 		tick_llm,
 		Some(tick_embed),
-		None,
+		Some(broadcast_q_wrapper),
 	);
 	let g = entry.graph.clone();
 	let worker = entry.worker.clone();
@@ -600,15 +626,19 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 			cfg.retrieval.query_cache_cap,
 			cfg.retrieval.query_cache_theta,
 		),
+		broadcast_pulse: None,
 	});
 
 	spawn_file_watcher(cfg, &worker);
 
 	spawn_capture(cfg, &worker, &llm_fn, &g);
 
-	start_gossip(cfg, &g, &q, &save_fn).await;
+	let (broadcast_pulse, broadcast_q) = start_gossip(cfg, &g, &q, &save_fn).await;
+	if let Some(bq) = broadcast_q {
+		*shared_bq.write() = Some(bq);
+	}
 
-	spawn_maintenance_tick(cfg, &g, &q);
+	spawn_maintenance_tick(cfg, &g, &q, broadcast_pulse.clone());
 
 	EngineHandle {
 		server: mcp_server,
@@ -821,14 +851,19 @@ fn spawn_capture(
 	});
 }
 
+type BroadcastPulseFn = Arc<dyn Fn(&str, f64) + Send + Sync>;
+
 async fn start_gossip(
 	cfg: &crate::config::Config,
 	g: &SharedGraph,
 	q: &Arc<crate::tick::queue::Queue>,
 	save_fn: &Arc<dyn Fn() + Send + Sync>,
+) -> (
+	Option<BroadcastPulseFn>,
+	Option<crate::tick::tasks::BroadcastQuestionFunc>,
 ) {
 	if !cfg.gossip.enabled {
-		return;
+		return (None, None);
 	}
 	let network_id = {
 		let g = read_recovered(g);
@@ -851,13 +886,49 @@ async fn start_gossip(
 			node.start_heartbeat();
 			crate::gossip::handler::start_announce(node.clone(), g.clone());
 			crate::gossip::handler::start_entity_sync(node.clone(), g.clone());
+			crate::gossip::handler::start_delta_flush(node.clone(), g.clone());
 			if cfg.gossip.discovery {
 				crate::gossip::discovery::start_broadcast(&node, cfg.gossip.discovery_port);
 				crate::gossip::discovery::start_listen(&node, cfg.gossip.discovery_port);
 			}
+			let pulse_node = node.clone();
+			let broadcast_pulse: BroadcastPulseFn = Arc::new(move |kern_id: &str, strength: f64| {
+				let stamp = crate::base::util::now_nanos();
+				let msg = crate::gossip::types::GossipMessage {
+					kind: crate::gossip::types::GossipKind::Pulse,
+					id: format!("pulse-{}-{}", pulse_node.addr(), stamp),
+					origin: pulse_node.addr(),
+					payload: crate::gossip::types::GossipPayload::Pulse(crate::gossip::types::PulsePayload {
+						kern_id: kern_id.to_string(),
+						strength,
+					}),
+				};
+				pulse_node.broadcast(msg);
+			});
+			let q_node = node.clone();
+			let broadcast_q: crate::tick::tasks::BroadcastQuestionFunc =
+				Arc::new(move |rid: &str, from_id: &str, rvec: &[f32], rtext: &str| {
+					let stamp = crate::base::util::now_nanos();
+					let msg = crate::gossip::types::GossipMessage {
+						kind: crate::gossip::types::GossipKind::Question,
+						id: format!("q-{}-{}", q_node.addr(), stamp),
+						origin: q_node.addr(),
+						payload: crate::gossip::types::GossipPayload::Question(
+							crate::gossip::types::QuestionPayload {
+								reason_id: rid.to_string(),
+								from_id: from_id.to_string(),
+								reason_vec: rvec.to_vec(),
+								question_text: rtext.to_string(),
+							},
+						),
+					};
+					q_node.broadcast(msg);
+				});
+			(Some(broadcast_pulse), Some(broadcast_q))
 		}
 		Err(e) => {
 			tracing::warn!(target: "kern.gossip", error = %e, "gossip listen failed; federation disabled");
+			(None, None)
 		}
 	}
 }
@@ -866,6 +937,7 @@ fn spawn_maintenance_tick(
 	cfg: &crate::config::Config,
 	g: &SharedGraph,
 	q: &Arc<crate::tick::queue::Queue>,
+	broadcast_pulse: Option<crate::mcp::PulseBroadcast>,
 ) {
 	if cfg.tick.interval_secs == 0 {
 		return;
@@ -888,6 +960,9 @@ fn spawn_maintenance_tick(
 			{
 				let mut g = crate::base::locks::write_recovered(&g_tick);
 				crate::tick::pulse::pulse(&q_tick, &mut g, &root_id, 1.0);
+			}
+			if let Some(broadcast) = &broadcast_pulse {
+				broadcast(&root_id, 1.0);
 			}
 			crate::tick::enqueue_all(&q_tick, &g_tick);
 			// Bound the crash-loss window for mutations whose event-driven save
@@ -928,12 +1003,12 @@ mod entry_point_tests {
 	}
 
 	#[test]
-	fn save_graph_guarded_refuses_stale_flush_then_reloads_committed_data() {
+	fn save_graph_guarded_absorbs_external_commit_and_keeps_unflushed_rows() {
 		use parking_lot::RwLock;
 		use std::sync::Arc;
 
-		use crate::base::locks::read_recovered;
-		use crate::base::types::Kern;
+		use crate::base::locks::{read_recovered, write_recovered};
+		use crate::base::types::{mk_entity, EntityKind, Kern};
 
 		let dir = tempfile::tempdir().unwrap();
 		let cfg = crate::config::Config {
@@ -951,25 +1026,38 @@ mod entry_point_tests {
 		let root_id = read_recovered(&g).root.id.clone();
 		commit_extra_kern_via_store(&g, Kern::new("cli-kern", &root_id));
 
+		let mut ram = Kern::new("ram-kern", &root_id);
+		ram.entities.insert(
+			"e1".into(),
+			mk_entity("e1", "unflushed row", 1.0, EntityKind::Fact),
+		);
+		write_recovered(&g)
+			.kerns
+			.insert("ram-kern".to_string(), ram);
+
 		super::save_graph_guarded(&g, &cfg);
 
 		assert!(
 			read_recovered(&g).loaded("cli-kern").is_some(),
-			"daemon reloaded the externally committed kern instead of wiping it"
+			"the externally committed kern was absorbed instead of ignored"
 		);
 		assert!(
-			read_recovered(&g).flushed_epoch() >= 1,
-			"the daemon adopted the advanced on-disk epoch after reloading"
+			read_recovered(&g).loaded("ram-kern").is_some(),
+			"the unflushed in-memory kern survived the refused flush"
+		);
+		assert!(
+			read_recovered(&g).flushed_epoch() >= 2,
+			"the daemon adopted the advanced on-disk epoch and flushed past it"
 		);
 		// Read disk back through the same store handle (no second env open).
-		let on_disk = read_recovered(&g)
-			.store()
-			.unwrap()
-			.load_one_kern("cli-kern")
-			.unwrap();
+		let store = read_recovered(&g).store().unwrap();
 		assert!(
-			on_disk.is_some(),
+			store.load_one_kern("cli-kern").unwrap().is_some(),
 			"the externally committed kern survives on disk"
+		);
+		assert!(
+			store.load_one_kern("ram-kern").unwrap().is_some(),
+			"the unflushed in-memory kern reached disk on the retry flush"
 		);
 	}
 

@@ -355,9 +355,24 @@ pub fn refine_edges(g: &mut GraphGnn, chains: &[PathChain], llm: &LlmFunc) {
 				let response = llm(&prompt);
 				if let Ok(new_score) = response.trim().parse::<f64>() {
 					let clamped = new_score.clamp(0.0, 1.0);
+					let lamport = g.bump_lamport();
+					let producer = g.network_id.clone();
 					if let Some(kern) = g.get_mut(&kern_id) {
 						if let Some(r) = kern.reasons.get_mut(node_id) {
 							r.score = clamped;
+							r.score_lamport = lamport;
+							r.score_producer = producer.clone();
+							let lww_value = bincode::serde::encode_to_vec(clamped, bincode::config::standard())
+								.unwrap_or_default();
+							g.push_delta(crate::base::graph::PendingDelta {
+								object_id: node_id.clone(),
+								target: 2,
+								replica: String::new(),
+								value: 0,
+								lamport,
+								producer,
+								lww_value,
+							});
 						}
 					}
 				}

@@ -1,5 +1,67 @@
 # Changelog
 
+- 2026-07-18 — Logging actually emits now: `main.rs` initialized a bare
+  `tracing_subscriber::registry()` with no layers, so every event — including
+  the flush-refusal warnings that would have exposed the persistence bug —
+  was dropped. Replaced with an stderr fmt subscriber honoring `RUST_LOG`
+  (default `warn`); stderr because `kern mcp --mcp-stdio` owns stdout for
+  JSON-RPC. Decided by: fix-bugs-on-sight. Supersedes: the layerless registry.
+
+- 2026-07-18 — A refused stale flush now absorbs the disk graph into the live
+  one and retries, instead of replacing the live graph with the disk copy.
+  The old path silently dropped every unflushed in-memory row whenever an
+  external writer (CLI `kern ingest`) bumped the store epoch — the daemon
+  held entities in RAM forever while LMDB stayed empty. New
+  `merge::absorb_graph` reuses the gossip CRDT joins (`merge_remote_entity`,
+  `merge_reason`) so both writers' rows survive; `save_graph_guarded` adopts
+  the disk epoch and retries up to 5 rounds. Tradeoff: rows deleted by an
+  external writer between two daemon flushes can resurrect from the daemon's
+  copy — accepted, losing data silently is worse and GC re-deletes.
+  Decided by: fix-the-root. Supersedes: the reload-and-drop refusal path.
+
+- 2026-07-17 — Implemented Phase 1 of the federation integration plan
+  (`docs/federation-integration-plan.md`): the correctness core. Added
+  `OrSet` and `LwwRegister` CRDT primitives to `src/crdt.rs`. Added Lamport
+  clock (`AtomicU64`) to `GraphGnn` with `bump_lamport`/`observe_lamport`.
+  Extended `CrdtDeltaPayload` with `lamport`, `producer`, `lww_value`,
+  `orset_delta` fields (`#[serde(default)]` for backward compat) and new
+  `CrdtTarget` variants (`ReasonScore`, `ValidUntil`, `Statements`).
+  `merge_entity` now unions `statements` (no more lost concurrent adds) and
+  uses LWW for `valid_until` instead of wall-clock `join_min_time`.
+  `merge_reason` uses LWW with `(lamport, producer)` tiebreak instead of
+  max-join for `Reason.score` (fixes the critical bug: `degrade` lowers scores,
+  max-join irreversibly lost the lowering on sync). Added shadow LWW fields to
+  `Entity` and `Reason` with `#[serde(default)]`. Write sites (`refine_edges`,
+  `degrade_entity_reasons`, `place_document`, `place_chunks`) stamp
+  `(lamport, producer)` via `g.bump_lamport()`/`g.network_id`. Added
+  `PendingDelta` queue to `GraphGnn` with `push_delta`/`drain_pending_deltas`;
+  `commit_access_ids_with_half_life` pushes counter deltas. Added
+  `start_delta_flush` heartbeat loop that drains and broadcasts. Wired Delta
+  sender (counter increments), Pulse sender (maintenance tick + `tool_pulse`),
+  and Question sender (shared-slot `BroadcastQuestionFunc` bridging
+  `registry.open` → `start_gossip` ordering). `handle_crdt_delta` handles all
+  new `CrdtTarget` variants and observes incoming Lamport. 736 tests pass,
+  fmt clean, build green with `--features bench`.
+  Decided by: verify-before-claiming. Supersedes: the audit entry above.
+
+- 2026-07-17 — Audited the federation roadmap (F0–F4) against the codebase
+  at v1.0.0 and wrote `docs/federation-integration-plan.md`. Every roadmap
+  claim verified against source: Delta/Question/Pulse are receive-only (no
+  sender anywhere in `src/`), `Fetch` is single-thought only (no `AntiEntropy`
+  variant), `crdt.rs` ships only GCounter/PnCounter (no OR-Set/LWW-Register),
+  `merge_entity` never unions `statements`, `valid_until` is wall-clock LWW,
+  transport is raw TCP with cleartext UDP `network_id`. One correction: the
+  roadmap says `Reason.score` has "no merge rule" — `merge_reason` does a
+  max-join; the real bug is that max-join is wrong for a non-monotonic field
+  (`degrade_entity_reasons` lowers scores, max-join irreversibly loses the
+  lowering on sync). Integration plan: Phase 1 (Lamport clock + delta/pulse/
+  question senders + OR-Set for statements + LWW-Register for score/valid_
+  until), Phase 2 (`AntiEntropy` bulk pull on rejoin), Phase 3 (mTLS +
+  payload signatures + `network_id` as secret), Phase 4 (per-peer rate limit +
+  divergence metric + remote heat floor). Refined ROADMAP item 4 into four
+  specific gating decisions.
+  Decided by: verify-before-claiming. Supersedes: nothing.
+
 - 2026-07-17 — Strict comment sweep across the whole crate: doc comments
   (`///`/`//!`) and rationale prose are now in splinter notes, not source.
   Descriptive docs, derivations, benchmark provenance, and restatement were

@@ -85,6 +85,22 @@ pub struct FetchResultPayload {
 pub enum CrdtTarget {
 	ThoughtAccessCount = 0,
 	ReasonTraversalCount = 1,
+	ReasonScore = 2,
+	ValidUntil = 3,
+	Statements = 4,
+}
+
+impl CrdtTarget {
+	pub fn from_u8(v: u8) -> Option<Self> {
+		match v {
+			0 => Some(Self::ThoughtAccessCount),
+			1 => Some(Self::ReasonTraversalCount),
+			2 => Some(Self::ReasonScore),
+			3 => Some(Self::ValidUntil),
+			4 => Some(Self::Statements),
+			_ => None,
+		}
+	}
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +112,7 @@ pub struct EntitySyncPayload {
 
 // value is the sender's ABSOLUTE replica-slot total, not an increment — a
 // delta-since-last would be lost under the receiver's max-merge.
+// lamport + producer carry the LWW-Register tiebreak for ReasonScore / ValidUntil.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrdtDeltaPayload {
 	pub kern_id: String,
@@ -103,4 +120,14 @@ pub struct CrdtDeltaPayload {
 	pub target: CrdtTarget,
 	pub replica: String,
 	pub value: u64,
+	#[serde(default)]
+	pub lamport: u64,
+	#[serde(default)]
+	pub producer: String,
+	// Encoded LWW value for ReasonScore / ValidUntil (bincode of the f64 / Option<SystemTime>).
+	#[serde(default)]
+	pub lww_value: Vec<u8>,
+	// Encoded OR-Set delta for Statements (bincode of Vec<String> adds).
+	#[serde(default)]
+	pub orset_delta: Vec<u8>,
 }

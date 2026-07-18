@@ -217,7 +217,22 @@ pub fn commit_access_ids_with_half_life(g: &mut GraphGnn, ids: &[String], half_l
 			.get_mut(&kern_id)
 			.and_then(|k| k.entities.get_mut(id))
 		{
+			let replica = if e.producer_id.is_empty() {
+				"local".to_string()
+			} else {
+				e.producer_id.clone()
+			};
 			stamp_access(e, now, half_life_secs);
+			let value = e.access_count.slots().get(&replica).copied().unwrap_or(0);
+			g.push_delta(crate::base::graph::PendingDelta {
+				object_id: id.clone(),
+				target: 0,
+				replica,
+				value,
+				lamport: 0,
+				producer: String::new(),
+				lww_value: Vec::new(),
+			});
 		}
 	}
 }

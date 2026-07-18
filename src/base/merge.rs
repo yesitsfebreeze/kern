@@ -31,6 +31,35 @@ fn join_min_time(local: &mut Option<SystemTime>, remote: Option<SystemTime>) -> 
 	join_time(local, remote, |r, l| r < l)
 }
 
+fn join_lww_time(
+	local: &mut Option<SystemTime>,
+	local_lamport: &mut u64,
+	local_producer: &mut String,
+	remote: Option<SystemTime>,
+	remote_lamport: u64,
+	remote_producer: &str,
+) -> bool {
+	if (remote_lamport, remote_producer) > (*local_lamport, local_producer.as_str()) {
+		*local = remote;
+		*local_lamport = remote_lamport;
+		*local_producer = remote_producer.to_string();
+		true
+	} else {
+		false
+	}
+}
+
+fn union_statements(local: &mut Vec<String>, remote: &[String]) -> bool {
+	let mut changed = false;
+	for s in remote {
+		if !local.iter().any(|e| e == s) {
+			local.push(s.clone());
+			changed = true;
+		}
+	}
+	changed
+}
+
 fn join_superseded_by(local: &mut String, remote: &str) -> bool {
 	if !remote.is_empty() && remote > local.as_str() {
 		*local = remote.to_string();
@@ -57,7 +86,15 @@ pub fn merge_entity(local: &mut Entity, remote: &Entity) -> bool {
 	changed |= join_max_time(&mut local.accessed_at, remote.accessed_at);
 	changed |= join_max_time(&mut local.updated_at, remote.updated_at);
 	changed |= join_max_time(&mut local.heat_updated_at, remote.heat_updated_at);
-	changed |= join_min_time(&mut local.valid_until, remote.valid_until);
+	changed |= join_lww_time(
+		&mut local.valid_until,
+		&mut local.valid_until_lamport,
+		&mut local.valid_until_producer,
+		remote.valid_until,
+		remote.valid_until_lamport,
+		&remote.valid_until_producer,
+	);
+	changed |= union_statements(&mut local.statements, &remote.statements);
 	if changed {
 		local.refresh_score();
 	}
@@ -66,8 +103,10 @@ pub fn merge_entity(local: &mut Entity, remote: &Entity) -> bool {
 
 pub fn merge_reason(local: &mut Reason, remote: &Reason) -> bool {
 	let mut changed = local.traversal_count.merge(&remote.traversal_count);
-	if remote.score > local.score {
+	if (remote.score_lamport, &remote.score_producer) > (local.score_lamport, &local.score_producer) {
 		local.score = remote.score;
+		local.score_lamport = remote.score_lamport;
+		local.score_producer = remote.score_producer.clone();
 		changed = true;
 	}
 	changed
@@ -146,6 +185,68 @@ pub fn merge_remote_entity(g: &mut GraphGnn, target_kern_id: &str, remote: Entit
 			true
 		}
 	}
+}
+
+// Fold a disk-loaded graph into the live one after a refused stale flush: the
+// live graph keeps its unflushed rows, the external writer's rows join via the
+// same CRDT joins gossip uses, and the caller retries the flush with the disk
+// epoch. Kern-shell fields (anchor, radii, weights) stay local for kerns both
+// sides know — only rows and topology union in.
+pub fn absorb_graph(local: &mut GraphGnn, disk: GraphGnn) -> usize {
+	let mut changed = 0;
+	for (kid, mut dkern) in disk.kerns {
+		let entities = std::mem::take(&mut dkern.entities);
+		let reasons = std::mem::take(&mut dkern.reasons);
+		let refs = std::mem::take(&mut dkern.refs);
+		let sources = std::mem::take(&mut dkern.source_index);
+		let descriptors = std::mem::take(&mut dkern.descriptors);
+		match local.kerns.get_mut(&kid) {
+			Some(lkern) => {
+				for c in &dkern.children {
+					if !lkern.children.contains(c) {
+						lkern.children.push(c.clone());
+					}
+				}
+			}
+			None => {
+				dkern.by_from.clear();
+				dkern.by_to.clear();
+				local.kerns.insert(kid.clone(), dkern);
+				changed += 1;
+			}
+		}
+		for e in entities.into_values() {
+			if merge_remote_entity(local, &kid, e) {
+				changed += 1;
+			}
+		}
+		let Some(lkern) = local.kerns.get_mut(&kid) else {
+			continue;
+		};
+		for (rid, r) in reasons {
+			match lkern.reasons.get_mut(&rid) {
+				Some(lr) => {
+					if merge_reason(lr, &r) {
+						changed += 1;
+					}
+				}
+				None => {
+					crate::base::reason::add_reason(lkern, r);
+					changed += 1;
+				}
+			}
+		}
+		for (k, v) in refs {
+			lkern.refs.entry(k).or_insert(v);
+		}
+		for (k, v) in sources {
+			lkern.source_index.entry(k).or_insert(v);
+		}
+		for (k, v) in descriptors {
+			lkern.descriptors.entry(k).or_insert(v);
+		}
+	}
+	changed
 }
 
 #[cfg(test)]
@@ -472,20 +573,25 @@ mod tests {
 	}
 
 	#[test]
-	fn merge_reason_maxes_score_and_joins_traversal_idempotently() {
+	fn merge_reason_lww_score_and_joins_traversal_idempotently() {
 		let mut local = Reason {
 			score: 0.3,
+			score_lamport: 1,
+			score_producer: "r1".into(),
 			..Default::default()
 		};
 		local.traversal_count.increment("a", 1);
 		let mut remote = Reason {
 			score: 0.7,
+			score_lamport: 2,
+			score_producer: "r2".into(),
 			..Default::default()
 		};
 		remote.traversal_count.increment("b", 2);
 
 		assert!(merge_reason(&mut local, &remote));
-		assert_eq!(local.score, 0.7, "score is a monotone max-join");
+		assert_eq!(local.score, 0.7, "higher lamport wins the LWW-Register");
+		assert_eq!(local.score_lamport, 2);
 		assert_eq!(local.traversal_count.value(), 3, "traversal GCounters join");
 
 		assert!(!merge_reason(&mut local, &remote));
@@ -494,10 +600,27 @@ mod tests {
 
 		let lower = Reason {
 			score: 0.1,
+			score_lamport: 1,
+			score_producer: "r1".into(),
 			..Default::default()
 		};
-		assert!(!merge_reason(&mut local, &lower));
+		assert!(
+			!merge_reason(&mut local, &lower),
+			"lower lamport does not overwrite"
+		);
 		assert_eq!(local.score, 0.7);
+
+		let same_lamport_higher_producer = Reason {
+			score: 0.9,
+			score_lamport: 2,
+			score_producer: "r9".into(),
+			..Default::default()
+		};
+		assert!(
+			merge_reason(&mut local, &same_lamport_higher_producer),
+			"same lamport, higher producer wins"
+		);
+		assert_eq!(local.score, 0.9);
 	}
 
 	#[test]
@@ -534,6 +657,63 @@ mod tests {
 		assert_eq!(
 			local.unlinked_count, snap_unlinked,
 			"unlinked_count is local bookkeeping"
+		);
+	}
+
+	#[test]
+	fn merge_entity_unions_statements() {
+		let mut local = mk_entity("e1", "a", 1.0, EntityKind::Fact);
+		let mut remote = mk_entity("e1", "b", 1.0, EntityKind::Fact);
+		remote.statements = vec!["b".into(), "c".into()];
+		assert!(merge_entity(&mut local, &remote));
+		let mut sorted = local.statements.clone();
+		sorted.sort();
+		assert_eq!(
+			sorted,
+			vec!["a".to_string(), "b".to_string(), "c".to_string()]
+		);
+	}
+
+	#[test]
+	fn merge_entity_valid_until_lww_takes_higher_lamport() {
+		let mut local = mk_entity("e1", "x", 1.0, EntityKind::Fact);
+		local.valid_until = Some(UNIX_EPOCH + Duration::from_secs(100));
+		local.valid_until_lamport = 1;
+		local.valid_until_producer = "r1".into();
+
+		let mut remote = mk_entity("e1", "x", 1.0, EntityKind::Fact);
+		remote.valid_until = Some(UNIX_EPOCH + Duration::from_secs(50));
+		remote.valid_until_lamport = 2;
+		remote.valid_until_producer = "r2".into();
+
+		assert!(merge_entity(&mut local, &remote));
+		assert_eq!(
+			local.valid_until,
+			Some(UNIX_EPOCH + Duration::from_secs(50)),
+			"higher lamport wins, not min time"
+		);
+		assert_eq!(local.valid_until_lamport, 2);
+	}
+
+	#[test]
+	fn merge_entity_valid_until_lower_lamport_loses() {
+		let mut local = mk_entity("e1", "x", 1.0, EntityKind::Fact);
+		local.valid_until = Some(UNIX_EPOCH + Duration::from_secs(100));
+		local.valid_until_lamport = 5;
+		local.valid_until_producer = "r1".into();
+
+		let mut remote = mk_entity("e1", "x", 1.0, EntityKind::Fact);
+		remote.valid_until = Some(UNIX_EPOCH + Duration::from_secs(50));
+		remote.valid_until_lamport = 2;
+		remote.valid_until_producer = "r2".into();
+
+		assert!(
+			!merge_entity(&mut local, &remote),
+			"lower lamport does not overwrite"
+		);
+		assert_eq!(
+			local.valid_until,
+			Some(UNIX_EPOCH + Duration::from_secs(100))
 		);
 	}
 }
