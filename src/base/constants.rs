@@ -36,11 +36,11 @@ pub const KERN_OUTER_RADIUS: f64 = 0.35;
 
 pub const ACCEPT_FLOOR: f64 = 0.5;
 
-// Empty anchor_vec, so similarity routing never matches it — fallback only.
-pub const GENERIC_ANCHOR: &str = "generic";
+// Empty graviton_vec, so similarity routing never matches it — fallback only.
+pub const GENERIC_GRAVITON: &str = "generic";
 
-// Two anchors above this cosine are the SAME concept. Re-tune if the embed model changes.
-pub const ANCHOR_DEDUP_THRESHOLD: f64 = 0.85;
+// Two gravitons above this cosine are the SAME concept. Re-tune if the embed model changes.
+pub const GRAVITON_DEDUP_THRESHOLD: f64 = 0.85;
 pub const KERN_COHESION_THRESHOLD: f64 = 0.60;
 pub const KERN_MIN_CLUSTER_SIZE: usize = 10;
 pub const KERN_NAMING_COHESION_THRESHOLD: f64 = 0.50;

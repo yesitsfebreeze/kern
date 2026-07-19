@@ -1,7 +1,7 @@
 use crate::base::util::short_id;
 
 use super::{
-	load_graph, save_graph, with_graph, AnchorAction, Client, DescriptorAction, Endpoint,
+	load_graph, save_graph, with_graph, GravitonAction, Client, DescriptorAction, Endpoint,
 	UnnamedAction,
 };
 
@@ -36,10 +36,10 @@ pub(super) fn cmd_health(cfg: &crate::config::Config) {
 	let h = crate::base::health::graph_health_stats(&g);
 
 	println!("data_dir:    {}", g.data_dir);
-	if h.anchors.is_empty() {
-		println!("anchors:     (none)");
+	if h.gravitons.is_empty() {
+		println!("gravitons:     (none)");
 	} else {
-		println!("anchors:     {}", h.anchors.join(", "));
+		println!("gravitons:     {}", h.gravitons.join(", "));
 	}
 	println!("kerns:       {}", h.kerns);
 	println!("thoughts:    {} (unnamed: {})", h.entities, h.unnamed);
@@ -47,10 +47,10 @@ pub(super) fn cmd_health(cfg: &crate::config::Config) {
 	println!("descriptors: {}", g.root.descriptors.len());
 
 	for k in g.all() {
-		let label = if k.anchor_text.is_empty() {
+		let label = if k.graviton_text.is_empty() {
 			"[unnamed]"
 		} else {
-			&k.anchor_text
+			&k.graviton_text
 		};
 		println!(
 			"  kern:{}  thoughts:{}  reasons:{}",
@@ -118,11 +118,12 @@ fn human_bytes(n: u64) -> String {
 	}
 }
 
-pub(super) async fn cmd_anchor(cfg: &crate::config::Config, action: AnchorAction) {
+pub(super) async fn cmd_graviton(cfg: &crate::config::Config, action: GravitonAction) {
 	match action {
-		AnchorAction::Add {
+		GravitonAction::Add {
 			name,
 			text,
+			mass,
 			embed_url,
 			embed_model,
 		} => {
@@ -140,29 +141,33 @@ pub(super) async fn cmd_anchor(cfg: &crate::config::Config, action: AnchorAction
 					return;
 				}
 			};
-			with_graph(cfg, |g| crate::base::accept::add_anchor(g, &name, vec));
-			println!("anchor added: {name}");
+			let mass = mass.unwrap_or(1.0);
+			with_graph(cfg, |g| {
+				crate::base::accept::add_graviton_with_mass(g, &name, vec, mass)
+			});
+			println!("graviton added: {name} (mass {mass})");
 		}
-		AnchorAction::List => {
+		GravitonAction::List => {
 			let g = load_graph(cfg);
-			println!("anchors:");
-			for cid in crate::base::accept::root_anchor_ids(&g) {
+			println!("gravitons:");
+			for cid in crate::base::accept::root_graviton_ids(&g) {
 				if let Some(c) = g.loaded(&cid) {
 					println!(
-						"  {}  thoughts:{}  reasons:{}",
-						c.anchor_text,
+						"  {}  mass:{}  thoughts:{}  reasons:{}",
+						c.graviton_text,
+						c.mass,
 						c.entities.len(),
 						c.reasons.len(),
 					);
 				}
 			}
 		}
-		AnchorAction::Remove { name } => {
-			let removed = with_graph(cfg, |g| crate::base::accept::remove_anchor(g, &name));
+		GravitonAction::Remove { name } => {
+			let removed = with_graph(cfg, |g| crate::base::accept::remove_graviton(g, &name));
 			if removed {
-				println!("anchor removed: {name}");
+				println!("graviton removed: {name}");
 			} else {
-				eprintln!("anchor not found: {name}");
+				eprintln!("graviton not found: {name}");
 			}
 		}
 	}

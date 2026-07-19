@@ -1,5 +1,5 @@
 use super::dto::{
-	AnchorReq, AnchorRes, CallToolReq, CallToolRes, DegradeReq, DegradeRes, DescriptorReq,
+	GravitonReq, GravitonRes, CallToolReq, CallToolRes, DegradeReq, DegradeRes, DescriptorReq,
 	DescriptorRes, ForgetReq, ForgetRes, HealthRes, IngestReq, IngestRes, LinkReq, LinkRes,
 	ListToolsReq, ListToolsRes, NeighborsReq, NeighborsRes, PulseReq, PulseRes, QueryReq, QueryRes,
 };
@@ -13,7 +13,7 @@ crate::service! {
 				async fn forget(req: ForgetReq) -> ForgetRes;
 				async fn degrade(req: DegradeReq) -> DegradeRes;
 				async fn health() -> HealthRes;
-				async fn anchor(req: AnchorReq) -> AnchorRes;
+				async fn graviton(req: GravitonReq) -> GravitonRes;
 				async fn descriptor(req: DescriptorReq) -> DescriptorRes;
 				async fn pulse(req: PulseReq) -> PulseRes;
 				async fn call_tool(req: CallToolReq) -> CallToolRes;

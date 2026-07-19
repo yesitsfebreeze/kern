@@ -25,7 +25,7 @@ Scope rating: 8/10 — builds the session-injected digest.md (anchors + hottest 
 - `near_duplicate_claims_are_skipped` — 9/10: covers dedup.
 - `low_trust_claim_quarantined_even_when_hottest` — 9/10: covers trust gating.
 - `documents_are_excluded_claims_kept` — 9/10: covers kind filtering.
-Recall digest: a markdown snapshot of purpose + hottest thoughts, written for the Claude-Code SessionStart hook. Pure builder (build_digest) + thin writer (write_digest); no live query path.
+Recall digest: a markdown snapshot of purpose + hottest thoughts, written for clients to read into new sessions. Pure builder (build_digest) + thin writer (write_digest); no live query path.
 
 - est_tokens: ~4 chars/token; the digest only needs an approximate budget.
 - dedup_key: near-duplicate key (whitespace-collapsed, lowercased, first 80 chars) so restatements of the same fact collapse to one key and only the first (hottest) survives.

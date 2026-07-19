@@ -236,7 +236,7 @@ arguably cleaner, and sidesteps score-calibration headaches.
 
 Thought-level PageRank (phase 2) feeds `base::split`:
 
-- High-rank thoughts become **anchors** — do not split them out of a kern;
+- High-rank thoughts become **gravitons** — do not split them out of a kern;
   they are the centre of gravity.
 - Low-rank thoughts with high local reason count are candidates for
   extraction into a sub-kern (they are "bridge" nodes inflating the parent).

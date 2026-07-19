@@ -24,7 +24,7 @@ mod tests {
 			"forget",
 			"degrade",
 			"health",
-			"anchor",
+			"graviton",
 			"descriptor",
 			"pulse",
 			"gc",

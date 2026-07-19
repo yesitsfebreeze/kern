@@ -34,3 +34,17 @@ Decisions ahead, ordered. Questions, not tasks.
    context, and warm-keeping shipped; speculative decode (draft → generator) is
    the open lever. Blocker: the baseline (1) for a before/after number.
    Deciding behavior: verify-before-claiming.
+6. **Does `src/wire.rs` survive?** 36 DTO structs, 3 validate fns actually
+   imported (`tools_mutate.rs`); the live RPC DTOs are
+   `src/trnsprt/src/kern_rpc/dto.rs`. Question: delete the dead 33 and move the
+   validators next to their one caller, or is wire.rs a planned external API
+   surface? Deciding behavior: delete-superseded.
+7. **Does graviton `mass` federate?** Kern-shell fields (graviton, radii, mass)
+   stay local under the current CRDT merge; two peers can disagree on a
+   graviton's pull. Question: is mass per-node tuning (stay local) or shared
+   graph shape (needs a sender + merge rule, folds into 4)? Deciding behavior:
+   none yet — amend first.
+8. **When do document gravitons outgrow one embed call?** Long seed documents
+   truncate at the embed model's context window (`ponytail:` ceiling in
+   `tools_admin.rs`); chunk+mean-pool is the upgrade path. Blocker: a real
+   document long enough to truncate. Deciding behavior: verify-before-claiming.

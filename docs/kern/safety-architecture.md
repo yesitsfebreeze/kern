@@ -26,7 +26,7 @@ The threat model is **drift via mutation** (silent reasoning shift through memor
 ## 1. What kern is, structurally
 
 | Module | Path | Role |
-|---|---|---|
+| --- | --- | --- |
 | Core types | `src/bin/kern/src/base/types.rs` | `Thought`, `SourceRef`, `ThoughtKind`, `Acl`, `Kern` |
 | Accept gate | `src/bin/kern/src/base/accept.rs` | `accept()`, `route_thought()`, `commit_thought()` |
 | Graph store | `src/bin/kern/src/base/graph.rs` | `GraphGnn`, three HNSW indices, in-memory mutation |
@@ -42,11 +42,13 @@ The threat model is **drift via mutation** (silent reasoning shift through memor
 | Sybil | `src/bin/kern/src/gossip/sybil.rs` | Rate-clipper only |
 
 **Mutation surfaces (where thoughts enter the graph):**
+
 1. `wire.rs IngestRequest` → `ingest::worker::Worker::{enqueue, run}` → `place_chunks` / `place_document` → `accept`. *Primary path. No auth, no signature, no kind validation at the boundary.*
 2. `gossip/handler.rs handle_sphere()` → `inject_remote_scope()`. Remote peer pushes a `Sphere` payload; if `network_id` differs from local, remote `Kern` + `Thought` objects are inserted **without identity verification, without per-peer trust scoring, without quorum**.
 3. `tick/pulse.rs pulse()` mutates `heat` / `heat_updated_at` in place. Not a content write but it shifts retrieval ranking.
 
 **Read surfaces:**
+
 - `wire.rs QueryRequest` → `retrieval/answer.rs query()`. Honors `min_conf`, `kind`, `since`, `before`, `source.system`. **Does not honor `Thought.acl`** (declared on the type, never checked).
 
 ---
@@ -56,7 +58,7 @@ The threat model is **drift via mutation** (silent reasoning shift through memor
 What's there, what it does, what it doesn't.
 
 | Primitive | Where | Effective scope today |
-|---|---|---|
+| --- | --- | --- |
 | `SourceRef` (system, author, object_id, url, section, timestamps) | `base/types.rs` | All fields **optional**. No signature binding source to content. Free-text `author`. |
 | `ThoughtKind { Normal, Fact, Superseded, Document }` | `base/types.rs` | Stored on every thought. **Not validated at ingest** — caller can claim any kind. Retrieval filters out `Superseded`, boosts `Fact`. |
 | `conf_alpha` / `conf_beta` (Bayesian beta-dist parameterization) | `base/types.rs` | Stored. Wire `conf` field accepted. **Not clamped to [0,1]; not required; not enforced.** |
@@ -118,31 +120,31 @@ These two together are the single most important safety property: **knowledge is
 3. **Enforce `valid_until` in retrieval.** `apply_query_options()` should drop expired thoughts (or include only with explicit `include_expired: true`). The field already exists; making it honored unblocks all later mortality work. *Effort: one afternoon.*
 4. **Source-keyed idempotency at ingest.** `accept()` (or `place_chunks`) should consult `(source.system, source.object_id, source.section)` as a unique key before the embedding-similarity dedup runs. Same external object → update existing thought, not new vote. The `src_index` field on `GraphGnn` already maps external_id → thought_id; wire it through. *Effort: one day.*
 5. **Reason text required on supersede.** `Thought.supersede(...)` should require a `reason: String` field; persisted alongside the chain. Retrieval can surface it on conflict. *Effort: hours.*
-6. **`PreToolUse` hook on `.claude/**`, `docs/kern/`, `recipes/`.** Block agent edits to these paths without explicit human signature flag. Capability-based, not promise-based. Operator hygiene; orthogonal to thesis stages. *Effort: minutes.*
+6. **PreToolUse guard on agent-config dirs, `docs/kern/`, `recipes/`.** Block agent edits to these paths without explicit human signature flag. Capability-based, not promise-based. Operator hygiene; orthogonal to thesis stages. *Effort: minutes.*
 7. **Append-only mutation log.** A simple JSONL alongside the snapshot recording `{op, thought_id, kind, source_id, conf, author, timestamp}` per accepted/superseded event. Foundation for any later audit; cheap to add now. *Effort: one day.*
 8. **Wire-level rate cap on `IngestRequest`.** Per-process (not per-peer; this is local-first) cap on ingest rate. Prevents a runaway agent from flooding the graph. *Effort: half a day.*
 
 ### [DESIGN-NOW, ENFORCE-LATER] — preserve fields and shapes; enforcement is Stage 4
 
-9. **`Thought.signature: Option<Vec<u8>>` present in the type.** Empty for now. Preserved through wire and gossip. When ed25519 signing lands (thesis 6.6, Stage 4), this is the slot. *Effort: hours.*
-10. **`Thought.author_identity: AuthorIdentity` (structured).** Distinct from free-text `source.author`. Shape: `{ kind: Human | Agent | System, id: String }`. Enforcement comes later; the field gets populated by the worker when the operator's identity is known. *Effort: half a day.*
-11. **`SourceTrust` field on `Kern` (and per-peer on gossip ledger).** `trust: f64` with default 1.0 for local, lower for unknown peers. Applied as a multiplier in retrieval scoring once federation goes public. Today it is a no-op. *Effort: half a day.*
-12. **Tier field on thoughts.** `tier: u8` defaulting to 0. Promotion rules and gates land at Stage 4. Field present from day one means promotion is a metadata change, not a schema migration. *Effort: hours.*
-13. **`LinkProvenance` enum on edges.** `HonestTrue | DeliberateFalseFromSystem | ExternalUntrusted`. The deliberate-false-injection design (per the conversation) requires this for diversity-injection vs adversarial-injection to be cryptographically distinguishable. Field today; signing later. *Effort: hours.*
+1. **`Thought.signature: Option<Vec<u8>>` present in the type.** Empty for now. Preserved through wire and gossip. When ed25519 signing lands (thesis 6.6, Stage 4), this is the slot. *Effort: hours.*
+2. **`Thought.author_identity: AuthorIdentity` (structured).** Distinct from free-text `source.author`. Shape: `{ kind: Human | Agent | System, id: String }`. Enforcement comes later; the field gets populated by the worker when the operator's identity is known. *Effort: half a day.*
+3. **`SourceTrust` field on `Kern` (and per-peer on gossip ledger).** `trust: f64` with default 1.0 for local, lower for unknown peers. Applied as a multiplier in retrieval scoring once federation goes public. Today it is a no-op. *Effort: half a day.*
+4. **Tier field on thoughts.** `tier: u8` defaulting to 0. Promotion rules and gates land at Stage 4. Field present from day one means promotion is a metadata change, not a schema migration. *Effort: hours.*
+5. **`LinkProvenance` enum on edges.** `HonestTrue | DeliberateFalseFromSystem | ExternalUntrusted`. The deliberate-false-injection design (per the conversation) requires this for diversity-injection vs adversarial-injection to be cryptographically distinguishable. Field today; signing later. *Effort: hours.*
 
 ### [STAGE 4] — deferred per thesis 6.6, 7, 8.5
 
-14. **ed25519 signatures on thoughts and links.** Per-source key management; verification at ingest and at gossip-handler boundary.
-15. **Per-peer trust scores driven by behavior** (concordance with consensus, age, signing track record). Adopts `pagerank-authority.md` work.
-16. **Sybil resistance proper.** Identity binding (DID, web-of-trust, or operator-signed peer roster). `gossip/sybil.rs` upgrade.
-17. **Causal ordering on CRDT writes.** Per-peer Lamport clocks or vector clocks; audit trail of who incremented what when.
-18. **Replay protection on gossip.** Nonce + timestamp; `seen.rs` upgrade to enforce.
-19. **Counterfactual replay test in CI.** Wipe kern, re-run a fixed query suite, diff outputs over time. Detect drift via memory accumulation.
-20. **Adversarial ingest fixtures.** Known knowledge-as-instruction attack patterns; verify they are quarantined or rejected.
-21. **Behavioral diff suite over time.** Track retrieval outputs on a fixed input set across versions and across periods of agent activity.
-22. **ACL enforcement in `apply_query_options()`.** When multi-user / multi-tenant is in scope.
-23. **Tripwire thoughts.** Plant entries no legitimate path should query; alarm on access. Detects exfiltration / lateral movement in federation.
-24. **Externalized capability budget enforcement** (firewall / kernel level for agents). Stage 3+ federation makes this load-bearing.
+1. **ed25519 signatures on thoughts and links.** Per-source key management; verification at ingest and at gossip-handler boundary.
+2. **Per-peer trust scores driven by behavior** (concordance with consensus, age, signing track record). Adopts `pagerank-authority.md` work.
+3. **Sybil resistance proper.** Identity binding (DID, web-of-trust, or operator-signed peer roster). `gossip/sybil.rs` upgrade.
+4. **Causal ordering on CRDT writes.** Per-peer Lamport clocks or vector clocks; audit trail of who incremented what when.
+5. **Replay protection on gossip.** Nonce + timestamp; `seen.rs` upgrade to enforce.
+6. **Counterfactual replay test in CI.** Wipe kern, re-run a fixed query suite, diff outputs over time. Detect drift via memory accumulation.
+7. **Adversarial ingest fixtures.** Known knowledge-as-instruction attack patterns; verify they are quarantined or rejected.
+8. **Behavioral diff suite over time.** Track retrieval outputs on a fixed input set across versions and across periods of agent activity.
+9. **ACL enforcement in `apply_query_options()`.** When multi-user / multi-tenant is in scope.
+10. **Tripwire thoughts.** Plant entries no legitimate path should query; alarm on access. Detects exfiltration / lateral movement in federation.
+11. **Externalized capability budget enforcement** (firewall / kernel level for agents). Stage 3+ federation makes this load-bearing.
 
 ---
 
@@ -151,9 +153,11 @@ These two together are the single most important safety property: **knowledge is
 The Plurality Invariant ("Rule of Threes": every interjection surfaces ≥3 framings + dismiss) is a property of the *consumer* of kern (the reasoner, the UI), not of kern itself. But kern can support it cheaply.
 
 **[NOW]:**
+
 - `QueryResponse` should always carry at least 3 hits where available, with their `confidence` fields populated. The retrieval path already does this; just ensure no consumer-level path collapses to single-result by default.
 
 **[DESIGN-NOW, ENFORCE-LATER]:**
+
 - `QueryResponse` could carry a `plurality: Plurality { sufficient: bool, distinctness_score: f64 }` field. `sufficient` means ≥3 distinct framings present; `distinctness_score` is the minimum pairwise semantic distance among returned hits. Stage 4 consumers reject low-distinctness sets when the consumer is a decision gate.
 
 ---
@@ -196,7 +200,7 @@ If you can do exactly one thing tomorrow morning, do `[NOW] 1` (validate `Kind` 
 
 If you can do three, add `[NOW] 2` (clamp `conf`) and `[NOW] 3` (honor `valid_until`). The three together are roughly one day of work and unlock the rest of the [NOW] list mechanically.
 
-`[NOW] 6` (`PreToolUse` hook on `.claude/**`) is independent, takes minutes, and prevents the highest-leverage silent-self-modification path in the agent layer. Worth doing alongside.
+`[NOW] 6` (`PreToolUse` guard on agent-config dirs) is independent, takes minutes, and prevents the highest-leverage silent-self-modification path in the agent layer. Worth doing alongside.
 
 ## Appendix B — Threat glossary
 

@@ -296,6 +296,7 @@ impl Client {
 				.json::<ChatLine>()
 				.await?
 				.content
+				.map(|t| strip_think(&t))
 				.filter(|t| !t.is_empty())
 				.ok_or(LlmError::EmptyCompletion);
 		}
@@ -315,7 +316,7 @@ impl Client {
 			.await?;
 		let parsed: ChatResponse = resp.json().await?;
 		let [c] = parsed.choices;
-		let content = c.message.content;
+		let content = strip_think(&c.message.content);
 		if content.is_empty() {
 			return Err(LlmError::EmptyCompletion);
 		}
@@ -354,7 +355,7 @@ impl Client {
 					};
 					if !params.stream {
 						match resp.json::<ChatLine>().await {
-							Ok(line) => match line.content.filter(|t| !t.is_empty()) {
+							Ok(line) => match line.content.map(|t| strip_think(&t)).filter(|t| !t.is_empty()) {
 								Some(t) => { yield Ok(t); }
 								None => { yield Err(LlmError::EmptyCompletion); }
 							},
@@ -379,7 +380,7 @@ impl Client {
 						match resp.json::<ChatResponse>().await {
 							Ok(parsed) => {
 								let [c] = parsed.choices;
-								let t = c.message.content;
+								let t = strip_think(&c.message.content);
 								if t.is_empty() { yield Err(LlmError::EmptyCompletion); return; }
 								yield Ok(t);
 							}
@@ -572,6 +573,20 @@ struct ContentDelta {
 	content: Option<String>,
 }
 
+// Reasoning models can leak chain-of-thought into content even with think:false;
+// the answer is whatever follows the last closing tag.
+fn strip_think(s: &str) -> String {
+	let after = match s.rfind("</think>") {
+		Some(i) => &s[i + "</think>".len()..],
+		None => s,
+	};
+	let clean = match after.find("<think>") {
+		Some(i) => &after[..i],
+		None => after,
+	};
+	clean.trim().to_string()
+}
+
 fn parse_chat_line(line: &str) -> Option<ChatLine> {
 	if line.is_empty() {
 		return None;
@@ -612,6 +627,16 @@ where
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn strip_think_recovers_answer_after_leaked_reasoning() {
+		assert_eq!(strip_think("plain answer"), "plain answer");
+		assert_eq!(strip_think("<think>hmm</think>yes"), "yes");
+		assert_eq!(strip_think("leaked reasoning</think>yes"), "yes");
+		assert_eq!(strip_think("a</think>b</think>final"), "final");
+		assert_eq!(strip_think("answer<think>unclosed trailing"), "answer");
+		assert_eq!(strip_think("<think>only reasoning"), "");
+	}
 
 	#[test]
 	fn chat_line_yields_token_then_done() {

@@ -16,14 +16,14 @@ fn dedup_key(s: &str) -> String {
 
 pub fn build_digest(graph: &GraphGnn, k: usize, min_trust: f64, token_budget: usize) -> String {
 	let mut out = String::from("# kern memory\n\n");
-	let anchors: Vec<String> = crate::base::accept::root_anchor_ids(graph)
+	let gravitons: Vec<String> = crate::base::accept::root_graviton_ids(graph)
 		.iter()
 		.filter_map(|cid| graph.loaded(cid))
-		.map(|c| c.anchor_text.clone())
+		.map(|c| c.graviton_text.clone())
 		.collect();
-	if !anchors.is_empty() {
-		out.push_str("Anchors: ");
-		out.push_str(&anchors.join(", "));
+	if !gravitons.is_empty() {
+		out.push_str("Gravitons: ");
+		out.push_str(&gravitons.join(", "));
 		out.push_str("\n\n");
 	}
 
@@ -201,9 +201,9 @@ mod tests {
 	}
 
 	#[test]
-	fn digest_has_anchor_and_hottest_first_capped() {
+	fn digest_has_graviton_and_hottest_first_capped() {
 		let mut g = GraphGnn::default();
-		crate::base::accept::add_anchor(&mut g, "durable facts", vec![1.0, 0.0, 0.0]);
+		crate::base::accept::add_graviton(&mut g, "durable facts", vec![1.0, 0.0, 0.0]);
 		let root_id = g.root.id.clone();
 		let kern = g.kerns.get_mut(&root_id).expect("root kern");
 		kern.entities.insert(
@@ -217,8 +217,8 @@ mod tests {
 
 		let md = build_digest(&g, 1, 0.0, 0);
 		assert!(
-			md.contains("Anchors: durable facts"),
-			"anchor present in header"
+			md.contains("Gravitons: durable facts"),
+			"graviton present in header"
 		);
 		assert!(md.contains("hot fact"), "hottest included");
 		assert!(!md.contains("cold fact"), "capped at k=1");

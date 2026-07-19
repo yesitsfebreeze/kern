@@ -15,6 +15,12 @@ struct Args {
 	/// Ollama base URL.
 	#[arg(long, default_value = DEFAULT_EMBED_URL)]
 	url: String,
+	/// Answerer base URL override (e.g. a vLLM `/v1` endpoint); defaults to --url.
+	#[arg(long)]
+	answer_url: Option<String>,
+	/// Judge base URL override; defaults to --url.
+	#[arg(long)]
+	judge_url: Option<String>,
 	/// Embedding model tag.
 	#[arg(long, default_value = DEFAULT_EMBED_MODEL)]
 	embed_model: String,
@@ -67,6 +73,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let cfg = EvalConfig {
 		dataset_path: dataset.clone(),
 		base_url: args.url,
+		answer_url: args.answer_url,
+		judge_url: args.judge_url,
 		embed_model: args.embed_model,
 		answer_model: args.answer_model,
 		judge_model: args.judge_model,

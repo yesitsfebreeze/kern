@@ -5,13 +5,15 @@ use crate::base::locks::{read_recovered, write_recovered};
 use super::{tool_error, tool_result_json, Server};
 
 #[derive(Deserialize, Default)]
-struct AnchorArgs {
+struct GravitonArgs {
 	#[serde(default)]
 	action: String,
 	#[serde(default)]
 	name: String,
 	#[serde(default)]
 	text: String,
+	#[serde(default)]
+	mass: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -36,14 +38,15 @@ pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 			"inputSchema": {"type": "object", "properties": {}},
 		}),
 		serde_json::json!({
-			"name": "anchor",
-			"description": "Manage anchors: named top-level buckets the root routes matching memories into; non-matches fall through to `generic`. action=list (default) returns anchors; action=add needs name+text (text is embedded into the routing vector); action=remove needs name.",
+			"name": "graviton",
+			"description": "Manage gravitons: multiple named focus attractors (replacing the old single 'purpose') that queries and ingest gravitate toward. Routing uses effective distance = cosine distance / mass, so heavier gravitons pull harder; non-matches fall through to `generic`. action=list (default) returns gravitons with mass; action=add needs name+text and takes optional mass (default 1.0); action=remove needs name.",
 			"inputSchema": {
 				"type": "object",
 				"properties": {
 					"action": {"type": "string", "enum": ["list", "add", "remove"], "description": "list (default) | add | remove"},
-					"name": {"type": "string", "description": "anchor name (required for add/remove)"},
-					"text": {"type": "string", "description": "description embedded into the anchor's routing vector (required for add)"},
+					"name": {"type": "string", "description": "graviton name (required for add/remove)"},
+					"text": {"type": "string", "description": "seed text embedded into the routing vector (required for add) — a phrase, a full document, or a whole message all work"},
+					"mass": {"type": "number", "description": "gravitational mass (default 1.0); heavier pulls harder"},
 				},
 			},
 		}),
@@ -83,8 +86,8 @@ impl Server {
 		tool_result_json(&self.health_stats())
 	}
 
-	pub(crate) fn tool_anchor(&self, args: &serde_json::Value) -> serde_json::Value {
-		let p: AnchorArgs = serde_json::from_value(args.clone()).unwrap_or_default();
+	pub(crate) fn tool_graviton(&self, args: &serde_json::Value) -> serde_json::Value {
+		let p: GravitonArgs = serde_json::from_value(args.clone()).unwrap_or_default();
 		let action = if p.action.is_empty() {
 			"list"
 		} else {
@@ -94,23 +97,26 @@ impl Server {
 		match action {
 			"list" => {
 				let g = read_recovered(&self.graph);
-				let anchors: Vec<serde_json::Value> = crate::base::accept::root_anchor_ids(&g)
+				let gravitons: Vec<serde_json::Value> = crate::base::accept::root_graviton_ids(&g)
 					.iter()
 					.filter_map(|cid| g.loaded(cid))
 					.map(|c| {
 						serde_json::json!({
-							"name": c.anchor_text,
+							"name": c.graviton_text,
+							"mass": c.mass,
 							"thoughts": c.entities.len(),
 							"reasons": c.reasons.len(),
 						})
 					})
 					.collect();
-				tool_result_json(&serde_json::json!({ "anchors": anchors }))
+				tool_result_json(&serde_json::json!({ "gravitons": gravitons }))
 			}
 			"add" => {
 				if p.name.is_empty() || p.text.is_empty() {
 					return tool_error("add requires name and text");
 				}
+				// ponytail: long documents embed as one call and the embed model
+				// truncates past its context window; chunk+mean-pool is the upgrade path.
 				let vec = match &self.llm {
 					Some(llm) => match crate::llm::block_on_in_place(llm.embed(&p.text)) {
 						Some(Ok(v)) => v,
@@ -120,7 +126,7 @@ impl Server {
 					None => return tool_error("no embed client configured"),
 				};
 				let mut g = write_recovered(&self.graph);
-				crate::base::accept::add_anchor(&mut g, &p.name, vec);
+				crate::base::accept::add_graviton_with_mass(&mut g, &p.name, vec, p.mass.unwrap_or(1.0));
 				drop(g);
 				(self.save_fn)();
 				tool_result_json(&serde_json::json!({ "added": p.name }))
@@ -130,13 +136,13 @@ impl Server {
 					return tool_error("remove requires name");
 				}
 				let mut g = write_recovered(&self.graph);
-				let removed = crate::base::accept::remove_anchor(&mut g, &p.name);
+				let removed = crate::base::accept::remove_graviton(&mut g, &p.name);
 				drop(g);
 				if removed {
 					(self.save_fn)();
 					tool_result_json(&serde_json::json!({ "removed": p.name }))
 				} else {
-					tool_error(&format!("anchor not found: {}", p.name))
+					tool_error(&format!("graviton not found: {}", p.name))
 				}
 			}
 			_ => tool_error("action must be add, list, or remove"),
@@ -393,11 +399,11 @@ mod descriptor_tests {
 	}
 
 	#[tokio::test]
-	async fn anchor_remove_not_found_errors_and_does_not_save() {
+	async fn graviton_remove_not_found_errors_and_does_not_save() {
 		let (srv, counter) = make_server();
-		let out = srv.tool_anchor(&serde_json::json!({"action": "remove", "name": "ghost"}));
+		let out = srv.tool_graviton(&serde_json::json!({"action": "remove", "name": "ghost"}));
 		assert!(is_error(&out));
-		assert!(text(&out).contains("anchor not found"));
+		assert!(text(&out).contains("graviton not found"));
 		assert_eq!(
 			counter.load(Ordering::SeqCst),
 			0,
@@ -406,14 +412,30 @@ mod descriptor_tests {
 	}
 
 	#[tokio::test]
-	async fn anchor_list_on_empty_graph_returns_no_anchors() {
+	async fn graviton_list_reports_mass() {
 		let (srv, _) = make_server();
-		let out = srv.tool_anchor(&serde_json::json!({}));
+		{
+			let mut g = crate::base::locks::write_recovered(&srv.graph);
+			crate::base::accept::add_graviton_with_mass(&mut g, "docs", vec![1.0, 0.0], 2.5);
+		}
+		let out = srv.tool_graviton(&serde_json::json!({"action": "list"}));
+		assert!(!is_error(&out));
+		let body: serde_json::Value = serde_json::from_str(&text(&out)).unwrap();
+		let gravitons = body["gravitons"].as_array().unwrap();
+		assert_eq!(gravitons.len(), 1);
+		assert_eq!(gravitons[0]["name"], "docs");
+		assert_eq!(gravitons[0]["mass"], 2.5, "mass round-trips through list");
+	}
+
+	#[tokio::test]
+	async fn graviton_list_on_empty_graph_returns_no_gravitons() {
+		let (srv, _) = make_server();
+		let out = srv.tool_graviton(&serde_json::json!({}));
 		assert!(!is_error(&out));
 		let body: serde_json::Value = serde_json::from_str(&text(&out)).unwrap();
 		assert!(
-			body["anchors"].as_array().unwrap().is_empty(),
-			"fresh graph has no anchors"
+			body["gravitons"].as_array().unwrap().is_empty(),
+			"fresh graph has no gravitons"
 		);
 	}
 }

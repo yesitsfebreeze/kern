@@ -10,7 +10,7 @@ pub struct ReasonConfig {
 
 pub const DEFAULT_REASON_URL: &str = "http://localhost:11434";
 
-pub const DEFAULT_REASON_MODEL: &str = "qwen2.5:7b";
+pub const DEFAULT_REASON_MODEL: &str = "granite4:3b";
 
 impl Default for ReasonConfig {
 	fn default() -> Self {

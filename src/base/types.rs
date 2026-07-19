@@ -456,9 +456,9 @@ pub struct EntityRef {
 pub struct Kern {
 	pub id: String,
 	pub root_id: String,
-	pub anchor_text: String,
+	pub graviton_text: String,
 	#[serde(with = "util::vec_f64_compat")]
-	pub anchor_vec: Vec<f32>,
+	pub graviton_vec: Vec<f32>,
 	pub inner_radius: f64,
 	pub outer_radius: f64,
 	pub spawn_reason_id: String,
@@ -476,8 +476,93 @@ pub struct Kern {
 	#[serde(default)]
 	pub gnn_weights: Vec<u8>,
 
+	// Trailing position keeps bincode's positional decode of pre-mass shards working (serde(default) fills it).
+	#[serde(default = "default_mass")]
+	pub mass: f64,
+
 	#[serde(skip)]
 	pub last_access: Option<SystemTime>,
+}
+
+fn default_mass() -> f64 {
+	1.0
+}
+
+// Pre-mass positional mirror of `Kern` for bincode decode of old rows/shards —
+// bincode never fills serde(default) on missing trailing bytes. Field order must
+// track `Kern` exactly, minus `mass`.
+#[derive(Serialize, Deserialize)]
+pub struct KernPreMass {
+	pub id: String,
+	pub root_id: String,
+	pub graviton_text: String,
+	#[serde(with = "util::vec_f64_compat")]
+	pub graviton_vec: Vec<f32>,
+	pub inner_radius: f64,
+	pub outer_radius: f64,
+	pub spawn_reason_id: String,
+	pub parent: String,
+	pub children: Vec<String>,
+	pub entities: HashMap<String, Entity>,
+	pub refs: HashMap<String, EntityRef>,
+	pub reasons: HashMap<String, Reason>,
+	pub by_from: HashMap<String, Vec<String>>,
+	pub by_to: HashMap<String, Vec<String>>,
+	pub source_index: HashMap<String, String>,
+	pub descriptors: HashMap<String, String>,
+	#[serde(default)]
+	pub gnn_weights: Vec<u8>,
+}
+
+// Test-side inverse for fabricating legacy blobs.
+impl From<Kern> for KernPreMass {
+	fn from(k: Kern) -> Self {
+		KernPreMass {
+			id: k.id,
+			root_id: k.root_id,
+			graviton_text: k.graviton_text,
+			graviton_vec: k.graviton_vec,
+			inner_radius: k.inner_radius,
+			outer_radius: k.outer_radius,
+			spawn_reason_id: k.spawn_reason_id,
+			parent: k.parent,
+			children: k.children,
+			entities: k.entities,
+			refs: k.refs,
+			reasons: k.reasons,
+			by_from: k.by_from,
+			by_to: k.by_to,
+			source_index: k.source_index,
+			descriptors: k.descriptors,
+			gnn_weights: k.gnn_weights,
+		}
+	}
+}
+
+impl From<KernPreMass> for Kern {
+	fn from(o: KernPreMass) -> Self {
+		Kern {
+			id: o.id,
+			root_id: o.root_id,
+			graviton_text: o.graviton_text,
+			graviton_vec: o.graviton_vec,
+			inner_radius: o.inner_radius,
+			outer_radius: o.outer_radius,
+			spawn_reason_id: o.spawn_reason_id,
+			parent: o.parent,
+			children: o.children,
+			entities: o.entities,
+			refs: o.refs,
+			reasons: o.reasons,
+			by_from: o.by_from,
+			by_to: o.by_to,
+			source_index: o.source_index,
+			descriptors: o.descriptors,
+			gnn_weights: o.gnn_weights,
+			mass: 1.0,
+			last_access: None,
+		}
+	}
 }
 
 // The only non-deterministic input to kern-id derivation.
@@ -492,7 +577,7 @@ fn unnamed_kern_id(parent_id: &str, nonce_nanos: u128) -> String {
 	util::content_hash(&format!("{parent_id}{nonce_nanos}"))
 }
 
-// Name folded into the hash so two anchors under one parent never collide.
+// Name folded into the hash so two gravitons under one parent never collide.
 fn named_child_kern_id(parent_id: &str, name: &str, nonce_nanos: u128) -> String {
 	util::content_hash(&format!("{parent_id}{name}{nonce_nanos}"))
 }
@@ -523,19 +608,19 @@ impl Kern {
 	pub fn new_named_child(parent_id: &str, root_id: &str, name: &str, vec: Vec<f32>) -> Self {
 		let mut k = Self::new(named_child_kern_id(parent_id, name, now_nanos()), parent_id);
 		k.root_id = root_id.to_string();
-		k.anchor_text = name.to_string();
-		k.anchor_vec = vec;
+		k.graviton_text = name.to_string();
+		k.graviton_vec = vec;
 		k.inner_radius = crate::base::constants::KERN_INNER_RADIUS;
 		k.outer_radius = crate::base::constants::KERN_OUTER_RADIUS;
 		k
 	}
 
 	pub fn is_unnamed(&self) -> bool {
-		self.anchor_text.is_empty()
+		self.graviton_text.is_empty()
 	}
 
 	pub fn is_named(&self) -> bool {
-		!self.anchor_text.is_empty()
+		!self.graviton_text.is_empty()
 	}
 
 	pub fn is_immortal(&self) -> bool {
@@ -543,11 +628,11 @@ impl Kern {
 	}
 
 	pub fn is_dead(&self) -> bool {
-		self.anchor_text.is_empty() && self.entities.is_empty()
+		self.graviton_text.is_empty() && self.entities.is_empty()
 	}
 
-	pub fn has_anchor(&self) -> bool {
-		!self.anchor_text.is_empty() && !self.anchor_vec.is_empty()
+	pub fn has_graviton(&self) -> bool {
+		!self.graviton_text.is_empty() && !self.graviton_vec.is_empty()
 	}
 
 	pub fn is_remote(&self) -> bool {
@@ -558,8 +643,8 @@ impl Kern {
 		Self {
 			id: String::new(),
 			root_id: String::new(),
-			anchor_text: String::new(),
-			anchor_vec: Vec::new(),
+			graviton_text: String::new(),
+			graviton_vec: Vec::new(),
 			inner_radius: 0.0,
 			outer_radius: 0.0,
 			spawn_reason_id: String::new(),
@@ -573,6 +658,7 @@ impl Kern {
 			source_index: HashMap::new(),
 			descriptors: HashMap::new(),
 			gnn_weights: Vec::new(),
+			mass: 1.0,
 			last_access: None,
 		}
 	}
@@ -693,7 +779,7 @@ mod tests {
 		assert!(empty_unnamed.is_dead(), "unnamed + no entities -> dead");
 
 		let mut named = Kern::new("k2", "");
-		named.anchor_text = "topic".into();
+		named.graviton_text = "topic".into();
 		assert!(!named.is_dead(), "a name keeps an empty kern alive");
 
 		let mut with_thought = Kern::new("k3", "");
@@ -711,26 +797,26 @@ mod tests {
 	}
 
 	#[test]
-	fn kern_has_anchor_requires_both_text_and_vector() {
+	fn kern_has_graviton_requires_both_text_and_vector() {
 		let mut k = Kern::new("k", "");
-		assert!(!k.has_anchor(), "fresh kern has no anchor");
-		k.anchor_text = "topic".into();
+		assert!(!k.has_graviton(), "fresh kern has no graviton");
+		k.graviton_text = "topic".into();
 		assert!(
-			!k.has_anchor(),
-			"text without a vector is not a full anchor"
+			!k.has_graviton(),
+			"text without a vector is not a full graviton"
 		);
-		k.anchor_vec = vec![0.1, 0.2];
-		assert!(k.has_anchor(), "text + vector -> anchored");
+		k.graviton_vec = vec![0.1, 0.2];
+		assert!(k.has_graviton(), "text + vector -> gravitationally bound");
 	}
 
 	#[test]
-	fn new_named_child_sets_anchor_parent_and_root() {
+	fn new_named_child_sets_graviton_parent_and_root() {
 		let k = Kern::new_named_child("parent", "rootid", "generic", vec![0.5, 0.5]);
 		assert_eq!(k.parent, "parent");
 		assert_eq!(k.root_id, "rootid");
-		assert_eq!(k.anchor_text, "generic");
-		assert_eq!(k.anchor_vec, vec![0.5, 0.5]);
-		assert!(k.is_named() && k.has_anchor() && !k.is_dead());
+		assert_eq!(k.graviton_text, "generic");
+		assert_eq!(k.graviton_vec, vec![0.5, 0.5]);
+		assert!(k.is_named() && k.has_graviton() && !k.is_dead());
 		assert!(!k.id.is_empty(), "id is the content hash, never empty");
 	}
 

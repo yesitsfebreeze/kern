@@ -49,12 +49,13 @@ RAG chore you'd otherwise own.
 
 ### 1. Self-learning — capture without a job
 
-A Claude Code `Stop` hook extracts the new conversation delta and queues it. The
-daemon drains the queue, runs one LLM distillation pass that pulls out durable
-*facts*, *decisions*, and *preferences* as typed claims, and ingests each into
-the graph. Recall flows back in via a fresh **digest** injected at session start,
-with deeper lookups available through the `query` tool mid-session. Nothing is
-lost on an LLM outage — the delta stays queued until distillation succeeds.
+A conversation delta (a `.txt` file dropped in `<cwd>/.kern/capture/`)
+is queued. The daemon drains the queue, runs one LLM distillation pass that
+pulls out durable *facts*, *decisions*, and *preferences* as typed claims, and
+ingests each into the graph. Recall flows back in via a fresh **digest** read at
+session start, with deeper lookups available through the `query` tool
+mid-session. Nothing is lost on an LLM outage — the delta stays queued until
+distillation succeeds.
 
 ### 2. Structured — a graph, not a bag
 
@@ -115,7 +116,7 @@ These constraints shape every decision in the codebase.
 ## kern vs. traditional RAG
 
 | | Traditional RAG | kern |
-|---|---|---|
+| --- | --- | --- |
 | **Ingestion** | Manual: you run a chunk-and-embed job over a corpus. | Automatic: sessions distill into typed claims via a Stop hook. |
 | **Unit stored** | Raw text chunks. | Distilled facts / decisions / preferences + *reason edges* between them. |
 | **Retrieval** | top-k vector similarity. | Hybrid vector + BM25 with GNN-blended seeds, edge expansion, RRF + PageRank fusion, optional LLM rerank, diversify. |
@@ -133,13 +134,13 @@ nearest neighbors.
 
 ## North star
 
-The long-range goal is to **equal or beat a dedicated vector database on its own
-turf while keeping the layers it will never have.** kern already leads on graph
-memory, the GNN re-embedder, self-organization, semantic caching, and LLM answer
-synthesis. The open climb is the production-database tier — sharding,
-replication, WAL, snapshots, on-disk tiering — built *inside* kern rather than
-delegated to a backend, plus a head-to-head benchmark harness so every "parity"
-and "no delay" claim is a measured number, not an assumption.
+The long-range goal is to **equal or beat Zep/Mem0-class agent-memory systems
+on LoCoMo / LongMemEval-style evals** while staying local-first,
+self-contained, in-process, and per-cwd — no cloud, no query-time LLM
+required. kern already leads structurally on graph memory, the GNN
+re-embedder, self-organization, and no-LLM default recall; the open climb is
+proving it: multi-seed eval runs with error bars and a strict judge, so every
+claim is a measured number, not an assumption.
 
 The detailed scoreboard and the staged roadmap live in
 [`aspiration.md`](../aspiration.md).
@@ -154,5 +155,3 @@ The detailed scoreboard and the staged roadmap live in
 - **[Research & rationale](kern/README.md)** — the models and proofs behind the
   self-organizing, federated design.
 - **[Federation security](FEDERATION-SECURITY.md)** — read before enabling gossip.
-</content>
-</invoke>

@@ -99,7 +99,7 @@ and `network_id` is a broadcast grouping key, not a secret.
 | `GOSSIP_CRDT_DELTA_MAX` clamp on inbound counters | ✓ | `constants.rs` — `GOSSIP_CRDT_DELTA_MAX = 1_000_000`. Enforced in `handler.rs:validated_delta_value`. |
 | Seen-set with TTL and hard count ceiling | ✓ | `constants.rs` — `GOSSIP_SEEN_SET_CAP = 10_000`, `GOSSIP_SEEN_TTL = 60s`. `seen.rs` enforces both. |
 | No per-peer inbound rate limit | ✓ | `src/gossip/ledger.rs` — `Ledger` has `entities` and `routing` indexes with TTL+cap. No message-rate tracking. |
-| No divergence alarm | ✓ | `src/base/health.rs` `HealthStats` — `kerns, entities, reasons, unnamed, anchors`. No federation divergence counter. `wire.rs` `HealthResponse` — no federation field. |
+| No divergence alarm | ✓ | `src/base/health.rs` `HealthStats` — `kerns, entities, reasons, unnamed, gravitons`. No federation divergence counter. `wire.rs` `HealthResponse` — no federation field. |
 | Heat joins by `max` | ✓ | `merge.rs:41` — `if remote.heat > local.heat { local.heat = remote.heat; }` |
 
 **Verdict: roadmap F4 is accurate.** Existing defenses are bounds (caps,

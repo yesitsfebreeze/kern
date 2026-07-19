@@ -15,6 +15,11 @@ pub struct AcceptResult {
 }
 
 const MAX_ACCEPT_DEPTH: usize = 64;
+const MASS_EPSILON: f64 = 1e-6;
+
+fn effective_distance(dist: f64, mass: f64) -> f64 {
+	dist / mass.max(MASS_EPSILON)
+}
 
 pub fn accept(g: &mut GraphGnn, kern_id: &str, thought: Entity, doc_id: &str) -> AcceptResult {
 	// Dedup scans graph-wide and routing only reads or spawns empty kerns, so
@@ -46,7 +51,7 @@ fn route_entity(g: &mut GraphGnn, kern_id: &str, thought: &Entity, is_dup: bool)
 			continue;
 		}
 
-		// The root is a pure dispatcher: a no-anchor-match falls through to the
+		// The root is a pure dispatcher: a no-graviton-match falls through to the
 		// `generic` catch-all, never commits onto the root itself.
 		if current_id == g.root.id {
 			let generic_id = get_or_spawn_generic_child(g, &current_id);
@@ -62,8 +67,11 @@ fn route_entity(g: &mut GraphGnn, kern_id: &str, thought: &Entity, is_dup: bool)
 				Some(k) => k,
 				None => break,
 			};
-			if kern.has_anchor() {
-				let dist = cosine_distance(&thought.vector, &kern.anchor_vec);
+			if kern.has_graviton() {
+				let dist = effective_distance(
+					cosine_distance(&thought.vector, &kern.graviton_vec),
+					kern.mass,
+				);
 				let p = acceptance_probability(dist, kern.inner_radius, kern.outer_radius);
 				p < ACCEPT_FLOOR
 			} else {
@@ -479,7 +487,7 @@ pub fn spawn_unnamed_child(g: &mut GraphGnn, kern_id: &str) -> String {
 	child_id
 }
 
-// The generic catch-all: empty anchor_vec never matches routing; named, hence immortal.
+// The generic catch-all: empty graviton_vec never matches routing; named, hence immortal.
 pub(crate) fn get_or_spawn_generic_child(g: &mut GraphGnn, parent_id: &str) -> String {
 	// Use `get` (auto-loads), NOT `loaded`: even the immortal generic child can
 	// spill to disk — same duplicate-spawn runaway as get_or_spawn_unnamed_child.
@@ -489,7 +497,7 @@ pub(crate) fn get_or_spawn_generic_child(g: &mut GraphGnn, parent_id: &str) -> S
 		.unwrap_or_default();
 	for child_id in &children {
 		if let Some(c) = g.get(child_id) {
-			if c.anchor_text == GENERIC_ANCHOR {
+			if c.graviton_text == GENERIC_GRAVITON {
 				return child_id.clone();
 			}
 		}
@@ -498,7 +506,7 @@ pub(crate) fn get_or_spawn_generic_child(g: &mut GraphGnn, parent_id: &str) -> S
 		.get(parent_id)
 		.map(|k| k.root_id.clone())
 		.unwrap_or_default();
-	let child = Kern::new_named_child(parent_id, &root_id, GENERIC_ANCHOR, Vec::new());
+	let child = Kern::new_named_child(parent_id, &root_id, GENERIC_GRAVITON, Vec::new());
 	let child_id = child.id.clone();
 	g.register(child);
 	if let Some(kern) = g.get_mut(parent_id) {
@@ -507,17 +515,24 @@ pub(crate) fn get_or_spawn_generic_child(g: &mut GraphGnn, parent_id: &str) -> S
 	child_id
 }
 
-// One anchor per name: a same-normalized-name anchor is updated in place.
-pub(crate) fn add_anchor(g: &mut GraphGnn, name: &str, vec: Vec<f32>) {
-	if let Some(existing) = find_anchor_by_name(g, name) {
+// One graviton per name: a same-normalized-name graviton is updated in place.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn add_graviton(g: &mut GraphGnn, name: &str, vec: Vec<f32>) {
+	add_graviton_with_mass(g, name, vec, 1.0)
+}
+
+pub(crate) fn add_graviton_with_mass(g: &mut GraphGnn, name: &str, vec: Vec<f32>, mass: f64) {
+	if let Some(existing) = find_graviton_by_name(g, name) {
 		if let Some(k) = g.get_mut(&existing) {
-			k.anchor_vec = vec;
+			k.graviton_vec = vec;
+			k.mass = mass;
 		}
 		return;
 	}
 	let root = g.root.id.clone();
 	let root_net = g.root.root_id.clone();
-	let child = Kern::new_named_child(&root, &root_net, name, vec);
+	let mut child = Kern::new_named_child(&root, &root_net, name, vec);
+	child.mass = mass;
 	let cid = child.id.clone();
 	g.register(child);
 	if let Some(r) = g.get_mut(&root) {
@@ -527,35 +542,35 @@ pub(crate) fn add_anchor(g: &mut GraphGnn, name: &str, vec: Vec<f32>) {
 	}
 }
 
-fn find_anchor_by_name(g: &GraphGnn, name: &str) -> Option<String> {
+fn find_graviton_by_name(g: &GraphGnn, name: &str) -> Option<String> {
 	let needle = name.trim().to_lowercase();
-	root_anchor_ids(g).into_iter().find(|cid| {
+	root_graviton_ids(g).into_iter().find(|cid| {
 		g.loaded(cid)
-			.map(|c| c.anchor_text.trim().to_lowercase() == needle)
+			.map(|c| c.graviton_text.trim().to_lowercase() == needle)
 			.unwrap_or(false)
 	})
 }
 
-fn equivalent_anchor_exists(g: &GraphGnn, name: &str, vec: &[f32]) -> bool {
-	if find_anchor_by_name(g, name).is_some() {
+fn equivalent_graviton_exists(g: &GraphGnn, name: &str, vec: &[f32]) -> bool {
+	if find_graviton_by_name(g, name).is_some() {
 		return true;
 	}
 	if vec.is_empty() {
 		return false;
 	}
-	root_anchor_ids(g).into_iter().any(|cid| {
+	root_graviton_ids(g).into_iter().any(|cid| {
 		g.loaded(&cid)
 			.map(|c| {
-				!c.anchor_vec.is_empty()
-					&& crate::base::math::cosine(&c.anchor_vec, vec)
-						>= crate::base::constants::ANCHOR_DEDUP_THRESHOLD
+				!c.graviton_vec.is_empty()
+					&& crate::base::math::cosine(&c.graviton_vec, vec)
+						>= crate::base::constants::GRAVITON_DEDUP_THRESHOLD
 			})
 			.unwrap_or(false)
 	})
 }
 
 // Read from the kern map, not the g.root snapshot — runtime mutations land there.
-pub(crate) fn root_anchor_ids(g: &GraphGnn) -> Vec<String> {
+pub(crate) fn root_graviton_ids(g: &GraphGnn) -> Vec<String> {
 	let root = g.root.id.clone();
 	let children = g
 		.loaded(&root)
@@ -565,7 +580,7 @@ pub(crate) fn root_anchor_ids(g: &GraphGnn) -> Vec<String> {
 		.into_iter()
 		.filter(|cid| {
 			g.loaded(cid)
-				.map(|c| !c.anchor_text.is_empty() && c.anchor_text != GENERIC_ANCHOR)
+				.map(|c| !c.graviton_text.is_empty() && c.graviton_text != GENERIC_GRAVITON)
 				.unwrap_or(false)
 		})
 		.collect()
@@ -578,16 +593,16 @@ pub(crate) fn promote_to_root_if_generic(g: &mut GraphGnn, kern_id: &str) -> boo
 	};
 	let under_generic = g
 		.loaded(&parent_id)
-		.map(|p| p.anchor_text == GENERIC_ANCHOR)
+		.map(|p| p.graviton_text == GENERIC_GRAVITON)
 		.unwrap_or(false);
 	if !under_generic {
 		return false;
 	}
 	let (cand_name, cand_vec) = match g.loaded(kern_id) {
-		Some(k) => (k.anchor_text.clone(), k.anchor_vec.clone()),
+		Some(k) => (k.graviton_text.clone(), k.graviton_vec.clone()),
 		None => return false,
 	};
-	if equivalent_anchor_exists(g, &cand_name, &cand_vec) {
+	if equivalent_graviton_exists(g, &cand_name, &cand_vec) {
 		return false;
 	}
 	let root_id = g.root.id.clone();
@@ -605,22 +620,22 @@ pub(crate) fn promote_to_root_if_generic(g: &mut GraphGnn, kern_id: &str) -> boo
 	true
 }
 
-pub(crate) fn remove_anchor(g: &mut GraphGnn, name: &str) -> bool {
+pub(crate) fn remove_graviton(g: &mut GraphGnn, name: &str) -> bool {
 	let root = g.root.id.clone();
 	let generic = get_or_spawn_generic_child(g, &root);
-	let target = root_anchor_ids(g).into_iter().find(|cid| {
+	let target = root_graviton_ids(g).into_iter().find(|cid| {
 		*cid != generic
 			&& g
 				.loaded(cid)
-				.map(|c| c.anchor_text == name)
+				.map(|c| c.graviton_text == name)
 				.unwrap_or(false)
 	});
 	let Some(tid) = target else {
 		return false;
 	};
 	if let Some(t) = g.get_mut(&tid) {
-		t.anchor_text.clear();
-		t.anchor_vec.clear();
+		t.graviton_text.clear();
+		t.graviton_vec.clear();
 		t.parent = generic.clone();
 	}
 	if let Some(r) = g.get_mut(&root) {
@@ -637,10 +652,10 @@ fn route_to_child_id(children: &[String], g: &GraphGnn, vec: &[f32]) -> Option<S
 	let mut best_p = 0.0;
 	for id in children {
 		let c = match g.loaded(id) {
-			Some(k) if k.is_named() && !k.anchor_vec.is_empty() => k,
+			Some(k) if k.is_named() && !k.graviton_vec.is_empty() => k,
 			_ => continue,
 		};
-		let dist = cosine_distance(vec, &c.anchor_vec);
+		let dist = effective_distance(cosine_distance(vec, &c.graviton_vec), c.mass);
 		let p = acceptance_probability(dist, c.inner_radius, c.outer_radius);
 		if p > best_p {
 			best_p = p;
@@ -733,7 +748,7 @@ mod tests {
 		let root_net = g.root.root_id.clone();
 
 		let parent = {
-			let p = Kern::new_named_child(&root, &root_net, "parent-anchor", vec![1.0, 0.0]);
+			let p = Kern::new_named_child(&root, &root_net, "parent-graviton", vec![1.0, 0.0]);
 			let pid = p.id.clone();
 			g.register(p);
 			if let Some(r) = g.get_mut(&root) {
@@ -812,14 +827,14 @@ mod tests {
 
 	#[test]
 	fn accept_never_leaves_empty_unnamed_kern() {
-		let (mut g, root, _anchor) = graph_with_anchor();
+		let (mut g, root, _graviton) = graph_with_graviton();
 		let vectors = [
-			vec![1.0, 0.0, 0.0], // matches the anchor
+			vec![1.0, 0.0, 0.0], // matches the graviton
 			vec![1.0, 0.0, 0.0], // duplicate -> deduped, must NOT spawn
 			vec![0.0, 1.0, 0.0], // non-match -> generic
 			vec![0.0, 1.0, 0.0], // duplicate of the generic one
 			vec![0.0, 0.0, 1.0], // another non-match
-			vec![0.9, 0.1, 0.0], // near the anchor
+			vec![0.9, 0.1, 0.0], // near the graviton
 		];
 		for (i, v) in vectors.iter().enumerate() {
 			accept(&mut g, &root, ent(&format!("e{i}"), v.clone()), "");
@@ -983,83 +998,83 @@ mod tests {
 		assert!(!r.deduped, "orthogonal vector must not dedup");
 	}
 
-	fn graph_with_anchor() -> (GraphGnn, String, String) {
+	fn graph_with_graviton() -> (GraphGnn, String, String) {
 		let mut g = GraphGnn::new();
 		let root = g.root.id.clone();
 		let root_net = g.root.root_id.clone();
-		let anchor = Kern::new_named_child(&root, &root_net, "work", vec![1.0, 0.0, 0.0]);
-		let anchor_id = anchor.id.clone();
-		g.register(anchor);
-		g.get_mut(&root).unwrap().children.push(anchor_id.clone());
-		(g, root, anchor_id)
+		let graviton = Kern::new_named_child(&root, &root_net, "work", vec![1.0, 0.0, 0.0]);
+		let graviton_id = graviton.id.clone();
+		g.register(graviton);
+		g.get_mut(&root).unwrap().children.push(graviton_id.clone());
+		(g, root, graviton_id)
 	}
 
 	#[test]
 	fn routes_nonmatch_to_generic() {
-		let (mut g, root, anchor_id) = graph_with_anchor();
+		let (mut g, root, graviton_id) = graph_with_graviton();
 		let r = accept(&mut g, &root, ent("e", vec![0.0, 1.0, 0.0]), "");
 		assert_ne!(
 			r.placed_in, root,
 			"must not commit onto the root dispatcher"
 		);
 		assert_ne!(
-			r.placed_in, anchor_id,
-			"non-matching entity must not enter the anchor"
+			r.placed_in, graviton_id,
+			"non-matching entity must not enter the graviton"
 		);
 		let placed = g.loaded(&r.placed_in).expect("placed kern is loaded");
 		assert_eq!(
-			placed.anchor_text, GENERIC_ANCHOR,
+			placed.graviton_text, GENERIC_GRAVITON,
 			"fell through to generic"
 		);
 	}
 
 	#[test]
-	fn routes_match_to_anchor() {
-		let (mut g, root, anchor_id) = graph_with_anchor();
+	fn routes_match_to_graviton() {
+		let (mut g, root, graviton_id) = graph_with_graviton();
 		let r = accept(&mut g, &root, ent("e", vec![1.0, 0.0, 0.0]), "");
-		assert_eq!(r.placed_in, anchor_id, "matching entity enters its anchor");
+		assert_eq!(r.placed_in, graviton_id, "matching entity enters its graviton");
 	}
 
-	fn anchor_names(g: &GraphGnn) -> Vec<String> {
-		root_anchor_ids(g)
+	fn graviton_names(g: &GraphGnn) -> Vec<String> {
+		root_graviton_ids(g)
 			.iter()
 			.filter_map(|c| g.loaded(c))
-			.map(|k| k.anchor_text.clone())
+			.map(|k| k.graviton_text.clone())
 			.collect()
 	}
 
 	#[test]
-	fn add_anchor_creates_named_root_child() {
+	fn add_graviton_creates_named_root_child() {
 		let mut g = GraphGnn::new();
 		let root = g.root.id.clone();
-		add_anchor(&mut g, "work", vec![1.0, 0.0, 0.0]);
-		assert!(anchor_names(&g).contains(&"work".to_string()));
+		add_graviton(&mut g, "work", vec![1.0, 0.0, 0.0]);
+		assert!(graviton_names(&g).contains(&"work".to_string()));
 		let r = accept(&mut g, &root, ent("e", vec![1.0, 0.0, 0.0]), "");
 		assert!(
 			g.loaded(&r.placed_in)
-				.map(|k| k.anchor_text == "work")
+				.map(|k| k.graviton_text == "work")
 				.unwrap_or(false),
-			"matching entity enters the added anchor"
+			"matching entity enters the added graviton"
 		);
 	}
 
 	#[test]
-	fn remove_anchor_demotes_and_reports() {
+	fn remove_graviton_demotes_and_reports() {
 		let mut g = GraphGnn::new();
-		add_anchor(&mut g, "work", vec![1.0, 0.0, 0.0]);
-		assert!(remove_anchor(&mut g, "work"), "existing anchor removed");
+		add_graviton(&mut g, "work", vec![1.0, 0.0, 0.0]);
+		assert!(remove_graviton(&mut g, "work"), "existing graviton removed");
 		assert!(
-			!anchor_names(&g).contains(&"work".to_string()),
-			"anchor no longer a named root child"
+			!graviton_names(&g).contains(&"work".to_string()),
+			"graviton no longer a named root child"
 		);
-		assert!(!remove_anchor(&mut g, "missing"), "missing anchor -> false");
+		assert!(!remove_graviton(&mut g, "missing"), "missing graviton -> false");
 	}
 
 	#[test]
-	fn promote_skips_when_root_has_equivalent_anchor_by_name() {
+	fn promote_skips_when_root_has_equivalent_graviton_by_name() {
 		let mut g = GraphGnn::new();
 		let root = g.root.id.clone();
-		add_anchor(&mut g, "sessions with no parent", vec![1.0, 0.0, 0.0]);
+		add_graviton(&mut g, "sessions with no parent", vec![1.0, 0.0, 0.0]);
 		let generic = get_or_spawn_generic_child(&mut g, &root);
 		let root_net = g.root.root_id.clone();
 		let child = Kern::new_named_child(
@@ -1074,11 +1089,11 @@ mod tests {
 
 		assert!(
 			!promote_to_root_if_generic(&mut g, &cid),
-			"name-equivalent anchor exists -> no promotion"
+			"name-equivalent graviton exists -> no promotion"
 		);
 		assert!(
-			!root_anchor_ids(&g).contains(&cid),
-			"not minted as a root anchor"
+			!root_graviton_ids(&g).contains(&cid),
+			"not minted as a root graviton"
 		);
 		assert_eq!(
 			g.loaded(&cid).unwrap().parent,
@@ -1088,10 +1103,10 @@ mod tests {
 	}
 
 	#[test]
-	fn promote_skips_when_root_anchor_vec_is_near_duplicate() {
+	fn promote_skips_when_root_graviton_vec_is_near_duplicate() {
 		let mut g = GraphGnn::new();
 		let root = g.root.id.clone();
-		add_anchor(&mut g, "parentless sessions", vec![1.0, 0.0, 0.0]);
+		add_graviton(&mut g, "parentless sessions", vec![1.0, 0.0, 0.0]);
 		let generic = get_or_spawn_generic_child(&mut g, &root);
 		let root_net = g.root.root_id.clone();
 
@@ -1106,7 +1121,7 @@ mod tests {
 		g.get_mut(&generic).unwrap().children.push(near_id.clone());
 		assert!(
 			!promote_to_root_if_generic(&mut g, &near_id),
-			"vector-equivalent anchor exists -> no promotion"
+			"vector-equivalent graviton exists -> no promotion"
 		);
 
 		let fresh = Kern::new_named_child(&generic, &root_net, "shader pipelines", vec![0.0, 0.0, 1.0]);
@@ -1120,21 +1135,69 @@ mod tests {
 	}
 
 	#[test]
-	fn add_anchor_updates_existing_same_name_instead_of_minting_duplicate() {
+	fn heavier_graviton_wins_at_equal_distance() {
 		let mut g = GraphGnn::new();
-		add_anchor(&mut g, "work", vec![1.0, 0.0, 0.0]);
-		add_anchor(&mut g, "work", vec![0.0, 1.0, 0.0]);
+		let root = g.root.id.clone();
+		add_graviton_with_mass(&mut g, "light", vec![1.0, 0.0, 0.0], 1.0);
+		add_graviton_with_mass(&mut g, "heavy", vec![0.0, 1.0, 0.0], 2.0);
 
-		let ids: Vec<String> = root_anchor_ids(&g)
+		let r = accept(&mut g, &root, ent("e", vec![1.0, 1.0, 0.0]), "");
+		assert_eq!(
+			g.loaded(&r.placed_in).unwrap().graviton_text,
+			"heavy",
+			"equal cosine distance, larger mass -> smaller effective distance -> wins"
+		);
+	}
+
+	#[test]
+	fn default_mass_preserves_nearest_graviton_routing() {
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		add_graviton(&mut g, "near", vec![1.0, 0.0, 0.0]);
+		add_graviton(&mut g, "far", vec![0.0, 1.0, 0.0]);
+		for id in root_graviton_ids(&g) {
+			assert_eq!(g.loaded(&id).unwrap().mass, 1.0, "default mass is 1.0");
+		}
+
+		let r = accept(&mut g, &root, ent("e", vec![0.95, 0.05, 0.0]), "");
+		assert_eq!(
+			g.loaded(&r.placed_in).unwrap().graviton_text,
+			"near",
+			"mass 1.0 everywhere reproduces plain nearest-distance routing"
+		);
+	}
+
+	#[test]
+	fn add_graviton_with_mass_round_trips_and_updates_in_place() {
+		let mut g = GraphGnn::new();
+		add_graviton_with_mass(&mut g, "docs", vec![1.0, 0.0, 0.0], 3.0);
+		let id = find_graviton_by_name(&g, "docs").unwrap();
+		assert_eq!(g.loaded(&id).unwrap().mass, 3.0, "mass stored on add");
+
+		add_graviton_with_mass(&mut g, "docs", vec![0.0, 1.0, 0.0], 0.5);
+		assert_eq!(
+			g.loaded(&id).unwrap().mass,
+			0.5,
+			"same-name add updates mass in place"
+		);
+	}
+
+	#[test]
+	fn add_graviton_updates_existing_same_name_instead_of_minting_duplicate() {
+		let mut g = GraphGnn::new();
+		add_graviton(&mut g, "work", vec![1.0, 0.0, 0.0]);
+		add_graviton(&mut g, "work", vec![0.0, 1.0, 0.0]);
+
+		let ids: Vec<String> = root_graviton_ids(&g)
 			.into_iter()
 			.filter(|cid| {
 				g.loaded(cid)
-					.map(|c| c.anchor_text == "work")
+					.map(|c| c.graviton_text == "work")
 					.unwrap_or(false)
 			})
 			.collect();
-		assert_eq!(ids.len(), 1, "one anchor per name, not one per call");
-		let vec = g.loaded(&ids[0]).unwrap().anchor_vec.clone();
+		assert_eq!(ids.len(), 1, "one graviton per name, not one per call");
+		let vec = g.loaded(&ids[0]).unwrap().graviton_vec.clone();
 		assert_eq!(
 			vec,
 			vec![0.0, 1.0, 0.0],
@@ -1158,8 +1221,8 @@ mod tests {
 			"promoted out of generic"
 		);
 		assert!(
-			root_anchor_ids(&g).contains(&cid),
-			"now a root-level anchor"
+			root_graviton_ids(&g).contains(&cid),
+			"now a root-level graviton"
 		);
 		assert_eq!(
 			g.loaded(&cid).unwrap().parent,

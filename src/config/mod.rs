@@ -60,7 +60,7 @@ impl Default for Config {
 
 // Pin a relative `data_dir` to the load-time `cwd`: re-resolving against the
 // live current_dir silently reads an empty graph from a wrong launch dir.
-fn anchor_data_dir(data_dir: &str, cwd: &Path) -> String {
+fn graviton_data_dir(data_dir: &str, cwd: &Path) -> String {
 	let p = Path::new(data_dir);
 	if p.is_absolute() {
 		data_dir.to_string()
@@ -100,7 +100,7 @@ impl Config {
 			.unwrap_or_else(|| cwd.join(".kern").join("kern.toml"));
 		let project = cwd.join(".kern").join("kern.toml");
 		let mut cfg: Self = config_io::load_layered(&user, &project)?;
-		cfg.data_dir = anchor_data_dir(&cfg.data_dir, cwd);
+		cfg.data_dir = graviton_data_dir(&cfg.data_dir, cwd);
 		cfg.redirect_loopback_to_wsl_host();
 		Ok(cfg)
 	}
@@ -196,7 +196,7 @@ mod tests {
 	use std::path::PathBuf;
 
 	#[test]
-	fn load_anchors_relative_data_dir_to_cwd() {
+	fn load_gravitons_relative_data_dir_to_cwd() {
 		let dir = tempfile::tempdir().unwrap();
 		let root = dir.path().canonicalize().unwrap();
 		let kern = root.join(".kern");
@@ -229,7 +229,7 @@ mod tests {
 	}
 
 	#[test]
-	fn resolve_root_anchors_at_git_root_when_no_kern() {
+	fn resolve_root_gravitons_at_git_root_when_no_kern() {
 		let dir = tempfile::tempdir().unwrap();
 		let root = dir.path().canonicalize().unwrap();
 		std::fs::create_dir_all(root.join(".git")).unwrap();

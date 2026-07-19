@@ -24,10 +24,10 @@ fn find_entity_by_prefix(g: &GraphGnn, id: &str) -> Option<(Entity, String)> {
 
 fn print_kern(kern: &Kern, g: &GraphGnn, depth: usize) {
 	let indent = "  ".repeat(depth);
-	let label = if kern.anchor_text.is_empty() {
+	let label = if kern.graviton_text.is_empty() {
 		"[unnamed]".to_string()
 	} else {
-		kern.anchor_text.clone()
+		kern.graviton_text.clone()
 	};
 	println!(
 		"{}kern:{}  thoughts:{}  reasons:{}",

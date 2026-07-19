@@ -1036,7 +1036,7 @@ mod tests {
 		g.register(empty_unnamed("B", "A", &["A"]));
 
 		let mut named = Kern::new("N", &root_id);
-		named.anchor_text = "durable facts".into();
+		named.graviton_text = "durable facts".into();
 		g.register(named);
 
 		let mut withent = Kern::new("E", &root_id);
@@ -1062,7 +1062,7 @@ mod tests {
 		);
 		assert!(g.loaded("A").is_none(), "A reaped");
 		assert!(g.loaded("B").is_none(), "B reaped");
-		assert!(g.loaded("N").is_some(), "named anchor kept");
+		assert!(g.loaded("N").is_some(), "named graviton kept");
 		assert!(g.loaded("E").is_some(), "entity-bearing kern kept");
 		assert!(g.loaded(&root_id).is_some(), "root kept");
 		assert_eq!(g.kerns.len(), before - 2);

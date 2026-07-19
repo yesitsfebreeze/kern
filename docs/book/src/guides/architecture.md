@@ -6,7 +6,7 @@ One graph, every subsystem and the edges between them.
 graph TB
     %% ===== external callers =====
     CLI["CLI kern &lt;cmd&gt;"]
-    MCPC["MCP client (Claude Code)"]
+    MCPC["MCP client"]
     PEER["Peer daemons (forest)"]
     FS["Filesystem"]
 
@@ -62,7 +62,7 @@ graph TB
 
     %% ===== accept / routing =====
     subgraph ACC["accept::accept"]
-        RT["route_entity ≤64 hops<br/>route_to_child_id by anchor_vec (floor .5)<br/>acceptance_prob(inner=.15,outer=.35)<br/>root → generic catch-all if no anchor matches"]
+        RT["route_entity ≤64 hops<br/>route_to_child_id by graviton_vec (floor .5)<br/>acceptance_prob(inner=.15,outer=.35)<br/>root → generic catch-all if no graviton matches"]
         CMT["commit_entity → kern.entities + entity_idx"]
         RSN["reason edges: Similarity(top2)+Provenance+Supersedes"]
         RT --> CMT --> RSN
@@ -78,7 +78,7 @@ graph TB
         GIDX["gnn_entity_idx (HNSW)"]
         RIDX["reason_idx (HNSW)"]
         LEXI["lexical BM25 index"]
-        K["Kern{anchor_text, anchor_vec, inner/outer_radius, parent, children, gnn_weights}"]
+        K["Kern{graviton_text, graviton_vec, inner/outer_radius, parent, children, gnn_weights}"]
         ENT["Entity{id=hash, kind, status, vector, gnn_vector,<br/>conf α/β, heat, access_count(CRDT), dirty, source}"]
         REA["Reason{id=hash, from, to, to_kern_id, to_net_id,<br/>kind, vector, traversal_count(CRDT)}"]
         GRAPH --> K
@@ -121,7 +121,7 @@ graph TB
         PULSE["pulse: recurse tree, deposit heat"]
         QUE["Queue (mpsc dedup, cap 512)"]
         CL["do_cluster (vector_cluster≥cohesion)<br/>spawn kerns → Name/Enrich"]
-        NM["do_name (LLM anchor name → radii; promote generic cluster → root)"]
+        NM["do_name (LLM graviton name → radii; promote generic cluster → root)"]
         EN["do_enrich (LLM edge label → reason_idx)"]
         RQ["do_resolve (answer ≥0.80 else broadcast up)"]
         ST["StigmergyGc: heat&lt;0.01 AND stale&gt;7d<br/>(clock: accessed_at, else created_at) AND not Fact/Doc"]
@@ -153,7 +153,7 @@ graph TB
         KF["Store: data.mdb + lock.mdb<br/>named DBs kern|cold|meta<br/>zstd(bincode) values, int8 vectors<br/>single-writer + epoch-guarded flush"]
         UNL["QUARANTINE: unloaded set<br/>auto-reload on get(); root never evicted"]
         COLD["COLD db: latest-wins keyed, cap 50k newest"]
-        DG["digest.md (SessionStart)"]
+        DG["digest.md (recall)"]
         KF -->|LRU enforce_kern_cap| UNL
         UNL -->|load_kern| KF
         KF --- COLD

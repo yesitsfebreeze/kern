@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use trnsprt::kern_rpc::{
-	AnchorReq, AnchorRes, CallToolReq, CallToolRes, DegradeReq, DegradeRes, DescriptorReq,
+	GravitonReq, GravitonRes, CallToolReq, CallToolRes, DegradeReq, DegradeRes, DescriptorReq,
 	DescriptorRes, EdgeKind, EntityKindLite, EntityRef, EntityStatusLite, ForgetReq, ForgetRes,
 	HealthRes, IngestReq, IngestRes, KernRpc, LinkReq, LinkRes, ListToolsReq, ListToolsRes,
 	NeighborsReq, NeighborsRes, PulseReq, PulseRes, QueryReq, QueryRes, SourceLite,
@@ -445,7 +445,7 @@ impl KernRpc for KernRpcHandler {
 		}
 	}
 
-	fn anchor(&self, req: AnchorReq) -> impl ::core::future::Future<Output = AnchorRes> + Send {
+	fn graviton(&self, req: GravitonReq) -> impl ::core::future::Future<Output = GravitonRes> + Send {
 		let kern = self.kern.clone();
 		async move {
 			let args = serde_json::json!({
@@ -453,8 +453,8 @@ impl KernRpc for KernRpcHandler {
 					"name": req.name,
 					"text": req.text,
 			});
-			let result = kern.tool_anchor(&args);
-			AnchorRes {
+			let result = kern.tool_graviton(&args);
+			GravitonRes {
 				result: result.to_string(),
 			}
 		}

@@ -40,7 +40,7 @@ sets; parallelize only what does not overlap.
 
 - **Scope:** `src/tick/`.
 - **Knows:** heat deposit/pulse, half-life lazy decay, stigmergy GC and its
-  Fact immunity, cold-tier spill, clustering into child kerns, anchor
+  Fact immunity, cold-tier spill, clustering into child kerns, graviton
   auto-promotion, the bi-temporal supersede classification that runs off the
   recall path.
 - **Delegate when:** decay/eviction tuning, tick cadence, or anything that
@@ -50,7 +50,7 @@ sets; parallelize only what does not overlap.
 
 - **Scope:** `src/ingest/`, `src/llm.rs`, `src/watcher/`.
 - **Knows:** the capture intake and its outage-safe queueing, the one-pass
-  distillation into typed claims, descriptors and anchors, Ollama endpoints
+  distillation into typed claims, descriptors and gravitons, Ollama endpoints
   (reason/embed/answer split), streaming, `num_ctx` caps, warm-keeping.
 - **Delegate when:** distillation quality, claim typing, LLM latency, or
   model/endpoint wiring.
@@ -67,15 +67,12 @@ sets; parallelize only what does not overlap.
 
 ## surface
 
-- **Scope:** `src/mcp/`, `src/rpc/`, `src/commands/`, `hooks/`,
-  `.claude-plugin/`.
+- **Scope:** `src/mcp/`, `src/rpc/`, `src/commands/`.
 - **Knows:** the one-dispatch-core law (every surface goes through
   `tools::dispatch`, never a second copy), the nine MCP tools, tarpc
-  `KernRpc`, the three fail-open project-guarded hooks, the plugin
-  marketplace packaging, and that the CLI races a live daemon (prefer MCP for
+  `KernRpc`, and that the CLI races a live daemon (prefer MCP for
   live state).
-- **Delegate when:** tool schemas, CLI subcommands, hook behavior, or plugin
-  packaging.
+- **Delegate when:** tool schemas or CLI subcommands.
 
 ## bench
 

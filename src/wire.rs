@@ -137,7 +137,6 @@ pub struct IngestResponse {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HealthResponse {
-	pub purpose: String,
 	pub kerns: i32,
 	pub entities: i32,
 	pub reasons: i32,
@@ -260,14 +259,14 @@ pub struct DescriptorResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnchorRequest {
+pub struct GravitonRequest {
 	pub action: String,
 	pub name: String,
 	pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnchorResponse {
+pub struct GravitonResponse {
 	pub ok: bool,
 }
 
@@ -316,8 +315,8 @@ pub struct SnapshotReason {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotKern {
 	pub id: String,
-	pub anchor_text: String,
-	pub anchor_vec: Vec<f64>,
+	pub graviton_text: String,
+	pub graviton_vec: Vec<f64>,
 	pub inner_radius: f64,
 	pub outer_radius: f64,
 	pub parent: String,
@@ -347,7 +346,6 @@ pub struct ListEntitiesResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KernListItem {
 	pub id: String,
-	pub purpose: String,
 	pub entities: i32,
 	pub reasons: i32,
 	pub children: i32,

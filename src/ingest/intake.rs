@@ -19,7 +19,7 @@ pub fn extract_claims(path: &Path, llm: &dyn Fn(&str) -> String) -> Option<(Stri
 	let stem = path
 		.file_stem()
 		.and_then(|s| s.to_str())
-		.unwrap_or("claude")
+		.unwrap_or("session")
 		.to_string();
 	let claims = match distill(&text, llm) {
 		Some(c) => c,
@@ -93,9 +93,9 @@ async fn drain_entry(
 	let mut results = Vec::with_capacity(claims.len());
 	for c in claims {
 		let src = Source::Session {
-			session_id: format!("claude:{stem}"),
+			session_id: format!("session:{stem}"),
 			section: String::new(),
-			title: format!("claude://{}", c.descriptor),
+			title: format!("session://{}", c.descriptor),
 		};
 		let mut claim_cfg = cfg.clone();
 		claim_cfg.valid_from = c.valid_from;

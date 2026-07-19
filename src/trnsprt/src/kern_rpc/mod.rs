@@ -4,7 +4,7 @@ pub mod mock;
 pub mod svc;
 
 pub use dto::{
-	Anchor, AnchorReq, AnchorRes, CallToolReq, CallToolRes, DegradeReq, DegradeRes, DescriptorReq,
+	Graviton, GravitonReq, GravitonRes, CallToolReq, CallToolRes, DegradeReq, DegradeRes, DescriptorReq,
 	DescriptorRes, EdgeKind, EntityKindLite, EntityRef, EntityStatusLite, ForgetReq, ForgetRes,
 	HealthRes, IngestReq, IngestRes, LinkReq, LinkRes, ListToolsReq, ListToolsRes, NeighborsReq,
 	NeighborsRes, PulseReq, PulseRes, QueryReq, QueryRes, SourceLite,

@@ -17,17 +17,17 @@ session text → intake → distill (LLM) → typed claims → graph → digest 
 
 ## What it does
 
-- **Captures automatically.** A Claude Code `Stop` hook extracts the new
-  conversation delta and drops it in `<cwd>/.kern/capture/`. The daemon drains
-  it, runs one LLM distillation pass that pulls out durable *facts*,
-  *decisions*, and *preferences* as typed claims, and ingests each into the
-  graph. Nothing is lost on an LLM outage — the delta stays queued until it
-  succeeds.
+- **Captures automatically.** A conversation delta (a `.txt` file) dropped in
+  `<cwd>/.kern/capture/` — by your agent, a wrapper, or the `ingest` MCP tool —
+  is drained by the daemon, which runs one LLM distillation pass that pulls out
+  durable *facts*, *decisions*, and *preferences* as typed claims and ingests
+  each into the graph. Nothing is lost on an LLM outage — the delta stays queued
+  until it succeeds.
 
-- **Recalls into context.** The daemon keeps a fresh **digest** (root anchors +
-  hottest thoughts) at `<cwd>/.kern/digest.md`. A `SessionStart` hook
-  injects it into every new session. For deeper mid-session lookups the agent
-  calls the `query` MCP tool directly.
+- **Recalls into context.** The daemon keeps a fresh **digest** (root gravitons +
+  hottest thoughts) at `<cwd>/.kern/digest.md`; clients read it into new
+  sessions. For deeper mid-session lookups the agent calls the `query` MCP tool
+  directly.
 
 - **Compacts itself.** Every access deposits a **heat** trace, and the tick's
   pulse re-deposits heat on entities still reachable from the roots; heat then
@@ -96,7 +96,7 @@ returns fewer than `k`.
 
 `kern --daemon` exposes its surface two ways:
 
-- **MCP** (stdio + HTTP/SSE) for external clients like Claude Code.
+- **MCP** (stdio + HTTP/SSE) for external clients.
 - **tarpc `KernRpc`** over a per-cwd socket for other local clients.
 
 A background **tick** (default 60s) drives decay, eviction, and clustering — an
@@ -116,8 +116,8 @@ are all written from scratch.
 
 ### Quickstart
 
-**Prerequisites:** Node.js (for the hooks) and a local
-[Ollama](https://ollama.com) with the default models pulled:
+**Prerequisites:** a local [Ollama](https://ollama.com) with the default
+models pulled:
 
 ```bash
 ollama pull qwen3-embedding:0.6b  # embeddings (default)
@@ -132,6 +132,7 @@ published to GitHub Releases):
 # Linux / macOS
 curl -fsSL https://raw.githubusercontent.com/yesitsfebreeze/kern/master/install.sh | sh
 ```
+
 ```powershell
 # Windows (PowerShell)
 irm https://raw.githubusercontent.com/yesitsfebreeze/kern/master/install.ps1 | iex
@@ -140,25 +141,28 @@ irm https://raw.githubusercontent.com/yesitsfebreeze/kern/master/install.ps1 | i
 > Or build from source (needs a Rust toolchain): `cargo build --release` →
 > `target/release/kern`, or `cargo install --path .`.
 
-**2. Register the MCP server with Claude Code.** `kern mcp` attaches to a
+**2. Register the MCP server with your client.** `kern mcp` attaches to a
 running daemon if one exists, and otherwise auto-spawns a detached daemon for
 the current directory — so this one command is all you need to bring kern up
-(the installer prints the exact path):
+(the installer prints the exact path). Add it as a stdio MCP server in your
+client's config:
 
-```bash
-claude mcp add kern -- kern mcp
+```json
+{
+  "mcpServers": {
+    "kern": { "command": "kern", "args": ["mcp"] }
+  }
+}
 ```
 
-**3. Install the capture + recall hooks.** The simplest path is the Claude
-plugin (`/plugin marketplace add yesitsfebreeze/kern` then
-`/plugin install kern@kern`), which registers all three hooks plus the MCP
-server in one step. The scripts ship in [`hooks/`](hooks/); see the *Hooks*
-section below for the full table and behavior. They are guarded to no-op outside
-`.kern/` projects, so a single global registration is safe everywhere.
+**3. Wire capture + recall (optional).** kern is agent-agnostic: any tool that
+writes a conversation delta to `<cwd>/.kern/capture/*.txt` feeds capture, and
+any client that reads `<cwd>/.kern/digest.md` gets recall. Wire those two in
+whatever way your client supports (a hook, a wrapper, or a manual `kern ingest`).
 
 **4. Opt the project in.** No config file is needed — every default (embedding,
 reasoning, capture, tick) works out of the box against a local Ollama. The
-hooks gate on the `.kern/` directory: it is created automatically the first
+daemon gates on the `.kern/` directory: it is created automatically the first
 time the daemon persists, or `mkdir .kern` to opt in immediately. Once it
 exists, capture and recall activate for that project. (A
 `<cwd>/.kern/kern.toml` is only for overriding defaults — see *Configure*
@@ -229,53 +233,40 @@ peers = []
 > unauthenticated and unencrypted today — enable it only on a network segment
 > where you trust every host.
 
-### Hooks
+### Capture & recall
 
-Three Claude Code hooks drive kern's automatic memory. They are plain Node ESM
-scripts in [`hooks/`](hooks/) with no dependencies, and all **fail open** — any
-error exits 0 and the session proceeds untouched.
+kern is agent-agnostic. There is no client-specific plugin; you wire capture
+and recall to whatever you use via two simple files.
 
-| Hook | Event | What it does |
-|------|-------|--------------|
-| `kern-capture.mjs` | `Stop` | Extracts the new conversation delta from the transcript and writes it to `<cwd>/.kern/capture/`. The daemon drains and distills it. |
-| `kern-recall.mjs` | `SessionStart` | Reads `<cwd>/.kern/digest.md` and injects it into the new session as context. |
-| `kern-recall-prompt.mjs` | `UserPromptSubmit` | Demand-driven semantic recall: runs `kern search <prompt>` against `<cwd>/.kern` and injects the top scored thoughts (score ≥ `MIN_SCORE`) as context for that prompt. Hard-bounded by `TIMEOUT_MS`. |
+- **Capture** — drop a conversation delta as a `.txt` file in
+  `<cwd>/.kern/capture/`. The daemon drains it, distills typed claims out of it,
+  and ingests them. Write the file however your client supports (a hook, a
+  wrapper, or a manual `kern ingest`); kern only cares about the file.
+- **Recall** — read `<cwd>/.kern/digest.md` into a new session for ambient
+  context, and call the `query` MCP tool for mid-session lookups. The daemon
+  keeps the digest fresh.
 
-All three are **project-scoped by a guard**: each no-ops in any directory
-without a `.kern/` folder, so a single global registration is safe across every
-project — only directories where a kern is (or has been) active get touched.
-`kern-recall-prompt` embeds the prompt every turn (Ollama), so it fails open on
-timeout and injects nothing rather than blocking the prompt.
+Both no-op outside a directory with a `.kern/` folder, so a single global
+registration is safe across every project — only directories where a kern is
+(or has been) active get touched.
 
-**Install as a plugin (recommended).** The repo is a self-contained Claude
-**plugin** and **marketplace** — install it straight from GitHub. From any
-Claude Code session:
-
-```
-/plugin marketplace add yesitsfebreeze/kern
-/plugin install kern@kern
-```
-
-That registers all three hooks (via `${CLAUDE_PLUGIN_ROOT}` — no machine paths)
-and the kern MCP server. Restart Claude Code to load them.
-
-**Requirements:** the `kern` CLI on `PATH` (hooks and MCP server both shell out
-to it), a running embedding endpoint for `kern-recall-prompt` (Ollama by
-default), and `node` on `PATH` for hook execution.
-
-Prefer the plugin over hand-editing `~/.claude/settings.json`; enabling it wires
-all three hooks plus the MCP server in one step.
+**Requirements:** the `kern` CLI on `PATH` and a running embedding endpoint
+(Ollama by default) for prompt-time recall.
 
 ### Seed the graph
 
 Once, via the MCP tools against the running daemon (not the CLI, which races the
-daemon). From a Claude Code session in the project:
+daemon). From an MCP session in the project:
 
-1. Add a few anchors — call `anchor` (action `add`) with a `name` and a one-line
-   `text` description for each top-level bucket the root should route memories
-   into, e.g. *"decisions"*, *"project state"*, *"preferences"*. Memories that
-   match no anchor land in `generic`; dense `generic` clusters auto-promote to
-   new anchors over time.
+1. Add a few gravitons — call `graviton` (action `add`) with a `name` and a
+   `text` for each focus area the graph should gravitate around, e.g.
+   *"decisions"*, *"project state"*, *"preferences"*. The text can be a one-line
+   description or a full document/message — it is embedded whole as the
+   graviton's pull vector. An optional `mass` (default `1.0`) makes a graviton
+   pull harder: ingest routes by `distance / mass`, and query ranking boosts
+   thoughts near a graviton by `gravity_weight * mass * cos`. Memories that
+   match no graviton land in `generic`; dense `generic` clusters auto-promote to
+   new gravitons over time.
 2. Add the typed descriptors you want to capture — call `descriptor` (action
    `add`) once each for the kinds you use: `preference`, `decision`, `project`,
    `fact`, `code-fact`, `reference`, `procedural`.
@@ -286,13 +277,13 @@ capture hook.
 ### MCP tools
 
 | Tool | Purpose |
-|------|---------|
+| ------ | --------- |
 | `query` | Search the graph. Scored thoughts + optional LLM answer. Filter by `mode`, `kind`, `source`, time range, `min_conf`, and `as_of` (bi-temporal point-in-time); set `include_history` to also return superseded revisions (flagged `history:true`). |
 | `ingest` | Add text. Supports `object_id` update semantics and `descriptor` chunking context. |
 | `link` | Create a reason edge between two thoughts (LLM writes the reason if blank). |
 | `forget` | Remove a thought and cascade its edges. Facts are immune. |
 | `degrade` | Down-weight the edges along a bad retrieval path — teaches the graph from miss feedback. |
-| `anchor` | Manage anchors (named top-level buckets): `list` (default), `add` (name+text), `remove` (name). |
+| `graviton` | Manage gravitons (named focus attractors; replaced the single per-kern "purpose"): `list` (default), `add` (name + text — phrase or full document — + optional mass), `remove` (name). |
 | `descriptor` | Add/remove a data-type descriptor. |
 | `health` | Graph stats: thought/edge counts, tick heat. |
 | `pulse` | Trigger a clustering pass across the kern tree. |
@@ -306,8 +297,8 @@ vector DB, and on every query do top-k cosine + prompt-stuff. kern is a memory
 that operates itself.
 
 | | Traditional RAG | kern |
-|---|---|---|
-| **Ingestion** | Manual: you run a chunk-and-embed job over a corpus. | Automatic: sessions distill into typed claims via a Stop hook. |
+| --- | --- | --- |
+| **Ingestion** | Manual: you run a chunk-and-embed job over a corpus. | Automatic: session deltas distill into typed claims via the capture intake. |
 | **Unit stored** | Raw text chunks. | Distilled facts/decisions/preferences + *reason edges* between them. |
 | **Retrieval** | top-k vector similarity. | Hybrid vector + BM25 with GNN-blended seeds, edge expansion, RRF + PageRank fusion, optional LLM rerank, diversify. |
 | **Structure** | A flat bag of vectors. | A knowledge graph — recall can follow *why* one fact connects to another. |

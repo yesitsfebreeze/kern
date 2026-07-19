@@ -83,12 +83,12 @@ fn best_cluster(clusters: &[Cluster], min_size: usize, min_cohesion: f64) -> Opt
 	best
 }
 
-pub fn is_core_cluster(c: &Cluster, anchor_vec: &[f32]) -> bool {
-	if anchor_vec.is_empty() || c.members.is_empty() {
+pub fn is_core_cluster(c: &Cluster, graviton_vec: &[f32]) -> bool {
+	if graviton_vec.is_empty() || c.members.is_empty() {
 		return false;
 	}
 	let centroid = compute_centroid(&c.members);
-	cosine(&centroid, anchor_vec) >= KERN_COHESION_THRESHOLD
+	cosine(&centroid, graviton_vec) >= KERN_COHESION_THRESHOLD
 }
 
 pub fn cohesion(members: &[Entity]) -> f64 {
@@ -135,7 +135,7 @@ pub fn compute_centroid(members: &[Entity]) -> Vec<f32> {
 	centroid
 }
 
-pub fn anchor_prompt(c: &Cluster) -> String {
+pub fn graviton_prompt(c: &Cluster) -> String {
 	const MAX_SAMPLES: usize = 10;
 	let members = if c.members.len() > MAX_SAMPLES {
 		let centroid = compute_centroid(&c.members);
@@ -170,7 +170,7 @@ mod tests {
 	use crate::test_support::entity_vec as ent;
 
 	#[test]
-	fn anchor_prompt_keeps_header_then_one_bullet_per_member() {
+	fn graviton_prompt_keeps_header_then_one_bullet_per_member() {
 		let c = Cluster {
 			members: vec![
 				ent("a", vec![1.0]),
@@ -178,7 +178,7 @@ mod tests {
 				ent("c", vec![1.0]),
 			],
 		};
-		let p = anchor_prompt(&c);
+		let p = graviton_prompt(&c);
 		assert!(
 			p.starts_with("Summarize the core theme of these related thoughts"),
 			"instruction header is preserved verbatim",
@@ -268,7 +268,7 @@ mod tests {
 	}
 
 	#[test]
-	fn is_core_cluster_false_when_anchor_empty() {
+	fn is_core_cluster_false_when_graviton_empty() {
 		let c = Cluster {
 			members: vec![ent("a", vec![1.0, 0.0])],
 		};

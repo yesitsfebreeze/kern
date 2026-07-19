@@ -190,7 +190,7 @@ pub fn merge_remote_entity(g: &mut GraphGnn, target_kern_id: &str, remote: Entit
 // Fold a disk-loaded graph into the live one after a refused stale flush: the
 // live graph keeps its unflushed rows, the external writer's rows join via the
 // same CRDT joins gossip uses, and the caller retries the flush with the disk
-// epoch. Kern-shell fields (anchor, radii, weights) stay local for kerns both
+// epoch. Kern-shell fields (graviton, radii, weights) stay local for kerns both
 // sides know — only rows and topology union in.
 pub fn absorb_graph(local: &mut GraphGnn, disk: GraphGnn) -> usize {
 	let mut changed = 0;

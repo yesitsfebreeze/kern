@@ -37,6 +37,7 @@ pub struct RetrievalConfig {
 	pub refine_traversal_weight: f64,
 	pub refine_boost_cap: f64,
 	pub fact_score_boost: f64,
+	pub gravity_weight: f64,
 	pub min_deliver_score: f64,
 	pub max_deliver_results: usize,
 	pub important_min_cosine: f64,
@@ -85,6 +86,7 @@ impl Default for RetrievalConfig {
 			refine_traversal_weight: constants::REFINE_TRAVERSAL_WEIGHT,
 			refine_boost_cap: constants::REFINE_BOOST_CAP,
 			fact_score_boost: constants::FACT_SCORE_BOOST,
+			gravity_weight: 0.15,
 			min_deliver_score: 0.0,
 			max_deliver_results: 25,
 			important_min_cosine: constants::IMPORTANT_MIN_COSINE,
@@ -180,6 +182,12 @@ impl RetrievalConfig {
 			));
 		}
 
+		if self.gravity_weight < 0.0 {
+			errs.push(format!(
+				"gravity_weight ({}) must be >= 0.0",
+				self.gravity_weight
+			));
+		}
 		if self.rrf_k < 0.0 {
 			errs.push(format!("rrf_k ({}) must be >= 0.0", self.rrf_k));
 		}
@@ -299,6 +307,18 @@ mod tests {
 				.iter()
 				.any(|e| e.contains("max_deliver_results")),
 			"max_deliver_results 0"
+		);
+
+		let neg_gravity = RetrievalConfig {
+			gravity_weight: -0.1,
+			..Default::default()
+		};
+		assert!(
+			neg_gravity
+				.validate()
+				.iter()
+				.any(|e| e.contains("gravity_weight")),
+			"negative gravity_weight"
 		);
 
 		let zero_rrf = RetrievalConfig {

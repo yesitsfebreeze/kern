@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 // `dir` and `digest_path` MUST stay cwd-relative and independent of `data_dir`:
-// the Claude-Code hooks resolve them from session cwd; deriving from data_dir breaks the hook contract.
+// the MCP server resolves them from session cwd; deriving from data_dir breaks that contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CaptureConfig {

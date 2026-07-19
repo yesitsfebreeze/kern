@@ -57,14 +57,14 @@ pub fn start_announce(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 				_ = interval.tick() => {
 					let payload = {
 						let g = read_recovered(&graph);
-						if g.root.anchor_vec.is_empty() {
+						if g.root.graviton_vec.is_empty() {
 							None
 						} else {
 							Some(SpherePayload {
 								network_id: g.network_id.clone(),
 								kern_id: g.root.id.clone(),
-								anchor_text: g.root.anchor_text.clone(),
-								anchor_vec: g.root.anchor_vec.clone(),
+								graviton_text: g.root.graviton_text.clone(),
+								graviton_vec: g.root.graviton_vec.clone(),
 								entity_id: String::new(),
 								inner_radius: g.root.inner_radius,
 								outer_radius: g.root.outer_radius,
@@ -237,8 +237,8 @@ fn handle_question(d: &Deps, msg: GossipMessage) {
 		payload: GossipPayload::Sphere(SpherePayload {
 			network_id: g.network_id.clone(),
 			kern_id: g.root.id.clone(),
-			anchor_text: g.root.anchor_text.clone(),
-			anchor_vec: g.root.anchor_vec.clone(),
+			graviton_text: g.root.graviton_text.clone(),
+			graviton_vec: g.root.graviton_vec.clone(),
 			entity_id: hits[0].entity_id.clone(),
 			inner_radius: g.root.inner_radius,
 			outer_radius: g.root.outer_radius,
@@ -445,14 +445,14 @@ fn inject_remote_scope(g: &mut GraphGnn, sphere: &SpherePayload, _origin: &str) 
 	let phantom_id = format!("remote-{}-{}", sphere.network_id, sphere.kern_id);
 
 	if let Some(kern) = g.kerns.get_mut(&phantom_id) {
-		kern.anchor_text = sphere.anchor_text.clone();
-		kern.anchor_vec = sphere.anchor_vec.clone();
+		kern.graviton_text = sphere.graviton_text.clone();
+		kern.graviton_vec = sphere.graviton_vec.clone();
 		kern.inner_radius = sphere.inner_radius;
 		kern.outer_radius = sphere.outer_radius;
 	} else {
 		let mut k = new_phantom_kern(g, &phantom_id);
-		k.anchor_text = sphere.anchor_text.clone();
-		k.anchor_vec = sphere.anchor_vec.clone();
+		k.graviton_text = sphere.graviton_text.clone();
+		k.graviton_vec = sphere.graviton_vec.clone();
 		k.inner_radius = sphere.inner_radius;
 		k.outer_radius = sphere.outer_radius;
 		g.register(k);
@@ -726,8 +726,8 @@ mod tests {
 		SpherePayload {
 			network_id: net.to_string(),
 			kern_id: "rk".into(),
-			anchor_vec: vec![],
-			anchor_text: String::new(),
+			graviton_vec: vec![],
+			graviton_text: String::new(),
 			entity_id: entity_id.to_string(),
 			inner_radius: 0.0,
 			outer_radius: 0.0,

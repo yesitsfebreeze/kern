@@ -27,6 +27,8 @@ const FORMAT_V1: u8 = 1;
 // V2 appends StoredKern::temporal; the embedded Kern/Entity layout is unchanged,
 // so V1 decodes via StoredKernV1.
 const FORMAT_V2: u8 = 2;
+// V3 appends Kern::mass; the pre-mass embedded layout decodes via KernPreMass.
+const FORMAT_V3: u8 = 3;
 const ZSTD_LEVEL: i32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,19 +57,19 @@ pub(crate) fn bincode_cfg() -> impl bincode::config::Config {
 	bincode::config::standard().with_limit::<{ 1024 * 1024 * 1024 }>()
 }
 
-// [FORMAT_V2] ++ zstd(bincode(v)).
+// [FORMAT_V3] ++ zstd(bincode(v)).
 fn encode<T: Serialize>(v: &T) -> Result<Vec<u8>, StoreError> {
 	let raw = bincode::serde::encode_to_vec(v, bincode_cfg())?;
 	let comp = zstd::encode_all(raw.as_slice(), ZSTD_LEVEL)?;
 	let mut out = Vec::with_capacity(comp.len() + 1);
-	out.push(FORMAT_V2);
+	out.push(FORMAT_V3);
 	out.extend_from_slice(&comp);
 	Ok(out)
 }
 
 fn strip_version(bytes: &[u8]) -> Result<(u8, Vec<u8>), StoreError> {
 	let (&ver, body) = bytes.split_first().ok_or(StoreError::BadVersion(0))?;
-	if ver != FORMAT_V1 && ver != FORMAT_V2 {
+	if !(FORMAT_V1..=FORMAT_V3).contains(&ver) {
 		return Err(StoreError::BadVersion(ver));
 	}
 	Ok((ver, zstd::decode_all(body)?))
@@ -84,8 +86,12 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, StoreError> {
 fn decode_stored_kern(bytes: &[u8]) -> Result<StoredKern, StoreError> {
 	let (ver, raw) = strip_version(bytes)?;
 	match ver {
-		FORMAT_V2 => Ok(bincode::serde::decode_from_slice(&raw, bincode_cfg())?.0),
-		// FORMAT_V1 (validated by strip_version): pre-temporal layout.
+		FORMAT_V3 => Ok(bincode::serde::decode_from_slice(&raw, bincode_cfg())?.0),
+		FORMAT_V2 => {
+			let (v2, _): (StoredKernV2, _) = bincode::serde::decode_from_slice(&raw, bincode_cfg())?;
+			Ok(v2.into())
+		}
+		// FORMAT_V1 (validated by strip_version): pre-temporal, pre-mass layout.
 		_ => {
 			let (v1, _): (StoredKernV1, _) = bincode::serde::decode_from_slice(&raw, bincode_cfg())?;
 			Ok(v1.into())
@@ -199,11 +205,31 @@ impl StoredKern {
 	}
 }
 
+// FORMAT_V2 mirror: pre-mass Kern with the temporal side-map.
+#[derive(Serialize, Deserialize)]
+struct StoredKernV2 {
+	kern: crate::base::types::KernPreMass,
+	entity_vecs: HashMap<String, StoredVec>,
+	reason_vecs: HashMap<String, StoredVec>,
+	temporal: HashMap<String, StoredTemporal>,
+}
+
+impl From<StoredKernV2> for StoredKern {
+	fn from(v2: StoredKernV2) -> Self {
+		StoredKern {
+			kern: v2.kern.into(),
+			entity_vecs: v2.entity_vecs,
+			reason_vecs: v2.reason_vecs,
+			temporal: v2.temporal,
+		}
+	}
+}
+
 // FORMAT_V1 mirror without the temporal side-map; the embedded entity bytes are
 // identical across versions.
 #[derive(Serialize, Deserialize)]
 struct StoredKernV1 {
-	kern: Kern,
+	kern: crate::base::types::KernPreMass,
 	entity_vecs: HashMap<String, StoredVec>,
 	reason_vecs: HashMap<String, StoredVec>,
 }
@@ -211,7 +237,7 @@ struct StoredKernV1 {
 impl From<StoredKernV1> for StoredKern {
 	fn from(v1: StoredKernV1) -> Self {
 		StoredKern {
-			kern: v1.kern,
+			kern: v1.kern.into(),
 			entity_vecs: v1.entity_vecs,
 			reason_vecs: v1.reason_vecs,
 			temporal: HashMap::new(),
@@ -624,7 +650,7 @@ mod tests {
 		})
 		.unwrap();
 		assert_eq!(
-			bytes[0], FORMAT_V2,
+			bytes[0], FORMAT_V3,
 			"first byte is the current write version"
 		);
 	}
@@ -786,7 +812,7 @@ mod tests {
 		let k = kern_with("k", e);
 
 		let bytes = encode(&StoredKern::from_kern(&k)).unwrap();
-		assert_eq!(bytes[0], FORMAT_V2, "kern rows are written as V2");
+		assert_eq!(bytes[0], FORMAT_V3, "kern rows are written as V3");
 		let back = decode_stored_kern(&bytes).unwrap().into_kern();
 		let be = &back.entities["e1"];
 		assert_eq!(be.valid_from, Some(t0), "valid_from survives");
@@ -802,7 +828,7 @@ mod tests {
 
 		let sk = StoredKern::from_kern(&k);
 		let v1 = StoredKernV1 {
-			kern: sk.kern,
+			kern: sk.kern.into(),
 			entity_vecs: sk.entity_vecs,
 			reason_vecs: sk.reason_vecs,
 		};
@@ -831,7 +857,7 @@ mod tests {
 		let k = kern_with("k", mk_entity("e1", "legacy", 1.0, EntityKind::Claim));
 		let sk = StoredKern::from_kern(&k);
 		let v1 = StoredKernV1 {
-			kern: sk.kern,
+			kern: sk.kern.into(),
 			entity_vecs: sk.entity_vecs,
 			reason_vecs: sk.reason_vecs,
 		};

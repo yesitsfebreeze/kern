@@ -4,7 +4,7 @@ Entity rename (slice A) was a clean break: the on-disk bincode layout changed
 (`Thought` -> `Entity`, `ThoughtKind` -> `EntityKind` + `EntityStatus`,
 `SourceRef` -> typed `Source` enum, `Kern.thoughts` -> `Kern.entities`,
 `created_at` moved off `Source` onto `Entity`). Old saved DBs are NOT migrated —
-they must be regenerated. CLAUDE.md mandates "no compat".
+they must be regenerated. The repo's conventions mandate "no compat".
 
 Encryption-at-rest posture: intentionally none at this layer. `atomic_write`'s
 tmp-write + fsync + atomic rename is durability, not confidentiality; the
@@ -25,6 +25,7 @@ filesystem ACLs).
   fans out cleanly across rayon's pool; wall time drops by ~core count.
 
 Second-pass migration (comment -> note):
+
 - `reload_from_disk` rationale in full: this is how a live graph reloads after
   another writer advanced the store. Opening a second `Store` on the same dir
   would be a same-process double-open of the LMDB env — forbidden, it corrupts the
@@ -70,6 +71,7 @@ Second-pass migration (comment -> note):
   mixed in so the skip path is exercised concurrently with the happy path.
 
 Third-pass migration (2026-07-17, comment -> note):
+
 - `load_legacy_dir` corrupt-sibling policy: a corrupt/unreadable sibling `.kern`
   is warned-and-skipped, never allowed to vanish silently or truncate the load;
   the root is loaded up front and still hard-errors, since a graph without its

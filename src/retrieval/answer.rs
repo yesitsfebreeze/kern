@@ -7,7 +7,7 @@ use crate::profile::Profiler;
 use crate::retrieval::expand::{self, PathChain, ScoredEntity, ScoredRef};
 use crate::retrieval::score::{self, QueryOptions};
 use crate::retrieval::seed::{self, Mode, Weights};
-use crate::retrieval::{diversify, fuse, hyde, merge, pagerank, rerank, LlmFunc};
+use crate::retrieval::{diversify, fuse, gravity, hyde, merge, pagerank, rerank, LlmFunc};
 
 #[derive(Debug, Clone)]
 pub struct QueryResult {
@@ -176,6 +176,7 @@ pub fn retrieve_profiled(
 	prof.checkpoint("merge");
 
 	score::apply_boosts(cfg, &mut results);
+	gravity::apply_gravity(g, cfg, &mut results);
 	// An active filter must run BEFORE filter_delivery's pool truncation, or expansion's non-matching neighbours crowd matching entities out of the cap.
 	if let Some(o) = opts {
 		if o.is_active() {

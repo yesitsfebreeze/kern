@@ -163,7 +163,7 @@ pub struct LinkRes {
 
 // `byte_range` is `[start, end)` over the underlying source bytes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Anchor {
+pub struct Graviton {
 	pub entity_id: String,
 	pub source_uri: String,
 	pub byte_range: (u64, u64),
@@ -202,14 +202,14 @@ pub struct HealthRes {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct AnchorReq {
+pub struct GravitonReq {
 	pub action: String,
 	pub name: String,
 	pub text: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct AnchorRes {
+pub struct GravitonRes {
 	pub result: String,
 }
 
@@ -344,20 +344,20 @@ mod dto_serde_tests {
 	}
 
 	#[test]
-	fn anchor_roundtrips_through_serde_json_and_bincode() {
-		let original = Anchor {
+	fn graviton_roundtrips_through_serde_json_and_bincode() {
+		let original = Graviton {
 			entity_id: "e-1".into(),
 			source_uri: "file:///tmp/x.rs".into(),
 			byte_range: (10, 42),
 			selection: Some("hello".into()),
 		};
 		let s = serde_json::to_string(&original).unwrap();
-		let back: Anchor = serde_json::from_str(&s).unwrap();
+		let back: Graviton = serde_json::from_str(&s).unwrap();
 		assert_eq!(back, original);
 
 		let cfg = bincode::config::standard();
 		let bytes = bincode::serde::encode_to_vec(&original, cfg).unwrap();
-		let (back, _): (Anchor, _) = bincode::serde::decode_from_slice(&bytes, cfg).unwrap();
+		let (back, _): (Graviton, _) = bincode::serde::decode_from_slice(&bytes, cfg).unwrap();
 		assert_eq!(back, original);
 	}
 

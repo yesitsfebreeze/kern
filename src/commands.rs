@@ -135,9 +135,9 @@ pub enum Commands {
 	},
 	Gc,
 	Compact,
-	Anchor {
+	Graviton {
 		#[command(subcommand)]
-		action: AnchorAction,
+		action: GravitonAction,
 	},
 	Degrade {
 		id: String,
@@ -169,10 +169,12 @@ pub enum Commands {
 }
 
 #[derive(Subcommand)]
-pub enum AnchorAction {
+pub enum GravitonAction {
 	Add {
 		name: String,
 		text: String,
+		#[arg(long)]
+		mass: Option<f64>,
 		#[arg(long)]
 		embed_url: Option<String>,
 		#[arg(long)]
@@ -506,7 +508,7 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 		Commands::Gc => admin::cmd_gc(cfg),
 		Commands::Compact => admin::cmd_compact(cfg),
 
-		Commands::Anchor { action } => admin::cmd_anchor(cfg, action).await,
+		Commands::Graviton { action } => admin::cmd_graviton(cfg, action).await,
 
 		Commands::Degrade { id } => graph_ops::cmd_degrade(cfg, &id),
 		Commands::Descriptor { action } => admin::cmd_descriptor(cfg, action),
@@ -1219,8 +1221,8 @@ mod entry_point_tests {
 			let g = Arc::new(RwLock::new(super::load_graph(&cfg)));
 			let root_id = read_recovered(&g).root.id.clone();
 			let mut k = Kern::new("k", &root_id);
-			k.anchor_text = "named".into();
-			k.anchor_vec = vec![1.0, 0.0];
+			k.graviton_text = "named".into();
+			k.graviton_vec = vec![1.0, 0.0];
 			for id in &entity_ids {
 				let mut e = mk_entity(id, id, 1.0, EntityKind::Claim);
 				e.vector = vec![0.0, 1.0];

@@ -20,7 +20,7 @@ use crate::config::TickConfig;
 use crate::ingest::place::build_chunk_entity;
 
 use super::cluster::{
-	anchor_prompt, centroid_thought, largest_cohesive_cluster_for_naming, vector_cluster,
+	graviton_prompt, centroid_thought, largest_cohesive_cluster_for_naming, vector_cluster,
 };
 use super::queue::{task, task_extra, Queue, TaskKind};
 
@@ -216,7 +216,7 @@ fn naming_prompt(
 	let entities: Vec<_> = kern.entities.values().collect();
 	let clusters = vector_cluster(&entities, cfg.max_cluster_sample);
 	let idx = largest_cohesive_cluster_for_naming(&clusters)?;
-	let prompt = anchor_prompt(&clusters[idx]);
+	let prompt = graviton_prompt(&clusters[idx]);
 	let centroid_id = centroid_thought(&clusters[idx]).map(|t| t.id.clone());
 	let parent_id = kern.parent.clone();
 	Some((prompt, centroid_id, parent_id))
@@ -256,8 +256,8 @@ pub fn do_name(
 		if kern.is_named() {
 			return;
 		}
-		kern.anchor_text = name_text.clone();
-		kern.anchor_vec = name_vec.unwrap_or_default();
+		kern.graviton_text = name_text.clone();
+		kern.graviton_vec = name_vec.unwrap_or_default();
 		kern.inner_radius = KERN_INNER_RADIUS;
 		kern.outer_radius = KERN_OUTER_RADIUS;
 

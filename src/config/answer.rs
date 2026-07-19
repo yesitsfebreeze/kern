@@ -8,7 +8,8 @@ pub struct AnswerConfig {
 	pub key: String,
 }
 
-pub const DEFAULT_ANSWER_MODEL: &str = "qwen3.5:4b";
+// Aliases the reason default: one runner serves both LLM legs (see CHANGELOG 2026-07-17).
+pub const DEFAULT_ANSWER_MODEL: &str = super::reason::DEFAULT_REASON_MODEL;
 
 impl Default for AnswerConfig {
 	fn default() -> Self {

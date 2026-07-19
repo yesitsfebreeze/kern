@@ -17,6 +17,8 @@ use std::time::Instant;
 pub struct EvalConfig {
 	pub dataset_path: String,
 	pub base_url: String,
+	pub answer_url: Option<String>,
+	pub judge_url: Option<String>,
 	pub embed_model: String,
 	pub answer_model: String,
 	pub judge_model: String,
@@ -123,15 +125,17 @@ pub async fn run_eval(cfg: &EvalConfig) -> Result<EvalReport, String> {
 	let samples = locomo::load(&cfg.dataset_path)?;
 	let take = cfg.max_samples.unwrap_or(samples.len());
 
+	let answer_url = cfg.answer_url.as_deref().unwrap_or(&cfg.base_url);
+	let judge_url = cfg.judge_url.as_deref().unwrap_or(&cfg.base_url);
 	let client = LlmClient::new(
-		Endpoint::new(&cfg.base_url, &cfg.answer_model, ""),
+		Endpoint::new(answer_url, &cfg.answer_model, ""),
 		Endpoint::default(),
 		Endpoint::new(&cfg.base_url, &cfg.embed_model, ""),
 	)
 	.for_eval(cfg.seed);
 	// Judge at temperature 0: verdicts must not carry sampling noise.
 	let judge = LlmClient::new(
-		Endpoint::new(&cfg.base_url, &cfg.judge_model, ""),
+		Endpoint::new(judge_url, &cfg.judge_model, ""),
 		Endpoint::default(),
 		Endpoint::new(&cfg.base_url, &cfg.embed_model, ""),
 	)
@@ -309,6 +313,14 @@ async fn eval_sample(
 			.sum::<usize>();
 
 		let pred = res.answer.trim();
+		if std::env::var_os("KERN_EVAL_DEBUG").is_some() {
+			eprintln!(
+				"  [debug] q={:?}\n    gold={:?}\n    pred={:?}",
+				q.question,
+				q.answer.as_deref().unwrap_or("<adversarial>"),
+				pred
+			);
+		}
 		let agg = report.per_category.entry(q.category).or_default();
 		agg.n += 1;
 

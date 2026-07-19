@@ -147,7 +147,7 @@ fn select_spawn_clusters(
 
 	let mut spawn_indices = Vec::new();
 	for (i, c) in clusters.iter().enumerate() {
-		if is_core_cluster(c, &kern.anchor_vec) {
+		if is_core_cluster(c, &kern.graviton_vec) {
 			continue;
 		}
 		if c.members.len() >= KERN_MIN_CLUSTER_SIZE && cohesion(&c.members) >= KERN_COHESION_THRESHOLD {
@@ -301,7 +301,7 @@ mod tests {
 		parent.children = vec![cid.clone()];
 		let mut child = Kern::new(&cid, &pid);
 		if child_named {
-			child.anchor_text = "named".into();
+			child.graviton_text = "named".into();
 		}
 		if child_has_thought {
 			child.entities.insert(
@@ -558,8 +558,8 @@ mod tests {
 	#[test]
 	fn select_spawn_clusters_still_spawns_off_core_cluster_from_named_kern() {
 		let mut kern = Kern::new("k", "");
-		kern.anchor_text = "named".into();
-		kern.anchor_vec = vec![1.0, 0.0];
+		kern.graviton_text = "named".into();
+		kern.graviton_vec = vec![1.0, 0.0];
 		assert!(kern.is_named(), "precondition: kern is named");
 		for i in 0..crate::base::constants::KERN_MIN_CLUSTER_SIZE {
 			let id = format!("e{i}");
@@ -586,8 +586,8 @@ mod tests {
 		let q = Queue::new(64);
 		let mut g = GraphGnn::new();
 		let mut kern = Kern::new("k", "");
-		kern.anchor_text = "named".into();
-		kern.anchor_vec = vec![1.0, 0.0];
+		kern.graviton_text = "named".into();
+		kern.graviton_vec = vec![1.0, 0.0];
 		for i in 0..crate::base::constants::KERN_MIN_CLUSTER_SIZE {
 			let id = format!("e{i}");
 			kern.entities.insert(

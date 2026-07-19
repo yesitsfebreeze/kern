@@ -1,5 +1,78 @@
 # Changelog
 
+- 2026-07-19 — Gravitons replace the single per-kern "purpose". The anchor
+  concept is renamed graviton end to end (~280 sites: types, routing, MCP
+  tool, CLI, gossip, digest, docs) and grows into multi-focus attractors:
+  `Kern.mass` (default 1.0) makes a graviton pull harder — ingest routes by
+  `cosine_distance / mass` (1e-6 floor, both child selection and retain),
+  and a new query-time pass (`retrieval/gravity.rs`) adds
+  `gravity_weight (0.15) * max_over_gravitons(mass * max(0, cos))` to
+  ranking (max, not sum; 0 disables). Seed text may be a full
+  document/message, embedded whole. Dead `purpose` fields deleted from
+  `wire.rs`. Tradeoff, named: gossip JSON field rename
+  (`anchor_*` → `graviton_*`) breaks pre-rename federation peers — accepted,
+  federation is opt-in LAN and pre-1.0. Bench (workload trace, 3-run
+  medians): recall@10/NDCG@10 unchanged with gravity on or off, gravity
+  pass costs ~+7% p50 with 5 gravitons, zero with none.
+  Decided by: delete-superseded, name-the-tradeoff, verify-before-claiming.
+  Supersedes: the one-purpose-per-kern anchor model.
+
+- 2026-07-19 — Kern rows bump to `FORMAT_V3`; the persist comment claiming
+  appended fields "use #[serde(default)]" lied for bincode — positional
+  decode never fills defaults on missing trailing bytes
+  (`UnexpectedEnd`), so any appended `Kern` field silently broke every
+  existing graph. Root fix, not a patch at one call site: `KernPreMass`
+  legacy mirror decodes V1/V2 LMDB rows and unversioned `.kern` file
+  shards (try-current-then-fallback), compat test proves a pre-mass shard
+  loads with `mass = 1.0`. Decided by: fix-the-root. Supersedes: the lying
+  serde(default) comment and V2-only decode.
+
+- 2026-07-19 — The 2026-07-17 model consolidation is now actually in the
+  code: `DEFAULT_REASON_MODEL` was still `qwen2.5:7b` and
+  `DEFAULT_ANSWER_MODEL` still `qwen3.5:4b` in `src/config/` — the decision
+  was recorded but never landed (`git log -S granite4 -- src/config` is
+  empty). `reason.rs` now says `granite4:3b`; `answer.rs` aliases it.
+  Decided by: verify-before-claiming. Supersedes: the drifted qwen defaults.
+
+- 2026-07-19 — `strip_think` in `src/llm.rs`: reasoning models (measured
+  with `glm-5.2:cloud`) leak chain-of-thought into `content` even with
+  `think:false`, poisoning answers with `</think>`-delimited reasoning.
+  All four non-stream content extraction points now keep only the text
+  after the last `</think>` and drop any unclosed `<think>` tail; unit
+  test covers the leak shapes. Streaming path unstripped — a stateful
+  filter isn't worth it until a streaming consumer feeds stored text.
+  Decided by: fix-bugs-on-sight. Supersedes: raw content pass-through.
+
+- 2026-07-19 — `locomo_eval` gains `--answer-url` / `--judge-url` per-leg
+  overrides (default `--url`), matching the per-leg routing kern's own
+  config already has — an eval can now mix an Ollama embedder with a
+  vLLM `/v1` answerer or a cloud judge. Also `KERN_EVAL_DEBUG=1` prints
+  gold vs pred per probe. Decided by: builtin-before-built (the config
+  layer already splits legs; the harness just never exposed it).
+  Supersedes: single-URL eval wiring.
+
+- 2026-07-19 — `VISION.md` absorbs `docs/vision.md`: the four autonomous
+  properties (self-learning, structured, self-compacting, self-distributing)
+  and the design principles land as failable criteria — graph-not-bag with
+  content-hash ids, bi-temporal supersede, retrieval-learns-from-use,
+  fail-open, opt-in coordinator-free federation. Corrected
+  `docs/vision.md`'s stale north star (beat-a-vector-DB) to the
+  agent-memory framing `docs/aspiration.md` already decided; removed stray
+  markup at its tail. Decided by: delete-superseded. Supersedes: the
+  vector-DB north star in `docs/vision.md` and the criteria-only
+  `VISION.md`.
+
+- 2026-07-19 — Removed the Claude Code plugin. Deleted `.claude-plugin/`
+  (plugin + marketplace manifests, which referenced a `hooks/` dir that was
+  never shipped). Genericized the ingest source scheme (`claude:{stem}` →
+  `session:{stem}`, `claude://` → `session://`) in `src/ingest/intake.rs` and
+  the cwd-relative contract comment in `src/config/capture.rs`. Reframed the
+  README, FEATURES, SPECIALISTS, and docs to present kern as an agent-agnostic
+  MCP memory daemon (capture = `.txt` deltas in `.kern/capture/`, recall =
+  `.kern/digest.md` + the `query` MCP tool) with no client-specific plugin or
+  hooks. Decided by: delete-superseded. Supersedes: the Claude Code plugin
+  packaging.
+
 - 2026-07-18 — Logging actually emits now: `main.rs` initialized a bare
   `tracing_subscriber::registry()` with no layers, so every event — including
   the flush-refusal warnings that would have exposed the persistence bug —

@@ -11,7 +11,7 @@ pub fn resource_definitions() -> Vec<serde_json::Value> {
 		serde_json::json!({
 			"uri": "kern://local/health",
 			"name": "Graph health",
-			"description": "Entity/edge counts, tick heat, unnamed count, purpose",
+			"description": "Entity/edge counts, tick heat, unnamed count, gravitons",
 			"mimeType": "application/json",
 		}),
 		serde_json::json!({
@@ -23,7 +23,7 @@ pub fn resource_definitions() -> Vec<serde_json::Value> {
 		serde_json::json!({
 			"uri": "kern://local/kerns",
 			"name": "All Kerns",
-			"description": "All loaded Kerns with purpose and stats",
+			"description": "All loaded Kerns with gravitons and stats",
 			"mimeType": "application/json",
 		}),
 		serde_json::json!({
@@ -126,7 +126,7 @@ fn resource_kerns(server: &Server) -> String {
 		.map(|k| {
 			serde_json::json!({
 				"id": k.id,
-				"anchor": k.anchor_text,
+				"graviton": k.graviton_text,
 				"entities": k.entities.len(),
 				"reasons": k.reasons.len(),
 				"children": k.children.len(),

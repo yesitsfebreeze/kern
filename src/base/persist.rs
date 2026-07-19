@@ -104,15 +104,28 @@ pub fn save_kern(dir: &str, kern: &Kern) -> Result<(), PersistError> {
 	Ok(())
 }
 
+// Unversioned file shards: current shape first, pre-mass fallback — bincode
+// never fills serde(default) on missing trailing bytes.
 pub fn load_kern(dir: &str, id: &str) -> Result<Kern, PersistError> {
 	let path = Path::new(dir).join(format!("{id}.kern"));
 	let data = fs::read(path)?;
-	let (mut kern, _): (Kern, _) = bincode::serde::decode_from_slice(&data, bincode_cfg())?;
+	let mut kern = match bincode::serde::decode_from_slice::<Kern, _>(&data, bincode_cfg()) {
+		Ok((k, _)) => k,
+		Err(e) => {
+			match bincode::serde::decode_from_slice::<crate::base::types::KernPreMass, _>(
+				&data,
+				bincode_cfg(),
+			) {
+				Ok((old, _)) => old.into(),
+				Err(_) => return Err(e.into()),
+			}
+		}
+	};
 	backfill_created_at(&mut kern);
 	Ok(kern)
 }
 
-// Do NOT extend — new fields use #[serde(default)]. Backfills pre-field shards.
+// Backfills pre-field shards.
 fn backfill_created_at(kern: &mut Kern) {
 	let now = std::time::SystemTime::now();
 	for t in kern.entities.values_mut() {
@@ -256,8 +269,8 @@ pub fn merged_root(g: &GraphGnn) -> Kern {
 		.unwrap_or_else(|| g.root.clone());
 	merged.id = g.root.id.clone();
 	merged.root_id = g.root.root_id.clone();
-	merged.anchor_text = g.root.anchor_text.clone();
-	merged.anchor_vec = g.root.anchor_vec.clone();
+	merged.graviton_text = g.root.graviton_text.clone();
+	merged.graviton_vec = g.root.graviton_vec.clone();
 	merged.inner_radius = g.root.inner_radius;
 	merged.outer_radius = g.root.outer_radius;
 	// REPLACE, don't union: a union re-adds descriptors from the stale map base,
@@ -397,17 +410,17 @@ mod tests {
 	fn merged_root_overlays_authoritative_fields_over_stale_map_entry() {
 		let mut g = GraphGnn::new();
 		let mut stale = g.root.clone();
-		stale.anchor_text = String::new();
+		stale.graviton_text = String::new();
 		stale.descriptors.clear();
 		g.register(stale);
-		g.root.anchor_text = "guiding purpose".to_string();
+		g.root.graviton_text = "guiding purpose".to_string();
 		g.root
 			.descriptors
 			.insert("chat".to_string(), "desc".to_string());
 
 		let merged = merged_root(&g);
 		assert_eq!(merged.id, g.root.id);
-		assert_eq!(merged.anchor_text, "guiding purpose");
+		assert_eq!(merged.graviton_text, "guiding purpose");
 		assert_eq!(
 			merged.descriptors.get("chat").map(String::as_str),
 			Some("desc")
@@ -419,36 +432,36 @@ mod tests {
 		let dir = tempdir().unwrap();
 		let mut g = GraphGnn::new();
 		g.data_dir = dir.path().to_string_lossy().to_string();
-		g.root.anchor_text = "P".to_string();
+		g.root.graviton_text = "P".to_string();
 		g.root.descriptors.insert("k".to_string(), "v".to_string());
 
 		fs::create_dir_all(&g.data_dir).unwrap();
 		save_kern(&g.data_dir, &merged_root(&g)).unwrap();
 
 		let reloaded = load_kern(&g.data_dir, &g.root.id).unwrap();
-		assert_eq!(reloaded.anchor_text, "P");
+		assert_eq!(reloaded.graviton_text, "P");
 		assert_eq!(reloaded.descriptors.get("k").map(String::as_str), Some("v"));
 	}
 
 	#[test]
-	fn named_kern_with_anchor_vec_round_trips() {
+	fn named_kern_with_graviton_vec_round_trips() {
 		// Guards bincode's positional layout: reordering `Kern`'s fields shifts
 		// every decoded value and corrupts live graphs.
 		let dir = tempdir().unwrap();
 		let d = dir.path().to_string_lossy().to_string();
-		let mut k = Kern::new("anchor-work", "root");
-		k.anchor_text = "work".to_string();
-		k.anchor_vec = vec![0.1, -0.2, 0.3, 0.4];
+		let mut k = Kern::new("graviton-work", "root");
+		k.graviton_text = "work".to_string();
+		k.graviton_vec = vec![0.1, -0.2, 0.3, 0.4];
 		k.inner_radius = 0.15;
 		k.outer_radius = 0.55;
 		save_kern(&d, &k).unwrap();
 
-		let back = load_kern(&d, "anchor-work").unwrap();
-		assert_eq!(back.anchor_text, "work");
-		assert_eq!(back.anchor_vec, vec![0.1, -0.2, 0.3, 0.4]);
+		let back = load_kern(&d, "graviton-work").unwrap();
+		assert_eq!(back.graviton_text, "work");
+		assert_eq!(back.graviton_vec, vec![0.1, -0.2, 0.3, 0.4]);
 		assert_eq!(back.inner_radius, 0.15);
 		assert_eq!(back.outer_radius, 0.55);
-		assert!(back.is_named() && back.has_anchor());
+		assert!(back.is_named() && back.has_graviton());
 	}
 
 	#[test]
@@ -486,5 +499,28 @@ mod tests {
 			g.map().keys().all(|k| k != "bad"),
 			"corrupt sibling skipped"
 		);
+	}
+}
+
+#[cfg(test)]
+mod mass_compat {
+	use crate::base::store::bincode_cfg;
+	use crate::base::types::{Kern, KernPreMass};
+	use tempfile::tempdir;
+
+	#[test]
+	fn pre_mass_shard_loads_with_default_mass() {
+		let dir = tempdir().unwrap();
+		let d = dir.path().to_string_lossy().to_string();
+		let mut k = Kern::new("k1", "root");
+		k.graviton_text = "work".into();
+		k.graviton_vec = vec![0.1, 0.2];
+		let old: KernPreMass = k.into();
+		let data = bincode::serde::encode_to_vec(&old, bincode_cfg()).unwrap();
+		std::fs::write(dir.path().join("k1.kern"), &data).unwrap();
+
+		let back = super::load_kern(&d, "k1").expect("pre-mass shard must load");
+		assert_eq!(back.graviton_text, "work");
+		assert_eq!(back.mass, 1.0, "missing trailing mass defaults to 1.0");
 	}
 }

@@ -39,8 +39,8 @@ pub struct SpherePayload {
 	pub kern_id: String,
 	// Serialized as Vec<f64> to keep the wire format stable.
 	#[serde(with = "crate::base::util::vec_f64_compat")]
-	pub anchor_vec: Vec<f32>,
-	pub anchor_text: String,
+	pub graviton_vec: Vec<f32>,
+	pub graviton_text: String,
 	pub entity_id: String,
 	// Cosine distance (1 - cos), smaller = closer.
 	pub inner_radius: f64,

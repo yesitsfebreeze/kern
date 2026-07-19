@@ -6,7 +6,7 @@ pub struct HealthStats {
 	pub entities: usize,
 	pub reasons: usize,
 	pub unnamed: usize,
-	pub anchors: Vec<String>,
+	pub gravitons: Vec<String>,
 }
 
 pub fn graph_health_stats(g: &GraphGnn) -> HealthStats {
@@ -21,17 +21,17 @@ pub fn graph_health_stats(g: &GraphGnn) -> HealthStats {
 			unnamed += 1;
 		}
 	}
-	let anchors: Vec<String> = crate::base::accept::root_anchor_ids(g)
+	let gravitons: Vec<String> = crate::base::accept::root_graviton_ids(g)
 		.iter()
 		.filter_map(|cid| g.loaded(cid))
-		.map(|c| c.anchor_text.clone())
+		.map(|c| c.graviton_text.clone())
 		.collect();
 	HealthStats {
 		kerns: kerns.len(),
 		entities,
 		reasons,
 		unnamed,
-		anchors,
+		gravitons,
 	}
 }
 
@@ -46,6 +46,6 @@ mod tests {
 		assert_eq!(h.entities, 0, "fresh graph has no entities");
 		assert_eq!(h.reasons, 0, "fresh graph has no reasons");
 		assert!(h.kerns >= 1, "at least the root kern is present");
-		assert!(h.anchors.len() <= h.kerns);
+		assert!(h.gravitons.len() <= h.kerns);
 	}
 }

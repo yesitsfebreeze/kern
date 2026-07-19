@@ -70,7 +70,7 @@ impl Server {
 		let h = crate::base::health::graph_health_stats(&g);
 		let descriptors = g.root.descriptors.len();
 		serde_json::json!({
-			"anchors": h.anchors,
+			"gravitons": h.gravitons,
 			"kerns": h.kerns,
 			"entities": h.entities,
 			"reasons": h.reasons,
@@ -111,7 +111,7 @@ impl trnsprt::McpServer for Server {
 			"forget" => self.tool_forget(args),
 			"degrade" => self.tool_degrade(args),
 			"health" => self.tool_health(),
-			"anchor" => self.tool_anchor(args),
+			"graviton" => self.tool_graviton(args),
 			"descriptor" => self.tool_descriptor(args),
 			"pulse" => self.tool_pulse(args),
 			"gc" => self.tool_gc(),
