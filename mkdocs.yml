@@ -1,0 +1,60 @@
+site_name: Kern
+site_description: A self-learning memory substrate for AI agents.
+site_url: https://yesitsfebreeze.github.io/kern/
+repo_url: https://github.com/yesitsfebreeze/kern
+edit_uri: edit/master/docs/site/
+docs_dir: docs/site
+
+theme:
+  name: terminal
+  custom_dir: docs/overrides
+  palette: gruvbox_dark
+  features:
+    - style.links.underline.hide
+
+extra_css:
+  - assets/extra.css
+  - assets/tui.css
+
+extra_javascript:
+  - assets/mermaid-init.js
+  - assets/tui.js
+
+nav:
+  - Introduction: index.md
+  - Concepts:
+      - Why kern exists: concepts/why-kern.md
+      - Architecture: concepts/architecture.md
+      - The graph: concepts/graph.md
+      - Acceptance & routing: concepts/acceptance.md
+      - Time & contradiction: concepts/time.md
+      - The retrieval pipeline: concepts/retrieval.md
+      - Heat, decay & self-compaction: concepts/heat-and-compaction.md
+      - Stigmergy GC & gravitons: concepts/stigmergy.md
+      - Federation: concepts/federation.md
+  - How-to:
+      - Install & run the daemon: howto/install-run.md
+      - The memory bank: howto/memory-bank.md
+      - Intake & recall: howto/intake-recall.md
+      - Seed the graph: howto/seed.md
+      - Wire up MCP: howto/mcp.md
+      - Configure models: howto/configure.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+plugins:
+  - search

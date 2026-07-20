@@ -3,6 +3,384 @@
 
 # Changelog
 
+- 2026-07-20 — The whole eval and bench surface is deleted: `bench_support/`
+  (14 modules, ~4k LoC), the `locomo_eval` and `retrieval_bench` binaries,
+  the `bench` cargo feature, `traces/`, `eval/`, the `bench-workload`/`trace`
+  just recipes, and the eval docs. Cause, measured the same day: the LoCoMo
+  score is `ingest x retrieval x answering` collapsed into one LLM-judged
+  number, and the answering term dominates. A grounded run (whole
+  conversation in the prompt, kern bypassed entirely) scored **0.187** on the
+  same slice where kern scored 0.027 — so the ceiling was set by a 3B
+  answerer, not by memory. Worse, three eval-side prompt changes landed the
+  same day (abstention hint, short-answer style, and the 5-fact answer cap
+  they interact with) took the slice from a 0.131 expectation to 0.027 by
+  making the model refuse 69% of ANSWERABLE probes and truncate correct
+  answers past what the judge accepts. A metric that three prompt tweaks can
+  move further than any retrieval change cannot steer retrieval work.
+  What replaces it, deliberately not yet written: retrieval-only scoring —
+  recall@k / MRR / NDCG against LoCoMo's per-turn `evidence` labels, with no
+  LLM in the loop, so it is deterministic, fast, and immune to judge bias,
+  model swaps, GPU contention and prompt wording. It needs turn-level claim
+  provenance; ingest currently records only session granularity.
+  Tradeoff, named: this drops external comparability (LoCoMo is the published
+  benchmark) and discards the recorded 0.137 baseline as a live reference.
+  Accepted — that number measured a pipeline whose dominant term was the
+  answerer, so it was never the retrieval signal it was read as. The dataset
+  (CC BY-NC, gitignored) and the three seed baselines were copied out of the
+  tree before deletion rather than destroyed.
+  Decided by: delete-superseded (a metric that cannot steer the work is
+  cruft), verify-before-claiming (the grounded ceiling is what exposed this),
+  name-the-tradeoff. Supersedes: the LoCoMo end-to-end eval as kern's primary
+  quality signal, and `docs/kern/eval-locomo.md`, `bench-retrieval.md`,
+  `locomo-improvements.md`, `locomo-baseline-2026-07-19.json`.
+
+- 2026-07-20 — Remoteness defeats durable-kind immunity. `EntityKind::Fact` is
+  immune to removal at three independent sites — `remove_entity` silently
+  no-ops, `forget_entity` errors, and `is_cold_victim` never reclaims — and a
+  federated entity arrives with an attacker-chosen `kind`. So a peer could pin
+  unbounded, permanently un-deletable, un-GC-able rows in the local graph by
+  setting one enum field, with the operator unable to remove them even by hand.
+  A denial-of-storage vector that outlasts every ranking defense: those stop the
+  rows ranking well, not existing forever. All three sites now treat a durable
+  kind in a `remote-*` kern as forgettable and evictable. The bypass covers
+  `Document` as well as `Fact` — a remote Document is the identical vector and
+  costs no extra code. **Local Facts keep their immunity in every case**: that
+  is a stated product guarantee ("Facts are never auto-forgotten", VISION and
+  README), and the regression guards for it were written first and pass
+  unchanged. Verified rather than assumed: `merge_remote_entity` cannot land a
+  remote entity outside a `remote-*` kern — both call sites build the phantom id
+  by format string, and the hijack guard blocks migration by id collision — so a
+  remote Fact stays remote for life and a local Fact never sees the bypass.
+  Decided by: fix-the-root (one predicate at all three gates), fix-bugs-on-sight,
+  verify-before-claiming (every `is_fact` gate audited, not just the three
+  reported).
+
+- 2026-07-20 — Cruft sweep across the whole tree, driven by six parallel
+  call-graph audits (base/vector, retrieval+gnn, federation, ingest+config,
+  surface, bench/eval). Deleted: `trnsprt::search` (whole module, zero callers
+  after its svc/mock died), the 14 unused `SOURCE_*` constants (half-abandoned
+  taxonomy; `USER_SOURCE`/`AGENT_SOURCE` live on), the `ttl_secs` ingest knob
+  (permanently `None` — not serde-exposed, no construction site ever set it, so
+  the `valid_until` branches it fed were unreachable), GNN spares never
+  constructed by the live model (`dropout.rs` + the whole `set_training`/
+  `dropout_mut` machinery, `Tensor::mul` which only dropout used,
+  `Activation::{Tanh,LeakyRelu,Gelu}`, write-only `Edge.features`,
+  `Graph::num_edges`), `tick::pulse::should_consolidate` (dead duplicate of the
+  live inline check), the discarded `let _loss` forward pass (24 wasted
+  epochs/tick), the redundant `kern docs --section` flag (`section.or(page)` —
+  both fed the same argument), and trnsprt's unused `tracing` dep. Demoted
+  test-only or file-local `pub` items (`save_kern`, `float_cosine_distance`,
+  `INT8_MAX_ABS`, `gc_empty_kerns`, `running_max`, `doc_count`, `mod docs`) and
+  dropped dead re-exports (`config::DEFAULT_REASON_MODEL`,
+  `config::ModeWeights`). Unified the four hand-rolled epoch-time helpers
+  (`mcp::epoch_ms`, `pulse::now_secs`, two private `now_nanos`) into
+  `base::util::{now_ms, now_secs, now_nanos}`. Kept deliberately, with reasons:
+  LayerNorm (live — layer 1 trains with `norm=true`; the audit that called it
+  dead was wrong), gossip (default-off but documented in docs/site as the
+  federation surface), the legacy `.kern`-shard migrate cluster (only entry is
+  `kern migrate`; it is the upgrade path for pre-LMDB data dirs — delete it the
+  release after the format is considered extinct), both tokenizers (lexical
+  stems for BM25, bench embed hashes unstemmed — unifying changes embeddings),
+  and `eval/baseline` (gitignored local artifacts, likely A/B inputs). 710 lib
+  tests green after surgery. Decided by: delete-superseded,
+  verify-before-claiming (every deletion grep-verified; two audit claims
+  refuted), name-the-tradeoff (migrate cluster kept, expiry named).
+  Follow-up consolidation round (same day): `tool_result_from_envelope`
+  (mcp_cmd) deleted — byte-identical duplicate of `mcp::value_to_tool_result`,
+  which is now `pub(crate)` and owns the envelope tests; the four
+  platform-split `spawn_hub`/`spawn_daemon` fns collapsed into one
+  `spawn_detached(arg)` with cfg-scoped detach flags; digest's hand-rolled
+  char-boundary truncation replaced with `util::truncate` (display suffix
+  `…`→`...`; util kept as-is so eval-path prompts stay byte-stable vs the
+  recorded baseline); the twice-repeated tool-schema deserialization folded
+  into `tools::typed_tool_schemas()`. Checked and clean: retry logic is
+  properly layered (`llm::is_transient` single source, embed consumes it),
+  lexical poison-lock idiom appears in one file only.
+
+- 2026-07-20 — Remote entities cast no PageRank votes, buy no kind privileges,
+  and cannot be reranked above local content. Three paths the trust weight left
+  open, now closed. **PageRank:** `EntityAdjacency::build` walked reasons from
+  every kern, so a peer could farm edges inside its own phantom kern to inflate
+  its seed rank. The obvious predicate was wrong and worth recording:
+  `Reason::is_remote()` is `!to_net_id.is_empty()`, which flags an edge
+  *crossing a network boundary* — a farm built entirely inside one phantom kern
+  has empty `to_net_id` on every edge and reads as not-remote, so filtering on it
+  would have caught nothing. Filtered on the owning kern instead; remote
+  entities stay adjacency *nodes* (still rankable) but cast no votes. **Kind:**
+  the fact bonus (`score.rs`) and the `important_access_threshold` bypass
+  (`seed.rs`) are withheld from remote entities, while the `kind` itself is
+  preserved — federated typing is the point of sharing structured claims, and
+  the attack was the privilege, not the type. **Rerank:** candidates are tagged
+  untrusted in the prompt AND a stable sort partitions remotes below locals after
+  the model returns, so model judgment survives within a tier but no injected
+  text can promote a remote above a local. Named for the next reader: the
+  structural bound is airtight for ordering, but ordering *among* remotes is
+  still model-controlled, and the synthesis prompt is NOT hardened — it is the
+  larger injection surface and remains open. Recall@10 and NDCG@10 verified
+  bit-identical against the fixes neutralized; an apparent 34% latency
+  regression was chased down to cold-cache noise (medians 0.095 vs 0.095).
+  Decided by: verify-before-claiming (predicate checked rather than assumed;
+  bench A/B'd rather than asserted), name-the-tradeoff (residual risk stated).
+
+- 2026-07-20 — Remote entities cannot buy rank. Federated entities land in
+  `remote-*` phantom kerns but are inserted into the SHARED `entity_idx`/
+  `gnn_entity_idx`, and retrieval had no remote filter — the `is_remote()` checks
+  at `expand.rs:256,365` apply to reasons, not entities. So a peer could place
+  attacker-chosen text with attacker-chosen ranking signals into the index local
+  queries search, and rank it into what the LLM reads: a prompt-injection channel
+  bounded only by the 50k phantom cap. Two defenses, because the second alone is
+  insufficient and that was proven by reverting: `merge_remote_entity` now
+  strips every caller-settable ranking signal (`heat`, `access_count`,
+  `accessed_at`, `conf_alpha`, `conf_beta`) from an entity landing in a phantom
+  kern, and `score::apply_remote_trust` multiplies the composite by
+  `remote_trust_weight` (default 0.4) AFTER boosts and gravity so it binds on the
+  full score. Heat is zeroed rather than clamped: a bound still lets a peer pin
+  heat at the ceiling forever, whereas zero makes the rule flat and checkable —
+  heat is earned by local access only. The strip is gated on the phantom-kern id
+  so `absorb_graph`'s trusted disk-fold path keeps its heat. Named for the next
+  reader: legitimate remote popularity no longer transfers, and the first-contact
+  insert path was bypassing `merge_entity`'s confidence guard entirely — the
+  vulnerability was wider than first reported.
+  Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming (each
+  defense verified by reverting it).
+
+- 2026-07-20 — `filter_delivery` sorts after boosts. It truncated in pre-boost
+  order and nothing re-sorted when `opts` was `None`, so `apply_boosts`,
+  `apply_gravity` and the new remote penalty were invisible on that path — and
+  the delivery cut ignored boosts on EVERY path. A live retrieval-quality defect
+  independent of the security work that surfaced it; recall@10 held at 1.0000
+  against the recorded baseline after the fix.
+  Decided by: fix-bugs-on-sight.
+
+- 2026-07-20 — The public gossip seed is opt-in. `GossipConfig::seed` defaults
+  to `false`, so enabling federation no longer auto-dials `seed.kern.dev`.
+  Federation is unauthenticated and unencrypted, and `announce`/`entity_sync`
+  push root graviton text and the hottest entity bodies in cleartext — auto-
+  dialing a public host would have shipped a user's hottest memories to a third
+  party on `enabled = true` alone, and handed a stranger the injection channel
+  above. Explicit `seed_addr` and `seed = true` still work, and the seed can be
+  disabled while gossip stays on, so an air-gapped LAN federation never phones
+  out. Also fixed on the way: `Node::new` inserted the configured peer list
+  verbatim, bypassing the `GOSSIP_MAX_PEERS` cap that `add_peer` enforces — a
+  200-entry `peers` list already blew past it.
+  Decided by: name-the-tradeoff (peer discovery traded for not calling a public
+  host by default), fix-bugs-on-sight (the peer cap).
+
+- 2026-07-20 — Queue metrics reach `health`. `record_task_latency` ran in
+  production while `metrics()`/`pending_count()` were read only by tests, so
+  task latency accumulated and was never surfaced. `HealthRes` gains
+  `queue_depth`, `task_avg_ms` and `tasks_done`, appended with `#[serde(default)]`
+  per the append-only law and pinned by a test that decodes an older payload
+  without them. Named for the next reader: `task_avg_ms` is a LIFETIME mean, not
+  current load — it converges and stops moving, so `tasks_done` ships beside it
+  because a mean over 3 tasks and over 3 million are otherwise
+  indistinguishable. No rolling window: the existing accumulator cannot support
+  one without real statistics machinery, and an EWMA field is the smallest
+  upgrade if recency turns out to matter.
+  Decided by: name-the-tradeoff (a lifetime figure labelled as one beats a
+  rolling window nobody asked for).
+
+- 2026-07-20 — `spawn_child_clusters` migrates through `move_entity`. The
+  clustering path hand-rolled entity migration and diverged from the real one in
+  three ways: remove-then-check ordering (latent, since `child_id` comes from
+  `spawn_unnamed_child`), it moved NO reasons — leaving outgoing edges in the
+  parent while their `from` entity lived in the child, breaking the "an edge
+  lives in its `from` kern" invariant — and it never called `index_entity`, so
+  the entity→kern index went stale after every clustering pass. The last two were
+  live, not latent: clustering runs every tick. Routed through the repaired
+  `move_entity` rather than patching the copy, because two copies of migration
+  logic is what produced the divergence. Named for the next reader: of the two
+  tests written here, only the reason-carrying/reindex one is decisive — the
+  ordering test passes against the old code too, and is kept as a contract guard
+  rather than as evidence.
+  Decided by: fix-the-root, verify-before-claiming (the non-decisive test is
+  labelled, not counted).
+
+- 2026-07-20 — Mutation ops share one core between CLI and MCP. `link` gets an
+  extracted `graph_ops::link_entities` (find/cosine/reason_id/add_reason);
+  `forget` reuses `graph_ops::forget_entity`; `graviton` list reads one
+  `graviton_rows`; graviton add/remove already shared `base::accept` and
+  `descriptor` is a bare BTreeMap insert/remove per side — wrapping either
+  would be pure indirection, skipped. Two real drift bugs fell out: MCP `link`
+  reported success with no edge added when the kern vanished during the
+  LLM-call unlock window (now errors, and endpoints re-validate under the
+  write lock), and MCP `forget` computed the cascade count with a raw
+  subtraction where the CLI used `saturating_sub`. MCP-side policy (agent
+  caller boundaries, required-field checks) stays in the tool wrappers.
+  Decided by: fix-the-root (drift impossible once the copy is gone),
+  fix-bugs-on-sight.
+
+- 2026-07-20 — `base::locks` shim deleted. parking_lot never poisons, so
+  `read_recovered`/`write_recovered`/`lock_recovered` were one-line
+  pass-throughs with historical names; all ~190 call sites now call
+  `.read()`/`.write()`/`.lock()` directly. Pure rename, no behavior change.
+  `docs/kern/safety-architecture.md` deleted with the cruft purge below
+  (stale `src/wire.rs` paths throughout); its ROADMAP reference now points at
+  git history.
+  Decided by: delete-superseded.
+
+- 2026-07-20 — Cruft purge: ~4.5k lines of verified-dead code removed after a
+  six-area audit (every deletion grep-verified to have zero non-test callers).
+  Largest cuts: the legacy MCP client stack in trnsprt (`client.rs`,
+  `registry.rs`, `inproc.rs`, `transport.rs`, `ServerId`) plus the `test-utils`
+  and `logsink` crates that existed only to serve it; the test-only search RPC
+  service (`SearchSvc`, mock, service DTOs); nine of thirteen `KernRpc` methods
+  whose per-verb wire path was superseded by the generic `call_tool` dispatcher
+  (only `health`/`shutdown`/`call_tool`/`list_tools` had live clients — the
+  server keeps exactly those four); the orphaned `bench_support/backend.rs`
+  A/B harness; `base/descriptors.rs` (a descriptor seed never wired — distill's
+  claim kinds are a disjoint set); the `config-io` crate collapsed into
+  `config::io` with unused `load`/`save` dropped. Dead config surface removed:
+  `ServeConfig.{addr,core_addr,gossip,mcp_sse}`, `Config.log_level`, root CLI
+  `--embed-url`/`--embed-model` — all parsed, never read. Unused deps pruned
+  (`unicode-segmentation`, `unicode-width`, `windows-sys`). Orphaned bench
+  scripts and stale `.splinter` caches for deleted sources removed.
+  Bug fixed on sight: MCP `tool_degrade` had drifted from the CLI copy — it
+  mutated scores in place with no lamport bump or `push_delta`, so degrades via
+  MCP never gossiped to peers. It now calls the shared
+  `graph_ops::degrade_entity_reasons`; a test pins the pending delta.
+  Kept deliberately: `KernPreMass` decode path (reads pre-V3 shards), the
+  `migrate` command (legacy-dir users), `locks.rs` naming shim (192 call
+  sites — churn without behavior change), the gnn activation zoo (coherent set
+  behind the enum). `docs/kern/safety-architecture.md` referenced the deleted
+  `src/wire.rs` layout throughout and was deleted rather than rewritten; its
+  threat-model content is recoverable from git history.
+  Decided by: delete-superseded, verify-before-claiming (grep per deletion,
+  full workspace tests green), fix-bugs-on-sight (degrade), name-the-tradeoff
+  (locks shim and compat decoders kept over churn/data-loss risk).
+
+- 2026-07-20 — Hub completes: auto-start, stop verb, and the phase-3 ordering
+  call. `kern mcp` now auto-starts a detached machine hub when none answers
+  (`[hub] auto_start = false` opts out; every failure falls through to the
+  legacy direct-connect path, so nothing regresses when the hub can't come up).
+  `kern hub stop` / `HubRpc::stop` ends a detached hub over RPC — nodes stay
+  up; without it the only way to stop an auto-started hub was kill. Ordering
+  decided for gossip-vs-hub: **federation senders and semantics (ROADMAP §5
+  a-e) build per-node first; the gossip transport moves hub-side together with
+  the TLS work, since both rewrite the same wire layer and moving a half-built
+  transport twice pays the migration cost twice.** §5x phase 3 stays open but
+  is no longer "blocked on a decision" — the decision is made and recorded.
+  Auto-attach is pinned end-to-end in `tests/hub_supervisor.rs`: one MCP
+  initialize from a hubless machine leaves a hub, a hub-owned node, and a
+  working proxy.
+  Decided by: name-the-tradeoff (auto-start default-on vs opt-in; migrate-once
+  for the transport), avoided-question-first (the ordering question answered
+  instead of deferred again), verify-before-claiming (auto-start test-pinned).
+
+- 2026-07-20 — `GraphGnn::unload` refuses to unload when no store is bound.
+  Unloading is residency, never forgetting: `get` reloads a kern through the
+  store, so with `store: None` the kern left RAM with nothing to come back from
+  — silent, total loss of every entity in it. The guard lives in `unload`
+  itself rather than at its two call sites (`enforce_kern_cap` at
+  `graph.rs:207`, the idle sweep at `tick/idle.rs:43`), because one guard in the
+  shared function is smaller than a guard in every caller and cannot be missed
+  by the next one. Found by the idle-eviction work, which had guarded its own
+  path; that local guard is now redundant with the real fix. Regression test
+  verified by reverting.
+  Decided by: fix-the-root, fix-bugs-on-sight.
+
+- 2026-07-20 — Idle kerns page out to the store on a time trigger.
+  `KERN_IDLE_TIMEOUT`/`KERN_IDLE_SWEEP_EVERY` had existed as constants with no
+  implementation. The question answered first was whether this duplicates
+  existing bounding: it does not. `enforce_kern_cap` is called from exactly one
+  place — `GraphGnn::register` — so it is coupled to *write traffic*, and
+  `max_loaded_kerns` defaults to `KERN_CAP_DISABLED`, meaning kern-level
+  unloading never happens at all in the default configuration. Stigmergy GC is
+  entity-scoped and forgets; this is kern-scoped and only pages out. Idle
+  eviction is the one mechanism that releases a kern sitting untouched under the
+  cap, which is what "an idle daemon still maintains itself" requires. New
+  `tick/idle.rs` selects victims under a read guard then takes the write guard
+  per victim, never across the sweep; root is filtered twice. The
+  compare_exchange cadence gate was about to become a third copy, so it is
+  extracted as `claim_slot` and the stigmergy-GC and disk-consolidate copies
+  collapsed onto it. Named for the next reader: `unload` deliberately leaves the
+  kern's entities in `entity_kern`/`entity_idx` — that looks like a leak but
+  keeps unloaded kerns searchable, and a hit resolves its kern and triggers the
+  transparent reload; stripping them would be a recall regression.
+  Decided by: builtin-before-built (reuse the existing unloaded/QUARANTINE
+  path), name-the-tradeoff.
+
+- 2026-07-20 — `move_entity` validates before it mutates, and has a surface.
+  The function relocated an entity between kerns and was thoroughly tested, but
+  nothing could call it — no MCP tool, no CLI. It also carried silent data loss:
+  **three** mutations ran before the destination check — the entity removed from
+  the source, incoming edges restamped toward the destination, outgoing edges
+  deleted from `reasons`/`by_from`/`by_to` — and only then did a missing
+  `to_kern_id` return early. A bad destination id destroyed the entity and every
+  outgoing edge, and left surviving incoming edges pointing at a kern that does
+  not exist. Restructured as validate-everything-then-mutate rather than
+  rollback: only three things can fail and all three resolve up front through
+  immutable borrows, after which `&mut GraphGnn` is exclusive and nothing can
+  invalidate them. The signature moved from a silent `()` to
+  `Result<(), MoveError>` so the failure cannot be swallowed at any call site.
+  Exposed as the `move` MCP tool; the source kern is derived via `find_entity`
+  rather than supplied, removing a class of bad input. Regression test verified
+  by reverting.
+  Decided by: fix-the-root, fix-bugs-on-sight.
+
+- 2026-07-20 — The gossip Fetch RPC round-trips. The receive half existed; the
+  sender half and the routing table never did. The real gap was
+  `resolve_question_from_peer`: a peer answers a Question by *naming*
+  `sphere.entity_id`, we stamped `r.to`/`r.to_net_id`, and the body was never
+  obtained — a dangling cross-network reason. It now fires `spawn_fetch_entity`,
+  and fetched bodies merge through `merge_remote_entity`, the same path
+  `EntitySync` already uses, so commutativity/associativity/idempotence and the
+  `conf_alpha`/`conf_beta`/`unlinked_count`/`statements` exclusions hold
+  unchanged. A response whose `entity.id` differs from the requested id is
+  rejected as a hijack. `put_thought`/`lookup_thought` — the third dead pair from
+  the same feature — are now load-bearing: holders are recorded on entity-sync
+  and on answer, and `fetch_thought` prefers the direct holder before falling
+  back to routing.
+  Decided by: fix-the-root (the dangling reason was the defect, not the unused
+  function).
+
+- 2026-07-20 — Dead code deleted after verification: the `SGD` optimizer whole
+  (only `Adam` is ever constructed, at `gnn/propagate.rs:94`; deleting just
+  `with_momentum` would have stranded an untested momentum branch),
+  `bench_support/compare.rs` (a vector-backend comparison harness from the
+  abandoned Qdrant-baseline effort — dead since it was written, and NOT
+  superseded by the new paired-A/B eval work, which compares LoCoMo probe logs:
+  different inputs, different metric, shared word), the `gnn` tensor and graph
+  accessors, `gnn/backward.rs` normalization helpers superseded by
+  `base::math::l2_normalize`, `tick/cluster.rs::largest_cohesive_cluster` (an
+  unused alias of `best_cluster`), the legacy `trnsprt` MCP-client registry
+  methods, and the `config-io` dir helpers duplicated inline in `config/mod.rs`.
+  `COLD_COMPACT_MIN_BYTES` and `DEFAULT_WEIGHT_{CONTENT,REASON,EDGE}` were WIRED
+  instead of deleted — the compaction guard is now live, and the weight literals
+  existed inline in three places. `DEFAULT_WEIGHT_SCORE` is renamed
+  `DEFAULT_WEIGHT_EDGE`: it feeds a field called `edge`, and the name mismatch
+  was the mechanism by which it got orphaned.
+  Three were kept after investigation contradicted the "unused" reading:
+  `kern_rpc`'s methods are macro-generated by `service!` and consumed across a
+  *process* boundary, so no in-repo caller could exist; GNN weights already
+  persist through `Kern.gnn_weights` and the store, so `save_weights`/
+  `load_weights` were a redundant second mechanism; and `MCP_VERSION` duplicated
+  `trnsprt::PROTOCOL_VERSION` from a crate kern depends on, so wiring it would
+  have been circular. `DEFAULT_DECAY` was deleted rather than wired because its
+  value had diverged from the config it supposedly seeded (0.45 vs 0.25) —
+  wiring it would have silently changed retrieval.
+  Decided by: delete-superseded, verify-before-claiming.
+
+- 2026-07-20 — Hub phase 2 + merge: the hub now manages node lifetime, not just
+  spawn. Nodes report `HealthRes.idle_ms` — stamped at the MCP dispatch core
+  *and* every typed `KernRpc` method (the typed surface bypasses `call_tool`,
+  and an untracked RPC client would be unloaded mid-use), with health polls
+  excluded so the hub's own probe can't keep a node warm. The reaper re-checks
+  idleness under the per-root lock before unloading (a tool call can land
+  between poll and kill), unloads only hub-owned nodes (a hand-started daemon
+  is the user's to stop), never trusts `idle_ms == 0` (pre-field daemons), and
+  polls at least as often as the threshold. `kern hub merge <src> <dst>` lands
+  the cross-kern half of the original plan: both daemons stopped, offline CRDT
+  union via `absorb_graph`, src never written. Found and fixed at the root
+  while testing: `Config::load(root)` with no config file inherited serde's
+  default `data_dir` — pinned to the *process* cwd — so any cross-root load
+  read (and would have written) the caller's own store; configless loads now
+  re-pin to the passed root, regression-tested. All lifecycle behavior is
+  pinned in `tests/hub_supervisor.rs` against real processes.
+  Decided by: fix-the-root (the config re-pin, not a merge-side workaround),
+  name-the-tradeoff (owned-only unload; double-check window),
+  verify-before-claiming (idle unload and merge proven end-to-end).
+
 - 2026-07-20 — The answer prompt stops discarding retrieved evidence.
   `ANSWER_MAX_THOUGHTS = 5` capped the answer prompt at five facts while
   retrieval delivers up to `max_deliver_results = 25` — so the pipeline
@@ -51,9 +429,19 @@
   Fixed on sight: a rebuild unlinks the running binary, `/proc/self/exe` reads
   "<path> (deleted)", and a long-lived hub could never spawn again — the marker
   is stripped since the fresh binary sits at the original path.
+  Hardened to production in the same change: hub `canon()` applies
+  `Config::resolve_root` after canonicalize (a booting node re-pins to the
+  nearest `.kern` ancestor; without the same re-pin the hub ready-waits on a
+  socket the node never binds and strands a live daemon), the resolve lock is
+  per-root (one project's ~10s cold boot must not block another's connect),
+  and `status` probes adopted nodes' sockets (a `child: None` entry has no
+  `try_wait` and would report alive forever). Pinned by unit tests plus an
+  end-to-end suite (`tests/hub_supervisor.rs`) that boots a real hub and node
+  in an isolated `XDG_RUNTIME_DIR`.
   Decided by: name-the-tradeoff (single binary vs skew, control plane vs proxy),
   avoided-question-first (idle signal named and parked, not guessed),
-  fix-bugs-on-sight (the deleted-exe spawn failure).
+  fix-bugs-on-sight (the deleted-exe spawn failure),
+  verify-before-claiming (the lifecycle is test-pinned, not smoke-tested once).
 
 - 2026-07-20 — Heat is decayed before the GC compares it, and the configured
   `[heat]` settings actually reach the deposit path. `is_cold_victim`
