@@ -50,5 +50,9 @@ ghpages.zip
 __pycache__/
 NUL
 
-# mkdocs build output
-/site/
+# docs site (fumadocs) — generated artifacts only, source is tracked
+/docs/site/node_modules/
+/docs/site/.next/
+/docs/site/out/
+/docs/site/.source/
+/docs/site/next-env.d.ts

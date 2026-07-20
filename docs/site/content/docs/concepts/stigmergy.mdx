@@ -1,0 +1,208 @@
+---
+title: "Stigmergy GC & gravitons"
+---
+
+kern decides what to forget from traces that reads leave behind, not from a
+retention policy anyone wrote down. This page covers the trace itself — how it
+is deposited, how it evaporates, and how collection follows from it — and then
+gravitons: the plural, weighted attractors that bias which regions of the graph
+stay dense and which results surface first.
+
+## The metaphor, briefly
+
+Ants do not hold a map. They deposit pheromone as they walk, other ants prefer
+paths that already smell of pheromone, and the pheromone evaporates. Short paths
+get retraversed sooner, so they accumulate faster than they evaporate; long
+paths fade out. No ant decides anything about the route; the route is a
+consequence of the medium. That is stigmergy: coordination through modification
+of a shared environment rather than through direct signalling or a central plan.
+
+That is the entire loan from biology. The rest of this page is the mechanism,
+which is exponential decay and a threshold test, and owes nothing further to
+insects. Why this was chosen over scheduled cleanup or manual curation — and
+what was proposed and *not* built, notably the convergence metrics that would
+substantiate the self-organisation claim — is in
+[Stigmergy over gardening](../decisions/stigmergy-over-gardening.mdx).
+
+## The trace a read leaves
+
+Retrieval is not read-only in the bookkeeping sense. When a query returns an
+entity, `stamp_access` (`src/retrieval/score.rs:217`) does three things to it:
+increments a per-replica access counter, sets `accessed_at`, and deposits heat.
+
+Where that stamping happens matters. The MCP query path takes only a read lock
+while ranking, and pushes the access stamps onto the tick queue as a
+`CommitAccess` task instead of writing them inline
+(`src/mcp/tools_query.rs:223`, handled by `do_commit_access` at
+`src/tick/tasks.rs:448`). The trace is deposited off the hot path — a recall
+never blocks on a write, and the stamp deliberately avoids bumping the graph's
+mutation epoch so it does not invalidate the query cache
+(`src/retrieval/score.rs:236`).
+
+The second depositor is the pulse. Every maintenance pass walks the kern tree
+from the root and re-deposits heat on the entities it reaches, at half strength
+per level, stopping below `PULSE_THRESHOLD = 0.05` (`src/tick/pulse.rs:108`).
+This is the part with no biological counterpart and it is load-bearing: it means
+the trace field is refreshed by *structural reachability from the root*, not
+only by explicit reads. An idle daemon still lays pheromone on its own main
+paths.
+
+Evaporation is exponential with a 7-day half-life, computed lazily from the age
+of the last deposit rather than decremented on a schedule. See [Heat, decay &
+self-compaction](./heat-and-compaction.mdx#decay-is-lazy-and-age-based) for the
+function and its consequences.
+
+## From trace to collection
+
+`run_gc` (`src/tick/stigmergy.rs:41`) runs per kern, once an hour
+(`STIGMERGY_GC_INTERVAL`), gated on a clock sanity check that refuses to sweep
+when the clock is unreadable or has gone backwards. It collects the entities for
+which `is_cold_victim` (`src/tick/stigmergy.rs:13`) holds, which is the
+conjunction of:
+
+- **not durable** — `Fact` and `Document` are immune while active; supersession
+  revokes that immunity;
+- **cold** — heat, *aged before the comparison*, below `COLD_HEAT_THRESHOLD =
+  0.01`;
+- **stale** — last touch (`accessed_at`, falling back to `created_at`) older
+  than `COLD_GC_AGE = 7 days`.
+
+Every victim is written to the cold LMDB table before it is dropped from the hot
+graph, and a failed write keeps it hot for the next pass (`evict_victims`,
+`src/tick/stigmergy.rs:78`). The full guarantee, including where it stops being
+absolute, is set out in [Heat, decay &
+self-compaction](./heat-and-compaction.mdx#what-stops-it-deleting-something-you-still-needed).
+
+What is worth naming here is the *shape* of the policy rather than its
+constants. There is no LRU list, no per-kern quota, no age-ordered queue, and no
+"keep the last N" rule. Selection is a linear scan over a kern's entities
+applying a pure predicate over values the system was already maintaining for
+ranking. Retention emerges from usage; it is not administered.
+
+<Callout type="info" title="The known cost of that simplicity">
+Victim selection is O(entities) per kern per sweep, and the cold tier is
+brute-force cosine search with no index. Both are acceptable at current
+scale, and both are tracked as open work in
+[`ROADMAP.md`](https://github.com/yesitsfebreeze/kern/blob/master/docs/oracle/ROADMAP.md)
+rather than quietly ignored.
+</Callout>
+
+## Gravitons
+
+Heat says what has been used. Gravitons say what this kern is *for* — and unlike
+heat, they are set deliberately.
+
+A graviton is a named focus attractor stored as a child kern of the root: a name
+(`graviton_text`), an embedding of its seed text (`graviton_vec`), and a scalar
+`mass` defaulting to `1.0`. You manage them through the `graviton` MCP tool
+(`tool_graviton`, `src/mcp/tools_admin.rs:89`) with `action=list|add|remove`;
+seed text may be a short phrase or an entire document, embedded whole.
+
+They act at two points.
+
+**At ingest.** Routing picks the child whose graviton is nearest by *effective*
+distance — `cosine_distance / max(mass, 1e-6)` (`effective_distance`,
+`src/base/accept.rs:20`; used by `route_to_child_id` at
+`src/base/accept.rs:732`). Mass is therefore a pull multiplier: two gravitons at
+equal cosine distance are not tied if one is heavier. Content that matches no
+graviton falls through to a catch-all `generic` child, which has an empty
+graviton vector and so never wins on similarity.
+
+**At query time.** After ranking, `apply_gravity` (`src/retrieval/gravity.rs:9`)
+adds `gravity_weight * max_over_gravitons(mass * max(0, cos(entity,
+graviton_vec)))` to each result's score. Default `gravity_weight` is `0.15`
+(`src/config/retrieval.rs:82`); setting it to `0` returns immediately at zero
+cost, and a graph with no gravitons is a no-op. The combination is a **max, not
+a sum**, so two overlapping gravitons over the same subject matter cannot
+double-count a result into the top of the list.
+
+Because heat governs retention and gravitons govern placement and ranking, they
+compound without being wired together: material that lands in a well-populated
+graviton's subtree sits closer to the root, is reached by the pulse at higher
+strength, is reinforced more often, and consequently survives GC more readily.
+Aiming a graviton at a subject is an indirect but real statement about what the
+graph should keep.
+
+<Mermaid
+  chart={`
+flowchart TD
+    I[new entity] --> R{nearest graviton by<br/>cosine distance / mass}
+    R -->|match| G1[graviton kern]
+    R -->|no match| GEN[generic catch-all]
+    GEN --> C{cluster reaches<br/>size 5, cohesion 0.50}
+    C -->|yes, LLM names it| P{name + vector already<br/>equivalent to a root graviton?}
+    C -->|no| GEN
+    P -->|no| PROMOTE[reparented to root:<br/>a new graviton]
+    P -->|yes| STAY[stays under generic]
+`}
+/>
+
+### Auto-promotion out of `generic`
+
+`generic` is not a dumping ground with no exit. When the tick names a kern
+(`do_name`, `src/tick/tasks.rs:224`) it immediately calls
+`promote_to_root_if_generic` (`src/base/accept.rs:671`). If the freshly named
+kern's parent is `generic`, and no existing root graviton is equivalent to its
+new name or vector, it is detached from `generic` and reparented to the root —
+becoming a graviton in its own right. A dense enough cluster of unfiled material
+promotes itself into a focus, without anyone declaring the topic in advance.
+
+## Why plural, not singular
+
+Gravitons replaced a single per-kern `purpose` field on 2026-07-19
+(`docs/oracle/CHANGELOG.md`). The rename touched roughly 280 sites across types,
+routing, the MCP tool, the CLI, gossip and the digest — but the substance of the
+change is not the name, it is the arity.
+
+One purpose per kern forces a single answer to "what is this memory about", and
+every real memory has several. It made three things impossible that the plural
+model makes routine:
+
+- **Overlapping focuses.** A graph can be simultaneously about a codebase, an
+  ongoing incident, and a person, and a new item can be scored against all three
+  rather than being forced into whichever one happened to be the kern's declared
+  purpose.
+- **Weighting.** With one purpose there is nothing to weigh it against, so
+  `mass` has no meaning. With several, mass is how you say *this focus matters
+  more right now* — heavier gravitons both attract at ingest and pull harder at
+  query time — without deleting the others.
+- **Query-time bias at all.** A single purpose was effectively a routing label.
+  A set of gravitons is a vector field over the graph, which is what makes the
+  `gravity.rs` ranking pass expressible as one bounded pass over the results.
+
+Two costs were named alongside it. The gossip wire fields renamed from
+`anchor_*` to `graviton_*`, which breaks federation peers that predate the
+change — accepted, as federation is opt-in LAN and pre-1.0. And the query-time
+pass is not free: measured on a workload trace over three-run medians, recall@10
+and NDCG@10 were unchanged with gravity on or off, at roughly **+7% p50 latency
+with five gravitons** and zero cost with none. Gravity is a bias knob, not a
+recall improvement, and the benchmark says so.
+
+## Observing and forcing it
+
+The sweep is autonomous, but it is not opaque. The `health` MCP tool reports
+graviton, kern, entity and reason counts, which is the fastest way to see
+whether unnamed-kern churn is accumulating. The `gc` tool (`tool_gc`,
+`src/mcp/tools_admin.rs:178`) is a *different* collector from the one on this
+page — it reaps empty and orphan kerns from the live graph and persists, rather
+than evicting cold entities — and it is the right thing to reach for when the
+structure, not the content, has grown residue.
+
+One caveat it reports itself: deleting rows frees pages inside the LMDB file but
+does not return that disk to the operating system. The file shrinks on the next
+restart, which auto-compacts, or via an offline `kern compact`. A `gc` that
+reports thousands of reaped kerns and an unchanged `data.mdb` size is behaving
+correctly.
+
+## See also
+
+- [Heat, decay & self-compaction](./heat-and-compaction.mdx) — the decay function,
+  the tick, and the retention guarantee in full.
+- [Acceptance & routing](./acceptance.mdx) — how effective distance places an
+  entity, and what `generic` does.
+- [Retrieval](./retrieval.mdx) — where `apply_gravity` sits in the ranking
+  pipeline.
+- [The graph](./graph.mdx) — kerns, entities, reasons, and what a root-child
+  graviton kern actually is.
+- [MCP tools](../howto/mcp.mdx) — the `graviton` and `gc` tool surfaces.
+- [Configure](../howto/configure.mdx) — `gravity_weight` and the tick intervals.

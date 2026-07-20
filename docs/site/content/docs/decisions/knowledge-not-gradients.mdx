@@ -1,0 +1,141 @@
+---
+title: "Knowledge, not gradients"
+---
+
+**kern federates knowledge artifacts — entities, reason edges, pulses — never
+model updates, and it borrows from federated learning only the robustness
+machinery, not the learning machinery.** Status: the design stance is settled
+and shipped; of the concrete primitives the study recommended adopting, only
+update clipping exists in code today.
+
+## The constraint
+
+When kern's federation was designed, the nearest well-studied system in the
+literature was federated learning: FedAvg, differential privacy, secure
+aggregation. Both systems share the same physics — independent replicas,
+partial observation, no shared memory, unreliable links — and the same goal of
+letting peers benefit from each other's experience. That made FL the obvious
+place to shop for primitives, and equally the obvious trap: importing its
+machinery wholesale would have imported its assumptions, several of which are
+fatal to what kern is. The decision was to walk the FL literature deliberately,
+adopt what transfers, and name what must never be imported.
+
+## Where the analogy actually breaks
+
+Three structural differences drove every rejection:
+
+1. **The delta is the payload.** In FL, a gradient is a lossy,
+   privacy-preserving summary of the client's private data. In kern, the gossip
+   message *is* the thought — there is no summary layer to add noise to or
+   compress. Privacy therefore cannot live in the update; it has to live at
+   the scope and membership layer.
+2. **No shared loss function.** FL optimises one global objective. kern has
+   none: each node answers its own queries against its own purpose.
+   "Convergence" means strong eventual consistency over graph state (see
+   [CRDTs over consensus](./crdts-over-consensus.mdx)), not minimisation of a
+   loss.
+3. **Time is not rounds.** FL is a discrete sequence of synchronous rounds.
+   kern is a continuous stream of events ordered by Lamport clocks. Anything
+   indexed by round number — learning-rate schedules, privacy accountants —
+   needs reframing before it means anything here.
+
+## Rejected primitives, and why
+
+**A coordinator.** FedAvg's aggregator is a single point of failure and an
+unanswered governance question. kern is a peer-to-peer substrate; gossip plus
+CRDTs plus local scoring deliver eventual consistency without one, and the
+concept page shows the shipped mesh has no privileged node anywhere
+(`src/gossip/node.rs` — every node floods to at most three random peers).
+Reintroducing a coordinator would defeat the self-organising thesis outright.
+
+**DP noise on content.** FL tolerates noise because gradients are redundant —
+losing epsilon of one dimension costs almost nothing. A thought is a *specific*
+artifact; calibrated noise on its text or vector makes it unrecognisable and
+destroys retrieval. Privacy at kern's layer comes from scope control — who
+sees which spheres — not from perturbation.
+
+**Cross-peer vector averaging.** "Average a thought's embedding across the
+peers that hold it" breaks twice: embeddings are deterministic functions of
+content, so averaging identical vectors is a no-op, and averaging vectors from
+*different* embedding models is meaningless arithmetic. The shipped rule is
+stricter than either: an entity's id is its content hash, so a same-id peer has
+the same content by construction and vectors are never blended at all.
+
+**Shared model architecture.** FL requires every client to run the same
+network. kern explicitly permits heterogeneous nodes — different embedding
+models, different GNN dimensions. This is why each node's learned GNN weights
+are excluded from federation entirely: they are local derivations, not
+replicated state.
+
+**Synchronous rounds.** Rounds need someone to fire them — the coordinator
+problem again. Gossip converges without them.
+
+**Gradient compression and sketching.** FL's sketching machinery targets
+megabyte-scale tensors. kern's deltas are a counter slot and a stamp. There is
+nothing to compress.
+
+## Adopted: clipping, the one that shipped
+
+FL clips every client update to a bounded norm so no single client can move
+the aggregate arbitrarily. kern's translation is the inbound CRDT delta clamp:
+every counter delta off the wire is validated and rejected if it is zero,
+malformed, or above `GOSSIP_CRDT_DELTA_MAX` (one million —
+`src/base/constants.rs:92`, enforced at `src/gossip/handler.rs:349`). A peer
+can still lie within the bound, but it cannot overflow a counter or teleport
+an access count to `u64::MAX` in one message. Cheap, no cryptography, and it
+composes with the G-Counter design: a clamped absolute slot total bounds that
+replica's entire contribution.
+
+Worked example: a hostile peer gossips a delta claiming ten billion traversals
+for an edge. The clamp drops the message before any state is touched
+(`src/gossip/handler.rs:353`). The honest path — real traversals accumulating
+a slot total under the cap — is unaffected.
+
+The same instinct — bound what any one peer can do to you — shipped in two
+forms the study did not anticipate, both stronger than its proposals:
+
+- **Ranking signals are stripped at the boundary, not down-weighted.** Every
+  entity arriving by sync has its heat, access counts, and confidence zeroed
+  before first insert (`src/base/merge.rs:20`), and confidence is never merged
+  from a peer at all (`src/base/merge.rs:93`). A remote assertion can make a
+  fact *visible*; it cannot make it *believed* or *hot*. That is a harder line
+  than the study's per-peer trust weighting.
+- **Remote data is quarantined and capped.** Inbound entities land in a
+  phantom `remote-*` kern, never in your own, bounded at 50,000 entities
+  (`src/base/constants.rs:90`, enforcement in `src/base/merge.rs:138`). See
+  [Federation](../concepts/federation.mdx) for the full quarantine rules.
+
+## Adopted on paper, not yet built
+
+The study's remaining "steal" list has no code behind it:
+
+- **Per-peer ingest budgets** — rate/divergence budgets that down-weight a
+  noisy peer's future contributions. Not built; the quarantine cap is the only
+  volume bound, and it is global per remote kern, not per peer.
+- **Trimmed-mean / median materialisation** for federated scalars, so one
+  outlier peer cannot move a materialised score by more than a bounded amount.
+  Not in effect; materialised values are plain CRDT reads. Note this one was
+  *written* — `trimmed_mean` and `trimmed_mean_merge_hits`, in the
+  since-deleted `gossip/merge.rs`, trimmed the top and bottom
+  `floor(n · trim_pct)` of each entity's per-peer scores before averaging —
+  but nothing ever called it, and it was deleted in `dc02a18`. Recoverable
+  from git if this is revived.
+- **Provenance ledger** — per-thought `(origin, lamport, confidence)` history
+  enabling retrospective down-weighting of a peer later deemed untrusted. Not
+  built. The shipped `Ledger` (`src/gossip/ledger.rs`) is a TTL-bounded routing
+  cache mapping thought ids and network ids to peer addresses
+  (`src/gossip/ledger.rs:67`) — enough to know *where to fetch*, not enough to
+  re-litigate *who told you what*.
+- **Secure aggregation for pulses** — deferred until pulse data is considered
+  sensitive; no use case has forced it.
+- **Anti-entropy cadence** — moot until anti-entropy itself exists; see the
+  status table in [Federation](../concepts/federation.mdx).
+
+<Callout type="info" title="Why the rejections matter more than the adoptions">
+The adopted list is incremental hardening; the rejected list is identity. Every
+rejected primitive — coordinator, rounds, noise, shared architecture — exists
+to serve FL's goal of jointly training one model. kern's goal is that a fact
+learned once is available everywhere you work, with each node deciding for
+itself what to believe. Import the wrong primitive and you quietly import the
+wrong goal.
+</Callout>

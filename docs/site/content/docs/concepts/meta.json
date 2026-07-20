@@ -1,0 +1,15 @@
+{
+  "title": "Concepts",
+  "pages": [
+    "why-kern",
+    "architecture",
+    "graph",
+    "acceptance",
+    "time",
+    "retrieval",
+    "heat-and-compaction",
+    "stigmergy",
+    "federation",
+    "security"
+  ]
+}

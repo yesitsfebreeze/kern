@@ -1,2 +1,0 @@
-mkdocs-terminal>=4.4
-mkdocs<2

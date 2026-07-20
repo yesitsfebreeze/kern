@@ -1,0 +1,151 @@
+---
+title: "Edit convergence"
+---
+
+**When two statements about the same thing conflict, kern supersedes — the new
+claim retires the old through a status flip and a `Supersedes` edge — rather
+than keeping Wikipedia-style parallel revisions; full versioning, edit
+rationales, and revert rate-limits were evaluated against Wikipedia's actual
+mechanics and deliberately deferred behind explicit trigger conditions.** The
+hybrid that was adopted shipped: supersession with bi-temporal stamps, alternate
+phrasings captured non-destructively as `Rephrase` edges, and LLM-adjudicated
+contradiction on the background tick. The two smaller additions the note also
+adopted — a `ReasonKind::Edit` rationale edge and a 3RR-style producer
+rate-limit — were **not built**.
+
+## Context
+
+The question the note (`docs/kern/wikipedia-edit-convergence.md`) set out to
+answer: when multiple producers repeatedly edit the same knowledge — the same
+`external_id`, or the same proposition in different words — does kern need
+Wikipedia's machinery to converge on a single stable statement instead of
+oscillating or forking?
+
+Wikipedia is the existence proof that a noisy, adversarial crowd can converge
+on one article for contested topics, and it takes four *coupled* mechanisms to
+do it: an append-only revision history (nothing is ever overwritten), the
+three-revert rule (a hard bound on edit wars), talk pages (disagreement moves
+to a slower channel where citations beat assertions), and reputation tiers
+(trusted editors' changes stick longer). None of the four is sufficient alone.
+
+## Alternatives considered
+
+**Adopt the full model** — inline revision vectors, per-producer reputation,
+rate-limited reverts, protected thoughts. The failure mode is not that it
+would not work; it is that it solves a threat kern does not have. Wikipedia's
+machinery exists because its editors are anonymous, unaligned, and sometimes
+adversarial. kern's writers are mostly cooperating agents with shared goals.
+Building four coupled mechanisms against a threat model with no observed
+instances is pure speculative weight, and each mechanism is a maintenance
+surface (reputation alone implies identity, scoring, and decay subsystems).
+
+**Bare supersede with no history** — the pre-decision status quo. Fails on
+three counts the note documents: no record of *why* a statement changed, no
+way to answer "what did we believe last month", and no convergence story at
+all when two producers ping-pong the same source — each re-ingest silently
+wins until the next one.
+
+**The adopted hybrid** keeps supersession as the default and takes only the
+cheapest piece of each Wikipedia mechanism: the supersede *chain* stands in
+for revision history, `Rephrase` edges and the reason graph stand in for the
+talk page, and everything else waits for evidence it is needed.
+
+## Why the hybrid wins
+
+The observation that makes it cheap: **the supersede chain is already a
+minimal history.** Superseding marks the old entity `Superseded`, points
+`superseded_by` at the replacement, stamps both temporal clocks, and evicts
+the old id from the vector indexes while leaving it in its kern
+(`supersede`, `src/base/accept.rs:346`; the clock stamping is
+`stamp_invalidated`, `src/base/types.rs:355`). Nothing is erased. The chain
+is walkable backwards (`superseded_ancestors`, `src/base/reason.rs:17`) and
+surfaced on demand through the query tool's `include_history` and `as_of`
+options — append-only revisions in effect, without a second storage mechanism.
+The full lifecycle is documented in
+[Time & contradiction](../concepts/time.mdx).
+
+Convergence between disagreeing producers is then a judgement call, and kern
+places it deliberately: not at query time, not synchronously at ingest, but on
+the background tick. A near-duplicate whose wording differs is first recorded
+as a non-destructive `Rephrase` edge (`src/ingest/dedup.rs:23`); the tick
+later asks the LLM whether the new statement is an update, a contradiction, or
+merely related (`do_classify_contradiction`, `src/tick/tasks.rs:114`), and
+only an unambiguous verdict triggers `supersede_by_contradiction`
+(`src/base/accept.rs:470`).
+
+Two guards shape the outcome, and both are the NPOV instinct translated into
+code:
+
+- **It fails open to coexistence.** `parse_contradiction`
+  (`src/base/accept.rs:460`) returns `Related` for hedged, empty, or
+  unparseable verdicts. A missed contradiction leaves two claims standing —
+  recoverable, visible, resolvable later. A wrongful supersede silently hides
+  a true claim behind a false one. When in doubt, kern keeps both points of
+  view rather than electing a winner.
+- **Kind gates the verdict.** Only a same-kind near-duplicate may supersede
+  (`src/ingest/dedup.rs:39`) — a distilled `Claim` can never invalidate a
+  user-asserted `Fact`. This is the one place the model *does* weight trust
+  asymmetrically, and it is a two-level static rule, not a reputation system.
+
+Worked example — the deadline moves. January: "deadline is March" is captured
+from ticket `T-42`. February: the same ticket is re-captured saying April. The
+`external_id` matches, so the explicit path fires with no LLM involved: the
+April claim is inserted, the March claim becomes `Superseded`, its world-time
+window is closed at April's `valid_from`, its transaction stamp records when
+kern learned of it, and a `Supersedes` edge links the two. A query today
+returns April only; `as_of` January returns March only; `include_history`
+returns both, labelled. Had the second capture arrived without an external id —
+same proposition, different words — it would instead have travelled the
+`Rephrase` → tick → classifier route to the same four-step mutation.
+
+<Callout type="info" title="Where the revert-war bound actually lives">
+Wikipedia needs 3RR because a revert restores the old text and the war can
+oscillate forever. kern's supersede is asymmetric — each step produces a
+*new* entity and extends the chain — so an A/B ping-pong leaves a growing,
+visible chain rather than an invisible oscillation. That makes the missing
+rate-limit observable after the fact (a long chain on one `external_id`), but
+nothing today bounds it while it happens.
+</Callout>
+
+## What shipped vs. what the note assumed
+
+The note's deferrals held: no inline revision storage, no reputation tiers, no
+protected thoughts — and none of the stated trigger conditions (chains past ~5
+hops, producers ping-ponging a source, byte-level blame requests) has fired.
+
+The note's two *adopted* additions diverged:
+
+- **`ReasonKind::Edit` was not built.** The edge vocabulary
+  (`src/base/types.rs:66`) has no `Edit` kind. Its role is partly covered by
+  `Rephrase`, which shipped later and carries the alternate wording on the
+  edge (`merge_duplicate`, `src/base/accept.rs:57`, idempotent under repeat) —
+  but a wording is not a rationale. "Why does this thought now say X" is
+  answerable only insofar as the new text implies it; no edit-summary
+  free-text is recorded.
+- **The 3RR-lite rate-limit was not built.** No per-producer supersede
+  counting exists on the ingest path. Nothing marks a producer that
+  supersedes the same `external_id` N times in a window.
+- **Shipped beyond the note:** the bi-temporal clocks (`valid_from`/`valid_to`
+  world time, `invalidated_at` transaction time) and the `as_of` /
+  `include_history` query surface postdate the note and make the
+  chain-as-history claim genuinely queryable rather than merely walkable.
+  Superseded facts also lose their GC immunity and are spilled to the cold
+  tier rather than held hot forever — see
+  [Heat & compaction](../concepts/heat-and-compaction.mdx).
+
+One honest caveat inherits from retention: the chain is a *minimal* history,
+not an archival one. A superseded revision that goes cold is evicted to the
+capped cold tier, and the temporal side-map does not follow it there
+([Time & contradiction](../concepts/time.mdx#how-the-clocks-survive-a-restart)),
+so deep history degrades gracefully rather than persisting byte-perfect. That
+is consistent with the decision — kern is a memory, not an encyclopedia — but
+anyone reaching for Wikipedia-grade auditability should know the difference.
+
+## See also
+
+- [Time & contradiction](../concepts/time.mdx) — the supersession mechanics,
+  the two clocks, and querying the past.
+- [Acceptance & routing](../concepts/acceptance.mdx) — dedup, `Rephrase`
+  edges, and the same-kind gate at the point of entry.
+- [Bayesian confidence](./bayesian-confidence.mdx) — the corroboration model
+  that answers "how believed", where supersession answers "which revision".

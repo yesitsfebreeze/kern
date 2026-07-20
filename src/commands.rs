@@ -166,11 +166,6 @@ pub enum Commands {
 		action: UnnamedAction,
 	},
 	Mcp,
-	Docs {
-		page: Option<String>,
-		#[arg(long)]
-		list: bool,
-	},
 	Compress {
 		src: String,
 		#[arg(long, default_value = "int8")]
@@ -528,12 +523,6 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 		Commands::Register { path } => admin::cmd_register(cfg, &path),
 		Commands::Unnamed { action } => admin::cmd_unnamed(cfg, action),
 		Commands::Mcp => mcp_cmd::cmd_mcp(cfg).await,
-		Commands::Docs { page, list } => {
-			if let Err(e) = crate::docs::run(page.as_deref(), list) {
-				eprintln!("docs: {e}");
-				std::process::exit(1);
-			}
-		}
 		Commands::Compress { src, mode, out } => admin::cmd_compress(&src, &mode, out.as_deref()),
 		Commands::Migrate { path } => {
 			let dir = path.unwrap_or_else(|| cfg.data_dir.clone());

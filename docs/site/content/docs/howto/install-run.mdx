@@ -1,0 +1,220 @@
+---
+title: "Install & run the daemon"
+---
+
+By the end of this page you will have the `kern` binary on your PATH, a daemon
+running for one project directory, and a `.kern/` directory on disk holding that
+project's graph. You will also know how to tell whether it is healthy, how to
+stop it, and how to start over.
+
+## Prerequisites
+
+kern calls a local [Ollama](https://ollama.com) for embeddings, distillation and
+answers. Pull the default models before the first run:
+
+```bash
+ollama pull qwen3-embedding:0.6b   # embeddings
+ollama pull granite4:3b            # distillation / reasoning, and answers
+```
+
+The answer model aliases the reason default and falls back to the reason
+endpoint, so two pulls cover all three legs.
+
+You can point kern at any OpenAI-compatible endpoint instead — see
+[Configure models](./configure.mdx).
+
+## 1. Install the binary
+
+```bash
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/yesitsfebreeze/kern/master/install.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/yesitsfebreeze/kern/master/install.ps1 | iex
+```
+
+Both installers fetch the prebuilt release binary for your platform and print
+the install path. To build from source instead, with a Rust toolchain:
+
+```bash
+cargo build --release   # -> target/release/kern
+# or
+cargo install --path .
+```
+
+## 2. Opt the project in
+
+kern gates on a `.kern/` directory. Create it in the project you want to have a
+memory:
+
+```bash
+cd /path/to/your/project
+mkdir .kern
+```
+
+The daemon also creates `.kern/` on its first persist, but making it yourself
+means intake and recall are active from the very first session rather than
+after the first flush.
+
+<Callout type="info">
+The binary walks up from your cwd to the nearest ancestor holding `.git`
+(falling back to the nearest holding `.kern/`) and re-pins itself there before
+loading anything — `Config::resolve_root`, `src/config/mod.rs:116`. Launching from a
+subdirectory therefore attaches to the project's graph instead of booting an
+empty one.
+</Callout>
+
+## 3. Start the daemon
+
+```bash
+kern --daemon      # or: kern daemon
+```
+
+It prints `kern running in daemon mode (ctrl-c to stop)` and stays in the
+foreground. To run it detached and keep the logs:
+
+```bash
+kern --daemon > .kern/daemon.log 2>&1 &
+```
+
+To serve MCP over HTTP as well as the local socket, add an address:
+
+```bash
+kern --daemon --mcp-addr 127.0.0.1:3000
+```
+
+You rarely need to do this by hand. `kern mcp` attaches to a running daemon and
+auto-spawns a detached one if there is none (`src/commands/mcp_cmd.rs:11`), so
+registering the MCP server is usually the only step — see
+[Wire up MCP](./mcp.mdx).
+
+## What starts up
+
+<Mermaid
+  chart={`
+flowchart LR
+  A["kern --daemon"] --> B["load graph<br/>.kern/data"]
+  B --> C["bind local socket<br/>kern-&lt;tag&gt;.sock"]
+  C --> D["MCP stdio / HTTP"]
+  C --> E["tarpc KernRpc"]
+  B --> F["tick: decay, GC, clustering"]
+  B --> G["intake<br/>.kern/intake/*"]
+`}
+/>
+
+`run_server` (`src/commands.rs:667`) binds the socket first, then brings up the
+watchdog, the LLM keepalive, the file watcher, the intake, gossip, the
+maintenance tick, and the MCP surface.
+
+## Where state lives
+
+Everything is under `<project>/.kern/`:
+
+| Path | What it is |
+| --- | --- |
+| `.kern/data/data.mdb` | The LMDB environment: hot graph plus cold tier. |
+| `.kern/data/lock.mdb` | LMDB's lock file. Never edit or delete it while running. |
+| `.kern/intake/*` | Dropped files waiting to be drained: `.txt` distilled as transcripts, anything else stored as documents. |
+| `.kern/kern.toml` | Optional config overrides. Absent by default. |
+| `.kern/data/mcp-token` | Bearer token for the HTTP/SSE surface, minted on first use. |
+
+The intake path is cwd-relative by contract and is *not* derived from
+`data_dir` (`src/config/intake.rs`) — the MCP server resolves it against the
+session's working directory.
+
+The local RPC endpoint lives outside the project: `$XDG_RUNTIME_DIR/kern-<tag>.sock`
+(or `/tmp/kern-<user>-<tag>.sock`) on Unix, and the named pipe
+`\\.\pipe\kern-<user>-<tag>` on Windows, where `<tag>` is a hash of the canonical
+cwd — `Endpoint::kern`, `src/trnsprt/src/typed/local.rs:16`.
+
+## One daemon per working directory
+
+The socket name is derived from the cwd hash, so each project gets its own
+daemon and its own graph, and several can run on one host. A second `kern --daemon`
+in the *same* directory loses the bind race and exits immediately:
+
+```
+kern: another daemon already running at /run/user/1000/kern-3f2a91c4.sock — exiting
+```
+
+That check happens before any further scaffolding spins up
+(`src/commands.rs:687`), so a duplicate start is cheap and harmless.
+
+## Is it healthy?
+
+Ask the running daemon through MCP — the `health` tool returns graviton, kern,
+entity, reason, unnamed and descriptor counts (`src/mcp.rs:88`). Non-zero
+entities means the graph has content; a growing `unnamed` count means clustering
+has work queued.
+
+Two more signals that need no client:
+
+- `.kern/intake/` is draining rather than accumulating. Files that pile up mean
+  distillation is failing — usually a missing `[reason]` model. Nothing is lost:
+  a delta stays queued until a pass succeeds.
+
+Logs go to **stderr** via `tracing`, filtered by `RUST_LOG` and defaulting to
+`warn` (`src/main.rs:12`). Turn them up when something looks stuck:
+
+```bash
+RUST_LOG=kern=info kern --daemon
+```
+
+The targets worth knowing: `kern.kern_rpc` (socket bind), `kern.intake`
+(intake), `kern.persist` (a refused stale flush), `kern.mcp` (proxy vs
+standalone). A daemon auto-spawned by `kern mcp` is detached with null stdio, so
+it has **no** log at all — start it yourself with a redirect when you need to see
+one.
+
+<Callout type="warn" title="There is no `kern status`">
+Nothing tells you whether a daemon is running for this directory. Check for
+the socket (`ls $XDG_RUNTIME_DIR/kern-*.sock`) or the process
+(`pgrep -af 'kern --daemon'`) instead.
+
+Worse, the `kern <subcommand>` CLI does not talk to the daemon — it opens the
+on-disk graph directly and **can race a live daemon**. `kern health`,
+`kern query` and friends may read a stale snapshot, and writing subcommands
+can contend with the daemon's writer. A guarded-flush protocol keeps a stale
+snapshot from overwriting newer on-disk state, but the safe rule stands:
+**use the MCP tools for live state, and stop the daemon before offline
+commands** (`kern reembed`, `kern compact`, `kern migrate`).
+</Callout>
+
+## Stopping it
+
+Ctrl-C in the foreground, or `pkill -f 'kern --daemon'` when detached. On
+shutdown the daemon runs one final guarded flush and prints `shutting down...`
+then `done` (`src/commands.rs:734`). Let it finish — killing with `SIGKILL`
+during the flush drops whatever was still only in RAM.
+
+## Starting over
+
+With the daemon stopped:
+
+```bash
+rm -rf .kern/data          # wipe the graph, keep config and queued intake files
+rm -rf .kern               # wipe everything, including opt-in
+```
+
+Deleting rows frees pages inside `data.mdb` but LMDB only returns that space to
+the OS on a compaction. The file shrinks on the next daemon restart, which
+auto-compacts, or offline via `kern compact`.
+
+Upgrading from a pre-LMDB build that kept one bincode shard per kern? Run the
+importer once per data directory, daemon stopped:
+
+```bash
+kern migrate               # migrates <cwd>/.kern/data/ in place
+kern migrate /dir          # or a specific data directory
+```
+
+New projects need no migration.
+
+## Next
+
+- [Wire up MCP](./mcp.mdx) — get an agent calling the tools.
+- [Intake & recall](./intake-recall.mdx) — the automatic loop.
+- [Seed the graph](./seed.mdx) — give it something to remember.
+- [Architecture](../concepts/architecture.mdx) — what the daemon is made of.

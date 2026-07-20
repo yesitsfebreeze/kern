@@ -1,0 +1,13 @@
+{
+  "title": "Decisions",
+  "pages": [
+    "index",
+    "stigmergy-over-gardening",
+    "pagerank-authority",
+    "bayesian-confidence",
+    "edit-convergence",
+    "crdts-over-consensus",
+    "knowledge-not-gradients",
+    "diskann-spill"
+  ]
+}

@@ -2,7 +2,6 @@ pub mod base;
 pub mod commands;
 pub mod config;
 pub mod crdt;
-pub(crate) mod docs;
 pub mod gnn;
 pub mod gossip;
 pub mod hub;
