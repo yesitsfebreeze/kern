@@ -1,5 +1,19 @@
 # Changelog
 
+- 2026-07-20 — `src/config/wsl.rs` and the `Config::load` loopback rewrite are
+  deleted. Resolving a WSL2 NAT loopback URL to the Windows host gateway is
+  environment plumbing, not kern's job: kern now uses configured URLs verbatim,
+  and a WSL NAT user pins the gateway in `kern.toml` (docs updated with the
+  one-liner to find it). This supersedes the 2026-07-17 auto-rewrite; if an
+  outside tool is ever wanted, it wraps kern rather than living inside it.
+  Tradeoff, named: the zero-config promise regresses on WSL2 NAT — a fresh
+  install there sits silently on a dead loopback again until the URL is pinned;
+  accepted because two 300 ms TCP probes and a route-table parse inside config
+  load was kern guessing at the network, and a wrong guess is worse than an
+  explicit setting. Also: `.pi/` added to `.gitignore` (local tooling layer).
+  Decided by: delete-superseded (in-binary URL guessing superseded by explicit
+  config plus documentation).
+
 - 2026-07-20 — `scripts/insight.py` and the `just insight` recipe are deleted;
   `scripts/` is gone. It printed a repo snapshot (build, tests, LOC, oracle
   counts) but nothing consumed it — no CI job, no hook, no doc — and `git`,

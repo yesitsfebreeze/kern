@@ -137,12 +137,13 @@ once, in `[embed]`. The default `[answer]` section ships with a blank `url`
 precisely so that the common case — one local Ollama — requires no wiring at
 all.
 
-!!! tip "WSL2 loopback is handled for you"
+!!! tip "WSL2 loopback needs an explicit URL"
 
-    Running kern inside WSL2 against an Ollama on the Windows host, a
-    `localhost` URL will not resolve. kern detects this and rewrites all three
-    legs to the Windows host gateway automatically, logging the substitution
-    (`src/config/wsl.rs:78`). You do not need to hardcode the gateway IP.
+    Running kern inside WSL2 (NAT mode) against an Ollama on the Windows host,
+    a `localhost` URL resolves inside the WSL VM, not on the host — set
+    `embed.url` to the Windows host gateway in `.kern/kern.toml`. Find it with
+    `ip route show default | awk '{print $3}'`. Mirrored-mode WSL2 and an
+    in-distro Ollama keep plain `localhost`.
 
 ## Pointing at a remote or OpenAI-compatible endpoint
 

@@ -695,14 +695,16 @@ tracking.
 **What.** Layered TOML config, all-optional (works zero-config against local
 Ollama).
 
-**How.** `Config` (`src/config/mod.rs`) aggregates 12 sub-configs:
+**How.** `Config` (`src/config/mod.rs`) aggregates 14 sub-configs:
 `Embed`, `Reason`, `Answer`, `Intake`, `Tick`, `Gossip`, `Gnn`, `Graph`,
-`Ingest`, `Retrieval`, `Serve`, `Watcher`. Resolved project-scope
-(`<cwd>/.kern/kern.toml`) over user-scope (`<XDG_CONFIG>/kern/kern.toml`).
-`Config::resolve_root` walks up to the nearest `.kern/` ancestor. WSL2
-loopback redirect for Ollama (`src/config/wsl.rs`).
+`Ingest`, `Retrieval`, `Serve`, `Watcher`, `Hub`, `Heat`. Resolved
+project-scope (`<cwd>/.kern/kern.toml`) over user-scope
+(`<XDG_CONFIG>/kern/kern.toml`). `Config::resolve_root` walks up to the
+nearest `.kern/` ancestor. Under WSL2 NAT a loopback Ollama URL must be
+pinned to the Windows host gateway in `kern.toml` — kern does not rewrite
+URLs.
 
-**Where.** `src/config/*` (1410 LoC, 14 files).
+**Where.** `src/config/*` (1418 LoC, 15 files).
 
 **Gaps.** No env-var override layer. Secrets (API keys) stored in plaintext
 TOML. Section-level replace rather than deep merge (`src/config/io.rs`)

@@ -179,10 +179,10 @@ nothing progresses either. Confirm the endpoint directly with
 `curl http://localhost:11434/api/tags`, then check the daemon log for
 `kern.ingest.intake` warnings mentioning "distill got no LLM output".
 
-If you are on WSL and Ollama runs on the Windows host, kern detects an
-unreachable loopback and rewrites the URL to the host gateway automatically
-(`src/config/mod.rs:108`) — you will see a `kern.config` log line saying so. If
-that detection misfires, pin the URL explicitly in `.kern/kern.toml`.
+If you are on WSL (NAT mode) and Ollama runs on the Windows host, a loopback
+URL resolves inside the WSL VM where nothing listens — pin the URL to the
+Windows host gateway (`ip route show default | awk '{print $3}'`) in
+`.kern/kern.toml`.
 
 There is one configuration that disables distillation outright: blanking both
 `[reason].url` and `[embed].url`, since reason falls back to the embed endpoint

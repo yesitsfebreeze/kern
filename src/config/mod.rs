@@ -12,7 +12,6 @@ mod retrieval;
 mod serve;
 mod tick;
 mod watcher;
-mod wsl;
 
 pub use answer::{AnswerConfig, DEFAULT_ANSWER_MODEL};
 pub use embed::{EmbedConfig, DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL};
@@ -110,25 +109,7 @@ impl Config {
 			cfg.data_dir = Self::default_in(cwd).data_dir;
 		}
 		cfg.data_dir = graviton_data_dir(&cfg.data_dir, cwd);
-		cfg.redirect_loopback_to_wsl_host();
 		Ok(cfg)
-	}
-
-	fn redirect_loopback_to_wsl_host(&mut self) {
-		for (leg, url) in [
-			("embed", &mut self.embed.url),
-			("reason", &mut self.reason.url),
-			("answer", &mut self.answer.url),
-		] {
-			if let Some(fixed) = wsl::resolve_loopback(url) {
-				tracing::info!(
-					target: "kern.config",
-					leg, from = %url, to = %fixed,
-					"WSL detected: loopback Ollama unreachable, using Windows host gateway"
-				);
-				*url = fixed;
-			}
-		}
 	}
 
 	// `.git` may be a FILE (worktree/submodule): test existence, not `is_dir()`.
