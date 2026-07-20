@@ -113,7 +113,7 @@ maintenance, so the merge/consolidate job slots in next to stigmergy GC.
   flush semantics differ; the daemon is per-cwd and single-writer, which helps.
 - **Incremental Vamana quality.** Naive incremental inserts degrade the graph;
   RobustPrune + periodic full rebuild is the usual answer. Needs a recall
-  regression harness (extend the feature-gated `retrieval_bench` bin).
+  regression harness (no bench harness exists yet — see CHANGELOG 2026-07-20).
 - **Crash consistency.** Disk graph + vectors + the bincode metadata must not
   diverge on a mid-write crash. Write-ahead or atomic rename per segment.
 - **Compatibility.** Per repo policy ("no compat, clean base"), the disk format
@@ -128,5 +128,3 @@ maintenance, so the merge/consolidate job slots in next to stigmergy GC.
   target, `src/base/cold.rs`, was absorbed here).
 - `src/base/vector_backend.rs` — the `Resident`/`Disk` backend seam the wiring
   landed on.
-- `retrieval_bench` / `locomo_eval` (feature-gated bins) — harnesses to guard
-  recall vs latency through the change.

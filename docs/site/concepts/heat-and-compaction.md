@@ -1,0 +1,223 @@
+# Heat, decay & self-compaction
+
+kern claims to keep itself small without manual gardening. This page is the
+mechanism behind that claim: a single per-entity scalar called *heat*, an
+exponential decay with a one-week half-life, and a background tick that
+reorganises the graph and evicts what has gone cold — with a spill-before-drop
+rule that means eviction is a demotion, not a deletion.
+
+## Heat is one number per entity
+
+Every entity carries a `heat: f32` and a `heat_updated_at` timestamp. Heat is a
+dimensionless usage signal, not a score, not a confidence, and not a duration.
+Two things raise it:
+
+- **Access.** When a query returns an entity, the retrieval path stamps it:
+  access count incremented, `accessed_at` set to now, heat deposited
+  (`stamp_access`, `src/retrieval/score.rs:188`). The default access deposit is
+  `1.0`.
+- **The pulse.** On each maintenance pass the tick walks the kern tree from the
+  root and re-deposits heat on every entity it reaches (`deposit_pulse`,
+  `src/tick/pulse.rs:113`). The default traversal deposit is `0.5`, scaled by
+  the pulse strength at that depth.
+
+Both defaults live in `HeatConfig` (`src/base/heat.rs:7`) and are configurable
+under the `[heat]` section (`src/config/mod.rs:47`).
+
+The pulse decays geometrically as it descends: strength is multiplied by
+`PULSE_DECAY = 0.5` per level, and the walk stops once strength falls below
+`PULSE_THRESHOLD = 0.05` (`src/base/constants.rs:47`). With those defaults a
+root pulse of `1.0` reaches roughly four levels deep. The consequence is
+structural: entities in kerns far from the root, or hanging off branches the
+pulse no longer reaches, stop being reinforced even though nothing about them
+changed. Depth in the tree is itself a decay term.
+
+!!! note "The pulse is why an idle daemon still maintains itself"
+    Heat deposits are not the only thing the pulse does. On the way down it
+    enqueues a `Cluster` task for every non-empty kern
+    (`src/tick/pulse.rs:129`), which is what drives clustering, naming,
+    enrichment and question resolution on a graph nobody is querying.
+
+## Decay is lazy and age-based
+
+Heat is never decremented on a timer. The stored value is only ever written on
+deposit; reads compute the decayed value from the age of that last write:
+
+```
+decayed = heat * exp(-ln(2) * dt / half_life)
+```
+
+That is `heat::decayed` (`src/base/heat.rs:25`), and `heat::deposit`
+(`src/base/heat.rs:41`) is defined as *decay first, then add* — so a deposit
+onto a stale value does not resurrect the stale magnitude. The default half-life
+is **7 days** (`src/base/heat.rs:18`).
+
+Lazy decay matters for correctness, not just cost. Because the stored number is
+a snapshot from whenever it was last touched, any consumer that compares raw
+`entity.heat` against a threshold is comparing against a value that may be a
+month old. The GC predicate ages the value before comparing
+(`src/tick/stigmergy.rs:19`), and there is a regression test pinning exactly
+that: an entity whose heat was `1e9` a week ago is a GC victim today, because
+raw stored heat must not grant permanent immunity.
+
+## What the tick does on each pass
+
+The tick is a bounded mpsc queue (`TICK_QUEUE_CAPACITY = 512`) drained by one
+async task that dispatches each item through `process_task` (`src/tick.rs:54`).
+Tasks are enqueued by the maintenance timer, by the pulse, and by each other —
+clustering enqueues naming, naming enqueues enrichment, and structural changes
+enqueue persistence and GNN propagation.
+
+The periodic driver is `spawn_maintenance_tick` (`src/commands.rs:938`). Every
+`TICK_INTERVAL_SECS = 60` it:
+
+1. Reconciles with the store, in case a CLI process wrote concurrently.
+2. Pulses the root at strength `1.0`.
+3. Fans a `Cluster` task out to every non-empty kern (`tick::enqueue_all`,
+   `src/tick.rs:257`).
+4. Snapshots if the mutation epoch moved, bounding the crash-loss window to one
+   interval.
+
+Setting `tick.interval_secs = 0` disables the timer entirely and leaves the
+system purely event-driven.
+
+Two of the heavier passes are rate-limited independently of the 60-second beat,
+gated on a wall-clock check that refuses to run under an unreadable or skewed
+clock (`should_run_gc`, `src/tick/pulse.rs:35`):
+
+| Pass | Interval | Extra gate |
+| --- | --- | --- |
+| Stigmergy GC | `STIGMERGY_GC_INTERVAL = 1 hour` | — |
+| Disk consolidate | `DISK_CONSOLIDATE_INTERVAL = 1 hour` | at least `10_000` pending deltas |
+
+## Clustering: how the graph reshapes itself
+
+`do_cluster` (`src/tick.rs:74`) is the structural half of compaction. For one
+kern it samples up to `TICK_MAX_CLUSTER_SAMPLE = 200` entities with vectors,
+greedily groups them by cosine similarity against a seed (`vector_cluster`,
+`src/tick/cluster.rs:14`), and then decides which groups deserve to become their
+own kern.
+
+A cluster spawns a child when all of the following hold
+(`select_spawn_clusters`, `src/tick.rs:137`):
+
+- The parent is **named**. Unnamed kerns never spawn — without this the tree
+  descends one level per pass, unboundedly.
+- The cluster is **not the core cluster**, i.e. its centroid is not already
+  within `KERN_COHESION_THRESHOLD` of the parent's own graviton. A kern does not
+  spawn a child that restates itself.
+- Size `>= KERN_MIN_CLUSTER_SIZE = 10` and cohesion `>= KERN_COHESION_THRESHOLD
+  = 0.60`.
+
+Each qualifying cluster gets its own distinct unnamed child and its members are
+migrated into it. Once a child crosses the lower *naming* thresholds (cohesion
+`>= 0.50`, size `>= 5`) the LLM names it from its centroid (`do_name`,
+`src/tick/tasks.rs:225`), which sets the child's graviton text and vector and
+turns it into a real routing target.
+
+The reverse operation runs in the same pass: `evict_empty_children`
+(`src/tick.rs:213`) folds any unnamed, empty child back into the parent and
+deregisters it, migrating stray entities upward first. Splitting and merging are
+both continuous, so a branch that stops earning its existence dissolves.
+
+Persistence ordering is deliberate: children are persisted before the parent,
+because parent-first plus a crash erases the migrated entities from disk, while
+child-first merely duplicates them briefly (`src/tick.rs:125`).
+
+## Eviction: cold, stale, and not durable
+
+The GC predicate is `is_cold_victim` (`src/tick/stigmergy.rs:13`). An entity is
+collected only when **all three** hold:
+
+1. It is not a durable kind — `Fact` and `Document` are immune, *unless* the
+   entity has been superseded, which revokes the immunity.
+2. Its **age-decayed** heat is below `COLD_HEAT_THRESHOLD = 0.01`.
+3. Its last touch — `accessed_at`, falling back to `created_at` — is older than
+   `COLD_GC_AGE = 7 days`.
+
+A missing timestamp or a future one (clock skew) means *not* a victim. The
+predicate fails closed.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Hot: ingest
+    Hot --> Hot: query / pulse deposit
+    Hot --> Cooling: no touch, heat decays
+    Cooling --> Hot: any access re-deposits
+    Cooling --> Victim: heat < 0.01 AND untouched > 7d AND not durable
+    Victim --> Cold: cold_spill succeeded
+    Victim --> Hot: spill failed, kept, retried next pass
+    Cold --> Hot: recall backfills when hot results < k
+    Cold --> [*]: cold tier over 50k, oldest rows dropped
+```
+
+## Spill before drop
+
+`run_gc` (`src/tick/stigmergy.rs:32`) never calls `remove_entity` on the
+strength of the predicate alone. It writes the victim to the cold LMDB table
+first (`Store::cold_spill`, `src/base/store.rs:490`) and only drops it from the
+hot graph when that write returned `Ok`. A failed spill increments a kept
+counter, logs a warning, and leaves the entity in place to be retried on the
+next hourly pass.
+
+The cold tier is not a graveyard. When a query returns fewer than `k` hot
+results, the MCP query path brute-force scans cold rows by cosine and backfills
+the shortfall (`src/mcp/tools_query.rs:251`). An evicted entity is therefore
+still reachable — it has simply been demoted out of the ANN index and out of
+ranking's fast path.
+
+## What stops it deleting something you still needed
+
+Name the guarantee precisely, because it is two guarantees with different
+strengths.
+
+**Absolute:** an active `Fact` or `Document` is never collected. The kind check
+is the first branch of the predicate and there is no heat or age value that
+overrides it. A superseded fact is a deliberate exception — it has been replaced
+by a newer version, is excluded from live recall anyway, and is still spilled to
+cold rather than erased.
+
+**Probabilistic, and bounded:** everything else — `Claim`s and the other
+non-durable kinds — survives on usage. Something you have not read in seven
+days, whose heat has decayed below `0.01`, is evicted from the hot graph. It
+remains queryable from the cold tier, but the cold tier is capped at
+`COLD_MAX_ENTRIES = 50_000` and `cold_cap` (`src/base/store.rs:541`) drops the
+oldest rows past that cap. So the honest statement is: eviction from RAM is
+lossless, and eviction from cold is a FIFO on creation time. A non-durable
+thought you never touch, in a store that spills more than 50k entities after it,
+is genuinely gone.
+
+!!! warning "In-memory mode drops for real"
+    If no store is bound to the graph, `cold_spill` is not attempted and the
+    victim is simply removed (`src/tick/stigmergy.rs:56`). That is the intended
+    memory bound for an ephemeral graph, not a bug — but it means the
+    spill-before-drop guarantee only holds for a persisted kern.
+
+If you need something to survive unconditionally, ingest it as a `Fact` or a
+`Document`, or keep it warm. Both are levers you control; neither requires you
+to prune anything by hand.
+
+## Steady state
+
+For a graph under steady use, the equilibrium looks like this: the working set —
+anything queried within a couple of half-lives, plus everything the pulse
+reaches from the root — stays hot and indexed. Around it, cohesive groups of ten
+or more thoughts keep condensing into named child kerns, which makes routing
+narrower and recall cheaper. Underneath, a slow hourly drain moves untouched
+non-durable claims to cold storage, where they cost nothing to hold and still
+answer queries that the hot tier under-serves. Facts and documents accumulate
+and are never swept.
+
+The size of the hot graph therefore tracks how much you actually use, not how
+much you have ever written.
+
+## See also
+
+- [Acceptance & routing](acceptance.md) — how new material is placed, and what
+  the cohesion thresholds mean at ingest time.
+- [Stigmergy GC & gravitons](stigmergy.md) — the usage-trace framing of the same
+  GC, and the attractors that bias what survives.
+- [Bi-temporal model](time.md) — supersede, and why a superseded fact loses its
+  GC immunity.
+- [Retrieval](retrieval.md) — how heat and access feed ranking.
+- [Configure](../howto/configure.md) — the `[heat]` and `[tick]` knobs.

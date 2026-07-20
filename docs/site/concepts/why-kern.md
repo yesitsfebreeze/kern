@@ -1,0 +1,189 @@
+# Why kern exists
+
+This page explains the problem kern is built for — agent sessions that forget
+everything — and why the standard answer, chunk-embed-retrieve, does not close
+it. By the end you should know which of kern's design decisions addresses which
+failure, where to read about each one, and how far along the implementation
+actually is.
+
+## The problem
+
+An agent session is stateless. Everything it learned about your project — the
+decision you settled on Tuesday, the constraint you imposed, the approach you
+already ruled out and do not want revisited — evaporates when the conversation
+ends. The next session starts from zero. It re-asks settled questions, proposes
+the dead end you rejected, and contradicts a preference you stated twice.
+
+The knowledge is not scarce. It was produced, in your own words, in a
+conversation. It simply had nowhere durable to go.
+
+## The standard answer, and where it breaks
+
+The usual patch is retrieval-augmented generation: chunk your documents, embed
+the chunks, put the vectors in a store, and on each turn prepend the top-k
+nearest neighbours to the prompt. This genuinely helps. It also has four
+structural gaps that no amount of tuning `k` closes, because they are properties
+of the data model, not of the ranking.
+
+**A chunk has no notion of being superseded.** You decide to use LMDB. Three
+weeks later you decide to use LMDB *with a guarded-flush protocol*, which
+changes what the first decision means. Both chunks are in the index. Both embed
+near "what storage engine are we using". Cosine similarity has no opinion about
+which one is current — it will happily rank the stale one first because it
+happens to be phrased closer to the question. The index has no concept of a fact
+having stopped being true, so it cannot express one.
+
+**There is no structure beyond similarity.** A vector store is a flat bag.
+"We use LMDB" and "readers never block writers" are related by a *reason* — the
+second is why the first was chosen — but the store only knows they are somewhat
+near each other in embedding space. Ask a question whose answer requires
+following that link and top-k has nothing to follow. This is the multi-hop
+failure, and it is the hardest one: the connective tissue was never recorded, so
+no retrieval strategy can recover it at query time.
+
+**It grows without bound.** Every chunk you ever ingested is still there, still
+being scored, forever. There is no forgetting, so there is no natural pressure
+toward the knowledge that still matters. Pruning is a job you schedule and
+perform, and because it is manual and unpleasant, it does not happen. The index
+gets slower and noisier in the same motion.
+
+**It has no sense of what matters to *this* project.** A single global index
+treats a note about your CI runner and a note about your storage layer as
+equally central. There is no notion of the handful of things this particular
+codebase actually gravitates around, so nothing biases recall toward them — and
+nothing learns from the fact that you keep using one result and ignoring
+another.
+
+Underneath all four is the same assumption: that memory is an index you operate.
+You feed it, you prune it, you rebuild it. kern's premise is that memory should
+be a process that operates itself.
+
+## How kern answers each
+
+### Superseded facts: bi-temporal knowledge
+
+Every claim carries a validity window as well as a transaction time. When a new
+claim updates or contradicts a stored claim of the same kind, kern does not
+delete the old one — it *supersedes* it, stamping when it stopped being true and
+leaving the old revision in place as history
+(`src/base/accept.rs:400`). A query answers as of now by default, but can ask
+`as_of` a past instant to recover what was believed then, or `include_history`
+to walk the supersede chain backwards.
+
+The classification of "does this contradict that" costs an LLM call, so it runs
+in the background tick rather than on the read path. Recall stays LLM-free.
+
+→ [Time & contradiction](./time.md)
+
+### No structure: a graph with reasons on the edges
+
+kern stores two things. **Thoughts** are distilled claims — a fact, a decision,
+a preference. **Reasons** are justified edges between thoughts: not a similarity
+score, but a written statement of *why* one connects to the other. Retrieval
+seeds candidates by vector and lexical match, then expands outward along those
+edges, so an answer can be assembled from facts that no single query embeds near.
+
+The edges are derived at write time, when an LLM is already in the loop
+distilling the session (`src/ingest/distill.rs:21`). That is the trade the whole
+system is organized around: pay once, at ingest, so the read path is a graph
+walk with no model call in it.
+
+→ [The graph](./graph.md) · [The retrieval pipeline](./retrieval.md)
+
+### Unbounded growth: heat, decay, and a stigmergy GC
+
+Every access deposits **heat** on the thoughts it touched, and the background
+tick re-deposits heat on everything still reachable from the graph's roots
+(`src/base/heat.rs:41`). Heat then decays with age on a half-life, computed
+lazily when read rather than swept every tick.
+
+What stays cold and stale long enough gets evicted by a stigmergy GC
+(`src/tick/stigmergy.rs:32`) — but not dropped outright. Evicted thoughts spill
+into a capped cold tier first, so a recent eviction is still recoverable while
+the genuinely ancient tail ages out. Thoughts typed as `fact` are immune to
+eviction entirely; the durable core is never at the mercy of the decay curve.
+
+The result is a hot graph that stays small on its own. Nobody prunes.
+
+→ [Heat, decay & self-compaction](./heat-and-compaction.md) ·
+[Stigmergy GC & gravitons](./stigmergy.md)
+
+### No sense of what matters: gravitons and one graph per directory
+
+A **graviton** is a named focus attractor with an embedded pull vector and a
+mass. You seed a few — "decisions", "architecture", "preferences" — and both
+ingest routing and query ranking bend toward them: routing picks a home by
+`distance / mass`, and ranking boosts thoughts sitting near a graviton. Content
+that matches none of them lands in `generic`, and dense `generic` clusters
+promote themselves into new gravitons over time, so the graph's centres of
+gravity are partly discovered rather than fully declared.
+
+Separately, the daemon is per working directory. Each project owns an isolated
+graph — no cross-project contamination, and no global index in which your
+codebases dilute each other.
+
+Feedback closes the loop from the other side: the `degrade` tool down-weights
+the edges along a retrieval path that produced a bad answer, so a result that
+keeps missing stops surfacing.
+
+→ [Acceptance & routing](./acceptance.md) ·
+[Stigmergy GC & gravitons](./stigmergy.md)
+
+## What that costs
+
+None of this is free, and the bill is worth stating plainly.
+
+Ingest is expensive. Distillation is an LLM pass per drained session, and
+contradiction classification is more LLM work in the tick. kern spends
+generously at write time precisely so that the read path can be a sub-millisecond
+graph walk with no network hop. If your workload is write-heavy and rarely
+recalls, that trade is the wrong way round for you.
+
+You need a model endpoint running. A local Ollama by default, but something.
+A vector store needs an embedding model; kern needs an embedding model *and* a
+reasoning model.
+
+And the graph forgets. That is the feature, but it means a non-`fact` thought
+you never touch again will eventually leave the hot graph. If you need
+guaranteed permanence for something, it needs to be a fact.
+
+## Maturity — read this before you commit
+
+kern's self-learning and self-compaction paths run today and are what the
+default configuration exercises.
+
+**Federation is not shipped.** `docs/oracle/FEATURES.md` marks it `building`,
+which means wired but partial: entity-body sharing over gossip is verified on a
+single host with manually seeded peers, multicast discovery only pairs nodes
+sharing a `network_id`, and several message kinds are handled on receipt with no
+live sender yet. The transport is also unauthenticated and unencrypted.
+
+!!! warning "Federation is off by default, and should stay off unless you have read the security notes"
+
+    Enable it only on a network segment where you trust every host. See
+    [Federation](./federation.md) and
+    [`docs/FEDERATION-SECURITY.md`](https://github.com/yesitsfebreeze/kern/blob/master/docs/FEDERATION-SECURITY.md).
+
+**Recall quality is currently unmeasured.** A LoCoMo baseline was recorded on
+2026-07-19 (overall 0.137) but the eval was deleted on 2026-07-20 once it was
+shown to measure answer quality more than memory: handed the entire
+conversation with kern bypassed, the same 3B answerer scored only 0.187, so the
+ceiling was set by the answerer rather than by retrieval. That number is
+therefore withdrawn rather than restated here. A retrieval-only replacement
+(recall@k / MRR / NDCG against per-turn evidence labels, no LLM in the loop) is
+planned; until it runs, this page makes no quality claim.
+
+The honest summary: the architecture on this page is implemented, the
+self-maintenance genuinely works, and the retrieval quality that the architecture
+is *supposed* to buy has not landed yet. If you want a memory substrate whose
+design you can read, run locally, and measure yourself, kern is that today. If
+you want best-in-class recall accuracy out of the box, the numbers above say it
+is not there yet.
+
+## Where to go next
+
+- [Install & run the daemon](../howto/install-run.md) — get a daemon up.
+- [Configure models](../howto/configure.md) — point it at your models.
+- [Seed the graph](../howto/seed.md) — put existing knowledge in.
+- [Architecture](./architecture.md) — the whole system, in order, in one page.
+- [Benchmark & evaluate](../howto/benchmark.md) — reproduce the numbers above.

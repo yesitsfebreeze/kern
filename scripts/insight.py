@@ -99,8 +99,6 @@ def section_oracle():
 def section_bench():
     return {
         "retrieval_baseline": (ROOT / "docs/kern/bench-retrieval.md").exists(),
-        "workload_trace": (ROOT / "traces/workload.json").exists(),
-        "locomo_baseline": any(ROOT.glob("docs/kern/*locomo*")),
     }
 
 
