@@ -1,5 +1,212 @@
 # Changelog
 
+- 2026-07-20 — Cleanup sweep after the docs reconciliation. The e2e harness's
+  only third-party dependency is now declared (`e2e/requirements.txt`, recipe
+  `just e2e-install`): `just test` runs `pytest -q e2e` and nothing in the repo
+  said where pytest comes from, so a clean clone could not run its own test
+  suite. Recorded alongside it, not fixed: **the e2e suite is not run in CI at
+  all** — `ci.yml` runs `cargo test --workspace` only, leaving the sole
+  end-to-end exercise of the real binary local-only and free to rot. Wiring it
+  is a CI-minutes-versus-coverage call left to a human (ROADMAP §6,
+  `FEATURES.md` §21a). Also: five pointers to `docs/FEDERATION-SECURITY.md`
+  re-aimed at the site's Security page now that the former is a stub (README,
+  `why-kern.mdx`, `SPECIALISTS.md`, `FEATURES.md`, and the pagerank research
+  note); three concept pages that sent readers to GitHub research notes now
+  link the in-site Decisions pages that supersede them; the pagerank note's own
+  "rate clipper that once existed was later removed" line — the sentence that
+  produced the withdrawn regression finding — corrected at the source; and a
+  reference count baked into `FEATURES.md` removed, since a number that changes
+  on every doc edit is drift-bait of exactly the kind this work exists to stop.
+  Decided by: fix-the-root (correct the note that caused the error, not just
+  the pages that repeated it). Verified: build artifacts and `__pycache__` are
+  ignored and untracked, no dangling references to the deleted mkdocs, bench or
+  eval surfaces remain, and the struck `§3A` citations are re-pointed.
+
+- 2026-07-20 — The "Sybil defence regressed" finding is withdrawn: nothing
+  regressed, because nothing was ever wired. User-prompted re-check of the
+  commits. Two Sybil-resistance components were fully written and never
+  connected — `RateClipper` (`gossip/sybil.rs`, 175 LoC), whose `set_clipper()`
+  has no call site in *any* commit (`git log -S"set_clipper("` returns only the
+  commit that defined it and the one that deleted it), and
+  `trimmed_mean_merge_hits` (`gossip/merge.rs`, 241 LoC), documented in its own
+  comment as "a Sybil-resistant alternative" for fusing per-peer hit lists, also
+  callerless. `dc02a18` deleted both in an audited dead-code sweep that traced
+  every deletion to zero live callers; runtime behaviour was unchanged because
+  neither had ever run. Decided by: verify-before-claiming — the prior entry
+  inferred a regression from a doc sentence ("a rate clipper that once existed
+  was later removed") without reading the commit, and "once existed" turned out
+  to mean "compiled", not "protected anything". Consequence is the opposite of
+  alarming: this is unbuilt work with a working reference implementation in git,
+  a cheaper starting point than assumed. Corrected in `ROADMAP.md` §5,
+  `decisions/pagerank-authority.mdx` and `decisions/knowledge-not-gradients.mdx`
+  (which also called trimmed-mean "not built" when it was built-then-deleted).
+  Supersedes the "A Sybil defence regressed" item recorded earlier the same day.
+
+- 2026-07-20 — `ROADMAP.md` is reconciled against source and the docs site, and
+  the eval section is withdrawn rather than migrated. A gap reconciliation
+  across all 25 site pages found the plan itself was the least accurate document
+  in the repo. Five items described shipped work: the Pulse and Question senders
+  are live (`commands.rs:900-930`, `tick.rs:64`), the query cache already matches
+  paraphrases by cosine ≥ 0.97 (`retrieval/cache.rs:60`), `validate_kind` and
+  `validate_conf` are both called (`mcp/tools_mutate.rs:115-117`), and
+  `FEATURES.md` still called the fetch RPC dead. The "highest-leverage safety
+  fix in the repo" — forgeable `Fact`/`Superseded` — was wrong on all three
+  counts: `Superseded` is an `EntityStatus` and was never an `EntityKind`, and
+  `kind` is derived from clamped confidence, so the MCP caller's `kind` is
+  discarded outright. Worse, §1's north star and all five of §3's items were
+  scheduled against the LoCoMo harness and baseline deleted in `8d8b19e`, three
+  commits after the file's own stamp. Those are struck, not re-pointed, because
+  `8d8b19e` measured why: a grounded run with kern bypassed scored 0.187 where
+  kern scored 0.027, so the answerer set the ceiling and the number could not
+  steer memory work. Published figures are **withdrawn, not superseded** — the
+  claim standard is now "no quality claim of any kind" until a retrieval-only
+  metric (recall@k / MRR / NDCG, no LLM in the scoring loop) is decided, which
+  is recorded as §3's open question with three sub-questions and no deciding
+  behavior yet. Decided by: verify-before-claiming, and the oracle's own rule
+  that content files disagreeing means the decision was not made in either
+  version. Also funded, having been documented on the site but tracked nowhere:
+  five silent wrong-answer/silent-loss defects now leading §6 (cold eviction
+  drops the temporal side-map so `as_of` lies; a prose-answering reason model
+  archives deltas having stored nothing; an embedding-model swap zeroes recall;
+  in-memory mode drops without spilling; the cold tier is a lossy FIFO past
+  50k), plus unverified entity content against claimed ids — which undercuts the
+  content-addressing invariant every other federation guarantee rests on — a
+  regressed Sybil rate clipper, and the operational, belief-model and retrieval
+  residuals. `concepts/stigmergy.mdx` filed its own gaps into `FEATURES.md`;
+  corrected, since FEATURES is not a plan (repo law 4).
+
+- 2026-07-20 — The gossip delta-scoping gap is split by target, and enforcing
+  `valid_until` is sequenced behind it. An earlier entry in this same session
+  prescribed "confine deltas to `remote-*` kerns"; reading the code, that fix
+  is wrong for the counters — ids are content hashes, so the same fact is a
+  local row on both nodes and `retrieval/score.rs:255` emits access deltas for
+  local entities precisely so G-Counter slots merge across replicas. Blanket
+  scoping would kill intended federation. Split instead: the two LWW targets
+  (`ValidUntil`, `ReasonScore`) confine to `remote-*` now, needing no wire
+  change; the counters' real exposure is attacker-chosen replica-slot names,
+  which genuinely gates on authenticated peer identity. This subsumes open
+  decision (a) — LWW-vs-max-join for `Reason.score` is no longer only a
+  trust-signalling question once an untrusted writer can reach a local row.
+  The coupling that makes it urgent: `matches_filter` honours `valid_until`
+  only when a caller passes `valid_at` (`retrieval/score.rs:168`), so §6's
+  "enforce `valid_until` in retrieval" would arm a remote
+  expire-any-local-claim attack on the default path — that item is now marked
+  blocked on this one. Also recorded: `handle_pulse` falls back to `g.root.id`
+  on an unknown `kern_id` (`gossip/handler.rs:319`), so a peer needs no ids at
+  all to heat your root kern. Decided by: verify-before-claiming (the earlier
+  prescription was asserted from a summary, not from the handler; reading it
+  reversed the conclusion). Supersedes this session's "fix is scoping, not
+  crypto" note in ROADMAP §5.
+
+- 2026-07-20 — `install.sh` and `install.ps1` are restored from `e46c859^`, and
+  the docs checker grew a check that would have caught their loss. They were
+  deleted on 2026-06-16 as collateral in a commit about OpenAI-compatible LLM
+  paths (same sweep as `benches/`, `test_utils/`, `viewer/`), which the commit
+  message never mentions — so for a month both the README and the site told
+  every new user to `curl` a URL that 404s. The restore is verbatim, not a
+  rewrite, because `release.yml` never stopped publishing the artifacts the
+  scripts consume: `kern-<target>.tar.gz` / `.zip`, and all fourteen target
+  triples the scripts detect still appear in the release matrix.
+  Decided by: fix-the-root (the dead link is the symptom; the missing file is the cause,
+  and an unenforced convention is why it stayed missing). `scripts/docs_check.py`
+  now also resolves links into this repo's own files on GitHub — verified to
+  fail on exactly this regression — and covers `README.md`, not just the site.
+  Its workflow drops its path filter entirely: the check costs two seconds and
+  every filter is a way for a deletion to slip past.
+
+- 2026-07-20 — Documentation becomes a code-verified contract, not prose.
+  Three moves in one change. (1) Security gets a first-class in-site page
+  (`concepts/security.mdx`) covering the whole posture — Unix-socket RPC and
+  its `0600` window, stdio-vs-HTTP MCP, plaintext LMDB, LLM-endpoint egress,
+  and the federation trust model with CAN/CANNOT tables — and
+  `docs/FEDERATION-SECURITY.md` collapses to a pointer, because two copies
+  meant the drifted one was the one operators read. (2) A `Decisions` section
+  ports the `docs/kern/` research notes into indexed pages that state the
+  alternatives rejected and why, each re-verified against source. (3) The
+  `src/…:line` citations those pages depend on are now enforced:
+  `scripts/docs_check.py` + `.github/workflows/docs-check.yml` fail any push
+  or PR whose code change orphans a doc reference.
+  Decided by: verify-before-claiming (a doc citing a line that no longer exists is a
+  claim nobody checked; CI now checks it). Tradeoff, named: write-time
+  friction on every code change that moves a cited line, bought against
+  readers acting on stale security and merge-semantics claims between manual
+  audit sweeps — for a system whose docs state exact CRDT bounds, the
+  friction is the cheaper side. The checker proves a cited line exists, not
+  that it still says the same thing; semantic drift still needs audit.
+  Supersedes `docs/FEDERATION-SECURITY.md` as the security source of truth.
+  Audit against source in the same change corrected the doc claims that had
+  already drifted: `statements` never merges (content-addressing forbids it)
+  rather than "set union", the fetch RPC is wired and live rather than dead,
+  and remote heat/access/confidence are stripped at the merge boundary rather
+  than max-joined from attacker values.
+
+- 2026-07-20 — The in-binary docs viewer (`kern docs`, `src/docs/`, ~316
+  LoC embedding docs/site markdown via `include_str!`) is deleted. It broke
+  when the markdown moved into the fumadocs app as MDX, and the published
+  site plus `/llms-full.txt` supersede an in-terminal copy. User-directed.
+  Decided by: fix-the-root (delete the duplicate doc surface rather than
+  re-point the embeds at MDX they can't render). Tradeoff, named: no offline
+  docs in the binary; docs now live only at the site and in the repo's
+  `docs/site/content/`.
+
+- 2026-07-20 — Docs site moved from mkdocs (terminal theme + custom TUI
+  overlay) to fumadocs with the stock UI, static-exported for GitHub Pages.
+  User-directed platform choice; stock-over-custom UI confirmed by the user
+  when offered a reskin. Decided by: name-the-tradeoff. Tradeoff, named: the
+  TUI identity (keyboard nav, gruvbox, Departure Mono) and the Python docs
+  toolchain die; gained MDX, client-side Orama search, `llms.txt` /
+  `llms-full.txt` generation, and a Node toolchain in CI. Deploy still
+  targets the `gh-pages` branch, so no Pages settings change. Four dead
+  `howto/benchmark.md` links (page never existed) de-linked in passing.
+  Supersedes the mkdocs setup (`mkdocs.yml`, `docs/overrides/`,
+  `docs/requirements.txt`, `docs/site/assets/`).
+
+- 2026-07-20 — Hybrid seed fusion rescores its survivors by query cosine
+  before expansion. RRF's reciprocal-rank scores (~1/rrf_k) replaced the
+  seeds' cosine scores, while `expand()` scores neighbours on the cosine
+  scale — `merge()` pooled the two, so any expanded neighbour outscored
+  every seed and hybrid/query ranking inverted (the e2e harness's strict
+  xfail, now a hard regression test: cosine-0 entities ranked above the
+  token-overlap match). RRF now decides only WHICH entities seed; cosine
+  against the query decides how much they score. Decided by: fix-the-root
+  (the scale mismatch, not the symptom ordering, was repaired). Tradeoff,
+  named: a BM25-strong but embedding-weak match now enters expansion with
+  its true (low) cosine — lexical strength buys seed-set membership, not
+  final magnitude; accepted because magnitude faked from rank order is what
+  produced the inversion.
+
+- 2026-07-20 — Chunk external ids are keyed on the full source identity
+  (`source_id()` + chunk index), not the bare section, and CLI `kern ingest`
+  derives its inline source hash from the text instead of the constant
+  `"user"`. Both fed the supersede path with colliding external ids, so chunk
+  0 of every document (watcher files have empty sections) and every CLI
+  ingest silently superseded the previous one — data loss the new e2e
+  harness surfaced on its first run. An identity-less source now gets an
+  empty external id and never supersedes. Decided by: fix-the-root.
+  Tradeoff, named: entities persisted under old-format external ids no
+  longer match, so the first re-ingest after this change creates a new
+  entity instead of superseding the old one (cosine dedup still catches
+  identical text); accepted as a one-time discontinuity against ongoing
+  silent loss.
+
+- 2026-07-20 — E2E lives in a Python pytest harness (`e2e/`, `just e2e`):
+  it drives the real binary against a deterministic fake Ollama server
+  (`fake_llm.py` — feature-hashed embeddings, echo answers), covering
+  answer retrieval end to end (ingest → search/query → answer prompt), with
+  the hub supervisor suite folded in as `test_hub.py`. The Rust
+  `e2e/hub_supervisor.rs` target and its `Cargo.toml` `[[test]]` block are
+  deleted as superseded. Decided by: verify-before-claiming (retrieval
+  behavior needs a runnable proof, not an asserted one; pytest is the premade
+  harness for it, and the Rust target it replaces goes in the same change).
+  Tradeoff, named: `just test` and
+  `just e2e` now need a Python with pytest; accepted because the retrieval
+  tests need a scriptable fake LLM server, which Rust dev-deps made
+  heavier, not lighter. A known query-mode
+  ranking gap (expansion + boosts flatten seed similarity on small graphs)
+  is pinned as a strict xfail in `test_retrieval.py`, owned by the refit
+  campaign. Supersedes: the 2026-07-20 `tests/` → `e2e/` rename entry's
+  explicit `[[test]]` target.
+
 - 2026-07-20 — `src/config/wsl.rs` and the `Config::load` loopback rewrite are
   deleted. Resolving a WSL2 NAT loopback URL to the Windows host gateway is
   environment plumbing, not kern's job: kern now uses configured URLs verbatim,

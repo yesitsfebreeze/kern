@@ -11,10 +11,14 @@ optional additive prior in retrieval scoring, never as the sole rank signal.
 > 25 iterations, teleport at the query's dense+lexical seeds —
 > `src/retrieval/pagerank.rs`) and fuses its top-k as an extra list in the RRF
 > seed fusion. The DB-level `AuthorityTable`, TrustRank seeding, and the Sybil
-> defences of §5 were not built (the gossip-side rate clipper that once
-> existed was later removed); see `docs/FEDERATION-SECURITY.md` for the
-> current trust model. Code paths below reference the pre-1.0 `crates/`
-> layout.
+> defences of §5 are not in effect — and none ever were: a `RateClipper`
+> (`gossip/sybil.rs`) and `trimmed_mean_merge_hits` (`gossip/merge.rs`) were
+> both fully written but never wired to any call site, and were deleted in
+> `dc02a18` as verified-unreachable code, changing no runtime behaviour. Treat
+> them as unbuilt work with a reference implementation in git history, not as
+> defences that were lost. For the current trust model see the
+> [Security](https://yesitsfebreeze.github.io/kern/concepts/security) page.
+> Code paths below reference the pre-1.0 `crates/` layout.
 
 ---
 

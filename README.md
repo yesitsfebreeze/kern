@@ -241,10 +241,11 @@ discovery_port = 7475
 peers = []
 ```
 
-> **Before enabling gossip**, read
-> [`docs/FEDERATION-SECURITY.md`](docs/FEDERATION-SECURITY.md). Federation is
-> unauthenticated and unencrypted today — enable it only on a network segment
-> where you trust every host.
+> **Before enabling gossip**, read the
+> [Security](https://yesitsfebreeze.github.io/kern/concepts/security) page —
+> the full trust model, including exactly what a malicious peer can and cannot
+> do. Federation is unauthenticated and unencrypted today: enable it only on a
+> network segment where you trust every host.
 
 ### Intake & recall
 

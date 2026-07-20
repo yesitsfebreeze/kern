@@ -4,42 +4,43 @@ State and work, one file. `FEATURES.md` says what exists, `CHANGELOG.md` says
 what was decided, `VISION.md` says what "built" means. This file is the only
 place that says **what is left**. Nothing else in the repo plans work.
 
-Stamped 2026-07-20, HEAD `2878223`. Verified against source, not against docs.
+Stamped 2026-07-20, re-verified against source after `8d8b19e`, `6c4a97f`,
+`d992432` and the docs audit. Verified against source, not against docs.
 
 ---
 
 ## 1. North star
 
-kern equals or beats Zep/Mem0-class agent memory on LoCoMo / LongMemEval while
-staying local-first, in-process, per-cwd, offline-capable, no query-time LLM on
-the default path.
+kern is the memory layer an agent recalls from: local-first, in-process,
+per-cwd, offline-capable, self-forgetting, with no query-time LLM on the
+default path — and it **retrieves the right thing**, provably.
 
-**Recorded baseline** (`docs/kern/locomo-baseline-2026-07-19.json`, full
-locomo10, 1986 QA, seeds 0/1/2, `qwen3-embedding:0.6b` + `granite4:3b` +
-`qwen2.5:7b` judge):
+**There is no recorded baseline.** The LoCoMo eval, the retrieval bench, and
+`docs/kern/locomo-baseline-2026-07-19.json` were all deleted in `8d8b19e`
+(2026-07-20). That deletion was correct and is not to be undone as-was: the
+LoCoMo score collapsed ingest × retrieval × answering into one LLM-judged
+number in which the **answering term dominated**. Measured the same day, a
+grounded run — whole conversation in the prompt, kern bypassed entirely —
+scored 0.187 on a slice where kern scored 0.027. The ceiling was set by a 3B
+answerer, not by memory, so the number could not steer memory work. Three
+eval-side prompt changes moving one slice from 0.131 to 0.027 in a single day
+confirmed it was measuring the harness.
 
-| category | n | F1 | judge+abstain |
-|---|--:|---|---|
-| single-hop | 282 | 0.104 ± 0.004 | 0.093 ± 0.005 |
-| multi-hop | 321 | 0.023 ± 0.003 | **0.042 ± 0.011** |
-| temporal | 96 | 0.118 ± 0.013 | 0.194 ± 0.016 |
-| open-domain | 841 | 0.118 ± 0.006 | 0.194 ± 0.013 |
-| adversarial | 446 | 0.0 | **0.112 ± 0.103** |
-| **overall** | 1986 | — | **0.137 ± 0.018** |
+The previously published figures (overall 0.137 ± 0.018, "gap 0.46") are
+therefore **withdrawn, not superseded** — no current number replaces them.
 
-Latency p50 901 ms / p95 1839 / p99 2666. Published rivals sit ~0.6+. **Gap:
-0.46.** Two craters carry it: multi-hop and adversarial abstention.
-
-Claim standard: no SOTA/parity/latency claim without a multi-seed run with error
-bars against this file. Published-leaderboard gaps under ~10 points are noise —
-LoCoMo's answer key is ~6% wrong and LLM judges are lenient.
+Claim standard, until a replacement exists: **no quality claim of any kind.**
+Not SOTA, not parity, not regression, not improvement. Latency claims remain
+permitted from the e2e harness. What the replacement should be is the open
+question in §3 — nothing below it can be scheduled honestly until that is
+decided.
 
 ---
 
 ## 2. How we supersede Zep / Mem0 / Letta / Qdrant
 
 Not by matching feature lists. By owning a combination none of them hold, then
-proving it on the eval.
+proving it — on a measurement that does not yet exist (§3).
 
 | property | kern | Zep/Graphiti | Mem0 | Letta | Qdrant |
 |---|---|---|---|---|---|
@@ -50,13 +51,16 @@ proving it on the eval.
 | Graph + dense ANN + BM25 + GNN in one process | ✅ | partial | ❌ | ❌ | ❌ |
 | Bi-temporal supersede off the recall path | ✅ | ✅ | ❌ | ❌ | ❌ |
 | Coordinator-free CRDT federation | 🟡 building | ❌ | ❌ | ❌ | ❌ |
-| Published eval numbers | 🟡 0.137 | ✅ | ✅ | ✅ | n/a |
+| Published eval numbers | ❌ withdrawn | ✅ | ✅ | ✅ | n/a |
 
 **The three moves, in order:**
 
-1. **Close the eval gap.** The architecture argument is already won on paper and
-   lost on the scoreboard. Nothing else matters until overall clears ~0.5.
-   Everything in §3 serves this.
+1. **Get a measurement worth steering by.** The architecture argument is won on
+   paper and currently unprovable: the only scoreboard we had measured a 3B
+   answerer more than it measured memory, so it was deleted (§1). We are the
+   only one in this table with no published number — that is honest, and it is
+   also the single biggest gap. Nothing else in this file can claim progress
+   until §3's question is answered.
 2. **Ship what a hosted service structurally cannot.** Offline, per-cwd, zero
    egress, sub-ms default recall, self-forgetting. These are not features they
    are behind on — they are features their business model forbids. Federation
@@ -73,37 +77,50 @@ KG). Full survey: `docs/kern/`.
 
 ---
 
-## 3. Eval work — everything blocks on the ablation suite
+## 3. Eval — the open question everything else waits on
 
-Instruments landed 2026-07-20; the runs have not happened. Sequence is strict.
+Everything previously listed here (items A–E: the attribution ablations, the
+`--min-deliver` sweep, `--multihop-paths`, distill-coverage, judge calibration)
+was scheduled against the harness deleted in `8d8b19e`. Those flags, binaries
+and traces no longer exist. The items are struck rather than migrated, because
+each was a probe into a composite score that has been ruled unfit for steering
+memory work; re-pointing them at a new harness would import the same conflation.
 
-- [ ] **A. Run the attribution ablations.** `--context-mode kern | grounded |
-      grounded-retrieval` at full scale. Grounded needs 32k ctx (conversations
-      measure 11–24k tokens; 8k/16k truncate silently). Deliverable: a signed
-      attribution table splitting the 0.46 gap into retrieval loss vs synthesis
-      loss vs distill loss. **This gates B, C, D, and half of §6.**
-- [ ] **B. Land abstention.** Prompt + empty-context short-circuit shipped and
-      unit-pinned. Remaining: the `--min-deliver 0 / 0.2 / 0.4` floor sweep and
-      the seed-0 re-run. Target: adversarial ≥ 0.5, no regression elsewhere.
-      (`MIN_DELIVER_SCORE` was dead code — shipped default 0.0 never gated
-      delivery. Deleted.)
-- [ ] **C. Close the multi-hop crater (0.042).** The "expansion is one hop"
-      hypothesis is **dead** — `expand()` is a beam search. Live bounds:
-      `max_expansions=500`, the `score < global_best*0.25` prune, and whether
-      the edges exist at all. Smoke n=8: 8/8 had nearby claims, only 4/8 linked
-      within 2 hops → **ingest-side edge creation is the prime suspect**. Run
-      `--multihop-paths` at full scale, then fix the side it names.
-- [ ] **D. Measure distill coverage.** Rides A's grounded-retrieval run:
-      `gold_nearest_cosine` p10/p50/p90 + share ≥0.6. Smoke n=6: p50 0.464, only
-      1/6 over 0.6 — but calibrate the 0.6 bar first (2–4-word golds vs sentence
-      claims).
-- [ ] **E. Calibrate the judge.** Untouched. 50 hand-labeled verdicts, agreement
-      ≥0.9. Until then no category delta under 5 points is real.
-- [x] Baseline recorded, 3 seeds, Wilson CIs + exact McNemar paired A/B
-      (`--compare-probes`), per-phase wall clock, `--concurrency 4`.
-- [x] Temporal: distill resolves relative dates against the session header
-      (**eval side only — the product intake still has the gap**).
-- [x] Answer shape: `QueryOptions::answer_style` (**eval-only by design**).
+**The question (blocker for every quality claim in this file):** what measures
+retrieval quality without an LLM in the scoring loop?
+
+The shape indicated by `8d8b19e`'s own reasoning — isolate the term that is
+actually kern's — is a **retrieval-only** metric over a labelled corpus:
+recall@k, MRR, NDCG against known-relevant ids, no answerer, no judge, so a
+change in the number can only mean a change in what was retrieved. Multi-hop
+becomes "were the linked entities returned", not "did a 3B model phrase it
+well". Deciding behavior: **none yet — amend first.** Sub-questions the
+amendment has to settle:
+
+- (a) Where does labelled ground truth come from? Hand-labelled corpus, a
+      LoCoMo-derived id-mapping (reusing the conversations while discarding the
+      answer key and judge), or synthetic generation?
+- (b) What is the pass bar, given there is no rival number to compare against
+      once the LLM-judged scale is abandoned? A rival's LoCoMo figure is no
+      longer commensurable with ours.
+- (c) Does answer synthesis get measured at all, or is it explicitly out of
+      scope for kern's scoreboard — given that owning it means owning a model's
+      quality?
+
+Two findings from the deleted work survive as unmeasured leads, and are the
+first candidates for the replacement to check — **evidence-grade smoke only,
+n≤8, not results:**
+
+- **Multi-hop edges are the suspect, not the search.** `expand()` is a beam
+  search, so "expansion is one hop" is dead. Smoke n=8: 8/8 probes had nearby
+  claims, only 4/8 were linked within 2 hops → **ingest-side edge creation**.
+- **Distill coverage may be the floor.** Smoke n=6: `gold_nearest_cosine` p50
+  0.464, 1/6 over 0.6 — but the 0.6 bar was never calibrated (2–4-word golds
+  against sentence-length claims), so it may be measuring the bar.
+
+Shipped and retained from that era: relative-date resolution in distill
+(**eval-side only — the product intake still has the gap**, see §6) and
+`QueryOptions::answer_style` (eval-only by design).
 
 ---
 
@@ -119,10 +136,36 @@ Instruments landed 2026-07-20; the runs have not happened. Sequence is strict.
       lever on answer latency. Streaming, capped `num_ctx`, warm-keeping shipped.
 - [ ] Min-max normalize scoring in `apply_boosts`; swap the hand-rolled stemmer
       for `rust-stemmers` 1.2.0 + stopwords (needs a BM25 rebuild);
-      validate-or-remove GNN reranking. All three are measurement-gated on §3A.
-- [ ] Query cache keys on vector hash only — near-identical queries miss.
+      validate-or-remove GNN reranking. All three are measurement-gated on §3 —
+      i.e. blocked until a replacement metric exists at all.
+- [x] Query cache already matches paraphrases — mis-listed. `QueryCache::lookup`
+      keys on cosine ≥ `theta` (0.97) against the stored query vector
+      (`retrieval/cache.rs:60-71`); the exact-hash `lookup_text` path
+      (`cache.rs:48`) is a pre-embed fast path, not the only key.
 - [ ] HNSW tombstone compaction — dead nodes accumulate.
 - [ ] No learned rerank model — every rerank is a cold LLM call.
+- [ ] **A spilled kern still carries two resident indexes.** DiskANN spill is
+      entity-index-only; the GNN-vector and reason-edge indexes are always
+      rebuilt resident (`decisions/diskann-spill.mdx:120`). The memory ceiling is
+      pushed back, not removed — this residual is not currently tracked anywhere.
+- [ ] **Two freshness signals, different half-lives, neither ever tuned.** A
+      24-hour one for ranking (`qbst_recency_half_life_secs`) and a 7-day one for
+      retention (`base/heat.rs:18`); the offline NDCG sweep meant to tune either
+      was never run (`decisions/stigmergy-over-gardening.mdx:117`). Blocked on
+      §3.
+- [ ] **Victim selection is O(entities) per kern per sweep, and the cold tier is
+      brute-force cosine with no index** — the second scaling cliff after the
+      O(N) importance scan. Previously recorded only in `FEATURES.md` §10, which
+      is not a plan.
+- [ ] **The self-organisation claim is unmeasured.** The convergence metrics
+      (Gini over access, top-10 stability) were never built, so "the corpus
+      converges on efficient paths" — a central product claim — is a design
+      intention, not a measurement (`decisions/stigmergy-over-gardening.mdx:128`).
+      Belongs with §3's replacement metric.
+- [ ] Binary quantization stays non-user-selectable until a rescoring pass
+      exists; its recall floor is too low without one (`concepts/retrieval.mdx:143`).
+- [ ] Ingest queue `enqueue` detaches with no backpressure
+      (`concepts/architecture.mdx:155`).
 - [x] Filtered ANN end-to-end (all three seed sources on `is_active`, recall@10
       A/B `9386de0`); RRF at the answer layer; `answer:false` sub-ms no-LLM path;
       semantic query cache (cosine ≥0.97 + version stamp); lock-scoped answer
@@ -133,28 +176,118 @@ Instruments landed 2026-07-20; the runs have not happened. Sequence is strict.
 ## 5. Federation (`building`, off by default)
 
 Phase 1 landed inline — lamport-stamped LWW on `Reason.score` and `valid_until`
-(`base/merge.rs`), `union_statements` OR-Set semantics, `PendingDelta` queue and
-`start_delta_flush` Delta sender. `crdt.rs` is still 90 LoC of `GCounter` only;
-the LWW/OR-Set semantics live as inline fields, not as named types. Fine.
+(`base/merge.rs`), `PendingDelta` queue and `start_delta_flush` Delta sender.
+`crdt.rs` is still 90 LoC of `GCounter` only; the LWW semantics live as inline
+fields, not as named types. Fine. The OR-Set-for-`statements` plan was
+**reversed, not deferred**: `id == content_hash(text)`, so importing remote
+statement text both breaks content-addressing and resurrects locally-cleared
+statements. Merge never imports them (`base/merge.rs:112`) and the wire target
+is rejected on receipt (`gossip/handler.rs:448`), kept as a refused variant so
+an older peer cannot inject text under a content-addressed id.
 
-Missing, verified by grep at HEAD:
+Missing, verified against source 2026-07-20 (re-verified during the docs audit;
+three items in the previous version of this list were stale — `Fetch` is wired,
+`union_statements` never existed, remote heat is no longer pinnable):
 
-- [ ] **Pulse and Question senders.** Handlers exist, no emitter. `handle_question`
-      is dead code; clustering does not federate.
-- [ ] **Anti-entropy.** No `AntiEntropy` wire variant. `Fetch` is single-id only,
-      and `set_fetch_handler` is never called, so every reply is `found:false` —
-      the fetch RPC is unwired. `EntitySync` ships only the hottest 32 per
-      heartbeat, so cold entities may never propagate. A partitioned node that
-      rejoins never catches up.
+- [x] **Pulse and Question senders.** Both are live and were mis-listed as
+      missing: `broadcast_pulse` and `broadcast_q` are built in `start_gossip`
+      (`commands.rs:900-930`), the pulse emitter is wired into the maintenance
+      tick (`:658`) and the `pulse` MCP tool (`mcp/tools_admin.rs:226`), and
+      `broadcast_q` is invoked by `do_resolve` (`tick.rs:64`).
+      `handle_question` is live-dispatched (`gossip/handler.rs:41`), not dead.
+- [ ] **Anti-entropy.** No `AntiEntropy` wire variant. `EntitySync` ships only
+      the hottest 32 per heartbeat, so cold entities may never propagate. A
+      partitioned node that rejoins never catches up. (`Fetch` is single-id
+      only, but it *is* live — `wire_fetch` installs the handler at
+      `commands.rs:894` and the question path issues it; it is not a
+      catch-up mechanism.)
 - [ ] **Transport security.** Raw TCP, no TLS. `network_id` broadcast cleartext
       over UDP multicast. No signature on `GossipMessage`; `handle_conn` accepts
       any stream and `handle_peer_exchange` trusts any `msg.origin`. Needs
       `tokio-rustls` + `rcgen` as direct deps. **This one gates any deployment
       off a trusted LAN / WireGuard mesh.**
-- [ ] **Backpressure.** No per-peer rate limit, no divergence metric in
-      `HealthStats`, remote heat is an unclamped `f64` joined by max → pinnable.
+- [ ] **Deltas and pulses reach *local* rows.** The sharpest edge the docs audit
+      surfaced. All four live delta targets iterate `g.all_ids()` — every kern
+      including local ones — and mutate the first id match
+      (`gossip/handler.rs:378-430`), with no network check. A peer that knows an
+      id (they are broadcast) can therefore LWW a **local** entity's
+      `valid_until` (`:424`) and its reason scores (`:403`), and inflate local
+      counters under attacker-chosen replica-slot names.
 
-Four decisions owed before the build (deciding behavior: **none yet — amend
+      **This is not one bug, and "scope it to `remote-*`" is the wrong fix** —
+      reaching local rows is *intended* for the counters. Ids are content
+      hashes, so the same fact is a local row on both nodes, and
+      `retrieval/score.rs:255` emits access deltas for local entities precisely
+      so G-Counter slots merge across replicas. Blanket scoping kills that.
+      Split by target:
+      - `ValidUntil` / `ReasonScore` (LWW): an unauthenticated peer overwriting
+        local truth buys nothing federation needs. Confine to `remote-*` now —
+        no wire change, no dependency on §5's TLS work. Note this **subsumes
+        decision (a)**: LWW-vs-max-join for `Reason.score` stops being purely a
+        trust-signalling question once an untrusted writer can reach a local row.
+      - Counters (G-Counter): slot-max is replay-safe by construction, so the
+        exposure is only attacker-chosen *slot names*. The real fix is binding
+        the slot name to an authenticated peer identity, which genuinely gates
+        on transport security above. Until then it is a ranking-inflation
+        nuisance, not a truth-corruption bug.
+
+      **Sequencing, and the reason this is urgent:** the `valid_until` attack is
+      armed but mostly latent — `matches_filter` only honours the field when a
+      caller passes `valid_at` (`retrieval/score.rs:168`), which today only the
+      MCP `valid_at` query param does. §6's "enforce `valid_until` in retrieval"
+      would make expiry apply on the default path — **arming a remote
+      expire-any-local-claim attack repo-wide.** Land this fix *before* that one.
+
+- [ ] **`handle_pulse` falls back to the local root kern.** Separate and simpler:
+      an unknown `pulse.kern_id` does not reject, it defaults to `g.root.id`
+      (`gossip/handler.rs:319-322`), so a peer sending a garbage kern id
+      deposits heat straight into your root kern — with no strength clamp
+      (`tick/pulse.rs:107`). No design intent justifies the fallback. Reject
+      unknown ids, clamp strength, and confine deposits to `remote-*`.
+- [ ] **Backpressure.** No per-peer rate limit, no divergence metric in
+      `HealthStats`. (Remote heat is no longer pinnable: entry to a `remote-*`
+      kern strips heat, access counts, and confidence to neutral —
+      `base/merge.rs:20`, applied at `:139`. The pin risk that remains is the
+      unclamped `Pulse` strength above, which lands on *local* kerns.)
+- [ ] **Entity bodies are never checked against their claimed ids.** The sync
+      path accepts content up to the cap without verifying `id ==
+      content_hash(text)` (`gossip/handler.rs:463`) — and content-addressing is
+      the invariant every other federation guarantee rests on. It is why merge
+      is safe as set-union, why a peer "cannot alter text you hold", and why
+      statements are never imported. A peer can therefore file arbitrary text
+      under an id that does not hash to it. Cheap to close (hash on receipt,
+      drop on mismatch) and it does not need auth, unlike most of §5.
+- [ ] **No Sybil defence is in effect** — and, corrected on inspection, none
+      ever was. Two were written and never wired: `RateClipper`
+      (the since-deleted `gossip/sybil.rs`, 175 LoC) whose `set_clipper()` had no call site in
+      any commit, and `trimmed_mean_merge_hits` (`gossip/merge.rs`, 241 LoC),
+      self-described as "a Sybil-resistant alternative" for fusing per-peer hit
+      lists, also callerless. Both were deleted in `dc02a18` as
+      verified-unreachable; the deletion changed no behaviour because neither
+      had ever run. This is **unbuilt work with a reference implementation in
+      git**, not a regression — a materially cheaper starting point than it
+      first appeared. The layered defences from the authority design
+      (edge-weight caps, pulse-coupled edge validation, temporal slashing of
+      frequently-superseded producers) were never written at all.
+- [ ] **Remote-injected text is retrievable and reaches an agent's context.**
+      Remote entities are vector-indexed on insert, so with gossip on, recall
+      output — and therefore any agent consuming it — extends to every host on
+      the segment (`concepts/security.mdx:233`). Bounded by ranking-signal
+      stripping, not by exclusion. Decide whether `remote-*` should be
+      opt-in-per-query rather than indexed by default.
+- [ ] **Two FL-derived bounds adopted on paper, neither in effect:**
+      trimmed-mean / median materialisation for federated scalars (written,
+      never called, deleted in `dc02a18` — see the Sybil item above; recoverable
+      from git), and a provenance ledger of per-thought
+      `(origin, lamport, confidence)` enabling retrospective down-weighting of a
+      peer later deemed untrusted, which was never written — the shipped
+      `Ledger` (`gossip/ledger.rs`) is a TTL-bounded routing cache, enough to
+      know where to fetch, not who told you what
+      (`decisions/knowledge-not-gradients.mdx:115`).
+- [ ] One fresh TCP connection per gossip message, no pooling
+      (`gossip/transport.rs:37`).
+
+Five decisions owed before the build (deciding behavior: **none yet — amend
 first**):
 
 - (a) Does `Reason.score` stay LWW, or revert to max-join for monotone trust
@@ -202,14 +335,67 @@ resolve/spawn/adopt/unload nodes, hub-first `kern mcp`, graceful shutdown via
 
 Ordered by leverage.
 
-- [ ] **Validate `Kind` at the wire boundary.** A caller can claim `Fact` or
-      `Superseded` today. Highest-leverage safety fix in the repo — `Fact` is
-      GC-immune, so a forged one is permanent.
-- [ ] **Enforce `valid_until` in retrieval.** The field is dead code; expired
-      claims still rank.
+### 6a. Silent wrong answers and silent loss
+
+Surfaced by the 2026-07-20 docs audit: each of these is documented on the site
+as a known limitation but was funded nowhere. They share a failure mode — no
+error, no warning, just a wrong or missing result — which is why they lead the
+section. None is a missing feature; all are live defects.
+
+- [ ] **Cold eviction drops the temporal side-map, so `as_of` silently lies.**
+      A thought recovered from cold returns with `valid_from`, `valid_to` and
+      `invalidated_at` unset, so an `as_of` filter treats a cold-recovered
+      revision as unbounded and therefore valid at *every* instant. Point-in-time
+      queries are exact over the hot graph and lossy over the cold tail, with no
+      signal to the caller which they got. Documented at
+      `concepts/time.mdx:112`.
+- [ ] **A prose-answering reason model archives deltas having stored nothing.**
+      `Some([])` from a model that replied in prose instead of JSON is
+      indistinguishable from a genuine "nothing worth keeping", so the intake
+      marks the delta done and moves on. Silent data loss on the main ingest
+      path. Distinct from the intake-visibility item below: that one exposes
+      failures, this one is not classified as a failure at all.
+      (`concepts/acceptance.mdx:72`.)
+- [ ] **Changing the embedding model silently zeroes recall.** Stored vectors
+      stop matching query vectors; search returns nothing useful rather than
+      erroring. No dimension guard, no model-identity stamp on the index, no
+      startup check. (`howto/configure.mdx:39`.)
+- [ ] **In-memory mode drops entities with no spill.** The spill-before-drop
+      guarantee holds only for a persisted kern; with no store bound,
+      `cold_spill` is skipped and the victim is simply removed
+      (`concepts/heat-and-compaction.mdx:196`).
+- [ ] **The cold tier is a lossy FIFO past 50k**, with no operator signal at the
+      boundary — a non-durable thought you never touch, in a store that spills
+      more than 50k after it, is permanently gone
+      (`concepts/heat-and-compaction.mdx:191`).
+
+### 6b. Everything else
+
+- [x] **Validate `Kind` at the wire boundary.** Listed for a long time as "the
+      highest-leverage safety fix in the repo"; it is shipped, and the premise
+      was wrong on all three counts. `validate_kind` **is** called
+      (`mcp/tools_mutate.rs:117`) and rejects the four internal-only kinds.
+      `Superseded` is an `EntityStatus`, not an `EntityKind`
+      (`base/types.rs:19-28`) — it was never claimable by anyone. And a forged
+      `Fact` is unreachable regardless: the MCP path runs
+      `clamp_confidence(p.conf, AGENT_SOURCE)` capping at `MAX_AI_CONFIDENCE`
+      0.95, and `kind` is *derived* from confidence — `Fact` needs 1.0
+      (`base/math.rs:205-210`, `base/constants.rs:62`) — so the caller's `kind`
+      is discarded. Only the CLI reaches `Fact`, via
+      `clamp_confidence(1.0, "user")` (`commands/ingest_cmd.rs:47`).
+- [x] Clamp `conf` to [0,1] — shipped; `validate_conf` (`base/validate.rs:18`)
+      is called at `mcp/tools_mutate.rs:115`.
+- [ ] **Enforce `valid_until` in retrieval.** Near-dead code: `matches_filter`
+      honours the field only when a caller passes `valid_at`
+      (`retrieval/score.rs:168`), which today only the MCP `valid_at` param
+      does, so on the default path expired claims still rank. **Blocked on §5's
+      delta-scoping fix** — with gossip enabled, an unauthenticated peer can
+      already LWW `valid_until` on a local row, so enforcing expiry by default
+      before that lands arms a remote expire-any-local-claim attack. Order is
+      not optional.
 - [ ] **Source-keyed idempotency at ingest** — `(source.system, object_id,
       section)` instead of paraphrase-evadable cosine dedup.
-- [ ] Clamp `conf` to [0,1]. Require reason text on supersede.
+- [ ] Require reason text on supersede.
 ### Getting data in — the intended shape, and what breaks it
 
 Three ways in, and they are not equals. **MCP `ingest` and `kern ingest` are the
@@ -254,12 +440,76 @@ request. One name for all of it — `intake`, everywhere, no second word.
 - [ ] Distill prompt is one-shot and global — no per-descriptor prompts, no
       long-delta chunking. `kind` label accuracy ~33% even at 7B; the taxonomy
       has overlapping categories (decision/project, fact/code-fact).
+- [ ] **The e2e suite is not run in CI.** `.github/workflows/ci.yml` runs
+      `cargo test --workspace` only, so `e2e/` — the only thing exercising the
+      real binary end to end, and the only place the hub lifecycle is
+      tested — is local-only and can rot unnoticed. Needs a Python setup step
+      (`e2e/requirements.txt` now declares the one dep) plus a built binary in
+      the job. Judgement call deferred to a human: CI minutes and flakiness
+      against a suite that currently catches things `cargo test` cannot.
 - [ ] Two parallel typed transport surfaces (`kern_rpc` + `search`) with
       overlapping DTOs — one should die.
 - [ ] Document gravitons truncate at the embed context window; chunk+mean-pool
       is the upgrade path. Blocked on a real document long enough to truncate.
+      **Note the docs actively recommend the input that triggers this** —
+      `howto/seed.mdx:43` and `concepts/stigmergy.mdx:97` both advise seeding a
+      graviton with a whole document. Fix the guidance now, the truncation
+      later.
 - [x] Durability: `snapshot_if_dirty` on the maintenance tick. WAL rejected —
       LMDB already orders recovery.
+
+**Operational surfaces** (documented on the site, previously unfunded):
+
+- [ ] **`kern mcp` standalone fallback is a silent second writer** against the
+      same LMDB environment — same class as the CLI/daemon race above, different
+      path. Symptom: tools work but the graph never grows across sessions
+      (`howto/mcp.mdx:57`).
+- [ ] **Standalone `kern mcp` runs no maintenance tick and no gossip**
+      (`concepts/architecture.mdx:118`), so a graph served that way never
+      decays, clusters or GCs.
+- [ ] **`resources/list` and `prompts/list` return `-32601` on the proxy path** —
+      i.e. the normal path when a daemon is running. Advertised, non-functional
+      (`howto/mcp.mdx:190`). Either forward them or stop advertising.
+- [ ] **An auto-spawned daemon has no log at all** — detached with null stdio
+      (`howto/install-run.mdx:167`). With hub auto-start shipped (§5x) this is
+      the default posture, so the default posture is undebuggable.
+- [ ] **Config validation failure does not stop startup** — logs a warning and
+      continues with whatever parsed (`howto/configure.mdx:99`).
+- [ ] No env-var override layer; API keys sit in plaintext TOML
+      (`howto/configure.mdx:103`). `--mcp-addr` has no config field.
+- [ ] RPC socket bind→chmod race (sub-millisecond, umask default) — recorded as
+      an accepted risk in `concepts/security.mdx:40`; revisit only if the umask
+      alternative stops being worse.
+
+**Belief model** (`decisions/bayesian-confidence.mdx`, none funded):
+
+- [ ] **No evidence decay.** `α` and `β` only grow, so stale consensus takes
+      proportionally many new observations to unseat; tick-based `γ` damping is
+      an open design (`:137`).
+- [ ] **An agent cannot register disagreement at all.** There is no `Contradicts`
+      reason kind and no `stance` parameter on ingest; `observe_contradict` has
+      exactly one caller in the tree, GNN alignment (`:100`). Also unbuilt:
+      observer-reputation weighting.
+- [ ] **Supersede chains are unbounded while contested** — no `ReasonKind::Edit`
+      rationale edge and no producer rate-limit, so an A/B ping-pong on one
+      `external_id` grows without bound (`decisions/edit-convergence.mdx:107`).
+
+**Documented nowhere the user would look** (funded here, missing from the site —
+fix on the docs side, tracked here so it is not lost):
+
+- [ ] `kern hub` appears on no site page, including its 1800s idle-unload
+      default — a user whose daemon vanishes has nothing to read.
+- [ ] Distill `kind` accuracy ~33% is not conveyed; the site presents the seven
+      descriptors as a working vocabulary, so every `kind`-filtered query is
+      less reliable than it reads.
+- [ ] The `id` path in `query` bypasses every filter (§7a) — undocumented at
+      `howto/mcp.mdx:73`.
+- [ ] Automatic session intake has no producer, but `index.mdx:11` reads
+      `session text → intake` as if automatic and
+      `howto/intake-recall.mdx:171` tells users to "check your client hook"
+      when none ships.
+- [ ] Cosine dedup is paraphrase-evadable, but `howto/seed.mdx:178` calls
+      re-running a seed "close to idempotent".
 
 Deferred design calls, still owed, no blocker but no urgency: quarantine
 representation (bool vs `EntityStatus::Quarantined` vs `Source` trust band);
@@ -357,8 +607,8 @@ materializes.
 Distributed sharding (Raft) · replication + write-consistency factor · API key /
 JWT-RBAC / TLS-for-clients / audit logging · public REST + gRPC + multi-language
 SDKs · multitenancy · GPU index building · product quantization / SPLADE sparse
-vectors / ColBERT multi-vector — re-promote any one of these **iff** §3A shows a
-retrieval-quality gap it would close.
+vectors / ColBERT multi-vector — re-promote any one of these **iff** §3's
+replacement metric shows a retrieval-quality gap it would close.
 
 **Parked indefinitely:** the v2 self-training track (LoRA in Rust, teacher
 pipeline over mature graph regions, per-graviton adapters hot-swapped at query

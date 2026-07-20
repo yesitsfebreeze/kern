@@ -553,24 +553,31 @@ thought ingested on node A becomes searchable on node B under the same id.
 seeded `peers` (the reliable path). Multicast discovery only pairs same-
 `network_id` nodes. The **Delta, Pulse and Question senders are all live**
 (`src/gossip/handler.rs:135`, `src/commands.rs:897`, `src/commands.rs:911`,
-driven from `src/tick/tasks.rs:439`). The **fetch RPC is the dead path**: the
-server side answers (`src/gossip/node.rs:219`) but `set_fetch_handler`
-(`src/gossip/node.rs:56`) is never called and `fetch_thought`
-(`src/gossip/node.rs:138`) has no caller, so every reply is `found: false`.
-OR-Set deltas for `statements` never send either — `src/gossip/handler.rs:160`
-hardcodes an empty `orset_delta`, so the receive path at `:384` is unreachable
-over the wire; statements still converge through full EntitySync bodies.
-Federation tuning at scale (batch size, push vs pull, anti-entropy) is open.
+driven from `src/tick/tasks.rs:439`). The **fetch RPC is live**: `wire_fetch`
+(`src/gossip/handler.rs:50`) installs the handler at startup
+(`src/commands.rs:894`) and `spawn_fetch_entity` (`src/gossip/handler.rs:71`)
+issues fetches from the question path. OR-Set deltas for `statements` are
+**dead on both ends by design, not by omission**: `id == content_hash(text)`,
+so a same-id peer has identical content by construction and a differing one is
+asserting content its id does not hash to. The sender emits empty
+(`src/gossip/handler.rs:216`) and the receiver rejects the target
+(`src/gossip/handler.rs:448`), kept as a refused variant so an older peer
+cannot inject text under a content-addressed id. Statements converge through
+full EntitySync bodies. Federation tuning at scale (batch size, push vs pull,
+anti-entropy) is open.
 
-**Security.** **Unauthenticated and unencrypted.** See `docs/FEDERATION-SECURITY.md`.
-Off by default.
+**Security.** **Unauthenticated and unencrypted.** Off by default. Full trust
+model, including what a malicious peer can and cannot do, is the `Security`
+page on the docs site (`docs/site/content/docs/concepts/security.mdx`).
 
 **Where.** `src/gossip/*` (1817 LoC, 7 files), `src/crdt.rs`, `src/base/merge.rs`.
 
 **Gaps.** No auth/crypto. No anti-entropy merkle/snapshot exchange — EntitySync
 ships the hottest 32 by heat per heartbeat, so cold entities may never
-propagate. Fetch RPC unwired. OR-Set delta send unimplemented. No backpressure
-on remote-id cap (drops new, keeps known).
+propagate. No backpressure on remote-id cap (drops new, keeps known). CRDT
+deltas and pulses reach *local* rows, not just `remote-*` (ROADMAP §5) —
+entity bodies are also accepted without checking content against the claimed
+id (`src/gossip/handler.rs:463`).
 
 ---
 
@@ -664,7 +671,7 @@ client→node — the hub is connect-time only, never a proxy hop.
   RPC; nodes stay up.
 
 **Where.** `src/hub/`, `src/trnsprt/src/hub_rpc/`, `commands/admin.rs::cmd_hub`,
-`src/config/hub.rs`, `tests/hub_supervisor.rs`.
+`src/config/hub.rs`, `e2e/test_hub.py`.
 
 **Gaps.** Gossip still lives in each node; the transport moves hub-side
 together with §5's TLS work (ordering recorded in ROADMAP §5x). Version skew
@@ -728,6 +735,71 @@ NDCG against LoCoMo's per-turn `evidence` labels, no LLM in the loop. It needs
 turn-level claim provenance, which ingest does not record yet.
 
 
+## 21a. E2E harness (`e2e/`, Python) — `active`
+
+**What.** `just e2e` (pytest) drives the real `kern` binary end to end:
+answer retrieval (ingest → search/query → `--answer` prompt) and the hub
+supervisor lifecycle.
+
+**How.** `fake_llm.py` serves the native Ollama API deterministically —
+`/api/embed` returns feature-hashed bag-of-words vectors (token overlap gives
+real cosine ranking, no GPU or model), `/api/chat` echoes the last user
+message so the answer test can assert the retrieved context reached the
+prompt. `conftest.py` isolates each test in a private project (own
+`XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME`, `.kern/kern.toml` pinned to the fake).
+`test_hub.py` is the ported Rust hub supervisor suite.
+
+**Where.** `e2e/conftest.py`, `e2e/fake_llm.py`, `e2e/test_retrieval.py`,
+`e2e/test_hub.py`, `e2e/requirements.txt`; `justfile` recipes `e2e` and
+`e2e-install`.
+
+**Gaps.** **Not run in CI** — `.github/workflows/ci.yml` runs
+`cargo test --workspace` only, so this suite is local-only and can rot
+unnoticed; wiring it needs a Python setup step plus a built binary. Windows:
+hub tests skip (unix sockets); retrieval tests unverified there. (The former
+query-ranking xfail is fixed — hybrid fusion rescores seeds by query cosine;
+see CHANGELOG 2026-07-20 — and is now a hard regression test.)
+
+
+## 21b. Docs site (`docs/site/`, fumadocs) — `active`
+
+**What.** The published documentation at yesitsfebreeze.github.io/kern —
+25 pages built with fumadocs (Next.js, static export), in three sections:
+**Concepts** (the mental model, including `security` — the whole trust model:
+local socket and MCP surface, plaintext-at-rest, LLM egress, and the
+federation CAN/CANNOT tables), **Decisions** (per-mechanism design rationale
+ported from `docs/kern/` research notes and re-verified against source), and
+**How-to** (task-shaped guides).
+
+**How.** MDX content in `docs/site/content/docs/`; `next build` with
+`output: 'export'` emits `docs/site/out/`. Client-side Orama search from a
+statically cached index (`/api/search`), mermaid rendered client-side,
+`/llms.txt` and `/llms-full.txt` generated from the page tree for LLM
+consumption. `NEXT_PUBLIC_BASE_PATH=/kern` in CI for GitHub Pages;
+`.github/workflows/docs.yml` builds on docs changes and pushes `out/` to the
+`gh-pages` branch. Replaced mkdocs + terminal theme + custom TUI overlay
+(deleted 2026-07-20).
+
+**Doc/code contract.** Pages cite exact `src/…:line` locations, so drift is
+mechanically checkable: `scripts/docs_check.py` (recipe `just docs-check`,
+`README.md` included) fails on any citation naming a missing file or a line
+past EOF, any relative page link whose target does not exist, and any link into
+this repo's own files on GitHub that names a file not committed — the check
+that would have caught the month-long dead `install.sh` link. `--selftest` pins
+its three regexes.
+`.github/workflows/docs-check.yml` runs it on every push and PR, deliberately
+unfiltered by path. Pages state only what exists today (including honest "not
+built"); what is *left* lives solely in `ROADMAP.md` per repo law 4.
+
+**Where.** `docs/site/` (app + content), `scripts/docs_check.py`, `justfile`
+recipes `docs` (dev server), `docs-build`, `docs-install`, `docs-check`.
+
+**Gaps.** No custom theme — stock fumadocs UI by explicit choice. Local dev
+needs `npm ci` in `docs/site` once. `docs_check.py` proves a cited line
+exists, not that it still holds the claimed thing — semantic drift is caught
+only by audit.
+
+
 ## 22. Cross-cutting utilities
 
 - **math** (`src/base/math.rs`) — `cosine`, `cosine_distance`, `l2_normalize`,
@@ -754,8 +826,10 @@ Ranked by leverage:
 
 1. **O(N) importance scan per retrieve** (`retrieval/seed.rs`) — index it; it's
    the scaling cliff at query time.
-2. **Federation security** — add auth + encryption before any real deployment
-   (`docs/FEDERATION-SECURITY.md`). Pulse/Question senders still partial.
+2. **Federation security** — add auth + encryption before any real deployment;
+   before that, close the local-row reach of CRDT deltas and pulses and verify
+   entity content against claimed ids, neither of which needs auth (ROADMAP §5).
+   Trust model: `docs/site/content/docs/concepts/security.mdx`.
 3. **Per-kern entity cap** — `KERN_CAP_DISABLED` today; a safe cap + escalation
    policy would bound memory deterministically.
 4. **CLI vs daemon race** — add `kern status` + advisory locking so the CLI

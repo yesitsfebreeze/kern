@@ -5,97 +5,117 @@ rustest_repo := "https://github.com/yesitsfebreeze/rustest"
 rustest_dir  := justfile_directory() / ".." / "rustest"
 image        := "rustest:latest"
 
-default:
+# shows this help
+help:
     @just --list
 
+# all static checks: formatting + clippy with warnings as errors
 check:
-    cargo check --workspace
+    cargo fmt --all -- --check
+    cargo clippy --all-targets -- -D warnings
 
+# debug build
 build:
     cargo build
 
+# Release build
 release:
     cargo build --release
 
-# Launch the mux: spawns the agent pane, becomes the cwd singleton daemon
-# (engine in-process), and registers/serves the kern MCP — all in one process.
+# launch the mux: agent pane + cwd daemon + kern MCP, one process
 run:
     cargo run --bin kern
 
-# Headless daemon only (no TUI/panes) — for servers or background use.
+# headless daemon only (no TUI/panes) — servers or background use
 daemon:
     cargo run --bin kern -- --daemon
 
+# full test suite: nextest + doc tests + e2e pytest
 test:
     cargo nextest run --workspace
     cargo test --doc --workspace
+    pytest -q e2e
 
+# E2E harness alone: real binary against a deterministic fake LLM
+e2e:
+    pytest -q e2e
+
+# apply formatting
 fmt:
-    cargo fmt --all -- --check
-
-fmt-fix:
     cargo fmt --all
 
-clippy:
-    cargo clippy --all-targets -- -D warnings
-
+# install the release binary via cargo
 install: release
     cargo install --path . --force
 
+# remove the installed binary
 uninstall:
-    -cargo uninstall kern
+    cargo uninstall kern
 
+# wipe build output and local runtime state
 [unix]
 clean:
     cargo clean
     rm -rf .relay .mesh .git-fs .machine
     rm -rf .kern/bin .kern/intake .kern/data .kern/*.log
-    rm -rf site traces
+    rm -rf traces docs/site/out docs/site/.next
 
+# wipe build output and local runtime state
 [windows]
 clean:
     cargo clean
     -Remove-Item -Recurse -Force .relay, .mesh, .git-fs, .machine
     -Remove-Item -Recurse -Force ".kern\bin", ".kern\intake", ".kern\data"
     -Remove-Item -Force ".kern\*.log"
-    -Remove-Item -Recurse -Force "site", "traces"
+    -Remove-Item -Recurse -Force "traces", "docs\site\out", "docs\site\.next"
 
+# kill running kern processes
 [windows]
 kill:
     -taskkill /IM kern.exe /F 2>$null
 
+# kill running kern processes
 [unix]
 kill:
     -pkill -f kern
 
+# serve the docs site locally (dev server)
 docs:
-    mkdocs build --strict
+    cd docs/site && npm run dev
 
-docs-serve:
-    mkdocs serve
+# static-export the docs site to docs/site/out
+docs-build:
+    cd docs/site && npm run build
 
-docs-deploy:
-    mkdocs gh-deploy --force
+# install e2e harness dependencies
+e2e-install:
+    pip install -r e2e/requirements.txt
 
-# Build the shared rustest image (clone the sibling repo if it's missing).
+# install docs site dependencies
+docs-install:
+    cd docs/site && npm ci
+
+# verify every src/...:line citation and page link in the docs site is alive
+docs-check:
+    python3 scripts/docs_check.py --selftest
+    python3 scripts/docs_check.py
+
+# build the shared rustest image (clone the sibling repo if missing)
 [unix]
 docker-build:
     test -d "{{rustest_dir}}" || git clone {{rustest_repo}} "{{rustest_dir}}"
     cd "{{rustest_dir}}" && just build
 
+# build the shared rustest image (clone the sibling repo if missing)
 [windows]
 docker-build:
     if (-not (Test-Path "{{rustest_dir}}")) { git clone {{rustest_repo}} "{{rustest_dir}}" }
     cd "{{rustest_dir}}"; just build
 
-# Interactive shell in the debug/test container (this repo mounted at /work).
+# interactive shell in the debug/test container (repo mounted at /work)
 docker:
     docker run --rm -it --cap-add SYS_PTRACE --security-opt seccomp=unconfined -v "{{justfile_directory()}}":/work -w /work {{image}} /bin/bash
 
-# Run the full test suite inside the container (installs nextest into the image's PATH if missing).
+# full test suite inside the container (installs nextest if missing)
 docker-test:
     docker run --rm --cap-add SYS_PTRACE --security-opt seccomp=unconfined -v "{{justfile_directory()}}":/work -w /work {{image}} sh -c 'command -v cargo-nextest >/dev/null || curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C /usr/local/bin; cargo nextest run --workspace && cargo test --doc --workspace'
-
-
-
-

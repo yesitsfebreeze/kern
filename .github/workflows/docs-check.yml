@@ -1,0 +1,14 @@
+name: Docs check
+
+# No path filter: the check is a two-second script, and every filter is a way
+# for a deletion to slip past it. install.sh was deleted in a commit about LLM
+# endpoints and left the documented install path 404ing for a month.
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/docs_check.py --selftest
+      - run: python3 scripts/docs_check.py
