@@ -1,5 +1,18 @@
 # Changelog
 
+- 2026-07-20 — `scripts/insight.py` and the `just insight` recipe are deleted;
+  `scripts/` is gone. It printed a repo snapshot (build, tests, LOC, oracle
+  counts) but nothing consumed it — no CI job, no hook, no doc — and `git`,
+  `cargo` and `tokei` already report everything in it except the oracle
+  counts, which are a `grep` away. It was repaired hours earlier the same day
+  (it had been silently reporting zeros after the governance files moved);
+  that repair is superseded by removing the thing entirely, which is the
+  cheaper end state for a tool with no consumer. It is not moved into `e2e/`:
+  that directory is for suites that drive the real binary, not for
+  reporting. Decided by: delete-superseded (an unused reporter is cruft
+  however correct it is). Supersedes: the insight.py path repair recorded
+  immediately above.
+
 - 2026-07-20 — `tests/` becomes `e2e/`, and the target is declared explicitly
   in `Cargo.toml`. The directory holds exactly one suite, and it is not a unit
   test: it spawns the real `kern` binary over a real Unix socket under a

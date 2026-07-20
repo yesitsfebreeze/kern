@@ -98,8 +98,4 @@ docker-test:
 
 
 
-# Measured repository snapshot: build, tests, code shape, oracle state.
-# Every number comes from a run. --json for CI diffing, --skip-tests when cold.
-insight *args:
-    python3 scripts/insight.py {{args}}
 
