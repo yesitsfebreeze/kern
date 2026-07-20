@@ -48,8 +48,10 @@ pub(super) async fn cmd_ingest(
 	let worker = crate::ingest::Worker::new(g.clone(), llm_client, None, None, None);
 
 	let (conf, kind) = clamp_confidence(1.0, "user");
+	// Identity per ingest, not a shared constant: a constant hash made every
+	// CLI ingest the same source, so each one superseded the previous fact.
 	let src = Source::Inline {
-		hash: "user".to_string(),
+		hash: crate::base::util::content_hash(&text),
 		section: String::new(),
 	};
 

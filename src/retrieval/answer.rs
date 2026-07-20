@@ -106,11 +106,13 @@ pub struct Retrieved {
 	pub remote_ids: std::collections::HashSet<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fuse_hybrid_seeds(
 	g: &GraphGnn,
 	cfg: &RetrievalConfig,
 	opts: Option<&QueryOptions>,
 	lex: &crate::base::lexical::LexicalIndex,
+	qvec: &[f32],
 	dense_seeds: Vec<crate::base::search::EntityHit>,
 	query_text: &str,
 	imp_hits: &[crate::base::search::EntityHit],
@@ -137,7 +139,19 @@ fn fuse_hybrid_seeds(
 		lists.push(&pr_hits);
 		weights.push(gw);
 	}
-	fuse::rrf(&lists, &weights, cfg.rrf_k, cfg.seed_k.max(1) * 2)
+	let mut fused = fuse::rrf(&lists, &weights, cfg.rrf_k, cfg.seed_k.max(1) * 2);
+	// RRF decides WHICH entities seed; it must not decide how much they score.
+	// Its reciprocal-rank scores live on a ~1/rrf_k scale while expand() scores
+	// neighbours on the cosine scale — pooled in merge(), any expanded neighbour
+	// outscored every seed and ranking inverted. Rescore the fused survivors by
+	// query cosine so seeds re-enter the pipeline on the one scale it speaks.
+	for h in &mut fused {
+		h.score = expand::find_entity_ref_in_graph(g, &h.entity_id)
+			.map(|e| crate::base::math::cosine(qvec, &e.vector))
+			.unwrap_or(0.0);
+	}
+	fused.sort_by(|a, b| crate::base::util::cmp_rank(a.score, &a.entity_id, b.score, &b.entity_id));
+	fused
 }
 
 // Graph-only half of retrieval (seed -> expand -> merge -> score -> diversify). NO LLM — callers hold the graph lock for exactly this sub-ms phase.
@@ -174,7 +188,7 @@ pub fn retrieve_profiled(
 
 	let seeds = if mode == Mode::Hybrid && cfg.lexical_enabled && !query_text.is_empty() {
 		match lex_ref {
-			Some(lex) => fuse_hybrid_seeds(g, cfg, opts, lex, dense_seeds, query_text, &important),
+			Some(lex) => fuse_hybrid_seeds(g, cfg, opts, lex, qvec, dense_seeds, query_text, &important),
 			None => dense_seeds,
 		}
 	} else {

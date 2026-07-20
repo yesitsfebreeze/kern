@@ -261,8 +261,14 @@ pub fn build_chunk_entity(
 	)
 }
 
+// Keyed on the FULL source identity (scheme+object+section), not the bare
+// section: section-only ids collide across documents, so chunk 0 of every
+// source superseded chunk 0 of the previous one — silent data loss.
 pub fn chunk_source_id(source: &Source, index: usize) -> String {
-	format!("{}#chunk{}", source.section(), index)
+	match source.source_id() {
+		Some(sid) => format!("{sid}#chunk{index}"),
+		None => String::new(),
+	}
 }
 
 #[cfg(test)]
@@ -307,8 +313,28 @@ mod tests {
 	}
 
 	#[test]
-	fn chunk_source_id_is_section_scoped() {
-		assert_eq!(chunk_source_id(&session_source(), 3), "sec#chunk3");
+	fn chunk_source_id_is_scoped_to_the_full_source_identity() {
+		let sid = session_source().source_id().unwrap();
+		assert_eq!(
+			chunk_source_id(&session_source(), 3),
+			format!("{sid}#chunk3")
+		);
+		let other = Source::Session {
+			session_id: "s2".into(),
+			section: "sec".into(),
+			title: String::new(),
+		};
+		assert_ne!(
+			chunk_source_id(&session_source(), 0),
+			chunk_source_id(&other, 0),
+			"same section in different sources must not collide"
+		);
+		let anonymous = Source::default();
+		assert_eq!(
+			chunk_source_id(&anonymous, 0),
+			"",
+			"an identity-less source gets no external id, so it never supersedes"
+		);
 	}
 
 	#[test]
