@@ -41,6 +41,8 @@ pub struct QueryOptions {
 	pub as_of: Option<SystemTime>,
 	// Superseded-history walk done at the tool layer, NOT a per-entity filter (the ANN never holds superseded entities).
 	pub include_history: bool,
+	// Appended to the synthesis prompt only — never a retrieval filter, so is_active() ignores it.
+	pub answer_style: Option<String>,
 }
 
 impl QueryOptions {

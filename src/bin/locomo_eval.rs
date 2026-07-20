@@ -1,5 +1,5 @@
 use clap::Parser;
-use kern::bench_support::locomo_run::{run_eval, EvalConfig};
+use kern::bench_support::locomo_run::{run_eval, run_multihop_paths, ContextMode, EvalConfig};
 use kern::config::{DEFAULT_ANSWER_MODEL, DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL};
 
 #[derive(Parser, Debug)]
@@ -42,6 +42,36 @@ struct Args {
 	/// Sampling seed forwarded to ollama; vary across runs for error bars.
 	#[arg(long, default_value_t = 0)]
 	seed: i64,
+	/// Ablation: kern (full pipeline) | grounded (answer from the full
+	/// conversation, kern skipped) | grounded-retrieval (top-10 claims nearest
+	/// the gold answer — splits distill loss from retrieval loss).
+	#[arg(long, default_value = "kern")]
+	context_mode: String,
+	/// Diagnostic instead of an eval: ingest, then report whether the claims
+	/// nearest each multi-hop gold share any graph path within 2 hops.
+	#[arg(long)]
+	multihop_paths: bool,
+	/// Concurrent samples (ingest+eval). >1 needs OLLAMA_NUM_PARALLEL on the
+	/// server; grounded mode multiplies its 32k KV cache per slot (VRAM).
+	#[arg(long, default_value_t = 8)]
+	concurrency: usize,
+	/// Retrieval delivery floor: results scoring below are dropped, and empty
+	/// delivery triggers the abstention gate. 0.0 = baseline-compatible.
+	#[arg(long, default_value_t = 0.0)]
+	min_deliver: f64,
+	/// Disable HyDE query expansion (saves one LLM call per probe).
+	#[arg(long)]
+	no_hyde: bool,
+	/// Disable LLM reranking (saves one LLM call per probe).
+	#[arg(long)]
+	no_rerank: bool,
+	/// Append one JSON line per probe (question, gold, pred, verdict,
+	/// top_cosine) — the judge-calibration / coverage-calibration artifact.
+	#[arg(long)]
+	probe_log: Option<String>,
+	/// Ignore the distilled-claims cache (eval/cache/) — no read, no write.
+	#[arg(long)]
+	fresh_distill: bool,
 	/// Emit a machine-readable (CI-diffable) report instead of the human table.
 	#[arg(long)]
 	json: bool,
@@ -70,6 +100,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 		return Err(format!("dataset not found: {dataset}").into());
 	}
 
+	let Some(context_mode) = ContextMode::parse(&args.context_mode) else {
+		return Err(format!(
+			"unknown --context-mode `{}` (expected kern | grounded | grounded-retrieval)",
+			args.context_mode
+		)
+		.into());
+	};
+
 	let cfg = EvalConfig {
 		dataset_path: dataset.clone(),
 		base_url: args.url,
@@ -82,12 +120,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 		max_qa_per_sample: args.max_qa,
 		dedup_threshold: args.dedup,
 		seed: args.seed,
+		context_mode,
+		concurrency: args.concurrency,
+		min_deliver: args.min_deliver,
+		hyde: !args.no_hyde,
+		rerank: !args.no_rerank,
+		probe_log: args.probe_log,
+		fresh_distill: args.fresh_distill,
 	};
 
 	eprintln!(
-		"locomo_eval: dataset={dataset} embed={} answer={} judge={} seed={}",
-		cfg.embed_model, cfg.answer_model, cfg.judge_model, cfg.seed
+		"locomo_eval: dataset={dataset} embed={} answer={} judge={} seed={} mode={}",
+		cfg.embed_model, cfg.answer_model, cfg.judge_model, cfg.seed, args.context_mode
 	);
+
+	if args.multihop_paths {
+		let table = run_multihop_paths(&cfg).await?;
+		match &args.output {
+			Some(path) => std::fs::write(path, &table)?,
+			None => println!("{table}"),
+		}
+		return Ok(());
+	}
+
 	let report = run_eval(&cfg).await?;
 
 	let body = if args.json {

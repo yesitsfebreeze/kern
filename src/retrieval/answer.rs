@@ -9,6 +9,9 @@ use crate::retrieval::score::{self, QueryOptions};
 use crate::retrieval::seed::{self, Mode, Weights};
 use crate::retrieval::{diversify, fuse, gravity, hyde, merge, pagerank, rerank, LlmFunc};
 
+// Must stay inside locomo::is_abstention's marker set — pinned by a test there.
+pub const NO_ANSWER: &str = "I don't have information about that.";
+
 #[derive(Debug, Clone)]
 pub struct QueryResult {
 	pub answer: String,
@@ -62,7 +65,8 @@ pub fn query_profiled(
 
 	score::commit_access(&mut results);
 
-	let answer = synthesize(&chain_text, &results, query_text, llm);
+	let style = opts.as_ref().and_then(|o| o.answer_style.as_deref());
+	let answer = synthesize(&chain_text, &results, query_text, llm, style);
 	prof.checkpoint("answer");
 
 	(
@@ -215,13 +219,23 @@ pub fn synthesize(
 	scored: &[ScoredEntity],
 	query_text: &str,
 	llm: Option<&LlmFunc>,
+	style: Option<&str>,
 ) -> String {
 	if query_text.is_empty() {
 		return String::new();
 	}
 	match llm {
 		Some(llm_fn) => {
-			let prompt = answer_prompt_from(chain_text, scored, query_text);
+			// Empty context: abstain without an LLM call — cheaper and more reliable
+			// than asking the model to notice it has nothing to work with.
+			if scored.is_empty() && chain_text.is_empty() {
+				return NO_ANSWER.to_string();
+			}
+			let mut prompt = answer_prompt_from(chain_text, scored, query_text);
+			if let Some(s) = style {
+				prompt.push(' ');
+				prompt.push_str(s);
+			}
 			llm_fn(&prompt)
 		}
 		None => String::new(),
@@ -257,7 +271,14 @@ pub fn query_locked(
 	score::commit_access(&mut retrieved.results);
 	// Live-graph access write-back is deferred to a CommitAccess tick task (see
 	// mcp::Server::tool_query) so this path takes ONLY a read lock (see note).
-	let answer = synthesize(&retrieved.chain_text, &retrieved.results, query_text, llm);
+	let style = opts.as_ref().and_then(|o| o.answer_style.as_deref());
+	let answer = synthesize(
+		&retrieved.chain_text,
+		&retrieved.results,
+		query_text,
+		llm,
+		style,
+	);
 
 	(
 		QueryResult {
@@ -293,7 +314,8 @@ pub fn answer_prompt_from(chain_text: &str, scored: &[ScoredEntity], query_text:
 	prompt.push_str(&format!(
 		"\nQuestion: {query_text}\n\
 		 Answer the question concisely using only the context above. \
-		 Do not restate the context. Be direct."
+		 Do not restate the context. Be direct. \
+		 If the context does not contain the answer, say exactly: {NO_ANSWER}"
 	));
 	prompt
 }
@@ -400,13 +422,33 @@ mod tests {
 	fn synthesize_is_empty_without_a_query_or_an_llm() {
 		let s = [scored("a", "fact", 1.0)];
 		assert!(
-			synthesize("ctx", &s, "", None).is_empty(),
+			synthesize("ctx", &s, "", None, None).is_empty(),
 			"empty query -> empty answer"
 		);
 		assert!(
-			synthesize("ctx", &s, "q?", None).is_empty(),
+			synthesize("ctx", &s, "q?", None, None).is_empty(),
 			"no llm -> empty answer"
 		);
+	}
+
+	#[test]
+	fn synthesize_abstains_on_empty_context_without_calling_the_llm() {
+		let llm: LlmFunc = Arc::new(|_: &str| panic!("LLM must not run on empty context"));
+		let out = synthesize("", &[], "q?", Some(&llm), None);
+		assert_eq!(out, NO_ANSWER);
+	}
+
+	#[test]
+	fn synthesize_appends_the_style_hint_to_the_prompt() {
+		let s = [scored("a", "fact", 1.0)];
+		let seen = Arc::new(std::sync::Mutex::new(String::new()));
+		let seen2 = seen.clone();
+		let llm: LlmFunc = Arc::new(move |p: &str| {
+			*seen2.lock().unwrap() = p.to_string();
+			"ok".to_string()
+		});
+		synthesize("", &s, "q?", Some(&llm), Some("STYLE-HINT"));
+		assert!(seen.lock().unwrap().ends_with("STYLE-HINT"));
 	}
 
 	#[test]
@@ -418,7 +460,7 @@ mod tests {
 			*seen2.lock().unwrap() = p.to_string();
 			"blue".to_string()
 		});
-		let out = synthesize("CHAINS", &s, "what colour?", Some(&llm));
+		let out = synthesize("CHAINS", &s, "what colour?", Some(&llm), None);
 		assert_eq!(out, "blue", "llm output returned verbatim");
 		let prompt = seen.lock().unwrap();
 		assert!(prompt.contains("what colour?"), "query in prompt: {prompt}");

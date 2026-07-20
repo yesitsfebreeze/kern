@@ -70,8 +70,6 @@ pub const PROVENANCE_SCORE: f64 = 0.85;
 pub const ANSWER_MAX_CHAINS: usize = 5;
 pub const ANSWER_MAX_THOUGHTS: usize = 5;
 
-pub const MIN_DELIVER_SCORE: f64 = 0.40;
-pub const MAX_DELIVER_RESULTS: usize = 10;
 
 pub const DEGRADE_DECAY_BASE: f64 = 0.15;
 pub const DEGRADE_DECAY_POW: f64 = 0.75;

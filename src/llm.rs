@@ -83,6 +83,7 @@ struct Inner {
 	reason_gpu: bool,
 	seed: Option<i64>,
 	temperature: Option<f64>,
+	num_ctx: Option<u64>,
 }
 
 impl Client {
@@ -133,6 +134,7 @@ impl Client {
 				reason_gpu: false,
 				seed: None,
 				temperature: None,
+				num_ctx: None,
 			}),
 		}
 	}
@@ -146,6 +148,12 @@ impl Client {
 
 	pub fn with_temperature(mut self, t: f64) -> Self {
 		Arc::make_mut(&mut self.inner).temperature = Some(t);
+		self
+	}
+
+	// Ollama-native `complete` only; the OpenAI-compat path has no client-side window.
+	pub fn with_num_ctx(mut self, n: u64) -> Self {
+		Arc::make_mut(&mut self.inner).num_ctx = Some(n);
 		self
 	}
 
@@ -271,7 +279,8 @@ impl Client {
 	pub async fn complete(&self, prompt: &str) -> Result<String, LlmError> {
 		if self.inner.reason_native {
 			let url = format!("{}/api/chat", self.inner.reason_url);
-			let mut options = serde_json::json!({ "num_ctx": REASON_NUM_CTX });
+			let mut options =
+				serde_json::json!({ "num_ctx": self.inner.num_ctx.unwrap_or(REASON_NUM_CTX) });
 			if self.pins_reason_to_cpu() {
 				options["num_gpu"] = 0.into();
 			}

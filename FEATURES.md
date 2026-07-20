@@ -163,7 +163,7 @@ profiled via `src/profile.rs`):
 | 9 | **Dedup by section** | `retrieval/diversify.rs:6` | Collapse near-duplicate sections. |
 | 10 | **MMR** | `retrieval/diversify.rs:46` | Maximal-marginal-relevance diversification so the `k` results actually differ. |
 | 11 | **Rerank** (opt) | `retrieval/rerank.rs` | LLM reranker reorders the head; `parse_ranking` recovers a permutation. |
-| 12 | **Answer** (opt) | `retrieval/answer.rs:212` | `synthesize` glues top chains + thoughts into an LLM answer prompt (`ANSWER_MAX_CHAINS=5`, `ANSWER_MAX_THOUGHTS=5`). |
+| 12 | **Answer** (opt) | `retrieval/answer.rs:212` | `synthesize` glues top chains + thoughts into an LLM answer prompt (`ANSWER_MAX_CHAINS=5`, `ANSWER_MAX_THOUGHTS=5`). Prompt instructs declining with the exact `NO_ANSWER` string when context lacks the answer; empty context short-circuits to that string with no LLM call. `QueryOptions::answer_style` appends a caller-supplied style hint (eval uses it for short-fact answers; product default none). |
 | 13 | **Cold backfill** | `base/store.rs:489` | If hot returns `< k`, cold-tier hits (brute-force `cold_search`) fill remaining slots, flagged `cold:true`. |
 | 14 | **Edge refine** | `retrieval/answer.rs:325` | Every `REFINE_INTERVAL=10` queries, `refine_edges` nudges traversal weights along used paths (capped at 0.1) — the graph learns from retrieval. |
 | 15 | **Query cache** | `retrieval/cache.rs` | LRU keyed on query-vector hash + tag (256 cap, θ=0.97 similarity). `lookup`/`lookup_text`/`insert`. `commit_access` deposits heat on every returned hit. |
@@ -647,7 +647,7 @@ override layer. Secrets (API keys) stored in plaintext TOML.
 
 ---
 
-## 21. Bench & eval — `active` / `building`
+## 21. Bench & eval — `active`
 
 **What.** A retrieval benchmark harness + a LoCoMo eval harness, behind the
 `bench` feature.
@@ -666,20 +666,37 @@ override layer. Secrets (API keys) stored in plaintext TOML.
 - **latency / throughput** (`latency.rs`) — timing reports.
 - **memory** (`memory.rs`) — `estimate_memory` + `quant_ratio`.
 - **ndcg** (`ndcg.rs`) — `ndcg_at_k` + `recall_at_k`.
-- **locomo_run** (`locomo_run.rs`, 500 LoC) + **locomo** (`locomo.rs`) — the
+- **locomo_run** (`locomo_run.rs`) + **locomo** (`locomo.rs`) — the
   LoCoMo eval: per-category F1 / ROUGE-L / LLM-judge, adversarial abstention,
   `EvalReport::summary`. Driven by the `locomo_eval` binary.
+  `--context-mode kern|oracle|oracle-retrieval` runs the loss-attribution
+  ablations (oracle = full conversation at 32 k ctx, kern skipped;
+  oracle-retrieval = top-10 claims nearest the gold embedding, also records
+  the `gold_nearest_cosine` distill-coverage distribution).
+  `--multihop-paths` is a scoring-free diagnostic: are the claims nearest
+  each multi-hop gold graph-connected within 2 hops
+  (`expand::neighbor_ids` traversal semantics)?
+  Distilled claims are disk-cached (`eval/cache/`, keyed
+  prompt+model+seed, `--fresh-distill` bypass); `--concurrency N` runs
+  probe/judge phases as capped tokio tasks with deterministic
+  index-ordered aggregation; `--min-deliver` exposes the retrieval
+  delivery floor (default 0.0); `--probe-log` appends per-probe JSONL for
+  judge/coverage calibration; transport failures are counted in the
+  report (`errors:` line).
 - **mixed / stage_profile / backend / embed** — supporting modules.
 - **Binaries** — `retrieval_bench` (`src/bin/retrieval_bench.rs`) and
   `locomo_eval` (`src/bin/locomo_eval.rs`), both `required-features=["bench"]`.
   `locomo_eval` takes per-leg URL overrides (`--answer-url`/`--judge-url`,
   default `--url`) and `KERN_EVAL_DEBUG=1` prints gold vs pred per probe.
 
-**Where.** `src/bench_support/*` (3178 LoC), `src/bin/`. Baselines in
-`docs/kern/bench-retrieval.md`; eval design in `docs/kern/eval-locomo.md`.
+**Where.** `src/bench_support/*`, `src/bin/`. Baselines in
+`docs/kern/bench-retrieval.md`; eval design + recorded LoCoMo baseline in
+`docs/kern/eval-locomo.md`; improvement plan in
+`docs/kern/locomo-improvements.md`.
 
-**Gaps.** LoCoMo has no recorded baseline yet (`building`). Bench is single-
-process; no distributed load gen.
+**Gaps.** Bench is single-process; no distributed load gen. Attribution
+runs (oracle / oracle-retrieval / multihop-paths) not yet executed at full
+scale.
 
 ---
 

@@ -1,0 +1,110 @@
+{
+ "date": "2026-07-19",
+ "dataset": "locomo10 (10 dialogues, 1986 QA)",
+ "models": {
+  "embed": "qwen3-embedding:0.6b",
+  "answer_distill": "granite4:3b",
+  "judge": "qwen2.5:7b @ temp 0"
+ },
+ "seeds": [
+  0,
+  1,
+  2
+ ],
+ "claims_per_seed": [
+  2213,
+  2056,
+  2062
+ ],
+ "per_category": {
+  "single-hop": {
+   "n": 282,
+   "f1": {
+    "mean": 0.1039,
+    "std": 0.0039
+   },
+   "rouge_l": {
+    "mean": 0.0954,
+    "std": 0.0037
+   },
+   "judge_or_abstain": {
+    "mean": 0.0934,
+    "std": 0.0054
+   }
+  },
+  "multi-hop": {
+   "n": 321,
+   "f1": {
+    "mean": 0.0225,
+    "std": 0.0025
+   },
+   "rouge_l": {
+    "mean": 0.0222,
+    "std": 0.0027
+   },
+   "judge_or_abstain": {
+    "mean": 0.0415,
+    "std": 0.0109
+   }
+  },
+  "temporal": {
+   "n": 96,
+   "f1": {
+    "mean": 0.1178,
+    "std": 0.0126
+   },
+   "rouge_l": {
+    "mean": 0.1087,
+    "std": 0.0134
+   },
+   "judge_or_abstain": {
+    "mean": 0.1944,
+    "std": 0.0159
+   }
+  },
+  "open-domain": {
+   "n": 841,
+   "f1": {
+    "mean": 0.1182,
+    "std": 0.0059
+   },
+   "rouge_l": {
+    "mean": 0.1114,
+    "std": 0.0061
+   },
+   "judge_or_abstain": {
+    "mean": 0.1938,
+    "std": 0.0134
+   }
+  },
+  "adversarial": {
+   "n": 446,
+   "f1": {
+    "mean": 0.0,
+    "std": 0.0
+   },
+   "rouge_l": {
+    "mean": 0.0,
+    "std": 0.0
+   },
+   "judge_or_abstain": {
+    "mean": 0.1121,
+    "std": 0.1031
+   }
+  }
+ },
+ "overall_judge_abstain": {
+  "mean": 0.1366,
+  "std": 0.0175,
+  "per_seed": [
+   0.1294,
+   0.1566,
+   0.1239
+  ]
+ },
+ "latency_ms_seed0": {
+  "p50": 901,
+  "p95": 1839,
+  "p99": 2666
+ }
+}

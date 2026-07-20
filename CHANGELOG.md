@@ -1,4 +1,157 @@
+
+
 # Changelog
+
+- 2026-07-20 — `EvalReport` records wall clock per phase
+  (`sample_phase_secs`, `judge_phase_secs`) and the summary prints them
+  next to the summed query latency. Cause: after deferred judging landed,
+  the answer/judge split had to be *inferred* from summed latencies, and
+  that number counts queue wait as work — under `--concurrency 4` it read
+  19.9 min of "answering" against a 21.8 min total run, which is
+  uninterpretable. Phases are timed at the top level, not summed per
+  sample, because concurrent samples overlap and summing double-counts.
+  Decided by: verify-before-claiming (an optimization loop needs measured
+  phases, not inferred ones). Supersedes: inferring phase cost from
+  `latencies_ms`.
+
+- 2026-07-20 — vLLM is ruled out for the Granite 4 answerer on this
+  hardware, and the reason is a vLLM bug rather than a tuning failure:
+  `KeyError: 'full_attention'` during KV-cache setup for
+  `GraniteMoeHybridForCausalLM`, reproduced identically under two
+  unrelated quantization paths (fp8 and bitsandbytes 4-bit) and with
+  `--enforce-eager`. The architecture is in vLLM 0.25.1's supported
+  registry but crashes at engine init. bf16 is not an escape: 6.8 GB of
+  weights against 6.98 GB free leaves nothing for KV cache. Recorded so
+  this is not re-derived: `ibm-granite/granite-4.0-micro` is a byte-exact
+  param match (3,402,836,480) for Ollama's `granite4:3b`, kern needs no
+  code change to drive vLLM (`--answer-url .../v1` already routes
+  OpenAI-compat), and `uv` is required to build the venv since
+  `python3.12-venv` is absent and sudo needs a password. Tradeoff, named:
+  vLLM's continuous batching genuinely beats Ollama under concurrent load,
+  but the answer path was measured at 7.2 of 24.9 min, so its ceiling here
+  was ~1.4× by Amdahl — the judge scheduling was the real lever, and that
+  is already fixed. Decided by: verify-before-claiming, name-the-tradeoff.
+  Supersedes: the assumption that vLLM was an available speed lever.
+
+- 2026-07-20 — Judging moves to one global phase after every dialogue has
+  answered (`judge_all`), instead of a per-dialogue judge pass. Measured
+  cause: in the seed-0 embed comparison, wall clock was 24.9 min of which
+  only **7.2 min was the answer path** — the other 17.7 min (71%) was the
+  judge, a 7B model swapping VRAM against granite on one 8 GB card once per
+  dialogue. Judging once means the judge model loads once per run. This also
+  answers the "should we use vLLM for the answerer" question with a number:
+  optimizing the answerer targets 29% of wall clock, so by Amdahl it caps
+  total speedup near 1.4× — the judge was always the bottleneck. Supporting
+  cleanups: `ProbeCtx` drops its now-unused judge handle; probe records are
+  sorted by sample index before logging (samples finish out of order under
+  concurrency, and a reproducible probe log is the point of the artifact);
+  the adversarial category number is now the single constant
+  `locomo::ADVERSARIAL_CATEGORY` instead of a magic `5` in three places.
+  Also repaired a non-compiling tree (`all_records` type mismatch) left in
+  the concurrency work this change rewrites.
+  Decided by: verify-before-claiming (profile before optimizing), fix-the-root (judge
+  scheduling, not per-call tuning), delete-superseded (the magic 5, the dead
+  judge handle). Supersedes: per-dialogue two-phase judging.
+
+- 2026-07-20 — The embedder stays `qwen3-embedding:0.6b`; unifying every
+  default onto the granite family is **not** funded by measurement. Paired
+  seed-0 comparison (10 dialogues × first 30 QA = 300 probes, identical
+  2146 cached claims so only the embed model differed):
+  qwen 0.060 vs `granite-embedding:278m` 0.050 overall, and McNemar on the
+  per-probe verdicts gives 8 qwen-only vs 5 granite-only wins,
+  **p = 0.58** — a tie, not a granite loss. Since the swap costs a full
+  re-ingest of every stored vector plus a re-baseline, a tie does not pay
+  for it. Chat/reason/answer/distill were already unified on `granite4:3b`;
+  the judge stays a different family on purpose (an instrument must not
+  grade its own answerer). Tradeoff, named: 300 probes with 13 discordant
+  pairs only resolves large gaps — a real ±2-point difference could still
+  hide, so this decision is "no evidence to move", not "proven equal".
+  Caveat recorded for anyone reading the raw numbers: `--max-qa 30` takes
+  the *first* 30 QA per dialogue, which skews the category mix (122
+  multi-hop, 131 temporal, 5 single-hop, 0 adversarial), so 0.060 is NOT
+  comparable to the 0.137 full-benchmark baseline.
+  Decided by: verify-before-claiming, name-the-tradeoff. Supersedes: the assumption
+  that model unification is free.
+
+- 2026-07-20 — Eval harness speed/precision pass. (a) Distilled-claims disk
+  cache (`eval/cache/`, keyed on prompt+model+seed, `--fresh-distill`
+  bypass): re-runs skip the distill phase and ablation modes compare over
+  byte-identical graphs — paired comparison needs fewer seeds. (b)
+  `--concurrency N`: probe and judge phases run as Semaphore-capped tokio
+  tasks with index-ordered aggregation (deterministic reports; default 1 =
+  serial, baseline-identical). (c) `constants::MIN_DELIVER_SCORE` (0.40)
+  and `MAX_DELIVER_RESULTS` were dead code — the shipped
+  `RetrievalConfig::default` never gated delivery (0.0), so the
+  improvement plan's "already gates delivery" claim was false; constants
+  deleted, plan corrected, `--min-deliver` flag added so the abstention
+  floor sweep (0/0.2/0.4) is runnable. (d) `--probe-log` JSONL (question,
+  gold, pred, verdict, abstained, top_cosine per probe) — the artifact
+  judge calibration and coverage-bar calibration both need. (e)
+  Embed/answer/judge transport failures are counted and printed instead of
+  silently shrinking denominators. Decided by: verify-before-claiming (the
+  dead-constant catch, error accounting), delete-superseded (the two dead
+  constants), name-the-tradeoff (concurrency>1 trades latency fidelity and
+  VRAM for wall clock; cache trades disk for repeatability). Supersedes:
+  serial-only eval, uncounted probe drops, the dead deliver constants.
+
+- 2026-07-20 — The eval ablation formerly named "oracle" is renamed
+  **grounded** (`--context-mode grounded|grounded-retrieval`, code + docs).
+  "Oracle" is the standard test-oracle term but collides with this repo's
+  `ORACLE.md` governance file and confused a reader; repo-local clarity wins
+  over literature convention. Decided by: name-the-tradeoff (loses the
+  standard term, gains an unambiguous name). Supersedes: the oracle naming in
+  the entry below.
+
+- 2026-07-20 — LoCoMo improvement plan items 0–5 implemented (measurement
+  first, fixes where the plan called them mechanical). (a) Loss attribution:
+  `locomo_eval --context-mode kern|grounded|grounded-retrieval` — grounded
+  answers from the full conversation at 32 k ctx (rendered dialogues measure
+  11–24 k tokens; the 8 k default and a first-guess 16 k both truncated —
+  caught because the smoke run abstained on early-session facts),
+  grounded-retrieval answers from the top-10 claims nearest the gold embedding
+  and records the `gold_nearest_cosine` distill-coverage distribution
+  (item 5 rides the same run). (b) Abstention seeded in the product path:
+  `answer_prompt_from` instructs the exact `NO_ANSWER` string, empty-context
+  synthesis returns it without an LLM call, and a unit test pins both to
+  `locomo::is_abstention`'s marker set. (c) Distill prompt resolves relative
+  dates against the session-date header; `valid_from` deliberately not
+  requested — the eval worker path drops it. (d) Short-answer shape is
+  eval-only via the new `QueryOptions::answer_style` (product prompt
+  untouched). (e) Multi-hop: the plan's "expansion is one hop deep" claim
+  was WRONG — `expand()` is a beam search and always was in this tree; the
+  doc is corrected, and `--multihop-paths` now measures the real question
+  (are gold-supporting claims graph-connected within 2 hops?) before any
+  fix is chosen. Supporting: `LlmClient::with_num_ctx` builder.
+  Decided by: avoided-question-first (attribution before fixes), verify-before-claiming
+  (the one-hop correction, the truncation catch), name-the-tradeoff
+  (32 k ctx slower but measures the ceiling, not recency). Supersedes: the
+  plan's unimplemented status and its one-hop expansion claim.
+
+- 2026-07-20 — `docs/kern/locomo-improvements.md`: the improvement plan the
+  baseline funds, ranked by leverage. Leads with the loss decomposition
+  (grounded-context / grounded-retrieval / baseline ablations) because every
+  downstream fix guesses differently about where the 0.86 headroom is lost;
+  then abstention seeding (prompt never asks for it, `answer_bench` proved
+  granite can), multi-hop (expansion verified one-hop in
+  `retrieval/expand.rs`; ingest links only Similarity+Provenance), temporal
+  date resolution at distill, answer-shape F1 handicap, distill coverage,
+  judge calibration. Decided by: avoided-question-first (the decomposition
+  before the fixes). Supersedes: nothing — first plan against a measured
+  number.
+
+- 2026-07-20 — The LoCoMo baseline is recorded: full locomo10 (1986 QA),
+  seeds 0/1/2, default local models (granite4:3b answer+distill,
+  qwen2.5:7b judge at temperature 0). **Overall judge+abstain
+  0.137 ± 0.018**; per-category table and per-seed numbers in
+  `docs/kern/locomo-baseline-2026-07-19.json` +
+  `docs/kern/eval-locomo.md`. p50 full-pipeline latency 901 ms. Roadmap
+  question 1 ("what is the baseline?") is answered and replaced by the two
+  craters the measurement exposed: multi-hop 0.042 ± 0.011 and adversarial
+  abstention 0.112 ± 0.103; HyDE-gating and RRF-merge questions unblock.
+  The number is far below the Zep/Mem0-class ~0.6+ the north star names —
+  now measured, not assumed. Decided by: verify-before-claiming.
+  Supersedes: the "validated but no baseline" status of 2026-07-16 and
+  judging retrieval changes against intuition.
 
 - 2026-07-19 — Gravitons replace the single per-kern "purpose". The anchor
   concept is renamed graviton end to end (~280 sites: types, routing, MCP

@@ -33,10 +33,11 @@ Mem0, Letta — and against those kern is architecturally credible today:
 ## Plan (ordered by leverage)
 
 ### Tier 0 — baseline first (unblocks everything)
-- [ ] **Run `locomo_eval` end-to-end** with the default local models
-      (`cargo run --features bench --bin locomo_eval`) and **record the
-      baseline** — per-category scores + latency, multi-seed, committed as the
-      reference JSON. Every later change is judged against this number.
+- [x] **Run `locomo_eval` end-to-end** with the default local models
+      and **record the baseline** — done 2026-07-20: 3 seeds, full locomo10,
+      overall judge+abstain 0.137 ± 0.018, reference JSON committed at
+      `docs/kern/locomo-baseline-2026-07-19.json`. Every later change is
+      judged against this number.
 - [ ] Add the strict-judge / multi-seed loop (seeds + error bars in the report).
 - [x] Profile query latency — `kern profile` (`profile_cmd`): graph is sub-ms;
       the LLM path (12–21s/call) is the delay villain.

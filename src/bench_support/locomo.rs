@@ -23,9 +23,13 @@ pub struct QaItem {
 	pub category: u8,
 }
 
+// Adversarial probes have no gold answer: they score on abstention, never on
+// the judge. The one place this category number is written down.
+pub const ADVERSARIAL_CATEGORY: u8 = 5;
+
 impl QaItem {
 	pub fn is_adversarial(&self) -> bool {
-		self.category == 5
+		self.category == ADVERSARIAL_CATEGORY
 	}
 }
 
@@ -414,6 +418,19 @@ mod tests {
 		assert!(is_abstention("I don't have information about that."));
 		assert!(is_abstention("That was not mentioned in the conversation."));
 		assert!(!is_abstention("7 May 2023"));
+	}
+
+	// Pins the answer path's emitted string and prompt wording to the marker set —
+	// if either drifts, seeded abstention silently stops scoring.
+	#[test]
+	fn answer_paths_abstention_wording_stays_inside_the_marker_set() {
+		use crate::retrieval::answer;
+		assert!(is_abstention(answer::NO_ANSWER), "gate string must score");
+		let prompt = answer::answer_prompt_from("", &[], "q?");
+		assert!(
+			prompt.contains(answer::NO_ANSWER),
+			"prompt must instruct the exact abstention string"
+		);
 	}
 
 	#[test]
