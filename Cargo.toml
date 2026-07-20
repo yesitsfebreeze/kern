@@ -86,3 +86,10 @@ tempfile = "3"
 
 [lints]
 workspace = true
+
+# `e2e/` is not Cargo's auto-discovered `tests/`, so the target is declared
+# explicitly — otherwise this suite silently stops running. CARGO_BIN_EXE_kern
+# is still provided, which is what lets it drive the real binary.
+[[test]]
+name = "hub_supervisor"
+path = "e2e/hub_supervisor.rs"

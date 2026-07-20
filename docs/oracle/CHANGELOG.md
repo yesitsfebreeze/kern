@@ -1,5 +1,29 @@
 # Changelog
 
+- 2026-07-20 — `tests/` becomes `e2e/`, and the target is declared explicitly
+  in `Cargo.toml`. The directory holds exactly one suite, and it is not a unit
+  test: it spawns the real `kern` binary over a real Unix socket under a
+  private `XDG_RUNTIME_DIR`. `e2e` says that; `tests` implied the 708
+  in-`src` unit tests lived there too. Tradeoff, named: `tests/` is Cargo's
+  auto-discovered path, so renaming it would silently stop the suite from
+  running — hence the explicit `[[test]]` target. `CARGO_BIN_EXE_kern` is
+  still provided for declared targets, which is what lets the suite drive the
+  binary, and is also why this suite cannot move into `src/`: a unit test has
+  no way to locate the built binary. Verified: `cargo test --test
+  hub_supervisor` still lists all 6.
+  Also repairs `scripts/insight.py`, which had been reporting **zero** active
+  features, decisions and specialists ever since the governance files moved to
+  `docs/oracle/` — it read them from the repo root and a missing file counted
+  as 0 rather than erroring. It now resolves either location and prints an
+  explicit NOT FOUND line when a file is genuinely absent; a plausible-looking
+  zero is worse than an error in a script whose whole premise is that every
+  number came from a run. Its dead `section_bench()` (probing for the
+  benchmark doc deleted earlier today) is removed.
+  Decided by: fix-the-root (silent-zero, not just the path), name-the-tradeoff
+  (auto-discovery lost, declared target gained), delete-superseded (the bench
+  probe). Supersedes: `tests/` as the directory name and the root-relative
+  oracle paths in insight.py.
+
 - 2026-07-20 — The digest is deleted. `.kern/digest.md`, `build_digest`, the 30s
   rebuild loop, and all five `[intake]` digest knobs are gone; recall is now
   `query` only. It dumped a `heat * conf_mean` ranked slice of the graph into a

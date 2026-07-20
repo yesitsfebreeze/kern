@@ -80,26 +80,40 @@ def section_code():
     }
 
 
+def oracle_file(name):
+    """Governance files moved to docs/oracle/ (2026-07-20); accept either home.
+
+    Returns None when genuinely absent so a missing file reports as missing
+    rather than silently counting zero — a plausible-looking 0 is worse than
+    an error, and this script exists to report only measured things.
+    """
+    for candidate in (ROOT / "docs/oracle" / name, ROOT / name):
+        if candidate.exists():
+            return candidate.read_text()
+    return None
+
+
 def section_oracle():
-    out = {}
-    features = (ROOT / "FEATURES.md").read_text() if (ROOT / "FEATURES.md").exists() else ""
+    out, missing = {}, []
+
+    def text(name):
+        body = oracle_file(name)
+        if body is None:
+            missing.append(name)
+        return body or ""
+
+    features = text("FEATURES.md")
     out["features_active"] = len(re.findall(r"`active`\s*$", features, re.M))
     out["features_building"] = len(re.findall(r"`building`\s*$", features, re.M))
-    roadmap = (ROOT / "ROADMAP.md").read_text() if (ROOT / "ROADMAP.md").exists() else ""
+    roadmap = text("ROADMAP.md")
     out["roadmap_questions"] = len(re.findall(r"^\d+\. ", roadmap, re.M))
     out["roadmap_undecidable"] = len(re.findall(r"none yet", roadmap))
-    changelog = (ROOT / "CHANGELOG.md").read_text() if (ROOT / "CHANGELOG.md").exists() else ""
-    out["decisions_recorded"] = changelog.count("Decided by:")
+    out["decisions_recorded"] = text("CHANGELOG.md").count("Decided by:")
+    out["specialists"] = len(re.findall(r"^## ", text("SPECIALISTS.md"), re.M))
     local = (ROOT / "CLAUDE.local.md").read_text() if (ROOT / "CLAUDE.local.md").exists() else ""
     out["behaviors_pinned"] = len(re.findall(r"behaviors/[a-z-]+\.md", local))
-    out["specialists"] = len(re.findall(r"^## ", (ROOT / "SPECIALISTS.md").read_text(), re.M)) if (ROOT / "SPECIALISTS.md").exists() else 0
+    out["missing_files"] = missing
     return out
-
-
-def section_bench():
-    return {
-        "retrieval_baseline": (ROOT / "docs/kern/bench-retrieval.md").exists(),
-    }
 
 
 def main():
@@ -113,13 +127,12 @@ def main():
         snap["tests"] = section_tests()
     snap["code"] = section_code()
     snap["oracle"] = section_oracle()
-    snap["bench"] = section_bench()
 
     if args.json:
         print(json.dumps(snap, indent=2))
         return 0 if snap["build"]["ok"] else 1
 
-    g, b, c, o, be = snap["git"], snap["build"], snap["code"], snap["oracle"], snap["bench"]
+    g, b, c, o = snap["git"], snap["build"], snap["code"], snap["oracle"]
     print(f"kern @ {g['head']}  ({g['branch']}, {g['dirty_files']} dirty)")
     print(f"build     {'ok' if b['ok'] else 'FAILING'} in {b['seconds']}s, {b['warnings']} warnings")
     if "tests" in snap:
@@ -136,8 +149,8 @@ def main():
         f"{o['roadmap_questions']} open questions ({o['roadmap_undecidable']} undecidable), "
         f"{o['decisions_recorded']} decisions, {o['behaviors_pinned']} behaviors, {o['specialists']} specialists"
     )
-    missing = [k for k, v in be.items() if not v]
-    print(f"bench     {'all baselines present' if not missing else 'missing: ' + ', '.join(missing)}")
+    if o["missing_files"]:
+        print(f"          NOT FOUND: {', '.join(o['missing_files'])} (counts above understate)")
     return 0 if b["ok"] else 1
 
 
