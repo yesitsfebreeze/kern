@@ -34,6 +34,54 @@ unseeded). The strict-judge caveat applies in both directions: a 7 B judge at
 temperature 0 is harsher than the lenient judges that inflate published
 numbers (`docs/aspiration.md` claim standard).
 
+## How to test kern (the fast, reliable loop)
+
+Three tiers. Use the cheapest one that can answer the question.
+
+**1. Logic — seconds, no GPU.** `cargo test --features bench` (768 tests).
+Covers prompts, scoring, abstention wording, cache round-trip, statistics.
+Every non-LLM claim in this doc is pinned by one of these.
+
+**2. Quality — one command, ~20 min for 300 probes.**
+
+```
+./target/debug/locomo_eval --url http://<host>:11434 \
+  --samples 10 --max-qa 30 --seed 0 --concurrency 4 \
+  --json --output run.json --probe-log run-probes.jsonl
+```
+
+Why these flags: `--concurrency 4` is measured fastest when the server has
+`OLLAMA_NUM_PARALLEL=4` (serial takes 33 min against 22 min, because parallel
+slots split GPU capacity and a serial client gets one slot). Claims are cached
+per (prompt, model, seed), so re-runs skip distillation and every variant
+compares over byte-identical graphs. `--probe-log` is required for tier 3.
+
+**3. Did it actually change anything? — instant, no GPU.**
+
+```
+./target/debug/locomo_eval --compare-probes before-probes.jsonl after-probes.jsonl
+```
+
+Paired McNemar over the probes both runs answered. **Use this, not the
+confidence intervals, to judge an A/B.** Pairing removes between-run variance,
+so it resolves differences that overlapping CIs cannot — and it refuses to
+call a wash a win. Worked example: the granite-vs-qwen embedder test scored
+0.060 against 0.050, which looks like a 17% regression, but pairing showed 8
+wins each way against 5 (p = 0.58) — a tie, and the embedder correctly did
+not move.
+
+Reliability properties the harness now guarantees: reports carry Wilson 95%
+intervals (correct near 0, where these scores live); transport failures are
+counted per phase instead of silently shrinking denominators; probe logs are
+sorted by sample index so they are byte-reproducible under concurrency; and
+phase wall clock is measured, not inferred from summed latencies (which count
+queue wait as work and misattributed 19.9 min of "answering" inside a 21.8 min
+run).
+
+What the CI does **not** cover: LLM sampling variance across seeds, and judge
+bias. For a new baseline claim, run 3 seeds — and never compare a
+strict-judge number against a published lenient-judge one.
+
 ## Ablations & diagnostics (added 2026-07-20)
 
 Implements items 0/2/5 of

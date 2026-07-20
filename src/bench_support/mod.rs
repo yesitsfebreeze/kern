@@ -2,6 +2,7 @@ pub mod backend;
 pub mod build;
 pub mod compare;
 pub mod embed;
+pub mod evalstats;
 pub mod latency;
 pub mod locomo;
 pub mod locomo_run;

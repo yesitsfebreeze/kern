@@ -1,3 +1,4 @@
+use super::evalstats;
 use super::locomo::{self, Sample};
 use crate::base::graph::GraphGnn;
 use crate::base::types::{EntityKind, Source};
@@ -260,8 +261,8 @@ impl EvalReport {
 			));
 		}
 		out.push('\n');
-		out.push_str("category      n     F1   ROUGE-L  judge/abstain\n");
-		out.push_str("------------------------------------------------\n");
+		out.push_str("category      n     F1   ROUGE-L  judge/abstain  95% CI\n");
+		out.push_str("----------------------------------------------------------------\n");
 		let mut tot_n = 0usize;
 		let mut tot_correct = 0usize;
 		for (cat, a) in &self.per_category {
@@ -271,30 +272,118 @@ impl EvalReport {
 			} else {
 				(a.judge_correct, "judge")
 			};
+			let (lo, hi) = evalstats::wilson(correct, a.n, evalstats::Z95);
 			out.push_str(&format!(
-				"{:<12} {:>3}  {:>5.3}  {:>6.3}   {:>5.3} ({})\n",
+				"{:<12} {:>3}  {:>5.3}  {:>6.3}   {:>5.3} ({:<7}) [{:.3}, {:.3}]\n",
 				locomo::category_name(*cat),
 				a.n,
 				a.f1 / n,
 				a.rouge / n,
 				correct as f64 / n,
 				label,
+				lo,
+				hi,
 			));
 			tot_n += a.n;
 			tot_correct += correct;
 		}
-		out.push_str("------------------------------------------------\n");
+		out.push_str("----------------------------------------------------------------\n");
+		let (lo, hi) = evalstats::wilson(tot_correct, tot_n, evalstats::Z95);
 		out.push_str(&format!(
-			"overall      {:>3}                   {:>5.3} (judge+abstain)\n",
+			"overall      {:>3}                   {:>5.3} (judge+abstain) [{:.3}, {:.3}]\n",
 			tot_n,
 			if tot_n == 0 {
 				0.0
 			} else {
 				tot_correct as f64 / tot_n as f64
 			},
+			lo,
+			hi,
 		));
+		out.push_str(
+			"(CI is sampling error only — it does NOT cover LLM sampling or judge bias.\n\
+			 To compare two runs, use --compare-probes: paired McNemar beats overlapping CIs.)\n",
+		);
 		out
 	}
+}
+
+// A probe is "correct" the same way the report scores it: adversarial probes on
+// abstention, everything else on the judge verdict.
+fn probe_correct(r: &serde_json::Value) -> Option<(String, bool)> {
+	let q = r.get("question")?.as_str()?;
+	let sid = r.get("sample_id").and_then(|v| v.as_str()).unwrap_or("");
+	let cat = r.get("category").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+	let ok = if cat == locomo::ADVERSARIAL_CATEGORY {
+		r.get("abstained")?.as_bool()?
+	} else {
+		r.get("verdict")?.as_bool()?
+	};
+	Some((format!("{sid}\u{1}{q}"), ok))
+}
+
+fn load_probes(path: &str) -> Result<std::collections::HashMap<String, bool>, String> {
+	let text = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
+	let mut out = std::collections::HashMap::new();
+	for line in text.lines().filter(|l| !l.trim().is_empty()) {
+		let v: serde_json::Value = serde_json::from_str(line).map_err(|e| format!("{path}: {e}"))?;
+		if let Some((k, ok)) = probe_correct(&v) {
+			out.insert(k, ok);
+		}
+	}
+	Ok(out)
+}
+
+/// Paired A/B over two probe logs. Pairing on the probe itself removes
+/// between-run variance, so it resolves differences that overlapping
+/// confidence intervals cannot.
+pub fn compare_probes(path_a: &str, path_b: &str) -> Result<String, String> {
+	let (a, b) = (load_probes(path_a)?, load_probes(path_b)?);
+	let mut keys: Vec<&String> = a.keys().filter(|k| b.contains_key(*k)).collect();
+	keys.sort();
+	if keys.is_empty() {
+		return Err("no probes in common — different datasets or --max-qa?".into());
+	}
+
+	let (mut both, mut a_only, mut b_only, mut neither) = (0, 0, 0, 0);
+	for k in &keys {
+		match (a[*k], b[*k]) {
+			(true, true) => both += 1,
+			(true, false) => a_only += 1,
+			(false, true) => b_only += 1,
+			(false, false) => neither += 1,
+		}
+	}
+	let n = keys.len();
+	let (sa, sb) = (both + a_only, both + b_only);
+	let p = evalstats::mcnemar_exact(a_only, b_only);
+	let (alo, ahi) = evalstats::wilson(sa, n, evalstats::Z95);
+	let (blo, bhi) = evalstats::wilson(sb, n, evalstats::Z95);
+
+	let verdict = if p < 0.05 {
+		if b_only > a_only {
+			"B is better (p < 0.05)"
+		} else {
+			"A is better (p < 0.05)"
+		}
+	} else {
+		"no significant difference — do not ship this as a win"
+	};
+
+	Ok(format!(
+		"paired probes: {n}  (dropped: A-only {}, B-only {})\n\
+		 A: {sa}/{n} = {:.4}  95% CI [{alo:.3}, {ahi:.3}]   {path_a}\n\
+		 B: {sb}/{n} = {:.4}  95% CI [{blo:.3}, {bhi:.3}]   {path_b}\n\
+		 both correct {both}   A-only {a_only}   B-only {b_only}   both wrong {neither}\n\
+		 delta (B-A): {:+.4}   discordant: {}   McNemar exact p = {p:.4}\n\
+		 verdict: {verdict}\n",
+		a.len() - n,
+		b.len() - n,
+		sa as f64 / n as f64,
+		sb as f64 / n as f64,
+		(sb as f64 - sa as f64) / n as f64,
+		a_only + b_only,
+	))
 }
 
 fn answer_client(cfg: &EvalConfig) -> LlmClient {
@@ -1218,6 +1307,94 @@ mod tests {
 		assert!(
 			!needs_judging(&rec(1, None, Some("pred"))),
 			"no gold means nothing to judge against"
+		);
+	}
+
+	fn write_probes(dir: &std::path::Path, name: &str, rows: &[(&str, u8, bool)]) -> String {
+		let path = dir.join(name);
+		let body: String = rows
+			.iter()
+			.map(|(q, cat, ok)| {
+				let field = if *cat == locomo::ADVERSARIAL_CATEGORY {
+					"abstained"
+				} else {
+					"verdict"
+				};
+				format!(
+					r#"{{"sample_id":"s","question":"{q}","category":{cat},"{field}":{ok}}}"#
+				) + "\n"
+			})
+			.collect();
+		std::fs::write(&path, body).unwrap();
+		path.to_string_lossy().into_owned()
+	}
+
+	#[test]
+	fn compare_pairs_on_probes_and_calls_a_tie_a_tie() {
+		let dir = tempfile::tempdir().unwrap();
+		// Same probes, one flip each way: a wash, and it must say so.
+		let a = write_probes(
+			dir.path(),
+			"a.jsonl",
+			&[("q1", 1, true), ("q2", 1, false), ("q3", 1, true)],
+		);
+		let b = write_probes(
+			dir.path(),
+			"b.jsonl",
+			&[("q1", 1, false), ("q2", 1, true), ("q3", 1, true)],
+		);
+		let out = compare_probes(&a, &b).expect("compare");
+		assert!(out.contains("paired probes: 3"), "{out}");
+		assert!(out.contains("A-only 1"), "{out}");
+		assert!(out.contains("B-only 1"), "{out}");
+		assert!(out.contains("no significant difference"), "{out}");
+	}
+
+	#[test]
+	fn compare_detects_a_real_win_and_scores_adversarial_on_abstention() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut a_rows = Vec::new();
+		let mut b_rows = Vec::new();
+		for i in 0..12 {
+			let q: &'static str = Box::leak(format!("q{i}").into_boxed_str());
+			// Adversarial probes score on `abstained`, not `verdict`.
+			a_rows.push((q, locomo::ADVERSARIAL_CATEGORY, false));
+			b_rows.push((q, locomo::ADVERSARIAL_CATEGORY, true));
+		}
+		let a = write_probes(dir.path(), "a.jsonl", &a_rows);
+		let b = write_probes(dir.path(), "b.jsonl", &b_rows);
+		let out = compare_probes(&a, &b).expect("compare");
+		assert!(out.contains("B is better"), "{out}");
+		assert!(out.contains("delta (B-A): +1.0000"), "{out}");
+	}
+
+	#[test]
+	fn compare_refuses_probe_logs_with_nothing_in_common() {
+		let dir = tempfile::tempdir().unwrap();
+		let a = write_probes(dir.path(), "a.jsonl", &[("q1", 1, true)]);
+		let b = write_probes(dir.path(), "b.jsonl", &[("zz", 1, true)]);
+		let err = compare_probes(&a, &b).unwrap_err();
+		assert!(err.contains("no probes in common"), "{err}");
+	}
+
+	#[test]
+	fn summary_reports_a_confidence_interval() {
+		let mut r = EvalReport::new();
+		r.per_category.insert(
+			1,
+			CatAgg {
+				n: 100,
+				judge_correct: 10,
+				..Default::default()
+			},
+		);
+		let s = r.summary();
+		assert!(s.contains("95% CI"), "{s}");
+		// Wilson at 10/100 brackets 0.1 asymmetrically and stays inside [0,1].
+		assert!(s.contains("[0.055, 0.174]"), "{s}");
+		assert!(
+			s.contains("paired McNemar beats overlapping CIs"),
+			"the summary must point at the right tool for A/B: {s}"
 		);
 	}
 

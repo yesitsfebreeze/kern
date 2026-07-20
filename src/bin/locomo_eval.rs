@@ -1,5 +1,7 @@
 use clap::Parser;
-use kern::bench_support::locomo_run::{run_eval, run_multihop_paths, ContextMode, EvalConfig};
+use kern::bench_support::locomo_run::{
+	compare_probes, run_eval, run_multihop_paths, ContextMode, EvalConfig,
+};
 use kern::config::{DEFAULT_ANSWER_MODEL, DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL};
 
 #[derive(Parser, Debug)]
@@ -72,6 +74,10 @@ struct Args {
 	/// Ignore the distilled-claims cache (eval/cache/) — no read, no write.
 	#[arg(long)]
 	fresh_distill: bool,
+	/// Compare two probe logs instead of running an eval: paired McNemar over
+	/// the probes both runs answered. Use this to judge an A/B, not the CIs.
+	#[arg(long, num_args = 2, value_names = ["A.jsonl", "B.jsonl"])]
+	compare_probes: Option<Vec<String>>,
 	/// Emit a machine-readable (CI-diffable) report instead of the human table.
 	#[arg(long)]
 	json: bool,
@@ -89,6 +95,13 @@ fn resolve_dataset(arg: Option<String>, env: Option<String>) -> String {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let args = Args::parse();
+
+	// Comparing two finished runs needs no dataset, no models, no GPU.
+	if let Some(paths) = &args.compare_probes {
+		print!("{}", compare_probes(&paths[0], &paths[1])?);
+		return Ok(());
+	}
+
 	let dataset = resolve_dataset(args.dataset, std::env::var("KERN_LOCOMO_PATH").ok());
 
 	if !std::path::Path::new(&dataset).exists() {
