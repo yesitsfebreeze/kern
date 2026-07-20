@@ -64,13 +64,7 @@ mod tests {
 			scored("novec", Vec::new(), 1.0),
 		];
 		apply_gravity(&g, &cfg, &mut results);
-		let get = |id: &str| {
-			results
-				.iter()
-				.find(|r| r.entity.id == id)
-				.unwrap()
-				.score
-		};
+		let get = |id: &str| results.iter().find(|r| r.entity.id == id).unwrap().score;
 		assert!(
 			get("near") > get("far"),
 			"near {} must outrank far {}",

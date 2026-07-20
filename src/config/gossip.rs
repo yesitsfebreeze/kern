@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::base::constants::{GOSSIP_MAX_PEERS, GOSSIP_SEED_ADDR};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GossipConfig {
@@ -9,9 +11,34 @@ pub struct GossipConfig {
 	pub network_id: Option<String>,
 	pub discovery_port: u16,
 	pub peers: Vec<String>,
+	pub seed: bool,
+	pub seed_addr: String,
 }
 
 impl GossipConfig {
+	pub fn effective_seed(&self) -> Option<&str> {
+		if !self.enabled || !self.seed {
+			return None;
+		}
+		let addr = self.seed_addr.trim();
+		(!addr.is_empty()).then_some(addr)
+	}
+
+	// The only peer source that runs before any inbound contact; still bounded by GOSSIP_MAX_PEERS.
+	pub fn bootstrap_peers(&self) -> Vec<String> {
+		if !self.enabled {
+			return Vec::new();
+		}
+		let mut peers = self.peers.clone();
+		if let Some(seed) = self.effective_seed() {
+			if !peers.iter().any(|p| p == seed) {
+				peers.push(seed.to_string());
+			}
+		}
+		peers.truncate(GOSSIP_MAX_PEERS);
+		peers
+	}
+
 	// A ':' in the id would corrupt the `kern:<id>:<addr>` announce wire format.
 	pub fn effective_network_id(&self, generated: &str) -> String {
 		match self.network_id.as_deref() {
@@ -38,6 +65,10 @@ impl Default for GossipConfig {
 			network_id: None,
 			discovery_port: 7475,
 			peers: Vec::new(),
+			// Dialing a public host is opt-in: federation is unauthenticated, so a
+			// default-on seed would auto-join a stranger's network.
+			seed: false,
+			seed_addr: GOSSIP_SEED_ADDR.into(),
 		}
 	}
 }
@@ -61,6 +92,109 @@ mod tests {
 			"no pooling id by default — each daemon keeps its unique generated id"
 		);
 		assert!(c.peers.is_empty(), "no seed peers by default");
+		assert!(
+			!c.seed,
+			"dialing the public seed is opt-in, never a default"
+		);
+		assert_eq!(c.seed_addr, GOSSIP_SEED_ADDR);
+	}
+
+	#[test]
+	fn disabled_gossip_bootstraps_nothing_at_all() {
+		// `seed: true` on purpose: the disabled gate, not the seed default, is what
+		// must silence this — otherwise the test passes for the wrong reason.
+		let c = GossipConfig {
+			seed: true,
+			peers: vec!["10.0.0.5:7400".into()],
+			..GossipConfig::default()
+		};
+		assert!(!c.enabled);
+		assert_eq!(
+			c.effective_seed(),
+			None,
+			"a default daemon must make zero outbound calls"
+		);
+		assert!(c.bootstrap_peers().is_empty());
+	}
+
+	#[test]
+	fn enabling_gossip_alone_dials_nothing() {
+		let c = GossipConfig {
+			enabled: true,
+			..GossipConfig::default()
+		};
+		assert_eq!(
+			c.effective_seed(),
+			None,
+			"turning gossip on must not, by itself, dial the public seed"
+		);
+		assert!(c.bootstrap_peers().is_empty());
+	}
+
+	#[test]
+	fn opting_into_the_seed_dials_the_default_addr() {
+		let c = GossipConfig {
+			enabled: true,
+			seed: true,
+			..GossipConfig::default()
+		};
+		assert_eq!(c.effective_seed(), Some(GOSSIP_SEED_ADDR));
+		assert_eq!(c.bootstrap_peers(), vec![GOSSIP_SEED_ADDR.to_string()]);
+	}
+
+	#[test]
+	fn an_explicit_seed_overrides_the_default() {
+		let c = GossipConfig {
+			enabled: true,
+			seed: true,
+			seed_addr: "seed.internal:7946".into(),
+			..GossipConfig::default()
+		};
+		assert_eq!(c.effective_seed(), Some("seed.internal:7946"));
+		assert!(!c.bootstrap_peers().iter().any(|p| p == GOSSIP_SEED_ADDR));
+	}
+
+	#[test]
+	fn the_seed_turns_off_while_gossip_stays_on() {
+		let mut c = GossipConfig {
+			enabled: true,
+			seed: false,
+			peers: vec!["10.0.0.5:7400".into()],
+			..GossipConfig::default()
+		};
+		assert_eq!(c.effective_seed(), None, "air-gapped LAN never phones out");
+		assert_eq!(c.bootstrap_peers(), vec!["10.0.0.5:7400".to_string()]);
+
+		c.seed = true;
+		c.seed_addr = "   ".into();
+		assert_eq!(
+			c.effective_seed(),
+			None,
+			"a blank seed_addr also disables it"
+		);
+	}
+
+	#[test]
+	fn bootstrap_peers_never_exceed_the_peer_cap() {
+		let c = GossipConfig {
+			enabled: true,
+			peers: (0..GOSSIP_MAX_PEERS + 10)
+				.map(|i| format!("10.0.0.{i}:7400"))
+				.collect(),
+			..GossipConfig::default()
+		};
+		assert_eq!(c.bootstrap_peers().len(), GOSSIP_MAX_PEERS);
+	}
+
+	#[test]
+	fn a_seed_already_in_peers_is_not_duplicated() {
+		let c = GossipConfig {
+			enabled: true,
+			seed: true,
+			peers: vec![GOSSIP_SEED_ADDR.into()],
+			..GossipConfig::default()
+		};
+		assert_eq!(c.bootstrap_peers(), vec![GOSSIP_SEED_ADDR.to_string()]);
 	}
 
 	#[test]

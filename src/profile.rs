@@ -13,16 +13,6 @@ pub struct Profile {
 	pub total_ms: f64,
 }
 
-impl Profile {
-	pub fn checkpoint(&self, label: &str) -> Option<f64> {
-		self
-			.checkpoints
-			.iter()
-			.find(|c| c.label == label)
-			.map(|c| c.elapsed_ms)
-	}
-}
-
 pub struct Profiler {
 	name: String,
 	start: Instant,
@@ -128,18 +118,6 @@ pub fn render_timeline(profiles: &[Profile], width: usize) -> String {
 		out.push('\n');
 	}
 	out
-}
-
-#[macro_export]
-macro_rules! profile_block {
-	($name:expr, $code:block) => {{
-		let mut prof = $crate::profile::Profiler::new($name);
-		let result = { $code };
-		// Required: without a checkpoint `finish()` yields a stage-less profile.
-		prof.checkpoint("body");
-		tracing::debug!("{}", prof.finish());
-		result
-	}};
 }
 
 #[cfg(test)]
@@ -280,14 +258,5 @@ mod tests {
 			out.contains('▓'),
 			"tiny non-zero stage must render >=1 cell: {out}"
 		);
-	}
-
-	#[test]
-	fn profile_block_macro_returns_block_value_and_expands_clean() {
-		let x = crate::profile_block!("unit", {
-			let a = 2;
-			a + 3
-		});
-		assert_eq!(x, 5);
 	}
 }

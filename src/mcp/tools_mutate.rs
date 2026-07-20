@@ -1,14 +1,13 @@
 use serde::Deserialize;
 
 use crate::base::constants::AGENT_SOURCE;
-use crate::base::locks::{read_recovered, write_recovered};
-use crate::base::math::{average_vec, clamp_confidence, cosine, reason_id};
-use crate::base::reason::{add_reason, remove_entity, remove_reason};
+use crate::base::math::clamp_confidence;
+use crate::base::reason::move_entity;
 use crate::base::search::find_entity;
-use crate::base::types::{EntityKind, Reason, ReasonKind, Source};
+use crate::base::types::{EntityKind, Source};
 use crate::base::util::explain_relationship_prompt;
+use crate::base::validate::{validate_conf, validate_fact_source, validate_kind};
 use crate::ingest;
-use crate::wire::{validate_fact_source, validate_wire_conf, validate_wire_kind};
 
 pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 	vec![
@@ -67,6 +66,18 @@ pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 				},
 			},
 		}),
+		serde_json::json!({
+			"name": "move",
+			"description": "Relocate a thought to another kern, carrying its outgoing edges and restamping cross-kern references.",
+			"inputSchema": {
+				"type": "object",
+				"required": ["id", "to_kern"],
+				"properties": {
+					"id":      {"type": "string", "description": "thought ID to relocate"},
+					"to_kern": {"type": "string", "description": "destination kern ID"},
+				},
+			},
+		}),
 	]
 }
 
@@ -98,12 +109,12 @@ struct IngestArgs {
 	kind: Option<EntityKind>,
 }
 
-// Wire boundary: an agent caller can mint neither Fact-kind nor Fact-confidence
-// entities (docs/kern/safety-architecture.md).
-fn validate_ingest_wire(p: &IngestArgs) -> Result<(), String> {
-	validate_wire_conf(p.conf).map_err(|e| e.to_string())?;
+// Caller boundary: an agent caller can mint neither Fact-kind nor Fact-confidence
+// entities.
+fn validate_ingest(p: &IngestArgs) -> Result<(), String> {
+	validate_conf(p.conf).map_err(|e| e.to_string())?;
 	if let Some(k) = p.kind {
-		validate_wire_kind(k).map_err(|e| e.to_string())?;
+		validate_kind(k).map_err(|e| e.to_string())?;
 		if k == EntityKind::Fact {
 			validate_fact_source(AGENT_SOURCE).map_err(|e| e.to_string())?;
 		}
@@ -132,6 +143,12 @@ struct DegradeArgs {
 	query_id: String,
 }
 
+#[derive(Deserialize)]
+struct MoveArgs {
+	id: String,
+	to_kern: String,
+}
+
 impl Server {
 	pub(crate) fn tool_ingest(&self, args: &serde_json::Value) -> serde_json::Value {
 		let p: IngestArgs = match serde_json::from_value(args.clone()) {
@@ -142,12 +159,12 @@ impl Server {
 			return tool_error("text is required");
 		}
 
-		if let Err(e) = validate_ingest_wire(&p) {
+		if let Err(e) = validate_ingest(&p) {
 			return tool_error(&e);
 		}
 
 		// MCP callers are agents; clamp against AGENT_SOURCE regardless of what
-		// `p.source` claims — the wire string cannot escalate to USER_SOURCE trust.
+		// `p.source` claims — the caller's source string cannot escalate to USER_SOURCE trust.
 		let (conf, kind) = clamp_confidence(p.conf, AGENT_SOURCE);
 		let src = match p.source.as_str() {
 			"" | "inline" => Source::Inline {
@@ -213,11 +230,11 @@ impl Server {
 
 		// Durable ack: persist to the direct intake BEFORE acknowledging, but only
 		// when the drain loop runs — an undrained intake is worse than the RAM queue.
-		let drain_runs = self.cfg.capture.enabled && !self.cfg.reason_url().is_empty();
+		let drain_runs = self.cfg.intake.enabled && !self.cfg.reason_url().is_empty();
 		if drain_runs {
 			let direct_dir = std::env::current_dir()
 				.unwrap_or_else(|_| std::path::PathBuf::from("."))
-				.join(&self.cfg.capture.dir)
+				.join(&self.cfg.intake.dir)
 				.join("direct");
 			let job = crate::ingest::direct::DirectJob {
 				text: p.text.clone(),
@@ -272,8 +289,8 @@ impl Server {
 			Err(e) => return tool_error(&format!("invalid arguments: {e}")),
 		};
 
-		let g = read_recovered(&self.graph);
-		let (from_t, from_kern_id) = match find_entity(&g, &p.from) {
+		let g = self.graph.read();
+		let (from_t, _) = match find_entity(&g, &p.from) {
 			Some(pair) => pair,
 			None => return tool_error(&format!("from thought not found: {}", p.from)),
 		};
@@ -293,39 +310,28 @@ impl Server {
 			}
 		}
 
-		let vec = if !reason_text.is_empty() {
-			if let Some(llm) = &self.llm {
-				crate::llm::block_on_in_place(llm.embed(&reason_text))
-					.and_then(Result::ok)
-					.unwrap_or_else(|| average_vec(&from_t.vector, &to_t.vector))
-			} else {
-				average_vec(&from_t.vector, &to_t.vector)
-			}
+		let reason_embed = if !reason_text.is_empty() {
+			self
+				.llm
+				.as_ref()
+				.and_then(|llm| crate::llm::block_on_in_place(llm.embed(&reason_text)))
+				.and_then(Result::ok)
 		} else {
-			average_vec(&from_t.vector, &to_t.vector)
+			None
 		};
 
-		let score = cosine(&from_t.vector, &to_t.vector);
-		let rid = reason_id(&p.from, &p.to, ReasonKind::Similarity, &reason_text, "");
-		let reason = Reason {
-			id: rid.clone(),
-			from: p.from,
-			to: p.to,
-			kind: ReasonKind::Similarity,
-			text: reason_text,
-			vector: vec,
-			score,
-			..Default::default()
-		};
-
-		let mut g = write_recovered(&self.graph);
-		if let Some(kern) = g.kerns.get_mut(&from_kern_id) {
-			add_reason(kern, reason);
-		}
+		let mut g = self.graph.write();
+		let res =
+			crate::commands::graph_ops::link_entities(&mut g, &p.from, &p.to, reason_text, reason_embed);
 		drop(g);
-		(self.save_fn)();
 
-		tool_result_json(&serde_json::json!({"edge_id": rid}))
+		match res {
+			Ok((rid, _)) => {
+				(self.save_fn)();
+				tool_result_json(&serde_json::json!({"edge_id": rid}))
+			}
+			Err(e) => tool_error(&e),
+		}
 	}
 
 	pub(crate) fn tool_forget(&self, args: &serde_json::Value) -> serde_json::Value {
@@ -334,25 +340,18 @@ impl Server {
 			Err(e) => return tool_error(&format!("invalid arguments: {e}")),
 		};
 
-		let mut g = write_recovered(&self.graph);
-		let (thought, kern_id) = match find_entity(&g, &p.id) {
-			Some(pair) => pair,
-			None => return tool_error(&format!("thought not found: {}", p.id)),
-		};
-		if thought.is_fact() {
-			return tool_error("cannot forget a fact");
-		}
-
-		let edges_before = g.kerns.get(&kern_id).map(|k| k.reasons.len()).unwrap_or(0);
-
-		remove_entity(&mut g, &kern_id, &p.id);
-
-		let edges_after = g.kerns.get(&kern_id).map(|k| k.reasons.len()).unwrap_or(0);
+		let mut g = self.graph.write();
+		let res = crate::commands::graph_ops::forget_entity(&mut g, &p.id);
 		drop(g);
-		(self.save_fn)();
 
-		let removed = edges_before - edges_after;
-		tool_result_json(&serde_json::json!({"removed_edges": removed}))
+		match res {
+			Ok(removed) => {
+				(self.save_fn)();
+				tool_result_json(&serde_json::json!({"removed_edges": removed}))
+			}
+			Err("thought not found") => tool_error(&format!("thought not found: {}", p.id)),
+			Err(e) => tool_error(e),
+		}
 	}
 
 	pub(crate) fn tool_degrade(&self, args: &serde_json::Value) -> serde_json::Value {
@@ -361,81 +360,61 @@ impl Server {
 			Err(e) => return tool_error(&format!("invalid arguments: {e}")),
 		};
 
-		let mut g = write_recovered(&self.graph);
+		let mut g = self.graph.write();
 		let (_, kern_id) = match find_entity(&g, &p.query_id) {
 			Some(pair) => pair,
 			None => return tool_error(&format!("thought not found: {}", p.query_id)),
 		};
 
-		let rids: Vec<String> = g
-			.kerns
-			.get(&kern_id)
-			.map(|kern| crate::base::reason::collect_reason_ids(kern, &p.query_id))
-			.unwrap_or_default();
-
-		let mut decayed = 0usize;
-		for (i, rid) in rids.iter().enumerate() {
-			let decay = crate::base::constants::DEGRADE_DECAY_BASE
-				* (crate::base::constants::DEGRADE_DECAY_POW).powi(i as i32);
-
-			let Some(kern) = g.kerns.get_mut(&kern_id) else {
-				continue;
-			};
-			let should_remove = match kern.reasons.get(rid) {
-				Some(r) => r.score - decay < crate::base::constants::DEGRADE_MIN_THRESHOLD,
-				None => continue,
-			};
-			if should_remove {
-				remove_reason(kern, rid);
-			} else if let Some(r) = kern.reasons.get_mut(rid) {
-				r.score -= decay;
-			}
-			decayed += 1;
-		}
+		let (decayed, _removed) =
+			crate::commands::graph_ops::degrade_entity_reasons(&mut g, &kern_id, &p.query_id);
 		drop(g);
 		(self.save_fn)();
 
 		tool_result_json(&serde_json::json!({"decayed_edges": decayed}))
+	}
+
+	pub(crate) fn tool_move(&self, args: &serde_json::Value) -> serde_json::Value {
+		let p: MoveArgs = match serde_json::from_value(args.clone()) {
+			Ok(v) => v,
+			Err(e) => return tool_error(&format!("invalid arguments: {e}")),
+		};
+
+		let mut g = self.graph.write();
+		let (_, from_kern_id) = match find_entity(&g, &p.id) {
+			Some(pair) => pair,
+			None => return tool_error(&format!("thought not found: {}", p.id)),
+		};
+
+		// move_entity validates before it mutates, so a rejection here cannot have
+		// left the graph half-moved — nothing to roll back, nothing to persist.
+		if let Err(e) = move_entity(&mut g, &from_kern_id, &p.to_kern, &p.id) {
+			return tool_error(&e.to_string());
+		}
+		drop(g);
+		(self.save_fn)();
+
+		tool_result_json(&serde_json::json!({
+			"id": p.id,
+			"from_kern": from_kern_id,
+			"to_kern": p.to_kern,
+		}))
 	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use parking_lot::RwLock;
-	use std::sync::Arc;
 
-	use crate::base::graph::GraphGnn;
-	use crate::base::types::{Entity, Kern};
-	use crate::config::Config;
-	use crate::llm;
+	use crate::base::reason::add_reason;
+	use crate::base::types::{Entity, Kern, Reason};
 	use crate::mcp::Server;
 
 	fn make_server() -> Server {
-		let graph = Arc::new(RwLock::new(GraphGnn::new()));
-		let embedder = llm::Client::new_embed_only("http://127.0.0.1:1", "test");
-		let worker = Arc::new(crate::ingest::Worker::new(
-			graph.clone(),
-			embedder,
-			None,
-			None,
-			None,
-		));
-		Server {
-			graph,
-			worker,
-			llm: None,
-			save_fn: Arc::new(|| {}),
-			task_q: None,
-			cfg: Arc::new(Config::default()),
-			cache: crate::retrieval::cache::QueryCache::default_shared(),
-			broadcast_pulse: None,
-		}
+		crate::test_support::mcp_server()
 	}
 
-	fn text(out: &serde_json::Value) -> String {
-		out["content"][0]["text"].as_str().unwrap_or("").to_string()
-	}
+	use crate::test_support::tool_text as text;
 	fn body(out: &serde_json::Value) -> serde_json::Value {
 		serde_json::from_str(&text(out)).expect("success body is json")
 	}
@@ -447,9 +426,7 @@ mod tests {
 	}
 
 	fn insert_kern(srv: &Server, kern: Kern) {
-		write_recovered(&srv.graph)
-			.kerns
-			.insert(kern.id.clone(), kern);
+		srv.graph.write().kerns.insert(kern.id.clone(), kern);
 	}
 
 	#[tokio::test]
@@ -485,7 +462,7 @@ mod tests {
 		assert!(!is_error(&out));
 		assert_eq!(body(&out)["removed_edges"], 1, "the incident edge cascades");
 
-		let g = read_recovered(&srv.graph);
+		let g = srv.graph.read();
 		assert!(
 			!g.kerns.get("kx").unwrap().entities.contains_key("a"),
 			"entity is gone"
@@ -552,12 +529,17 @@ mod tests {
 			"both incident edges visited"
 		);
 
-		let g = read_recovered(&srv.graph);
+		let g = srv.graph.read();
 		let kern = g.kerns.get("kx").unwrap();
 		assert_eq!(kern.reasons.len(), 1, "the sub-threshold edge is reaped");
+		let r = kern.reasons.get("a->b").expect("the healthy edge survives");
+		assert!(r.score_lamport > 0, "decay stamped for CRDT merge");
+		let deltas = g.drain_pending_deltas();
 		assert!(
-			kern.reasons.contains_key("a->b"),
-			"the healthy edge survives"
+			deltas
+				.iter()
+				.any(|d| d.object_id == "a->b" && d.target == 2),
+			"decay queued for gossip"
 		);
 	}
 
@@ -588,7 +570,7 @@ mod tests {
 		assert!(!is_error(&out));
 		let edge_id = body(&out)["edge_id"].as_str().expect("edge_id").to_string();
 
-		let g = read_recovered(&srv.graph);
+		let g = srv.graph.read();
 		let r = g
 			.kerns
 			.get("kx")
@@ -609,5 +591,69 @@ mod tests {
 		let out = srv.tool_link(&serde_json::json!({ "from": "nope", "to": "nada", "reason": "x" }));
 		assert!(is_error(&out));
 		assert!(text(&out).contains("not found"));
+	}
+
+	fn move_server() -> Server {
+		let srv = make_server();
+		let mut src = Kern::new("src", "");
+		src
+			.entities
+			.insert("a".into(), crate::test_support::entity("a"));
+		src
+			.entities
+			.insert("b".into(), crate::test_support::entity("b"));
+		add_reason(&mut src, crate::test_support::edge("a", "b"));
+		insert_kern(&srv, src);
+		insert_kern(&srv, Kern::new("dst", ""));
+		srv
+	}
+
+	#[tokio::test]
+	async fn tool_move_carries_entity_and_outgoing_edges() {
+		let srv = move_server();
+
+		let out = srv.tool_move(&serde_json::json!({ "id": "a", "to_kern": "dst" }));
+		assert!(!is_error(&out), "{}", text(&out));
+		assert_eq!(body(&out)["from_kern"], "src");
+		assert_eq!(body(&out)["to_kern"], "dst");
+
+		let g = srv.graph.read();
+		let src = g.kerns.get("src").unwrap();
+		let dst = g.kerns.get("dst").unwrap();
+		assert!(dst.entities.contains_key("a"), "entity relocated");
+		assert!(!src.entities.contains_key("a"), "entity left src");
+		let moved = dst.reasons.get("a->b").expect("outgoing edge travelled");
+		assert_eq!(
+			moved.to_kern_id, "src",
+			"target b stayed behind, so the edge is stamped cross-kern"
+		);
+		assert!(!src.reasons.contains_key("a->b"));
+	}
+
+	#[tokio::test]
+	async fn tool_move_rejects_unknown_entity_and_unknown_destination() {
+		let srv = move_server();
+
+		let out = srv.tool_move(&serde_json::json!({ "id": "ghost", "to_kern": "dst" }));
+		assert!(is_error(&out));
+		assert!(text(&out).contains("thought not found"), "{}", text(&out));
+
+		let out = srv.tool_move(&serde_json::json!({ "id": "a", "to_kern": "ghost_kern" }));
+		assert!(is_error(&out));
+		assert!(text(&out).contains("kern not found"), "{}", text(&out));
+
+		// The rejected destination must not have cost us the entity.
+		let g = srv.graph.read();
+		let src = g.kerns.get("src").unwrap();
+		assert!(src.entities.contains_key("a"), "entity survives a bad move");
+		assert!(src.reasons.contains_key("a->b"), "edge survives a bad move");
+	}
+
+	#[tokio::test]
+	async fn tool_move_rejects_malformed_arguments() {
+		let srv = move_server();
+		let out = srv.tool_move(&serde_json::json!({ "id": "a" }));
+		assert!(is_error(&out));
+		assert!(text(&out).contains("invalid arguments"), "{}", text(&out));
 	}
 }

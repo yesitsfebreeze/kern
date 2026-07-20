@@ -1,10 +1,12 @@
 mod answer;
-mod capture;
 mod embed;
 mod gnn;
 mod gossip;
 mod graph;
+mod hub;
 mod ingest;
+mod intake;
+pub mod io;
 mod reason;
 mod retrieval;
 mod serve;
@@ -13,15 +15,16 @@ mod watcher;
 mod wsl;
 
 pub use answer::{AnswerConfig, DEFAULT_ANSWER_MODEL};
-pub use capture::CaptureConfig;
 pub use embed::{EmbedConfig, DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL};
 pub use gnn::GnnConfig;
 pub use gossip::GossipConfig;
 pub use graph::GraphConfig;
+pub use hub::HubConfig;
 pub use ingest::IngestConfig;
-pub use reason::{ReasonConfig, DEFAULT_REASON_MODEL};
-pub use retrieval::{ModeWeights, RetrievalConfig};
-pub use serve::ServeConfig;
+pub use intake::IntakeConfig;
+pub use reason::ReasonConfig;
+pub use retrieval::RetrievalConfig;
+pub use serve::{mcp_token_path, ServeConfig};
 pub use tick::TickConfig;
 pub use watcher::WatcherConfig;
 
@@ -35,7 +38,6 @@ use crate::base::heat::HeatConfig;
 #[serde(default)]
 pub struct Config {
 	pub data_dir: String,
-	pub log_level: String,
 	pub embed: EmbedConfig,
 	pub reason: ReasonConfig,
 	pub answer: AnswerConfig,
@@ -47,8 +49,9 @@ pub struct Config {
 	pub heat: HeatConfig,
 	pub gnn: GnnConfig,
 	pub watcher: WatcherConfig,
-	pub capture: CaptureConfig,
+	pub intake: IntakeConfig,
 	pub graph: GraphConfig,
+	pub hub: HubConfig,
 }
 
 impl Default for Config {
@@ -77,7 +80,6 @@ impl Config {
 				.join("data")
 				.to_string_lossy()
 				.into_owned(),
-			log_level: "info".into(),
 			embed: EmbedConfig::default(),
 			reason: ReasonConfig::default(),
 			answer: AnswerConfig::default(),
@@ -89,17 +91,24 @@ impl Config {
 			heat: HeatConfig::default(),
 			gnn: GnnConfig::default(),
 			watcher: WatcherConfig::default(),
-			capture: CaptureConfig::default(),
+			intake: IntakeConfig::default(),
 			graph: GraphConfig::default(),
+			hub: HubConfig::default(),
 		}
 	}
 
-	pub fn load(cwd: &Path) -> Result<Self, config_io::Error> {
+	pub fn load(cwd: &Path) -> Result<Self, io::Error> {
 		let user = dirs::config_dir()
 			.map(|d| d.join("kern").join("kern.toml"))
 			.unwrap_or_else(|| cwd.join(".kern").join("kern.toml"));
 		let project = cwd.join(".kern").join("kern.toml");
-		let mut cfg: Self = config_io::load_layered(&user, &project)?;
+		let mut cfg: Self = io::load_layered(&user, &project)?;
+		// serde's struct-level default pins data_dir to the *process* cwd. A
+		// caller loading another root (hub merge, any cross-root tooling) must
+		// get that root's store, never its own — re-pin when no config set it.
+		if cfg.data_dir == Self::default().data_dir {
+			cfg.data_dir = Self::default_in(cwd).data_dir;
+		}
 		cfg.data_dir = graviton_data_dir(&cfg.data_dir, cwd);
 		cfg.redirect_loopback_to_wsl_host();
 		Ok(cfg)
@@ -145,11 +154,7 @@ impl Config {
 			return Err("embed.model is required".into());
 		}
 		self.ingest.validate().map_err(|e| format!("ingest: {e}"))?;
-		self
-			.capture
-			.validate()
-			.map_err(|e| format!("capture: {e}"))?;
-		self.serve.validate().map_err(|e| format!("serve: {e}"))?;
+		self.intake.validate().map_err(|e| format!("intake: {e}"))?;
 		let retrieval = self.retrieval.validate();
 		if !retrieval.is_empty() {
 			return Err(format!("retrieval: {}", retrieval.join("; ")));
@@ -208,6 +213,22 @@ mod tests {
 		let got = PathBuf::from(&cfg.data_dir);
 		assert!(got.is_absolute(), "data_dir must be absolute, got {got:?}");
 		assert_eq!(got, root.join(".kern").join("data"));
+	}
+
+	#[test]
+	fn load_of_a_foreign_root_pins_data_dir_to_that_root() {
+		// Regression: with no config file, serde's default pinned data_dir to the
+		// *process* cwd — a cross-root load (hub merge) then read its own store.
+		let dir = tempfile::tempdir().unwrap();
+		let root = dir.path().canonicalize().unwrap();
+		std::fs::create_dir_all(root.join(".kern")).unwrap();
+
+		let cfg = Config::load(&root).expect("load");
+		assert_eq!(
+			PathBuf::from(&cfg.data_dir),
+			root.join(".kern").join("data"),
+			"configless load must land in the passed root, not the process cwd"
+		);
 	}
 
 	#[test]
@@ -283,10 +304,6 @@ mod tests {
 		assert_eq!(
 			cfg.data_dir,
 			cwd.join(".kern").join("data").to_string_lossy()
-		);
-		assert_eq!(
-			cfg.log_level, "info",
-			"baseline fields are independent of cwd"
 		);
 		assert_eq!(Config::default_in(cwd).data_dir, cfg.data_dir);
 	}

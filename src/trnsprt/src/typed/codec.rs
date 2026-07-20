@@ -75,73 +75,6 @@ impl Decoder for JsonEnvelopeCodec {
 	}
 }
 
-// Wire framing: 4-byte big-endian u32 length prefix, then payload (frame is Vec<u8>).
-#[derive(Default)]
-pub struct BincodeCodec;
-
-// 64 MiB frame cap — without it a bogus 4-byte header claiming ~4 GiB makes the
-// reader buffer that much before yielding (OOM/DoS). Encode rejects too.
-pub const MAX_FRAME_LEN: usize = 64 * 1024 * 1024;
-
-impl BincodeCodec {
-	pub fn new() -> Self {
-		Self
-	}
-}
-
-impl Codec for BincodeCodec {
-	type Frame = Vec<u8>;
-
-	fn encode(&mut self, frame: Self::Frame, dst: &mut BytesMut) -> Result<(), CodecError> {
-		if frame.len() > MAX_FRAME_LEN {
-			return Err(CodecError::Encode(format!(
-				"frame length {} exceeds max {MAX_FRAME_LEN}",
-				frame.len()
-			)));
-		}
-		let len =
-			u32::try_from(frame.len()).map_err(|_| CodecError::Encode("frame too large".into()))?;
-		dst.extend_from_slice(&len.to_be_bytes());
-		dst.extend_from_slice(&frame);
-		Ok(())
-	}
-
-	fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Frame>, CodecError> {
-		if src.len() < 4 {
-			return Ok(None);
-		}
-		let mut len_buf = [0u8; 4];
-		len_buf.copy_from_slice(&src[..4]);
-		let len = u32::from_be_bytes(len_buf) as usize;
-		if len > MAX_FRAME_LEN {
-			return Err(CodecError::Decode(format!(
-				"frame length {len} exceeds max {MAX_FRAME_LEN}"
-			)));
-		}
-		if src.len() < 4 + len {
-			return Ok(None);
-		}
-		let _ = src.split_to(4);
-		let payload = src.split_to(len);
-		Ok(Some(payload.to_vec()))
-	}
-}
-
-impl Encoder<Vec<u8>> for BincodeCodec {
-	type Error = CodecError;
-	fn encode(&mut self, item: Vec<u8>, dst: &mut BytesMut) -> Result<(), Self::Error> {
-		<Self as Codec>::encode(self, item, dst)
-	}
-}
-
-impl Decoder for BincodeCodec {
-	type Item = Vec<u8>;
-	type Error = CodecError;
-	fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-		<Self as Codec>::decode(self, src)
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -206,53 +139,5 @@ mod tests {
 			dec(&mut c, &mut buf).unwrap().unwrap(),
 			json!({"partial": 1})
 		);
-	}
-
-	#[test]
-	fn bincode_roundtrip_and_multi_frame() {
-		let mut c = BincodeCodec::new();
-		let mut buf = BytesMut::new();
-		enc(&mut c, vec![1, 2, 3], &mut buf).unwrap();
-		enc(&mut c, vec![9, 8], &mut buf).unwrap();
-		assert_eq!(dec(&mut c, &mut buf).unwrap().unwrap(), vec![1, 2, 3]);
-		assert_eq!(dec(&mut c, &mut buf).unwrap().unwrap(), vec![9, 8]);
-		assert!(dec(&mut c, &mut buf).unwrap().is_none());
-	}
-
-	#[test]
-	fn bincode_partial_header_and_partial_payload_yield_none() {
-		let mut c = BincodeCodec::new();
-		let mut buf = BytesMut::from(&[0u8, 0u8][..]);
-		assert!(dec(&mut c, &mut buf).unwrap().is_none());
-		let mut buf = BytesMut::new();
-		buf.extend_from_slice(&5u32.to_be_bytes());
-		buf.extend_from_slice(&[1, 2]);
-		assert!(dec(&mut c, &mut buf).unwrap().is_none());
-		assert_eq!(buf.len(), 6, "buffer left intact awaiting the rest");
-	}
-
-	#[test]
-	fn bincode_decode_rejects_oversized_length_header() {
-		let mut c = BincodeCodec::new();
-		let mut buf = BytesMut::new();
-		buf.extend_from_slice(&((MAX_FRAME_LEN as u32) + 1).to_be_bytes());
-		let err = dec(&mut c, &mut buf).unwrap_err();
-		assert!(
-			matches!(err, CodecError::Decode(_)),
-			"oversized header -> Decode err, got {err:?}"
-		);
-	}
-
-	#[test]
-	fn bincode_encode_rejects_oversized_frame() {
-		let mut c = BincodeCodec::new();
-		let mut buf = BytesMut::new();
-		let oversized = vec![0u8; MAX_FRAME_LEN + 1];
-		let err = enc(&mut c, oversized, &mut buf).unwrap_err();
-		assert!(
-			matches!(err, CodecError::Encode(_)),
-			"oversized frame -> Encode err, got {err:?}"
-		);
-		assert!(buf.is_empty(), "nothing written for a rejected frame");
 	}
 }

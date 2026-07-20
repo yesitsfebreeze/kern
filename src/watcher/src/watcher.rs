@@ -56,10 +56,6 @@ impl FileWatcher {
 	pub async fn next_event(&mut self) -> Option<WatchEvent> {
 		self.rx.recv().await
 	}
-
-	pub fn receiver(&mut self) -> &mut mpsc::UnboundedReceiver<WatchEvent> {
-		&mut self.rx
-	}
 }
 
 fn spawn_coalescer(

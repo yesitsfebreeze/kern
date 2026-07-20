@@ -3,7 +3,6 @@ use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 use crate::base::constants::{GOSSIP_SEEN_SET_CAP, GOSSIP_SEEN_TTL};
-use crate::base::locks::lock_recovered;
 
 // Constant TTL makes expiry monotonic in insertion order, so expired entries sit at
 // the deque front — the reclaim loop relies on this.
@@ -31,7 +30,7 @@ impl SeenSet {
 	}
 
 	fn add_and_check_at(&self, id: &str, now: Instant) -> bool {
-		let mut inner = lock_recovered(&self.inner);
+		let mut inner = self.inner.lock();
 
 		if let Some(&expires) = inner.live.get(id) {
 			if expires > now {

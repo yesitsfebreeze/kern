@@ -1,5 +1,4 @@
 use crate::gnn::activation::Activation;
-use crate::gnn::dropout::Dropout;
 use crate::gnn::graph::Graph;
 use crate::gnn::tensor::Tensor;
 
@@ -11,65 +10,10 @@ pub fn act_deriv_mul(act: Activation, d_out: &Tensor, pre_act: &Tensor) -> Tenso
 	out
 }
 
-fn row_sum_sq(t: &Tensor, row: usize) -> f64 {
-	let mut sum_sq = 0.0;
-	for j in 0..t.cols {
-		let v = t.at(row, j);
-		sum_sq += v * v;
-	}
-	sum_sq
-}
-
-pub fn l2_normalize_rows(t: &Tensor) -> Tensor {
-	let mut out = t.clone();
-	for i in 0..t.rows {
-		let sum_sq = row_sum_sq(t, i);
-		if sum_sq == 0.0 {
-			continue;
-		}
-		let inv_norm = 1.0 / sum_sq.sqrt();
-		for j in 0..t.cols {
-			out.set(i, j, t.at(i, j) * inv_norm);
-		}
-	}
-	out
-}
-
-pub fn l2_norm_backward(pre_norm: &Tensor, d_out: &Tensor) -> Tensor {
-	let mut out = Tensor::zeros(pre_norm.rows, pre_norm.cols);
-	for i in 0..pre_norm.rows {
-		let sum_sq = row_sum_sq(pre_norm, i);
-		if sum_sq == 0.0 {
-			continue;
-		}
-		let inv_norm = 1.0 / sum_sq.sqrt();
-		// dL/dx = (d_out - x̂·(d_out·x̂)) / ‖x‖: dot with the NORMALIZED x̂ — raw
-		// `pre_norm` drops a 1/‖x‖ factor (see l2_norm_backward_matches_numeric_gradient).
-		let mut dot_val = 0.0;
-		for j in 0..pre_norm.cols {
-			let x_hat = pre_norm.at(i, j) * inv_norm;
-			dot_val += d_out.at(i, j) * x_hat;
-		}
-		for j in 0..pre_norm.cols {
-			let x_hat = pre_norm.at(i, j) * inv_norm;
-			out.set(i, j, (d_out.at(i, j) - x_hat * dot_val) * inv_norm);
-		}
-	}
-	out
-}
-
 pub trait GraphLayer {
 	fn forward_graph(&mut self, g: &Graph, features: &Tensor) -> Tensor;
 	fn parameters(&self) -> Vec<&Tensor>;
 	fn parameters_mut(&mut self) -> Vec<&mut Tensor>;
-
-	fn dropout_mut(&mut self) -> Option<&mut Dropout>;
-
-	fn set_training(&mut self, training: bool) {
-		if let Some(d) = self.dropout_mut() {
-			d.set_training(training);
-		}
-	}
 }
 
 pub trait BackwardGraphLayer: GraphLayer {
@@ -98,72 +42,6 @@ mod tests {
 		let g = act_deriv_mul(Activation::Relu, &d_out, &pre);
 		assert_eq!(g.data, vec![0.0, 0.0, 0.0, 1.0, 1.0]);
 	}
-
-	#[test]
-	fn backward_scales_incoming_gradient_by_deriv() {
-		let pre = Tensor {
-			data: vec![1.0, -1.0],
-			rows: 1,
-			cols: 2,
-		};
-		let d_out = Tensor {
-			data: vec![0.5, 0.5],
-			rows: 1,
-			cols: 2,
-		};
-		let g = act_deriv_mul(Activation::LeakyRelu(0.2), &d_out, &pre);
-		assert_eq!(g.data, vec![0.5, 0.1]);
-	}
-
-	#[test]
-	fn l2_norm_backward_matches_numeric_gradient() {
-		let x = Tensor {
-			data: vec![0.5, -0.2, 0.1, -0.4, 0.6, 0.2],
-			rows: 2,
-			cols: 3,
-		};
-		let d_out = Tensor {
-			data: vec![1.0; 6],
-			rows: 2,
-			cols: 3,
-		};
-		let analytic = l2_norm_backward(&x, &d_out);
-		let loss = |t: &Tensor| -> f64 { l2_normalize_rows(t).data.iter().sum() };
-		const H: f64 = 1e-6;
-		for idx in 0..x.data.len() {
-			let mut xp = x.clone();
-			xp.data[idx] += H;
-			let mut xm = x.clone();
-			xm.data[idx] -= H;
-			let num = (loss(&xp) - loss(&xm)) / (2.0 * H);
-			let den = 1.0_f64.max(analytic.data[idx].abs()).max(num.abs());
-			assert!(
-				(analytic.data[idx] - num).abs() / den < 1e-4,
-				"grad[{idx}]: analytic {} vs numeric {num}",
-				analytic.data[idx]
-			);
-		}
-	}
-
-	#[test]
-	fn l2_norm_backward_zero_row_yields_zero_grad() {
-		let x = Tensor {
-			data: vec![0.0, 0.0, 3.0, 4.0],
-			rows: 2,
-			cols: 2,
-		};
-		let d_out = Tensor {
-			data: vec![1.0; 4],
-			rows: 2,
-			cols: 2,
-		};
-		let g = l2_norm_backward(&x, &d_out);
-		assert_eq!(&g.data[0..2], &[0.0, 0.0], "zero row -> zero grad, no NaN");
-		assert!(
-			g.data[2..].iter().all(|v| v.is_finite()),
-			"non-zero row grad is finite"
-		);
-	}
 }
 
 #[cfg(test)]
@@ -185,9 +63,9 @@ mod gnn_math_tests {
 		for (i, f) in feats.iter().enumerate() {
 			g.add_node(&format!("n{i}"), f.to_vec()).unwrap();
 		}
-		g.add_edge("n0", "n1", vec![]).unwrap();
-		g.add_edge("n1", "n2", vec![]).unwrap();
-		g.add_edge("n2", "n0", vec![]).unwrap();
+		g.add_edge("n0", "n1").unwrap();
+		g.add_edge("n1", "n2").unwrap();
+		g.add_edge("n2", "n0").unwrap();
 		g.add_self_loops();
 		let x = g.feature_matrix();
 		(g, x)
@@ -263,7 +141,7 @@ mod gnn_math_tests {
 	fn gcn_linear_input_grad_matches_numeric() {
 		let (g, x) = tiny_graph();
 		let mut rng = rand::rngs::StdRng::seed_from_u64(23);
-		let mut l = GCNLayer::with_rng(4, 3, None, false, 0.0, &mut rng);
+		let mut l = GCNLayer::with_rng(4, 3, None, false, &mut rng);
 		assert_input_grad_matches_numeric(&mut l, &g, &x);
 	}
 
@@ -271,7 +149,7 @@ mod gnn_math_tests {
 	fn gcn_relu_input_grad_matches_numeric() {
 		let (g, x) = tiny_graph();
 		let mut rng = rand::rngs::StdRng::seed_from_u64(29);
-		let mut l = GCNLayer::with_rng(4, 3, Some(Activation::Relu), false, 0.0, &mut rng);
+		let mut l = GCNLayer::with_rng(4, 3, Some(Activation::Relu), false, &mut rng);
 		assert_input_grad_matches_numeric(&mut l, &g, &x);
 	}
 
@@ -279,7 +157,7 @@ mod gnn_math_tests {
 	fn gcn_linear_backward_matches_numeric() {
 		let (g, x) = tiny_graph();
 		let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-		let mut l = GCNLayer::with_rng(4, 3, None, false, 0.0, &mut rng);
+		let mut l = GCNLayer::with_rng(4, 3, None, false, &mut rng);
 		assert_grad_matches_numeric(&mut l, &g, &x);
 	}
 
@@ -287,7 +165,7 @@ mod gnn_math_tests {
 	fn gcn_relu_backward_matches_numeric() {
 		let (g, x) = tiny_graph();
 		let mut rng = rand::rngs::StdRng::seed_from_u64(11);
-		let mut l = GCNLayer::with_rng(4, 3, Some(Activation::Relu), false, 0.0, &mut rng);
+		let mut l = GCNLayer::with_rng(4, 3, Some(Activation::Relu), false, &mut rng);
 		assert_grad_matches_numeric(&mut l, &g, &x);
 	}
 

@@ -400,7 +400,6 @@ mod tests {
 			content: 1.0,
 			reason: 0.0,
 			edge: 0.0,
-			lexical: 0.0,
 		};
 		let s = score_neighbor(&[1.0, 0.0], &neighbor, &r, w, 0.1, 0.3);
 		assert!(
@@ -417,7 +416,6 @@ mod tests {
 			content: 0.0,
 			reason: 0.0,
 			edge: 1.0,
-			lexical: 0.0,
 		};
 		let s = score_neighbor(&[1.0, 0.0], &neighbor, &r, w, 0.1, 0.3);
 		assert!(
@@ -446,7 +444,6 @@ mod tests {
 			content: 1.0,
 			reason: 0.0,
 			edge: 0.0,
-			lexical: 0.0,
 		};
 		let res = expand(&g, &cfg, &[1.0, 0.0], &seeds, w);
 

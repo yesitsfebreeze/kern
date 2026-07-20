@@ -21,7 +21,7 @@ session delta (.txt) ──► intake ──► distill (LLM) ──► typed cl
                                    │            │
    ┌───────── MCP (stdio+SSE) ────┼──────── RPC (tarpc socket) ────┐
    │            ▲                  │                 ▲              │
-   │        query pipeline ◄───────┴──────────►  digest.md         │
+   │        query pipeline ◄───────┴──────────►  recall            │
    │  (HNSW+BM25 seed → expand → RRF+PageRank → MMR → answer)      │
    │                                                                │
    │   tick queue ──► cluster / name / enrich / gc / gnn / persist  │

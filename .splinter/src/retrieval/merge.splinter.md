@@ -1,8 +1,0 @@
-# src/retrieval/merge.rs — commentary
-
-- `merge` tie-break history: before the id secondary key, entities tied on the merged score kept whatever order the `thoughts` HashMap iterated — RandomState varies per process, enough to wobble a rank-boundary result run-to-run.
-Second-pass migration:
-
-- `merge` corroboration math (moved off the doc comment): scores from the beam and the seed list pool into one `OnlineSoftmax` per entity, i.e. the merged value is `ln(sum_i exp(s_i))`. For a single observation this is just `ln(exp(s)) = s`, so a lone hit passes through unchanged. For n observations at the same score s it is `ln(n * exp(s)) = s + ln(n)` — the `+ln(count)` corroboration boost, which is why an entity found via *both* the seed and expansion paths outranks one found via a single path at the same raw score (pinned by the `a`/`b` test where `a` earns `+ln(2)` and sorts first). Because the value is a log-sum-exp of unnormalized scores rather than a softmax over a partition, it is a relevance magnitude and can exceed 1.0 — do not read it as a probability or feed it anywhere expecting [0,1].
-- Seeds absent from the beam are resolved against the live graph via `find_entity_ref_in_graph`; a seed id in neither the beam nor the graph is dropped rather than surfaced as a bare id with no entity behind it.
-merge() fuses the seed list and the expansion beam. Scores pool with log-sum-exp (OnlineSoftmax), so an entity appearing in BOTH sources earns +ln(count). The merged score is a magnitude, not a probability — it may exceed 1.0. Final sort is score desc, id asc: the explicit id tie-break is required for determinism because HashMap iteration order varies per process.

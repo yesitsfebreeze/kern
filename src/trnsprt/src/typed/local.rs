@@ -14,22 +14,49 @@ pub enum Endpoint {
 
 impl Endpoint {
 	pub fn kern() -> Self {
-		let tag = cwd_tag();
+		let dir = std::env::current_dir().unwrap_or_default();
+		Self::kern_for(&dir)
+	}
+
+	// Same socket a daemon running with cwd `root` binds — lets the hub address
+	// a node's endpoint without being in that directory.
+	pub fn kern_for(root: &std::path::Path) -> Self {
+		let tag = path_tag(root);
+		Self::scoped(&format!("kern-{tag}"))
+	}
+
+	pub fn hub() -> Self {
+		Self::scoped("kern-hub")
+	}
+
+	// Reconstruct from the wire form produced by `display()`.
+	pub fn parse(s: &str) -> Self {
+		#[cfg(unix)]
+		{
+			Endpoint::Unix(PathBuf::from(s))
+		}
+		#[cfg(windows)]
+		{
+			Endpoint::NamedPipe(s.to_string())
+		}
+	}
+
+	fn scoped(name: &str) -> Self {
 		#[cfg(unix)]
 		{
 			let path = std::env::var_os("XDG_RUNTIME_DIR")
 				.map(PathBuf::from)
-				.map(|d| d.join(format!("kern-{tag}.sock")))
+				.map(|d| d.join(format!("{name}.sock")))
 				.unwrap_or_else(|| {
 					let user = std::env::var("USER").unwrap_or_else(|_| "default".into());
-					PathBuf::from(format!("/tmp/kern-{user}-{tag}.sock"))
+					PathBuf::from(format!("/tmp/{name}-{user}.sock"))
 				});
 			Endpoint::Unix(path)
 		}
 		#[cfg(windows)]
 		{
 			let user = std::env::var("USERNAME").unwrap_or_else(|_| "default".into());
-			Endpoint::NamedPipe(format!(r"\\.\pipe\kern-{user}-{tag}"))
+			Endpoint::NamedPipe(format!(r"\\.\pipe\{name}-{user}"))
 		}
 	}
 
@@ -43,11 +70,10 @@ impl Endpoint {
 	}
 }
 
-// FNV-1a over the canonical cwd — MUST stay stable across processes (unlike
-// DefaultHasher's randomized state) so daemon and clients always agree.
-fn cwd_tag() -> String {
-	let dir = std::env::current_dir().unwrap_or_default();
-	let canon = dir.canonicalize().unwrap_or(dir);
+// FNV-1a over the canonical path — MUST stay stable across processes (unlike
+// DefaultHasher's randomized state) so daemon, hub, and clients always agree.
+fn path_tag(dir: &std::path::Path) -> String {
+	let canon = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
 	let s = canon.to_string_lossy();
 	let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
 	for b in s.as_bytes() {
@@ -62,21 +88,39 @@ mod cwd_tag_tests {
 	use super::*;
 
 	#[test]
-	fn cwd_tag_is_stable_and_nonempty() {
-		let a = cwd_tag();
-		let b = cwd_tag();
-		assert_eq!(a, b, "same cwd must yield the same tag");
+	fn path_tag_is_stable_and_nonempty() {
+		let dir = std::env::current_dir().unwrap();
+		let a = path_tag(&dir);
+		let b = path_tag(&dir);
+		assert_eq!(a, b, "same path must yield the same tag");
 		assert_eq!(a.len(), 16, "tag is 16 hex chars");
 		assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
 	}
 
 	#[test]
 	fn endpoint_kern_includes_tag() {
+		let dir = std::env::current_dir().unwrap();
 		let ep = Endpoint::kern();
 		assert!(
-			ep.display().contains(&cwd_tag()),
+			ep.display().contains(&path_tag(&dir)),
 			"endpoint scoped by cwd tag"
 		);
+	}
+
+	#[test]
+	fn kern_for_cwd_matches_kern() {
+		let dir = std::env::current_dir().unwrap();
+		assert_eq!(
+			Endpoint::kern().display(),
+			Endpoint::kern_for(&dir).display(),
+			"hub-computed endpoint must match the node's own"
+		);
+	}
+
+	#[test]
+	fn parse_round_trips_display() {
+		let ep = Endpoint::hub();
+		assert_eq!(Endpoint::parse(&ep.display()).display(), ep.display());
 	}
 }
 
@@ -186,27 +230,34 @@ pub enum BindError {
 	Io(#[from] std::io::Error),
 }
 
+// The socket serves unauthenticated graph reads AND mutations, so it must be
+// owner-only. chmod-after-bind leaves a sub-ms window at the umask default
+// (0755); the alternative is flipping the process-global umask, which in a
+// multi-threaded daemon would race every unrelated file created concurrently.
+#[cfg(unix)]
+fn harden_socket(path: &Path) -> std::io::Result<()> {
+	use std::os::unix::fs::PermissionsExt;
+	std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
 pub async fn bind_kern_listener(endpoint: &Endpoint) -> Result<BindOutcome, BindError> {
 	match endpoint {
 		#[cfg(unix)]
 		Endpoint::Unix(path) => {
-			match tokio::net::UnixListener::bind(path) {
-				Ok(listener) => {
-					return Ok(BindOutcome::Bound(LocalListener {
-						inner: listener,
-						socket_path: path.clone(),
-					}));
-				}
+			let listener = match tokio::net::UnixListener::bind(path) {
+				Ok(listener) => listener,
 				Err(e) if e.kind() != std::io::ErrorKind::AddrInUse => {
 					return Err(e.into());
 				}
-				Err(_) => {}
-			}
-			if tokio::net::UnixStream::connect(path).await.is_ok() {
-				return Ok(BindOutcome::AlreadyRunning);
-			}
-			let _ = std::fs::remove_file(path);
-			let listener = tokio::net::UnixListener::bind(path)?;
+				Err(_) => {
+					if tokio::net::UnixStream::connect(path).await.is_ok() {
+						return Ok(BindOutcome::AlreadyRunning);
+					}
+					let _ = std::fs::remove_file(path);
+					tokio::net::UnixListener::bind(path)?
+				}
+			};
+			harden_socket(path)?;
 			Ok(BindOutcome::Bound(LocalListener {
 				inner: listener,
 				socket_path: path.clone(),
@@ -315,6 +366,38 @@ mod bind_tests_unix {
 		assert!(
 			matches!(second, BindOutcome::AlreadyRunning),
 			"a live owner -> AlreadyRunning"
+		);
+	}
+
+	#[tokio::test]
+	async fn a_bound_socket_is_owner_only() {
+		use std::os::unix::fs::PermissionsExt;
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("kern.sock");
+		let ep = Endpoint::Unix(path.clone());
+		let BindOutcome::Bound(_listener) = bind_kern_listener(&ep).await.unwrap() else {
+			panic!("first bind should own the socket")
+		};
+		let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+		assert_eq!(mode, 0o600, "socket must be owner-only, got {mode:o}");
+	}
+
+	#[tokio::test]
+	async fn a_rebound_stale_socket_is_also_owner_only() {
+		use std::os::unix::fs::PermissionsExt;
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("kern.sock");
+		{
+			let _l = tokio::net::UnixListener::bind(&path).unwrap();
+		}
+		let ep = Endpoint::Unix(path.clone());
+		let BindOutcome::Bound(_listener) = bind_kern_listener(&ep).await.unwrap() else {
+			panic!("stale file should be removed and rebound")
+		};
+		let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+		assert_eq!(
+			mode, 0o600,
+			"the stale-rebind path hardens too, got {mode:o}"
 		);
 	}
 

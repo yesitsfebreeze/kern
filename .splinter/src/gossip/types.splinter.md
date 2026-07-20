@@ -1,5 +1,0 @@
-Second-pass migration:
-- `GossipKind` doc compressed. Moved here: it is a lightweight tag for dispatch/metrics, intentionally coarser than `GossipPayload` and NOT 1:1 — `Fetch` covers both `FetchRequest` and `FetchResult` because a fetch is one logical request/response exchange; match on the payload when the exact shape matters.
-- `SpherePayload` field docs trimmed: `kern_id` = id of the advertised kern; `anchor_text` = human-readable anchor label (the kern's name); `anchor_vec` has the same dimensionality as entity vectors, and the `Vec<f64>` serde shim (`vec_f64_compat`) exists so the gossip wire format stays stable across peer versions; an empty anchor (unnamed kern) matches nothing by similarity.
-- Radii: cosine distance `1 - cosine_similarity`; within `inner_radius` firmly inside, beyond `outer_radius` firmly outside, the band between is the fuzzy "consider" zone.
-- `CrdtDeltaPayload` doc compressed; convergence rationale (max-merge is commutative + idempotent, so any delivery order/duplication converges) lives in src/crdt.rs and its note. Senders must transmit the full absolute slot value.

@@ -9,6 +9,12 @@ use trnsprt::{McpError, McpServer, ToolResult, ToolSchema};
 use super::load_graph;
 
 pub(super) async fn cmd_mcp(cfg: &crate::config::Config) {
+	// Hub-first: a running hub owns node lifecycle (spawn, adopt, unload) so the
+	// proxy never self-spawns a daemon the hub can't see. No hub -> legacy path.
+	if let Some(client) = attach_via_hub(cfg.hub.auto_start).await {
+		run_proxy(client).await;
+		return;
+	}
 	match attach_with_retry(2, 150).await {
 		Ok(client) => {
 			run_proxy(client).await;
@@ -65,6 +71,62 @@ async fn run_proxy(client: KernRpcClient<JsonEnvelopeCodec>) {
 	}
 }
 
+async fn attach_via_hub(auto_start: bool) -> Option<KernRpcClient<JsonEnvelopeCodec>> {
+	use trnsprt::hub_rpc::{HubRpcClient, ResolveReq};
+	let hub = match HubRpcClient::<JsonEnvelopeCodec>::connect_hub().await {
+		Ok(h) => h,
+		Err(_) if auto_start => {
+			// Same detach pattern as spawn_daemon; a lost race lands on
+			// AlreadyRunning in the second hub and the retry below still connects.
+			if let Err(e) = spawn_hub() {
+				tracing::warn!(target: "kern.mcp", error = %e, "hub auto-start failed — legacy path");
+				return None;
+			}
+			let mut connected = None;
+			for _ in 0..6 {
+				tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+				if let Ok(h) = HubRpcClient::<JsonEnvelopeCodec>::connect_hub().await {
+					connected = Some(h);
+					break;
+				}
+			}
+			match connected {
+				Some(h) => {
+					tracing::info!(target: "kern.mcp", "auto-started machine hub");
+					h
+				}
+				None => {
+					tracing::warn!(target: "kern.mcp", "auto-started hub never answered — legacy path");
+					return None;
+				}
+			}
+		}
+		Err(_) => return None,
+	};
+	// main.rs re-pinned cwd to the project root before dispatch.
+	let root = std::env::current_dir().ok()?;
+	let res = hub
+		.resolve(ResolveReq {
+			root: root.display().to_string(),
+		})
+		.await
+		.ok()?;
+	if !res.ok {
+		tracing::warn!(target: "kern.mcp", error = %res.err, "hub resolve failed — legacy path");
+		return None;
+	}
+	let endpoint = trnsprt::typed::Endpoint::parse(&res.endpoint);
+	tracing::info!(
+		target: "kern.mcp",
+		endpoint = %res.endpoint,
+		spawned = res.spawned,
+		"attached via hub"
+	);
+	KernRpcClient::<JsonEnvelopeCodec>::connect_endpoint(&endpoint)
+		.await
+		.ok()
+}
+
 async fn attach_with_retry(
 	retries: u32,
 	delay_ms: u64,
@@ -84,36 +146,37 @@ async fn attach_with_retry(
 	Err(last_err.unwrap_or_else(|| AdapterError::Other("no attempts".into())))
 }
 
-#[cfg(windows)]
-fn spawn_daemon() -> std::io::Result<()> {
-	use std::os::windows::process::CommandExt;
-	use std::process::{Command, Stdio};
-	const DETACHED_PROCESS: u32 = 0x0000_0008;
-	const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-	let exe = std::env::current_exe()?;
-	let _child = Command::new(exe)
-		.arg("--daemon")
-		.stdin(Stdio::null())
-		.stdout(Stdio::null())
-		.stderr(Stdio::null())
-		.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
-		.spawn()?;
-	// Drop child handle — detach flags + null stdio keep it alive past our exit.
-	Ok(())
+fn spawn_hub() -> std::io::Result<()> {
+	spawn_detached("hub")
 }
 
-#[cfg(unix)]
 fn spawn_daemon() -> std::io::Result<()> {
-	use std::os::unix::process::CommandExt;
+	spawn_detached("--daemon")
+}
+
+// Drop the child handle — detach flags + null stdio keep it alive past our exit.
+fn spawn_detached(arg: &str) -> std::io::Result<()> {
 	use std::process::{Command, Stdio};
 	let exe = std::env::current_exe()?;
-	let _child = Command::new(exe)
-		.arg("--daemon")
+	let mut cmd = Command::new(exe);
+	cmd
+		.arg(arg)
 		.stdin(Stdio::null())
 		.stdout(Stdio::null())
-		.stderr(Stdio::null())
-		.process_group(0)
-		.spawn()?;
+		.stderr(Stdio::null());
+	#[cfg(windows)]
+	{
+		use std::os::windows::process::CommandExt;
+		const DETACHED_PROCESS: u32 = 0x0000_0008;
+		const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+		cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+	}
+	#[cfg(unix)]
+	{
+		use std::os::unix::process::CommandExt;
+		cmd.process_group(0);
+	}
+	let _child = cmd.spawn()?;
 	Ok(())
 }
 
@@ -131,22 +194,17 @@ impl McpServer for ProxyServer {
 
 	fn tools_list(&self) -> Vec<ToolSchema> {
 		let client = self.client.clone();
-		let res = tokio::task::block_in_place(|| {
-			tokio::runtime::Handle::current().block_on(async move {
-				let c = client.lock().await;
-				c.list_tools(trnsprt::kern_rpc::ListToolsReq {}).await
-			})
+		let res = crate::llm::block_on_in_place(async move {
+			let c = client.lock().await;
+			c.list_tools(trnsprt::kern_rpc::ListToolsReq {}).await
 		});
 		match res {
-			Ok(r) => r
+			Some(Ok(r)) => r
 				.tools
 				.into_iter()
 				.filter_map(|v| serde_json::from_value(v).ok())
 				.collect(),
-			Err(_) => crate::mcp::tools::tool_definitions()
-				.into_iter()
-				.filter_map(|v| serde_json::from_value(v).ok())
-				.collect(),
+			_ => crate::mcp::tools::typed_tool_schemas(),
 		}
 	}
 
@@ -156,73 +214,26 @@ impl McpServer for ProxyServer {
 			name: name.to_string(),
 			args: args.clone(),
 		};
-		let res = tokio::task::block_in_place(|| {
-			tokio::runtime::Handle::current().block_on(async move {
-				let c = client.lock().await;
-				c.call_tool(req).await
-			})
+		let res = crate::llm::block_on_in_place(async move {
+			let c = client.lock().await;
+			c.call_tool(req).await
 		})
+		.ok_or_else(|| McpError::Rpc {
+			code: -32000,
+			message: "kern_rpc call_tool: no tokio runtime".to_string(),
+		})?
 		.map_err(|e| McpError::Rpc {
 			code: -32000,
 			message: format!("kern_rpc call_tool: {e}"),
 		})?;
 
-		Ok(tool_result_from_envelope(&res.envelope))
+		Ok(crate::mcp::value_to_tool_result(&res.envelope))
 	}
 
 	fn extra_capabilities(&self) -> serde_json::Value {
 		// Must match the standalone server so a client probing capabilities
 		// can't tell the two apart.
 		serde_json::json!({"resources": {}, "prompts": {}})
-	}
-}
-
-fn tool_result_from_envelope(envelope: &serde_json::Value) -> ToolResult {
-	let content = envelope
-		.get("content")
-		.and_then(|v| v.as_array())
-		.cloned()
-		.unwrap_or_default();
-	let is_error = envelope
-		.get("isError")
-		.and_then(|v| v.as_bool())
-		.unwrap_or(false);
-	ToolResult {
-		content,
-		is_error,
-		structured_content: None,
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-	use serde_json::json;
-
-	#[test]
-	fn envelope_extracts_content_array_and_error_flag() {
-		let env = json!({ "content": [{ "type": "text", "text": "hi" }], "isError": true });
-		let r = tool_result_from_envelope(&env);
-		assert!(r.is_error);
-		assert_eq!(r.content.len(), 1);
-		assert_eq!(r.content[0]["text"], "hi");
-		assert!(r.structured_content.is_none());
-	}
-
-	#[test]
-	fn envelope_missing_fields_default_to_empty_and_ok() {
-		let r = tool_result_from_envelope(&json!({}));
-		assert!(!r.is_error, "missing isError defaults to false");
-		assert!(r.content.is_empty(), "missing content defaults to empty");
-	}
-
-	#[test]
-	fn envelope_non_array_content_falls_back_to_empty() {
-		let r = tool_result_from_envelope(&json!({ "content": "oops", "isError": false }));
-		assert!(
-			r.content.is_empty(),
-			"a non-array content is ignored, not panicked on"
-		);
 	}
 }
 
@@ -289,6 +300,7 @@ async fn run_standalone(cfg: &crate::config::Config) {
 			broadcast_q: None,
 			gnn_cfg: cfg.gnn.into(),
 			tick_cfg: cfg.tick,
+			heat_cfg: cfg.heat,
 		},
 	);
 
@@ -304,6 +316,9 @@ async fn run_standalone(cfg: &crate::config::Config) {
 			cfg.retrieval.query_cache_theta,
 		),
 		broadcast_pulse: None,
+		last_activity: Arc::new(std::sync::atomic::AtomicU64::new(
+			crate::base::util::now_ms(),
+		)),
 	};
 	server.run_stdio();
 }

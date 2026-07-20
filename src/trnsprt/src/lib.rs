@@ -1,20 +1,12 @@
-mod client;
 mod error;
 mod http;
-mod inproc;
-mod registry;
 mod server;
-mod transport;
 mod types;
 
-pub use client::Client;
 pub use error::McpError;
 pub use http::serve_http;
-pub use inproc::InProcTransport;
-pub use registry::{LiveServer, Registry};
 pub use server::{serve_rw, serve_stdio, McpServer};
-pub use transport::{ChildStdio, Transport};
-pub use types::{ServerId, ToolResult, ToolSchema};
+pub use types::{ToolResult, ToolSchema};
 
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
 
@@ -25,8 +17,7 @@ extern crate self as trnsprt;
 pub mod typed;
 pub use trnsprt_macros::service;
 
-pub mod search;
-
+pub mod hub_rpc;
 pub mod kern_rpc;
 
 // Re-exports solely for service!-generated code (::trnsprt::__private::*).

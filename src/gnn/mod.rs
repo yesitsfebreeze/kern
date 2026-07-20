@@ -13,7 +13,6 @@ pub enum GnnError {
 	Tensor(#[from] crate::gnn::tensor::TensorError),
 }
 
-pub mod dropout;
 pub mod gcn;
 pub mod graph;
 pub mod layer;

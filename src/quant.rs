@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const INT8_MAX_ABS: f32 = 127.0;
+const INT8_MAX_ABS: f32 = 127.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[repr(u8)]
@@ -86,14 +86,6 @@ impl QuantizedVec {
 				.collect(),
 		}
 	}
-
-	pub fn dim(&self) -> usize {
-		match self.mode {
-			QuantizationMode::None => self.f.len(),
-			QuantizationMode::Int8 => self.q.len(),
-			QuantizationMode::Binary => self.dim_bits,
-		}
-	}
 }
 
 fn encode_int8(v: &[f32]) -> QuantizedVec {
@@ -176,7 +168,7 @@ pub fn quantized_cosine_distance(a: &QuantizedVec, b: &QuantizedVec) -> f64 {
 	}
 }
 
-pub fn float_cosine_distance(a: &[f32], b: &[f32]) -> f64 {
+fn float_cosine_distance(a: &[f32], b: &[f32]) -> f64 {
 	if a.is_empty() || b.is_empty() || a.len() != b.len() {
 		return 1.0;
 	}
@@ -310,7 +302,7 @@ mod tests {
 	#[test]
 	fn empty_and_zero_vectors() {
 		let empty = QuantizedVec::encode(&[], QuantizationMode::Int8);
-		assert_eq!(empty.dim(), 0);
+		assert!(empty.q.is_empty());
 		assert!(empty.decode().is_empty());
 
 		let zero = QuantizedVec::encode(&[0.0, 0.0, 0.0], QuantizationMode::Int8);
@@ -388,8 +380,7 @@ mod tests {
 		let v = vec![1.0f32, -1.0, 0.0, -0.5, 2.0, -3.0, 0.1, -0.1, 5.0, -5.0];
 		let qv = QuantizedVec::encode(&v, QuantizationMode::Binary);
 		assert_eq!(
-			qv.dim(),
-			10,
+			qv.dim_bits, 10,
 			"dim_bits is the true dimension, not b.len()*8"
 		);
 		assert_eq!(qv.b.len(), 2, "10 dims pack into ceil(10/8)=2 bytes");

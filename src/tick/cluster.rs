@@ -1,6 +1,5 @@
 use crate::base::constants::{
-	KERN_COHESION_THRESHOLD, KERN_MIN_CLUSTER_SIZE, KERN_NAMING_COHESION_THRESHOLD,
-	KERN_NAMING_MIN_CLUSTER_SIZE,
+	KERN_COHESION_THRESHOLD, KERN_NAMING_COHESION_THRESHOLD, KERN_NAMING_MIN_CLUSTER_SIZE,
 };
 use crate::base::math::cosine;
 use crate::base::types::Entity;
@@ -54,10 +53,6 @@ pub fn vector_cluster(thoughts: &[&Entity], max_sample: usize) -> Vec<Cluster> {
 		clusters.push(c);
 	}
 	clusters
-}
-
-pub fn largest_cohesive_cluster(clusters: &[Cluster]) -> Option<usize> {
-	best_cluster(clusters, KERN_MIN_CLUSTER_SIZE, KERN_COHESION_THRESHOLD)
 }
 
 pub fn largest_cohesive_cluster_for_naming(clusters: &[Cluster]) -> Option<usize> {

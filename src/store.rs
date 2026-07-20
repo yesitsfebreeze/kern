@@ -6,7 +6,6 @@ use parking_lot::{Mutex, RwLock};
 use std::time::Instant;
 
 use crate::base::graph::GraphGnn;
-use crate::base::locks::{lock_recovered, read_recovered, write_recovered};
 use crate::config::Config;
 use crate::ingest::Worker;
 use crate::llm::Client as LlmClient;
@@ -44,17 +43,15 @@ impl Registry {
 	}
 
 	pub fn get(&self, data_dir: &Path) -> Option<Arc<StoreEntry>> {
-		read_recovered(&self.stores)
-			.get(&Self::canon(data_dir))
-			.cloned()
+		self.stores.read().get(&Self::canon(data_dir)).cloned()
 	}
 
 	pub fn len(&self) -> usize {
-		read_recovered(&self.stores).len()
+		self.stores.read().len()
 	}
 
 	pub fn is_empty(&self) -> bool {
-		read_recovered(&self.stores).is_empty()
+		self.stores.read().is_empty()
 	}
 
 	pub fn open(
@@ -67,20 +64,17 @@ impl Registry {
 		broadcast_q: Option<BroadcastQuestionFunc>,
 	) -> Arc<StoreEntry> {
 		let key = Self::canon(data_dir);
-		if let Some(e) = read_recovered(&self.stores).get(&key) {
-			*write_recovered(&e.last_touch) = Instant::now();
+		if let Some(e) = self.stores.read().get(&key) {
+			*e.last_touch.write() = Instant::now();
 			return e.clone();
 		}
 
-		let build_lock = lock_recovered(&self.builds)
-			.entry(key.clone())
-			.or_default()
-			.clone();
-		let _build = lock_recovered(&build_lock);
+		let build_lock = self.builds.lock().entry(key.clone()).or_default().clone();
+		let _build = build_lock.lock();
 
 		// Re-check under the build lock: a prior builder may have inserted while we waited.
-		if let Some(e) = read_recovered(&self.stores).get(&key) {
-			*write_recovered(&e.last_touch) = Instant::now();
+		if let Some(e) = self.stores.read().get(&key) {
+			*e.last_touch.write() = Instant::now();
 			return e.clone();
 		}
 
@@ -134,6 +128,7 @@ impl Registry {
 				broadcast_q,
 				gnn_cfg: cfg.gnn.into(),
 				tick_cfg: cfg.tick,
+				heat_cfg: cfg.heat,
 			},
 		);
 
@@ -149,7 +144,9 @@ impl Registry {
 			last_touch: RwLock::new(Instant::now()),
 		});
 
-		write_recovered(&self.stores)
+		self
+			.stores
+			.write()
 			.entry(key)
 			.or_insert_with(|| entry.clone())
 			.clone()
@@ -162,7 +159,7 @@ mod tests {
 	use std::time::Duration;
 
 	fn dead_client() -> LlmClient {
-		LlmClient::new_embed_only("http://127.0.0.1:1", "test")
+		LlmClient::new_embed_only("http://127.0.0.1:1", "test", "")
 	}
 
 	#[tokio::test]
@@ -172,7 +169,7 @@ mod tests {
 		let cfg = Config::default();
 
 		let a = reg.open(dir.path(), &cfg, dead_client(), None, None, None);
-		let first_touch = *read_recovered(&a.last_touch);
+		let first_touch = *a.last_touch.read();
 
 		tokio::time::sleep(Duration::from_millis(2)).await;
 
@@ -183,7 +180,7 @@ mod tests {
 		);
 		assert_eq!(reg.len(), 1, "no duplicate store registered");
 		assert!(
-			*read_recovered(&b.last_touch) > first_touch,
+			*b.last_touch.read() > first_touch,
 			"last_touch advanced on re-open",
 		);
 	}

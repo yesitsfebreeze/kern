@@ -5,15 +5,28 @@ use parking_lot::RwLock;
 
 use crate::base::constants::{COLD_GC_AGE, COLD_HEAT_THRESHOLD};
 use crate::base::graph::GraphGnn;
-use crate::base::locks::write_recovered;
+use crate::base::heat::{self, HeatConfig};
 use crate::base::reason::remove_entity;
 use crate::base::types::{Entity, EntityKind};
 
-fn is_cold_victim(entity: &Entity, now: SystemTime) -> bool {
-	if !entity.is_superseded() && matches!(entity.kind, EntityKind::Fact | EntityKind::Document) {
+// SECURITY: durable-kind immunity only holds for LOCAL kerns. A peer-supplied
+// kind=Fact in a phantom kern would otherwise be permanently unreclaimable.
+fn is_cold_victim(
+	entity: &Entity,
+	now: SystemTime,
+	half_life_secs: u64,
+	kern_is_remote: bool,
+) -> bool {
+	if !kern_is_remote
+		&& !entity.is_superseded()
+		&& matches!(entity.kind, EntityKind::Fact | EntityKind::Document)
+	{
 		return false;
 	}
-	if (entity.heat as f64) >= COLD_HEAT_THRESHOLD {
+	// Stored heat is only ever refreshed on deposit, so an entity that went cold
+	// long ago still carries its last hot value; age it before the comparison.
+	let heat = heat::decayed(entity.heat, entity.heat_updated_at, now, half_life_secs);
+	if (heat as f64) >= COLD_HEAT_THRESHOLD {
 		return false;
 	}
 	let Some(last_touch) = entity.accessed_at.or(entity.created_at) else {
@@ -25,18 +38,19 @@ fn is_cold_victim(entity: &Entity, now: SystemTime) -> bool {
 	}
 }
 
-pub fn run_gc(graph: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
-	let mut g = write_recovered(graph);
+pub fn run_gc(graph: &Arc<RwLock<GraphGnn>>, kern_id: &str, heat_cfg: &HeatConfig) {
+	let mut g = graph.write();
 	let kern = match g.kerns.get(kern_id) {
 		Some(k) => k,
 		None => return,
 	};
 
 	let now = SystemTime::now();
+	let kern_is_remote = crate::base::merge::is_remote_kern_id(kern_id);
 	let victims: Vec<String> = kern
 		.entities
 		.values()
-		.filter(|t| is_cold_victim(t, now))
+		.filter(|t| is_cold_victim(t, now, heat_cfg.half_life_secs, kern_is_remote))
 		.map(|t| t.id.clone())
 		.collect();
 
@@ -91,6 +105,8 @@ mod tests {
 	use crate::base::types::Kern;
 	use std::time::Duration;
 
+	const HL: u64 = 3600;
+
 	fn ent(kind: EntityKind, heat: f32, accessed_at: Option<SystemTime>) -> Entity {
 		Entity {
 			id: "e".into(),
@@ -138,17 +154,34 @@ mod tests {
 	fn cold_old_claim_is_a_victim() {
 		let now = SystemTime::now();
 		let old = now - (COLD_GC_AGE + Duration::from_secs(1));
-		assert!(is_cold_victim(&ent(EntityKind::Claim, 0.0, Some(old)), now));
+		assert!(is_cold_victim(
+			&ent(EntityKind::Claim, 0.0, Some(old)),
+			now,
+			HL,
+			false
+		));
 	}
 
 	#[test]
 	fn heat_above_threshold_is_preserved_even_when_old() {
 		let now = SystemTime::now();
 		let old = now - (COLD_GC_AGE + Duration::from_secs(1));
-		assert!(!is_cold_victim(
-			&ent(EntityKind::Claim, 1e9, Some(old)),
-			now
-		));
+		let mut hot = ent(EntityKind::Claim, 1e9, Some(old));
+		hot.heat_updated_at = Some(now);
+		assert!(!is_cold_victim(&hot, now, HL, false));
+	}
+
+	#[test]
+	fn stale_heat_decays_away_and_stops_shielding_the_entity() {
+		let now = SystemTime::now();
+		let old = now - (COLD_GC_AGE + Duration::from_secs(1));
+		let mut once_hot = ent(EntityKind::Claim, 1e9, Some(old));
+		once_hot.heat_updated_at = Some(old);
+		assert!(
+			is_cold_victim(&once_hot, now, HL, false),
+			"heat last deposited a week ago has decayed below the threshold; \
+			 raw stored heat must not grant permanent GC immunity"
+		);
 	}
 
 	#[test]
@@ -156,12 +189,71 @@ mod tests {
 		let now = SystemTime::now();
 		let old = now - (COLD_GC_AGE + Duration::from_secs(1));
 		assert!(
-			!is_cold_victim(&ent(EntityKind::Fact, 0.0, Some(old)), now),
+			!is_cold_victim(&ent(EntityKind::Fact, 0.0, Some(old)), now, HL, false),
 			"Fact preserved"
 		);
 		assert!(
-			!is_cold_victim(&ent(EntityKind::Document, 0.0, Some(old)), now),
+			!is_cold_victim(&ent(EntityKind::Document, 0.0, Some(old)), now, HL, false),
 			"Document preserved"
+		);
+	}
+
+	// Cold-tier GC is the only bound on graph size; a remote Fact that kept durable
+	// immunity would be permanently unreclaimable storage a peer chose to allocate.
+	#[test]
+	fn remote_durable_kinds_lose_immunity_and_are_reclaimed() {
+		let now = SystemTime::now();
+		let old = now - (COLD_GC_AGE + Duration::from_secs(1));
+		for kind in [EntityKind::Fact, EntityKind::Document] {
+			assert!(
+				is_cold_victim(&ent(kind, 0.0, Some(old)), now, HL, true),
+				"a cold, stale {kind:?} in a remote kern is reclaimable"
+			);
+			assert!(
+				!is_cold_victim(&ent(kind, 0.0, Some(old)), now, HL, false),
+				"the LOCAL {kind:?} keeps its immunity unchanged"
+			);
+		}
+		assert!(
+			!is_cold_victim(&ent(EntityKind::Fact, 0.0, Some(now)), now, HL, true),
+			"a freshly-touched remote Fact is still spared — remoteness drops immunity, \
+			 it does not bypass the staleness and heat gates"
+		);
+	}
+
+	#[test]
+	fn run_gc_reclaims_a_stale_remote_fact() {
+		use crate::base::store::Store;
+
+		let dir = tempfile::tempdir().unwrap();
+		let store = Arc::new(Store::open(&dir.path().to_string_lossy()).unwrap());
+
+		let old = SystemTime::now() - (COLD_GC_AGE + Duration::from_secs(1));
+		let mut pinned = ent(EntityKind::Fact, 0.0, Some(old));
+		pinned.id = "pinned".into();
+
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("remote-evilnet-k1", "");
+		k.entities.insert("pinned".into(), pinned);
+		g.kerns.insert("remote-evilnet-k1".into(), k);
+		g.set_store(store.clone());
+
+		let graph = Arc::new(RwLock::new(g));
+		run_gc(&graph, "remote-evilnet-k1", &HeatConfig::default());
+
+		assert!(
+			!graph
+				.read()
+				.kerns
+				.get("remote-evilnet-k1")
+				.unwrap()
+				.entities
+				.contains_key("pinned"),
+			"a peer cannot pin an unreclaimable row by setting kind=Fact"
+		);
+		assert!(
+			store.cold_get("pinned").unwrap().is_some(),
+			"spill-before-drop still holds for the remote fact"
 		);
 	}
 
@@ -171,19 +263,19 @@ mod tests {
 		let now = SystemTime::now();
 		let old = now - (COLD_GC_AGE + Duration::from_secs(1));
 		assert!(
-			!is_cold_victim(&ent(EntityKind::Fact, 0.0, Some(old)), now),
+			!is_cold_victim(&ent(EntityKind::Fact, 0.0, Some(old)), now, HL, false),
 			"active Fact is immune even when stale"
 		);
 		let mut superseded = ent(EntityKind::Fact, 0.0, Some(old));
 		superseded.status = EntityStatus::Superseded;
 		assert!(
-			is_cold_victim(&superseded, now),
+			is_cold_victim(&superseded, now, HL, false),
 			"a superseded (invalidated) Fact is no longer immune"
 		);
 		let mut fresh_superseded = ent(EntityKind::Fact, 0.0, Some(now));
 		fresh_superseded.status = EntityStatus::Superseded;
 		assert!(
-			!is_cold_victim(&fresh_superseded, now),
+			!is_cold_victim(&fresh_superseded, now, HL, false),
 			"a recently-touched superseded fact is still spared"
 		);
 	}
@@ -213,7 +305,7 @@ mod tests {
 		g.set_store(store.clone());
 
 		let graph = Arc::new(RwLock::new(g));
-		run_gc(&graph, "k");
+		run_gc(&graph, "k", &HeatConfig::default());
 
 		let g = graph.read();
 		let entities = &g.kerns.get("k").unwrap().entities;
@@ -235,16 +327,16 @@ mod tests {
 	fn recent_untouched_or_clock_skewed_is_preserved() {
 		let now = SystemTime::now();
 		assert!(
-			!is_cold_victim(&ent(EntityKind::Claim, 0.0, Some(now)), now),
+			!is_cold_victim(&ent(EntityKind::Claim, 0.0, Some(now)), now, HL, false),
 			"recently accessed"
 		);
 		assert!(
-			!is_cold_victim(&ent(EntityKind::Claim, 0.0, None), now),
+			!is_cold_victim(&ent(EntityKind::Claim, 0.0, None), now, HL, false),
 			"no timestamps at all"
 		);
 		let future = now + Duration::from_secs(3600);
 		assert!(
-			!is_cold_victim(&ent(EntityKind::Claim, 0.0, Some(future)), now),
+			!is_cold_victim(&ent(EntityKind::Claim, 0.0, Some(future)), now, HL, false),
 			"clock skew"
 		);
 	}
@@ -256,16 +348,19 @@ mod tests {
 		let mut stale = ent(EntityKind::Claim, 0.0, None);
 		stale.created_at = Some(old);
 		assert!(
-			is_cold_victim(&stale, now),
+			is_cold_victim(&stale, now, HL, false),
 			"old-but-never-queried is a victim"
 		);
 		let mut fresh = ent(EntityKind::Claim, 0.0, None);
 		fresh.created_at = Some(now);
-		assert!(!is_cold_victim(&fresh, now), "fresh ingest is preserved");
+		assert!(
+			!is_cold_victim(&fresh, now, HL, false),
+			"fresh ingest is preserved"
+		);
 		let mut touched = ent(EntityKind::Claim, 0.0, Some(now));
 		touched.created_at = Some(old);
 		assert!(
-			!is_cold_victim(&touched, now),
+			!is_cold_victim(&touched, now, HL, false),
 			"accessed_at takes precedence over created_at"
 		);
 	}
@@ -293,7 +388,7 @@ mod tests {
 		g.set_store(store.clone());
 
 		let graph = Arc::new(RwLock::new(g));
-		run_gc(&graph, "k");
+		run_gc(&graph, "k", &HeatConfig::default());
 
 		let g = graph.read();
 		let entities = &g.kerns.get("k").unwrap().entities;

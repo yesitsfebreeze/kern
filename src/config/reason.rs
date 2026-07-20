@@ -8,7 +8,7 @@ pub struct ReasonConfig {
 	pub key: String,
 }
 
-pub const DEFAULT_REASON_URL: &str = "http://localhost:11434";
+const DEFAULT_REASON_URL: &str = "http://localhost:11434";
 
 pub const DEFAULT_REASON_MODEL: &str = "granite4:3b";
 

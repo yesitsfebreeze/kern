@@ -31,7 +31,6 @@ pub struct Weights {
 	pub content: f64,
 	pub reason: f64,
 	pub edge: f64,
-	pub lexical: f64,
 }
 
 impl Weights {
@@ -45,21 +44,8 @@ impl Weights {
 			content: w.content,
 			reason: w.reason,
 			edge: w.edge,
-			lexical: w.lexical,
 		}
 	}
-}
-
-pub fn seed(
-	g: &GraphGnn,
-	cfg: &RetrievalConfig,
-	query_vec: &[f32],
-	k: usize,
-	mode: Mode,
-	opts: Option<&QueryOptions>,
-) -> Vec<EntityHit> {
-	let important = seed_important(g, cfg, query_vec, opts);
-	seed_with_important(g, cfg, query_vec, k, mode, opts, &important)
 }
 
 pub fn seed_with_important(
@@ -152,7 +138,12 @@ pub fn seed_important(
 	let mut hits: Vec<EntityHit> = kerns
 		.par_iter()
 		.flat_map_iter(|kern| {
-			kern.entities.values().filter_map(|t| {
+			// SECURITY: a peer picks its own kind, so a remote Fact does not inherit the
+			// Fact bypass of the access gate. Merge zeroes remote access_count, so this
+			// leaves remote entities gated on access they can never accrue remotely —
+			// they enter the seed pool only once LOCAL use earns it.
+			let remote_kern = kern.is_remote();
+			kern.entities.values().filter_map(move |t| {
 				if !t.has_vector() {
 					return None;
 				}
@@ -161,7 +152,8 @@ pub fn seed_important(
 						return None;
 					}
 				}
-				let dominated = !t.is_fact() && t.access_count.value_i32() < access_threshold;
+				let privileged_kind = t.is_fact() && !remote_kern;
+				let dominated = !privileged_kind && t.access_count.value_i32() < access_threshold;
 				if dominated {
 					return None;
 				}
@@ -230,6 +222,31 @@ mod tests {
 	}
 
 	#[test]
+	fn a_remote_fact_does_not_bypass_the_importance_access_gate() {
+		let mut g = graph_with(vec![ent("local_fact", vec![1.0, 0.0], 0, true)]);
+		let mut phantom = Kern::new("remote-evilnet-k1", "");
+		phantom.entities.insert(
+			"evil_fact".into(),
+			ent("evil_fact", vec![1.0, 0.0], 0, true),
+		);
+		g.kerns.insert("remote-evilnet-k1".into(), phantom);
+
+		let ids: Vec<String> = seed_important(&g, &cfg(), &[1.0, 0.0], None)
+			.into_iter()
+			.map(|h| h.entity_id)
+			.collect();
+
+		assert!(
+			ids.contains(&"local_fact".to_string()),
+			"a LOCAL Fact still bypasses the access gate: {ids:?}"
+		);
+		assert!(
+			!ids.contains(&"evil_fact".to_string()),
+			"a REMOTE Fact is gated on access it never earned locally: {ids:?}"
+		);
+	}
+
+	#[test]
 	fn seed_important_applies_cosine_and_access_gates() {
 		let g = graph_with(vec![
 			ent("hot", vec![1.0, 0.0], 10, false),
@@ -295,7 +312,12 @@ mod tests {
 		};
 		let q = [1.0, 0.0];
 
-		let unfiltered = seed(&g, &cfg, &q, 5, Mode::Content, None);
+		let run = |opts: Option<&QueryOptions>| {
+			let important = seed_important(&g, &cfg, &q, opts);
+			seed_with_important(&g, &cfg, &q, 5, Mode::Content, opts, &important)
+		};
+
+		let unfiltered = run(None);
 		assert!(
 			unfiltered.iter().all(|h| h.entity_id.starts_with("claim")),
 			"unfiltered dense seed is all Claims: {:?}",
@@ -306,7 +328,7 @@ mod tests {
 			kind: Some(EntityKind::Fact),
 			..Default::default()
 		};
-		let filtered = seed(&g, &cfg, &q, 5, Mode::Content, Some(&opts));
+		let filtered = run(Some(&opts));
 		assert!(
 			!filtered.is_empty() && filtered.iter().all(|h| h.entity_id.starts_with("fact")),
 			"filtered seed returns only matching Facts: {:?}",
@@ -331,15 +353,13 @@ mod tests {
 		};
 		let q = [1.0, 0.0];
 
-		let none = seed(&g, &cfg, &q, 4, Mode::Content, None);
-		let empty = seed(
-			&g,
-			&cfg,
-			&q,
-			4,
-			Mode::Content,
-			Some(&QueryOptions::default()),
-		);
+		let run = |opts: Option<&QueryOptions>| {
+			let important = seed_important(&g, &cfg, &q, opts);
+			seed_with_important(&g, &cfg, &q, 4, Mode::Content, opts, &important)
+		};
+		let inactive = QueryOptions::default();
+		let none = run(None);
+		let empty = run(Some(&inactive));
 		let ids = |v: &[EntityHit]| v.iter().map(|h| h.entity_id.clone()).collect::<Vec<_>>();
 		assert_eq!(
 			ids(&none),

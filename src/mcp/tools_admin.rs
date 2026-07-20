@@ -1,7 +1,5 @@
 use serde::Deserialize;
 
-use crate::base::locks::{read_recovered, write_recovered};
-
 use super::{tool_error, tool_result_json, Server};
 
 #[derive(Deserialize, Default)]
@@ -96,16 +94,15 @@ impl Server {
 
 		match action {
 			"list" => {
-				let g = read_recovered(&self.graph);
-				let gravitons: Vec<serde_json::Value> = crate::base::accept::root_graviton_ids(&g)
-					.iter()
-					.filter_map(|cid| g.loaded(cid))
-					.map(|c| {
+				let g = self.graph.read();
+				let gravitons: Vec<serde_json::Value> = crate::commands::admin::graviton_rows(&g)
+					.into_iter()
+					.map(|r| {
 						serde_json::json!({
-							"name": c.graviton_text,
-							"mass": c.mass,
-							"thoughts": c.entities.len(),
-							"reasons": c.reasons.len(),
+							"name": r.name,
+							"mass": r.mass,
+							"thoughts": r.thoughts,
+							"reasons": r.reasons,
 						})
 					})
 					.collect();
@@ -125,7 +122,7 @@ impl Server {
 					},
 					None => return tool_error("no embed client configured"),
 				};
-				let mut g = write_recovered(&self.graph);
+				let mut g = self.graph.write();
 				crate::base::accept::add_graviton_with_mass(&mut g, &p.name, vec, p.mass.unwrap_or(1.0));
 				drop(g);
 				(self.save_fn)();
@@ -135,7 +132,7 @@ impl Server {
 				if p.name.is_empty() {
 					return tool_error("remove requires name");
 				}
-				let mut g = write_recovered(&self.graph);
+				let mut g = self.graph.write();
 				let removed = crate::base::accept::remove_graviton(&mut g, &p.name);
 				drop(g);
 				if removed {
@@ -160,14 +157,14 @@ impl Server {
 				if p.description.is_empty() {
 					return tool_error("description required for add");
 				}
-				let mut g = write_recovered(&self.graph);
+				let mut g = self.graph.write();
 				g.root.descriptors.insert(p.name.clone(), p.description);
 				drop(g);
 				(self.save_fn)();
 				tool_result_json(&serde_json::json!({"added": p.name}))
 			}
 			"rm" => {
-				let mut g = write_recovered(&self.graph);
+				let mut g = self.graph.write();
 				g.root.descriptors.remove(&p.name);
 				drop(g);
 				(self.save_fn)();
@@ -180,14 +177,16 @@ impl Server {
 	// Write lock held only for the reap; no env close, so safe while serving.
 	pub(crate) fn tool_gc(&self) -> serde_json::Value {
 		let (before, reaped, after) = {
-			let mut g = write_recovered(&self.graph);
+			let mut g = self.graph.write();
 			g.gc_empty_kerns_counted()
 		};
 		if reaped > 0 {
 			(self.save_fn)();
 		}
 		// LMDB keeps freed pages until a restart/`kern compact`.
-		let data_bytes = read_recovered(&self.graph)
+		let data_bytes = self
+			.graph
+			.read()
 			.store()
 			.map(|s| s.data_file_len())
 			.unwrap_or(0);
@@ -219,9 +218,9 @@ impl Server {
 			Some(q) => q,
 		};
 
-		let mut g = write_recovered(&self.graph);
+		let mut g = self.graph.write();
 		let root_id = g.root.id.clone();
-		crate::tick::pulse::pulse(q, &mut g, &root_id, strength);
+		crate::tick::pulse::pulse_with_heat(q, &mut g, &root_id, strength, &self.cfg.heat);
 		drop(g);
 
 		if let Some(broadcast) = &self.broadcast_pulse {
@@ -239,44 +238,19 @@ mod descriptor_tests {
 		Arc,
 	};
 
-	use parking_lot::RwLock;
-
-	use crate::base::graph::GraphGnn;
-	use crate::base::locks::read_recovered;
-	use crate::config::Config;
-	use crate::llm;
 	use crate::mcp::Server;
 
 	fn make_server() -> (Server, Arc<AtomicUsize>) {
-		let graph = Arc::new(RwLock::new(GraphGnn::new()));
 		let counter = Arc::new(AtomicUsize::new(0));
 		let c2 = counter.clone();
-		let embedder = llm::Client::new_embed_only("http://127.0.0.1:1", "test");
-		let worker = Arc::new(crate::ingest::Worker::new(
-			graph.clone(),
-			embedder,
-			None,
-			None,
-			None,
-		));
-		let server = Server {
-			graph,
-			worker,
-			llm: None,
-			save_fn: Arc::new(move || {
-				c2.fetch_add(1, Ordering::SeqCst);
-			}),
-			task_q: None,
-			cfg: Arc::new(Config::default()),
-			cache: crate::retrieval::cache::QueryCache::default_shared(),
-			broadcast_pulse: None,
-		};
+		let mut server = crate::test_support::mcp_server();
+		server.save_fn = Arc::new(move || {
+			c2.fetch_add(1, Ordering::SeqCst);
+		});
 		(server, counter)
 	}
 
-	fn text(v: &serde_json::Value) -> String {
-		v["content"][0]["text"].as_str().unwrap_or("").to_string()
-	}
+	use crate::test_support::tool_text as text;
 
 	fn is_error(v: &serde_json::Value) -> bool {
 		v.get("isError").and_then(|x| x.as_bool()).unwrap_or(false)
@@ -287,7 +261,7 @@ mod descriptor_tests {
 		use crate::base::types::{Entity, Kern};
 		let (srv, _c) = make_server();
 		{
-			let mut g = crate::base::locks::write_recovered(&srv.graph);
+			let mut g = srv.graph.write();
 			let mut k = Kern::new("kx", "");
 			k.entities.insert(
 				"a".into(),
@@ -320,6 +294,34 @@ mod descriptor_tests {
 	}
 
 	#[tokio::test]
+	async fn health_stats_reports_queue_depth_and_task_latency() {
+		use crate::tick::queue::{task, Queue, TaskKind};
+		use std::time::Duration;
+
+		let (mut srv, _c) = make_server();
+		let q = Arc::new(Queue::new(8));
+		assert!(q.enqueue(task(TaskKind::Cluster, "a")));
+		assert!(q.enqueue(task(TaskKind::Persist, "b")));
+		q.record_task_latency(Duration::from_millis(10));
+		q.record_task_latency(Duration::from_millis(30));
+		srv.task_q = Some(q);
+
+		let stats = srv.health_stats();
+		assert_eq!(stats["queue_depth"], 2, "both pending tasks counted");
+		assert_eq!(stats["tasks_done"], 2);
+		assert_eq!(stats["task_avg_ms"], 20, "lifetime mean of 10ms and 30ms");
+	}
+
+	#[tokio::test]
+	async fn health_stats_reports_zeroed_queue_metrics_without_a_queue() {
+		let (srv, _c) = make_server();
+		let stats = srv.health_stats();
+		assert_eq!(stats["queue_depth"], 0);
+		assert_eq!(stats["tasks_done"], 0);
+		assert_eq!(stats["task_avg_ms"], 0);
+	}
+
+	#[tokio::test]
 	async fn add_inserts_descriptor_and_calls_save() {
 		let (srv, counter) = make_server();
 		let out = srv.tool_descriptor(
@@ -329,7 +331,7 @@ mod descriptor_tests {
 		let body: serde_json::Value = serde_json::from_str(&text(&out)).unwrap();
 		assert_eq!(body["added"], "code");
 		assert_eq!(counter.load(Ordering::SeqCst), 1);
-		let g = read_recovered(&srv.graph);
+		let g = srv.graph.read();
 		assert_eq!(
 			g.root.descriptors.get("code").map(String::as_str),
 			Some("source code snippets")
@@ -365,7 +367,7 @@ mod descriptor_tests {
 		let body: serde_json::Value = serde_json::from_str(&text(&out)).unwrap();
 		assert_eq!(body["removed"], "notes");
 		assert_eq!(counter.load(Ordering::SeqCst), 2);
-		let g = read_recovered(&srv.graph);
+		let g = srv.graph.read();
 		assert!(!g.root.descriptors.contains_key("notes"));
 	}
 
@@ -415,7 +417,7 @@ mod descriptor_tests {
 	async fn graviton_list_reports_mass() {
 		let (srv, _) = make_server();
 		{
-			let mut g = crate::base::locks::write_recovered(&srv.graph);
+			let mut g = srv.graph.write();
 			crate::base::accept::add_graviton_with_mass(&mut g, "docs", vec![1.0, 0.0], 2.5);
 		}
 		let out = srv.tool_graviton(&serde_json::json!({"action": "list"}));

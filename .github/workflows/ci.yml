@@ -75,3 +75,18 @@ jobs:
           command: build
           target: ${{ matrix.target }}
           args: "--release --bin kern --locked"
+
+  # The 2026-07-17 intake rename scrubbed a print-queue-style working name from
+  # the tree "with no alias kept anywhere". It drifted back into three prose
+  # files anyway, so the ban is enforced instead of remembered.
+  vocab:
+    name: banned vocabulary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No scrubbed synonyms for the intake
+        run: |
+          if grep -rniE 's''pool' src docs .splinter README.md; then
+            echo "::error::banned word: the intake is called the intake"
+            exit 1
+          fi

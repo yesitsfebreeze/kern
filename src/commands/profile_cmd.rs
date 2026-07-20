@@ -112,18 +112,6 @@ pub(super) async fn cmd_profile(cfg: &crate::config::Config, text: &str, no_llm:
 		profiles.push(flat(&format!("distill ({n} claims)"), ms(t)));
 	}
 
-	let t = Instant::now();
-	let digest = crate::retrieval::digest::build_digest(
-		&g,
-		cfg.capture.digest_k,
-		cfg.capture.digest_min_trust,
-		cfg.capture.digest_token_budget,
-	);
-	profiles.push(flat(
-		&format!("digest build ({} bytes)", digest.len()),
-		ms(t),
-	));
-
 	println!("kern profile — {kerns} kerns, {entities} entities, query: {text:?}");
 	println!();
 	print!("{}", render_timeline(&profiles, TIMELINE_WIDTH));

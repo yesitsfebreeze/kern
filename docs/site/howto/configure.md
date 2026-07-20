@@ -1,0 +1,217 @@
+# Configure models
+
+kern talks to three model endpoints. This page explains what each one is
+responsible for, how to size it, and how to point kern at your models. At the
+end you will have a `kern.toml` that works — or, if you run a local Ollama with
+the default models pulled, the confidence to write no config at all.
+
+## You may not need a config file
+
+kern is configless by default. With no `kern.toml` anywhere, every setting comes
+from the shipped defaults (`src/config/mod.rs:36`), which assume a local Ollama
+at `http://localhost:11434`. Pull the three defaults and you are done:
+
+```bash
+ollama pull qwen3-embedding:0.6b   # embeddings
+ollama pull granite4:3b            # distillation / reasoning, and the ask oracle
+```
+
+A config file only exists to override those. Everything in it is optional, and
+any section you omit keeps its default.
+
+## The three model roles
+
+### `embed` — the embedding model
+
+**On the critical path for:** every ingest and every query. Nothing enters the
+graph without being embedded, and every retrieval embeds the query text. It is
+the highest-frequency call kern makes.
+
+**Sizing:** small. The default is `qwen3-embedding:0.6b`
+(`src/config/embed.rs:6`). Embedding quality matters, but a bigger model here
+buys less than a bigger reason model and costs you on every single operation.
+
+!!! warning "The embedding dimension locks the graph"
+
+    The first ingest fixes the vector dimension for the whole graph. Change the
+    embedding model later and stored vectors no longer match query vectors —
+    search silently returns nothing useful rather than erroring. `kern reembed`
+    is the only escape, and it re-embeds everything.
+
+`embed.url` and `embed.model` are the only two settings kern actually requires;
+`Config::validate` rejects a config with either blank
+(`src/config/mod.rs:140`).
+
+### `reason` — distillation and reasoning
+
+**On the critical path for:** the intake. One distillation pass per drained
+session extracts durable facts, decisions, and preferences as typed claims. Also
+used for contradiction classification in the background tick, and for writing
+the reason text on an edge when `link` is called without one.
+
+**Sizing:** this is the quality lever that matters most. Distillation decides
+what is remembered at all — a claim the reason model fails to extract is a claim
+that never enters the graph, and no amount of retrieval tuning recovers it. The
+default is `granite4:3b` (`src/config/reason.rs:13`), chosen to run comfortably
+on a small GPU. If you have headroom, spend it here first.
+
+It is off the read path entirely, so a slower model costs you ingest latency,
+not recall latency.
+
+### `answer` — the user-facing ask oracle
+
+**On the critical path for:** the streamed answer over MCP, when a query asks
+for one. It receives the already-retrieved nodes and glues them into prose; it
+does no retrieval and no reasoning about what to fetch.
+
+**Sizing:** smallest model that reliably grounds its output in the passages it
+was given. This call is latency-critical — a human is watching it stream — and
+its job is narrow. The default aliases the reason default
+(`src/config/answer.rs:12`), so one runner serves both legs and a single local
+Ollama needs no extra wiring.
+
+## Where the config file lives
+
+Two scopes, both optional (`src/config/mod.rs:97`):
+
+| Scope | Path |
+| --- | --- |
+| Project | `<project root>/.kern/kern.toml` |
+| User | `<XDG_CONFIG>/kern/kern.toml` |
+
+The project root is the nearest ancestor directory containing `.git`, falling
+back to the nearest containing `.kern` (`src/config/mod.rs:126`) — so kern finds
+the same config whether you launch it from the root or from a subdirectory.
+
+!!! warning "Precedence is per-section, not per-key"
+
+    A top-level section present in the project file **replaces** the user file's
+    section wholesale — there is no deep merge
+    (`src/config/io.rs`). If your user config sets `[reason] url` and
+    `key`, and your project config sets only `[reason] model`, the project file
+    wins the whole section and your `url` and `key` are gone.
+
+    Keep any given section entirely in one scope.
+
+A config that fails validation does not abort startup: kern logs a warning and
+continues with what it parsed (`src/main.rs:44`). Check stderr on first run
+after editing.
+
+There is no environment-variable override layer. API keys live in plaintext in
+the TOML — treat the file accordingly.
+
+## A complete Ollama config
+
+Everything below is a default made explicit. Delete any line you are not
+changing.
+
+```toml
+[embed]
+url   = "http://localhost:11434"
+model = "qwen3-embedding:0.6b"
+key   = ""
+
+[reason]
+url   = "http://localhost:11434"
+model = "granite4:3b"
+key   = ""
+
+[answer]
+url   = ""              # blank -> falls back to [reason]'s endpoint
+model = "granite4:3b"
+key   = ""              # blank -> inherits [reason]'s key
+```
+
+### The fallback chain
+
+Blank values are not errors — they are how you say "same as the leg above"
+(`src/config/mod.rs:160` and `:176`):
+
+- `answer.url` blank → uses the resolved `reason` url.
+  `answer.key` blank → uses the resolved `reason` key.
+- `reason.url` blank → uses `embed.url`.
+  `reason.key` blank → uses `embed.key`.
+
+So a single endpoint serving all three models needs the URL written exactly
+once, in `[embed]`. The default `[answer]` section ships with a blank `url`
+precisely so that the common case — one local Ollama — requires no wiring at
+all.
+
+!!! tip "WSL2 loopback is handled for you"
+
+    Running kern inside WSL2 against an Ollama on the Windows host, a
+    `localhost` URL will not resolve. kern detects this and rewrites all three
+    legs to the Windows host gateway automatically, logging the substitution
+    (`src/config/wsl.rs:78`). You do not need to hardcode the gateway IP.
+
+## Pointing at a remote or OpenAI-compatible endpoint
+
+kern speaks two protocols and picks between them by inspecting the URL
+(`src/llm.rs:525`). It uses Ollama's native API (`/api/embed`, `/api/chat`) only
+when the URL looks local *and* does not end in `/v1`. Anything else gets the
+OpenAI-compatible API (`/v1/embeddings`, `/v1/chat/completions`), with the `key`
+sent as a bearer token.
+
+A trailing `/v1` is stripped before the request path is built, so writing it or
+omitting it produces the same URL — but writing it is what selects the
+OpenAI-compatible protocol.
+
+**A hosted OpenAI-compatible provider:**
+
+```toml
+[embed]
+url   = "http://localhost:11434"          # keep embeddings local — highest call volume
+model = "qwen3-embedding:0.6b"
+
+[reason]
+url   = "https://api.example.com/v1"
+model = "some-instruct-model"
+key   = "sk-..."
+
+[answer]
+url   = ""                                 # inherits reason's url and key
+model = "some-small-model"
+```
+
+**A local OpenAI-compatible server** (vLLM, llama.cpp, LM Studio) — the `/v1`
+suffix is **required** here, not optional:
+
+```toml
+[reason]
+url   = "http://localhost:8000/v1"
+model = "Qwen/Qwen2.5-7B-Instruct"
+```
+
+Without the `/v1`, a `localhost` URL is treated as Ollama-native and every
+request goes to `/api/chat`, which your server does not serve.
+
+**A remote Ollama** stays on the native protocol only if it is reachable at a
+local address. A non-local host is always driven over the OpenAI-compatible
+path, which Ollama also serves — so point it at `http://host:11434/v1` and be
+explicit.
+
+## Verify
+
+Restart the daemon, then check that the endpoints actually answer:
+
+```bash
+kern health                                    # graph loads, config parsed
+kern search "anything" --k 3                   # exercises the embed leg
+kern query "what is this project about" --answer   # exercises reason + answer
+```
+
+The one-off flags `--embed-url`, `--embed-model`, `--reason-url`, and
+`--reason-model` override config for a single command
+(`src/commands.rs:65`) — useful for testing an endpoint before committing it to
+the file.
+
+If embedding fails, ingest and query both return nothing rather than erroring
+loudly: kern fails open on LLM outages by design. Check stderr for the actual
+connection error.
+
+## Related
+
+- [Install & run the daemon](./install-run.md)
+- [Seed the graph](./seed.md)
+- [Benchmark & evaluate](./benchmark.md) — measure the effect of a model change.
+- [The retrieval pipeline](../concepts/retrieval.md) — where each model sits.

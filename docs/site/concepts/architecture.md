@@ -40,7 +40,7 @@ That single trade explains the whole system:
 ## The flow, in one line
 
 ```
-session text → intake → distill (LLM) → typed claims → graph → tick → digest → recall
+session text → intake → distill (LLM) → typed claims → graph → tick → recall
 ```
 
 Four independent loops, not one pipeline:
@@ -450,7 +450,6 @@ graph TB
         KF["Store: data.mdb + lock.mdb<br/>named DBs kern|cold|meta<br/>zstd(bincode) values, int8 vectors<br/>single-writer + epoch-guarded flush"]
         UNL["QUARANTINE: unloaded set<br/>auto-reload on get(); root never evicted"]
         COLD["COLD db: latest-wins keyed, cap 50k newest"]
-        DG["digest.md (recall)"]
         KF -->|LRU enforce_kern_cap| UNL
         UNL -->|load_kern| KF
         KF --- COLD

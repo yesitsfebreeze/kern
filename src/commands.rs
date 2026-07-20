@@ -1,5 +1,5 @@
-mod admin;
-mod graph_ops;
+pub(crate) mod admin;
+pub(crate) mod graph_ops;
 mod ingest_cmd;
 mod mcp_cmd;
 mod profile_cmd;
@@ -10,10 +10,9 @@ pub(crate) use mcp_cmd::ensure_mcp_registered;
 
 use std::sync::Arc;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 use crate::base::graph::GraphGnn;
-use crate::base::locks::read_recovered;
 
 const SELF_HEAL_BLOAT_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -32,12 +31,6 @@ pub struct Cli {
 	#[arg(long)]
 	pub mcp_stdio: bool,
 
-	#[arg(long, default_value = crate::config::DEFAULT_EMBED_URL)]
-	pub embed_url: String,
-
-	#[arg(long, default_value = crate::config::DEFAULT_EMBED_MODEL)]
-	pub embed_model: String,
-
 	#[arg(long, default_value = "")]
 	pub reason_url: String,
 
@@ -52,11 +45,51 @@ impl Cli {
 			daemon: true,
 			mcp_addr: String::new(),
 			mcp_stdio: false,
-			embed_url: crate::config::DEFAULT_EMBED_URL.to_string(),
-			embed_model: crate::config::DEFAULT_EMBED_MODEL.to_string(),
 			reason_url: String::new(),
 			reason_model: String::new(),
 		}
+	}
+}
+
+#[derive(Args)]
+pub struct EmbedArgs {
+	#[arg(long)]
+	pub embed_url: Option<String>,
+	#[arg(long)]
+	pub embed_model: Option<String>,
+}
+
+impl EmbedArgs {
+	pub(crate) fn resolve<'a>(&'a self, cfg: &'a crate::config::Config) -> (&'a str, &'a str) {
+		(
+			resolve(&self.embed_url, &cfg.embed.url),
+			resolve(&self.embed_model, &cfg.embed.model),
+		)
+	}
+}
+
+#[derive(Args)]
+pub struct LlmArgs {
+	#[command(flatten)]
+	pub embed: EmbedArgs,
+	#[arg(long)]
+	pub reason_url: Option<String>,
+	#[arg(long)]
+	pub reason_model: Option<String>,
+}
+
+impl LlmArgs {
+	pub(crate) fn resolve<'a>(
+		&'a self,
+		cfg: &'a crate::config::Config,
+	) -> (&'a str, &'a str, &'a str, &'a str) {
+		let (embed_url, embed_model) = self.embed.resolve(cfg);
+		(
+			embed_url,
+			embed_model,
+			resolve(&self.reason_url, &cfg.reason.url),
+			resolve(&self.reason_model, &cfg.reason.model),
+		)
 	}
 }
 
@@ -66,14 +99,8 @@ pub enum Commands {
 		text: Vec<String>,
 		#[arg(long)]
 		file: Option<String>,
-		#[arg(long)]
-		embed_url: Option<String>,
-		#[arg(long)]
-		embed_model: Option<String>,
-		#[arg(long)]
-		reason_url: Option<String>,
-		#[arg(long)]
-		reason_model: Option<String>,
+		#[command(flatten)]
+		llm: LlmArgs,
 	},
 	Query {
 		text: String,
@@ -81,29 +108,19 @@ pub enum Commands {
 		mode: String,
 		#[arg(long)]
 		answer: bool,
-		#[arg(long)]
-		embed_url: Option<String>,
-		#[arg(long)]
-		embed_model: Option<String>,
-		#[arg(long)]
-		reason_url: Option<String>,
-		#[arg(long)]
-		reason_model: Option<String>,
+		#[command(flatten)]
+		llm: LlmArgs,
 	},
 	Search {
 		text: String,
 		#[arg(long, default_value = "5")]
 		k: usize,
-		#[arg(long)]
-		embed_url: Option<String>,
-		#[arg(long)]
-		embed_model: Option<String>,
+		#[command(flatten)]
+		embed: EmbedArgs,
 	},
 	Reembed {
-		#[arg(long)]
-		embed_url: Option<String>,
-		#[arg(long)]
-		embed_model: Option<String>,
+		#[command(flatten)]
+		embed: EmbedArgs,
 	},
 	Get {
 		id: String,
@@ -117,14 +134,8 @@ pub enum Commands {
 		to: String,
 		#[arg(long, default_value = "")]
 		reason: String,
-		#[arg(long)]
-		embed_url: Option<String>,
-		#[arg(long)]
-		embed_model: Option<String>,
-		#[arg(long)]
-		reason_url: Option<String>,
-		#[arg(long)]
-		reason_model: Option<String>,
+		#[command(flatten)]
+		llm: LlmArgs,
 	},
 	Health,
 	Profile {
@@ -155,6 +166,11 @@ pub enum Commands {
 		action: UnnamedAction,
 	},
 	Mcp,
+	Docs {
+		page: Option<String>,
+		#[arg(long)]
+		list: bool,
+	},
 	Compress {
 		src: String,
 		#[arg(long, default_value = "int8")]
@@ -166,6 +182,32 @@ pub enum Commands {
 		path: Option<String>,
 	},
 	Daemon,
+	Hub {
+		#[command(subcommand)]
+		action: Option<HubAction>,
+		/// Auto-unload hub-owned nodes idle this long; 0 disables.
+		#[arg(long, default_value_t = 1800)]
+		idle_unload_secs: u64,
+	},
+}
+
+#[derive(Subcommand)]
+pub enum HubAction {
+	Status,
+	Resolve {
+		root: Option<String>,
+	},
+	Unload {
+		root: Option<String>,
+	},
+	/// Absorb src's graph into dst (CRDT union). Both daemons are stopped
+	/// first; src is left untouched.
+	Merge {
+		src: String,
+		dst: String,
+	},
+	/// Stop the hub daemon; nodes stay up.
+	Stop,
 }
 
 #[derive(Subcommand)]
@@ -175,10 +217,8 @@ pub enum GravitonAction {
 		text: String,
 		#[arg(long)]
 		mass: Option<f64>,
-		#[arg(long)]
-		embed_url: Option<String>,
-		#[arg(long)]
-		embed_model: Option<String>,
+		#[command(flatten)]
+		embed: EmbedArgs,
 	},
 	List,
 	Remove {
@@ -250,7 +290,7 @@ pub(crate) fn save_graph_guarded(
 	const FLUSH_RETRIES: u32 = 5;
 	for attempt in 0..FLUSH_RETRIES {
 		let (snapshot, expected) = {
-			let g = read_recovered(graph);
+			let g = graph.read();
 			(
 				crate::base::persist::snapshot_for_flush(&g),
 				g.flushed_epoch(),
@@ -262,7 +302,7 @@ pub(crate) fn save_graph_guarded(
 		let outcome = crate::base::persist::flush_snapshot(&snapshot, expected);
 		match outcome {
 			Ok(crate::base::store::FlushOutcome::Flushed { epoch }) => {
-				crate::base::locks::write_recovered(graph).set_flushed_epoch(epoch);
+				graph.write().set_flushed_epoch(epoch);
 				return;
 			}
 			Ok(crate::base::store::FlushOutcome::RefusedStale {
@@ -277,7 +317,7 @@ pub(crate) fn save_graph_guarded(
 					data_dir = %cfg.data_dir,
 					"refused to flush a stale snapshot — disk advanced under us (another writer); absorbing disk rows and retrying"
 				);
-				let mut w = crate::base::locks::write_recovered(graph);
+				let mut w = graph.write();
 				let Some(fresh) = crate::base::persist::reload_from_disk(&w) else {
 					return;
 				};
@@ -303,7 +343,7 @@ pub(crate) fn snapshot_if_dirty(
 	cfg: &crate::config::Config,
 	last_snap_epoch: &mut u64,
 ) -> bool {
-	let epoch = read_recovered(graph).mutation_epoch();
+	let epoch = graph.read().mutation_epoch();
 	if epoch == *last_snap_epoch {
 		return false;
 	}
@@ -316,7 +356,7 @@ pub(crate) fn reconcile_if_stale(
 	graph: &std::sync::Arc<parking_lot::RwLock<GraphGnn>>,
 	cfg: &crate::config::Config,
 ) -> bool {
-	let mut w = crate::base::locks::write_recovered(graph);
+	let mut w = graph.write();
 	let stale = match w.store() {
 		Some(store) => store.read_epoch() > w.flushed_epoch(),
 		None => false,
@@ -405,22 +445,16 @@ pub(crate) fn server_llm_client(
 
 pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 	match cmd {
-		Commands::Ingest {
-			text,
-			file,
-			embed_url,
-			embed_model,
-			reason_url,
-			reason_model,
-		} => {
+		Commands::Ingest { text, file, llm } => {
+			let (embed_url, embed_model, reason_url, reason_model) = llm.resolve(cfg);
 			ingest_cmd::cmd_ingest(
 				cfg,
 				text,
 				file,
-				resolve(&embed_url, &cfg.embed.url),
-				resolve(&embed_model, &cfg.embed.model),
-				resolve(&reason_url, &cfg.reason.url),
-				resolve(&reason_model, &cfg.reason.model),
+				embed_url,
+				embed_model,
+				reason_url,
+				reason_model,
 			)
 			.await
 		}
@@ -429,52 +463,32 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 			text,
 			mode,
 			answer,
-			embed_url,
-			embed_model,
-			reason_url,
-			reason_model,
+			llm,
 		} => {
+			let (embed_url, embed_model, reason_url, reason_model) = llm.resolve(cfg);
 			query::cmd_query(
 				cfg,
 				query::QueryParams {
 					text: &text,
 					mode: &mode,
 					answer,
-					embed_url: resolve(&embed_url, &cfg.embed.url),
-					embed_model: resolve(&embed_model, &cfg.embed.model),
-					reason_url: resolve(&reason_url, &cfg.reason.url),
-					reason_model: resolve(&reason_model, &cfg.reason.model),
+					embed_url,
+					embed_model,
+					reason_url,
+					reason_model,
 				},
 			)
 			.await
 		}
 
-		Commands::Search {
-			text,
-			k,
-			embed_url,
-			embed_model,
-		} => {
-			query::cmd_search(
-				cfg,
-				&text,
-				k,
-				resolve(&embed_url, &cfg.embed.url),
-				resolve(&embed_model, &cfg.embed.model),
-			)
-			.await
+		Commands::Search { text, k, embed } => {
+			let (embed_url, embed_model) = embed.resolve(cfg);
+			query::cmd_search(cfg, &text, k, embed_url, embed_model).await
 		}
 
-		Commands::Reembed {
-			embed_url,
-			embed_model,
-		} => {
-			reembed::cmd_reembed(
-				cfg,
-				resolve(&embed_url, &cfg.embed.url),
-				resolve(&embed_model, &cfg.embed.model),
-			)
-			.await
+		Commands::Reembed { embed } => {
+			let (embed_url, embed_model) = embed.resolve(cfg);
+			reembed::cmd_reembed(cfg, embed_url, embed_model).await
 		}
 
 		Commands::Get { id } => graph_ops::cmd_get(cfg, &id),
@@ -485,20 +499,18 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 			from,
 			to,
 			reason,
-			embed_url,
-			embed_model,
-			reason_url,
-			reason_model,
+			llm,
 		} => {
+			let (embed_url, embed_model, reason_url, reason_model) = llm.resolve(cfg);
 			graph_ops::cmd_link(
 				cfg,
 				&from,
 				&to,
 				&reason,
-				resolve(&embed_url, &cfg.embed.url),
-				resolve(&embed_model, &cfg.embed.model),
-				resolve(&reason_url, &cfg.reason.url),
-				resolve(&reason_model, &cfg.reason.model),
+				embed_url,
+				embed_model,
+				reason_url,
+				reason_model,
 			)
 			.await
 		}
@@ -516,6 +528,12 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 		Commands::Register { path } => admin::cmd_register(cfg, &path),
 		Commands::Unnamed { action } => admin::cmd_unnamed(cfg, action),
 		Commands::Mcp => mcp_cmd::cmd_mcp(cfg).await,
+		Commands::Docs { page, list } => {
+			if let Err(e) = crate::docs::run(page.as_deref(), list) {
+				eprintln!("docs: {e}");
+				std::process::exit(1);
+			}
+		}
 		Commands::Compress { src, mode, out } => admin::cmd_compress(&src, &mode, out.as_deref()),
 		Commands::Migrate { path } => {
 			let dir = path.unwrap_or_else(|| cfg.data_dir.clone());
@@ -531,6 +549,10 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 			// main.rs intercepts Daemon first; this arm is kept as a fallthrough.
 			run_server(&Cli::daemon(), cfg).await;
 		}
+		Commands::Hub {
+			action,
+			idle_unload_secs,
+		} => admin::cmd_hub(action, idle_unload_secs).await,
 	}
 }
 
@@ -557,7 +579,6 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 	} else {
 		cli.reason_model.clone()
 	};
-	// Embed/answer must come from cfg, never cli.embed_* — see server_llm_client.
 	let llm_client = server_llm_client(cfg, &reason_url, &reason_model);
 
 	let llm_fn: Option<crate::ingest::LlmFunc> = if !reason_url.is_empty() {
@@ -601,7 +622,7 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 	let save_fn = entry.save_fn.clone();
 
 	{
-		let (before, reaped, after) = crate::base::locks::write_recovered(&g).gc_empty_kerns_counted();
+		let (before, reaped, after) = g.write().gc_empty_kerns_counted();
 		if reaped > 0 {
 			tracing::info!(
 				target: "kern.startup",
@@ -617,6 +638,17 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 		}
 	}
 
+	spawn_file_watcher(cfg, &worker);
+
+	spawn_intake(cfg, &worker, &llm_fn);
+
+	// Gossip starts before the server is built: the server captures the pulse
+	// broadcaster by value, so a server built first can only ever hold None.
+	let (broadcast_pulse, broadcast_q) = start_gossip(cfg, &g, &q, &save_fn).await;
+	if let Some(bq) = broadcast_q {
+		*shared_bq.write() = Some(bq);
+	}
+
 	let mcp_server = std::sync::Arc::new(crate::mcp::Server {
 		graph: g.clone(),
 		worker: worker.clone(),
@@ -628,17 +660,11 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 			cfg.retrieval.query_cache_cap,
 			cfg.retrieval.query_cache_theta,
 		),
-		broadcast_pulse: None,
+		broadcast_pulse: broadcast_pulse.clone(),
+		last_activity: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+			crate::base::util::now_ms(),
+		)),
 	});
-
-	spawn_file_watcher(cfg, &worker);
-
-	spawn_capture(cfg, &worker, &llm_fn, &g);
-
-	let (broadcast_pulse, broadcast_q) = start_gossip(cfg, &g, &q, &save_fn).await;
-	if let Some(bq) = broadcast_q {
-		*shared_bq.write() = Some(bq);
-	}
 
 	spawn_maintenance_tick(cfg, &g, &q, broadcast_pulse.clone());
 
@@ -660,16 +686,19 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	let mcp_server = h.server.clone();
 	let save_fn = h.save_fn.clone();
 
-	let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-	tokio::spawn(async move {
-		tokio::signal::ctrl_c().await.ok();
-		let _ = shutdown_tx.send(());
-	});
+	let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+	{
+		let shutdown = shutdown.clone();
+		tokio::spawn(async move {
+			tokio::signal::ctrl_c().await.ok();
+			shutdown.notify_one();
+		});
+	}
 
 	// kern.sock bound synchronously so `AlreadyRunning` short-circuits before more
 	// scaffolding spins up.
 	{
-		let handler = crate::rpc::KernRpcHandler::new(mcp_server.clone());
+		let handler = crate::rpc::KernRpcHandler::new(mcp_server.clone(), shutdown.clone());
 		let endpoint = trnsprt::typed::Endpoint::kern();
 		match trnsprt::typed::bind_kern_listener(&endpoint).await {
 			Ok(trnsprt::typed::BindOutcome::Bound(listener)) => {
@@ -708,7 +737,7 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 		}
 
 		println!("kern running in daemon mode (ctrl-c to stop)");
-		let _ = shutdown_rx.await;
+		shutdown.notified().await;
 	}
 
 	drop(q);
@@ -804,53 +833,35 @@ fn spawn_file_watcher(cfg: &crate::config::Config, worker: &Arc<crate::ingest::W
 	});
 }
 
-fn spawn_capture(
+fn spawn_intake(
 	cfg: &crate::config::Config,
 	worker: &Arc<crate::ingest::Worker>,
 	llm_fn: &Option<crate::ingest::LlmFunc>,
-	g: &SharedGraph,
 ) {
-	if !cfg.capture.enabled {
+	if !cfg.intake.enabled {
 		return;
 	}
 	let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-	if let Some(llm_fn) = llm_fn.clone() {
-		let intake = cwd.join(&cfg.capture.dir);
-		let worker_c = worker.clone();
-		let dedup = cfg.ingest.dedup_threshold;
-		let poll = std::time::Duration::from_secs(cfg.capture.poll_secs);
-		let done_retention = std::time::Duration::from_secs(cfg.capture.done_retention_secs);
-		tokio::spawn(crate::ingest::intake::run(
-			intake,
-			worker_c,
-			llm_fn,
-			dedup,
-			poll,
-			done_retention,
-		));
-	} else {
+	if llm_fn.is_none() {
 		tracing::warn!(
-			target: "kern.capture",
-			"capture: intake drain inactive — add a [reason] section to kern.toml to enable distillation; deltas will accumulate in .kern/capture/ and will be processed once the daemon restarts with a reason LLM configured"
+			target: "kern.intake",
+			"intake: no reason LLM configured — documents dropped in the intake still ingest, but session transcripts (.txt) wait for distillation; add a [reason] section to kern.toml"
 		);
 	}
-
-	let digest_path = cwd.join(&cfg.capture.digest_path);
-	let g_digest = g.clone();
-	let k = cfg.capture.digest_k;
-	let min_trust = cfg.capture.digest_min_trust;
-	let token_budget = cfg.capture.digest_token_budget;
-	let every = std::time::Duration::from_secs(cfg.capture.digest_secs);
-	tokio::spawn(async move {
-		loop {
-			{
-				let g = read_recovered(&g_digest);
-				crate::retrieval::digest::write_digest(&g, &digest_path, k, min_trust, token_budget);
-			}
-			tokio::time::sleep(every).await;
-		}
-	});
+	let intake = cwd.join(&cfg.intake.dir);
+	let worker_c = worker.clone();
+	let dedup = cfg.ingest.dedup_threshold;
+	let poll = std::time::Duration::from_secs(cfg.intake.poll_secs);
+	let done_retention = std::time::Duration::from_secs(cfg.intake.done_retention_secs);
+	tokio::spawn(crate::ingest::intake::run(
+		intake,
+		worker_c,
+		llm_fn.clone(),
+		dedup,
+		poll,
+		done_retention,
+	));
 }
 
 type BroadcastPulseFn = Arc<dyn Fn(&str, f64) + Send + Sync>;
@@ -868,12 +879,15 @@ async fn start_gossip(
 		return (None, None);
 	}
 	let network_id = {
-		let g = read_recovered(g);
+		let g = g.read();
 		g.network_id.clone()
 	};
 	let network_id = cfg.gossip.effective_network_id(&network_id);
-	let node =
-		crate::gossip::node::Node::new(&cfg.gossip.addr, &network_id, cfg.gossip.peers.clone());
+	let bootstrap = cfg.gossip.bootstrap_peers();
+	if let Some(seed) = cfg.gossip.effective_seed() {
+		tracing::info!(target: "kern.gossip", seed = %seed, "gossip bootstrap seed — federation is unauthenticated and unencrypted; set [gossip] seed = false to stay LAN-only");
+	}
+	let node = crate::gossip::node::Node::new(&cfg.gossip.addr, &network_id, bootstrap);
 	node.ledger.set_max_entries(cfg.graph.max_ledger_entries);
 	let deps = Arc::new(crate::gossip::handler::Deps {
 		graph: g.clone(),
@@ -888,6 +902,7 @@ async fn start_gossip(
 			node.start_heartbeat();
 			crate::gossip::handler::start_announce(node.clone(), g.clone());
 			crate::gossip::handler::start_entity_sync(node.clone(), g.clone());
+			crate::gossip::handler::wire_fetch(node.clone(), g.clone());
 			crate::gossip::handler::start_delta_flush(node.clone(), g.clone());
 			if cfg.gossip.discovery {
 				crate::gossip::discovery::start_broadcast(&node, cfg.gossip.discovery_port);
@@ -948,7 +963,7 @@ fn spawn_maintenance_tick(
 	let q_tick = q.clone();
 	let cfg_tick = cfg.clone();
 	let every = std::time::Duration::from_secs(cfg.tick.interval_secs);
-	let mut last_snap_epoch = read_recovered(g).mutation_epoch();
+	let mut last_snap_epoch = g.read().mutation_epoch();
 	tokio::spawn(async move {
 		loop {
 			tokio::time::sleep(every).await;
@@ -956,12 +971,12 @@ fn spawn_maintenance_tick(
 			// writes, or per-kern persist writes stale kerns over newer disk rows.
 			reconcile_if_stale(&g_tick, &cfg_tick);
 			let root_id = {
-				let g = read_recovered(&g_tick);
+				let g = g_tick.read();
 				g.root.id.clone()
 			};
 			{
-				let mut g = crate::base::locks::write_recovered(&g_tick);
-				crate::tick::pulse::pulse(&q_tick, &mut g, &root_id, 1.0);
+				let mut g = g_tick.write();
+				crate::tick::pulse::pulse_with_heat(&q_tick, &mut g, &root_id, 1.0, &cfg_tick.heat);
 			}
 			if let Some(broadcast) = &broadcast_pulse {
 				broadcast(&root_id, 1.0);
@@ -990,8 +1005,7 @@ mod entry_point_tests {
 		g: &std::sync::Arc<parking_lot::RwLock<super::GraphGnn>>,
 		kern: crate::base::types::Kern,
 	) {
-		use crate::base::locks::read_recovered;
-		let gg = read_recovered(g);
+		let gg = g.read();
 		let store = gg.store().expect("graph has a bound store");
 		let mut kerns = std::collections::HashMap::new();
 		for k in gg.all() {
@@ -1009,7 +1023,6 @@ mod entry_point_tests {
 		use parking_lot::RwLock;
 		use std::sync::Arc;
 
-		use crate::base::locks::{read_recovered, write_recovered};
 		use crate::base::types::{mk_entity, EntityKind, Kern};
 
 		let dir = tempfile::tempdir().unwrap();
@@ -1019,13 +1032,9 @@ mod entry_point_tests {
 		};
 
 		let g = Arc::new(RwLock::new(super::load_graph(&cfg)));
-		assert_eq!(
-			read_recovered(&g).flushed_epoch(),
-			0,
-			"fresh load at epoch 0"
-		);
+		assert_eq!(g.read().flushed_epoch(), 0, "fresh load at epoch 0");
 
-		let root_id = read_recovered(&g).root.id.clone();
+		let root_id = g.read().root.id.clone();
 		commit_extra_kern_via_store(&g, Kern::new("cli-kern", &root_id));
 
 		let mut ram = Kern::new("ram-kern", &root_id);
@@ -1033,26 +1042,24 @@ mod entry_point_tests {
 			"e1".into(),
 			mk_entity("e1", "unflushed row", 1.0, EntityKind::Fact),
 		);
-		write_recovered(&g)
-			.kerns
-			.insert("ram-kern".to_string(), ram);
+		g.write().kerns.insert("ram-kern".to_string(), ram);
 
 		super::save_graph_guarded(&g, &cfg);
 
 		assert!(
-			read_recovered(&g).loaded("cli-kern").is_some(),
+			g.read().loaded("cli-kern").is_some(),
 			"the externally committed kern was absorbed instead of ignored"
 		);
 		assert!(
-			read_recovered(&g).loaded("ram-kern").is_some(),
+			g.read().loaded("ram-kern").is_some(),
 			"the unflushed in-memory kern survived the refused flush"
 		);
 		assert!(
-			read_recovered(&g).flushed_epoch() >= 2,
+			g.read().flushed_epoch() >= 2,
 			"the daemon adopted the advanced on-disk epoch and flushed past it"
 		);
 		// Read disk back through the same store handle (no second env open).
-		let store = read_recovered(&g).store().unwrap();
+		let store = g.read().store().unwrap();
 		assert!(
 			store.load_one_kern("cli-kern").unwrap().is_some(),
 			"the externally committed kern survives on disk"
@@ -1068,7 +1075,6 @@ mod entry_point_tests {
 		use parking_lot::RwLock;
 		use std::sync::Arc;
 
-		use crate::base::locks::read_recovered;
 		use crate::base::types::Kern;
 
 		let dir = tempfile::tempdir().unwrap();
@@ -1083,17 +1089,14 @@ mod entry_point_tests {
 			"nothing committed yet -> no reload"
 		);
 
-		let root_id = read_recovered(&g).root.id.clone();
+		let root_id = g.read().root.id.clone();
 		commit_extra_kern_via_store(&g, Kern::new("late", &root_id));
 
 		assert!(
 			super::reconcile_if_stale(&g, &cfg),
 			"store advanced -> reload"
 		);
-		assert!(
-			read_recovered(&g).loaded("late").is_some(),
-			"adopted the new kern"
-		);
+		assert!(g.read().loaded("late").is_some(), "adopted the new kern");
 		assert!(
 			!super::reconcile_if_stale(&g, &cfg),
 			"already reconciled -> no second reload"
@@ -1105,7 +1108,6 @@ mod entry_point_tests {
 		use parking_lot::RwLock;
 		use std::sync::Arc;
 
-		use crate::base::locks::{read_recovered, write_recovered};
 		use crate::base::types::{mk_entity, EntityKind, Kern};
 
 		let dir = tempfile::tempdir().unwrap();
@@ -1115,7 +1117,7 @@ mod entry_point_tests {
 		};
 
 		let g = Arc::new(RwLock::new(super::load_graph(&cfg)));
-		let root_id = read_recovered(&g).root.id.clone();
+		let root_id = g.read().root.id.clone();
 
 		let mut k = Kern::new("k", &root_id);
 		k.entities.insert(
@@ -1124,13 +1126,12 @@ mod entry_point_tests {
 		);
 		commit_extra_kern_via_store(&g, k);
 
-		write_recovered(&g)
-			.kerns
-			.insert("k".into(), Kern::new("k", &root_id));
+		g.write().kerns.insert("k".into(), Kern::new("k", &root_id));
 		crate::tick::tasks::do_persist(&g, "k");
 
 		// Read disk back through the same store handle.
-		let on_disk = read_recovered(&g)
+		let on_disk = g
+			.read()
 			.store()
 			.unwrap()
 			.load_one_kern("k")
@@ -1148,7 +1149,6 @@ mod entry_point_tests {
 		use parking_lot::RwLock;
 		use std::sync::Arc;
 
-		use crate::base::locks::{read_recovered, write_recovered};
 		use crate::base::types::Kern;
 
 		let dir = tempfile::tempdir().unwrap();
@@ -1159,8 +1159,8 @@ mod entry_point_tests {
 
 		{
 			let g = Arc::new(RwLock::new(super::load_graph(&cfg)));
-			let root_id = read_recovered(&g).root.id.clone();
-			write_recovered(&g).register(Kern::new("unflushed", &root_id));
+			let root_id = g.read().root.id.clone();
+			g.write().register(Kern::new("unflushed", &root_id));
 		} // crash: all env handles dropped, no save
 		{
 			let g = super::load_graph(&cfg);
@@ -1172,13 +1172,13 @@ mod entry_point_tests {
 
 		{
 			let g = Arc::new(RwLock::new(super::load_graph(&cfg)));
-			let mut last = read_recovered(&g).mutation_epoch();
+			let mut last = g.read().mutation_epoch();
 			assert!(
 				!super::snapshot_if_dirty(&g, &cfg, &mut last),
 				"clean graph -> the interval snapshot is a no-op"
 			);
-			let root_id = read_recovered(&g).root.id.clone();
-			write_recovered(&g).register(Kern::new("snapshotted", &root_id));
+			let root_id = g.read().root.id.clone();
+			g.write().register(Kern::new("snapshotted", &root_id));
 			assert!(
 				super::snapshot_if_dirty(&g, &cfg, &mut last),
 				"mutation epoch moved -> the snapshot flushes"
@@ -1205,7 +1205,6 @@ mod entry_point_tests {
 		use std::sync::Arc;
 
 		use crate::base::constants::KERN_MIN_CLUSTER_SIZE;
-		use crate::base::locks::{read_recovered, write_recovered};
 		use crate::base::types::{mk_entity, EntityKind, Kern};
 
 		let dir = tempfile::tempdir().unwrap();
@@ -1219,7 +1218,7 @@ mod entry_point_tests {
 
 		{
 			let g = Arc::new(RwLock::new(super::load_graph(&cfg)));
-			let root_id = read_recovered(&g).root.id.clone();
+			let root_id = g.read().root.id.clone();
 			let mut k = Kern::new("k", &root_id);
 			k.graviton_text = "named".into();
 			k.graviton_vec = vec![1.0, 0.0];
@@ -1228,12 +1227,12 @@ mod entry_point_tests {
 				e.vector = vec![0.0, 1.0];
 				k.entities.insert(id.clone(), e);
 			}
-			write_recovered(&g).register(k);
+			g.write().register(k);
 			super::save_graph_guarded(&g, &cfg);
 
 			crate::tick::tick_sync(&g, "k", None, None, None);
 			let child_exists = {
-				let gg = read_recovered(&g);
+				let gg = g.read();
 				let parent = gg.loaded("k").expect("parent kern still loaded");
 				assert!(
 					parent.entities.is_empty(),

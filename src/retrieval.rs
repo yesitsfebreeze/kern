@@ -2,7 +2,6 @@ pub use crate::types::{EmbedFunc, LlmFunc};
 
 pub mod answer;
 pub mod cache;
-pub mod digest;
 pub mod diversify;
 pub mod expand;
 pub mod fuse;

@@ -10,14 +10,50 @@ use axum::Router;
 use crate::server::{dispatch, error_response};
 use crate::McpServer;
 
-pub async fn serve_http<S>(server: Arc<S>, addr: &str) -> std::io::Result<()>
+pub struct AppState<S> {
+	server: Arc<S>,
+	token: Option<Arc<str>>,
+}
+
+// Derived Clone would demand `S: Clone`; only the Arcs are cloned here.
+impl<S> Clone for AppState<S> {
+	fn clone(&self) -> Self {
+		Self {
+			server: self.server.clone(),
+			token: self.token.clone(),
+		}
+	}
+}
+
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+	a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn authorized<S>(state: &AppState<S>, headers: &HeaderMap) -> bool {
+	let Some(expected) = state.token.as_deref() else {
+		return true;
+	};
+	headers
+		.get(axum::http::header::AUTHORIZATION)
+		.and_then(|v| v.to_str().ok())
+		.and_then(|v| v.strip_prefix("Bearer "))
+		.is_some_and(|got| ct_eq(got.trim().as_bytes(), expected.as_bytes()))
+}
+
+/// `token` gates every route. `None` leaves the surface open — callers binding
+/// anything other than loopback are expected to pass one.
+pub async fn serve_http<S>(server: Arc<S>, addr: &str, token: Option<&str>) -> std::io::Result<()>
 where
 	S: McpServer + Sync + 'static,
 {
+	let state = AppState {
+		server,
+		token: token.map(Arc::from),
+	};
 	let app = Router::new()
 		.route("/mcp", post(handle_post::<S>))
-		.route("/mcp", get(handle_get))
-		.with_state(server);
+		.route("/mcp", get(handle_get::<S>))
+		.with_state(state);
 
 	let listener = tokio::net::TcpListener::bind(addr).await?;
 	axum::serve(listener, app).await?;
@@ -25,10 +61,15 @@ where
 }
 
 async fn handle_post<S: McpServer + Sync + 'static>(
-	State(server): State<Arc<S>>,
+	State(state): State<AppState<S>>,
 	headers: HeaderMap,
 	body: String,
 ) -> impl IntoResponse {
+	if !authorized(&state, &headers) {
+		let resp = error_response(serde_json::Value::Null, -32001, "unauthorized");
+		return (StatusCode::UNAUTHORIZED, axum::Json(resp));
+	}
+	let server = state.server;
 	// A missing Content-Type is allowed (many MCP clients omit it); only an
 	// explicit non-JSON one is rejected.
 	if let Some(ct) = headers.get(axum::http::header::CONTENT_TYPE) {
@@ -64,14 +105,20 @@ async fn handle_post<S: McpServer + Sync + 'static>(
 	}
 }
 
-async fn handle_get() -> impl IntoResponse {
+async fn handle_get<S: McpServer + Sync + 'static>(
+	State(state): State<AppState<S>>,
+	headers: HeaderMap,
+) -> axum::response::Response {
+	if !authorized(&state, &headers) {
+		return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+	}
 	let stream = async_stream::stream! {
 		loop {
 			tokio::time::sleep(std::time::Duration::from_secs(25)).await;
 			yield Ok::<Event, std::convert::Infallible>(Event::default().comment("keepalive"));
 		}
 	};
-	Sse::new(stream)
+	Sse::new(stream).into_response()
 }
 
 #[cfg(test)]
@@ -80,8 +127,6 @@ mod tests {
 	use axum::http::header::CONTENT_TYPE;
 	use serde_json::{json, Value};
 
-	// Local mock, not test-utils::AdderServer: trnsprt's dev-dep cycle
-	// (trnsprt -> test-utils -> trnsprt) makes that a *different* McpServer here.
 	struct MockServer;
 	impl McpServer for MockServer {
 		fn tools_list(&self) -> Vec<crate::ToolSchema> {
@@ -107,6 +152,22 @@ mod tests {
 		}
 	}
 
+	fn state(token: Option<&str>) -> AppState<MockServer> {
+		AppState {
+			server: Arc::new(MockServer),
+			token: token.map(Arc::from),
+		}
+	}
+
+	fn bearer(tok: &str) -> HeaderMap {
+		let mut h = HeaderMap::new();
+		h.insert(
+			axum::http::header::AUTHORIZATION,
+			format!("Bearer {tok}").parse().unwrap(),
+		);
+		h
+	}
+
 	async fn body_json(resp: axum::response::Response) -> Value {
 		let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
 			.await
@@ -116,9 +177,8 @@ mod tests {
 
 	#[tokio::test]
 	async fn post_tools_list_returns_a_result_listing_the_tool() {
-		let server = Arc::new(MockServer);
 		let body = json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/list" }).to_string();
-		let resp = handle_post(State(server), HeaderMap::new(), body)
+		let resp = handle_post(State(state(None)), HeaderMap::new(), body)
 			.await
 			.into_response();
 		assert_eq!(resp.status(), StatusCode::OK);
@@ -137,8 +197,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn post_non_json_body_returns_parse_error() {
-		let server = Arc::new(MockServer);
-		let resp = handle_post(State(server), HeaderMap::new(), "not json".into())
+		let resp = handle_post(State(state(None)), HeaderMap::new(), "not json".into())
 			.await
 			.into_response();
 		assert_eq!(resp.status(), StatusCode::OK);
@@ -151,13 +210,67 @@ mod tests {
 
 	#[tokio::test]
 	async fn post_with_non_json_content_type_is_rejected() {
-		let server = Arc::new(MockServer);
 		let mut headers = HeaderMap::new();
 		headers.insert(CONTENT_TYPE, "text/plain".parse().unwrap());
-		let resp = handle_post(State(server), headers, "{}".into())
+		let resp = handle_post(State(state(None)), headers, "{}".into())
 			.await
 			.into_response();
 		let v = body_json(resp).await;
 		assert_eq!(v["error"]["code"], -32700, "wrong content-type -> -32700");
+	}
+
+	fn call_frame() -> String {
+		json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		        "params": { "name": "add", "arguments": {} } })
+		.to_string()
+	}
+
+	#[tokio::test]
+	async fn post_without_a_token_is_rejected_when_one_is_configured() {
+		let resp = handle_post(State(state(Some("s3cret"))), HeaderMap::new(), call_frame())
+			.await
+			.into_response();
+		assert_eq!(
+			resp.status(),
+			StatusCode::UNAUTHORIZED,
+			"no Authorization header -> 401"
+		);
+		let v = body_json(resp).await;
+		assert_eq!(v["error"]["code"], -32001);
+	}
+
+	#[tokio::test]
+	async fn post_with_a_wrong_token_is_rejected() {
+		let resp = handle_post(State(state(Some("s3cret"))), bearer("nope"), call_frame())
+			.await
+			.into_response();
+		assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+	}
+
+	#[tokio::test]
+	async fn post_with_the_right_token_is_served() {
+		let resp = handle_post(State(state(Some("s3cret"))), bearer("s3cret"), call_frame())
+			.await
+			.into_response();
+		assert_eq!(resp.status(), StatusCode::OK, "correct bearer token passes");
+	}
+
+	#[tokio::test]
+	async fn the_sse_stream_is_gated_too() {
+		let unauth = handle_get(State(state(Some("s3cret"))), HeaderMap::new()).await;
+		assert_eq!(
+			unauth.status(),
+			StatusCode::UNAUTHORIZED,
+			"GET /mcp must not stream to an unauthenticated caller"
+		);
+		let ok = handle_get(State(state(Some("s3cret"))), bearer("s3cret")).await;
+		assert_eq!(ok.status(), StatusCode::OK);
+	}
+
+	#[test]
+	fn ct_eq_matches_only_identical_bytes() {
+		assert!(ct_eq(b"abc", b"abc"));
+		assert!(!ct_eq(b"abc", b"abd"));
+		assert!(!ct_eq(b"abc", b"ab"), "a prefix is not a match");
 	}
 }

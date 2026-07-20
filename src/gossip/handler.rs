@@ -5,13 +5,12 @@ use parking_lot::RwLock;
 
 use crate::base::constants::*;
 use crate::base::graph::GraphGnn;
-use crate::base::locks::{read_recovered, write_recovered};
 use crate::base::search::search_all_unlocked;
 use crate::base::types::{Kern, ReasonKind};
-use crate::crdt::GCounter;
+use crate::crdt::{lww_wins, GCounter};
 use crate::tick;
 
-use super::node::{Handler, Node};
+use super::node::{FetchHandler, Handler, Node};
 use super::types::*;
 
 pub struct Deps {
@@ -48,6 +47,63 @@ pub fn new_handler(d: Arc<Deps>) -> Handler {
 	})
 }
 
+pub fn wire_fetch(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
+	let handler: FetchHandler = Arc::new(move |resource: &str, id: &str| {
+		if resource != "thought" {
+			return (Vec::new(), false);
+		}
+		let g = graph.read();
+		let found = g
+			.kern_of_entity(id)
+			.and_then(|kid| g.kerns.get(kid))
+			.and_then(|k| k.entities.get(id));
+		match found {
+			Some(entity) => match bincode::serde::encode_to_vec(entity, bincode::config::standard()) {
+				Ok(bytes) => (bytes, true),
+				Err(_) => (Vec::new(), false),
+			},
+			None => (Vec::new(), false),
+		}
+	});
+	node.set_fetch_handler(handler);
+}
+
+fn spawn_fetch_entity(d: &Arc<Deps>, network_id: String, kern_id: String, entity_id: String) {
+	if d.graph.read().kern_of_entity(&entity_id).is_some() {
+		return;
+	}
+	let d = d.clone();
+	tokio::spawn(async move {
+		let body = match d.node.fetch_thought(&network_id, &entity_id).await {
+			Some(b) => b,
+			None => return,
+		};
+		let entity = match bincode::serde::decode_from_slice::<crate::base::types::Entity, _>(
+			&body,
+			bincode::config::standard(),
+		) {
+			Ok((e, _)) => e,
+			Err(_) => return,
+		};
+		// A peer answering with a different id than we asked for is a hijack attempt.
+		if entity.id != entity_id {
+			return;
+		}
+		let phantom = format!("remote-{network_id}-{kern_id}");
+		let changed = {
+			let mut g = d.graph.write();
+			if !g.kerns.contains_key(&phantom) {
+				let k = new_phantom_kern(&g, &phantom);
+				g.register(k);
+			}
+			crate::base::merge::merge_remote_entity(&mut g, &phantom, entity)
+		};
+		if changed {
+			d.persist();
+		}
+	});
+}
+
 pub fn start_announce(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 	let mut stop = node.stop_rx.clone();
 	tokio::spawn(async move {
@@ -56,7 +112,7 @@ pub fn start_announce(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 			tokio::select! {
 				_ = interval.tick() => {
 					let payload = {
-						let g = read_recovered(&graph);
+						let g = graph.read();
 						if g.root.graviton_vec.is_empty() {
 							None
 						} else {
@@ -96,7 +152,7 @@ pub fn start_entity_sync(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 			tokio::select! {
 				_ = interval.tick() => {
 					let payload = {
-						let g = read_recovered(&graph);
+						let g = graph.read();
 						let mut entities: Vec<crate::base::types::Entity> = g
 							.kerns
 							.iter()
@@ -140,7 +196,7 @@ pub fn start_delta_flush(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 			tokio::select! {
 				_ = interval.tick() => {
 					let (deltas, kern_id) = {
-						let g = read_recovered(&graph);
+						let g = graph.read();
 						(g.drain_pending_deltas(), g.root.id.clone())
 					};
 					for delta in deltas {
@@ -182,7 +238,7 @@ fn handle_sphere(d: &Deps, msg: GossipMessage) {
 	};
 
 	if !sphere.network_id.is_empty() {
-		let mut g = write_recovered(&d.graph);
+		let mut g = d.graph.write();
 		if sphere.network_id != g.network_id {
 			inject_remote_scope(&mut g, sphere, &msg.origin);
 		}
@@ -192,13 +248,13 @@ fn handle_sphere(d: &Deps, msg: GossipMessage) {
 	}
 
 	if let Some(q) = &d.queue {
-		let mut g = write_recovered(&d.graph);
+		let mut g = d.graph.write();
 		let root_id = g.root.id.clone();
 		tick::pulse::pulse(q, &mut g, &root_id, PULSE_THRESHOLD * 2.0);
 	}
 }
 
-fn handle_answer(d: &Deps, msg: GossipMessage) {
+fn handle_answer(d: &Arc<Deps>, msg: GossipMessage) {
 	let sphere = match &msg.payload {
 		GossipPayload::Sphere(s) => s,
 		_ => return,
@@ -208,7 +264,7 @@ fn handle_answer(d: &Deps, msg: GossipMessage) {
 	resolve_question_from_peer(d, reason_id, sphere, &msg.origin);
 
 	if let Some(q) = &d.queue {
-		let mut g = write_recovered(&d.graph);
+		let mut g = d.graph.write();
 		let root_id = g.root.id.clone();
 		tick::pulse::pulse(q, &mut g, &root_id, PULSE_THRESHOLD * 2.0);
 	}
@@ -224,7 +280,7 @@ fn handle_question(d: &Deps, msg: GossipMessage) {
 		return;
 	}
 
-	let g = read_recovered(&d.graph);
+	let g = d.graph.read();
 	let hits = search_all_unlocked(&g, &question.reason_vec, 1);
 	if hits.is_empty() || hits[0].score < QUESTION_RESOLVE_THRESHOLD {
 		return;
@@ -259,7 +315,7 @@ fn handle_pulse(d: &Deps, msg: GossipMessage) {
 		None => return,
 	};
 
-	let mut g = write_recovered(&d.graph);
+	let mut g = d.graph.write();
 	let kern_id = if g.kerns.contains_key(&pulse.kern_id) {
 		pulse.kern_id.clone()
 	} else {
@@ -308,7 +364,7 @@ fn handle_crdt_delta(d: &Deps, msg: GossipMessage) {
 
 	let mut changed = false;
 	{
-		let mut g = write_recovered(&d.graph);
+		let mut g = d.graph.write();
 		g.observe_lamport(delta.lamport);
 
 		match delta.target {
@@ -351,7 +407,10 @@ fn handle_crdt_delta(d: &Deps, msg: GossipMessage) {
 				for kern_id in g.all_ids() {
 					if let Some(kern) = g.get_mut(&kern_id) {
 						if let Some(r) = kern.reasons.get_mut(&delta.object_id) {
-							if (delta.lamport, &delta.producer) > (r.score_lamport, &r.score_producer) {
+							if lww_wins(
+								(delta.lamport, &delta.producer),
+								(r.score_lamport, &r.score_producer),
+							) {
 								r.score = score;
 								r.score_lamport = delta.lamport;
 								r.score_producer = delta.producer.clone();
@@ -369,8 +428,10 @@ fn handle_crdt_delta(d: &Deps, msg: GossipMessage) {
 				for kern_id in g.all_ids() {
 					if let Some(kern) = g.get_mut(&kern_id) {
 						if let Some(t) = kern.entities.get_mut(&delta.object_id) {
-							if (delta.lamport, &delta.producer) > (t.valid_until_lamport, &t.valid_until_producer)
-							{
+							if lww_wins(
+								(delta.lamport, &delta.producer),
+								(t.valid_until_lamport, &t.valid_until_producer),
+							) {
 								t.valid_until = valid;
 								t.valid_until_lamport = delta.lamport;
 								t.valid_until_producer = delta.producer.clone();
@@ -381,24 +442,10 @@ fn handle_crdt_delta(d: &Deps, msg: GossipMessage) {
 					}
 				}
 			}
-			CrdtTarget::Statements => {
-				let Some(adds) = decode_lww::<Vec<String>>(&delta.orset_delta) else {
-					return;
-				};
-				for kern_id in g.all_ids() {
-					if let Some(kern) = g.get_mut(&kern_id) {
-						if let Some(t) = kern.entities.get_mut(&delta.object_id) {
-							for s in &adds {
-								if !t.statements.iter().any(|existing| existing == s) {
-									t.statements.push(s.clone());
-									changed = true;
-								}
-							}
-							break;
-						}
-					}
-				}
-			}
+			// SECURITY: never applied — see the statements note in `base::merge::merge_entity`.
+			// No producer emits this target; it stays rejected rather than removed so a peer
+			// on an older build cannot inject statement text under a content-addressed id.
+			CrdtTarget::Statements => {}
 		}
 	}
 	// Persist only after dropping the write guard — the save closure read-locks the graph (deadlock otherwise).
@@ -422,7 +469,7 @@ fn handle_entity_sync(d: &Deps, msg: GossipMessage) {
 	if payload.network_id.is_empty() {
 		return;
 	}
-	let mut g = write_recovered(&d.graph);
+	let mut g = d.graph.write();
 	if payload.network_id == g.network_id {
 		return;
 	}
@@ -433,6 +480,7 @@ fn handle_entity_sync(d: &Deps, msg: GossipMessage) {
 	}
 	let mut changed = false;
 	for e in &payload.entities {
+		d.node.ledger.put_thought(&e.id, &msg.origin);
 		changed |= crate::base::merge::merge_remote_entity(&mut g, &phantom, e.clone());
 	}
 	drop(g);
@@ -465,13 +513,18 @@ fn new_phantom_kern(g: &GraphGnn, phantom_id: &str) -> Kern {
 	k
 }
 
-fn resolve_question_from_peer(d: &Deps, reason_id: &str, sphere: &SpherePayload, origin: &str) {
+fn resolve_question_from_peer(
+	d: &Arc<Deps>,
+	reason_id: &str,
+	sphere: &SpherePayload,
+	origin: &str,
+) {
 	if sphere.entity_id.is_empty() || sphere.network_id.is_empty() {
 		return;
 	}
 
 	let (reason, kern_id, local_net) = {
-		let g = read_recovered(&d.graph);
+		let g = d.graph.read();
 		match crate::base::search::find_reason(&g, reason_id) {
 			Some((reason, kern_id)) => (reason, kern_id, g.network_id.clone()),
 			None => return,
@@ -483,7 +536,7 @@ fn resolve_question_from_peer(d: &Deps, reason_id: &str, sphere: &SpherePayload,
 
 	let is_local = sphere.network_id == local_net;
 
-	let mut g = write_recovered(&d.graph);
+	let mut g = d.graph.write();
 	if let Some(kern) = g.kerns.get_mut(&kern_id) {
 		if let Some(r) = kern.reasons.get_mut(reason_id) {
 			r.to = sphere.entity_id.clone();
@@ -491,11 +544,22 @@ fn resolve_question_from_peer(d: &Deps, reason_id: &str, sphere: &SpherePayload,
 			if !is_local {
 				r.to_net_id = sphere.network_id.clone();
 				d.node.ledger.put_routing(&sphere.network_id, origin);
+				d.node.ledger.put_thought(&sphere.entity_id, origin);
 			}
 			r.id = crate::base::math::reason_id(&r.from, &r.to, r.kind, &r.text, &r.to_net_id);
 		}
 	}
 	drop(g);
+
+	// The answer only names the entity; without the body the cross-net reason dangles.
+	if !is_local {
+		spawn_fetch_entity(
+			d,
+			sphere.network_id.clone(),
+			sphere.kern_id.clone(),
+			sphere.entity_id.clone(),
+		);
+	}
 
 	if let Some(q) = &d.queue {
 		q.enqueue(tick::queue::task(tick::queue::TaskKind::Persist, &kern_id));
@@ -734,10 +798,46 @@ mod tests {
 		}
 	}
 
+	#[tokio::test]
+	async fn fetch_thought_round_trips_an_entity_body_from_the_holder() {
+		let holder_graph = Arc::new(RwLock::new(GraphGnn::new()));
+		{
+			let mut g = holder_graph.write();
+			let root = g.root.id.clone();
+			let mut k = Kern::new("kh", &root);
+			k.entities
+				.insert("eF".into(), mk_entity("eF", "fetched body", 2.0));
+			g.register(k);
+		}
+		let holder = Node::new("127.0.0.1:0", "holdernet", vec![]);
+		wire_fetch(holder.clone(), holder_graph.clone());
+		let holder_addr = holder.listen().await.expect("holder listens");
+
+		let seeker = Node::new("127.0.0.1:0", "seekernet", vec![]);
+		seeker.ledger.put_thought("eF", &holder_addr);
+
+		let body = seeker
+			.fetch_thought("holdernet", "eF")
+			.await
+			.expect("holder serves the entity body");
+		let (entity, _) = bincode::serde::decode_from_slice::<crate::base::types::Entity, _>(
+			&body,
+			bincode::config::standard(),
+		)
+		.expect("body decodes as an Entity");
+		assert_eq!(entity.id, "eF");
+		assert_eq!(entity.text(), "fetched body");
+
+		assert!(
+			seeker.fetch_thought("holdernet", "missing").await.is_none(),
+			"an unknown id resolves to not-found, not a bogus body"
+		);
+	}
+
 	#[test]
 	fn resolve_question_from_peer_fills_answer_and_promotes_to_similarity() {
 		let (g, net) = graph_with_open_question();
-		let d = mk_deps(g.clone());
+		let d = Arc::new(mk_deps(g.clone()));
 		resolve_question_from_peer(&d, "r1", &answer_sphere(&net, "ans"), "127.0.0.1:9");
 		let guard = g.read();
 		let r = guard.kerns["kq"].reasons.get("r1").expect("reason present");
@@ -751,7 +851,7 @@ mod tests {
 	#[test]
 	fn resolve_question_from_peer_ignores_an_empty_answer() {
 		let (g, net) = graph_with_open_question();
-		let d = mk_deps(g.clone());
+		let d = Arc::new(mk_deps(g.clone()));
 		resolve_question_from_peer(&d, "r1", &answer_sphere(&net, ""), "o");
 		let guard = g.read();
 		let r = guard.kerns["kq"].reasons.get("r1").unwrap();

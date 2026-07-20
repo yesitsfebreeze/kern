@@ -1,13 +1,6 @@
 pub mod client_local;
 pub mod dto;
-pub mod mock;
 pub mod svc;
 
-pub use dto::{
-	Graviton, GravitonReq, GravitonRes, CallToolReq, CallToolRes, DegradeReq, DegradeRes, DescriptorReq,
-	DescriptorRes, EdgeKind, EntityKindLite, EntityRef, EntityStatusLite, ForgetReq, ForgetRes,
-	HealthRes, IngestReq, IngestRes, LinkReq, LinkRes, ListToolsReq, ListToolsRes, NeighborsReq,
-	NeighborsRes, PulseReq, PulseRes, QueryReq, QueryRes, SourceLite,
-};
-pub use mock::MockKernServer;
+pub use dto::{CallToolReq, CallToolRes, HealthRes, ListToolsReq, ListToolsRes, ShutdownRes};
 pub use svc::{serve_kern_rpc, KernRpc, KernRpcClient};

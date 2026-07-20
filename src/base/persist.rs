@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
+#[cfg(test)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -30,6 +31,7 @@ pub enum PersistError {
 	},
 }
 
+#[cfg(test)]
 fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
 	let mut p = path.as_os_str().to_owned();
 	p.push(suffix);
@@ -37,11 +39,13 @@ fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
 }
 
 // Same dir (same volume) so rename is atomic on both Windows and Unix.
+#[cfg(test)]
 fn tmp_path(path: &Path) -> PathBuf {
 	append_suffix(path, ".tmp")
 }
 
 // fsync before rename: the crash-atomicity guarantee.
+#[cfg(test)]
 fn atomic_write(path: &Path, data: &[u8]) -> Result<(), PersistError> {
 	let tmp = tmp_path(path);
 	{
@@ -97,6 +101,7 @@ fn read_quant_mode(sidecar: &Path) -> QuantizationMode {
 		.unwrap_or(QuantizationMode::None)
 }
 
+#[cfg(test)]
 pub fn save_kern(dir: &str, kern: &Kern) -> Result<(), PersistError> {
 	let path = Path::new(dir).join(format!("{}.kern", kern.id));
 	let data = bincode::serde::encode_to_vec(kern, bincode_cfg())?;
@@ -287,10 +292,6 @@ pub fn save_graph_into(
 	kerns.insert(g.root.id.clone(), merged_root(g));
 	store.save_all_kerns(&kerns, &g.network_id, g.quant_mode)?;
 	Ok(())
-}
-
-pub fn current_epoch(g: &GraphGnn) -> u64 {
-	g.store().map(|s| s.read_epoch()).unwrap_or(0)
 }
 
 pub fn flush_guarded(

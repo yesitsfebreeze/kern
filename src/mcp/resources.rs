@@ -1,6 +1,5 @@
 use serde_json::value::RawValue;
 
-use crate::base::locks::read_recovered;
 use crate::base::search::{find_entity, find_reason};
 use crate::base::util::truncate;
 
@@ -94,7 +93,7 @@ fn resource_health(server: &Server) -> String {
 const TOP_THOUGHTS: usize = 50;
 
 fn resource_thoughts(server: &Server) -> String {
-	let g = read_recovered(&server.graph);
+	let g = server.graph.read();
 	let mut all: Vec<(f64, serde_json::Value)> = Vec::new();
 	for kern in g.all() {
 		for t in kern.entities.values() {
@@ -119,7 +118,7 @@ fn resource_thoughts(server: &Server) -> String {
 }
 
 fn resource_kerns(server: &Server) -> String {
-	let g = read_recovered(&server.graph);
+	let g = server.graph.read();
 	let summaries: Vec<serde_json::Value> = g
 		.all()
 		.iter()
@@ -137,12 +136,12 @@ fn resource_kerns(server: &Server) -> String {
 }
 
 fn resource_descriptors(server: &Server) -> String {
-	let g = read_recovered(&server.graph);
+	let g = server.graph.read();
 	serde_json::to_string(&g.root.descriptors).unwrap_or_default()
 }
 
 fn resource_thought(server: &Server, id: &str) -> String {
-	let g = read_recovered(&server.graph);
+	let g = server.graph.read();
 	match find_entity(&g, id) {
 		Some((thought, kern_id)) => {
 			let mut edges = Vec::new();
@@ -177,7 +176,7 @@ fn resource_thought(server: &Server, id: &str) -> String {
 }
 
 fn resource_reason(server: &Server, id: &str) -> String {
-	let g = read_recovered(&server.graph);
+	let g = server.graph.read();
 	match find_reason(&g, id) {
 		Some((reason, _)) => serde_json::to_string(&serde_json::json!({
 			"id": reason.id,
@@ -206,41 +205,17 @@ fn resource_content(uri: &str, text: &str) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use parking_lot::RwLock;
-	use std::sync::Arc;
 
-	use crate::base::graph::GraphGnn;
-	use crate::base::locks::write_recovered;
 	use crate::base::reason::add_reason;
 	use crate::base::types::{Entity, Kern, Reason};
-	use crate::config::Config;
-	use crate::llm;
 	use crate::mcp::Server;
 
 	fn make_server() -> Server {
-		let graph = Arc::new(RwLock::new(GraphGnn::new()));
-		let embedder = llm::Client::new_embed_only("http://127.0.0.1:1", "test");
-		let worker = Arc::new(crate::ingest::Worker::new(
-			graph.clone(),
-			embedder,
-			None,
-			None,
-			None,
-		));
-		Server {
-			graph,
-			worker,
-			llm: None,
-			save_fn: Arc::new(|| {}),
-			task_q: None,
-			cfg: Arc::new(Config::default()),
-			cache: crate::retrieval::cache::QueryCache::default_shared(),
-			broadcast_pulse: None,
-		}
+		crate::test_support::mcp_server()
 	}
 
 	fn seed(server: &Server) {
-		let mut g = write_recovered(&server.graph);
+		let mut g = server.graph.write();
 		let mut k = Kern::new("kx", "");
 		k.entities.insert(
 			"e1".into(),

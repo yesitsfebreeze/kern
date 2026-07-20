@@ -115,9 +115,10 @@ pub(super) fn cmd_forget(cfg: &crate::config::Config, id: &str) {
 	});
 }
 
-fn forget_entity(g: &mut GraphGnn, id: &str) -> Result<usize, &'static str> {
+pub(crate) fn forget_entity(g: &mut GraphGnn, id: &str) -> Result<usize, &'static str> {
 	let (thought, kern_id) = find_entity(g, id).ok_or("thought not found")?;
-	if thought.is_fact() {
+	// A remote Fact is a peer's assertion, not durable local knowledge — forgettable.
+	if thought.is_fact() && !crate::base::merge::is_remote_kern_id(&kern_id) {
 		return Err("cannot forget a fact");
 	}
 	let edges_before = g.kerns.get(&kern_id).map(|k| k.reasons.len()).unwrap_or(0);
@@ -139,7 +140,7 @@ pub(super) async fn cmd_link(
 	reason_model: &str,
 ) {
 	let mut g = load_graph(cfg);
-	let (from_t, from_kern_id) = match find_entity(&g, from) {
+	let (from_t, _) = match find_entity(&g, from) {
 		Some(pair) => pair,
 		None => {
 			eprintln!("from thought not found: {from}");
@@ -176,8 +177,34 @@ pub(super) async fn cmd_link(
 	} else {
 		None
 	};
-	let vec = link_vector(reason_embed, &from_t.vector, &to_t.vector);
 
+	match link_entities(&mut g, from, to, reason_text, reason_embed) {
+		Ok((rid, score)) => {
+			save_graph(&g);
+			println!(
+				"linked {} -> {}  edge={}  score={:.4}",
+				short_id(from),
+				short_id(to),
+				short_id(&rid),
+				score,
+			);
+		}
+		Err(e) => eprintln!("{e}"),
+	}
+}
+
+pub(crate) fn link_entities(
+	g: &mut GraphGnn,
+	from: &str,
+	to: &str,
+	reason_text: String,
+	reason_embed: Option<Vec<f32>>,
+) -> Result<(String, f64), String> {
+	let (from_t, from_kern_id) =
+		find_entity(g, from).ok_or_else(|| format!("from thought not found: {from}"))?;
+	let (to_t, _) = find_entity(g, to).ok_or_else(|| format!("to thought not found: {to}"))?;
+
+	let vec = link_vector(reason_embed, &from_t.vector, &to_t.vector);
 	let score = cosine(&from_t.vector, &to_t.vector);
 	let rid = reason_id(from, to, ReasonKind::Similarity, &reason_text, "");
 	let r = Reason {
@@ -191,23 +218,14 @@ pub(super) async fn cmd_link(
 		..Default::default()
 	};
 
-	let Some(kern) = g.kerns.get_mut(&from_kern_id) else {
-		eprintln!(
+	let kern = g.kerns.get_mut(&from_kern_id).ok_or_else(|| {
+		format!(
 			"link failed: kern {} no longer present",
 			short_id(&from_kern_id)
-		);
-		return;
-	};
+		)
+	})?;
 	add_reason(kern, r);
-	save_graph(&g);
-
-	println!(
-		"linked {} -> {}  edge={}  score={:.4}",
-		short_id(from),
-		short_id(to),
-		short_id(&rid),
-		score,
-	);
+	Ok((rid, score))
 }
 
 fn link_vector(reason_embed: Option<Vec<f32>>, from_vec: &[f32], to_vec: &[f32]) -> Vec<f32> {
@@ -233,7 +251,7 @@ pub(super) fn cmd_degrade(cfg: &crate::config::Config, id: &str) {
 	});
 }
 
-fn degrade_entity_reasons(g: &mut GraphGnn, kern_id: &str, id: &str) -> (usize, usize) {
+pub(crate) fn degrade_entity_reasons(g: &mut GraphGnn, kern_id: &str, id: &str) -> (usize, usize) {
 	let rids: Vec<String> = match g.kerns.get(kern_id) {
 		Some(kern) => crate::base::reason::collect_reason_ids(kern, id),
 		None => Vec::new(),
@@ -367,8 +385,12 @@ mod tests {
 	}
 
 	fn graph_with(entities: &[(&str, EntityKind)], edges: &[(&str, &str)]) -> GraphGnn {
+		graph_in("kx", entities, edges)
+	}
+
+	fn graph_in(kern_id: &str, entities: &[(&str, EntityKind)], edges: &[(&str, &str)]) -> GraphGnn {
 		let mut g = GraphGnn::new();
-		let mut k = Kern::new("kx", "");
+		let mut k = Kern::new(kern_id, "");
 		for (id, kind) in entities {
 			k.entities.insert((*id).into(), ent(id, *kind));
 		}
@@ -403,6 +425,25 @@ mod tests {
 		assert!(
 			g.kerns.get("kx").unwrap().entities.contains_key("f"),
 			"the fact is left intact"
+		);
+	}
+
+	// Without this the operator has no way to remove a peer-pinned Fact by hand.
+	#[test]
+	fn forget_allows_a_remote_fact() {
+		let mut g = graph_in("remote-evilnet-k1", &[("f", EntityKind::Fact)], &[]);
+		assert_eq!(
+			forget_entity(&mut g, "f"),
+			Ok(0),
+			"a remote Fact must be forgettable"
+		);
+		assert!(
+			!g.kerns
+				.get("remote-evilnet-k1")
+				.unwrap()
+				.entities
+				.contains_key("f"),
+			"the remote fact is actually gone, not just reported gone"
 		);
 	}
 

@@ -1,0 +1,223 @@
+# Seed the graph
+
+kern normally fills its graph a session at a time, through the intake. This page
+covers the other direction: pushing an existing body of knowledge — design docs,
+an architecture decision log, a README, a pile of notes — into a fresh graph in
+one go, so the first session already has something to recall. At the end you
+will have gravitons, descriptors, and your existing material in the graph, and
+you will have verified it landed.
+
+## Before you start
+
+You need a running daemon for the project (see
+[Install & run the daemon](./install-run.md)) and a reachable embedding endpoint
+— every seeded item is embedded on the way in, and nothing is stored if the
+embedder is down.
+
+## Step 1 — Add gravitons
+
+Gravitons are the named focus areas the graph gravitates around. Ingest routes
+each new thought to the nearest one, and query ranking boosts thoughts sitting
+near one. Seed these first: content ingested before any graviton exists lands in
+`generic` and stays there.
+
+From an MCP session in the project, call the `graviton` tool
+(`src/mcp/tools_admin.rs:41`) once per focus area:
+
+```json
+{ "action": "add", "name": "decisions",   "text": "Architectural and design decisions, the alternatives considered, and the rationale." }
+{ "action": "add", "name": "architecture", "text": "How the system is structured: components, data flow, and the boundaries between them." }
+{ "action": "add", "name": "preferences",  "text": "How this project wants to be worked on: style, conventions, things to avoid." }
+```
+
+The equivalent CLI form (`src/commands.rs:172`):
+
+```bash
+kern graviton add decisions "Architectural and design decisions, the alternatives considered, and the rationale."
+kern graviton add architecture "How the system is structured: components, data flow, and the boundaries between them."
+kern graviton list
+```
+
+`text` is embedded whole as the graviton's pull vector, so it can be a phrase, a
+paragraph, or an entire document — a longer, more representative text gives a
+better-placed vector than a single word. An optional `mass` (default `1.0`)
+makes a graviton pull harder: routing compares `distance / mass`, so a graviton
+at `mass = 2.0` claims content from roughly twice as far away.
+
+!!! tip "Three to six is usually right"
+
+    Too few and everything lands in one bucket; too many and each one is starved.
+    You do not have to get the set right up front — dense `generic` clusters
+    promote themselves into new gravitons over time.
+
+## Step 2 — Add descriptors
+
+A descriptor is a named chunking context. Passing `descriptor: "decision"` with
+an ingest tells kern what kind of text it is looking at, which shapes how the
+content is interpreted on the way in. Register the kinds you intend to use:
+
+```json
+{ "action": "add", "name": "decision", "description": "An architectural or design decision. The decision itself, the alternatives considered, the rationale, and any trade-offs." }
+{ "action": "add", "name": "doc",      "description": "Documentation such as a README or manual. Subject, key concepts, usage, and any caveats." }
+```
+
+Or via the CLI (`src/commands.rs:190`):
+
+```bash
+kern descriptor add decision "An architectural or design decision, its alternatives, and its rationale."
+kern descriptor rm decision
+```
+
+Names are free-form — pick a vocabulary that matches your material and reuse it
+consistently.
+
+## Step 3 — Push the content in
+
+There are three intake shapes. They differ in what happens to the text on the
+way in, which is the thing to choose on.
+
+### Direct ingest, per document
+
+The `ingest` MCP tool (`src/mcp/tools_mutate.rs:16`) takes the text plus
+optional provenance:
+
+```json
+{
+  "text": "<the document body>",
+  "source": "file",
+  "object_id": "docs/decisions/0007-storage-engine.md",
+  "title": "ADR 7 — storage engine",
+  "descriptor": "decision",
+  "sync": true
+}
+```
+
+`sync: true` blocks until the ingest completes and returns the outcome, which is
+what you want when seeding — the default is fire-and-forget, and a batch of
+those gives you no way to tell what failed.
+
+`source` selects the provenance shape: `inline` (the default), `file`,
+`session`, `agent`, or any other string, which is treated as a ticket system
+identifier. `object_id` is the stable identity for update semantics — re-ingest
+with the same `object_id` and kern treats it as a revision of the same object
+rather than a new one.
+
+The CLI equivalent reads a whole file:
+
+```bash
+kern ingest --file docs/decisions/0007-storage-engine.md
+kern ingest "We chose LMDB because readers never block writers."
+```
+
+!!! warning "The CLI and the daemon are separate writers"
+
+    `kern ingest` opens the on-disk graph directly and can race a running
+    daemon. It retries on a refused stale flush, but for bulk seeding the
+    predictable path is either the MCP tool against the live daemon, or the CLI
+    with the daemon stopped. Do not run both at once.
+
+    There is a second, deliberate difference: CLI ingest is attributed to the
+    `user` source at full confidence, which makes the resulting entities
+    **facts** — immune to eviction (`src/base/math.rs:216`). MCP callers are
+    agents and are clamped below fact confidence, so their content remains
+    subject to decay. If you are seeding durable reference material you want to
+    survive GC forever, the CLI path is the one that produces it.
+
+### Bulk, through the intake
+
+For a large pile of prose, drop the files into `<cwd>/.kern/intake/` and let the
+daemon drain them:
+
+```bash
+mkdir -p .kern/intake
+cp docs/decisions/*.md .kern/intake/
+```
+
+The intake polls that directory (default every 5s) and takes anything that reads
+as text, whatever its extension. What a file becomes depends on its suffix:
+
+| dropped file | becomes | needs |
+|---|---|---|
+| `*.txt` | a session transcript, distilled into typed claims | the reason LLM |
+| anything else | a `Document`, stored whole and chunked | the embedder only |
+| not valid UTF-8 | quarantined into `.kern/intake/failed/` | — |
+
+So seeding documents works with no reason model configured at all. Each drained
+file is archived to `.kern/intake/done/` once everything from it has been
+ingested; if the LLM or embedder is unreachable, the file stays queued and is
+retried on the next drain, so nothing is lost to an outage.
+
+This path differs from direct ingest in one significant way: it runs
+**distillation** first (`src/ingest/distill.rs:21`) — one LLM pass that extracts
+durable facts, decisions, and preferences as typed claims — and ingests those
+claims rather than the raw text. Use it when your source material is prose that
+needs interpreting. Use direct ingest when the text is already the claim you
+want stored.
+
+## What happens to your text on the way in
+
+Direct ingest does no LLM work. Understanding the two steps it does perform will
+save you from badly-shaped seed files.
+
+**Splitting is heuristic and paragraph-based.** The text is split on blank lines
+(`src/ingest/split.rs:28`), and the splitter is explicitly called with no LLM —
+an LLM split would put a model call on the commit path
+(`src/ingest/worker.rs:213`). The whole text is also stored as one `Document`
+entity alongside the chunks (`src/ingest/place.rs:76`), so both the parts and
+the whole are retrievable.
+
+The practical consequence: **one idea per paragraph, separated by a blank line.**
+A wall of text with no blank lines becomes a single chunk and retrieves as an
+undifferentiated blob.
+
+**Every chunk goes through the same acceptance path as anything else**
+(`src/base/accept.rs:30`). Nothing about seeding is privileged. Each chunk is
+checked graph-wide for a near-duplicate (cosine ≥ `ingest.dedup_threshold`,
+default `0.95`), routed to the graviton whose effective distance is smallest,
+and committed there. Re-running a seed is therefore close to idempotent —
+identical content dedupes rather than duplicating.
+
+That also means seeded content participates in contradiction handling like
+everything else: seed a document that contradicts a stored claim and the older
+one is superseded, not silently kept alongside.
+
+→ [Acceptance & routing](../concepts/acceptance.md) ·
+[Time & contradiction](../concepts/time.md)
+
+## Step 4 — Check it landed
+
+Call the `health` MCP tool, or run:
+
+```bash
+kern health
+```
+
+which prints the data directory, the graviton names, and the kern / thought /
+reason / descriptor counts, then a per-kern breakdown. Two things to look at:
+
+- **Thought count moved** by roughly what you expect. A count of zero after a
+  seed run means embedding failed — check the endpoint in
+  [Configure models](./configure.md).
+- **Thoughts are distributed across gravitons**, not all sitting in one. Every
+  thought landing in the same place usually means the graviton texts are too
+  similar to each other, or you seeded content before the gravitons existed.
+
+Then confirm the content is actually retrievable:
+
+```bash
+kern search "which storage engine did we choose" --k 5
+kern list
+```
+
+`kern search` runs a retrieval and prints the top hits; `kern list` walks the
+kern tree and prints each thought under its kern. From an MCP session, the
+`query` tool is the equivalent and is the one that exercises the full pipeline.
+
+## After seeding
+
+Nothing further is required. Normal sessions populate the graph through the intake
+from here, and the background tick starts folding your seeded content into the
+same heat, decay, and clustering cycle as everything else.
+
+→ [Intake & recall](./intake-recall.md) ·
+[Heat, decay & self-compaction](../concepts/heat-and-compaction.md)

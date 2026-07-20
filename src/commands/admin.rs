@@ -1,8 +1,7 @@
 use crate::base::util::short_id;
 
 use super::{
-	load_graph, save_graph, with_graph, GravitonAction, Client, DescriptorAction, Endpoint,
-	UnnamedAction,
+	load_graph, save_graph, with_graph, Client, DescriptorAction, GravitonAction, UnnamedAction,
 };
 
 pub(super) fn cmd_compress(src: &str, mode_str: &str, out: Option<&str>) {
@@ -124,16 +123,10 @@ pub(super) async fn cmd_graviton(cfg: &crate::config::Config, action: GravitonAc
 			name,
 			text,
 			mass,
-			embed_url,
-			embed_model,
+			embed,
 		} => {
-			let url = embed_url.as_deref().unwrap_or(&cfg.embed.url);
-			let model = embed_model.as_deref().unwrap_or(&cfg.embed.model);
-			let llm_client = Client::new(
-				Endpoint::default(),
-				Endpoint::default(),
-				Endpoint::new(url, model, &cfg.embed.key),
-			);
+			let (url, model) = embed.resolve(cfg);
+			let llm_client = Client::new_embed_only(url, model, &cfg.embed.key);
 			let vec = match llm_client.embed(&text).await {
 				Ok(v) => v,
 				Err(e) => {
@@ -150,16 +143,11 @@ pub(super) async fn cmd_graviton(cfg: &crate::config::Config, action: GravitonAc
 		GravitonAction::List => {
 			let g = load_graph(cfg);
 			println!("gravitons:");
-			for cid in crate::base::accept::root_graviton_ids(&g) {
-				if let Some(c) = g.loaded(&cid) {
-					println!(
-						"  {}  mass:{}  thoughts:{}  reasons:{}",
-						c.graviton_text,
-						c.mass,
-						c.entities.len(),
-						c.reasons.len(),
-					);
-				}
+			for r in graviton_rows(&g) {
+				println!(
+					"  {}  mass:{}  thoughts:{}  reasons:{}",
+					r.name, r.mass, r.thoughts, r.reasons,
+				);
 			}
 		}
 		GravitonAction::Remove { name } => {
@@ -171,6 +159,26 @@ pub(super) async fn cmd_graviton(cfg: &crate::config::Config, action: GravitonAc
 			}
 		}
 	}
+}
+
+pub(crate) struct GravitonRow {
+	pub(crate) name: String,
+	pub(crate) mass: f64,
+	pub(crate) thoughts: usize,
+	pub(crate) reasons: usize,
+}
+
+pub(crate) fn graviton_rows(g: &crate::base::graph::GraphGnn) -> Vec<GravitonRow> {
+	crate::base::accept::root_graviton_ids(g)
+		.iter()
+		.filter_map(|cid| g.loaded(cid))
+		.map(|c| GravitonRow {
+			name: c.graviton_text.clone(),
+			mass: c.mass,
+			thoughts: c.entities.len(),
+			reasons: c.reasons.len(),
+		})
+		.collect()
 }
 
 pub(super) fn cmd_descriptor(cfg: &crate::config::Config, action: DescriptorAction) {
@@ -339,5 +347,238 @@ pub(super) fn cmd_unnamed(cfg: &crate::config::Config, action: UnnamedAction) {
 				println!("no unnamed kerns");
 			}
 		}
+	}
+}
+
+fn default_root() -> String {
+	let cwd = std::env::current_dir().unwrap_or_default();
+	crate::config::Config::resolve_root(&cwd)
+		.display()
+		.to_string()
+}
+
+pub(super) async fn cmd_hub(action: Option<super::HubAction>, idle_unload_secs: u64) {
+	use trnsprt::hub_rpc::{HubRpcClient, ResolveReq, UnloadReq};
+	use trnsprt::typed::JsonEnvelopeCodec;
+
+	match action {
+		None => crate::hub::run_hub(idle_unload_secs).await,
+		Some(super::HubAction::Resolve { root }) => {
+			let root = root.unwrap_or_else(default_root);
+			let client = match HubRpcClient::<JsonEnvelopeCodec>::connect_hub().await {
+				Ok(c) => c,
+				Err(e) => {
+					eprintln!("hub: not running ({e})");
+					return;
+				}
+			};
+			match client.resolve(ResolveReq { root: root.clone() }).await {
+				Ok(res) if res.ok => println!(
+					"{}  {}",
+					if res.spawned { "spawned" } else { "running" },
+					res.endpoint
+				),
+				Ok(res) => eprintln!("resolve {root}: {}", res.err),
+				Err(e) => eprintln!("hub resolve: {e}"),
+			}
+		}
+		Some(super::HubAction::Status) => {
+			let client = match HubRpcClient::<JsonEnvelopeCodec>::connect_hub().await {
+				Ok(c) => c,
+				Err(e) => {
+					eprintln!("hub: not running ({e})");
+					return;
+				}
+			};
+			match client.status().await {
+				Ok(res) => {
+					if res.nodes.is_empty() {
+						println!("hub: running, no nodes");
+					}
+					for n in res.nodes {
+						println!(
+							"{}  pid:{}  {}  {}",
+							if n.alive { "up  " } else { "dead" },
+							n.pid,
+							n.root,
+							n.endpoint
+						);
+					}
+				}
+				Err(e) => eprintln!("hub status: {e}"),
+			}
+		}
+		Some(super::HubAction::Unload { root }) => {
+			let root = root.unwrap_or_else(default_root);
+			let client = match HubRpcClient::<JsonEnvelopeCodec>::connect_hub().await {
+				Ok(c) => c,
+				Err(e) => {
+					eprintln!("hub: not running ({e})");
+					return;
+				}
+			};
+			match client.unload(UnloadReq { root: root.clone() }).await {
+				Ok(res) if res.ok && res.existed => println!("unloaded {root}"),
+				Ok(res) if res.ok => println!("no node for {root}"),
+				Ok(res) => eprintln!("unload {root}: {}", res.err),
+				Err(e) => eprintln!("hub unload: {e}"),
+			}
+		}
+		Some(super::HubAction::Merge { src, dst }) => cmd_hub_merge(&src, &dst).await,
+		Some(super::HubAction::Stop) => match HubRpcClient::<JsonEnvelopeCodec>::connect_hub().await {
+			Ok(client) => match client.stop().await {
+				Ok(_) => println!("hub stopped (nodes stay up)"),
+				Err(e) => eprintln!("hub stop: {e}"),
+			},
+			Err(e) => eprintln!("hub: not running ({e})"),
+		},
+	}
+}
+
+// Offline CRDT union: src's rows and topology join dst's store; src is never
+// written. Both daemons must be down — the store is single-writer and a live
+// daemon's flush would clobber the merge.
+async fn cmd_hub_merge(src: &str, dst: &str) {
+	use trnsprt::hub_rpc::{HubRpcClient, UnloadReq};
+	use trnsprt::typed::JsonEnvelopeCodec;
+
+	let canon = |s: &str| -> Option<std::path::PathBuf> {
+		let p = std::path::Path::new(s).canonicalize().ok()?;
+		Some(crate::config::Config::resolve_root(&p))
+	};
+	let Some(src_root) = canon(src) else {
+		eprintln!("merge: src {src} does not exist");
+		return;
+	};
+	let Some(dst_root) = canon(dst) else {
+		eprintln!("merge: dst {dst} does not exist");
+		return;
+	};
+	if src_root == dst_root {
+		eprintln!(
+			"merge: src and dst are the same root {}",
+			src_root.display()
+		);
+		return;
+	}
+	if !src_root.join(".kern").is_dir() {
+		eprintln!("merge: src {} has no .kern store", src_root.display());
+		return;
+	}
+
+	if let Ok(client) = HubRpcClient::<JsonEnvelopeCodec>::connect_hub().await {
+		for root in [&src_root, &dst_root] {
+			let _ = client
+				.unload(UnloadReq {
+					root: root.display().to_string(),
+				})
+				.await;
+		}
+	}
+	for root in [&src_root, &dst_root] {
+		let endpoint = trnsprt::typed::Endpoint::kern_for(root);
+		if crate::hub::node::probe(&endpoint).await {
+			eprintln!(
+				"merge: a daemon still serves {} — stop it first",
+				root.display()
+			);
+			return;
+		}
+	}
+
+	// Fallback must stay pinned to the root: a bare `Config::default()` carries a
+	// cwd-relative data_dir and would read (and write!) whatever store the
+	// caller happens to stand in.
+	let src_cfg = crate::config::Config::load(&src_root)
+		.unwrap_or_else(|_| crate::config::Config::default_in(&src_root));
+	let dst_cfg = crate::config::Config::load(&dst_root)
+		.unwrap_or_else(|_| crate::config::Config::default_in(&dst_root));
+	let src_g = load_graph(&src_cfg);
+	let mut dst_g = load_graph(&dst_cfg);
+
+	let src_h = crate::base::health::graph_health_stats(&src_g);
+	if src_h.entities == 0 {
+		eprintln!("merge: src {} holds no entities", src_root.display());
+		return;
+	}
+	let before = crate::base::health::graph_health_stats(&dst_g);
+	let changed = crate::base::merge::absorb_graph(&mut dst_g, src_g);
+	save_graph(&dst_g);
+	let after = crate::base::health::graph_health_stats(&dst_g);
+	println!(
+		"merged {} -> {}: {} rows joined, entities {} -> {}, kerns {} -> {} (src untouched)",
+		src_root.display(),
+		dst_root.display(),
+		changed,
+		before.entities,
+		after.entities,
+		before.kerns,
+		after.kerns,
+	);
+}
+
+#[cfg(test)]
+mod hub_merge_tests {
+	use crate::base::types::{mk_entity, EntityKind, Kern};
+
+	fn store_with_entity(root: &std::path::Path, eid: &str) {
+		std::fs::create_dir_all(root.join(".kern")).unwrap();
+		let cfg = crate::config::Config::default_in(root);
+		let mut g = crate::base::graph::GraphGnn::new();
+		g.data_dir = cfg.data_dir.clone();
+		std::fs::create_dir_all(&g.data_dir).unwrap();
+		let mut k = Kern::new("k-hub-merge", g.root.id.clone());
+		k.root_id = g.root.id.clone();
+		k.graviton_text = "merge test".into();
+		k.entities.insert(
+			eid.to_string(),
+			mk_entity(eid, "merged fact", 1.0, EntityKind::Fact),
+		);
+		g.register(k);
+		// save_all silently no-ops without a store attached.
+		let store = crate::base::store::Store::open(&g.data_dir).unwrap();
+		g.set_store(std::sync::Arc::new(store));
+		crate::base::persist::save_all(&g).unwrap();
+	}
+
+	fn dst_entities(root: &std::path::Path) -> usize {
+		let cfg = crate::config::Config::default_in(root);
+		let g = super::load_graph(&cfg);
+		crate::base::health::graph_health_stats(&g).entities
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn merge_absorbs_src_entities_into_dst_and_leaves_src_alone() {
+		let dir = tempfile::tempdir().unwrap();
+		let src = dir.path().join("src");
+		let dst = dir.path().join("dst");
+		store_with_entity(&src, "e-src");
+		store_with_entity(&dst, "e-dst");
+		assert_eq!(dst_entities(&src), 1, "src store persisted before merge");
+
+		super::cmd_hub_merge(&src.display().to_string(), &dst.display().to_string()).await;
+
+		assert_eq!(
+			dst_entities(&dst),
+			2,
+			"dst holds its own + the absorbed entity"
+		);
+		assert_eq!(dst_entities(&src), 1, "src is never written");
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn merge_refuses_identical_roots_and_missing_src() {
+		let dir = tempfile::tempdir().unwrap();
+		let root = dir.path().join("only");
+		store_with_entity(&root, "e-1");
+		let r = root.display().to_string();
+
+		// Same root: refused before any store is touched.
+		super::cmd_hub_merge(&r, &r).await;
+		assert_eq!(dst_entities(&root), 1, "self-merge is a refused no-op");
+
+		// Missing src: refused.
+		super::cmd_hub_merge("/nonexistent/kern-merge-src", &r).await;
+		assert_eq!(dst_entities(&root), 1, "missing src leaves dst untouched");
 	}
 }

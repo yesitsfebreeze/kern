@@ -107,6 +107,14 @@ impl EntityAdjacency {
 		}
 		let mut out: Vec<Vec<usize>> = vec![Vec::new(); ids.len()];
 		for kern in g.map().values() {
+			// SECURITY: PageRank feeds the RRF seed list, so an edge is a vote. A peer owns
+			// every reason in its own phantom kern and can farm them; remote entities stay
+			// NODES (still rankable) but cast no votes. Filtered on the owning kern, not
+			// Reason::is_remote() — that flags a cross-NETWORK edge, which a peer's
+			// self-contained edge farm is not.
+			if kern.is_remote() {
+				continue;
+			}
 			for r in kern.reasons.values() {
 				if r.from == r.to {
 					continue;
@@ -213,10 +221,6 @@ impl GraphGnn {
 
 	pub fn lexical(&self) -> Option<Arc<LexicalIndex>> {
 		self.lexical.clone()
-	}
-
-	pub fn set_lexical(&mut self, lex: Option<Arc<LexicalIndex>>) {
-		self.lexical = lex;
 	}
 
 	pub fn rebuild_index(&mut self) {
@@ -349,6 +353,13 @@ impl GraphGnn {
 		None
 	}
 
+	// Direct map access, same contract as `kerns.get_mut(&root.id)` — no load,
+	// no epoch bump. Use `get_mut` when either matters.
+	pub fn root_kern_mut(&mut self) -> Option<&mut Kern> {
+		let id = self.root.id.clone();
+		self.kerns.get_mut(&id)
+	}
+
 	pub fn get_mut(&mut self, id: &str) -> Option<&mut Kern> {
 		if !self.kerns.contains_key(id) {
 			self.get(id);
@@ -408,7 +419,7 @@ impl GraphGnn {
 	pub fn entity_adjacency(&self) -> Arc<EntityAdjacency> {
 		let epoch = self.mutation_epoch;
 		{
-			let cached = crate::base::locks::read_recovered(&self.adjacency_cache);
+			let cached = self.adjacency_cache.read();
 			if let Some((e, adj)) = cached.as_ref() {
 				if *e == epoch {
 					return adj.clone();
@@ -416,7 +427,7 @@ impl GraphGnn {
 			}
 		}
 		let adj = Arc::new(EntityAdjacency::build(self));
-		*crate::base::locks::write_recovered(&self.adjacency_cache) = Some((epoch, adj.clone()));
+		*self.adjacency_cache.write() = Some((epoch, adj.clone()));
 		adj
 	}
 
@@ -470,10 +481,6 @@ impl GraphGnn {
 		self.src_index.insert(external_id, kern_id);
 	}
 
-	pub fn delete_source_entry(&mut self, external_id: &str) {
-		self.src_index.remove(external_id);
-	}
-
 	pub fn loaded(&self, id: &str) -> Option<&Kern> {
 		self.kerns.get(id)
 	}
@@ -504,17 +511,21 @@ impl GraphGnn {
 		if id == self.root.id || !self.kerns.contains_key(id) {
 			return Ok(());
 		}
-		if let Some(store) = self.store.clone() {
-			if let Some(k) = self.kerns.get(id) {
-				store.save_one_kern(k)?;
-			}
+		// Unloading is residency, never forgetting: `get` reloads through the
+		// store, so without one the kern would leave RAM with nothing to come
+		// back from.
+		let Some(store) = self.store.clone() else {
+			return Ok(());
+		};
+		if let Some(k) = self.kerns.get(id) {
+			store.save_one_kern(k)?;
 		}
 		self.kerns.remove(id);
 		self.unloaded.insert(id.to_string());
 		Ok(())
 	}
 
-	pub fn gc_empty_kerns(&mut self) -> usize {
+	fn gc_empty_kerns(&mut self) -> usize {
 		let root_id = self.root.id.clone();
 
 		// Cycle-safe via the `live` visited-set: re-encountering a live id stops.
@@ -584,10 +595,6 @@ impl GraphGnn {
 		&self.kerns
 	}
 
-	pub fn unloaded_ids(&self) -> Vec<String> {
-		self.unloaded.iter().cloned().collect()
-	}
-
 	pub fn from_saved_with_mode(
 		root: Kern,
 		network_id: String,
@@ -647,6 +654,80 @@ mod tests {
 		let mut k = Kern::new(id, parent);
 		k.children = children.iter().map(|s| s.to_string()).collect();
 		k
+	}
+
+	#[test]
+	fn adjacency_ignores_edges_a_peer_farmed_inside_its_own_phantom_kern() {
+		use crate::base::types::Reason;
+
+		let edge = |id: &str, from: &str, to: &str| Reason {
+			id: id.into(),
+			from: from.into(),
+			to: to.into(),
+			..Default::default()
+		};
+		let with_entities = |k: &mut Kern, ids: &[&str]| {
+			for id in ids {
+				k.entities.insert(
+					(*id).into(),
+					Entity {
+						id: (*id).into(),
+						..Default::default()
+					},
+				);
+			}
+		};
+
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+
+		let mut local = Kern::new("k1", &root);
+		with_entities(&mut local, &["a", "b"]);
+		local.reasons.insert("r1".into(), edge("r1", "a", "b"));
+		g.kerns.insert("k1".into(), local);
+
+		// The attack: a peer owns every reason in its own phantom kern, so it can farm
+		// inbound edges to itself for free. Note to_net_id is EMPTY — these edges do not
+		// cross a network boundary, so Reason::is_remote() would not catch them.
+		let mut phantom = Kern::new("remote-evilnet-k1", &root);
+		with_entities(&mut phantom, &["evil", "sock1", "sock2"]);
+		phantom
+			.reasons
+			.insert("f1".into(), edge("f1", "sock1", "evil"));
+		phantom
+			.reasons
+			.insert("f2".into(), edge("f2", "sock2", "evil"));
+		assert!(
+			phantom.reasons.values().all(|r| !r.is_remote()),
+			"the farmed edges are not flagged by Reason::is_remote()"
+		);
+		g.kerns.insert("remote-evilnet-k1".into(), phantom);
+
+		let adj = EntityAdjacency::build(&g);
+		let out_of = |id: &str| adj.out[adj.id_to_idx[id]].len();
+
+		assert_eq!(out_of("a"), 1, "legitimate local edges survive");
+		assert_eq!(out_of("sock1"), 0, "a farmed vote is dropped");
+		assert_eq!(out_of("sock2"), 0, "a farmed vote is dropped");
+		assert!(
+			adj.id_to_idx.contains_key("evil"),
+			"the remote entity stays a NODE — it is still rankable, it just gets no votes"
+		);
+	}
+
+	#[test]
+	fn unload_without_a_store_keeps_the_kern_resident() {
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		g.kerns.insert("k1".into(), Kern::new("k1", &root));
+
+		g.unload("k1").expect("no store is not an error");
+
+		assert!(
+			g.kerns.contains_key("k1"),
+			"without a store there is nothing to reload from, so unloading would lose the kern"
+		);
+		assert!(!g.unloaded.contains("k1"), "not marked unloaded either");
 	}
 
 	#[test]
@@ -807,7 +888,7 @@ mod tests {
 			.map(|h| h.entity_id)
 			.collect();
 		let disk_hits: Vec<String> = disk
-			.search_hits(&q32, 10, 96)
+			.search_hits_filtered(&q32, 10, 96, &|_| true)
 			.into_iter()
 			.map(|h| h.id)
 			.collect();

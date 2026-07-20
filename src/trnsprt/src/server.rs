@@ -169,8 +169,6 @@ mod tests {
 	use super::*;
 	use std::io::Cursor;
 
-	// Local mock, not test-utils::AdderServer: trnsprt's dev-dep cycle
-	// (trnsprt -> test-utils -> trnsprt) makes that a *different* McpServer here.
 	struct Mock;
 	impl McpServer for Mock {
 		fn tools_list(&self) -> Vec<ToolSchema> {

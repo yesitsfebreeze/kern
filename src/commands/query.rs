@@ -72,6 +72,7 @@ pub(super) async fn cmd_query(cfg: &crate::config::Config, params: QueryParams<'
 			&result.path_chains,
 			&result.entities,
 			text,
+			cfg.retrieval.answer_abstain_hint,
 		);
 		let mut gen = std::pin::pin!(llm_client.answer(crate::llm::AnswerParams {
 			messages: vec![("user".to_string(), prompt)],
@@ -102,11 +103,7 @@ pub(super) async fn cmd_search(
 	let g = load_graph(cfg);
 	// Reason/answer deliberately unconfigured: pure vector retrieval never calls
 	// them — do NOT "fix" these to real endpoints/credentials.
-	let llm_client = Client::new(
-		Endpoint::default(),
-		Endpoint::default(),
-		Endpoint::new(embed_url, embed_model, &cfg.embed.key),
-	);
+	let llm_client = Client::new_embed_only(embed_url, embed_model, &cfg.embed.key);
 	let vec = match llm_client.embed(text).await {
 		Ok(v) => v,
 		Err(e) => {

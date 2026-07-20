@@ -745,16 +745,33 @@ mod tests {
 			);
 		}
 
-		#[test]
-		fn a_remote_entity_inside_a_chain_is_marked_too() {
+		// Mirrors score.rs's federation fixture: a real phantom kern, so remoteness comes
+		// from the kern id exactly as it does in production.
+		fn graph_with(local_text: &str, remote_text: &str) -> GraphGnn {
 			let mut g = GraphGnn::new();
 			let kid = g.root.id.clone();
-			g.kerns.get_mut(&kid).unwrap().entities.insert(
-				"local".into(),
-				mk_entity("local", "local node", 0.0, EntityKind::Claim),
-			);
-			let evil = mk_entity("evil", INJECTION, 0.0, EntityKind::Claim);
+			let mut local = mk_entity("local", local_text, 0.0, EntityKind::Claim);
+			local.vector = vec![1.0, 0.0, 0.0, 0.0];
+			g.kerns
+				.get_mut(&kid)
+				.unwrap()
+				.entities
+				.insert("local".into(), local);
+			g.index_entity("local", &kid);
+			g.entity_idx
+				.insert("local".into(), vec![1.0, 0.0, 0.0, 0.0]);
+
+			g.register(Kern::new(PHANTOM, &kid));
+			let mut evil = mk_entity("evil", remote_text, 0.0, EntityKind::Claim);
+			evil.vector = vec![1.0, 0.0, 0.0, 0.0];
 			assert!(merge_remote_entity(&mut g, PHANTOM, evil));
+			g.entity_idx.insert("evil".into(), vec![1.0, 0.0, 0.0, 0.0]);
+			g
+		}
+
+		#[test]
+		fn a_remote_entity_inside_a_chain_is_marked_too() {
+			let g = graph_with("local node", INJECTION);
 
 			let chains = [PathChain {
 				nodes: vec!["local".into(), "r".into(), "evil".into()],
@@ -774,18 +791,7 @@ mod tests {
 
 		#[test]
 		fn remote_ids_are_resolved_even_when_the_reranker_is_disabled() {
-			let mut g = GraphGnn::new();
-			let kid = g.root.id.clone();
-			let mut local = mk_entity("local", "local knowledge", 0.0, EntityKind::Claim);
-			local.vector = vec![1.0, 0.0, 0.0, 0.0];
-			g.kerns
-				.get_mut(&kid)
-				.unwrap()
-				.entities
-				.insert("local".into(), local);
-			let mut evil = mk_entity("evil", INJECTION, 0.0, EntityKind::Claim);
-			evil.vector = vec![1.0, 0.0, 0.0, 0.0];
-			assert!(merge_remote_entity(&mut g, PHANTOM, evil));
+			let g = graph_with("local knowledge", INJECTION);
 
 			let cfg = RetrievalConfig {
 				rerank_enabled: false,

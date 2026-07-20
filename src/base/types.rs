@@ -566,12 +566,7 @@ impl From<KernPreMass> for Kern {
 }
 
 // The only non-deterministic input to kern-id derivation.
-fn now_nanos() -> u128 {
-	SystemTime::now()
-		.duration_since(SystemTime::UNIX_EPOCH)
-		.unwrap_or_default()
-		.as_nanos()
-}
+use util::now_nanos;
 
 fn unnamed_kern_id(parent_id: &str, nonce_nanos: u128) -> String {
 	util::content_hash(&format!("{parent_id}{nonce_nanos}"))
@@ -621,14 +616,6 @@ impl Kern {
 
 	pub fn is_named(&self) -> bool {
 		!self.graviton_text.is_empty()
-	}
-
-	pub fn is_immortal(&self) -> bool {
-		self.is_named()
-	}
-
-	pub fn is_dead(&self) -> bool {
-		self.graviton_text.is_empty() && self.entities.is_empty()
 	}
 
 	pub fn has_graviton(&self) -> bool {
@@ -774,29 +761,6 @@ mod tests {
 	}
 
 	#[test]
-	fn kern_is_dead_only_when_unnamed_and_empty() {
-		let empty_unnamed = Kern::new("k", "");
-		assert!(empty_unnamed.is_dead(), "unnamed + no entities -> dead");
-
-		let mut named = Kern::new("k2", "");
-		named.graviton_text = "topic".into();
-		assert!(!named.is_dead(), "a name keeps an empty kern alive");
-
-		let mut with_thought = Kern::new("k3", "");
-		with_thought.entities.insert(
-			"e".into(),
-			Entity {
-				id: "e".into(),
-				..Default::default()
-			},
-		);
-		assert!(
-			!with_thought.is_dead(),
-			"an entity keeps an unnamed kern alive"
-		);
-	}
-
-	#[test]
 	fn kern_has_graviton_requires_both_text_and_vector() {
 		let mut k = Kern::new("k", "");
 		assert!(!k.has_graviton(), "fresh kern has no graviton");
@@ -816,7 +780,7 @@ mod tests {
 		assert_eq!(k.root_id, "rootid");
 		assert_eq!(k.graviton_text, "generic");
 		assert_eq!(k.graviton_vec, vec![0.5, 0.5]);
-		assert!(k.is_named() && k.has_graviton() && !k.is_dead());
+		assert!(k.is_named() && k.has_graviton());
 		assert!(!k.id.is_empty(), "id is the content hash, never empty");
 	}
 

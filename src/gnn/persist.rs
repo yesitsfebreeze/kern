@@ -103,20 +103,6 @@ pub fn unmarshal_weights(model: &mut Model, data: &[u8]) -> Result<(), PersistEr
 	Ok(())
 }
 
-pub fn save_weights(model: &Model, path: impl AsRef<std::path::Path>) -> Result<(), PersistError> {
-	let data = marshal_weights(model)?;
-	std::fs::write(path, data)?;
-	Ok(())
-}
-
-pub fn load_weights(
-	model: &mut Model,
-	path: impl AsRef<std::path::Path>,
-) -> Result<(), PersistError> {
-	let data = std::fs::read(path)?;
-	unmarshal_weights(model, &data)
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -127,9 +113,7 @@ mod tests {
 	fn small_model(seed: u64) -> Model {
 		let mut rng = StdRng::seed_from_u64(seed);
 		Model::new(
-			vec![Box::new(GCNLayer::with_rng(
-				4, 3, None, false, 0.0, &mut rng,
-			))],
+			vec![Box::new(GCNLayer::with_rng(4, 3, None, false, &mut rng))],
 			None,
 		)
 	}

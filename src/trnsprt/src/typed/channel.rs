@@ -55,7 +55,7 @@ fn adapter_err_from_codec(e: CodecError) -> AdapterError {
 #[cfg(test)]
 mod tests {
 	use super::super::adapter::InprocAdapter;
-	use super::super::codec::{BincodeCodec, JsonEnvelopeCodec};
+	use super::super::codec::JsonEnvelopeCodec;
 	use super::Channel;
 	use serde_json::json;
 
@@ -67,15 +67,6 @@ mod tests {
 		ca.send(json!({"hello": "world"})).await.unwrap();
 		let got = cb.recv().await.unwrap().unwrap();
 		assert_eq!(got["hello"], "world");
-	}
-
-	#[tokio::test]
-	async fn channel_roundtrip_bincode() {
-		let (a, b) = InprocAdapter::pair();
-		let mut ca = Channel::new(a, BincodeCodec::new());
-		let mut cb = Channel::new(b, BincodeCodec::new());
-		ca.send(vec![1u8, 2, 3, 255]).await.unwrap();
-		assert_eq!(cb.recv().await.unwrap().unwrap(), vec![1u8, 2, 3, 255]);
 	}
 
 	#[tokio::test]

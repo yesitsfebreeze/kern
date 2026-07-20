@@ -10,7 +10,6 @@ use crate::base::constants::{
 	QUESTION_RESOLVE_THRESHOLD,
 };
 use crate::base::graph::GraphGnn;
-use crate::base::locks::{read_recovered, write_recovered};
 use crate::base::math::reason_id;
 use crate::base::reason::{add_reason, remove_reason};
 use crate::base::search::search_all_unlocked;
@@ -20,7 +19,7 @@ use crate::config::TickConfig;
 use crate::ingest::place::build_chunk_entity;
 
 use super::cluster::{
-	graviton_prompt, centroid_thought, largest_cohesive_cluster_for_naming, vector_cluster,
+	centroid_thought, graviton_prompt, largest_cohesive_cluster_for_naming, vector_cluster,
 };
 use super::queue::{task, task_extra, Queue, TaskKind};
 
@@ -47,7 +46,7 @@ pub fn do_seed_questions(
 ) {
 	let Some(llm) = llm else { return };
 	let (text, root_id) = {
-		let g = read_recovered(g);
+		let g = g.read();
 		let Some(kid) = g.kern_of_entity(entity_id).map(|s| s.to_string()) else {
 			return;
 		};
@@ -84,7 +83,7 @@ pub fn do_seed_questions(
 	}
 
 	{
-		let mut g = write_recovered(g);
+		let mut g = g.write();
 		for question in questions {
 			let rid = reason_id(entity_id, "", ReasonKind::Question, &question, "");
 			let reason = Reason {
@@ -126,7 +125,7 @@ pub fn do_classify_contradiction(
 	};
 
 	let (old_id, old_text, new_text, old_kind, old_source, confidence) = {
-		let graph = read_recovered(g);
+		let graph = g.read();
 		let kern = match graph.loaded(kern_id) {
 			Some(k) => k,
 			None => return,
@@ -175,7 +174,7 @@ pub fn do_classify_contradiction(
 	// Re-validate under the write guard — another tick may have superseded or
 	// removed this pair while we were unlocked.
 	{
-		let mut graph = write_recovered(g);
+		let mut graph = g.write();
 		let still_pending = graph
 			.loaded(kern_id)
 			.map(|k| {
@@ -208,7 +207,7 @@ fn naming_prompt(
 	kern_id: &str,
 	cfg: &TickConfig,
 ) -> Option<(String, Option<String>, String)> {
-	let graph = read_recovered(g);
+	let graph = g.read();
 	let kern = graph.loaded(kern_id)?;
 	if kern.is_named() {
 		return None;
@@ -248,7 +247,7 @@ pub fn do_name(
 	let name_vec = embed.and_then(|e| e(&name_text).ok());
 
 	let promoted_to_root = {
-		let mut graph = write_recovered(g);
+		let mut graph = g.write();
 		let kern = match graph.kerns.get_mut(kern_id) {
 			Some(k) => k,
 			None => return,
@@ -280,7 +279,7 @@ pub fn do_name(
 	};
 
 	{
-		let graph = read_recovered(g);
+		let graph = g.read();
 		if let Some(kern) = graph.loaded(kern_id) {
 			for r in kern.reasons.values() {
 				if r.is_enriched() || r.kind == ReasonKind::Spawn || r.kind == ReasonKind::Question {
@@ -296,7 +295,7 @@ pub fn do_name(
 	}
 	// Promotion rewired the root's children — persist it too.
 	if promoted_to_root {
-		let root_id = read_recovered(g).root.id.clone();
+		let root_id = g.read().root.id.clone();
 		q.enqueue(task(TaskKind::Persist, &root_id));
 	}
 }
@@ -315,7 +314,7 @@ pub fn do_enrich(
 	};
 
 	let prompt = {
-		let graph = read_recovered(g);
+		let graph = g.read();
 		let kern = match graph.loaded(kern_id) {
 			Some(k) => k,
 			None => return,
@@ -346,7 +345,7 @@ pub fn do_enrich(
 	let vec = embed(&text).ok();
 
 	{
-		let mut graph = write_recovered(g);
+		let mut graph = g.write();
 		let mut new_vec: Option<(String, Vec<f32>)> = None;
 		if let Some(kern) = graph.kerns.get_mut(kern_id) {
 			if let Some(r) = kern.reasons.get_mut(rid) {
@@ -377,7 +376,7 @@ pub fn do_resolve(
 	bq: Option<&BroadcastQuestionFunc>,
 ) {
 	let top_hit = {
-		let graph = read_recovered(g);
+		let graph = g.read();
 		let kern = match graph.loaded(kern_id) {
 			Some(k) => k,
 			None => return,
@@ -401,7 +400,7 @@ pub fn do_resolve(
 	// removed this question while the read guard was dropped.
 	if let Some(entity_id) = top_hit {
 		{
-			let mut graph = write_recovered(g);
+			let mut graph = g.write();
 			let kern = match graph.kerns.get_mut(kern_id) {
 				Some(k) => k,
 				None => return,
@@ -421,7 +420,7 @@ pub fn do_resolve(
 	}
 
 	let broadcast_data = if bq.is_some() {
-		let graph = read_recovered(g);
+		let graph = g.read();
 		graph.loaded(kern_id).and_then(|kern| {
 			kern.reasons.get(rid).map(|r| {
 				(
@@ -442,7 +441,7 @@ pub fn do_resolve(
 }
 
 pub fn do_disk_consolidate(g: &Arc<RwLock<GraphGnn>>) {
-	write_recovered(g).consolidate_disk_index();
+	g.write().consolidate_disk_index();
 }
 
 pub fn do_commit_access(g: &Arc<RwLock<GraphGnn>>, extra: &str) {
@@ -454,11 +453,11 @@ pub fn do_commit_access(g: &Arc<RwLock<GraphGnn>>, extra: &str) {
 	if ids.is_empty() {
 		return;
 	}
-	crate::retrieval::score::commit_access_ids(&mut write_recovered(g), &ids);
+	crate::retrieval::score::commit_access_ids(&mut g.write(), &ids);
 }
 
 pub fn do_persist(g: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
-	let graph = read_recovered(g);
+	let graph = g.read();
 	let store = match graph.store() {
 		Some(s) => s,
 		None => return,
@@ -492,7 +491,7 @@ pub fn do_reembed(g: &Arc<RwLock<GraphGnn>>, kern_id: &str, embed: Option<&Embed
 	let Some(embed) = embed else { return };
 
 	let dirty_ents: Vec<(String, String)> = {
-		let g = read_recovered(g);
+		let g = g.read();
 		let Some(k) = g.kerns.get(kern_id) else {
 			return;
 		};
@@ -514,7 +513,7 @@ pub fn do_reembed(g: &Arc<RwLock<GraphGnn>>, kern_id: &str, embed: Option<&Embed
 	}
 
 	let has_dirty_reasons = {
-		let g = read_recovered(g);
+		let g = g.read();
 		g.kerns
 			.get(kern_id)
 			.map(|k| k.reasons.values().any(|r| r.dirty))
@@ -526,7 +525,7 @@ pub fn do_reembed(g: &Arc<RwLock<GraphGnn>>, kern_id: &str, embed: Option<&Embed
 	}
 
 	{
-		let mut g = write_recovered(g);
+		let mut g = g.write();
 		let Some(k) = g.kerns.get_mut(kern_id) else {
 			return;
 		};

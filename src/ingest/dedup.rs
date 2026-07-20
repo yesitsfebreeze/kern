@@ -1,12 +1,9 @@
+use crate::base::accept::merge_duplicate;
 use crate::base::graph::GraphGnn;
-use crate::base::math;
-use crate::base::reason::add_reason;
 use crate::base::types::*;
-use crate::crdt::GCounter;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
-use std::time::SystemTime;
 
 pub fn find_duplicate(
 	graph: &Arc<RwLock<GraphGnn>>,
@@ -23,8 +20,6 @@ pub fn find_duplicate(
 		.map(|h| h.id)
 }
 
-// INVARIANT: never overwrite statements/vector under the existing id
-// (= content_hash(text)); differing phrasing → Rephrase edge.
 pub fn update_existing_entity(
 	graph: &Arc<RwLock<GraphGnn>>,
 	entity_id: &str,
@@ -33,52 +28,18 @@ pub fn update_existing_entity(
 	incoming_kind: EntityKind,
 	on_supersede_candidate: Option<&crate::ingest::worker::DeferContradictionFn>,
 ) {
-	let mut g = graph.write();
-	let kern_id = match g.kern_of_entity(entity_id) {
-		Some(kid) => kid.to_string(),
-		None => return,
-	};
-	let kern = match g.get_mut(&kern_id) {
-		Some(k) => k,
-		None => return,
-	};
+	let outcome = merge_duplicate(
+		&mut graph.write(),
+		entity_id,
+		new_text,
+		new_score,
+		incoming_kind,
+	);
 
-	let (differs, old_kind) = {
-		let Some(t) = kern.entities.get_mut(entity_id) else {
-			return;
-		};
-		t.observe_support(new_score);
-		t.updated_at = Some(SystemTime::now());
-		(t.text() != new_text, t.kind)
-	};
-
-	if differs {
-		let rid = math::reason_id(entity_id, "", ReasonKind::Rephrase, new_text, "");
-		let reason = Reason {
-			id: rid.clone(),
-			from: entity_id.to_string(),
-			// Rephrase is a LOCAL annotation on `from` — the three cross-kern fields
-			// are intentionally blank.
-			to: String::new(),
-			to_kern_id: String::new(),
-			to_net_id: String::new(),
-			kind: ReasonKind::Rephrase,
-			dirty: false,
-			text: new_text.to_string(),
-			vector: Vec::new(),
-			score: 0.5,
-			score_lamport: 0,
-			score_producer: String::new(),
-			traversal_count: GCounter::new(),
-			producer_id: String::new(),
-		};
-		add_reason(kern, reason);
-
-		// Only a SAME-KIND near-dup may supersede (a preference must not supersede a fact).
-		if incoming_kind == old_kind {
-			if let Some(hook) = on_supersede_candidate {
-				hook(&kern_id, &rid);
-			}
+	// Only a SAME-KIND near-dup may supersede (a preference must not supersede a fact).
+	if let Some(o) = outcome {
+		if let (Some(rid), true, Some(hook)) = (o.rephrase_id, o.same_kind, on_supersede_candidate) {
+			hook(&o.kern_id, &rid);
 		}
 	}
 }

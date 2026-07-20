@@ -67,22 +67,44 @@ pub fn remove_reason(kern: &mut Kern, id: &str) {
 	}
 }
 
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum MoveError {
+	#[error("kern not found: {0}")]
+	KernNotFound(String),
+	#[error("entity {entity} not found in kern {kern}")]
+	EntityNotFound { kern: String, entity: String },
+}
+
 // A kern hosts a reason iff it hosts its `from`: OUTGOING reasons move, incoming stay.
-pub fn move_entity(g: &mut GraphGnn, from_kern_id: &str, to_kern_id: &str, entity_id: &str) {
+//
+// Every fallible lookup resolves BEFORE the first mutation: a rejected move leaves
+// the graph byte-identical. Once validated, `&mut g` is exclusive, so the mutation
+// phase cannot observe a missing kern.
+pub fn move_entity(
+	g: &mut GraphGnn,
+	from_kern_id: &str,
+	to_kern_id: &str,
+	entity_id: &str,
+) -> Result<(), MoveError> {
+	let src = g
+		.kerns
+		.get(from_kern_id)
+		.ok_or_else(|| MoveError::KernNotFound(from_kern_id.to_string()))?;
+	if !src.entities.contains_key(entity_id) {
+		return Err(MoveError::EntityNotFound {
+			kern: from_kern_id.to_string(),
+			entity: entity_id.to_string(),
+		});
+	}
+	if !g.kerns.contains_key(to_kern_id) {
+		return Err(MoveError::KernNotFound(to_kern_id.to_string()));
+	}
 	if from_kern_id == to_kern_id {
-		return;
+		return Ok(());
 	}
 
-	let src = match g.kerns.get_mut(from_kern_id) {
-		Some(k) => k,
-		None => return,
-	};
-
-	let entity = match src.entities.remove(entity_id) {
-		Some(t) => t,
-		None => return,
-	};
-
+	let src = g.kerns.get_mut(from_kern_id).expect("validated above");
+	let entity = src.entities.remove(entity_id).expect("validated above");
 	let (outgoing_rids, incoming_rids) = reasons_touching(src, entity_id);
 
 	for rid in &incoming_rids {
@@ -104,11 +126,7 @@ pub fn move_entity(g: &mut GraphGnn, from_kern_id: &str, to_kern_id: &str, entit
 		}
 	}
 
-	let dst = match g.kerns.get_mut(to_kern_id) {
-		Some(k) => k,
-		None => return,
-	};
-
+	let dst = g.kerns.get_mut(to_kern_id).expect("validated above");
 	let moved_ids: Vec<String> = moved_reasons.iter().map(|r| r.id.clone()).collect();
 	for mut reason in moved_reasons {
 		if !reason.to.is_empty()
@@ -126,10 +144,14 @@ pub fn move_entity(g: &mut GraphGnn, from_kern_id: &str, to_kern_id: &str, entit
 	for rid in &moved_ids {
 		g.index_reason(rid, to_kern_id);
 	}
+	Ok(())
 }
 
-// Active Facts are immune; Superseded facts are not. Missing id is a silent no-op.
+// Active LOCAL Facts are immune; Superseded facts are not. Missing id is a silent no-op.
 pub fn remove_entity(g: &mut GraphGnn, kern_id: &str, id: &str) {
+	// SECURITY: fact-immunity is a LOCAL guarantee. A peer that sets kind=Fact on the
+	// wire would otherwise pin unbounded undeletable rows in a phantom kern.
+	let immune_kern = !crate::base::merge::is_remote_kern_id(kern_id);
 	let kern = match g.kerns.get_mut(kern_id) {
 		Some(k) => k,
 		None => return,
@@ -138,7 +160,7 @@ pub fn remove_entity(g: &mut GraphGnn, kern_id: &str, id: &str) {
 	if let Some(t) = kern.entities.get(id) {
 		// A SUPERSEDED fact is invalidated history, not durable knowledge — the
 		// bi-temporal GC spills it to the cold tier and drops it here.
-		if t.is_fact() && !t.is_superseded() {
+		if immune_kern && t.is_fact() && !t.is_superseded() {
 			return;
 		}
 	}
@@ -279,8 +301,7 @@ mod tests {
 		);
 	}
 
-	#[test]
-	fn move_entity_relocates_outgoing_and_stamps_cross_kern_targets() {
+	fn move_fixture() -> GraphGnn {
 		let mut g = GraphGnn::new();
 		let mut src = Kern::new("src", "");
 		src.entities.insert("E".into(), ent("E", vec![]));
@@ -289,9 +310,15 @@ mod tests {
 		add_reason(&mut src, edge("E", "E"));
 		add_reason(&mut src, edge("Y", "E"));
 		g.kerns.insert("src".into(), src);
+		g
+	}
+
+	#[test]
+	fn move_entity_relocates_outgoing_and_stamps_cross_kern_targets() {
+		let mut g = move_fixture();
 		g.kerns.insert("dst".into(), Kern::new("dst", ""));
 
-		move_entity(&mut g, "src", "dst", "E");
+		assert_eq!(move_entity(&mut g, "src", "dst", "E"), Ok(()));
 
 		let dst = g.kerns.get("dst").unwrap();
 		let src = g.kerns.get("src").unwrap();
@@ -300,7 +327,8 @@ mod tests {
 
 		assert_eq!(
 			dst.reasons.get("E->X").map(|r| r.to_kern_id.as_str()),
-			Some("src")
+			Some("src"),
+			"outgoing edge to an entity left behind is stamped back to src"
 		);
 		assert!(
 			!src.reasons.contains_key("E->X"),
@@ -312,30 +340,87 @@ mod tests {
 		);
 		assert_eq!(
 			dst.reasons.get("E->E").map(|r| r.to_kern_id.as_str()),
-			Some("")
+			Some(""),
+			"self-loop travels with the entity, unstamped"
 		);
 
 		assert_eq!(
 			src.reasons.get("Y->E").map(|r| r.to_kern_id.as_str()),
-			Some("dst")
+			Some("dst"),
+			"incoming edge stays in src, restamped at dst"
 		);
 		assert!(
 			!dst.reasons.contains_key("Y->E"),
 			"incoming reason not moved"
 		);
+
+		assert_eq!(g.kern_of_entity("E"), Some("dst"), "entity index follows");
+	}
+
+	// Regression: the destination check once ran AFTER the entity and its outgoing
+	// reasons had already been ripped out of src, so a bad `to_kern_id` deleted them.
+	#[test]
+	fn move_entity_to_missing_destination_leaves_source_untouched() {
+		let mut g = move_fixture();
+		let before = g.kerns.get("src").unwrap().clone();
+
+		assert_eq!(
+			move_entity(&mut g, "src", "ghost_kern", "E"),
+			Err(MoveError::KernNotFound("ghost_kern".into()))
+		);
+
+		let src = g.kerns.get("src").unwrap();
+		assert!(src.entities.contains_key("E"), "entity NOT lost");
+		assert_eq!(src.entities.len(), before.entities.len());
+		assert_eq!(
+			src.reasons.len(),
+			before.reasons.len(),
+			"no reason removed on a rejected move"
+		);
+		for (id, r) in &before.reasons {
+			let now = src.reasons.get(id).expect("reason survived");
+			assert_eq!(
+				(now.to_kern_id.as_str(), now.to_net_id.as_str()),
+				(r.to_kern_id.as_str(), r.to_net_id.as_str()),
+				"{id} not restamped by a rejected move"
+			);
+		}
+		assert_eq!(src.by_from, before.by_from, "by_from adjacency untouched");
+		assert_eq!(src.by_to, before.by_to, "by_to adjacency untouched");
 	}
 
 	#[test]
-	fn move_entity_same_kern_or_missing_entity_is_noop() {
-		let mut g = GraphGnn::new();
-		let mut k = Kern::new("k", "");
-		k.entities.insert("E".into(), ent("E", vec![]));
-		g.kerns.insert("k".into(), k);
+	fn move_entity_rejects_missing_source_kern_and_missing_entity() {
+		let mut g = move_fixture();
+		g.kerns.insert("dst".into(), Kern::new("dst", ""));
 
-		move_entity(&mut g, "k", "k", "E");
-		assert!(g.kerns.get("k").unwrap().entities.contains_key("E"));
-		move_entity(&mut g, "k", "dst", "ghost");
-		assert!(g.kerns.get("k").unwrap().entities.contains_key("E"));
+		assert_eq!(
+			move_entity(&mut g, "ghost", "dst", "E"),
+			Err(MoveError::KernNotFound("ghost".into()))
+		);
+		assert_eq!(
+			move_entity(&mut g, "src", "dst", "ghost_entity"),
+			Err(MoveError::EntityNotFound {
+				kern: "src".into(),
+				entity: "ghost_entity".into(),
+			})
+		);
+		assert!(g.kerns.get("dst").unwrap().entities.is_empty());
+		assert!(g.kerns.get("src").unwrap().entities.contains_key("E"));
+	}
+
+	#[test]
+	fn move_entity_same_kern_is_a_validated_noop() {
+		let mut g = move_fixture();
+		let before = g.kerns.get("src").unwrap().clone();
+
+		assert_eq!(move_entity(&mut g, "src", "src", "E"), Ok(()));
+
+		let src = g.kerns.get("src").unwrap();
+		assert_eq!(src.entities.len(), before.entities.len());
+		assert_eq!(src.reasons.len(), before.reasons.len());
+		assert_eq!(src.by_from, before.by_from, "self-move changes nothing");
+		assert_eq!(src.by_to, before.by_to, "self-move changes nothing");
 	}
 
 	#[test]
@@ -393,6 +478,41 @@ mod tests {
 		assert!(
 			g.kerns.get("k").unwrap().entities.contains_key("f"),
 			"facts are immune to removal"
+		);
+	}
+
+	// A peer picks `kind` off the wire. If a remote Fact kept local fact-immunity it
+	// would be an unbounded, undeletable pin in the local graph.
+	#[test]
+	fn remove_entity_drops_a_remote_fact_but_spares_the_local_one() {
+		let mut g = GraphGnn::new();
+		for kid in ["k", "remote-evilnet-k1"] {
+			let mut k = Kern::new(kid, "");
+			k.entities.insert(
+				"f".into(),
+				Entity {
+					id: "f".into(),
+					kind: EntityKind::Fact,
+					..Default::default()
+				},
+			);
+			g.kerns.insert(kid.into(), k);
+		}
+
+		remove_entity(&mut g, "remote-evilnet-k1", "f");
+		assert!(
+			!g.kerns
+				.get("remote-evilnet-k1")
+				.unwrap()
+				.entities
+				.contains_key("f"),
+			"a remote Fact is not durable local knowledge — it must be removable"
+		);
+
+		remove_entity(&mut g, "k", "f");
+		assert!(
+			g.kerns.get("k").unwrap().entities.contains_key("f"),
+			"the LOCAL fact keeps its immunity unchanged"
 		);
 	}
 }

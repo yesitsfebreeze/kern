@@ -2,114 +2,13 @@ use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::TcpStream;
-use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::mpsc;
-
-use super::error::AdapterError;
 
 pub type DynRead = Box<dyn AsyncRead + Unpin + Send>;
 pub type DynWrite = Box<dyn AsyncWrite + Unpin + Send>;
 
 pub trait Adapter: Send + 'static {
 	fn split(self: Box<Self>) -> (DynRead, DynWrite);
-}
-
-pub struct TcpAdapter {
-	stream: TcpStream,
-}
-
-impl TcpAdapter {
-	pub fn new(stream: TcpStream) -> Self {
-		Self { stream }
-	}
-
-	pub async fn connect(addr: &str) -> Result<Self, AdapterError> {
-		let stream = TcpStream::connect(addr).await?;
-		Ok(Self { stream })
-	}
-
-	pub async fn bind(addr: &str) -> Result<tokio::net::TcpListener, AdapterError> {
-		Ok(tokio::net::TcpListener::bind(addr).await?)
-	}
-
-	pub async fn accept(listener: &tokio::net::TcpListener) -> Result<Self, AdapterError> {
-		let (stream, _) = listener.accept().await?;
-		Ok(Self { stream })
-	}
-}
-
-impl Adapter for TcpAdapter {
-	fn split(self: Box<Self>) -> (DynRead, DynWrite) {
-		let (r, w) = self.stream.into_split();
-		(Box::new(r), Box::new(w))
-	}
-}
-
-// On split the Child moves into the writer; its Drop calls start_kill — tokio
-// detaches Child on drop, so without this the writer would orphan the subprocess.
-pub struct AsyncStdioAdapter {
-	stdin: ChildStdin,
-	stdout: ChildStdout,
-	child: Child,
-}
-
-impl AsyncStdioAdapter {
-	pub fn new(mut child: Child) -> Result<Self, AdapterError> {
-		let stdin = child
-			.stdin
-			.take()
-			.ok_or_else(|| AdapterError::Other("child stdin missing".into()))?;
-		let stdout = child
-			.stdout
-			.take()
-			.ok_or_else(|| AdapterError::Other("child stdout missing".into()))?;
-		Ok(Self {
-			stdin,
-			stdout,
-			child,
-		})
-	}
-}
-
-impl Adapter for AsyncStdioAdapter {
-	fn split(self: Box<Self>) -> (DynRead, DynWrite) {
-		struct WriterWithChild {
-			inner: ChildStdin,
-			child: Child,
-		}
-		impl Drop for WriterWithChild {
-			fn drop(&mut self) {
-				let _ = self.child.start_kill();
-			}
-		}
-		impl AsyncWrite for WriterWithChild {
-			fn poll_write(
-				mut self: Pin<&mut Self>,
-				cx: &mut TaskContext<'_>,
-				buf: &[u8],
-			) -> Poll<std::io::Result<usize>> {
-				Pin::new(&mut self.inner).poll_write(cx, buf)
-			}
-			fn poll_flush(
-				mut self: Pin<&mut Self>,
-				cx: &mut TaskContext<'_>,
-			) -> Poll<std::io::Result<()>> {
-				Pin::new(&mut self.inner).poll_flush(cx)
-			}
-			fn poll_shutdown(
-				mut self: Pin<&mut Self>,
-				cx: &mut TaskContext<'_>,
-			) -> Poll<std::io::Result<()>> {
-				Pin::new(&mut self.inner).poll_shutdown(cx)
-			}
-		}
-		let writer = WriterWithChild {
-			inner: self.stdin,
-			child: self.child,
-		};
-		(Box::new(self.stdout), Box::new(writer))
-	}
 }
 
 pub struct InprocAdapter {
@@ -232,29 +131,5 @@ mod tests {
 			got.extend_from_slice(&chunk[..n]);
 		}
 		assert_eq!(&got, b"hello", "leftover bytes are drained across reads");
-	}
-
-	#[tokio::test]
-	async fn tcp_bind_accept_connect_round_trips() {
-		let listener = TcpAdapter::bind("127.0.0.1:0").await.unwrap();
-		let addr = listener.local_addr().unwrap().to_string();
-
-		let server = tokio::spawn(async move {
-			let a = TcpAdapter::accept(&listener).await.unwrap();
-			let (mut r, _w) = Box::new(a).split();
-			let mut buf = [0u8; 5];
-			r.read_exact(&mut buf).await.unwrap();
-			buf
-		});
-
-		let client = TcpAdapter::connect(&addr).await.unwrap();
-		let (_r, mut w) = Box::new(client).split();
-		w.write_all(b"hello").await.unwrap();
-
-		assert_eq!(
-			&server.await.unwrap(),
-			b"hello",
-			"bind/accept pairs with connect"
-		);
 	}
 }

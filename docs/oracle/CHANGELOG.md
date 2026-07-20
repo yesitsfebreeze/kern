@@ -1,7 +1,98 @@
-
-
-
 # Changelog
+
+- 2026-07-20 — The digest is deleted. `.kern/digest.md`, `build_digest`, the 30s
+  rebuild loop, and all five `[intake]` digest knobs are gone; recall is now
+  `query` only. It dumped a `heat * conf_mean` ranked slice of the graph into a
+  file that sessions read wholesale as this node's own knowledge — with no
+  provenance a reader could weigh, ranked by popularity rather than by relevance
+  to the session at hand, duplicating what `query` already does with provenance
+  intact. The one thing it did that `query` cannot — answer before the agent
+  knows what to ask — did not justify injecting unvetted claims into every
+  session. `ROADMAP.md` had already recorded the doubt ("still written every 30s
+  and nothing reads it") without acting on it.
+  What this costs, named: the architecture's "the recall hook never opens the
+  store" property is gone. A session-start hook could previously get context with
+  zero dependencies — no daemon, no embeddings, no MCP. Recall now requires a
+  live `query`. Accepted: a dependency-free path that injects unattributable
+  claims is worse than a dependency that returns attributable ones.
+  Consequence worth stating plainly: the `remote-*` exclusion added earlier today
+  disappears with the module. That is correct rather than a regression — it
+  guarded provenance-free wholesale injection, and the surface no longer exists.
+  Federated claims stay reachable through `query`, where they are marked
+  untrusted. Config compatibility is pinned by test, not asserted: `Config` and
+  `IntakeConfig` are `#[serde(default)]` with no `deny_unknown_fields`, so a
+  stale `[intake]` block carrying the five dead keys parses and its live keys
+  still apply.
+  Decided by: delete-superseded, name-the-tradeoff, avoided-question-first (the
+  roadmap had flagged this and left it standing).
+
+- 2026-07-20 — Peer text is marked untrusted where the LLM reads it, and cannot
+  be the majority of the evidence. The synthesis prompt fed retrieved passages to
+  the answer model with no trust marking at all — the largest remaining injection
+  surface after the reranker was bounded. Facts and chain nodes now carry the
+  same `UNTRUSTED` tag `rerank` established (tagging only facts would have left
+  "get your text into a chain instead" as a trivial bypass), the preamble is
+  emitted only when peer text is actually present so an all-local prompt stays
+  byte-identical, and `admit_facts` caps remote passages at the local count.
+  The zero-locals case is exempt, mirroring the stance `apply_remote_trust`
+  already takes: remote stays reachable when it is the only match. Full
+  exclusion-when-locals-suffice was rejected — one weak local hit would suppress
+  genuinely better federated knowledge for a marginal security gain.
+  `remote_ids` was computed only when `cfg.rerank_enabled`; that gate is deleted
+  rather than widened, because a trust signal conditional on an unrelated feature
+  flag is itself the defect. Cost measured, not assumed: the always-on scan sits
+  inside the noise band of the gated runs, path stays sub-ms.
+  Found while there and fixed: `build_digest` iterated remote kerns, so peer text
+  landed in `.kern/digest.md` and was injected into new sessions **as this node's
+  own memory**, unmarked — strictly worse than the surface being fixed, and the
+  digest has nowhere to put a trust tag, so remote kerns are excluded there
+  outright.
+  Named for the next reader, because this must not read as solved: the tagging is
+  a SOFT defense. A single remote passage still carries an injection; the cap
+  bounds volume, not effect. There is no structural analogue to the reranker's
+  tier sort, because synthesis emits free-form prose rather than an ordering.
+  The attribution instruction is unenforced. Chain text is bounded by
+  `ANSWER_MAX_CHAINS`, not by the fact cap. All of it is downstream mitigation of
+  the root cause: federation is unauthenticated.
+  Decided by: name-the-tradeoff, fix-the-root (the gate deleted, not widened),
+  verify-before-claiming (cost measured; no recall claim made — see below).
+
+- 2026-07-20 — No retrieval-quality claim accompanies the above. The LoCoMo eval
+  and retrieval bench were deleted in `8d8b19e`, so `just bench-workload`, the
+  recall@10 1.0000 / NDCG@10 0.9993 baselines, and the recorded LoCoMo baseline
+  are unmeasurable in this tree. The claim standard requires a run, and there is
+  no harness to run; the retrieval-facing risk is instead bounded by
+  construction — no scoring, ordering or delivery logic changed, and the
+  all-local prompt is asserted byte-identical.
+  Decided by: verify-before-claiming (absence of a measurement is recorded, not
+  papered over).
+
+- 2026-07-20 — A duplicate detected at accept time is merged, not dropped. The
+  threshold unification earlier today narrowed this loss window without closing
+  it: `commit_entity` still returned `deduped: true` having stored nothing AND
+  merged nothing — no `observe_support`, no `Rephrase` edge — so the
+  corroboration signal was discarded and the alternate phrasing lost. It still
+  bit after unification because the two checks run different queries:
+  `find_duplicate` searches `entity_idx` alone while `is_duplicate` also searches
+  `gnn_entity_idx` and blends `0.4*content + 0.6*gnn`, so they can disagree.
+  The merge body is extracted as `merge_duplicate` in `base/accept.rs` with
+  `update_existing_entity` reduced to a wrapper — direct reuse was impossible
+  because that function takes `&Arc<RwLock<GraphGnn>>` and acquires its own write
+  lock while `commit_entity` already holds `&mut GraphGnn`, so calling it would
+  have deadlocked. There is now exactly one copy of merge semantics, proven by
+  reverting: breaking the invariant inside `merge_duplicate` fails the
+  ingest-path tests too. Two defects found while there: `AcceptResult.entity_id`
+  returned the *incoming* id on the dedup path — an entity that was never stored,
+  so any caller resolving it got a miss — and it now names the survivor; and the
+  supersede hook was being invoked while holding the write lock, now moved out.
+  Content-addressing is preserved: the merge touches only `conf_alpha` and
+  `updated_at`, never `statements`/`chunks`/`vector`, pinned by a test asserting
+  the survivor is bit-identical after a merge with different wording. Verified
+  unreachable with remote content — every `accept` caller is local ingest, so the
+  new `observe_support` is not a confidence-injection path.
+  Decided by: fix-the-root (one shared merge, not a third copy),
+  delete-superseded, fix-bugs-on-sight (the lying `entity_id`, the hook under
+  the lock).
 
 - 2026-07-20 — The whole eval and bench surface is deleted: `bench_support/`
   (14 modules, ~4k LoC), the `locomo_eval` and `retrieval_bench` binaries,
@@ -96,6 +187,41 @@
   into `tools::typed_tool_schemas()`. Checked and clean: retry logic is
   properly layered (`llm::is_transient` single source, embed consumes it),
   lexical poison-lock idiom appears in one file only.
+  Round 3: the endpoint-override flag quad (`--embed-url/--embed-model/
+  --reason-url/--reason-model`), hand-repeated across six subcommand variants
+  (Ingest, Query, Search, Reembed, Link, Graviton Add) with per-arm `resolve`
+  calls, collapsed into two flattened clap structs — `EmbedArgs` and `LlmArgs`
+  (embed + reason) — each owning its config-fallback `resolve()`; CLI surface
+  verified byte-identical via `--help`. Graviton's inline
+  `as_deref().unwrap_or` fallback now routes through the same helper. Also
+  removed orphaned `.splinter/src/{config-io,log,test-utils}` index dirs whose
+  source crates were deleted, and repaired stale `synthesize`/
+  `answer_prompt_from` test call sites left behind by the remote-trust
+  signature change (missing `remote: &HashSet` arg — lib tests were not
+  compiling).
+  Round 4: `Client::new_embed_only` gained an `embed_key` param and became the
+  single way to build an embed-only client — the three prod sites (reembed,
+  query, graviton add) that hand-rolled
+  `Client::new(Endpoint::default(), Endpoint::default(), …)` now call it, and
+  the 20 test callers pass `""`. The two hand-rolled
+  `block_in_place(|| Handle::current().block_on(…))` blocks in the MCP proxy
+  now route through `llm::block_on_in_place` — one place owns the
+  runtime-or-None contract (proxy maps None to an RPC error instead of the old
+  panic-on-no-runtime).
+  Round 5: the three copy-pasted MCP test-server builders (resources,
+  tools_admin, tools_mutate — full 10-field `Server` literals each) collapsed
+  into `test_support::mcp_server()`; tools_admin overrides `save_fn` on the
+  shared builder for its save-counter. The duplicated `text()` JSON extractor
+  became `test_support::tool_text`, aliased locally. Net ~90 lines of test
+  scaffolding gone; any future `Server` field lands in one place.
+  Round 6: added `GraphGnn::root_kern_mut()` (documented as no-load/no-epoch,
+  unlike `get_mut`) and collapsed digest.rs's ten
+  clone-root-id-then-`kerns.get_mut` couplets onto it. Audited the other 16
+  root-id sites and left them: each needs the id VALUE next to `&mut g`
+  (pulse calls, `Kern::new(parent)`) — the two-step is the borrow split, not
+  duplication. `strip_think` and LLM-output parsing verified already
+  single-sourced. Consolidation yield is flattening; remaining repetition is
+  load-bearing.
 
 - 2026-07-20 — Remote entities cast no PageRank votes, buy no kind privileges,
   and cannot be reranked above local content. Three paths the trust weight left

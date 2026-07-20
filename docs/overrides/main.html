@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% macro nav_json(items) %}
+  [
+  {%- for item in items -%}
+    {%- if item.children -%}
+      {"title": {{ item.title|tojson }}, "children": {{ nav_json(item.children) }}}
+    {%- else -%}
+      {"title": {{ item.title|tojson }}, "url": {{ (item.url|url)|tojson }}}
+    {%- endif -%}
+    {{- "," if not loop.last -}}
+  {%- endfor -%}
+  ]
+{% endmacro %}
+
+{% block extrahead %}
+  {% set title = page.title ~ " — " ~ config.site_name if page and page.title and not page.is_homepage else config.site_name %}
+  {% set desc = page.meta.description if page and page.meta and page.meta.description else config.site_description %}
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="{{ config.site_name }}">
+  <meta property="og:title" content="{{ title }}">
+  <meta property="og:description" content="{{ desc }}">
+  <meta property="og:url" content="{{ page.canonical_url if page else config.site_url }}">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="{{ title }}">
+  <meta name="twitter:description" content="{{ desc }}">
+{% endblock %}
+
+{% block top_nav %}
+<div class="tui" data-current="{{ page.url|url if page else '' }}">
+  <div class="tui-body">
+    <div class="tui-line"><span class="tui-ps1">$</span> kern docs</div>
+
+    <nav class="tui-menu" id="tui-menu" aria-label="Documentation">
+      <noscript><p class="tui-hint">Keyboard navigation needs JavaScript. The links below work regardless.</p></noscript>
+    </nav>
+
+    <form class="tui-prompt" id="tui-prompt" autocomplete="off">
+      <label class="tui-ps1" for="tui-input">$</label>
+      <input id="tui-input" name="c" type="text" spellcheck="false" aria-label="Command">
+    </form>
+
+    <div class="tui-out" id="tui-out" aria-live="polite"></div>
+  </div>
+</div>
+
+<script id="tui-nav-data" type="application/json">{{ nav_json(nav) }}</script>
+{% endblock %}
+
+{% block side_panel %}{% endblock %}
+
+{% block footer %}
+<div class="tui-status">
+  <span>[<b>↑↓</b> select]</span>
+  <span>[<b>↵</b> open]</span>
+  <span>[<b>/</b> filter]</span>
+  <span>[<b>help</b> commands]</span>
+</div>
+{% endblock %}

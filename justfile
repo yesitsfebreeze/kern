@@ -49,14 +49,14 @@ uninstall:
 clean:
     cargo clean
     rm -rf .relay .mesh .git-fs .machine
-    rm -rf .kern/bin .kern/intake .kern/data .kern/digest.md .kern/*.log
+    rm -rf .kern/bin .kern/intake .kern/data .kern/*.log
     rm -rf site traces
 
 [windows]
 clean:
     cargo clean
     -Remove-Item -Recurse -Force .relay, .mesh, .git-fs, .machine
-    -Remove-Item -Recurse -Force ".kern\bin", ".kern\intake", ".kern\data", ".kern\digest.md"
+    -Remove-Item -Recurse -Force ".kern\bin", ".kern\intake", ".kern\data"
     -Remove-Item -Force ".kern\*.log"
     -Remove-Item -Recurse -Force "site", "traces"
 

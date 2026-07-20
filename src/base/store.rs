@@ -563,7 +563,7 @@ fn compact_tmp(dir: &Path) -> std::path::PathBuf {
 }
 
 // Caller MUST drop every env handle first; retries ride out Windows' async unmap lag.
-pub fn swap_compacted(dir: &str) -> Result<(u64, u64), StoreError> {
+fn swap_compacted(dir: &str) -> Result<(u64, u64), StoreError> {
 	let path = Path::new(dir);
 	let data = path.join("data.mdb");
 	let tmp = compact_tmp(path);
@@ -593,6 +593,14 @@ pub fn swap_compacted(dir: &str) -> Result<(u64, u64), StoreError> {
 // run offline, daemon stopped.
 pub fn compact_dir(dir: &str) -> Result<(u64, u64), StoreError> {
 	let path = Path::new(dir);
+	// A full env copy costs more than the space it could reclaim below this size.
+	let old_len = std::fs::metadata(path.join("data.mdb"))
+		.map(|m| m.len())
+		.unwrap_or(0);
+	if old_len < crate::base::constants::COLD_COMPACT_MIN_BYTES {
+		return Ok((old_len, old_len));
+	}
+
 	let tmp = compact_tmp(path);
 	let _ = std::fs::remove_file(&tmp);
 
@@ -984,6 +992,36 @@ mod tests {
 		let (loaded, _, _) = s.load_all_kerns().unwrap();
 		assert!(loaded.contains_key("a"));
 		assert!(!loaded.contains_key("b"), "removed kern pruned from disk");
+	}
+
+	#[test]
+	fn compact_dir_skips_a_store_below_the_min_size() {
+		let d = tmp();
+		let dir = dir_of(&d);
+		{
+			let s = Store::open(&dir).unwrap();
+			let mut kerns = HashMap::new();
+			kerns.insert("root".to_string(), Kern::new("root", ""));
+			s.save_all_kerns(&kerns, "n", QuantizationMode::Int8)
+				.unwrap();
+			assert!(
+				s.data_file_len() < crate::base::constants::COLD_COMPACT_MIN_BYTES,
+				"tiny store"
+			);
+		}
+
+		let (old_len, new_len) = compact_dir(&dir).unwrap();
+		assert_eq!(
+			old_len, new_len,
+			"under the threshold compaction is a no-op"
+		);
+		assert!(
+			!compact_tmp(Path::new(&dir)).exists(),
+			"no env copy was made"
+		);
+
+		let s2 = Store::open(&dir).unwrap();
+		assert!(s2.load_all_kerns().unwrap().0.contains_key("root"));
 	}
 
 	#[test]

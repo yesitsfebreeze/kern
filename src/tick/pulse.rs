@@ -2,8 +2,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::base::constants::{
-	DISK_CONSOLIDATE_INTERVAL, DISK_CONSOLIDATE_MIN_DELTA, PULSE_DECAY, PULSE_THRESHOLD,
-	STIGMERGY_GC_INTERVAL,
+	DISK_CONSOLIDATE_INTERVAL, DISK_CONSOLIDATE_MIN_DELTA, KERN_IDLE_SWEEP_EVERY, PULSE_DECAY,
+	PULSE_THRESHOLD, STIGMERGY_GC_INTERVAL,
 };
 use crate::base::graph::GraphGnn;
 use crate::base::heat::{self, HeatConfig};
@@ -14,18 +14,50 @@ use super::queue::{task, Queue, TaskKind};
 static LAST_GC_AT_SECS: AtomicU64 = AtomicU64::new(0);
 
 pub fn pulse(q: &Queue, g: &mut GraphGnn, kern_id: &str, strength: f64) {
-	pulse_with_half_life(
-		q,
-		g,
-		kern_id,
-		strength,
-		HeatConfig::default().half_life_secs,
-	);
+	pulse_with_heat(q, g, kern_id, strength, &HeatConfig::default());
+}
+
+pub fn pulse_with_heat(
+	q: &Queue,
+	g: &mut GraphGnn,
+	kern_id: &str,
+	strength: f64,
+	heat_cfg: &HeatConfig,
+) {
+	deposit_pulse(q, g, kern_id, strength, heat_cfg);
 	if strength >= PULSE_THRESHOLD {
 		maybe_enqueue_stigmergy_gc(q, g);
 		maybe_enqueue_reembed(q, g);
 		maybe_enqueue_disk_consolidate(q, g);
+		maybe_enqueue_idle_sweep(q);
 	}
+}
+
+// Unix-seconds of the last idle sweep; single-flighted by compare_exchange.
+static LAST_IDLE_SWEEP_AT_SECS: AtomicU64 = AtomicU64::new(0);
+
+fn maybe_enqueue_idle_sweep(q: &Queue) {
+	if !claim_slot(&LAST_IDLE_SWEEP_AT_SECS, now_secs(), KERN_IDLE_SWEEP_EVERY) {
+		return;
+	}
+	// Graph-global task: a fixed empty key means at most one is ever pending.
+	q.enqueue(task(TaskKind::IdleSweep, ""));
+}
+
+fn now_secs() -> u64 {
+	SystemTime::now()
+		.duration_since(UNIX_EPOCH)
+		.map(|d| d.as_secs())
+		.unwrap_or(0)
+}
+
+// Wins the cadence slot for exactly one caller; a fan-out cannot double-fire.
+fn claim_slot(cell: &AtomicU64, now_secs: u64, interval: Duration) -> bool {
+	let last = cell.load(Ordering::Relaxed);
+	should_run_gc(now_secs, last, interval)
+		&& cell
+			.compare_exchange(last, now_secs, Ordering::AcqRel, Ordering::Relaxed)
+			.is_ok()
 }
 
 pub fn should_run_gc(now_secs: u64, last_secs: u64, interval: Duration) -> bool {
@@ -36,18 +68,7 @@ pub fn should_run_gc(now_secs: u64, last_secs: u64, interval: Duration) -> bool 
 }
 
 fn maybe_enqueue_stigmergy_gc(q: &Queue, g: &GraphGnn) {
-	let now_secs = SystemTime::now()
-		.duration_since(UNIX_EPOCH)
-		.map(|d| d.as_secs())
-		.unwrap_or(0);
-	let last = LAST_GC_AT_SECS.load(Ordering::Relaxed);
-	if !should_run_gc(now_secs, last, STIGMERGY_GC_INTERVAL) {
-		return;
-	}
-	if LAST_GC_AT_SECS
-		.compare_exchange(last, now_secs, Ordering::AcqRel, Ordering::Relaxed)
-		.is_err()
-	{
+	if !claim_slot(&LAST_GC_AT_SECS, now_secs(), STIGMERGY_GC_INTERVAL) {
 		return;
 	}
 	for kern_id in g.kerns.keys() {
@@ -58,39 +79,16 @@ fn maybe_enqueue_stigmergy_gc(q: &Queue, g: &GraphGnn) {
 // Unix-seconds of the last disk-consolidate fan-out; single-flighted by compare_exchange.
 static LAST_CONSOLIDATE_AT_SECS: AtomicU64 = AtomicU64::new(0);
 
-pub fn should_consolidate(
-	now_secs: u64,
-	last_secs: u64,
-	interval: Duration,
-	delta_len: usize,
-	min_delta: usize,
-) -> bool {
-	delta_len >= min_delta && should_run_gc(now_secs, last_secs, interval)
-}
-
 fn maybe_enqueue_disk_consolidate(q: &Queue, g: &GraphGnn) {
 	let delta = g.pending_disk_delta_len();
 	if delta < DISK_CONSOLIDATE_MIN_DELTA {
 		return;
 	}
-	let now_secs = SystemTime::now()
-		.duration_since(UNIX_EPOCH)
-		.map(|d| d.as_secs())
-		.unwrap_or(0);
-	let last = LAST_CONSOLIDATE_AT_SECS.load(Ordering::Relaxed);
-	if !should_consolidate(
-		now_secs,
-		last,
+	if !claim_slot(
+		&LAST_CONSOLIDATE_AT_SECS,
+		now_secs(),
 		DISK_CONSOLIDATE_INTERVAL,
-		delta,
-		DISK_CONSOLIDATE_MIN_DELTA,
 	) {
-		return;
-	}
-	if LAST_CONSOLIDATE_AT_SECS
-		.compare_exchange(last, now_secs, Ordering::AcqRel, Ordering::Relaxed)
-		.is_err()
-	{
 		return;
 	}
 	// Graph-global task: a fixed empty key means at most one is ever pending.
@@ -106,13 +104,7 @@ fn maybe_enqueue_reembed(q: &Queue, g: &GraphGnn) {
 	}
 }
 
-pub fn pulse_with_half_life(
-	q: &Queue,
-	g: &mut GraphGnn,
-	kern_id: &str,
-	strength: f64,
-	half_life_secs: u64,
-) {
+fn deposit_pulse(q: &Queue, g: &mut GraphGnn, kern_id: &str, strength: f64, heat_cfg: &HeatConfig) {
 	if strength < PULSE_THRESHOLD {
 		return;
 	}
@@ -131,13 +123,19 @@ pub fn pulse_with_half_life(
 		q.enqueue(task(TaskKind::Cluster, kern_id));
 	}
 
-	let deposit = (HeatConfig::default().deposit_traversal as f64 * strength) as f32;
+	let deposit = (heat_cfg.deposit_traversal as f64 * strength) as f32;
 	if deposit > 0.0 {
 		let now = SystemTime::now();
 		if let Some(k) = g.kerns.get_mut(kern_id) {
 			for tid in &entity_ids {
 				if let Some(t) = k.entities.get_mut(tid) {
-					t.heat = heat::deposit(t.heat, t.heat_updated_at, now, half_life_secs, deposit);
+					t.heat = heat::deposit(
+						t.heat,
+						t.heat_updated_at,
+						now,
+						heat_cfg.half_life_secs,
+						deposit,
+					);
 					t.heat_updated_at = Some(now);
 				}
 			}
@@ -146,7 +144,7 @@ pub fn pulse_with_half_life(
 
 	let reduced = strength * PULSE_DECAY;
 	for child_id in &children {
-		pulse_with_half_life(q, g, child_id, reduced, half_life_secs);
+		deposit_pulse(q, g, child_id, reduced, heat_cfg);
 	}
 }
 
@@ -154,6 +152,7 @@ pub fn pulse_with_half_life(
 mod tests {
 	use super::*;
 	use crate::base::types::{mk_entity, EntityKind, Kern};
+	use std::sync::Arc;
 
 	fn cluster_kerns_after_pulse(strength: f64) -> Vec<String> {
 		let mut g = GraphGnn::new();
@@ -168,7 +167,16 @@ mod tests {
 		g.kerns.insert("c".into(), c);
 
 		let q = Queue::new(64);
-		pulse_with_half_life(&q, &mut g, "p", strength, 3600);
+		deposit_pulse(
+			&q,
+			&mut g,
+			"p",
+			strength,
+			&HeatConfig {
+				half_life_secs: 3600,
+				..HeatConfig::default()
+			},
+		);
 
 		let mut rx = q.take_receiver().unwrap();
 		let mut kerns = Vec::new();
@@ -203,27 +211,6 @@ mod tests {
 	}
 
 	#[test]
-	fn should_consolidate_gates_on_both_delta_size_and_interval() {
-		let iv = Duration::from_secs(100);
-		assert!(
-			!should_consolidate(200, 50, iv, 9, 10),
-			"delta < min_delta -> no"
-		);
-		assert!(
-			!should_consolidate(100, 50, iv, 100, 10),
-			"interval not elapsed -> no"
-		);
-		assert!(
-			should_consolidate(150, 50, iv, 10, 10),
-			"delta>=min and interval elapsed -> yes"
-		);
-		assert!(
-			!should_consolidate(0, 0, iv, 1000, 10),
-			"unreadable clock never consolidates"
-		);
-	}
-
-	#[test]
 	fn pulse_decays_below_threshold_before_reaching_the_child() {
 		let kerns = cluster_kerns_after_pulse(PULSE_THRESHOLD);
 		assert!(kerns.contains(&"p".to_string()), "parent clusters");
@@ -239,6 +226,70 @@ mod tests {
 		assert!(
 			kerns.contains(&"c".to_string()),
 			"child clusters when decay keeps it above threshold"
+		);
+	}
+
+	#[test]
+	fn pulse_deposits_using_the_configured_heat_settings_not_the_defaults() {
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("k", "");
+		let mut e = mk_entity("e", "x", 0.0, EntityKind::Claim);
+		e.heat = 8.0;
+		e.heat_updated_at = Some(SystemTime::now() - Duration::from_secs(100));
+		k.entities.insert("e".into(), e);
+		g.kerns.insert("k".into(), k);
+
+		let q = Queue::new(64);
+		let cfg = HeatConfig {
+			half_life_secs: 100,
+			deposit_access: 1.0,
+			deposit_traversal: 1.0,
+		};
+		pulse_with_heat(&q, &mut g, "k", 1.0, &cfg);
+
+		let heat = g.kerns.get("k").unwrap().entities.get("e").unwrap().heat;
+		assert!(
+			(heat - 5.0).abs() < 0.05,
+			"8 halved over the configured 100s half-life plus the configured 1.0 \
+			 traversal deposit = ~5; the one-week default would give ~9, got {heat}"
+		);
+	}
+
+	#[test]
+	fn claim_slot_lets_exactly_one_caller_through_per_cadence() {
+		let cell = AtomicU64::new(0);
+		let iv = Duration::from_secs(60);
+
+		assert!(claim_slot(&cell, 1_000, iv), "first call wins the slot");
+		assert!(!claim_slot(&cell, 1_000, iv), "same second is gated");
+		assert!(!claim_slot(&cell, 1_059, iv), "59s < 60s cadence is gated");
+		assert!(claim_slot(&cell, 1_060, iv), "the next cadence wins again");
+		assert!(!claim_slot(&cell, 0, iv), "unreadable clock never claims");
+	}
+
+	#[test]
+	fn concurrent_claims_on_one_cadence_produce_exactly_one_winner() {
+		use std::sync::atomic::AtomicUsize;
+
+		static CELL: AtomicU64 = AtomicU64::new(0);
+		let winners = Arc::new(AtomicUsize::new(0));
+		let iv = Duration::from_secs(60);
+
+		std::thread::scope(|s| {
+			for _ in 0..16 {
+				let winners = Arc::clone(&winners);
+				s.spawn(move || {
+					if claim_slot(&CELL, 5_000, iv) {
+						winners.fetch_add(1, Ordering::Relaxed);
+					}
+				});
+			}
+		});
+
+		assert_eq!(
+			winners.load(Ordering::Relaxed),
+			1,
+			"a 16-way fan-out must not double-fire the sweep"
 		);
 	}
 

@@ -1,0 +1,77 @@
+/* Departure Mono (MIT, Helena Zhang & Tobias Fried) — vendored, see fonts/. */
+@font-face {
+	font-family: "Departure Mono";
+	src:
+		url("fonts/DepartureMono-Regular.woff2") format("woff2"),
+		url("fonts/DepartureMono-Regular.woff") format("woff");
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
+
+:root {
+	--font-stack: "Departure Mono", Menlo, Monaco, "Liberation Mono", monospace;
+	--mono-font-stack: var(--font-stack);
+	/* Departure Mono is a pixel face on a small em — it reads a size down from
+	   Terminal's 15px default. */
+	--global-font-size: 16px;
+}
+
+/* Only a Regular is shipped; let the browser synthesize bold rather than fall
+   back to Menlo mid-sentence. */
+:root {
+	font-synthesis: weight;
+}
+
+/* Terminal ships no admonition styling; python-markdown emits .admonition. */
+.admonition {
+	border: 1px solid var(--secondary-color);
+	border-left-width: 4px;
+	padding: 0.6em 1em;
+	margin: 1.4em 0;
+	background: var(--code-bg-color, rgba(127, 127, 127, 0.08));
+}
+
+.admonition > .admonition-title {
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	font-size: 0.85em;
+	margin: 0 0 0.4em;
+}
+
+.admonition > :last-child {
+	margin-bottom: 0;
+}
+
+.admonition.note,
+.admonition.tip {
+	border-left-color: var(--primary-color);
+}
+
+.admonition.warning > .admonition-title {
+	color: #d79921;
+}
+.admonition.warning {
+	border-left-color: #d79921;
+}
+
+.admonition.danger > .admonition-title {
+	color: #fb4934;
+}
+.admonition.danger {
+	border-left-color: #fb4934;
+	background: rgba(251, 73, 52, 0.08);
+}
+
+.mermaid {
+	margin: 1.6em 0;
+	text-align: center;
+}
+
+/* Long tables and wide code must scroll themselves, never the page. */
+#terminal-mkdocs-main-content table {
+	display: block;
+	overflow-x: auto;
+	max-width: 100%;
+}

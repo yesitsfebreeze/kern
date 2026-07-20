@@ -52,6 +52,26 @@ pub struct Server {
 	pub cfg: Arc<Config>,
 	pub cache: Arc<Mutex<QueryCache>>,
 	pub broadcast_pulse: Option<PulseBroadcast>,
+	// Epoch ms of the last real tool call (health polls excluded, or the hub's
+	// own idle probe would keep every node alive forever). Seeded at boot so a
+	// never-used node counts idle from startup.
+	pub last_activity: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Server {
+	pub fn idle_ms(&self) -> u64 {
+		let last = self
+			.last_activity
+			.load(std::sync::atomic::Ordering::Relaxed);
+		crate::base::util::now_ms().saturating_sub(last)
+	}
+
+	pub(crate) fn touch(&self) {
+		self.last_activity.store(
+			crate::base::util::now_ms(),
+			std::sync::atomic::Ordering::Relaxed,
+		);
+	}
 }
 
 impl Server {
@@ -66,9 +86,20 @@ impl Server {
 	}
 
 	pub(crate) fn health_stats(&self) -> serde_json::Value {
-		let g = crate::base::locks::read_recovered(&self.graph);
+		let g = self.graph.read();
 		let h = crate::base::health::graph_health_stats(&g);
 		let descriptors = g.root.descriptors.len();
+		let (queue_depth, tasks_done, task_avg_ms) = match &self.task_q {
+			Some(q) => {
+				let (done, avg_ms) = q.metrics();
+				(
+					q.pending_count() as u64,
+					done.max(0) as u64,
+					avg_ms.max(0) as u64,
+				)
+			}
+			None => (0, 0, 0),
+		};
 		serde_json::json!({
 			"gravitons": h.gravitons,
 			"kerns": h.kerns,
@@ -76,6 +107,9 @@ impl Server {
 			"reasons": h.reasons,
 			"unnamed": h.unnamed,
 			"descriptors": descriptors,
+			"queue_depth": queue_depth,
+			"tasks_done": tasks_done,
+			"task_avg_ms": task_avg_ms,
 		})
 	}
 }
@@ -93,10 +127,7 @@ impl trnsprt::McpServer for Server {
 	}
 
 	fn tools_list(&self) -> Vec<trnsprt::ToolSchema> {
-		tools::tool_definitions()
-			.into_iter()
-			.filter_map(|v| serde_json::from_value(v).ok())
-			.collect()
+		tools::typed_tool_schemas()
 	}
 
 	fn call_tool(
@@ -104,12 +135,16 @@ impl trnsprt::McpServer for Server {
 		name: &str,
 		args: &serde_json::Value,
 	) -> Result<trnsprt::ToolResult, trnsprt::McpError> {
+		if name != "health" {
+			self.touch();
+		}
 		let result = match name {
 			"query" => self.tool_query(args),
 			"ingest" => self.tool_ingest(args),
 			"link" => self.tool_link(args),
 			"forget" => self.tool_forget(args),
 			"degrade" => self.tool_degrade(args),
+			"move" => self.tool_move(args),
 			"health" => self.tool_health(),
 			"graviton" => self.tool_graviton(args),
 			"descriptor" => self.tool_descriptor(args),
@@ -125,7 +160,7 @@ impl trnsprt::McpServer for Server {
 				})
 			}
 		};
-		Ok(value_to_tool_result(result))
+		Ok(value_to_tool_result(&result))
 	}
 
 	fn handle_method(
@@ -154,7 +189,7 @@ impl trnsprt::McpServer for Server {
 	}
 }
 
-fn value_to_tool_result(v: serde_json::Value) -> trnsprt::ToolResult {
+pub(crate) fn value_to_tool_result(v: &serde_json::Value) -> trnsprt::ToolResult {
 	let is_error = v
 		.get("isError")
 		.and_then(serde_json::Value::as_bool)
@@ -219,4 +254,35 @@ pub(crate) fn tool_error(msg: &str) -> serde_json::Value {
 		"isError": true,
 		"content": [{"type": "text", "text": msg}],
 	})
+}
+
+#[cfg(test)]
+mod tests {
+	use serde_json::json;
+
+	#[test]
+	fn envelope_extracts_content_array_and_error_flag() {
+		let env = json!({ "content": [{ "type": "text", "text": "hi" }], "isError": true });
+		let r = super::value_to_tool_result(&env);
+		assert!(r.is_error);
+		assert_eq!(r.content.len(), 1);
+		assert_eq!(r.content[0]["text"], "hi");
+		assert!(r.structured_content.is_none());
+	}
+
+	#[test]
+	fn envelope_missing_fields_default_to_empty_and_ok() {
+		let r = super::value_to_tool_result(&json!({}));
+		assert!(!r.is_error, "missing isError defaults to false");
+		assert!(r.content.is_empty(), "missing content defaults to empty");
+	}
+
+	#[test]
+	fn envelope_non_array_content_falls_back_to_empty() {
+		let r = super::value_to_tool_result(&json!({ "content": "oops", "isError": false }));
+		assert!(
+			r.content.is_empty(),
+			"a non-array content is ignored, not panicked on"
+		);
+	}
 }

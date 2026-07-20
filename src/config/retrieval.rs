@@ -36,12 +36,22 @@ pub struct RetrievalConfig {
 	pub refine_boost_cap: f64,
 	pub fact_score_boost: f64,
 	pub gravity_weight: f64,
+	// Multiplier on the final score of an entity held in a `remote-*` phantom kern.
+	// Federation is unauthenticated: this is what stops peer-supplied content from
+	// outranking local knowledge. 1.0 disables the penalty; 0.0 keeps remote
+	// entities retrievable but always last.
+	pub remote_trust_weight: f64,
 	pub min_deliver_score: f64,
 	pub max_deliver_results: usize,
 	// Facts placed in the answer prompt. Retrieval delivers up to
 	// `max_deliver_results`, so anything below that silently discards evidence
 	// kern already found and ranked.
 	pub answer_max_facts: usize,
+	// Tell the answerer to decline when the context looks insufficient.
+	// Measured 2026-07-20: combined with a small `answer_max_facts` this made the
+	// model abstain on 69% of ANSWERABLE probes — a starved prompt reads as
+	// "the fact does not exist". Off until an A/B shows it earns its place.
+	pub answer_abstain_hint: bool,
 	pub important_min_cosine: f64,
 	pub important_access_threshold: i32,
 	pub weights_content: ModeWeights,
@@ -84,9 +94,11 @@ impl Default for RetrievalConfig {
 			refine_boost_cap: constants::REFINE_BOOST_CAP,
 			fact_score_boost: constants::FACT_SCORE_BOOST,
 			gravity_weight: 0.15,
+			remote_trust_weight: 0.4,
 			min_deliver_score: 0.0,
 			max_deliver_results: 25,
 			answer_max_facts: constants::ANSWER_MAX_THOUGHTS,
+			answer_abstain_hint: false,
 			important_min_cosine: constants::IMPORTANT_MIN_COSINE,
 			important_access_threshold: constants::IMPORTANT_ACCESS_THRESHOLD,
 			weights_content: ModeWeights {
@@ -144,6 +156,7 @@ impl RetrievalConfig {
 			("mmr_lambda", self.mmr_lambda),
 			("hyde_fusion_weight", self.hyde_fusion_weight),
 			("bm25_b", self.bm25_b),
+			("remote_trust_weight", self.remote_trust_weight),
 		] {
 			if !(0.0..=1.0).contains(&v) {
 				errs.push(format!("{name} ({v}) must be in [0.0, 1.0]"));

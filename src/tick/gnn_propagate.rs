@@ -4,7 +4,6 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::base::graph::GraphGnn;
-use crate::base::locks::{read_recovered, write_recovered};
 use crate::base::types::{EntityStatus, Kern};
 use crate::gnn::graph::Graph;
 use crate::gnn::propagate::{self, GnnConfig, GnnSnapshot};
@@ -13,7 +12,7 @@ use super::queue::{task, Queue, TaskKind};
 
 pub fn do_gnn_propagate(q: &Queue, g: &Arc<RwLock<GraphGnn>>, kern_id: &str, cfg: &GnnConfig) {
 	let snap = {
-		let graph = read_recovered(g);
+		let graph = g.read();
 		let kern = match graph.loaded(kern_id) {
 			Some(k) => k,
 			None => return,
@@ -95,8 +94,8 @@ pub fn build_gnn_snapshot(kern: &Kern, cfg: &GnnConfig) -> Option<GnnSnapshot> {
 			continue;
 		}
 
-		let _ = gg.add_edge(&r.from, &r.to, Vec::new());
-		let _ = gg.add_edge(&r.to, &r.from, Vec::new());
+		let _ = gg.add_edge(&r.from, &r.to);
+		let _ = gg.add_edge(&r.to, &r.from);
 
 		let (a, b) = if i < j { (i, j) } else { (j, i) };
 		if pair_seen.insert((a, b)) {
@@ -129,7 +128,7 @@ fn apply_gnn_updates(
 	if updates.is_empty() {
 		return;
 	}
-	let mut graph = write_recovered(g);
+	let mut graph = g.write();
 	let mut changed: Vec<(String, Vec<f32>)> = Vec::new();
 	if let Some(kern) = graph.kerns.get_mut(kern_id) {
 		for (entity_id, vec) in &updates {
@@ -283,7 +282,7 @@ mod tests {
 		apply_gnn_updates(&q, &g, "k", updates, vec![9, 9]);
 
 		{
-			let gg = read_recovered(&g);
+			let gg = g.read();
 			let kern = gg.kerns.get("k").unwrap();
 			assert_eq!(
 				kern.entities["e0"].gnn_vector,
@@ -317,7 +316,7 @@ mod tests {
 		let q = Queue::new(16);
 		apply_gnn_updates(&q, &g, "k", updates, Vec::new());
 
-		let gg = read_recovered(&g);
+		let gg = g.read();
 		assert!(
 			gg.kerns["k"].entities["e0"].gnn_vector.is_empty(),
 			"empty update doesn't write"

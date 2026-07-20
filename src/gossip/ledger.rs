@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use crate::base::constants::{LEDGER_ROUTING_TTL, LEDGER_THOUGHT_TTL};
-use crate::base::locks::{read_recovered, write_recovered};
 
 const DEFAULT_LEDGER_CAP: usize = 10_000;
 
@@ -67,25 +66,26 @@ impl Ledger {
 
 	pub fn put_thought(&self, id: &str, addr: &str) {
 		let expires = Instant::now() + LEDGER_THOUGHT_TTL;
-		write_recovered(&self.entities).insert(id.to_string(), addr.to_string(), expires, self.cap());
+		self
+			.entities
+			.write()
+			.insert(id.to_string(), addr.to_string(), expires, self.cap());
 	}
 
 	pub fn put_routing(&self, kern_id: &str, addr: &str) {
 		let expires = Instant::now() + LEDGER_ROUTING_TTL;
-		write_recovered(&self.routing).insert(
-			kern_id.to_string(),
-			addr.to_string(),
-			expires,
-			self.cap(),
-		);
+		self
+			.routing
+			.write()
+			.insert(kern_id.to_string(), addr.to_string(), expires, self.cap());
 	}
 
 	pub fn lookup_thought(&self, id: &str) -> Option<String> {
-		read_recovered(&self.entities).lookup(id, Instant::now())
+		self.entities.read().lookup(id, Instant::now())
 	}
 
 	pub fn lookup_routing(&self, kern_id: &str) -> Option<String> {
-		read_recovered(&self.routing).lookup(kern_id, Instant::now())
+		self.routing.read().lookup(kern_id, Instant::now())
 	}
 }
 

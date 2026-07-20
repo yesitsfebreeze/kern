@@ -1,6 +1,5 @@
 use crate::gnn::activation::Activation;
 use crate::gnn::backward::{act_deriv_mul, BackwardGraphLayer, GraphLayer};
-use crate::gnn::dropout::Dropout;
 use crate::gnn::graph::Graph;
 use crate::gnn::layer::{Backward, Layer, LinearLayer};
 use crate::gnn::norm::LayerNorm;
@@ -10,22 +9,15 @@ use crate::gnn::GnnError;
 pub struct GCNLayer {
 	pub linear: LinearLayer,
 	pub norm: Option<LayerNorm>,
-	pub drop: Option<Dropout>,
 	pub act: Option<Activation>,
 	last_norm_adj: Option<Tensor>,
 	last_pre_act: Option<Tensor>,
 }
 
 impl GCNLayer {
-	pub fn new(
-		in_features: usize,
-		out_features: usize,
-		act: Option<Activation>,
-		norm: bool,
-		drop_rate: f64,
-	) -> Self {
+	pub fn new(in_features: usize, out_features: usize, act: Option<Activation>, norm: bool) -> Self {
 		let mut rng = rand::rng();
-		Self::with_rng(in_features, out_features, act, norm, drop_rate, &mut rng)
+		Self::with_rng(in_features, out_features, act, norm, &mut rng)
 	}
 
 	pub fn with_rng<R: rand::Rng>(
@@ -33,18 +25,12 @@ impl GCNLayer {
 		out_features: usize,
 		act: Option<Activation>,
 		norm: bool,
-		drop_rate: f64,
 		rng: &mut R,
 	) -> Self {
 		Self {
 			linear: LinearLayer::with_rng(in_features, out_features, rng),
 			norm: if norm {
 				Some(LayerNorm::new(out_features))
-			} else {
-				None
-			},
-			drop: if drop_rate > 0.0 {
-				Some(Dropout::new(drop_rate))
 			} else {
 				None
 			},
@@ -56,9 +42,6 @@ impl GCNLayer {
 
 	pub fn try_backward_graph(&mut self, _g: &Graph, d_out: &Tensor) -> Result<Tensor, GnnError> {
 		let mut grad = d_out.clone();
-		if let Some(ref d) = self.drop {
-			grad = d.backward(&grad);
-		}
 		if let Some(a) = self.act {
 			let pre_act = self
 				.last_pre_act
@@ -92,9 +75,6 @@ impl GraphLayer for GCNLayer {
 		if let Some(a) = self.act {
 			h = h.apply(|x| a.forward(x));
 		}
-		if let Some(ref mut d) = self.drop {
-			h = d.forward(&h);
-		}
 		h
 	}
 
@@ -112,10 +92,6 @@ impl GraphLayer for GCNLayer {
 			p.extend(Layer::parameters_mut(n));
 		}
 		p
-	}
-
-	fn dropout_mut(&mut self) -> Option<&mut Dropout> {
-		self.drop.as_mut()
 	}
 }
 
@@ -165,7 +141,7 @@ mod tests {
 		let mut g = Graph::new();
 		g.add_node("a", vec![1.0, 0.0]).unwrap();
 		g.add_node("b", vec![0.0, 1.0]).unwrap();
-		g.add_edge("a", "b", vec![]).unwrap();
+		g.add_edge("a", "b").unwrap();
 		g
 	}
 
@@ -174,7 +150,7 @@ mod tests {
 		let g = two_node_graph();
 		let feats = Tensor::new(2, 2, vec![1.0, 0.0, 0.0, 1.0]).unwrap();
 		let mut rng = StdRng::seed_from_u64(1);
-		let mut layer = GCNLayer::with_rng(2, 3, None, false, 0.0, &mut rng);
+		let mut layer = GCNLayer::with_rng(2, 3, None, false, &mut rng);
 
 		let out = layer.forward_graph(&g, &feats);
 		assert_eq!((out.rows, out.cols), (2, 3), "num_nodes x out_features");
@@ -197,7 +173,7 @@ mod tests {
 	fn try_backward_before_forward_is_missing_state_and_infallible_path_zeroes() {
 		let g = two_node_graph();
 		let mut rng = StdRng::seed_from_u64(2);
-		let mut layer = GCNLayer::with_rng(2, 3, Some(Activation::Relu), false, 0.0, &mut rng);
+		let mut layer = GCNLayer::with_rng(2, 3, Some(Activation::Relu), false, &mut rng);
 		let d_out = Tensor::ones(2, 3);
 
 		assert!(matches!(

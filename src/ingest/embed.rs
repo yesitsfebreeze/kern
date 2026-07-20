@@ -89,7 +89,7 @@ mod tests {
 	#[tokio::test]
 	async fn embed_chunks_short_circuits_on_the_batch_path_when_counts_match() {
 		let (url, _server) = crate::test_support::spawn_http(echo_count_app()).await;
-		let client = LlmClient::new_embed_only(&url, "m");
+		let client = LlmClient::new_embed_only(&url, "m", "");
 		let (vecs, fails) = embed_chunks(&client, &["a".into(), "b".into()]).await;
 		assert_eq!(vecs.len(), 2);
 		assert!(
@@ -106,7 +106,7 @@ mod tests {
 			axum::routing::post(|| async { axum::Json(json!({ "embeddings": [[0.5, 0.6]] })) }),
 		);
 		let (url, _server) = crate::test_support::spawn_http(app).await;
-		let client = LlmClient::new_embed_only(&url, "m");
+		let client = LlmClient::new_embed_only(&url, "m", "");
 		let (vecs, fails) = embed_chunks(&client, &["a".into(), "b".into()]).await;
 		assert_eq!(vecs.len(), 2);
 		assert!(
@@ -123,7 +123,7 @@ mod tests {
 			axum::routing::post(|| async { axum::Json(json!({ "embeddings": [] })) }),
 		);
 		let (url, _server) = crate::test_support::spawn_http(app).await;
-		let client = LlmClient::new_embed_only(&url, "m");
+		let client = LlmClient::new_embed_only(&url, "m", "");
 		let fail = embed_with_retry(&client, "x", "chunk", 0)
 			.await
 			.unwrap_err();
@@ -133,7 +133,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn embed_with_retry_treats_a_connection_failure_as_transient() {
-		let client = LlmClient::new_embed_only("http://127.0.0.1:1", "m");
+		let client = LlmClient::new_embed_only("http://127.0.0.1:1", "m", "");
 		let fail = embed_with_retry(&client, "x", "document", 3)
 			.await
 			.unwrap_err();
@@ -144,7 +144,7 @@ mod tests {
 	#[tokio::test]
 	async fn embed_chunks_empty_input_short_circuits_to_empty() {
 		let (url, _server) = crate::test_support::spawn_http(echo_count_app()).await;
-		let client = LlmClient::new_embed_only(&url, "m");
+		let client = LlmClient::new_embed_only(&url, "m", "");
 		let (vecs, fails) = embed_chunks(&client, &[]).await;
 		assert!(vecs.is_empty() && fails.is_empty());
 	}

@@ -310,7 +310,7 @@ mod tests {
 	}
 
 	fn dead_worker(graph: Arc<RwLock<GraphGnn>>) -> Worker {
-		let embedder = LlmClient::new_embed_only("http://127.0.0.1:1", "test");
+		let embedder = LlmClient::new_embed_only("http://127.0.0.1:1", "test", "");
 		Worker::new(graph, embedder, None, None, None)
 	}
 

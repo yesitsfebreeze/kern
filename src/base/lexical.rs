@@ -131,7 +131,8 @@ impl LexicalIndex {
 		}
 	}
 
-	pub fn doc_count(&self) -> usize {
+	#[cfg(test)]
+	fn doc_count(&self) -> usize {
 		self
 			.inner
 			.read()

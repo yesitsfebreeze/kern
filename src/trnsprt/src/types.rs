@@ -24,21 +24,6 @@ pub struct ToolResult {
 	pub structured_content: Option<Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ServerId(pub String);
-
-impl ServerId {
-	pub fn new<S: Into<String>>(id: S) -> Self {
-		Self(id.into())
-	}
-}
-
-impl std::fmt::Display for ServerId {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.write_str(&self.0)
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -64,11 +49,5 @@ mod tests {
 			structured_content: None,
 		};
 		assert_eq!(r, r.clone());
-	}
-
-	#[test]
-	fn server_id_displays_as_its_inner_string() {
-		assert_eq!(ServerId::new("math").to_string(), "math");
-		assert_eq!(format!("[{}]", ServerId::new("srv1")), "[srv1]");
 	}
 }

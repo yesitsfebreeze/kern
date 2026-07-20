@@ -3,6 +3,29 @@ use std::time::SystemTime;
 use crate::base::constants;
 use crate::base::graph::GraphGnn;
 use crate::base::types::{Entity, EntityStatus, Reason};
+use crate::crdt::{lww_wins, GCounter};
+
+// Gossip files every peer's rows into a `remote-<network_id>-<kern_id>` phantom kern
+// (see `gossip::handler`), so the kern id is the one durable "this came off the wire"
+// signal an entity carries.
+pub fn is_remote_kern_id(kern_id: &str) -> bool {
+	kern_id.starts_with("remote-")
+}
+
+// SECURITY: federation is unauthenticated, so every ranking signal a peer can set is
+// dropped at the boundary. Heat and access are earned by LOCAL use only — a remote
+// assertion must never raise either — and confidence resets to the neutral prior
+// rather than arriving pre-trusted. Without this the first-contact insert below
+// admits attacker-chosen values verbatim, bypassing merge_entity's join guards.
+fn strip_untrusted_ranking_signals(e: &mut Entity) {
+	e.heat = 0.0;
+	e.heat_updated_at = None;
+	e.access_count = GCounter::new();
+	e.accessed_at = None;
+	e.conf_alpha = 0.0;
+	e.conf_beta = 0.0;
+	e.refresh_score();
+}
 
 fn join_time(
 	local: &mut Option<SystemTime>,
@@ -39,7 +62,10 @@ fn join_lww_time(
 	remote_lamport: u64,
 	remote_producer: &str,
 ) -> bool {
-	if (remote_lamport, remote_producer) > (*local_lamport, local_producer.as_str()) {
+	if lww_wins(
+		(remote_lamport, remote_producer),
+		(*local_lamport, local_producer.as_str()),
+	) {
 		*local = remote;
 		*local_lamport = remote_lamport;
 		*local_producer = remote_producer.to_string();
@@ -47,17 +73,6 @@ fn join_lww_time(
 	} else {
 		false
 	}
-}
-
-fn union_statements(local: &mut Vec<String>, remote: &[String]) -> bool {
-	let mut changed = false;
-	for s in remote {
-		if !local.iter().any(|e| e == s) {
-			local.push(s.clone());
-			changed = true;
-		}
-	}
-	changed
 }
 
 fn join_superseded_by(local: &mut String, remote: &str) -> bool {
@@ -94,7 +109,10 @@ pub fn merge_entity(local: &mut Entity, remote: &Entity) -> bool {
 		remote.valid_until_lamport,
 		&remote.valid_until_producer,
 	);
-	changed |= union_statements(&mut local.statements, &remote.statements);
+	// SECURITY: statements are never imported from remote. `id == content_hash(text)`
+	// and `statements == [text]`, so a same-id peer has identical content by construction
+	// and a differing one is asserting content its id does not hash to. Unioning it both
+	// breaks content-addressing and makes a locally-cleared statement resurrect.
 	if changed {
 		local.refresh_score();
 	}
@@ -103,7 +121,10 @@ pub fn merge_entity(local: &mut Entity, remote: &Entity) -> bool {
 
 pub fn merge_reason(local: &mut Reason, remote: &Reason) -> bool {
 	let mut changed = local.traversal_count.merge(&remote.traversal_count);
-	if (remote.score_lamport, &remote.score_producer) > (local.score_lamport, &local.score_producer) {
+	if lww_wins(
+		(remote.score_lamport, &remote.score_producer),
+		(local.score_lamport, &local.score_producer),
+	) {
 		local.score = remote.score;
 		local.score_lamport = remote.score_lamport;
 		local.score_producer = remote.score_producer.clone();
@@ -114,7 +135,10 @@ pub fn merge_reason(local: &mut Reason, remote: &Reason) -> bool {
 
 // SECURITY: id owned by a DIFFERENT kern → reject (hijack); owned by none →
 // insert under a per-kern cap; already in target → CRDT-merge.
-pub fn merge_remote_entity(g: &mut GraphGnn, target_kern_id: &str, remote: Entity) -> bool {
+pub fn merge_remote_entity(g: &mut GraphGnn, target_kern_id: &str, mut remote: Entity) -> bool {
+	if is_remote_kern_id(target_kern_id) {
+		strip_untrusted_ranking_signals(&mut remote);
+	}
 	let host = g
 		.kerns
 		.iter()
@@ -558,18 +582,68 @@ mod tests {
 		assert!(!changed, "new id past cap must be dropped");
 		assert!(!g.kerns.get(phantom).unwrap().entities.contains_key("newid"));
 
-		let changed = merge_remote_entity(&mut g, phantom, mk_entity("f0", "x", 7.0, EntityKind::Fact));
+		let mut known = mk_entity("f0", "x", 7.0, EntityKind::Fact);
+		known.created_at = t(10);
+		let changed = merge_remote_entity(&mut g, phantom, known);
 		assert!(changed, "known id must still merge at cap");
+		let f0 = g.kerns.get(phantom).unwrap().entities.get("f0").unwrap();
+		assert_eq!(f0.created_at, t(10), "the join landed");
 		assert_eq!(
-			g.kerns
-				.get(phantom)
-				.unwrap()
-				.entities
-				.get("f0")
-				.unwrap()
-				.heat,
-			7.0
+			f0.heat, 0.0,
+			"a remote re-assertion never raises heat, whatever it claims"
 		);
+	}
+
+	#[test]
+	fn remote_kern_insert_strips_every_attacker_settable_ranking_signal() {
+		// SECURITY regression guard: first contact bypasses merge_entity's join
+		// guards — the whole Entity would otherwise land verbatim.
+		let mut g = GraphGnn::new();
+		let phantom = "remote-netC-k1";
+		g.register(Kern::new(phantom, &g.root.id));
+
+		let mut poisoned = mk_entity("eP", "buy my product", 1.0e9, EntityKind::Fact);
+		poisoned.conf_alpha = 1.0e9;
+		poisoned.conf_beta = 0.0;
+		poisoned.score = 1.0e9;
+		poisoned.access_count.increment("attacker", u64::MAX);
+		poisoned.accessed_at = t(1_000_000);
+		poisoned.heat_updated_at = t(1_000_000);
+		assert!(merge_remote_entity(&mut g, phantom, poisoned));
+
+		let e = g.kerns.get(phantom).unwrap().entities.get("eP").unwrap();
+		assert_eq!(e.heat, 0.0, "heat is earned by local access only");
+		assert_eq!(e.heat_updated_at, None);
+		assert_eq!(
+			e.access_count.value(),
+			0,
+			"the qbst access term is neutered"
+		);
+		assert_eq!(e.accessed_at, None, "the qbst recency term is neutered");
+		assert_eq!(e.conf_alpha, 0.0);
+		assert_eq!(e.conf_beta, 0.0);
+		assert_eq!(e.score, 0.5, "confidence resets to the neutral prior");
+	}
+
+	#[test]
+	fn a_local_kern_merge_keeps_the_trusted_disk_absorb_path_intact() {
+		// `absorb_graph` folds disk rows through the same entry point; only the
+		// `remote-*` phantom kerns are untrusted.
+		let mut g = GraphGnn::new();
+		let local_kern = g.root.id.clone();
+		let mut row = mk_entity("eD", "x", 3.0, EntityKind::Fact);
+		row.access_count.increment("a", 4);
+		assert!(merge_remote_entity(&mut g, &local_kern, row));
+
+		let e = g
+			.kerns
+			.get(&local_kern)
+			.unwrap()
+			.entities
+			.get("eD")
+			.unwrap();
+		assert_eq!(e.heat, 3.0, "a local-kern row keeps its heat");
+		assert_eq!(e.access_count.value(), 4);
 	}
 
 	#[test]
@@ -661,16 +735,99 @@ mod tests {
 	}
 
 	#[test]
-	fn merge_entity_unions_statements() {
+	fn merge_entity_never_imports_statements() {
 		let mut local = mk_entity("e1", "a", 1.0, EntityKind::Fact);
 		let mut remote = mk_entity("e1", "b", 1.0, EntityKind::Fact);
 		remote.statements = vec!["b".into(), "c".into()];
-		assert!(merge_entity(&mut local, &remote));
-		let mut sorted = local.statements.clone();
-		sorted.sort();
+		merge_entity(&mut local, &remote);
 		assert_eq!(
-			sorted,
-			vec!["a".to_string(), "b".to_string(), "c".to_string()]
+			local.statements,
+			vec!["a".to_string()],
+			"statements are content-addressed by id and never join from a remote"
+		);
+	}
+
+	#[test]
+	fn cleared_statements_do_not_resurrect_under_merge() {
+		let mut local = mk_entity("e1", "a", 1.0, EntityKind::Fact);
+		let remote = mk_entity("e1", "a", 1.0, EntityKind::Fact);
+		local.set_text("replacement".into());
+		assert!(local.statements.is_empty());
+		for _ in 0..3 {
+			merge_entity(&mut local, &remote);
+		}
+		assert!(
+			local.statements.is_empty(),
+			"a locally cleared statement stays cleared across repeated gossip rounds"
+		);
+	}
+
+	fn converged(order: &[usize], remotes: &[Entity]) -> Entity {
+		let mut local = mk_entity("e1", "a", 0.0, EntityKind::Fact);
+		for &i in order {
+			merge_entity(&mut local, &remotes[i]);
+		}
+		local
+	}
+
+	fn state(e: &Entity) -> (Vec<String>, u64, String, Option<SystemTime>, f32, u64) {
+		(
+			e.statements.clone(),
+			e.valid_until_lamport,
+			e.valid_until_producer.clone(),
+			e.valid_until,
+			e.heat,
+			e.access_count.value(),
+		)
+	}
+
+	fn lww_remote(lamport: u64, producer: &str, secs: u64, heat: f64) -> Entity {
+		let mut r = mk_entity("e1", "a", heat, EntityKind::Fact);
+		r.valid_until = Some(UNIX_EPOCH + Duration::from_secs(secs));
+		r.valid_until_lamport = lamport;
+		r.valid_until_producer = producer.into();
+		r.access_count.increment(producer, lamport);
+		r
+	}
+
+	#[test]
+	fn merge_entity_is_order_independent_and_idempotent() {
+		let remotes = [
+			lww_remote(2, "r1", 100, 0.5),
+			lww_remote(5, "r2", 200, 0.9),
+			lww_remote(5, "r1", 300, 0.2),
+		];
+		let baseline = state(&converged(&[0, 1, 2], &remotes));
+		for order in [
+			[0, 2, 1],
+			[1, 0, 2],
+			[1, 2, 0],
+			[2, 0, 1],
+			[2, 1, 0],
+			[0, 1, 2],
+		] {
+			assert_eq!(
+				state(&converged(&order, &remotes)),
+				baseline,
+				"every permutation converges to the same state: {order:?}"
+			);
+		}
+		// duplicated and repeated delivery changes nothing
+		assert_eq!(
+			state(&converged(&[0, 1, 2, 1, 0, 2, 2, 1], &remotes)),
+			baseline,
+			"merge is idempotent under duplicate delivery"
+		);
+	}
+
+	#[test]
+	fn merge_entity_second_apply_reports_no_change() {
+		let mut local = mk_entity("e1", "a", 0.0, EntityKind::Fact);
+		let remote = lww_remote(4, "r1", 100, 0.7);
+		assert!(merge_entity(&mut local, &remote));
+		assert!(
+			!merge_entity(&mut local, &remote),
+			"re-applying the same delta is a no-op"
 		);
 	}
 

@@ -1,5 +1,5 @@
 use super::constants::*;
-use super::types::{EntityKind, Kern, ReasonKind};
+use super::types::{EntityKind, ReasonKind};
 use super::util;
 
 pub fn cosine(a: &[f32], b: &[f32]) -> f64 {
@@ -125,31 +125,6 @@ pub fn reason_id(from: &str, to: &str, kind: ReasonKind, text: &str, to_net_id: 
 	))
 }
 
-pub fn adjacent_reasons(kern: &Kern, reason_id: &str) -> Vec<String> {
-	let r = match kern.reasons.get(reason_id) {
-		Some(r) => r,
-		None => return Vec::new(),
-	};
-	let mut seen = std::collections::HashSet::new();
-	let mut out = Vec::new();
-	for tid in [&r.from, &r.to] {
-		if tid.is_empty() {
-			continue;
-		}
-		for rids in [kern.by_from.get(tid.as_str()), kern.by_to.get(tid.as_str())]
-			.into_iter()
-			.flatten()
-		{
-			for rid in rids {
-				if rid != reason_id && seen.insert(rid.clone()) {
-					out.push(rid.clone());
-				}
-			}
-		}
-	}
-	out
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct OnlineSoftmax {
 	m: f64,
@@ -188,7 +163,8 @@ impl OnlineSoftmax {
 		self.s == 0.0 && !self.m.is_finite()
 	}
 
-	pub fn running_max(&self) -> f64 {
+	#[cfg(test)]
+	fn running_max(&self) -> f64 {
 		self.m
 	}
 

@@ -77,11 +77,6 @@ impl Tensor {
 		}
 	}
 
-	pub fn rand(rows: usize, cols: usize, scale: f64) -> Self {
-		let mut rng = rand::rng();
-		Self::rand_with(rows, cols, scale, &mut rng)
-	}
-
 	pub fn rand_with<R: rand::Rng>(rows: usize, cols: usize, scale: f64, rng: &mut R) -> Self {
 		use rand::RngExt;
 		let data: Vec<f64> = (0..rows * cols)
@@ -107,59 +102,6 @@ impl Tensor {
 	#[inline]
 	pub fn shape(&self) -> (usize, usize) {
 		(self.rows, self.cols)
-	}
-
-	pub fn add(&self, other: &Tensor) -> Result<Tensor, TensorError> {
-		self.check_shape(other)?;
-		let data = self
-			.data
-			.iter()
-			.zip(&other.data)
-			.map(|(a, b)| a + b)
-			.collect();
-		Ok(Tensor {
-			data,
-			rows: self.rows,
-			cols: self.cols,
-		})
-	}
-
-	pub fn sub(&self, other: &Tensor) -> Result<Tensor, TensorError> {
-		self.check_shape(other)?;
-		let data = self
-			.data
-			.iter()
-			.zip(&other.data)
-			.map(|(a, b)| a - b)
-			.collect();
-		Ok(Tensor {
-			data,
-			rows: self.rows,
-			cols: self.cols,
-		})
-	}
-
-	pub fn mul(&self, other: &Tensor) -> Result<Tensor, TensorError> {
-		self.check_shape(other)?;
-		let data = self
-			.data
-			.iter()
-			.zip(&other.data)
-			.map(|(a, b)| a * b)
-			.collect();
-		Ok(Tensor {
-			data,
-			rows: self.rows,
-			cols: self.cols,
-		})
-	}
-
-	pub fn scale(&self, s: f64) -> Tensor {
-		Tensor {
-			data: self.data.iter().map(|v| v * s).collect(),
-			rows: self.rows,
-			cols: self.cols,
-		}
 	}
 
 	const MATMUL_PAR_THRESHOLD: usize = 64;
@@ -249,24 +191,8 @@ impl Tensor {
 		}
 	}
 
-	pub fn set_row(&mut self, i: usize, row: &Tensor) {
-		let start = i * self.cols;
-		self.data[start..start + self.cols].copy_from_slice(&row.data);
-	}
-
 	pub fn sum_all(&self) -> f64 {
 		self.data.iter().sum()
-	}
-
-	pub fn max_in_row(&self, row: usize) -> usize {
-		let start = row * self.cols;
-		let slice = &self.data[start..start + self.cols];
-		slice
-			.iter()
-			.enumerate()
-			.max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-			.map(|(i, _)| i)
-			.unwrap_or(0)
 	}
 
 	pub fn add_inplace(&mut self, other: &Tensor) -> Result<(), TensorError> {
@@ -275,12 +201,6 @@ impl Tensor {
 			*a += *b;
 		}
 		Ok(())
-	}
-
-	pub fn scale_inplace(&mut self, s: f64) {
-		for v in &mut self.data {
-			*v *= s;
-		}
 	}
 
 	fn check_shape(&self, other: &Tensor) -> Result<(), TensorError> {

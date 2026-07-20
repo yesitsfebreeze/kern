@@ -13,7 +13,6 @@ pub struct Node {
 pub struct Edge {
 	pub source: String,
 	pub target: String,
-	pub features: Vec<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -48,12 +47,7 @@ impl Graph {
 		Ok(())
 	}
 
-	pub fn add_edge(
-		&mut self,
-		source: &str,
-		target: &str,
-		features: Vec<f64>,
-	) -> Result<(), GraphError> {
+	pub fn add_edge(&mut self, source: &str, target: &str) -> Result<(), GraphError> {
 		if !self.node_idx.contains_key(source) {
 			return Err(GraphError::NodeNotFound(source.to_owned()));
 		}
@@ -63,7 +57,6 @@ impl Graph {
 		self.edges.push(Edge {
 			source: source.to_owned(),
 			target: target.to_owned(),
-			features,
 		});
 		self
 			.adj_list
@@ -82,20 +75,8 @@ impl Graph {
 		self.adj_list.get(id).map(|v| v.as_slice()).unwrap_or(&[])
 	}
 
-	pub fn in_neighbors(&self, id: &str) -> &[String] {
-		self.in_list.get(id).map(|v| v.as_slice()).unwrap_or(&[])
-	}
-
 	pub fn num_nodes(&self) -> usize {
 		self.nodes.len()
-	}
-
-	pub fn num_edges(&self) -> usize {
-		self.edges.len()
-	}
-
-	pub fn node_index(&self, id: &str) -> Option<usize> {
-		self.node_idx.get(id).copied()
 	}
 
 	pub fn feature_matrix(&self) -> Tensor {
@@ -138,7 +119,6 @@ impl Graph {
 				self.edges.push(Edge {
 					source: id.clone(),
 					target: id.clone(),
-					features: Vec::new(),
 				});
 				self
 					.adj_list
@@ -217,9 +197,9 @@ mod tests {
 	fn add_edge_rejects_unknown_endpoints() {
 		let mut g = Graph::new();
 		g.add_node("a", vec![1.0]).unwrap();
-		assert!(matches!(g.add_edge("a", "b", vec![]), Err(GraphError::NodeNotFound(id)) if id == "b"));
-		assert!(matches!(g.add_edge("x", "a", vec![]), Err(GraphError::NodeNotFound(id)) if id == "x"));
-		assert_eq!(g.num_edges(), 0);
+		assert!(matches!(g.add_edge("a", "b"), Err(GraphError::NodeNotFound(id)) if id == "b"));
+		assert!(matches!(g.add_edge("x", "a"), Err(GraphError::NodeNotFound(id)) if id == "x"));
+		assert_eq!(g.edges.len(), 0);
 	}
 
 	#[test]
@@ -227,12 +207,12 @@ mod tests {
 		let mut g = Graph::new();
 		g.add_node("a", vec![1.0]).unwrap();
 		g.add_node("b", vec![1.0]).unwrap();
-		g.add_edge("a", "b", vec![]).unwrap();
+		g.add_edge("a", "b").unwrap();
 		g.add_self_loops();
-		let after_first = g.num_edges();
+		let after_first = g.edges.len();
 		g.add_self_loops();
 		assert_eq!(
-			g.num_edges(),
+			g.edges.len(),
 			after_first,
 			"self-loops are not duplicated on re-run"
 		);
@@ -260,7 +240,7 @@ mod tests {
 			("c", "a"),
 			("a", "c"),
 		] {
-			g.add_edge(s, t, vec![]).unwrap();
+			g.add_edge(s, t).unwrap();
 		}
 		g.add_self_loops();
 

@@ -4,17 +4,13 @@ use std::collections::HashMap;
 
 use crate::base::math::average_vec;
 
-use super::{load_graph, save_graph, Client, Endpoint};
+use super::{load_graph, save_graph, Client};
 
 const BATCH: usize = 64;
 
 pub(super) async fn cmd_reembed(cfg: &crate::config::Config, embed_url: &str, embed_model: &str) {
 	let mut g = load_graph(cfg);
-	let client = Client::new(
-		Endpoint::default(),
-		Endpoint::default(),
-		Endpoint::new(embed_url, embed_model, &cfg.embed.key),
-	);
+	let client = Client::new_embed_only(embed_url, embed_model, &cfg.embed.key);
 
 	let mut ids: Vec<String> = Vec::new();
 	let mut texts: Vec<String> = Vec::new();
@@ -163,7 +159,7 @@ mod tests {
 		);
 		let (url, server) = crate::test_support::spawn_http(app).await;
 
-		let client = crate::llm::Client::new_embed_only(&url, "test-model");
+		let client = crate::llm::Client::new_embed_only(&url, "test-model", "");
 		let ids = vec!["a".to_string(), "b".to_string()];
 		let texts = vec!["alpha".to_string(), "beta".to_string()];
 
@@ -208,7 +204,7 @@ mod tests {
 		];
 		store.cold_put_all(&seed).unwrap();
 
-		let client = crate::llm::Client::new_embed_only(&url, "m");
+		let client = crate::llm::Client::new_embed_only(&url, "m", "");
 		let err = reembed_cold(Some(store.clone()), &client)
 			.await
 			.expect_err("a mismatched cold batch must surface a partial-failure error");

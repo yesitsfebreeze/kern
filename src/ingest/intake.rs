@@ -9,12 +9,9 @@ use crate::ingest::Worker;
 use crate::types::LlmFunc;
 
 pub fn extract_claims(path: &Path, llm: &dyn Fn(&str) -> String) -> Option<(String, Vec<Claim>)> {
-	let text = match std::fs::read_to_string(path) {
-		Ok(t) => t,
-		Err(e) => {
-			tracing::warn!(target: "kern.ingest.intake", path = %path.display(), error = %e, "failed to read delta; leaving in intake");
-			return None;
-		}
+	let text = match read_text(path)? {
+		Text::Content(t) => t,
+		Text::Binary => return None,
 	};
 	let stem = path
 		.file_stem()
@@ -29,6 +26,23 @@ pub fn extract_claims(path: &Path, llm: &dyn Fn(&str) -> String) -> Option<(Stri
 		}
 	};
 	Some((stem, claims))
+}
+
+pub enum Text {
+	Content(String),
+	Binary,
+}
+
+// None = transient read error, retry next drain. Binary = never ingestable, quarantine.
+fn read_text(path: &Path) -> Option<Text> {
+	match std::fs::read_to_string(path) {
+		Ok(t) => Some(Text::Content(t)),
+		Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Some(Text::Binary),
+		Err(e) => {
+			tracing::warn!(target: "kern.ingest.intake", path = %path.display(), error = %e, "failed to read intake file; leaving for retry");
+			None
+		}
+	}
 }
 
 // Best effort: on rename failure (cross-device) the source is removed so it is not re-processed.
@@ -76,16 +90,43 @@ pub fn prune_done(done_dir: &Path, max_age: Duration, now: SystemTime) -> usize 
 	removed
 }
 
+// The intake contract: anything readable as text gets in. `.txt` is a session
+// transcript and is distilled into claims; everything else is a document and is
+// stored whole, which is why documents need no reason LLM. Binary is quarantined
+// rather than left to sit forever looking accepted.
+// ponytail: a file still being copied can read as valid-but-truncated text; a
+// mtime-settle check is the upgrade path if partial drops show up in practice.
 async fn drain_entry(
 	path: &Path,
 	done: &Path,
+	failed: &Path,
 	worker: &Worker,
-	llm: &LlmFunc,
+	llm: Option<&LlmFunc>,
 	cfg: &crate::ingest::Config,
 ) -> bool {
-	if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("txt") {
+	if !path.is_file() {
 		return false;
 	}
+	let text = match read_text(path) {
+		Some(Text::Content(t)) => t,
+		Some(Text::Binary) => {
+			tracing::warn!(target: "kern.ingest.intake", path = %path.display(), "not text; moved to failed/");
+			archive(path, failed);
+			return false;
+		}
+		None => return false,
+	};
+	if text.trim().is_empty() {
+		archive(path, done);
+		return true;
+	}
+	if path.extension().and_then(|s| s.to_str()) != Some("txt") {
+		return drain_document(path, &text, done, worker, cfg).await;
+	}
+	let Some(llm) = llm else {
+		tracing::warn!(target: "kern.ingest.intake", path = %path.display(), "transcript needs a reason LLM to distill; leaving in intake");
+		return false;
+	};
 	let (stem, claims) = match extract_claims(path, llm.as_ref()) {
 		Some(v) => v,
 		None => return false,
@@ -111,11 +152,47 @@ async fn drain_entry(
 	finalize(path, done, &results)
 }
 
+async fn drain_document(
+	path: &Path,
+	text: &str,
+	done: &Path,
+	worker: &Worker,
+	cfg: &crate::ingest::Config,
+) -> bool {
+	let name = path
+		.file_name()
+		.and_then(|s| s.to_str())
+		.unwrap_or("document")
+		.to_string();
+	let src = Source::File {
+		path: name.clone(),
+		section: String::new(),
+		title: name.clone(),
+		author: String::new(),
+		url: String::new(),
+	};
+	let outcome = worker
+		.run(
+			text.to_string(),
+			src,
+			EntityKind::Document,
+			String::new(),
+			1.0,
+			cfg.clone(),
+		)
+		.await;
+	let ok = !matches!(outcome.status, OutcomeStatus::Failed);
+	if !ok {
+		tracing::warn!(target: "kern.ingest.intake", name = %name, status = outcome.status.as_str(), "document ingest failed; leaving in intake for retry");
+	}
+	finalize(path, done, &[ok])
+}
+
 async fn drain_once(
 	intake_dir: &Path,
 	done: &Path,
 	worker: &Worker,
-	llm: &LlmFunc,
+	llm: Option<&LlmFunc>,
 	cfg: &crate::ingest::Config,
 	done_retention: Duration,
 	now: SystemTime,
@@ -127,9 +204,10 @@ async fn drain_once(
 			return 0;
 		}
 	};
+	let failed = intake_dir.join("failed");
 	let mut archived = 0;
 	for ent in entries.flatten() {
-		if drain_entry(&ent.path(), done, worker, llm, cfg).await {
+		if drain_entry(&ent.path(), done, &failed, worker, llm, cfg).await {
 			archived += 1;
 		}
 	}
@@ -142,7 +220,7 @@ async fn drain_once(
 pub async fn run(
 	intake_dir: PathBuf,
 	worker: Arc<Worker>,
-	llm: LlmFunc,
+	llm: Option<LlmFunc>,
 	dedup_threshold: f64,
 	interval: Duration,
 	done_retention: Duration,
@@ -158,7 +236,7 @@ pub async fn run(
 			&intake_dir,
 			&done,
 			&worker,
-			&llm,
+			llm.as_ref(),
 			&cfg,
 			done_retention,
 			SystemTime::now(),
@@ -299,7 +377,7 @@ mod tests {
 		let addr = listener.local_addr().unwrap();
 		let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-		let embedder = crate::llm::Client::new_embed_only(&format!("http://{addr}"), "m");
+		let embedder = crate::llm::Client::new_embed_only(&format!("http://{addr}"), "m", "");
 		let llm: LlmFunc =
 			Arc::new(|_p: &str| r#"[{"text":"the API key lives in vault X","kind":"fact"}]"#.to_string());
 		let graph = Arc::new(RwLock::new(GraphGnn::new()));
@@ -319,7 +397,7 @@ mod tests {
 			&intake,
 			&done,
 			&worker,
-			&llm,
+			Some(&llm),
 			&cfg,
 			Duration::from_secs(3600),
 			SystemTime::now(),
@@ -332,12 +410,69 @@ mod tests {
 		);
 		assert!(!delta.exists(), "consumed delta left the intake");
 		assert!(done.join("sess-42.txt").exists(), "delta moved into done/");
-		let g = crate::base::locks::read_recovered(&graph);
+		let g = graph.read();
 		let entities: usize = g.all().iter().map(|k| k.entities.len()).sum();
 		assert!(
 			entities > 0,
 			"the claim flowed through the worker into the graph"
 		);
+
+		server.abort();
+	}
+
+	// The intake promise: drop a document in, it lands — no reason LLM, no .txt suffix.
+	#[tokio::test]
+	async fn drain_once_ingests_a_non_txt_document_without_an_llm() {
+		use crate::base::graph::GraphGnn;
+		use parking_lot::RwLock;
+
+		let app = axum::Router::new().route(
+			"/api/embed",
+			axum::routing::post(|_b: axum::Json<serde_json::Value>| async move {
+				axum::Json(serde_json::json!({ "embeddings": [[0.1, 0.2, 0.3]] }))
+			}),
+		);
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let addr = listener.local_addr().unwrap();
+		let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+		let embedder = crate::llm::Client::new_embed_only(&format!("http://{addr}"), "m", "");
+		let graph = Arc::new(RwLock::new(GraphGnn::new()));
+		let worker = Arc::new(Worker::new(graph.clone(), embedder, None, None, None));
+
+		let dir = tempdir().unwrap();
+		let intake = dir.path().to_path_buf();
+		let done = intake.join("done");
+		let doc = intake.join("spec.md");
+		std::fs::write(&doc, "# Spec\n\nThe retry budget is four attempts.").unwrap();
+		let binary = intake.join("logo.png");
+		std::fs::write(&binary, [0xff, 0xd8, 0xff, 0xe0, 0x00]).unwrap();
+
+		let cfg = crate::ingest::Config {
+			dedup_threshold: 0.95,
+			..Default::default()
+		};
+		let archived = drain_once(
+			&intake,
+			&done,
+			&worker,
+			None,
+			&cfg,
+			Duration::from_secs(3600),
+			SystemTime::now(),
+		)
+		.await;
+
+		assert_eq!(archived, 1, "the document committed with no LLM configured");
+		assert!(!doc.exists(), "consumed document left the intake");
+		assert!(done.join("spec.md").exists(), "document moved into done/");
+		assert!(
+			!binary.exists() && intake.join("failed").join("logo.png").exists(),
+			"binary quarantined into failed/ instead of sitting in the intake forever"
+		);
+		let g = graph.read();
+		let entities: usize = g.all().iter().map(|k| k.entities.len()).sum();
+		assert!(entities > 0, "the document reached the graph");
 
 		server.abort();
 	}

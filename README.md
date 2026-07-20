@@ -1,7 +1,7 @@
 # kern
 
 **A self-learning memory daemon for AI agents.** One long-running process per
-working directory owns a knowledge graph that captures durable facts from your
+working directory owns a knowledge graph that takes in durable facts from your
 sessions, keeps itself small without gardening, and serves the right context
 back when you need it.
 
@@ -10,24 +10,22 @@ learns on its own, compacts on its own, and (optionally) federates across
 machines on its own.
 
 ```
-session text → intake → distill (LLM) → typed claims → graph → digest → recall
+session text → intake → distill (LLM) → typed claims → graph → recall
 ```
 
 ---
 
 ## What it does
 
-- **Captures automatically.** A conversation delta (a `.txt` file) dropped in
-  `<cwd>/.kern/capture/` — by your agent, a wrapper, or the `ingest` MCP tool —
+- **Takes files automatically.** A conversation delta (a `.txt` file) dropped in
+  `<cwd>/.kern/intake/` — by your agent, a wrapper, or the `ingest` MCP tool —
   is drained by the daemon, which runs one LLM distillation pass that pulls out
   durable *facts*, *decisions*, and *preferences* as typed claims and ingests
   each into the graph. Nothing is lost on an LLM outage — the delta stays queued
   until it succeeds.
 
-- **Recalls into context.** The daemon keeps a fresh **digest** (root gravitons +
-  hottest thoughts) at `<cwd>/.kern/digest.md`; clients read it into new
-  sessions. For deeper mid-session lookups the agent calls the `query` MCP tool
-  directly.
+- **Recalls into context.** Recall is the `query` MCP tool: relevance-targeted
+  against the live graph, with provenance on every result.
 
 - **Compacts itself.** Every access deposits a **heat** trace, and the tick's
   pulse re-deposits heat on entities still reachable from the roots; heat then
@@ -106,9 +104,23 @@ KV. Hot graph and cold tier live together in one LMDB environment
 (`data.mdb` + `lock.mdb`) per data dir; vectors are stored int8, values are
 `zstd(bincode)`. LMDB is single-writer: readers never block, writers serialize,
 and a guarded-flush protocol keeps a stale in-memory snapshot from overwriting
-newer on-disk state. The recall hook never opens the store at all — it only
-reads `.kern/digest.md`. HNSW, the GNN, beam search, gossip, and the MCP server
+newer on-disk state. HNSW, the GNN, beam search, gossip, and the MCP server
 are all written from scratch.
+
+### The hub
+
+One machine-level supervisor owns node lifecycle. `kern mcp` asks the hub for
+the project's daemon — auto-starting the hub if none runs (`[hub] auto_start =
+false` opts out) — and the hub spawns the node, adopts an externally started
+one, or hands back the live socket. `kern hub status` lists
+tracked nodes; `kern hub unload [root]` shuts one down gracefully
+(save-then-exit over RPC). Nodes idle past `--idle-unload-secs` (default 30
+min) are unloaded automatically and respawn on the next connect, so memory
+tracks the active set, not the installed set. `kern hub merge <src> <dst>`
+folds one project's graph into another (offline CRDT union; src untouched);
+`kern hub stop` ends the hub, leaving nodes up. The data path stays direct
+client→daemon — the hub is connect-time only. If the hub is disabled or
+unreachable, everything falls back to the pre-hub behavior.
 
 ---
 
@@ -121,8 +133,8 @@ models pulled:
 
 ```bash
 ollama pull qwen3-embedding:0.6b  # embeddings (default)
-ollama pull qwen2.5:7b        # distillation / reasoning (default)
-ollama pull qwen3.5:4b        # /ask oracle answer model (default)
+ollama pull granite4:3b       # distillation / reasoning (default)
+# the /ask oracle answer model defaults to the same granite4:3b
 ```
 
 **1. Install the binary.** A prebuilt binary for your platform (built by CI and
@@ -155,24 +167,23 @@ client's config:
 }
 ```
 
-**3. Wire capture + recall (optional).** kern is agent-agnostic: any tool that
-writes a conversation delta to `<cwd>/.kern/capture/*.txt` feeds capture, and
-any client that reads `<cwd>/.kern/digest.md` gets recall. Wire those two in
+**3. Wire the intake (optional).** kern is agent-agnostic: any tool that
+writes a conversation delta to `<cwd>/.kern/intake/*` feeds the intake. Wire it
 whatever way your client supports (a hook, a wrapper, or a manual `kern ingest`).
+Recall needs no wiring — it is the `query` MCP tool.
 
 **4. Opt the project in.** No config file is needed — every default (embedding,
-reasoning, capture, tick) works out of the box against a local Ollama. The
+reasoning, intake, tick) works out of the box against a local Ollama. The
 daemon gates on the `.kern/` directory: it is created automatically the first
 time the daemon persists, or `mkdir .kern` to opt in immediately. Once it
-exists, capture and recall activate for that project. (A
+exists, the intake and recall activate for that project. (A
 `<cwd>/.kern/kern.toml` is only for overriding defaults — see *Configure*
 below.)
 
 **5. Seed the graph** (see *Seed the graph* below), then start a session. From
-then on, capture and recall are automatic.
+then on, the intake and recall are automatic.
 
-To verify it's working, call the `health` MCP tool from your session, or check
-that the daemon has written `<cwd>/.kern/digest.md`. Prefer the MCP tools
+To verify it's working, call the `health` MCP tool from your session. Prefer the MCP tools
 over the `kern <subcommand>` CLI for live state — the CLI reads the on-disk
 graph directly and can race the running daemon.
 
@@ -182,7 +193,7 @@ daemon stopped) once per data directory to import them into the new LMDB store:
 
 ```bash
 kern migrate              # migrates <cwd>/.kern/data/ in-place
-kern migrate --path /dir  # or target a specific data directory
+kern migrate /dir         # or target a specific data directory
 ```
 
 The old shard files are left in place; remove them once you've verified recall is
@@ -199,7 +210,7 @@ recalls with the defaults shown below. To override, create
 [reason]
 # LLM for distillation. Local Ollama.
 url = "http://localhost:11434"
-model = "qwen2.5:7b"        # default (small, fast, reliable)
+model = "granite4:3b"       # default (small, fast, reliable)
 
 [embed]
 # Embedding model. Local Ollama.
@@ -209,11 +220,13 @@ model = "qwen3-embedding:0.6b"  # default; dimension locks the graph (use `kern 
 [answer]
 # User-facing /ask oracle (streamed answer over MCP). Latency-critical, only
 # glues retrieved nodes into prose → smallest model that grounds. Uses Ollama's
-# native /api/chat (capped context, kept GPU-resident). url/key blank → fall back
-# to [reason]'s endpoint, so a single local Ollama needs no extra wiring.
-model = "qwen3.5:4b"        # default; must be an Ollama model
+# native /api/chat (capped context, kept GPU-resident) only when the url is local
+# and does not end in /v1 — otherwise it speaks OpenAI-compatible /v1/chat/completions,
+# so a remote or vLLM endpoint works here too. url/key blank → fall back to
+# [reason]'s endpoint, so a single local Ollama needs no extra wiring.
+model = "granite4:3b"       # default (same as [reason])
 
-[capture]
+[intake]
 enabled = true          # self-learning (ON by default; set false to opt out)
 
 [tick]
@@ -233,18 +246,17 @@ peers = []
 > unauthenticated and unencrypted today — enable it only on a network segment
 > where you trust every host.
 
-### Capture & recall
+### Intake & recall
 
-kern is agent-agnostic. There is no client-specific plugin; you wire capture
+kern is agent-agnostic. There is no client-specific plugin; you wire the intake
 and recall to whatever you use via two simple files.
 
-- **Capture** — drop a conversation delta as a `.txt` file in
-  `<cwd>/.kern/capture/`. The daemon drains it, distills typed claims out of it,
+- **Intake** — drop a conversation delta as a `.txt` file in
+  `<cwd>/.kern/intake/`. The daemon drains it, distills typed claims out of it,
   and ingests them. Write the file however your client supports (a hook, a
   wrapper, or a manual `kern ingest`); kern only cares about the file.
-- **Recall** — read `<cwd>/.kern/digest.md` into a new session for ambient
-  context, and call the `query` MCP tool for mid-session lookups. The daemon
-  keeps the digest fresh.
+- **Recall** — call the `query` MCP tool. It is relevance-targeted against the
+  live graph and keeps provenance on every result.
 
 Both no-op outside a directory with a `.kern/` folder, so a single global
 registration is safe across every project — only directories where a kern is
@@ -267,12 +279,12 @@ daemon). From an MCP session in the project:
    thoughts near a graviton by `gravity_weight * mass * cos`. Memories that
    match no graviton land in `generic`; dense `generic` clusters auto-promote to
    new gravitons over time.
-2. Add the typed descriptors you want to capture — call `descriptor` (action
+2. Add the typed descriptors you want the intake to emit — call `descriptor` (action
    `add`) once each for the kinds you use: `preference`, `decision`, `project`,
    `fact`, `code-fact`, `reference`, `procedural`.
 
 After seeding, normal sessions populate the graph automatically through the
-capture hook.
+intake hook.
 
 ### MCP tools
 
@@ -287,6 +299,7 @@ capture hook.
 | `descriptor` | Add/remove a data-type descriptor. |
 | `health` | Graph stats: thought/edge counts, tick heat. |
 | `pulse` | Trigger a clustering pass across the kern tree. |
+| `gc` | Reap empty/orphan kerns from the running daemon's graph and persist, live. Returns before/after kern counts and the `data.mdb` size. |
 
 ---
 
@@ -298,7 +311,7 @@ that operates itself.
 
 | | Traditional RAG | kern |
 | --- | --- | --- |
-| **Ingestion** | Manual: you run a chunk-and-embed job over a corpus. | Automatic: session deltas distill into typed claims via the capture intake. |
+| **Ingestion** | Manual: you run a chunk-and-embed job over a corpus. | Automatic: session deltas distill into typed claims via the intake. |
 | **Unit stored** | Raw text chunks. | Distilled facts/decisions/preferences + *reason edges* between them. |
 | **Retrieval** | top-k vector similarity. | Hybrid vector + BM25 with GNN-blended seeds, edge expansion, RRF + PageRank fusion, optional LLM rerank, diversify. |
 | **Structure** | A flat bag of vectors. | A knowledge graph — recall can follow *why* one fact connects to another. |

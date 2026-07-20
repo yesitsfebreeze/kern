@@ -2,8 +2,6 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::base::locks::lock_recovered;
-
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -21,6 +19,8 @@ pub enum TaskKind {
 	StigmergyGc,
 	Reembed,
 	DiskConsolidate,
+	// graph-global; kern_id empty
+	IdleSweep,
 	// extra = newline-joined entity ids; kern_id empty
 	CommitAccess,
 }
@@ -68,13 +68,13 @@ impl Queue {
 	}
 
 	pub fn take_receiver(&self) -> Option<mpsc::Receiver<Task>> {
-		lock_recovered(&self.rx).take()
+		self.rx.lock().take()
 	}
 
 	pub fn enqueue(&self, t: Task) -> bool {
 		let k = key_of(&t);
 		{
-			let mut pending = lock_recovered(&self.pending);
+			let mut pending = self.pending.lock();
 			if *pending.get(&k).unwrap_or(&false) {
 				return false;
 			}
@@ -89,7 +89,7 @@ impl Queue {
 				.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
 			// Roll back the pending marker too — else a full-channel failure flags
 			// this key forever and dedup blocks every future re-enqueue.
-			lock_recovered(&self.pending).remove(&k);
+			self.pending.lock().remove(&k);
 			return false;
 		}
 		true
@@ -97,7 +97,7 @@ impl Queue {
 
 	pub fn dequeued(&self, t: &Task) {
 		let k = key_of(t);
-		lock_recovered(&self.pending).remove(&k);
+		self.pending.lock().remove(&k);
 	}
 
 	pub fn done(&self) {
@@ -107,17 +107,17 @@ impl Queue {
 	}
 
 	pub fn pending_count(&self) -> usize {
-		lock_recovered(&self.pending).len()
+		self.pending.lock().len()
 	}
 
 	pub fn record_task_latency(&self, d: Duration) {
-		let mut s = lock_recovered(&self.stats);
+		let mut s = self.stats.lock();
 		s.0 += 1;
 		s.1 += d;
 	}
 
 	pub fn metrics(&self) -> (i64, i64) {
-		let (count, total) = *lock_recovered(&self.stats);
+		let (count, total) = *self.stats.lock();
 		let avg = if count > 0 {
 			total.as_millis() as i64 / count
 		} else {

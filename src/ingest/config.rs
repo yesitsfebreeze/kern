@@ -3,7 +3,6 @@ use crate::base::constants::INGEST_DEDUP_THRESHOLD;
 #[derive(Debug, Clone)]
 pub struct Config {
 	pub dedup_threshold: f64,
-	pub ttl_secs: Option<u64>,
 	pub valid_from: Option<std::time::SystemTime>,
 }
 
@@ -11,7 +10,6 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			dedup_threshold: INGEST_DEDUP_THRESHOLD,
-			ttl_secs: None,
 			valid_from: None,
 		}
 	}

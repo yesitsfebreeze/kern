@@ -153,7 +153,7 @@ mod tests {
 		let addr = listener.local_addr().unwrap();
 		let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-		let embedder = crate::llm::Client::new_embed_only(&format!("http://{addr}"), "m");
+		let embedder = crate::llm::Client::new_embed_only(&format!("http://{addr}"), "m", "");
 		let graph = Arc::new(RwLock::new(GraphGnn::new()));
 		let worker = Worker::new(graph.clone(), embedder, None, None, None);
 
@@ -172,7 +172,7 @@ mod tests {
 			direct.join("done").join(format!("{doc_id}.json")).exists(),
 			"intake file moved into direct/done/"
 		);
-		let g = crate::base::locks::read_recovered(&graph);
+		let g = graph.read();
 		let total: usize = g.all().iter().map(|k| k.entities.len()).sum();
 		assert!(
 			total > 0,
@@ -184,7 +184,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn drain_direct_once_leaves_failed_job_for_retry() {
-		let embedder = crate::llm::Client::new_embed_only("http://127.0.0.1:1", "m");
+		let embedder = crate::llm::Client::new_embed_only("http://127.0.0.1:1", "m", "");
 		let graph = Arc::new(RwLock::new(GraphGnn::new()));
 		let worker = Worker::new(graph, embedder, None, None, None);
 

@@ -5,6 +5,13 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
 	defs
 }
 
+pub(crate) fn typed_tool_schemas() -> Vec<trnsprt::ToolSchema> {
+	tool_definitions()
+		.into_iter()
+		.filter_map(|v| serde_json::from_value(v).ok())
+		.collect()
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -23,6 +30,7 @@ mod tests {
 			"link",
 			"forget",
 			"degrade",
+			"move",
 			"health",
 			"graviton",
 			"descriptor",
@@ -80,6 +88,7 @@ mod tests {
 			("link", &["from", "to"]),
 			("forget", &["id"]),
 			("degrade", &["query_id"]),
+			("move", &["id", "to_kern"]),
 			("descriptor", &["action", "name"]),
 		];
 		for (name, fields) in want {

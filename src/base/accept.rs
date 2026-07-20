@@ -21,17 +21,91 @@ fn effective_distance(dist: f64, mass: f64) -> f64 {
 	dist / mass.max(MASS_EPSILON)
 }
 
+// Callers with no ingest config in scope (bench, tests) get the same default the
+// config layer starts from, so the two dedup checks can never disagree.
 pub fn accept(g: &mut GraphGnn, kern_id: &str, thought: Entity, doc_id: &str) -> AcceptResult {
-	// Dedup scans graph-wide and routing only reads or spawns empty kerns, so
-	// the result cannot change during descent — safe to compute once.
-	let is_dup = is_duplicate(g, &thought.vector);
-	let target_id = route_entity(g, kern_id, &thought, is_dup);
-	commit_entity(g, &target_id, thought, doc_id, is_dup)
+	accept_with_dedup(g, kern_id, thought, doc_id, INGEST_DEDUP_THRESHOLD)
 }
 
-fn is_duplicate(g: &GraphGnn, vector: &[f32]) -> bool {
-	let hits = search_all_unlocked(g, vector, 1);
-	!hits.is_empty() && hits[0].score > DEFAULT_DEDUP_THRESHOLD
+pub fn accept_with_dedup(
+	g: &mut GraphGnn,
+	kern_id: &str,
+	thought: Entity,
+	doc_id: &str,
+	dedup_threshold: f64,
+) -> AcceptResult {
+	// Dedup scans graph-wide and routing only reads or spawns empty kerns, so
+	// the result cannot change during descent — safe to compute once.
+	let dup = find_duplicate_hit(g, &thought.vector, dedup_threshold);
+	let target_id = route_entity(g, kern_id, &thought, dup.is_some());
+	commit_entity(g, &target_id, thought, doc_id, dup)
+}
+
+fn find_duplicate_hit(g: &GraphGnn, vector: &[f32], threshold: f64) -> Option<(String, f64)> {
+	let h = search_all_unlocked(g, vector, 1).into_iter().next()?;
+	(h.score >= threshold).then_some((h.entity_id, h.score))
+}
+
+pub struct MergeOutcome {
+	pub kern_id: String,
+	pub rephrase_id: Option<String>,
+	pub same_kind: bool,
+}
+
+// INVARIANT: never overwrite statements/vector under the existing id
+// (= content_hash(text)); differing phrasing → Rephrase edge.
+pub fn merge_duplicate(
+	g: &mut GraphGnn,
+	entity_id: &str,
+	new_text: &str,
+	new_score: f64,
+	incoming_kind: EntityKind,
+) -> Option<MergeOutcome> {
+	let kern_id = g.kern_of_entity(entity_id)?.to_string();
+	let kern = g.get_mut(&kern_id)?;
+
+	let (differs, old_kind) = {
+		let t = kern.entities.get_mut(entity_id)?;
+		t.observe_support(new_score);
+		t.updated_at = Some(std::time::SystemTime::now());
+		(t.text() != new_text, t.kind)
+	};
+	let same_kind = incoming_kind == old_kind;
+
+	if !differs {
+		return Some(MergeOutcome {
+			kern_id,
+			rephrase_id: None,
+			same_kind,
+		});
+	}
+
+	let rid = reason_id(entity_id, "", ReasonKind::Rephrase, new_text, "");
+	let reason = Reason {
+		id: rid.clone(),
+		from: entity_id.to_string(),
+		// Rephrase is a LOCAL annotation on `from` — the three cross-kern fields
+		// are intentionally blank.
+		to: String::new(),
+		to_kern_id: String::new(),
+		to_net_id: String::new(),
+		kind: ReasonKind::Rephrase,
+		dirty: false,
+		text: new_text.to_string(),
+		vector: Vec::new(),
+		score: 0.5,
+		score_lamport: 0,
+		score_producer: String::new(),
+		traversal_count: GCounter::new(),
+		producer_id: String::new(),
+	};
+	add_reason(kern, reason);
+
+	Some(MergeOutcome {
+		kern_id,
+		rephrase_id: Some(rid),
+		same_kind,
+	})
 }
 
 fn route_entity(g: &mut GraphGnn, kern_id: &str, thought: &Entity, is_dup: bool) -> String {
@@ -95,14 +169,22 @@ fn commit_entity(
 	kern_id: &str,
 	mut thought: Entity,
 	doc_id: &str,
-	is_dup: bool,
+	dup: Option<(String, f64)>,
 ) -> AcceptResult {
-	if is_dup {
+	// A duplicate MERGES into the survivor: corroboration plus a Rephrase edge for
+	// the alternate wording. Returning early stored nothing and merged nothing.
+	if let Some((survivor_id, _)) = dup {
+		let text = thought.text();
+		let outcome = merge_duplicate(g, &survivor_id, &text, thought.conf_mean(), thought.kind);
+		let (placed_in, reason_ids) = match outcome {
+			Some(o) => (o.kern_id, o.rephrase_id.into_iter().collect()),
+			None => (kern_id.to_string(), Vec::new()),
+		};
 		return AcceptResult {
-			placed_in: kern_id.to_string(),
-			entity_id: thought.id.clone(),
+			placed_in,
+			entity_id: survivor_id,
 			deduped: true,
-			reason_ids: Vec::new(),
+			reason_ids,
 		};
 	}
 
@@ -989,6 +1071,129 @@ mod tests {
 		assert!(r2.deduped, "identical vector must dedup");
 	}
 
+	fn ent_text(id: &str, vector: Vec<f32>, text: &str) -> Entity {
+		Entity {
+			id: id.into(),
+			vector,
+			statements: vec![text.into()],
+			chunks: vec![ChunkPart {
+				kind: ChunkPartKind::StatementRef,
+				index: 0,
+				text: String::new(),
+			}],
+			..Default::default()
+		}
+	}
+
+	fn survivor<'a>(g: &'a GraphGnn, id: &str) -> &'a Entity {
+		let kid = g.kern_of_entity(id).expect("survivor is indexed");
+		g.loaded(kid).unwrap().entities.get(id).unwrap()
+	}
+
+	#[test]
+	fn accept_time_duplicate_merges_instead_of_dropping() {
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		let r1 = accept(
+			&mut g,
+			&root,
+			ent_text("a", vec![1.0, 0.0, 0.0], "the claim"),
+			"",
+		);
+		assert!(!r1.deduped);
+		let before = survivor(&g, "a").clone();
+
+		let r2 = accept(
+			&mut g,
+			&root,
+			ent_text("b", vec![1.0, 0.0, 0.0], "the claim reworded"),
+			"",
+		);
+		assert!(r2.deduped, "identical vector must dedup");
+		assert_eq!(
+			r2.entity_id, "a",
+			"result names the SURVIVOR, not the dropped incoming id"
+		);
+
+		let after = survivor(&g, "a");
+		assert!(
+			after.conf_alpha > before.conf_alpha,
+			"duplicate corroborates the survivor instead of vanishing"
+		);
+		assert!(after.updated_at.is_some(), "updated_at bumped");
+		assert!(
+			!g.loaded(&r2.placed_in).unwrap().entities.contains_key("b"),
+			"the duplicate is not stored under its own id"
+		);
+	}
+
+	#[test]
+	fn accept_time_duplicate_records_rephrase_edge() {
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		accept(
+			&mut g,
+			&root,
+			ent_text("a", vec![1.0, 0.0, 0.0], "the claim"),
+			"",
+		);
+		let r = accept(
+			&mut g,
+			&root,
+			ent_text("b", vec![1.0, 0.0, 0.0], "the claim reworded"),
+			"",
+		);
+
+		let kid = g.kern_of_entity("a").unwrap();
+		let rephrase: Vec<_> = g
+			.loaded(kid)
+			.unwrap()
+			.reasons
+			.values()
+			.filter(|x| x.kind == ReasonKind::Rephrase)
+			.collect();
+		assert_eq!(rephrase.len(), 1, "exactly one rephrase edge");
+		assert_eq!(rephrase[0].from, "a", "annotated on the survivor");
+		assert_eq!(
+			rephrase[0].text, "the claim reworded",
+			"alternate phrasing preserved"
+		);
+		assert_eq!(
+			r.reason_ids,
+			vec![rephrase[0].id.clone()],
+			"merge reports the edge it minted"
+		);
+	}
+
+	#[test]
+	fn accept_time_merge_never_overwrites_survivor_text_or_vector() {
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		accept(
+			&mut g,
+			&root,
+			ent_text("a", vec![1.0, 0.0, 0.0], "the claim"),
+			"",
+		);
+		let before = survivor(&g, "a").clone();
+
+		accept(
+			&mut g,
+			&root,
+			ent_text("b", vec![1.0, 0.0, 0.0], "a totally different wording"),
+			"",
+		);
+
+		let after = survivor(&g, "a");
+		assert_eq!(after.id, "a", "content-addressed id unchanged");
+		assert_eq!(after.text(), before.text(), "stored text NOT overwritten");
+		assert_eq!(
+			after.statements, before.statements,
+			"statements NOT overwritten"
+		);
+		assert_eq!(after.vector, before.vector, "vector NOT overwritten");
+	}
+
 	#[test]
 	fn distinct_vector_is_placed() {
 		let mut g = GraphGnn::new();
@@ -1032,7 +1237,10 @@ mod tests {
 	fn routes_match_to_graviton() {
 		let (mut g, root, graviton_id) = graph_with_graviton();
 		let r = accept(&mut g, &root, ent("e", vec![1.0, 0.0, 0.0]), "");
-		assert_eq!(r.placed_in, graviton_id, "matching entity enters its graviton");
+		assert_eq!(
+			r.placed_in, graviton_id,
+			"matching entity enters its graviton"
+		);
 	}
 
 	fn graviton_names(g: &GraphGnn) -> Vec<String> {
@@ -1067,7 +1275,10 @@ mod tests {
 			!graviton_names(&g).contains(&"work".to_string()),
 			"graviton no longer a named root child"
 		);
-		assert!(!remove_graviton(&mut g, "missing"), "missing graviton -> false");
+		assert!(
+			!remove_graviton(&mut g, "missing"),
+			"missing graviton -> false"
+		);
 	}
 
 	#[test]

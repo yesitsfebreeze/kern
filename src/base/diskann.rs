@@ -389,17 +389,6 @@ impl DiskIndex {
 			.collect()
 	}
 
-	pub fn search_hits(&self, query: &[f32], k: usize, search_l: usize) -> Vec<HnswHit> {
-		self
-			.search(query, k, search_l)
-			.into_iter()
-			.map(|(id, dist)| HnswHit {
-				id,
-				score: 1.0 - dist as f64,
-			})
-			.collect()
-	}
-
 	pub fn search_hits_filtered(
 		&self,
 		query: &[f32],
@@ -503,13 +492,13 @@ mod tests {
 	}
 
 	#[test]
-	fn search_hits_returns_cosine_similarity_nearest_first() {
+	fn search_hits_filtered_returns_cosine_similarity_nearest_first() {
 		let dir = tempfile::tempdir().unwrap();
 		let items = rand_items(200, 16, 1);
 		build_and_save(dir.path(), &items, Params::default()).unwrap();
 		let idx = DiskIndex::open(dir.path()).unwrap();
 
-		let hits = idx.search_hits(&items[0].1, 5, 64);
+		let hits = idx.search_hits_filtered(&items[0].1, 5, 64, &|_| true);
 		assert_eq!(hits.len(), 5);
 		assert_eq!(hits[0].id, "e0", "indexed point finds itself first");
 		assert!(
@@ -544,7 +533,7 @@ mod tests {
 		);
 
 		let wide: HashSet<String> = idx
-			.search_hits(q, 128, 128)
+			.search_hits_filtered(q, 128, 128, &|_| true)
 			.into_iter()
 			.map(|h| h.id)
 			.collect();

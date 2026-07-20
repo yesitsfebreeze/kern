@@ -8,7 +8,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
 use crate::base::constants::*;
-use crate::base::locks::{read_recovered, write_recovered};
 
 use super::ledger::Ledger;
 use super::seen::SeenSet;
@@ -35,6 +34,8 @@ pub struct Node {
 impl Node {
 	pub fn new(addr: &str, network_id: &str, peers: Vec<String>) -> Arc<Self> {
 		let (stop_tx, stop_rx) = watch::channel(false);
+		let mut peers = peers;
+		peers.truncate(GOSSIP_MAX_PEERS);
 		Arc::new(Self {
 			addr: RwLock::new(addr.to_string()),
 			network_id: network_id.to_string(),
@@ -50,15 +51,15 @@ impl Node {
 	}
 
 	pub fn set_handler(&self, h: Handler) {
-		*write_recovered(&self.handler) = Some(h);
+		*self.handler.write() = Some(h);
 	}
 
 	pub fn set_fetch_handler(&self, h: FetchHandler) {
-		*write_recovered(&self.fetch_handler) = Some(h);
+		*self.fetch_handler.write() = Some(h);
 	}
 
 	pub fn addr(&self) -> String {
-		read_recovered(&self.addr).clone()
+		self.addr.read().clone()
 	}
 
 	pub fn bump_lamport(&self) -> u64 {
@@ -79,7 +80,7 @@ impl Node {
 	}
 
 	pub fn add_peer(&self, addr: &str) {
-		let mut peers = write_recovered(&self.peers);
+		let mut peers = self.peers.write();
 		if peers.len() >= GOSSIP_MAX_PEERS {
 			return;
 		}
@@ -89,18 +90,18 @@ impl Node {
 	}
 
 	pub fn peer_list(&self) -> Vec<String> {
-		read_recovered(&self.peers).clone()
+		self.peers.read().clone()
 	}
 
 	pub fn peer_count(&self) -> usize {
-		read_recovered(&self.peers).len()
+		self.peers.read().len()
 	}
 
 	pub async fn listen(self: &Arc<Self>) -> Result<String, std::io::Error> {
 		let addr = self.addr();
 		let listener = TcpListener::bind(&addr).await?;
 		let actual = listener.local_addr()?.to_string();
-		*write_recovered(&self.addr) = actual.clone();
+		*self.addr.write() = actual.clone();
 
 		let node = self.clone();
 		let mut stop = self.stop_rx.clone();
@@ -136,7 +137,10 @@ impl Node {
 	}
 
 	pub async fn fetch_thought(&self, network_id: &str, entity_id: &str) -> Option<Vec<u8>> {
-		let peer_addr = self.ledger.lookup_routing(network_id)?;
+		let peer_addr = self
+			.ledger
+			.lookup_thought(entity_id)
+			.or_else(|| self.ledger.lookup_routing(network_id))?;
 		let msg = GossipMessage {
 			kind: GossipKind::Fetch,
 			id: format!("fetch-{entity_id}-{}", now_nanos()),
@@ -209,7 +213,7 @@ impl Node {
 			self.ledger.put_routing(&s.kern_id, &msg.origin);
 		}
 
-		if let Some(h) = read_recovered(&self.handler).as_ref() {
+		if let Some(h) = self.handler.read().as_ref() {
 			h(msg.clone());
 		}
 
@@ -223,7 +227,7 @@ impl Node {
 			return;
 		};
 
-		let (body, found) = if let Some(fh) = read_recovered(&self.fetch_handler).as_ref() {
+		let (body, found) = if let Some(fh) = self.fetch_handler.read().as_ref() {
 			fh(resource, id)
 		} else {
 			(Vec::new(), false)
@@ -260,6 +264,45 @@ impl Node {
 	}
 }
 
-fn now_nanos() -> u64 {
-	crate::base::util::now_nanos() as u64
+use crate::base::util::now_nanos;
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	// Port 1 on loopback: refused instantly, no DNS and no off-host traffic.
+	const DEAD_SEED: &str = "127.0.0.1:1";
+
+	#[tokio::test]
+	async fn an_unreachable_bootstrap_seed_never_blocks_or_panics_startup() {
+		let node = Node::new("127.0.0.1:0", "net", vec![DEAD_SEED.into()]);
+		let started = std::time::Instant::now();
+		node.listen().await.expect("listener binds");
+		node.start_heartbeat();
+		node.broadcast(GossipMessage {
+			kind: GossipKind::PeerExchange,
+			id: "pe-1".into(),
+			origin: node.addr(),
+			payload: GossipPayload::PeerExchange(PeerExchangePayload {
+				peers: node.peer_list(),
+			}),
+		});
+		assert!(
+			started.elapsed() < GOSSIP_DIAL_TIMEOUT,
+			"a dead seed degrades in the background instead of stalling startup"
+		);
+		assert_eq!(node.peer_list(), vec![DEAD_SEED.to_string()]);
+		node.close();
+	}
+
+	#[test]
+	fn a_bootstrap_list_cannot_exceed_the_peer_cap() {
+		let peers: Vec<String> = (0..GOSSIP_MAX_PEERS + 10)
+			.map(|i| format!("10.0.0.{i}:7400"))
+			.collect();
+		let node = Node::new("127.0.0.1:0", "net", peers);
+		assert_eq!(node.peer_count(), GOSSIP_MAX_PEERS);
+		node.add_peer("10.9.9.9:7400");
+		assert_eq!(node.peer_count(), GOSSIP_MAX_PEERS, "add_peer still capped");
+	}
 }

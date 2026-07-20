@@ -5,7 +5,7 @@ pub struct Claim {
 	pub valid_from: Option<std::time::SystemTime>,
 }
 
-// Must mirror the descriptors seeded into the kern.
+// The claim kinds the distill prompt may emit.
 pub const DESCRIPTORS: [&str; 7] = [
 	"preference",
 	"decision",

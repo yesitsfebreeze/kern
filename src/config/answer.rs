@@ -8,7 +8,7 @@ pub struct AnswerConfig {
 	pub key: String,
 }
 
-// Aliases the reason default: one runner serves both LLM legs (see CHANGELOG 2026-07-17).
+// Aliases the reason default: one runner serves both LLM legs.
 pub const DEFAULT_ANSWER_MODEL: &str = super::reason::DEFAULT_REASON_MODEL;
 
 impl Default for AnswerConfig {

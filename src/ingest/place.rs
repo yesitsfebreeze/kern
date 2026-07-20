@@ -11,7 +11,7 @@ use crate::llm::Client as LlmClient;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 fn beta_params_from_confidence(conf: f32) -> (f32, f32) {
 	(1.0 + conf, 1.0 + (1.0 - conf))
@@ -101,10 +101,6 @@ pub(crate) async fn place_document(
 	}
 
 	let external_id = job.source.source_id().unwrap_or_default();
-	let valid_until = job
-		.config
-		.ttl_secs
-		.map(|s| SystemTime::now() + Duration::from_secs(s));
 
 	let mut thought = new_statement_entity(
 		doc_id.to_string(),
@@ -114,7 +110,7 @@ pub(crate) async fn place_document(
 		job.source.clone(),
 		external_id,
 		job.confidence,
-		valid_until,
+		None,
 		unlinked,
 	);
 	thought.valid_from = job.config.valid_from;
@@ -141,7 +137,7 @@ pub(crate) async fn place_document(
 				lww_value,
 			});
 		}
-		accept::accept(&mut g, &root_id, thought.clone(), "");
+		accept::accept_with_dedup(&mut g, &root_id, thought.clone(), "", dedup_threshold);
 		g.lexical()
 	};
 	if let Some(lex) = lex {
@@ -191,10 +187,6 @@ pub(crate) fn place_chunks(
 		}
 
 		let external_id = chunk_source_id(&job.source, i);
-		let chunk_valid_until = job
-			.config
-			.ttl_secs
-			.map(|s| SystemTime::now() + Duration::from_secs(s));
 		let mut thought = build_chunk_entity(
 			chunk,
 			vec,
@@ -202,7 +194,7 @@ pub(crate) fn place_chunks(
 			&job.source,
 			&external_id,
 			job.confidence,
-			chunk_valid_until,
+			None,
 		);
 		thought.valid_from = job.config.valid_from;
 		let tid = thought.id.clone();
@@ -228,7 +220,7 @@ pub(crate) fn place_chunks(
 					lww_value,
 				});
 			}
-			let r = accept::accept(&mut g, &root_id, thought, doc_id);
+			let r = accept::accept_with_dedup(&mut g, &root_id, thought, doc_id, dedup_threshold);
 			let l = g.lexical();
 			(r, l)
 		};
@@ -393,6 +385,30 @@ mod tests {
 	}
 
 	#[test]
+	fn chunk_in_the_old_threshold_gap_is_not_silently_dropped() {
+		let g = empty_graph();
+		let chunks = vec!["alpha".to_string(), "alpha restated".to_string()];
+		// cosine 0.93: inside the old 0.92 accept / 0.95 ingest gap.
+		let vecs = vec![vec![1.0, 0.0, 0.0], vec![0.93, 0.367_6, 0.0]];
+		let placed = place_chunks(
+			&g,
+			None,
+			None,
+			&job("doc", 1.0),
+			&chunks,
+			&vecs,
+			"doc1",
+			0.95,
+		);
+		assert_eq!(placed, 2);
+		assert_eq!(
+			total_entity_count(&g),
+			2,
+			"below the configured dedup threshold -> stored as a new entity, not dropped"
+		);
+	}
+
+	#[test]
 	fn place_chunks_skips_empty_vectors() {
 		let g = empty_graph();
 		let chunks = vec!["a".to_string(), "b".to_string()];
@@ -442,7 +458,7 @@ mod tests {
 	#[tokio::test]
 	async fn place_document_reports_failure_and_leaves_graph_untouched_on_embed_error() {
 		let g = empty_graph();
-		let embedder = LlmClient::new_embed_only("http://127.0.0.1:1", "test");
+		let embedder = LlmClient::new_embed_only("http://127.0.0.1:1", "test", "");
 		let (id, fail) =
 			place_document(&g, &embedder, &job("a document", 1.0), "doc1", 0.95, None).await;
 		assert!(

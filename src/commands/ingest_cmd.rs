@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::base::locks::{read_recovered, write_recovered};
 use crate::base::math::clamp_confidence;
 use crate::base::store::FlushOutcome;
 use crate::base::types::Source;
@@ -58,16 +57,16 @@ pub(super) async fn cmd_ingest(
 	for attempt in 0..WRITE_RETRIES {
 		// Guard against the epoch observed at LOAD time, not a re-read at flush time —
 		// else a writer that committed in between gets overwritten unseen.
-		let expected = read_recovered(&g).flushed_epoch();
+		let expected = g.read().flushed_epoch();
 		// Bind before matching: a scrutinee temporary keeps the read guard alive
-		// across the match — deadlocking write_recovered below.
-		let flushed = crate::base::persist::flush_guarded(&read_recovered(&g), expected);
+		// across the match — deadlocking the write() below.
+		let flushed = crate::base::persist::flush_guarded(&g.read(), expected);
 		match flushed {
 			Ok(FlushOutcome::Flushed { .. }) => break,
 			Ok(FlushOutcome::RefusedStale { .. }) if attempt + 1 < WRITE_RETRIES => {
 				// Adopt the committed graph reusing the open store handle — never reopen the env.
 				{
-					let mut w = write_recovered(&g);
+					let mut w = g.write();
 					let fresh = super::reload_graph(cfg, &w);
 					*w = fresh;
 				}

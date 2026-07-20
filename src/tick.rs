@@ -1,18 +1,19 @@
 pub mod cluster;
 pub mod gnn_propagate;
+pub mod idle;
 pub mod pulse;
 pub mod queue;
 pub mod stigmergy;
 pub mod tasks;
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 
 use crate::base::constants::{KERN_COHESION_THRESHOLD, KERN_MIN_CLUSTER_SIZE};
 use crate::base::graph::GraphGnn;
-use crate::base::locks::{read_recovered, write_recovered};
+use crate::base::heat::HeatConfig;
 use crate::config::TickConfig;
 use crate::gnn::propagate::GnnConfig;
 
@@ -30,6 +31,7 @@ pub struct TickContext {
 	pub broadcast_q: Option<BroadcastQuestionFunc>,
 	pub gnn_cfg: GnnConfig,
 	pub tick_cfg: TickConfig,
+	pub heat_cfg: HeatConfig,
 }
 
 pub fn start(
@@ -62,9 +64,12 @@ fn process_task(q: &Queue, g: &Arc<RwLock<GraphGnn>>, t: &Task, ctx: &TickContex
 		TaskKind::ResolveQuestion => do_resolve(q, g, &t.kern_id, &t.extra, ctx.broadcast_q.as_ref()),
 		TaskKind::Persist => do_persist(g, &t.kern_id),
 		TaskKind::GnnPropagate => do_gnn_propagate(q, g, &t.kern_id, &ctx.gnn_cfg),
-		TaskKind::StigmergyGc => stigmergy::run_gc(g, &t.kern_id),
+		TaskKind::StigmergyGc => stigmergy::run_gc(g, &t.kern_id, &ctx.heat_cfg),
 		TaskKind::Reembed => do_reembed(g, &t.kern_id, embed),
 		TaskKind::DiskConsolidate => do_disk_consolidate(g),
+		TaskKind::IdleSweep => {
+			idle::run_idle_sweep(g, Duration::from_secs(ctx.tick_cfg.kern_idle_timeout_secs));
+		}
 		TaskKind::CommitAccess => do_commit_access(g, &t.extra),
 	}
 }
@@ -77,7 +82,7 @@ fn do_cluster(
 	llm: Option<&LlmFunc>,
 	_embed: Option<&EmbedFunc>,
 ) {
-	let mut graph = write_recovered(g);
+	let mut graph = g.write();
 
 	let (clusters, spawn_indices) = match graph.kerns.get(kern_id) {
 		Some(kern) => select_spawn_clusters(kern, tick_cfg.max_cluster_sample),
@@ -169,15 +174,16 @@ fn spawn_child_clusters(
 		// reuses the first unnamed child, collapsing every cluster into one kern.
 		let child_id = crate::base::accept::spawn_unnamed_child(graph, kern_id);
 		for m in &clusters[*i].members {
-			let entity_id = m.id.clone();
-			let thought = graph
-				.kerns
-				.get_mut(kern_id)
-				.and_then(|k| k.entities.remove(&entity_id));
-			if let Some(t) = thought {
-				if let Some(child) = graph.kerns.get_mut(&child_id) {
-					child.entities.insert(entity_id, t);
-				}
+			// Carries outgoing reasons and reindexes; a rejected move leaves the entity put.
+			if let Err(e) = crate::base::reason::move_entity(graph, kern_id, &child_id, &m.id) {
+				tracing::warn!(
+					target: "kern.cluster",
+					from = %kern_id,
+					to = %child_id,
+					entity = %m.id,
+					error = %e,
+					"cluster migration skipped"
+				);
 			}
 		}
 		spawned_children.push(child_id);
@@ -253,7 +259,7 @@ fn evict_empty_children(graph: &mut GraphGnn, kern_id: &str) -> bool {
 }
 
 pub fn enqueue_all(q: &Queue, g: &Arc<RwLock<GraphGnn>>) {
-	let graph = read_recovered(g);
+	let graph = g.read();
 	for kern in graph.all() {
 		if !kern.entities.is_empty() {
 			q.enqueue(task(TaskKind::Cluster, &kern.id));
@@ -277,6 +283,7 @@ pub fn tick_sync(
 		broadcast_q: bq.cloned(),
 		gnn_cfg: GnnConfig::defaults(),
 		tick_cfg: TickConfig::default(),
+		heat_cfg: HeatConfig::default(),
 	};
 
 	let gg = Arc::clone(g);
@@ -604,7 +611,7 @@ mod tests {
 
 		do_cluster(&q, &g, "k", &TickConfig::default(), None, None);
 
-		let children = read_recovered(&g).kerns.get("k").unwrap().children.clone();
+		let children = g.read().kerns.get("k").unwrap().children.clone();
 		assert!(!children.is_empty(), "precondition: a child spawned");
 
 		let mut rx = q.take_receiver().unwrap();
@@ -628,6 +635,108 @@ mod tests {
 				"child Persist must run before the parent row drops the migrated entities"
 			);
 		}
+	}
+
+	#[test]
+	fn spawning_a_cluster_carries_outgoing_reasons_and_reindexes_the_entity() {
+		use crate::base::reason::add_reason;
+		use crate::base::types::{Kern, Reason};
+
+		let mut g = GraphGnn::new();
+		let root_id = g.root.id.clone();
+		let mut parent = Kern::new("parent", &root_id);
+		for id in ["moved", "stays"] {
+			parent.entities.insert(
+				id.into(),
+				Entity {
+					id: id.into(),
+					..Default::default()
+				},
+			);
+		}
+		add_reason(
+			&mut parent,
+			Reason {
+				id: "out".into(),
+				from: "moved".into(),
+				to: "stays".into(),
+				..Default::default()
+			},
+		);
+		g.register(parent);
+		g.index_entity("moved", "parent");
+		g.index_entity("stays", "parent");
+		g.index_reason("out", "parent");
+
+		let clusters = vec![Cluster {
+			members: vec![Entity {
+				id: "moved".into(),
+				..Default::default()
+			}],
+		}];
+		let children = spawn_child_clusters(&mut g, "parent", &clusters, &[0]);
+		let child_id = children.first().expect("one child spawned").clone();
+
+		assert_eq!(
+			g.kern_of_entity("moved"),
+			Some(child_id.as_str()),
+			"entity->kern index must follow the entity into the child"
+		);
+
+		let child = g.kerns.get(&child_id).expect("child resident");
+		assert!(child.entities.contains_key("moved"));
+		assert!(
+			child.reasons.contains_key("out"),
+			"an edge lives in its `from` kern, so the outgoing reason moves too"
+		);
+		assert_eq!(
+			g.kern_of_reason("out"),
+			Some(child_id.as_str()),
+			"reason->kern index must follow the reason"
+		);
+
+		let parent = g.kerns.get("parent").expect("parent resident");
+		assert!(
+			!parent.reasons.contains_key("out"),
+			"the reason must not be left behind in the parent"
+		);
+		assert!(
+			parent.entities.contains_key("stays"),
+			"unclustered entities stay put"
+		);
+	}
+
+	#[test]
+	fn a_failed_cluster_migration_never_drops_the_entity() {
+		let mut g = GraphGnn::new();
+		let root_id = g.root.id.clone();
+		let mut parent = crate::base::types::Kern::new("parent", &root_id);
+		parent.entities.insert(
+			"e1".into(),
+			Entity {
+				id: "e1".into(),
+				..Default::default()
+			},
+		);
+		g.register(parent);
+
+		// A member that is not actually in the source kern: the move must be rejected, not lossy.
+		let clusters = vec![Cluster {
+			members: vec![Entity {
+				id: "ghost".into(),
+				..Default::default()
+			}],
+		}];
+		spawn_child_clusters(&mut g, "parent", &clusters, &[0]);
+
+		assert!(
+			g.kerns
+				.get("parent")
+				.expect("parent resident")
+				.entities
+				.contains_key("e1"),
+			"a rejected move leaves the parent intact"
+		);
 	}
 
 	#[test]

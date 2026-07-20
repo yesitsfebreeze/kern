@@ -1,18 +1,16 @@
 use std::time::Duration;
 
+// The balanced hybrid mix: ModeWeights::default() and RetrievalConfig.weights_hybrid.
 pub const DEFAULT_WEIGHT_CONTENT: f64 = 0.5;
 pub const DEFAULT_WEIGHT_REASON: f64 = 0.3;
-pub const DEFAULT_WEIGHT_SCORE: f64 = 0.2;
+pub const DEFAULT_WEIGHT_EDGE: f64 = 0.2;
 
 pub const DEFAULT_SEED_K: usize = 5;
-pub const DEFAULT_DECAY: f64 = 0.45;
 
 pub const QBST_ACCESS_WEIGHT: f64 = 0.02;
 pub const QBST_RECENCY_WEIGHT: f64 = 0.05;
 pub const QBST_RECENCY_HALF_LIFE: Duration = Duration::from_secs(24 * 60 * 60);
 pub const QBST_CAP: f64 = 0.1;
-
-pub const DEFAULT_DEDUP_THRESHOLD: f64 = 0.92;
 
 pub const COLD_COMPACT_MIN_BYTES: u64 = 256 * 1024;
 
@@ -51,7 +49,6 @@ pub const PULSE_THRESHOLD: f64 = 0.05;
 
 pub const REFINE_TRAVERSAL_WEIGHT: f64 = 0.01;
 pub const REFINE_BOOST_CAP: f64 = 0.1;
-pub const REFINE_INTERVAL: u32 = 10;
 
 pub const IMPORTANT_MIN_COSINE: f64 = 0.20;
 pub const IMPORTANT_ACCESS_THRESHOLD: i32 = 3;
@@ -70,14 +67,11 @@ pub const PROVENANCE_SCORE: f64 = 0.85;
 pub const ANSWER_MAX_CHAINS: usize = 5;
 pub const ANSWER_MAX_THOUGHTS: usize = 5;
 
-
 pub const DEGRADE_DECAY_BASE: f64 = 0.15;
 pub const DEGRADE_DECAY_POW: f64 = 0.75;
 pub const DEGRADE_MIN_THRESHOLD: f64 = 0.05;
 
 pub const QUESTION_RESOLVE_THRESHOLD: f64 = 0.80;
-
-pub const MCP_VERSION: &str = "2024-11-05";
 
 pub const GOSSIP_FANOUT: usize = 3;
 pub const GOSSIP_SEEN_SET_CAP: usize = 10_000;
@@ -100,6 +94,7 @@ pub const GOSSIP_CRDT_DELTA_MAX: u64 = 1_000_000;
 pub const LEDGER_THOUGHT_TTL: Duration = Duration::from_secs(72 * 60 * 60);
 pub const LEDGER_ROUTING_TTL: Duration = Duration::from_secs(5 * 60);
 
+// Residency, not forgetting: an unloaded kern is persisted first and reloads on next `get`.
 pub const KERN_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 pub const KERN_IDLE_SWEEP_EVERY: Duration = Duration::from_secs(60);
 
@@ -115,19 +110,5 @@ pub const DISK_CONSOLIDATE_MIN_DELTA: usize = 10_000;
 
 pub const USER_SOURCE: &str = "user";
 pub const AGENT_SOURCE: &str = "agent";
-pub const SOURCE_CHAT: &str = "chat";
-pub const SOURCE_REQUEST: &str = "request";
-pub const SOURCE_DECISION: &str = "decision";
-pub const SOURCE_IDEA: &str = "idea";
-pub const SOURCE_FILE: &str = "file";
-pub const SOURCE_CODE: &str = "code";
-pub const SOURCE_DIFF: &str = "diff";
-pub const SOURCE_ERROR: &str = "error";
-pub const SOURCE_DOC: &str = "doc";
-pub const SOURCE_TEST: &str = "test";
-pub const SOURCE_CONFIG: &str = "config";
-pub const SOURCE_LOG: &str = "log";
-pub const SOURCE_SCHEMA: &str = "schema";
-pub const SOURCE_DEP: &str = "dep";
 // "agent" as a source is canonically AGENT_SOURCE — do NOT add a second const
 // with the same value (it silently collides in the descriptor map).

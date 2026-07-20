@@ -4,9 +4,9 @@ pub mod codec;
 pub mod error;
 pub mod local;
 
-pub use adapter::{Adapter, AsyncStdioAdapter, InprocAdapter, TcpAdapter};
+pub use adapter::{Adapter, InprocAdapter};
 pub use channel::Channel;
-pub use codec::{BincodeCodec, Codec, JsonEnvelopeCodec};
+pub use codec::{Codec, JsonEnvelopeCodec};
 pub use error::{AdapterError, CodecError, RpcError};
 #[cfg(windows)]
 pub use local::NamedPipeAdapter;

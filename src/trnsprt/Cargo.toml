@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Transport boundary: MCP client (legacy) + typed-RPC stack (Adapter/Codec/Channel)."
+description = "Transport boundary: MCP server + typed-RPC stack (Adapter/Codec/Channel)."
 
 [lints]
 workspace = true
@@ -13,8 +13,6 @@ workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-logsink = { path = "../log" }
-# Typed-RPC stack (Phase 1, additive):
 tokio = { workspace = true }
 tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1"
@@ -22,9 +20,7 @@ futures = "0.3"
 axum = { workspace = true }
 async-stream = "0.3"
 bincode = { workspace = true }
-tracing = { workspace = true }
 trnsprt-macros = { workspace = true }
 
 [dev-dependencies]
-test-utils = { path = "../test-utils" }
 tempfile = "3"

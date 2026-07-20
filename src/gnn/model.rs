@@ -7,38 +7,17 @@ use crate::gnn::tensor::Tensor;
 pub struct Model {
 	pub layers: Vec<Box<dyn BackwardGraphLayer>>,
 	pub out_layer: Option<LinearLayer>,
-	pub residual: bool,
 }
 
 impl Model {
 	pub fn new(layers: Vec<Box<dyn BackwardGraphLayer>>, out_layer: Option<LinearLayer>) -> Self {
-		Self {
-			layers,
-			out_layer,
-			residual: false,
-		}
-	}
-
-	pub fn new_residual(
-		layers: Vec<Box<dyn BackwardGraphLayer>>,
-		out_layer: Option<LinearLayer>,
-	) -> Self {
-		Self {
-			layers,
-			out_layer,
-			residual: true,
-		}
+		Self { layers, out_layer }
 	}
 
 	pub fn forward(&mut self, g: &Graph, features: &Tensor) -> Tensor {
 		let mut h = features.clone();
 		for layer in &mut self.layers {
-			let mut out = layer.forward_graph(g, &h);
-			if self.residual && h.rows == out.rows && h.cols == out.cols {
-				// Shapes were just checked equal, so `add` is infallible here.
-				out = out.add(&h).expect("residual add (dims pre-checked)");
-			}
-			h = out;
+			h = layer.forward_graph(g, &h);
 		}
 		if let Some(ref mut ol) = self.out_layer {
 			h = ol.forward(&h);
@@ -52,14 +31,7 @@ impl Model {
 			grad = ol.backward(&grad);
 		}
 		for layer in self.layers.iter_mut().rev() {
-			let mut input_grad = layer.backward_graph(g, &grad);
-			if self.residual && input_grad.rows == grad.rows && input_grad.cols == grad.cols {
-				// Shapes were just checked equal, so `add_inplace` is infallible here.
-				input_grad
-					.add_inplace(&grad)
-					.expect("residual backward add (dims pre-checked)");
-			}
-			grad = input_grad;
+			grad = layer.backward_graph(g, &grad);
 		}
 	}
 
@@ -115,12 +87,6 @@ impl Model {
 			Backward::zero_grads(ol);
 		}
 	}
-
-	pub fn set_training(&mut self, training: bool) {
-		for layer in &mut self.layers {
-			layer.set_training(training);
-		}
-	}
 }
 
 #[cfg(test)]
@@ -140,9 +106,9 @@ mod tests {
 		for (i, f) in feats.iter().enumerate() {
 			g.add_node(&format!("n{i}"), f.to_vec()).unwrap();
 		}
-		g.add_edge("n0", "n1", vec![]).unwrap();
-		g.add_edge("n1", "n2", vec![]).unwrap();
-		g.add_edge("n2", "n0", vec![]).unwrap();
+		g.add_edge("n0", "n1").unwrap();
+		g.add_edge("n1", "n2").unwrap();
+		g.add_edge("n2", "n0").unwrap();
 		g.add_self_loops();
 		let x = g.feature_matrix();
 		(g, x)
@@ -153,46 +119,12 @@ mod tests {
 		let (g, x) = tiny_graph();
 		let mut rng = StdRng::seed_from_u64(3);
 		let mut model = Model::new(
-			vec![Box::new(GCNLayer::with_rng(
-				4, 3, None, false, 0.0, &mut rng,
-			))],
+			vec![Box::new(GCNLayer::with_rng(4, 3, None, false, &mut rng))],
 			None,
 		);
 		let out = model.forward(&g, &x);
 		assert_eq!(out.rows, g.num_nodes(), "one row per node");
 		assert_eq!(out.cols, 3, "width equals the layer's out_features");
 		assert!(out.data.iter().all(|v| v.is_finite()), "no NaN/inf");
-	}
-
-	#[test]
-	fn residual_model_adds_the_input_back() {
-		let (g, x) = tiny_graph();
-
-		let mut rng = StdRng::seed_from_u64(7);
-		let mut model = Model::new_residual(
-			vec![Box::new(GCNLayer::with_rng(
-				4, 4, None, false, 0.0, &mut rng,
-			))],
-			None,
-		);
-		let out = model.forward(&g, &x);
-		assert_eq!(
-			out.shape(),
-			x.shape(),
-			"residual preserves the feature shape"
-		);
-
-		let mut rng2 = StdRng::seed_from_u64(7);
-		let mut bare = GCNLayer::with_rng(4, 4, None, false, 0.0, &mut rng2);
-		let layer_out = bare.forward_graph(&g, &x);
-		for i in 0..out.data.len() {
-			let expected = layer_out.data[i] + x.data[i];
-			assert!(
-				(out.data[i] - expected).abs() < 1e-9,
-				"residual[{i}]: got {}, want {}",
-				out.data[i],
-				expected
-			);
-		}
 	}
 }

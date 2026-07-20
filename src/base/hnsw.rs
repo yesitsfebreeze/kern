@@ -1,7 +1,6 @@
 use super::math::cosine_distance;
 use super::util::{cmp_partial, content_hash};
 use crate::quant::{quantized_cosine_distance, QuantizationMode, QuantizedVec};
-use rayon::prelude::*;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
@@ -9,25 +8,6 @@ use std::marker::PhantomData;
 pub struct HnswHit {
 	pub id: String,
 	pub score: f64,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct AdaptiveEfConfig {
-	pub ef_start: usize,
-	pub ef_max: usize,
-	pub ef_step: usize,
-	pub spread_epsilon: f64,
-}
-
-impl Default for AdaptiveEfConfig {
-	fn default() -> Self {
-		Self {
-			ef_start: 16,
-			ef_max: 128,
-			ef_step: 128,
-			spread_epsilon: 0.02,
-		}
-	}
 }
 
 struct HnswNode {
@@ -98,15 +78,6 @@ impl HnswIndex {
 			max_layer: 0,
 			quant_mode,
 		}
-	}
-
-	pub fn quant_mode(&self) -> QuantizationMode {
-		self.quant_mode
-	}
-
-	pub fn set_quant_mode(&mut self, mode: QuantizationMode) {
-		debug_assert!(self.is_empty(), "set_quant_mode on a non-empty index");
-		self.quant_mode = mode;
 	}
 
 	pub fn len(&self) -> usize {
@@ -263,43 +234,6 @@ impl HnswIndex {
 		}
 
 		let candidates = self.beam_search(ep, &query, 0, ef);
-		let k = k.min(candidates.len());
-		candidates[..k]
-			.iter()
-			.map(|c| HnswHit {
-				id: self.id_str(c.id).to_string(),
-				score: 1.0 - c.dist,
-			})
-			.collect()
-	}
-
-	pub fn search_batch(&self, queries: &[&[f32]], k: usize, ef: usize) -> Vec<Vec<HnswHit>> {
-		queries.par_iter().map(|q| self.search(q, k, ef)).collect()
-	}
-
-	pub fn search_adaptive(&self, vec: &[f32], k: usize, cfg: AdaptiveEfConfig) -> Vec<HnswHit> {
-		let Some(mut ep) = self.ep else {
-			return Vec::new();
-		};
-		if vec.is_empty() || k == 0 {
-			return Vec::new();
-		}
-		let query = Query::new(vec, self.quant_mode);
-		let ef_start = cfg.ef_start.max(k);
-		let ef_max = cfg.ef_max.max(ef_start);
-		let ef_step = cfg.ef_step.max(1);
-
-		for l in (1..=self.max_layer).rev() {
-			ep = self.greedy_nearest(ep, &query, l);
-		}
-
-		let mut ef = ef_start;
-		let mut candidates = self.beam_search(ep, &query, 0, ef);
-		while ef < ef_max && is_ambiguous(&candidates, k, cfg.spread_epsilon) {
-			ef = (ef + ef_step).min(ef_max);
-			candidates = self.beam_search(ep, &query, 0, ef);
-		}
-
 		let k = k.min(candidates.len());
 		candidates[..k]
 			.iter()
@@ -580,20 +514,6 @@ impl HnswIndex {
 		pairs.truncate(m);
 		pairs.into_iter().map(|(id, _)| id).collect()
 	}
-}
-
-fn is_ambiguous(candidates: &[Candidate], k: usize, epsilon: f64) -> bool {
-	if candidates.len() < k {
-		return true;
-	}
-	let top = &candidates[..k.min(candidates.len())];
-	let Some(best) = top.first() else {
-		return false;
-	};
-	let Some(worst) = top.last() else {
-		return false;
-	};
-	(worst.dist - best.dist) < epsilon
 }
 
 // Equal distances break on slot id, so pop order never depends on push order.
@@ -1020,63 +940,5 @@ mod tests {
 			agreement >= 0.30,
 			"binary vs f64 top-{k} agreement below floor: {agreement:.3}"
 		);
-	}
-
-	#[test]
-	fn is_ambiguous_flags_short_results_and_tight_spreads() {
-		let c = |dist: f64| Candidate { id: 0, dist };
-		assert!(
-			is_ambiguous(&[c(0.1)], 3, 0.05),
-			"short result set is ambiguous"
-		);
-		assert!(
-			is_ambiguous(&[c(0.10), c(0.11), c(0.12)], 3, 0.05),
-			"tight spread is ambiguous"
-		);
-		assert!(
-			!is_ambiguous(&[c(0.10), c(0.30), c(0.50)], 3, 0.05),
-			"wide spread is decisive"
-		);
-	}
-
-	#[test]
-	fn search_adaptive_finds_the_true_nearest_by_widening_from_a_small_ef() {
-		let mut idx = HnswIndex::new(8, 64);
-		for i in 0..20 {
-			idx.insert(format!("c{i}"), vec![1.0, 0.02 * (i as f32 + 1.0), 0.0]);
-		}
-		idx.insert("exact".into(), vec![1.0, 0.0, 0.0]);
-
-		let cfg = AdaptiveEfConfig {
-			ef_start: 2,
-			ef_max: 64,
-			ef_step: 8,
-			spread_epsilon: 0.05,
-		};
-		let hits = idx.search_adaptive(&[1.0, 0.0, 0.0], 3, cfg);
-		assert_eq!(hits.len(), 3, "returns k results");
-		assert!(
-			hits.iter().any(|h| h.id == "exact"),
-			"widening recovers the exact match: {hits:?}"
-		);
-		assert!(
-			hits.windows(2).all(|w| w[0].score >= w[1].score),
-			"hits are ranked by score descending"
-		);
-	}
-
-	#[test]
-	fn search_adaptive_handles_empty_index_zero_k_and_empty_query() {
-		let cfg = AdaptiveEfConfig::default();
-		assert!(
-			HnswIndex::new(8, 64)
-				.search_adaptive(&[1.0, 0.0], 5, cfg)
-				.is_empty(),
-			"empty index"
-		);
-		let mut idx = HnswIndex::new(8, 64);
-		idx.insert("x".into(), vec![1.0, 0.0]);
-		assert!(idx.search_adaptive(&[1.0, 0.0], 0, cfg).is_empty(), "k=0");
-		assert!(idx.search_adaptive(&[], 5, cfg).is_empty(), "empty query");
 	}
 }

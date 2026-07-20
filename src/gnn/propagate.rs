@@ -4,7 +4,7 @@ use crate::gnn::activation::Activation;
 use crate::gnn::backward::BackwardGraphLayer;
 use crate::gnn::gcn::GCNLayer;
 use crate::gnn::graph::Graph;
-use crate::gnn::loss::{link_prediction_grad, link_prediction_loss};
+use crate::gnn::loss::link_prediction_grad;
 use crate::gnn::model::Model;
 use crate::gnn::optim::Adam;
 use crate::gnn::persist::{marshal_weights, unmarshal_weights};
@@ -73,14 +73,9 @@ pub fn run_learned_propagation(
 		return Err("could not sample negative edges".into());
 	}
 
-	let l1: Box<dyn BackwardGraphLayer> = Box::new(GCNLayer::new(
-		dim,
-		hidden,
-		Some(Activation::Relu),
-		true,
-		0.0,
-	));
-	let l2: Box<dyn BackwardGraphLayer> = Box::new(GCNLayer::new(hidden, dim, None, false, 0.0));
+	let l1: Box<dyn BackwardGraphLayer> =
+		Box::new(GCNLayer::new(dim, hidden, Some(Activation::Relu), true));
+	let l2: Box<dyn BackwardGraphLayer> = Box::new(GCNLayer::new(hidden, dim, None, false));
 	let mut model = Model::new(vec![l1, l2], None);
 
 	if !snap.weights.is_empty() {
@@ -96,7 +91,6 @@ pub fn run_learned_propagation(
 	for _epoch in 0..cfg.train_epochs {
 		model.zero_grads();
 		let predicted = model.forward(&snap.graph, &snap.features);
-		let _loss = link_prediction_loss(&predicted, &pos, &neg);
 		let d_out = link_prediction_grad(&predicted, &pos, &neg);
 		model.backward(&snap.graph, &d_out);
 
@@ -107,7 +101,6 @@ pub fn run_learned_propagation(
 		optim.step(&mut params, &grad_refs);
 	}
 
-	model.set_training(false);
 	let emb = model.forward(&snap.graph, &snap.features);
 	let mut updates = HashMap::new();
 
@@ -199,7 +192,7 @@ mod tests {
 		let mut pos_edges = Vec::new();
 		for i in 0..n - 1 {
 			graph
-				.add_edge(&format!("n{i}"), &format!("n{}", i + 1), vec![1.0])
+				.add_edge(&format!("n{i}"), &format!("n{}", i + 1))
 				.unwrap();
 			pos_edges.push([i, i + 1]);
 		}

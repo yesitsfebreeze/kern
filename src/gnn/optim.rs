@@ -11,56 +11,6 @@ pub trait Optimizer {
 	}
 }
 
-pub struct SGD {
-	pub lr: f64,
-	pub momentum: f64,
-	velocity: Vec<Tensor>,
-}
-
-impl SGD {
-	pub fn new(lr: f64) -> Self {
-		Self {
-			lr,
-			momentum: 0.0,
-			velocity: Vec::new(),
-		}
-	}
-
-	pub fn with_momentum(lr: f64, momentum: f64) -> Self {
-		Self {
-			lr,
-			momentum,
-			velocity: Vec::new(),
-		}
-	}
-}
-
-impl Optimizer for SGD {
-	fn step(&mut self, params: &mut [&mut Tensor], grads: &[&Tensor]) {
-		if self.momentum > 0.0 && self.velocity.is_empty() {
-			self.velocity = params
-				.iter()
-				.map(|p| Tensor::zeros(p.rows, p.cols))
-				.collect();
-		}
-
-		for (i, (param, grad)) in params.iter_mut().zip(grads.iter()).enumerate() {
-			if self.momentum > 0.0 {
-				let (momentum, lr) = (self.momentum, self.lr);
-				let v = &mut self.velocity[i];
-				for (j, pj) in param.data.iter_mut().enumerate() {
-					v.data[j] = momentum * v.data[j] + grad.data[j];
-					*pj -= lr * v.data[j];
-				}
-			} else {
-				for (pj, gj) in param.data.iter_mut().zip(&grad.data) {
-					*pj -= self.lr * gj;
-				}
-			}
-		}
-	}
-}
-
 pub struct Adam {
 	pub lr: f64,
 	pub beta1: f64,
@@ -126,25 +76,6 @@ mod tests {
 	}
 
 	#[test]
-	fn sgd_plain_step() {
-		let mut p = scalar(1.0);
-		let g = scalar(0.5);
-		let mut opt = SGD::new(0.1);
-		opt.step(&mut [&mut p], &[&g]);
-		assert!((p.data[0] - 0.95).abs() < 1e-12);
-	}
-
-	#[test]
-	fn sgd_momentum_accumulates() {
-		let mut p = scalar(0.0);
-		let g = scalar(1.0);
-		let mut opt = SGD::with_momentum(0.1, 0.9);
-		opt.step(&mut [&mut p], &[&g]);
-		opt.step(&mut [&mut p], &[&g]);
-		assert!((p.data[0] - (-0.29)).abs() < 1e-12);
-	}
-
-	#[test]
 	fn adam_first_step_is_lr_scaled_sign() {
 		// At t=1 the bias-corrected update is lr * g / (|g| + eps) ~= lr*sign(g).
 		let mut p = scalar(0.0);
@@ -164,18 +95,5 @@ mod tests {
 		opt.step(&mut [&mut p0, &mut p1], &[&g0, &g1]);
 		assert!((p0.data[0] - (-0.1)).abs() < 1e-6, "p0 {}", p0.data[0]);
 		assert!((p1.data[0] - 0.1).abs() < 1e-6, "p1 {}", p1.data[0]);
-	}
-
-	#[test]
-	fn sgd_momentum_velocity_is_independent_per_parameter() {
-		let mut p0 = scalar(0.0);
-		let mut p1 = scalar(0.0);
-		let g0 = scalar(1.0);
-		let g1 = scalar(-1.0);
-		let mut opt = SGD::with_momentum(0.1, 0.9);
-		opt.step(&mut [&mut p0, &mut p1], &[&g0, &g1]);
-		opt.step(&mut [&mut p0, &mut p1], &[&g0, &g1]);
-		assert!((p0.data[0] - (-0.29)).abs() < 1e-12, "p0 {}", p0.data[0]);
-		assert!((p1.data[0] - 0.29).abs() < 1e-12, "p1 {}", p1.data[0]);
 	}
 }

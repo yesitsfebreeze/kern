@@ -168,11 +168,11 @@ impl Client {
 		!shares_answer_runner
 	}
 
-	pub fn new_embed_only(embed_url: &str, embed_model: &str) -> Self {
+	pub fn new_embed_only(embed_url: &str, embed_model: &str, embed_key: &str) -> Self {
 		Self::new(
 			Endpoint::default(),
 			Endpoint::default(),
-			Endpoint::new(embed_url, embed_model, ""),
+			Endpoint::new(embed_url, embed_model, embed_key),
 		)
 	}
 
@@ -797,7 +797,7 @@ mod tests {
 			}),
 		);
 		let (url, _server) = crate::test_support::spawn_http(app).await;
-		let client = Client::new_embed_only(&url, "m");
+		let client = Client::new_embed_only(&url, "m", "");
 		let v = client
 			.embed("hello")
 			.await
@@ -818,7 +818,7 @@ mod tests {
 			}),
 		);
 		let (url, _server) = crate::test_support::spawn_http(app).await;
-		let client = Client::new_embed_only(&url, "m");
+		let client = Client::new_embed_only(&url, "m", "");
 		let v = client
 			.embed("x")
 			.await
@@ -846,7 +846,7 @@ mod tests {
 			}),
 		);
 		let (url, _server) = crate::test_support::spawn_http(app).await;
-		let client = Client::new_embed_only(&url, "m");
+		let client = Client::new_embed_only(&url, "m", "");
 		let err = client.embed("hello").await.unwrap_err();
 		assert!(
 			matches!(err, LlmError::Api { status: 400, .. }),

@@ -25,6 +25,37 @@ pub(crate) fn edge(from: &str, to: &str) -> Reason {
 	}
 }
 
+pub(crate) fn mcp_server() -> crate::mcp::Server {
+	use parking_lot::RwLock;
+	use std::sync::Arc;
+	let graph = Arc::new(RwLock::new(crate::base::graph::GraphGnn::new()));
+	let embedder = crate::llm::Client::new_embed_only("http://127.0.0.1:1", "test", "");
+	let worker = Arc::new(crate::ingest::Worker::new(
+		graph.clone(),
+		embedder,
+		None,
+		None,
+		None,
+	));
+	crate::mcp::Server {
+		graph,
+		worker,
+		llm: None,
+		save_fn: Arc::new(|| {}),
+		task_q: None,
+		cfg: Arc::new(crate::config::Config::default()),
+		cache: crate::retrieval::cache::QueryCache::default_shared(),
+		broadcast_pulse: None,
+		last_activity: Arc::new(std::sync::atomic::AtomicU64::new(
+			crate::base::util::now_ms(),
+		)),
+	}
+}
+
+pub(crate) fn tool_text(v: &serde_json::Value) -> String {
+	v["content"][0]["text"].as_str().unwrap_or("").to_string()
+}
+
 pub(crate) async fn spawn_http(app: axum::Router) -> (String, JoinHandle<()>) {
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let addr = listener.local_addr().unwrap();

@@ -118,7 +118,7 @@ impl Server {
 		};
 
 		if !p.id.is_empty() {
-			let g = crate::base::locks::read_recovered(&self.graph);
+			let g = self.graph.read();
 			return match find_entity(&g, &p.id) {
 				Some((thought, kern_id)) => {
 					let detail = entity_detail(&thought, &kern_id, &g);
@@ -146,7 +146,7 @@ impl Server {
 		let text_hash = retrieval::cache::hash_text(&p.text);
 
 		let text_hit = if cacheable {
-			let g = crate::base::locks::read_recovered(&self.graph);
+			let g = self.graph.read();
 			self
 				.cache
 				.lock()
@@ -186,7 +186,7 @@ impl Server {
 			// query_locked runs HyDE/rerank/answer with the read lock RELEASED — a slow
 			// LLM must never pin it (starves writers, trips the 30s watchdog).
 			let cached = if cacheable {
-				let g = crate::base::locks::read_recovered(&self.graph);
+				let g = self.graph.read();
 				self
 					.cache
 					.lock()
@@ -244,7 +244,7 @@ impl Server {
 		if let Some(ref vec) = vec {
 			if scored.len() < k {
 				// Clone the store handle under a brief read guard; drop it before the scan.
-				let store = crate::base::locks::read_recovered(&self.graph).store();
+				let store = self.graph.read().store();
 				let have: std::collections::HashSet<String> =
 					scored.iter().map(|s| s.entity.id.clone()).collect();
 				if let Some(store) = &store {
@@ -269,7 +269,7 @@ impl Server {
 				Ok(o) => o,
 				Err(e) => return tool_error(&e),
 			};
-			let g = crate::base::locks::read_recovered(&self.graph);
+			let g = self.graph.read();
 			let heads: Vec<(String, f64)> = scored
 				.iter()
 				.map(|s| (s.entity.id.clone(), s.score))
@@ -302,7 +302,7 @@ impl Server {
 
 		let take_n = k + history_ids.len();
 		let entities: Vec<serde_json::Value> = {
-			let g = crate::base::locks::read_recovered(&self.graph);
+			let g = self.graph.read();
 			scored
 				.iter()
 				.take(take_n)

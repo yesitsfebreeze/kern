@@ -23,62 +23,10 @@ pub fn sigmoid_deriv(x: f64) -> f64 {
 	s * (1.0 - s)
 }
 
-#[inline]
-pub fn tanh_act(x: f64) -> f64 {
-	x.tanh()
-}
-
-#[inline]
-pub fn tanh_deriv(x: f64) -> f64 {
-	let t = x.tanh();
-	1.0 - t * t
-}
-
-#[inline]
-pub fn leaky_relu(alpha: f64, x: f64) -> f64 {
-	if x > 0.0 {
-		x
-	} else {
-		alpha * x
-	}
-}
-
-#[inline]
-pub fn leaky_relu_deriv(alpha: f64, x: f64) -> f64 {
-	if x > 0.0 {
-		1.0
-	} else {
-		alpha
-	}
-}
-
-// GELU via the tanh approximation (GPT/BERT form); `gelu_deriv` is the exact
-// derivative OF THIS approximation, so forward/backward stay consistent.
-const SQRT_2_OVER_PI: f64 = 0.797_884_560_802_865_4; // sqrt(2/π)
-const GELU_C: f64 = 0.044_715;
-
-#[inline]
-pub fn gelu(x: f64) -> f64 {
-	let inner = SQRT_2_OVER_PI * (x + GELU_C * x * x * x);
-	0.5 * x * (1.0 + inner.tanh())
-}
-
-#[inline]
-pub fn gelu_deriv(x: f64) -> f64 {
-	let inner = SQRT_2_OVER_PI * (x + GELU_C * x * x * x);
-	let t = inner.tanh();
-	let sech2 = 1.0 - t * t;
-	let d_inner = SQRT_2_OVER_PI * (1.0 + 3.0 * GELU_C * x * x);
-	0.5 * (1.0 + t) + 0.5 * x * sech2 * d_inner
-}
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Activation {
 	Relu,
 	Sigmoid,
-	Tanh,
-	LeakyRelu(f64),
-	Gelu,
 }
 
 impl Activation {
@@ -87,9 +35,6 @@ impl Activation {
 		match self {
 			Activation::Relu => relu(x),
 			Activation::Sigmoid => sigmoid(x),
-			Activation::Tanh => tanh_act(x),
-			Activation::LeakyRelu(alpha) => leaky_relu(alpha, x),
-			Activation::Gelu => gelu(x),
 		}
 	}
 
@@ -98,9 +43,6 @@ impl Activation {
 		match self {
 			Activation::Relu => relu_deriv(x),
 			Activation::Sigmoid => sigmoid_deriv(x),
-			Activation::Tanh => tanh_deriv(x),
-			Activation::LeakyRelu(alpha) => leaky_relu_deriv(alpha, x),
-			Activation::Gelu => gelu_deriv(x),
 		}
 	}
 }
@@ -119,24 +61,16 @@ mod tests {
 	}
 
 	#[test]
-	fn leaky_relu_deriv_is_alpha_or_one() {
-		let a = Activation::LeakyRelu(0.2);
-		assert_eq!(a.deriv(-5.0), 0.2);
-		assert_eq!(a.deriv(5.0), 1.0);
-	}
-
-	#[test]
 	fn smooth_derivs_match_central_difference() {
 		const H: f64 = 1e-6;
-		for &act in &[Activation::Sigmoid, Activation::Tanh] {
-			for &x in &[-2.3, -0.5, 0.0, 0.7, 1.9] {
-				let numeric = (act.forward(x + H) - act.forward(x - H)) / (2.0 * H);
-				assert!(
-					(act.deriv(x) - numeric).abs() < 1e-6,
-					"{act:?} at {x}: analytic {} vs numeric {numeric}",
-					act.deriv(x)
-				);
-			}
+		let act = Activation::Sigmoid;
+		for &x in &[-2.3, -0.5, 0.0, 0.7, 1.9] {
+			let numeric = (act.forward(x + H) - act.forward(x - H)) / (2.0 * H);
+			assert!(
+				(act.deriv(x) - numeric).abs() < 1e-6,
+				"{act:?} at {x}: analytic {} vs numeric {numeric}",
+				act.deriv(x)
+			);
 		}
 	}
 
@@ -144,27 +78,6 @@ mod tests {
 	fn forward_dispatches_correctly() {
 		assert_eq!(Activation::Relu.forward(-1.0), 0.0);
 		assert_eq!(Activation::Relu.forward(2.0), 2.0);
-		assert!((Activation::LeakyRelu(0.1).forward(-3.0) - (-0.3)).abs() < 1e-12);
-		assert!((Activation::Tanh.forward(0.0)).abs() < 1e-12);
-		assert!((Activation::Tanh.forward(0.7) - 0.7_f64.tanh()).abs() < 1e-12);
-	}
-
-	#[test]
-	fn gelu_basic_properties_and_exact_derivative() {
-		assert!((Activation::Gelu.forward(0.0)).abs() < 1e-12);
-		assert!(
-			(Activation::Gelu.forward(5.0) - 5.0).abs() < 0.01,
-			"gelu(5) ~ 5"
-		);
-		assert!(Activation::Gelu.forward(-5.0).abs() < 0.01, "gelu(-5) ~ 0");
-		const H: f64 = 1e-6;
-		for &x in &[-2.3, -0.5, 0.0, 0.7, 1.9] {
-			let numeric = (Activation::Gelu.forward(x + H) - Activation::Gelu.forward(x - H)) / (2.0 * H);
-			assert!(
-				(Activation::Gelu.deriv(x) - numeric).abs() < 1e-6,
-				"gelu at {x}: analytic {} vs numeric {numeric}",
-				Activation::Gelu.deriv(x)
-			);
-		}
+		assert!((Activation::Sigmoid.forward(0.0) - 0.5).abs() < 1e-12);
 	}
 }
