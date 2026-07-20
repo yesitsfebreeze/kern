@@ -25,14 +25,14 @@ Built from the working tree containing the granite default fix and
 Latency (seed 0, full pipeline incl. LLM synthesis): p50 901 ms, p95 1839 ms,
 p99 2666 ms. Claims distilled per seed: 2213 / 2056 / 2062.
 
-Read against the aspiration: Zep/Mem0-class systems publish ~0.6+ LLM-judge
+Read against the north star: Zep/Mem0-class systems publish ~0.6+ LLM-judge
 scores on LoCoMo-style evals. The gap is the work, and it is now measured,
 not assumed. Biggest craters: multi-hop (0.042 — reason-edge expansion is
 not connecting facts across sessions) and adversarial abstention (0.112 with
 10× the variance of any other category — abstention behavior is nearly
 unseeded). The strict-judge caveat applies in both directions: a 7 B judge at
 temperature 0 is harsher than the lenient judges that inflate published
-numbers (`docs/aspiration.md` claim standard).
+numbers (`ROADMAP.md` §1 claim standard).
 
 ## How to test kern (the fast, reliable loop)
 
@@ -49,6 +49,13 @@ Every non-LLM claim in this doc is pinned by one of these.
   --samples 10 --max-qa 30 --seed 0 --concurrency 4 \
   --json --output run.json --probe-log run-probes.jsonl
 ```
+
+**The canonical run uses the full pipeline.** HyDE, reranking, and synthesis
+all stay on: a fast number from a disabled stage measures something kern does
+not ship. `--no-hyde` / `--no-rerank` exist to attribute cost and value to a
+stage, and their scores must never be quoted as kern results. Speed has to
+come from making the full pipeline cheaper (fewer round trips, smaller
+prompts), not from switching parts of it off.
 
 Why these flags: `--concurrency 4` is measured fastest when the server has
 `OLLAMA_NUM_PARALLEL=4` (serial takes 33 min against 22 min, because parallel
@@ -85,7 +92,7 @@ strict-judge number against a published lenient-judge one.
 ## Ablations & diagnostics (added 2026-07-20)
 
 Implements items 0/2/5 of
-[`locomo-improvements.md`](locomo-improvements.md):
+[`ROADMAP.md`](../oracle/ROADMAP.md) §3:
 
 - `--context-mode kern|grounded|grounded-retrieval` — loss attribution.
   `grounded` answers every probe from the full conversation (kern skipped,
@@ -199,7 +206,7 @@ twice per probe. Measured after the fix: p50 query latency 2.3 s (was
   ("run it end-to-end") is resolved at the validation level.
 - **Does not unblock:** a recorded, reportable baseline number. That needs a
   GPU-offloaded host (or a cloud endpoint) and a multi-sample, multi-seed run
-  with error bars, per `docs/aspiration.md` Tier 0.
+  with error bars, per `ROADMAP.md` §1.
 
 ## Reproduce
 

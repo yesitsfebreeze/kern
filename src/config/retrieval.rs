@@ -9,16 +9,14 @@ pub struct ModeWeights {
 	pub content: f64,
 	pub reason: f64,
 	pub edge: f64,
-	pub lexical: f64,
 }
 
 impl Default for ModeWeights {
 	fn default() -> Self {
 		Self {
-			content: 0.50,
-			reason: 0.30,
-			edge: 0.20,
-			lexical: 0.0,
+			content: constants::DEFAULT_WEIGHT_CONTENT,
+			reason: constants::DEFAULT_WEIGHT_REASON,
+			edge: constants::DEFAULT_WEIGHT_EDGE,
 		}
 	}
 }
@@ -40,6 +38,10 @@ pub struct RetrievalConfig {
 	pub gravity_weight: f64,
 	pub min_deliver_score: f64,
 	pub max_deliver_results: usize,
+	// Facts placed in the answer prompt. Retrieval delivers up to
+	// `max_deliver_results`, so anything below that silently discards evidence
+	// kern already found and ranked.
+	pub answer_max_facts: usize,
 	pub important_min_cosine: f64,
 	pub important_access_threshold: i32,
 	pub weights_content: ModeWeights,
@@ -63,11 +65,6 @@ pub struct RetrievalConfig {
 	pub pagerank_damping: f64,
 	pub pagerank_iters: usize,
 	pub pagerank_top_k: usize,
-	pub adaptive_ef_enabled: bool,
-	pub adaptive_ef_start: usize,
-	pub adaptive_ef_max: usize,
-	pub adaptive_ef_step: usize,
-	pub adaptive_ef_spread_epsilon: f64,
 	pub query_cache_cap: usize,
 	pub query_cache_theta: f64,
 }
@@ -89,26 +86,20 @@ impl Default for RetrievalConfig {
 			gravity_weight: 0.15,
 			min_deliver_score: 0.0,
 			max_deliver_results: 25,
+			answer_max_facts: constants::ANSWER_MAX_THOUGHTS,
 			important_min_cosine: constants::IMPORTANT_MIN_COSINE,
 			important_access_threshold: constants::IMPORTANT_ACCESS_THRESHOLD,
 			weights_content: ModeWeights {
 				content: 0.70,
 				reason: 0.15,
 				edge: 0.15,
-				lexical: 0.0,
 			},
 			weights_reason: ModeWeights {
 				content: 0.20,
 				reason: 0.60,
 				edge: 0.20,
-				lexical: 0.0,
 			},
-			weights_hybrid: ModeWeights {
-				content: 0.50,
-				reason: 0.30,
-				edge: 0.20,
-				lexical: 0.0,
-			},
+			weights_hybrid: ModeWeights::default(),
 			rrf_k: 60.0,
 			rrf_global_weight: 0.5,
 			dedup_by_section: true,
@@ -127,11 +118,6 @@ impl Default for RetrievalConfig {
 			pagerank_damping: 0.85,
 			pagerank_iters: 25,
 			pagerank_top_k: 100,
-			adaptive_ef_enabled: false,
-			adaptive_ef_start: 16,
-			adaptive_ef_max: 128,
-			adaptive_ef_step: 128,
-			adaptive_ef_spread_epsilon: 0.02,
 			query_cache_cap: constants::QUERY_CACHE_DEFAULT_CAP,
 			query_cache_theta: constants::QUERY_CACHE_DEFAULT_THETA,
 		}
@@ -147,17 +133,10 @@ impl RetrievalConfig {
 			("reason", &self.weights_reason),
 			("hybrid", &self.weights_hybrid),
 		] {
-			let sum = w.content + w.reason + w.edge + w.lexical;
+			let sum = w.content + w.reason + w.edge;
 			if (sum - 1.0).abs() > 0.01 {
 				errs.push(format!("weights_{name} sum to {sum:.3}, expected ~1.0"));
 			}
-		}
-
-		if self.adaptive_ef_start > self.adaptive_ef_max {
-			errs.push(format!(
-				"adaptive_ef_start ({}) must be <= adaptive_ef_max ({})",
-				self.adaptive_ef_start, self.adaptive_ef_max,
-			));
 		}
 
 		for (name, v) in [
@@ -197,6 +176,18 @@ impl RetrievalConfig {
 		if self.max_deliver_results == 0 {
 			errs.push("max_deliver_results must be >= 1 (0 delivers nothing)".to_string());
 		}
+		if self.answer_max_facts == 0 {
+			errs.push(
+				"answer_max_facts must be >= 1 (0 puts no evidence in the prompt, so every answer abstains)"
+					.to_string(),
+			);
+		}
+		if self.answer_max_facts > self.max_deliver_results {
+			errs.push(format!(
+				"answer_max_facts ({}) exceeds max_deliver_results ({}) — retrieval never delivers that many, so the extra is dead",
+				self.answer_max_facts, self.max_deliver_results,
+			));
+		}
 
 		errs
 	}
@@ -223,19 +214,6 @@ mod tests {
 			errs.iter().any(|e| e.contains("weights_hybrid")),
 			"got {errs:?}"
 		);
-	}
-
-	#[test]
-	fn adaptive_ef_start_above_max_is_flagged() {
-		let cfg = RetrievalConfig {
-			adaptive_ef_start: 200,
-			adaptive_ef_max: 128,
-			..Default::default()
-		};
-		assert!(cfg
-			.validate()
-			.iter()
-			.any(|e| e.contains("adaptive_ef_start")));
 	}
 
 	#[test]
@@ -274,6 +252,41 @@ mod tests {
 		assert!(
 			neg_k1.validate().iter().any(|e| e.contains("bm25_k1")),
 			"negative bm25_k1"
+		);
+	}
+
+	#[test]
+	fn answer_fact_budget_is_bounded_by_what_retrieval_delivers() {
+		let none = RetrievalConfig {
+			answer_max_facts: 0,
+			..Default::default()
+		};
+		assert!(
+			none
+				.validate()
+				.iter()
+				.any(|e| e.contains("answer_max_facts")),
+			"0 facts means every answer abstains"
+		);
+
+		let over = RetrievalConfig {
+			answer_max_facts: 40,
+			max_deliver_results: 25,
+			..Default::default()
+		};
+		assert!(
+			over.validate().iter().any(|e| e.contains("dead")),
+			"asking for more facts than retrieval delivers is a config error"
+		);
+
+		let ok = RetrievalConfig {
+			answer_max_facts: 25,
+			max_deliver_results: 25,
+			..Default::default()
+		};
+		assert!(
+			!ok.validate().iter().any(|e| e.contains("answer_max_facts")),
+			"using the full delivered set is valid"
 		);
 	}
 

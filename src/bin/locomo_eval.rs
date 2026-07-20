@@ -61,10 +61,20 @@ struct Args {
 	/// delivery triggers the abstention gate. 0.0 = baseline-compatible.
 	#[arg(long, default_value_t = 0.0)]
 	min_deliver: f64,
-	/// Disable HyDE query expansion (saves one LLM call per probe).
+	/// Facts placed in the answer prompt (default 5). Retrieval delivers up to
+	/// 25, so the default discards most of what kern found — this is tuning of
+	/// the full pipeline, not a disabled stage.
+	#[arg(long, default_value_t = 5)]
+	answer_facts: usize,
+	/// DIAGNOSTIC ONLY — disables HyDE query expansion. This measures what the
+	/// stage costs and contributes; it is NOT a faster way to run the eval,
+	/// because it no longer tests the shipped pipeline. Never quote a score
+	/// from this as a kern result.
 	#[arg(long)]
 	no_hyde: bool,
-	/// Disable LLM reranking (saves one LLM call per probe).
+	/// DIAGNOSTIC ONLY — disables LLM reranking. Same caveat as --no-hyde:
+	/// it changes what is under test, so it answers "what does rerank buy?",
+	/// never "how fast is kern?".
 	#[arg(long)]
 	no_rerank: bool,
 	/// Append one JSON line per probe (question, gold, pred, verdict,
@@ -114,11 +124,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 	}
 
 	let Some(context_mode) = ContextMode::parse(&args.context_mode) else {
-		return Err(format!(
-			"unknown --context-mode `{}` (expected kern | grounded | grounded-retrieval)",
-			args.context_mode
-		)
-		.into());
+		return Err(
+			format!(
+				"unknown --context-mode `{}` (expected kern | grounded | grounded-retrieval)",
+				args.context_mode
+			)
+			.into(),
+		);
 	};
 
 	let cfg = EvalConfig {
@@ -136,6 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 		context_mode,
 		concurrency: args.concurrency,
 		min_deliver: args.min_deliver,
+		answer_facts: args.answer_facts,
 		hyde: !args.no_hyde,
 		rerank: !args.no_rerank,
 		probe_log: args.probe_log,

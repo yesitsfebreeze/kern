@@ -65,6 +65,9 @@ pub struct EvalConfig {
 	// server; grounded mode multiplies its 32k KV cache per slot — watch VRAM.
 	pub concurrency: usize,
 	pub min_deliver: f64,
+	// Facts placed in the answer prompt. Tuning, not disabling — the full
+	// pipeline still runs, it just stops discarding evidence it retrieved.
+	pub answer_facts: usize,
 	// Each probe costs up to 3 LLM calls: HyDE expansion, LLM rerank, synthesis.
 	// Both extras default on and neither has ever been scored (ROADMAP 3) — these
 	// make that measurable instead of assumed.
@@ -86,6 +89,46 @@ impl ContextMode {
 }
 
 const CLAIMS_CACHE_DIR: &str = "eval/cache";
+
+/// Exact LLM work done, independent of wall clock. Wall clock on a shared box
+/// measures whatever else is running — two conclusions were drawn from it here
+/// and both were wrong. Call counts and prompt bytes are contention-immune, so
+/// "does config A do less work than B" is answerable without a quiet machine.
+#[derive(Default)]
+pub struct LlmCounters {
+	pub calls: std::sync::atomic::AtomicUsize,
+	pub prompt_chars: std::sync::atomic::AtomicUsize,
+	pub completion_chars: std::sync::atomic::AtomicUsize,
+}
+
+impl LlmCounters {
+	fn record(&self, prompt: &str, completion: &str) {
+		use std::sync::atomic::Ordering::Relaxed;
+		self.calls.fetch_add(1, Relaxed);
+		self.prompt_chars.fetch_add(prompt.len(), Relaxed);
+		self.completion_chars.fetch_add(completion.len(), Relaxed);
+	}
+
+	fn snapshot(&self) -> (usize, usize, usize) {
+		use std::sync::atomic::Ordering::Relaxed;
+		(
+			self.calls.load(Relaxed),
+			self.prompt_chars.load(Relaxed),
+			self.completion_chars.load(Relaxed),
+		)
+	}
+}
+
+/// Wraps an LLM closure so every call is counted. Distillation is excluded by
+/// construction: it runs through the cache, so a cached run does zero distill
+/// calls and the counters describe the query path only.
+fn counting_llm(inner: LlmFunc, counters: Arc<LlmCounters>) -> LlmFunc {
+	Arc::new(move |prompt: &str| {
+		let out = inner(prompt);
+		counters.record(prompt, &out);
+		out
+	})
+}
 
 // Cache rows survive prompt/model/seed changes by keying on all three — an
 // edited distill prompt hashes to new keys, stale rows just stop being read.
@@ -167,6 +210,11 @@ pub struct EvalReport {
 	// queueing as work and misattributes where the time actually goes.
 	pub sample_phase_secs: f64,
 	pub judge_phase_secs: f64,
+	// Exact LLM work on the query path — comparable across runs even on a busy
+	// machine, unlike the wall clock above.
+	pub llm_calls: usize,
+	pub llm_prompt_chars: usize,
+	pub llm_completion_chars: usize,
 }
 
 impl EvalReport {
@@ -185,6 +233,9 @@ impl EvalReport {
 			judge_errors: 0,
 			sample_phase_secs: 0.0,
 			judge_phase_secs: 0.0,
+			llm_calls: 0,
+			llm_prompt_chars: 0,
+			llm_completion_chars: 0,
 		}
 	}
 
@@ -229,6 +280,17 @@ impl EvalReport {
 				"avg retrieved context: {:.1} entities / {:.0} chars per query (token-efficiency proxy)\n",
 				self.ctx_entities_sum as f64 / self.n_queries as f64,
 				self.ctx_chars_sum as f64 / self.n_queries as f64,
+			));
+		}
+		if self.llm_calls > 0 && self.n_queries > 0 {
+			let q = self.n_queries as f64;
+			out.push_str(&format!(
+				"LLM work (query path, contention-immune): {} calls = {:.2}/probe  \
+				 prompt {:.0} chars/probe  completion {:.0} chars/probe\n",
+				self.llm_calls,
+				self.llm_calls as f64 / q,
+				self.llm_prompt_chars as f64 / q,
+				self.llm_completion_chars as f64 / q,
 			));
 		}
 		if self.sample_phase_secs + self.judge_phase_secs > 0.0 {
@@ -480,7 +542,8 @@ pub async fn run_eval(cfg: &EvalConfig) -> Result<EvalReport, String> {
 	.for_eval(cfg.seed)
 	.with_temperature(0.0);
 
-	let llm: LlmFunc = Arc::new(client.complete_func());
+	let counters = Arc::new(LlmCounters::default());
+	let llm: LlmFunc = counting_llm(Arc::new(client.complete_func()), counters.clone());
 	let embed_fn: EmbedFunc = {
 		let c = client.clone();
 		Arc::new(move |t: &str| block_on_embed(&c, t))
@@ -489,6 +552,7 @@ pub async fn run_eval(cfg: &EvalConfig) -> Result<EvalReport, String> {
 		min_deliver_score: cfg.min_deliver,
 		hyde_enabled: cfg.hyde,
 		rerank_enabled: cfg.rerank,
+		answer_max_facts: cfg.answer_facts,
 		..Default::default()
 	};
 	let icfg = Config {
@@ -517,6 +581,10 @@ pub async fn run_eval(cfg: &EvalConfig) -> Result<EvalReport, String> {
 	let sem = Arc::new(tokio::sync::Semaphore::new(cfg.concurrency.max(1)));
 	let mut set = tokio::task::JoinSet::new();
 
+	// Timed from BEFORE the spawn loop: acquiring a permit blocks once
+	// `concurrency` samples are in flight, so most of the work happens inside
+	// this loop, not in the drain below.
+	let sample_phase_start = Instant::now();
 	for (i, sample) in samples.into_iter().take(take).enumerate() {
 		let permit = sem
 			.clone()
@@ -532,7 +600,6 @@ pub async fn run_eval(cfg: &EvalConfig) -> Result<EvalReport, String> {
 
 	let mut report = EvalReport::new();
 	let mut all_records: Vec<(usize, Vec<ProbeRecord>)> = Vec::new();
-	let sample_phase_start = Instant::now();
 	while let Some(res) = set.join_next().await {
 		let (i, sub, records) = res.map_err(|e| e.to_string())?;
 		report.merge(sub);
@@ -543,8 +610,20 @@ pub async fn run_eval(cfg: &EvalConfig) -> Result<EvalReport, String> {
 	all_records.sort_by_key(|(i, _)| *i);
 	let mut records: Vec<ProbeRecord> = all_records.into_iter().flat_map(|(_, r)| r).collect();
 
+	// Snapshot before judging so the counters describe the query path only.
+	let (calls, prompt_chars, completion_chars) = counters.snapshot();
+	report.llm_calls = calls;
+	report.llm_prompt_chars = prompt_chars;
+	report.llm_completion_chars = completion_chars;
+
 	let judge_phase_start = Instant::now();
-	judge_all(&ctx.judge, cfg.concurrency.max(1), &mut records, &mut report).await;
+	judge_all(
+		&ctx.judge,
+		cfg.concurrency.max(1),
+		&mut records,
+		&mut report,
+	)
+	.await;
 	report.judge_phase_secs = judge_phase_start.elapsed().as_secs_f64();
 
 	if let Some(path) = &cfg.probe_log {
@@ -826,14 +905,12 @@ async fn run_probe(ctx: ProbeCtx, idx: usize, q: locomo::QaItem) -> ProbeOutcome
 			};
 			let (facts, top_cosine) = {
 				let g = crate::base::locks::read_recovered(&ctx.graph);
-				let hits =
-					crate::base::search::search_all_unlocked(&g, &gvec, GROUNDED_RETRIEVAL_TOP_K);
+				let hits = crate::base::search::search_all_unlocked(&g, &gvec, GROUNDED_RETRIEVAL_TOP_K);
 				let top = hits.first().map(|h| h.score).unwrap_or(0.0);
 				let facts: Vec<String> = hits
 					.iter()
 					.filter_map(|h| {
-						crate::base::search::find_entity(&g, &h.entity_id)
-							.map(|(e, _)| e.text().to_string())
+						crate::base::search::find_entity(&g, &h.entity_id).map(|(e, _)| e.text().to_string())
 					})
 					.collect();
 				(facts, top)
@@ -991,7 +1068,9 @@ async fn judge_all(
 	records: &mut [ProbeRecord],
 	report: &mut EvalReport,
 ) {
-	let pending: Vec<usize> = (0..records.len()).filter(|i| needs_judging(&records[*i])).collect();
+	let pending: Vec<usize> = (0..records.len())
+		.filter(|i| needs_judging(&records[*i]))
+		.collect();
 	if pending.is_empty() {
 		return;
 	}
@@ -1239,6 +1318,7 @@ mod tests {
 			context_mode: ContextMode::Kern,
 			concurrency: 1,
 			min_deliver: 0.0,
+			answer_facts: 5,
 			hyde: true,
 			rerank: true,
 			probe_log: None,
@@ -1320,9 +1400,7 @@ mod tests {
 				} else {
 					"verdict"
 				};
-				format!(
-					r#"{{"sample_id":"s","question":"{q}","category":{cat},"{field}":{ok}}}"#
-				) + "\n"
+				format!(r#"{{"sample_id":"s","question":"{q}","category":{cat},"{field}":{ok}}}"#) + "\n"
 			})
 			.collect();
 		std::fs::write(&path, body).unwrap();
@@ -1399,6 +1477,31 @@ mod tests {
 	}
 
 	#[test]
+	fn counting_llm_records_every_call_without_altering_the_answer() {
+		let counters = Arc::new(LlmCounters::default());
+		let inner: LlmFunc = Arc::new(|p: &str| format!("<{p}>"));
+		let wrapped = counting_llm(inner, counters.clone());
+		assert_eq!(wrapped("ab"), "<ab>", "wrapper is transparent");
+		wrapped("cde");
+		let (calls, prompt, completion) = counters.snapshot();
+		assert_eq!(calls, 2);
+		assert_eq!(prompt, 5, "2 + 3 prompt chars");
+		assert_eq!(completion, 9, "4 + 5 completion chars");
+	}
+
+	#[test]
+	fn summary_reports_llm_work_per_probe() {
+		let mut r = EvalReport::new();
+		r.n_queries = 100;
+		r.llm_calls = 150;
+		r.llm_prompt_chars = 500_000;
+		r.llm_completion_chars = 20_000;
+		let s = r.summary();
+		assert!(s.contains("1.50/probe"), "calls per probe: {s}");
+		assert!(s.contains("prompt 5000 chars/probe"), "{s}");
+	}
+
+	#[test]
 	fn summary_shows_phase_timing_only_when_measured() {
 		let mut r = EvalReport::new();
 		assert!(!r.summary().contains("phases:"));
@@ -1471,7 +1574,12 @@ mod tests {
 
 		let mut g = GraphGnn::new();
 		let mut k = Kern::new("k", "");
-		for (id, text) in [("a", "alpha"), ("b", "beta"), ("c", "gamma"), ("d", "delta")] {
+		for (id, text) in [
+			("a", "alpha"),
+			("b", "beta"),
+			("c", "gamma"),
+			("d", "delta"),
+		] {
 			k.entities
 				.insert(id.into(), mk_entity(id, text, 0.0, EntityKind::Claim));
 		}
@@ -1492,9 +1600,17 @@ mod tests {
 
 		assert_eq!(hops_within(&g, "a", "b", 2), Some(1));
 		assert_eq!(hops_within(&g, "a", "c", 2), Some(2), "walks via b");
-		assert_eq!(hops_within(&g, "c", "a", 2), Some(2), "edges are undirected");
+		assert_eq!(
+			hops_within(&g, "c", "a", 2),
+			Some(2),
+			"edges are undirected"
+		);
 		assert_eq!(hops_within(&g, "a", "c", 1), None, "bound respected");
-		assert_eq!(hops_within(&g, "a", "d", 2), None, "no path to isolated node");
+		assert_eq!(
+			hops_within(&g, "a", "d", 2),
+			None,
+			"no path to isolated node"
+		);
 	}
 
 	#[test]

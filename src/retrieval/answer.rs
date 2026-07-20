@@ -1,4 +1,4 @@
-use crate::base::constants::{ANSWER_MAX_CHAINS, ANSWER_MAX_THOUGHTS, REFINE_INTERVAL};
+use crate::base::constants::ANSWER_MAX_CHAINS;
 use crate::base::graph::GraphGnn;
 use crate::base::search::{find_entity, find_reason};
 use crate::base::util;
@@ -66,7 +66,8 @@ pub fn query_profiled(
 	score::commit_access(&mut results);
 
 	let style = opts.as_ref().and_then(|o| o.answer_style.as_deref());
-	let answer = synthesize(&chain_text, &results, query_text, llm, style);
+	let facts = &results[..results.len().min(cfg.answer_max_facts)];
+	let answer = synthesize(&chain_text, facts, query_text, llm, style);
 	prof.checkpoint("answer");
 
 	(
@@ -272,13 +273,8 @@ pub fn query_locked(
 	// Live-graph access write-back is deferred to a CommitAccess tick task (see
 	// mcp::Server::tool_query) so this path takes ONLY a read lock (see note).
 	let style = opts.as_ref().and_then(|o| o.answer_style.as_deref());
-	let answer = synthesize(
-		&retrieved.chain_text,
-		&retrieved.results,
-		query_text,
-		llm,
-		style,
-	);
+	let facts = &retrieved.results[..retrieved.results.len().min(cfg.answer_max_facts)];
+	let answer = synthesize(&retrieved.chain_text, facts, query_text, llm, style);
 
 	(
 		QueryResult {
@@ -305,8 +301,10 @@ pub fn answer_prompt_from(chain_text: &str, scored: &[ScoredEntity], query_text:
 		prompt.push_str(chain_text);
 		prompt.push('\n');
 	}
+	// Renders every fact it is given: how many to include is a retrieval
+	// policy (`answer_max_facts`), applied by the caller that holds the config.
 	prompt.push_str("Relevant facts:\n");
-	for (i, st) in scored.iter().take(ANSWER_MAX_THOUGHTS).enumerate() {
+	for (i, st) in scored.iter().enumerate() {
 		let text = st.entity.text();
 		let truncated = util::truncate(&text, 300);
 		prompt.push_str(&format!("{}. {}\n", i + 1, truncated));
@@ -343,65 +341,6 @@ pub fn format_chains(g: &GraphGnn, chains: &[PathChain]) -> String {
 		}
 	}
 	out
-}
-
-pub fn refine_edges(g: &mut GraphGnn, chains: &[PathChain], llm: &LlmFunc) {
-	for chain in chains {
-		for (j, node_id) in chain.nodes.iter().enumerate() {
-			if j.is_multiple_of(2) {
-				continue;
-			}
-			let (reason, kern_id) = match find_reason(g, node_id) {
-				Some(pair) => pair,
-				None => continue,
-			};
-			let tc = reason.traversal_count.value();
-			if tc > 0 && (tc as u32).is_multiple_of(REFINE_INTERVAL) {
-				let from_text = find_entity(g, &reason.from)
-					.map(|(t, _)| t.text())
-					.unwrap_or_default();
-				let to_text = find_entity(g, &reason.to)
-					.map(|(t, _)| t.text())
-					.unwrap_or_default();
-
-				if from_text.is_empty() || to_text.is_empty() {
-					continue;
-				}
-
-				let prompt = format!(
-					"Rate the strength of the relationship between these two knowledge items \
-					 on a scale from 0.0 to 1.0. Respond with only the number.\n\n\
-					 A: {}\n\nB: {}",
-					util::truncate(&from_text, 200),
-					util::truncate(&to_text, 200),
-				);
-				let response = llm(&prompt);
-				if let Ok(new_score) = response.trim().parse::<f64>() {
-					let clamped = new_score.clamp(0.0, 1.0);
-					let lamport = g.bump_lamport();
-					let producer = g.network_id.clone();
-					if let Some(kern) = g.get_mut(&kern_id) {
-						if let Some(r) = kern.reasons.get_mut(node_id) {
-							r.score = clamped;
-							r.score_lamport = lamport;
-							r.score_producer = producer.clone();
-							let lww_value = bincode::serde::encode_to_vec(clamped, bincode::config::standard())
-								.unwrap_or_default();
-							g.push_delta(crate::base::graph::PendingDelta {
-								object_id: node_id.clone(),
-								target: 2,
-								replica: String::new(),
-								value: 0,
-								lamport,
-								producer,
-								lww_value,
-							});
-						}
-					}
-				}
-			}
-		}
-	}
 }
 
 #[cfg(test)]

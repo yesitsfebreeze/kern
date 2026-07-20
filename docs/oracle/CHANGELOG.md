@@ -1,6 +1,358 @@
 
 
+
 # Changelog
+
+- 2026-07-20 — The answer prompt stops discarding retrieved evidence.
+  `ANSWER_MAX_THOUGHTS = 5` capped the answer prompt at five facts while
+  retrieval delivers up to `max_deliver_results = 25` — so the pipeline
+  seeded, expanded, reranked and delivered ~24 claims per probe and then
+  threw 19 away before the model saw them. Measured against real data,
+  that ceiling buys nothing: distilled claims average **79 chars** (p50 75,
+  max 227), so all 25 occupy ~493 tokens — **6% of the answerer's 8192
+  context**. The cap discarded 80% of the evidence to save 6% of the
+  window, and any gold-supporting claim ranked 6th-24th was found and then
+  hidden. `answer_max_facts` is now a `RetrievalConfig` field (default
+  unchanged at 5 pending the A/B) with validation: 0 is rejected (every
+  answer would abstain) and exceeding `max_deliver_results` is rejected as
+  dead config. `answer_prompt_from` now renders every fact it is handed —
+  how many to include is retrieval policy, applied by the caller that holds
+  the config. `locomo_eval --answer-facts N` exposes it. This is tuning of
+  the full pipeline, not a disabled stage.
+  Also: `--no-hyde`/`--no-rerank` are relabelled DIAGNOSTIC ONLY in CLI
+  help and docs, because a fast number from a disabled stage measures
+  something kern does not ship; speed must come from making the full
+  pipeline cheaper. And eval reports now carry contention-immune LLM work
+  counters (`llm_calls`, `llm_prompt_chars`, `llm_completion_chars`, per
+  probe) — wall clock on this shared box produced two confident wrong
+  conclusions today (that concurrency was hurting, and that HyDE was worth
+  1.7×; HyDE in fact fires on 11.7% of probes because it is gated to
+  queries under 6 tokens), so "does A do less work than B" is now
+  answerable without a quiet machine.
+  Decided by: verify-before-claiming (the 5-vs-25 ceiling was measured
+  against claim lengths, not assumed), fix-the-root (the cap, not the
+  symptom), name-the-tradeoff (more facts cost context but the budget is
+  6%). Supersedes: the fixed five-fact answer prompt and wall-clock-only
+  speed comparisons.
+
+- 2026-07-20 — One binary, two roles: `kern hub` (machine-level control plane)
+  supervises per-project node daemons instead of every project process fending
+  for itself. The hub owns lifecycle only — `resolve(root)` spawns or adopts a
+  node and returns its socket, `unload` drives the new `KernRpc::shutdown`
+  (save-then-exit over RPC, no signals), a reaper drops dead entries; the data
+  path stays client→node direct, so query latency is untouched. `kern mcp` asks
+  the hub first and falls back to the legacy self-spawn path when no hub runs —
+  rollout is opt-in by starting `kern hub`. Chosen over two separate binaries:
+  same build means zero hub↔node version skew, and the "fast node" comes free
+  since a node skips hub scaffolding. Chosen over hub-as-proxy: a proxy hop
+  taxes every query to simplify connect-time only. Deferred deliberately:
+  idle auto-unload (no honest activity signal yet — resolve time lies when MCP
+  clients hold long connections), gossip hub-side (phase 3, ROADMAP §5x).
+  Fixed on sight: a rebuild unlinks the running binary, `/proc/self/exe` reads
+  "<path> (deleted)", and a long-lived hub could never spawn again — the marker
+  is stripped since the fresh binary sits at the original path.
+  Decided by: name-the-tradeoff (single binary vs skew, control plane vs proxy),
+  avoided-question-first (idle signal named and parked, not guessed),
+  fix-bugs-on-sight (the deleted-exe spawn failure).
+
+- 2026-07-20 — Heat is decayed before the GC compares it, and the configured
+  `[heat]` settings actually reach the deposit path. `is_cold_victim`
+  (`tick/stigmergy.rs`) tested the raw stored `entity.heat` against
+  `COLD_HEAT_THRESHOLD`; `heat::decayed` was correct but only ever reached
+  through `heat::deposit`, so an entity that was hot once and never touched
+  again kept its stale heat forever and evaded cold-tier eviction permanently —
+  a direct breach of the "hot graph stays bounded" vision test. Separately,
+  `pulse` hardcoded `HeatConfig::default()`, so a user's `half_life_secs` and
+  `deposit_traversal` overrides were silently dropped. `TickContext` now carries
+  `heat_cfg`; `pulse_with_heat` threads the real config from `cfg.heat`, the
+  single source of truth. A pre-existing test that appeared to cover this
+  (`heat_above_threshold_is_preserved_even_when_old`) set no `heat_updated_at`,
+  so `decayed` short-circuited on `since: None` and it passed vacuously — now
+  tightened into a real assertion. Named for the next reader: `pulse` still
+  defaults the config at `gossip/handler.rs:197,213,268`, because
+  `handler::Deps` carries no `Config` at all; behaviour there is unchanged from
+  before, not regressed, and the fix is a one-line swap once that struct carries
+  config.
+  Decided by: fix-the-root (decay at the comparison, not at every call site),
+  name-the-tradeoff (the handler seam is stated, not hidden).
+
+- 2026-07-20 — One dedup decision, one threshold. Ingest deduped at a
+  configurable `INGEST_DEDUP_THRESHOLD` (0.95) while `accept` hardcoded
+  `DEFAULT_DEDUP_THRESHOLD` (0.92), so a claim scoring in the gap was judged new
+  by ingest, fully built and embedded, then dropped by `commit_entity` with
+  `deduped: true` — neither stored nor merged into the survivor, no
+  `observe_support`, no `Rephrase` edge. Silent content loss reported to the
+  caller as a successful dedup. `accept_with_dedup` now takes the configured
+  value; `DEFAULT_DEDUP_THRESHOLD` is deleted. A second boundary bug found on
+  sight: `is_duplicate` used `>` where `find_duplicate` uses `>=`, so a claim
+  scoring exactly at the threshold was a duplicate to one check and not the
+  other — both are `>=` now. Threading beats merging the constants because a
+  user config above 0.95 would have re-opened the gap. Named for the next
+  reader: the two checks still run *different queries* — `find_duplicate` hits
+  `entity_idx` alone, `is_duplicate` also searches `gnn_entity_idx` and blends
+  `0.4*content + 0.6*gnn` — so they can still disagree, and the residual fix is
+  to make `commit_entity`'s duplicate branch merge like `update_existing_entity`
+  instead of dropping.
+  Decided by: fix-the-root, fix-bugs-on-sight (the `>`/`>=` split was found
+  while fixing the threshold).
+
+- 2026-07-20 — `src/wire.rs` deleted; the three surviving validators live in
+  `base/validate.rs`. 451 of its 454 lines were DTOs with zero consumers,
+  superseded by `trnsprt::kern_rpc::dto`. The validators stay in `base`, not
+  `trnsprt`: the transport crate has no dependency on `kern` and these need
+  `base::types::EntityKind`, so moving them there would invert the dependency —
+  and they are domain validation, not wire framing, regardless. Renamed with the
+  concept: `validate_wire_conf` → `validate_conf`, `WireError` → `ValidateError`.
+  Decided by: delete-superseded.
+
+- 2026-07-20 — The default local surfaces are authenticated. The kern_rpc Unix
+  socket is `chmod 0600` after bind, and `serve_http` requires a bearer token
+  (auto-minted at `<data_dir>/mcp-token`, created `0600` via
+  `create_new` so the secret is never briefly world-readable) on both the POST
+  and the SSE GET — the stream had been an open keepalive. Two premises were
+  corrected by measurement rather than assumed: HTTP is opt-in (it binds only
+  when `--mcp-addr` is passed), not exposed by default; and a bound socket at
+  the default `umask 022` is `0755`, not `0777`, so Linux's write-bit check on
+  `connect()` already blocked other users — the real exposure was
+  umask-dependent. Named for the next reader: bind-then-chmod leaves a sub-ms
+  window, chosen over a `umask` flip because umask is process-global and this
+  daemon is multi-threaded, which would have raced every unrelated concurrent
+  file creation; the race-free option (a private 0700 parent dir) would change
+  the socket path and break rendezvous with running clients.
+  Decided by: verify-before-claiming (both premises measured), name-the-tradeoff.
+
+- 2026-07-20 — Statements no longer federate. `union_statements` in
+  `base/merge.rs` merged them as a grow-only union, but entity ids *are*
+  `content_hash(text)`, so honest replicas hold identical statements by
+  construction and the union is provably a no-op — except when a peer asserts
+  content its id does not hash to, which appended peer-controlled text into the
+  lexical index and the digest. Statements join `conf_alpha`/`conf_beta`/
+  `unlinked_count` on the never-import list; the senderless
+  `CrdtTarget::Statements` arm becomes an explicit rejecting no-op so an older
+  peer still cannot inject. No tombstones and no `OrSet`: removals are already
+  encoded by the id changing, so a tombstone set would be permanent unbounded
+  metadata solving a problem content-addressing had solved — and `statements` is
+  positional (`ChunkPart.index` indexes into it), so an `OrSet<String>` would
+  have silently broken chunk rendering. The four hand-rolled last-writer-wins
+  comparisons are consolidated into `crdt::lww_wins`, pinned by a
+  behaviour-preservation test. Named for the next reader: a genuinely divergent
+  same-id entity now stays divergent instead of converging to a union — correct,
+  because union of conflicting content under one hash is corruption, not
+  convergence.
+  Decided by: fix-the-root, name-the-tradeoff.
+
+- 2026-07-20 — Dead code deleted after verification: `search_adaptive` +
+  `AdaptiveEfConfig` + the never-read `adaptive_ef_*` config block,
+  `ModeWeights.lexical` (defaulted 0.0 in all three modes and never read by
+  `score_neighbor`; lexical retrieval is already wired correctly as a BM25
+  channel fused by RRF, which is the right place for it — the field was a
+  vestige of an abandoned linear-blend design), and the unused `PnCounter` /
+  `LwwRegister` / `OrSet` types. `GCounter` stays; it is live.
+  `refine_edges` was deleted, briefly restored on a mistaken premise, and
+  deleted again — see the correction below.
+  Decided by: delete-superseded.
+
+- 2026-07-20 — Correction to the record. `refine_edges` was restored on the
+  claim that it was the only producer of `CrdtTarget::ReasonScore` deltas,
+  leaving that target receive-only. That claim was false and was relayed without
+  verification: `degrade_entity_reasons` (`commands/graph_ops.rs:271`) is a live
+  producer, so the CRDT half was never stranded. Two supporting claims were also
+  false — `FEATURES.md` never described an "Edge refine" feature, and its CRDT
+  section already stated correctly that no `LwwRegister`/`OrSet` type exists.
+  On re-examination the function could not work regardless: nothing in
+  production increments `traversal_count`, so its cadence gate reads a counter
+  that is always 0 locally, and with gossip a peer shipping `tc == 10` would
+  fire it on *every* query touching that edge, unbounded — it also needs a write
+  guard and an LLM round-trip, so it can never run on the read path at any
+  cadence. Re-deleted.
+  Decided by: verify-before-claiming (the failure this entry records),
+  delete-superseded.
+
+- 2026-07-20 — `broadcast_pulse` reaches the MCP `pulse` tool. It was reported
+  as dead code; it is an initialization-order bug. The `Server` was constructed
+  at `commands.rs:631` with `None` while `start_gossip` does not return the real
+  broadcaster until line 638, and the struct captures it by value — so the
+  maintenance tick got a working broadcaster and the MCP tool silently never
+  broadcast to peers. Server construction moved below `start_gossip`; nothing in
+  between depended on it. The same tool now also uses the configured heat
+  settings via `self.cfg.heat`, which `Server` already carried. Named for the
+  next reader: this fix is verified by compile and inspection, not by a test —
+  covering it needs a booted daemon with gossip enabled, which the harness does
+  not do.
+  Decided by: fix-bugs-on-sight, verify-before-claiming (the coverage gap is
+  stated rather than implied).
+
+- 2026-07-20 — `capture` is gone; the intake is the only name, and it now
+  reaches the disk and the config file the 2026-07-17 rename deliberately
+  stopped short of. `CaptureConfig` → `IntakeConfig`, `[capture]` → `[intake]`,
+  `.kern/capture/` → `.kern/intake/`, `spawn_capture` → `spawn_intake`,
+  tracing target `kern.capture` → `kern.intake`, and the docs site's
+  `howto/capture-recall.md` → `howto/intake-recall.md` with the nav entry to
+  match. Cause: that rename kept the old name on disk to avoid a migration, and
+  the half-rename cost more than the migration would have — a reader hit
+  `intake` in the code, `capture` in `kern.toml`, and had no way to tell whether
+  they were the same thing. Worse, this session invented a *third* word for it
+  ("inbox") in comments and roadmap prose before anyone noticed, which is what a
+  vocabulary with two live names invites. All three now read `intake`.
+  The migration the old decision feared is nine lines: `migrate_legacy_dir`
+  renames `.kern/capture` to `.kern/intake` on daemon start, and only when the
+  new path is free — an existing intake dir means the move already happened, and
+  merging a re-created legacy dir over live state is never correct. Both
+  branches are tested. No serde alias or compat shim is kept: `Config` is
+  `#[serde(default)]` with no `deny_unknown_fields`, so a stale `[capture]`
+  section is ignored rather than fatal, and all four real `kern.toml` files on
+  this machine carry the section empty — header and comment, zero settings — so
+  nothing tunable is dropped. Named for the next reader: an operator who *had*
+  tuned `[capture]` would lose those values silently on upgrade; accepted
+  because no such config exists, and rejected as a permanent alias because one
+  concept with two accepted spellings is the defect being fixed.
+  The digest knobs stay inside `[intake]` rather than splitting into their own
+  section — one configuration, per the call made here.
+  Decided by: delete-superseded (one name, no alias), fix-the-root (rename the
+  disk and the config, not just the code), name-the-tradeoff (the silent
+  config-value loss). Supersedes: the 2026-07-17 decision to leave the on-disk
+  layout and config section named `capture`.
+
+- 2026-07-20 — The intake accepts what is dropped in it,
+  instead of silently eating everything it did not recognise.
+  `drain_entry` gated on `extension == "txt"` and returned early otherwise —
+  no log, no error, no move to `done/` — so a `.md`, a `.json`, or an
+  extensionless note sat in the intake forever *looking accepted*. Silent
+  loss on the exact gesture the intake exists for. The extension allowlist is
+  replaced by asking what the file is: anything that reads as UTF-8 gets in,
+  `.txt` stays the session-transcript lane and is distilled into claims, and
+  everything else is a document stored whole through the same path the file
+  watcher uses (`Source::File`, `EntityKind::Document`). Binary — an
+  `InvalidData` read — is quarantined into `failed/` with a warning rather
+  than retried forever; a genuine IO error is still left in place, because
+  those are transient and quarantining them would lose data. Empty files
+  archive straight to `done/`. Consequence worth naming: **documents need no
+  reason LLM**, only the embedder, so `spawn_capture` now always starts the
+  drain and downgrades the missing-reason-model case from "intake dead" to a
+  warning that transcripts specifically will wait. `intake::run` takes
+  `Option<LlmFunc>` to carry that. Two behaviours the design deliberately
+  keeps apart: distillation is what a *transcript* gets, not what everything
+  gets — a large document routed through the one-shot distill prompt would
+  truncate at the model's context window, while the document path chunks.
+  Ceiling marked in place: a file still being copied can read as
+  valid-but-truncated text; an mtime-settle check is the upgrade path if
+  partial drops appear. New test asserts the whole promise in one run — a
+  `.md` document ingests with `None` for the LLM, and a planted PNG lands in
+  `failed/`. 826 workspace tests green.
+  Decided by: fix-bugs-on-sight (silent data loss found while documenting the
+  path), fix-the-root (the allowlist was the defect, not the missing
+  extensions), name-the-tradeoff (transcript-vs-document routing, and the
+  partial-write ceiling). Supersedes: the `.txt`-only intake filter and the
+  reason-LLM gate on the whole drain.
+
+- 2026-07-20 — The docs site moves from MkDocs Material to the Terminal
+  theme (`mkdocs-terminal`, `gruvbox_dark` palette), and the book is filled
+  out to 16 pages across Concepts and How-to. Cause: the theme was chosen
+  for look; the monospace terminal aesthetic matches what kern is. Tradeoff,
+  named, and it is not free — Terminal ships neither Mermaid nor admonition
+  styling, both of which Material gave for nothing and both of which the
+  written pages depend on. Rather than drop the content,
+  `docs/site/assets/extra.css` styles `.admonition` (danger/warning carry
+  their own colour, so the unauthenticated-federation notice keeps its
+  visual weight) and `docs/site/assets/mermaid-init.js` bootstraps Mermaid
+  11 from jsDelivr. That init file injects its own `<script type="module">`
+  because Terminal's `base.html:34` renders `extra_javascript` as a plain
+  `<script src>` and drops the `type`, which silently breaks a bare ESM
+  import — recorded because the failure is invisible at build time and
+  `--strict` stays green. Social preview cards were requested but Material's
+  `social` plugin cannot run under another theme; `docs/overrides/main.html`
+  hooks Terminal's `extrahead` block to emit per-page OpenGraph/Twitter
+  title, description and canonical URL instead. Link unfurls therefore carry
+  the right text but no generated image, and the CI image pipeline
+  (cairo/pango) is not needed after all. Supersedes the Material theme
+  configuration recorded earlier today.
+  Decided by: name-the-tradeoff, verify-before-claiming.
+
+- 2026-07-20 — The intake naming ban stops being remembered and starts being
+  enforced: a `vocab` job in `ci.yml` fails any commit reintroducing the
+  print-queue-style working name the 2026-07-17 rename scrubbed. Cause: that
+  decision said "no alias or historical mention kept anywhere", and the word
+  had already drifted back into three prose files (`CHANGELOG.md` line 504,
+  `.splinter/src/config/mod.splinter.md`, `.splinter/src/config/wsl.splinter.md`)
+  — all written *after* the scrub. A hand-run scrub cannot hold a vocabulary;
+  a failing check can. All three sites now say the intake retries the job.
+  Verified in both directions: the guard passes on the clean tree and fires on
+  a reintroduced occurrence. Also fixed while here: `ROADMAP.md` §7e cited an
+  outage queue at `ingest/queue.rs` — that file does not exist and never did;
+  the retry behaviour it described is the intake's (`ingest/intake.rs`,
+  `finalize` archives only on full success). The citation was inherited
+  unchecked from the Alois plan when §7 was folded in.
+  Decided by: fix-the-root (enforce the ban instead of re-scrubbing),
+  verify-before-claiming (a cited path that does not exist is a false claim).
+  Supersedes: the hand-run scrub as the ban's only enforcement.
+
+- 2026-07-20 — The Alois integration plan folds into `ROADMAP.md` §7 as the
+  embeddable-endpoint track, and `docs/ALOIS-INTEGRATION-PLAN.md` is deleted.
+  Cause: the work it described was never Alois-specific — ACL plus a request
+  principal, a review/draft lifecycle, source-trust weighting, and
+  `forget_by_source` retention are what *any* host system needs to mount kern
+  as its reasoning store instead of Zep or a vector DB. Filed under one
+  consumer's name it read as a side integration; it is the second-most
+  valuable track after the eval gap, because it converts kern from one agent's
+  memory into a memory layer other agentic workflows embed. Ordering is
+  preserved from the audit: ACL gates everything, review builds on its
+  `QueryOptions` work, source-trust runs parallel. Three constraints carried
+  over verbatim because they are easy to lose: ACL is caller-asserted and
+  trust ends at the process edge; Facts are GC-immune but never ACL-immune;
+  and `forget_by_source` is the sole sanctioned bypass of the Fact guard, so
+  it must be explicit and never default. In-kern token metering stays
+  deferred — gateway-side metering needs zero kern change. Decided by:
+  delete-superseded. Supersedes: `docs/ALOIS-INTEGRATION-PLAN.md`.
+
+- 2026-07-20 — `ROADMAP.md` becomes the single source of truth for state and
+  open work, and eight planning documents that duplicated it are deleted:
+  `docs/aspiration.md`, `docs/vision.md`, `docs/landscape.md`, `docs/v2.md`,
+  `docs/federation-roadmap.md`, `docs/federation-integration-plan.md`,
+  `docs/oracle/FEATURE-AUDIT.md`, `docs/kern/board-unblock-plan.md`,
+  `docs/kern/locomo-improvements.md`. Cause: nine files each held a partial,
+  separately-dated view of what was left, and they disagreed — the feature
+  audit claimed the hook layer both shipped and was retired, the federation
+  plan said the Delta sender did not exist while `start_delta_flush` had
+  been live since 2026-07-17, and `docs/landscape.md` still said no LoCoMo
+  baseline existed a day after one was recorded. Every open item was
+  re-verified against source at HEAD before being folded in, and the
+  contradictions resolved in favour of the code: federation Phase 1 landed
+  as inline lamport-stamped LWW fields plus `union_statements`, not as named
+  `OrSet`/`LwwRegister` types, so `crdt.rs` is correctly still `GCounter`
+  only; Pulse/Question senders and `AntiEntropy` are genuinely absent. The
+  new file carries the north star and recorded baseline, the supersession
+  argument against Zep/Mem0/Letta/Qdrant, the eval sequence, retrieval,
+  federation, safety, non-goals, and the repo laws — including a fourth law:
+  new work goes in this file, never a new document. `docs/kern/` is now
+  reference and measurement records only. Decided by: delete-superseded,
+  with verify-before-claiming governing every folded status marker.
+  Supersedes: the nine deleted documents and the previous nine-question
+  `ROADMAP.md`.
+
+- 2026-07-20 — Documentation moves from mdBook to MkDocs Material, and the
+  site publishes itself. `docs/book/` is gone; the three real pages live in
+  `docs/site/` (`introduction.md` became `index.md`), configured by a
+  root `mkdocs.yml`. Cause: `just docs` was dead — it invoked a `doc-gen`
+  crate in a sibling `../shared` workspace that does not exist on any
+  checkout, and `SUMMARY.md` was never generated, so `mdbook build` could
+  not succeed for anyone. Rather than resurrect a generator nothing depends
+  on, the pages are hand-written and the generation step is deleted.
+  MkDocs Material subsumes the whole `book.toml` surface in stock
+  configuration — search, dark/light palette, edit-url, and Mermaid via
+  `pymdownx.superfences` — so the vendored `mermaid.min.js`,
+  `mermaid-init.js`, `theme/custom.css`, `theme/custom.js`, and
+  `flows.toml` (an empty hand-seeded flow list feeding the dead generator)
+  are all deleted rather than ported. No plugin beyond stock `search` is
+  installed: the MkDocs catalog is a directory to consult when a need
+  appears, not a set to adopt up front. `.github/workflows/docs.yml`
+  builds `--strict` on every docs-touching PR and runs `mkdocs gh-deploy`
+  on master; `docs/requirements.txt` pins `mkdocs<2` because Material's
+  maintainers have flagged MkDocs 2.0 as removing the plugin system with
+  no migration path. `.pi/update.sh` is created so a fresh checkout
+  installs the docs toolchain via `/doctor`. Supersedes the mdBook
+  toolchain and the `docs`/`docs-watch`/`docs-serve`/`docs-check` recipes,
+  replaced by `docs`/`docs-serve`/`docs-deploy`.
+  Decided by: delete-superseded, builtin-before-built, fix-the-root.
 
 - 2026-07-20 — Eval results carry their own uncertainty, and A/B becomes a
   command instead of a habit. New `bench_support::evalstats` provides a
@@ -433,7 +785,7 @@
   Root cause is the zero-config promise colliding with WSL2 NAT networking —
   Ollama runs as a Windows host process, kern's loopback default
   (`http://localhost:11434`) resolves inside the WSL VM where nothing listens,
-  so every embed returned a transient connect error and ingest re-spooled the
+  so every embed returned a transient connect error and the intake retried the
   job forever. Nothing crashed and nothing surfaced: the failure mode is an
   empty graph. New `config::wsl` repoints loopback LLM endpoints (embed /
   reason / answer) at the default-route gateway, but ONLY when all of: running
