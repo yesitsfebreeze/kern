@@ -110,7 +110,7 @@ mod tests {
 
 	use crate::base::accept;
 	use crate::base::graph::GraphGnn;
-	use crate::base::types::{Acl, ChunkPart, ChunkPartKind, Entity, EntityStatus};
+	use crate::base::types::{Acl, ChunkPart, ChunkPartKind, Embedding, Entity, EntityStatus};
 	use crate::base::util;
 	use crate::crdt::GCounter;
 
@@ -140,8 +140,8 @@ mod tests {
 					text: String::new(),
 					index: 0,
 				}],
-				vector: vec,
-				gnn_vector: Vec::new(),
+				vector: vec.into(),
+				gnn_vector: Embedding::default(),
 				score: 0.0,
 				conf_alpha: 2.0,
 				conf_beta: 1.0,

@@ -358,7 +358,7 @@ pub(crate) fn link_entities(
 		to: to.to_string(),
 		kind: ReasonKind::Similarity,
 		text: reason_text,
-		vector: vec,
+		vector: vec.into(),
 		score,
 		..Default::default()
 	};

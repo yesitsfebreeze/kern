@@ -544,7 +544,7 @@ mod tests {
 		k.entities.insert("a".into(), ent("a", vec![1.0, 0.0]));
 		k.entities.insert("b".into(), ent("b", vec![0.0, 1.0]));
 		let mut r = edge("a", "b", 0.9);
-		r.vector = vec![0.7, 0.7];
+		r.vector = vec![0.7, 0.7].into();
 		add_reason(&mut k, r);
 		g.kerns.insert("kx".into(), k);
 		g
@@ -620,7 +620,7 @@ mod tests {
 		k.entities.insert("c".into(), ent("c", vec![1.0, 0.0]));
 		k.entities.insert("n".into(), ent("n", vec![0.6, 0.8]));
 		let mut r = edge("c", "n", 1.0);
-		r.vector = vec![1.0, 0.0];
+		r.vector = vec![1.0, 0.0].into();
 		add_reason(&mut k, r);
 		g.kerns.insert("kx".into(), k);
 
@@ -687,7 +687,7 @@ mod tests {
 		// Orthogonal to the query: reachable only across the edge.
 		k.entities.insert("b".into(), ent("b", vec![0.0, 1.0]));
 		let mut r = edge("a", "b", 0.9);
-		r.vector = vec![0.7, 0.7];
+		r.vector = vec![0.7, 0.7].into();
 		add_reason(&mut k, r);
 		g.kerns.insert("kx".into(), k);
 

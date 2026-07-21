@@ -55,7 +55,7 @@ fn kern_with(n: usize, deg: usize) -> Kern {
 			id.clone(),
 			Entity {
 				id,
-				vector: dense_vec(i + 1),
+				vector: dense_vec(i + 1).into(),
 				kind: EntityKind::Claim,
 				..Default::default()
 			},

@@ -11,7 +11,7 @@ pub(crate) fn entity(id: &str) -> Entity {
 pub(crate) fn entity_vec(id: &str, vector: Vec<f32>) -> Entity {
 	Entity {
 		id: id.into(),
-		vector,
+		vector: vector.into(),
 		..Default::default()
 	}
 }

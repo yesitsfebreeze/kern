@@ -191,7 +191,7 @@ mod tests {
 		ScoredEntity {
 			entity: Entity {
 				id: id.into(),
-				vector,
+				vector: vector.into(),
 				..Default::default()
 			},
 			score,

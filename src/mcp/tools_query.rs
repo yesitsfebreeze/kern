@@ -699,7 +699,7 @@ mod cold_tier_filter_tests {
 			acl,
 			..Default::default()
 		};
-		e.vector = vec![1.0, 0.0, 0.0];
+		e.vector = vec![1.0, 0.0, 0.0].into();
 		e
 	}
 

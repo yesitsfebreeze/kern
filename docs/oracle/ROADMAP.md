@@ -1731,6 +1731,51 @@ unchanged: a safe cap plus an escalation policy. The comment's "currently unsafe
 is a real reason nothing is set — eviction drops unpersisted `children` pushes
 (`src/config/graph.rs:16-17`).
 
+**The double-storage half shipped 2026-07-21; the bounding half is untouched.**
+Item 29 finding 3 assigned it here: every vector was resident twice. Verified
+before building rather than assumed — `index_kern_into` handed the index
+`t.vector.clone()` (`src/base/graph.rs:34`, `gnn_vector` `:38`, reasons `:46`)
+and `HnswNode` stored that clone verbatim, because the shipped default is
+`QuantizationMode::None` (`src/quant.rs:8-9`; int8 is opt-in through
+`kern compress`, and under it the node's float vector was already empty, so this
+buys nothing there). The two copies were the same floats, not a normalised one
+and a raw one — recall is unmoved to four decimals across the change, which is
+the check that would have caught it had they differed. `Entity::vector`,
+`Entity::gnn_vector` and `Reason::vector` are now `Embedding`
+(`src/base/types.rs:586`) and every index holds the map's own allocation.
+
+Measured with `tests/spill_memory.rs` in `resident` mode — 50k entities at dim
+384 each carrying `vector` AND `gnn_vector`, plus 25k reasons, one process per
+reading, ten interleaved before/after pairs in release:
+
+| | hot RSS | index walk, median |
+| --- | --- | --- |
+| before | 510.2 MB | 190 µs |
+| after | **324.6 MB** | 211 µs |
+
+**−185.6 MB, −36.4%**, with 0.5 MB of spread across ten runs. The three
+`*_only` rows are the control — they still copy, and the type now makes that
+copy visible as a `to_vec` (`src/base/graph.rs:336` does the same for the
+DiskANN build input) — and they moved ≤1.3 MB, which is the `Arc` header on
+125k allocations.
+
+The cost is query latency, and naming it is the point: **+17 µs median on a
+~190 µs index walk (+9%), slower in 11 of 15 paired runs.** It is not the atomic
+refcount, which is never touched on the read path, and not the indirection —
+`Arc<[f32]>` derefs exactly as `Vec<f32>` does. The likely mechanism is
+locality: the index's vectors used to be allocated together during its build and
+now point into the scattered kern map. That mechanism is unproven, and the
+measurement cannot settle it — the host carried load average 4-6 from two
+sibling cycles throughout and the before-arm spread was ±60 µs, the same order
+as the effect. What is safe to claim is that it is not a step change.
+
+Still open here, and the reason this item does not close: **nothing bounds the
+resident set.** Halving the O(N) term moves the ceiling; it does not install
+one. Also deliberately unclaimed, so that the number above measures one change:
+`do_reembed` seeds `vector` and `gnn_vector` from the same embed
+(`src/tick/tasks.rs:542-543`) and they could share a third allocation until GNN
+propagation overwrites one — another 76.8 MB at this corpus size.
+
 ### 84. Remaining operational odds and ends `[surface]`
 
 - **`serve.mcp_addr` is a config field with no reader.** Added when item 11
