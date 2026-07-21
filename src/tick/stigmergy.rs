@@ -137,7 +137,8 @@ fn evict_victims(
 				continue;
 			}
 		}
-		remove_entity(g, kern_id, id);
+		// never forced: GC does not get to punch through fact-immunity.
+		remove_entity(g, kern_id, id, false);
 	}
 	kept
 }

@@ -148,7 +148,13 @@ pub fn move_entity(
 }
 
 // Active LOCAL Facts are immune; Superseded facts are not. Missing id is a silent no-op.
-pub fn remove_entity(g: &mut GraphGnn, kern_id: &str, id: &str) {
+//
+// `force` is the ONE deliberate bypass of that immunity (ROADMAP item 19): a
+// legal deletion of the source outranks GC-immunity. It exists here and not
+// only in `forget_entity` because this is where the removal actually happens —
+// a caller that punched through the outer guard alone would report a removal
+// this function silently refused. Every other caller passes false.
+pub fn remove_entity(g: &mut GraphGnn, kern_id: &str, id: &str, force: bool) {
 	// SECURITY: fact-immunity is a LOCAL guarantee. A peer that sets kind=Fact on the
 	// wire would otherwise pin unbounded undeletable rows in a phantom kern.
 	let immune_kern = !crate::base::merge::is_remote_kern_id(kern_id);
@@ -160,7 +166,7 @@ pub fn remove_entity(g: &mut GraphGnn, kern_id: &str, id: &str) {
 	if let Some(t) = kern.entities.get(id) {
 		// A SUPERSEDED fact is invalidated history, not durable knowledge — the
 		// bi-temporal GC spills it to the cold tier and drops it here.
-		if immune_kern && t.is_fact() && !t.is_superseded() {
+		if immune_kern && !force && t.is_fact() && !t.is_superseded() {
 			return;
 		}
 	}
@@ -440,7 +446,7 @@ mod tests {
 		assert_eq!(g.entity_idx.len(), 2, "two entities indexed");
 		assert_eq!(g.reason_idx.len(), 2, "two reasons indexed");
 
-		remove_entity(&mut g, "k", "a");
+		remove_entity(&mut g, "k", "a", false);
 
 		let k = g.kerns.get("k").unwrap();
 		assert!(!k.entities.contains_key("a"), "entity removed from map");
@@ -474,10 +480,18 @@ mod tests {
 		k.entities.insert("f".into(), fact);
 		g.kerns.insert("k".into(), k);
 
-		remove_entity(&mut g, "k", "f");
+		remove_entity(&mut g, "k", "f", false);
 		assert!(
 			g.kerns.get("k").unwrap().entities.contains_key("f"),
 			"facts are immune to removal"
+		);
+
+		// The one bypass (ROADMAP item 19). Without it here the outer guard could
+		// be lifted and the removal would still silently not happen.
+		remove_entity(&mut g, "k", "f", true);
+		assert!(
+			!g.kerns.get("k").unwrap().entities.contains_key("f"),
+			"force punches through local fact-immunity"
 		);
 	}
 
@@ -499,7 +513,7 @@ mod tests {
 			g.kerns.insert(kid.into(), k);
 		}
 
-		remove_entity(&mut g, "remote-evilnet-k1", "f");
+		remove_entity(&mut g, "remote-evilnet-k1", "f", false);
 		assert!(
 			!g.kerns
 				.get("remote-evilnet-k1")
@@ -509,7 +523,7 @@ mod tests {
 			"a remote Fact is not durable local knowledge — it must be removable"
 		);
 
-		remove_entity(&mut g, "k", "f");
+		remove_entity(&mut g, "k", "f", false);
 		assert!(
 			g.kerns.get("k").unwrap().entities.contains_key("f"),
 			"the LOCAL fact keeps its immunity unchanged"

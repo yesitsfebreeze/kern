@@ -3,7 +3,7 @@ use crate::base::graph::GraphGnn;
 use crate::base::math::{average_vec, reason_id};
 use crate::base::reason::{add_reason, remove_entity, remove_reason};
 use crate::base::search::find_entity;
-use crate::base::types::{EntityKind, Kern, Reason, ReasonKind};
+use crate::base::types::{EntityKind, Kern, Reason, ReasonKind, Source};
 use crate::base::util::{explain_relationship_prompt, short_id, truncate};
 use crate::mcp::tools_query::entity_detail_by_id;
 
@@ -123,23 +123,133 @@ pub(super) async fn cmd_forget(cfg: &crate::config::Config, id: &str) {
 		Routed::Refused(e) => return eprintln!("{e}"),
 		Routed::NoDaemon => {}
 	}
-	with_graph(cfg, |g| match forget_entity(g, id) {
+	with_graph(cfg, |g| match forget_entity(g, id, false) {
 		Ok(removed) => print_forget(id, removed as u64),
 		Err(e) => eprintln!("{e}: {id}"),
 	});
 }
 
-pub(crate) fn forget_entity(g: &mut GraphGnn, id: &str) -> Result<usize, &'static str> {
+// The one removal path. `force` is ROADMAP item 19's deliberate bypass of local
+// fact-immunity and nothing else may set it — every per-id caller passes false.
+pub(crate) fn forget_entity(
+	g: &mut GraphGnn,
+	id: &str,
+	force: bool,
+) -> Result<usize, &'static str> {
 	let (thought, kern_id) = find_entity(g, id).ok_or("thought not found")?;
 	// A remote Fact is a peer's assertion, not durable local knowledge — forgettable.
-	if thought.is_fact() && !crate::base::merge::is_remote_kern_id(&kern_id) {
+	if thought.is_fact() && !force && !crate::base::merge::is_remote_kern_id(&kern_id) {
 		return Err("cannot forget a fact");
 	}
 	let edges_before = g.kerns.get(&kern_id).map(|k| k.reasons.len()).unwrap_or(0);
-	remove_entity(g, &kern_id, id);
+	remove_entity(g, &kern_id, id, force);
 	let edges_after = g.kerns.get(&kern_id).map(|k| k.reasons.len()).unwrap_or(0);
 	// saturating: remove_entity only drops edges, never adds — guard against underflow.
 	Ok(edges_before.saturating_sub(edges_after))
+}
+
+#[derive(Default)]
+pub(crate) struct SourceForget {
+	pub removed_entities: usize,
+	pub removed_edges: usize,
+	// Local Facts the guard refused. Without this a `--source` that hits nothing
+	// but Facts prints "forgot 0" and never says why `--force` was the answer.
+	pub kept_facts: usize,
+}
+
+// Deleting a source in the host must cascade into the graph (ROADMAP item 19).
+// The key is `(scheme, object_id)` and deliberately NOT the section: `source_id`
+// hashes scheme+object+section, so keying on one would forget a single section
+// of a document and leave the rest. Reaches exactly as far as `forget_entity`
+// does — the resident kerns; an unloaded kern is out of both their reach.
+pub(crate) fn forget_by_source(
+	g: &mut GraphGnn,
+	scheme: &str,
+	object_id: &str,
+	force: bool,
+) -> SourceForget {
+	// Collected first: the removal mutates every kern map we would be iterating.
+	let ids: Vec<String> = g
+		.all()
+		.into_iter()
+		.flat_map(|k| k.entities.values())
+		.filter(|t| t.source.scheme() == scheme && t.source.object_id() == object_id)
+		.map(|t| t.id.clone())
+		.collect();
+
+	let mut out = SourceForget::default();
+	for id in ids {
+		match forget_entity(g, &id, force) {
+			Ok(edges) => {
+				out.removed_entities += 1;
+				out.removed_edges += edges;
+			}
+			Err("cannot forget a fact") => out.kept_facts += 1,
+			// The id came out of the graph one statement ago; a miss here means a
+			// duplicate id across kerns already took it. Nothing left to remove.
+			Err(_) => {}
+		}
+	}
+	out
+}
+
+// `<scheme>://<object_id>` — the URI shape `Source`'s own doc comment uses
+// (`src/base/types.rs`). Everything after `://` is the raw `Source::object_id()`,
+// not a parsed URI path: that is the half of the pair the graph actually stores,
+// and re-deriving it from a `ticket://<system>/<id>` spelling would guess.
+fn parse_source_selector(arg: &str) -> Result<(&'static str, &str), String> {
+	let bad = || format!("--source wants <scheme>://<object_id>, got: {arg}");
+	let (scheme, object_id) = arg.split_once("://").ok_or_else(bad)?;
+	let scheme = Source::parse_scheme(scheme).ok_or_else(|| {
+		format!("unknown source scheme: {scheme} (file, ticket, session, agent, inline)")
+	})?;
+	if object_id.is_empty() {
+		return Err(bad());
+	}
+	Ok((scheme, object_id))
+}
+
+fn print_forget_source(scheme: &str, object_id: &str, out: &SourceForget) {
+	println!(
+		"forgot {} thoughts from {scheme}://{object_id}  removed {} edges",
+		out.removed_entities, out.removed_edges,
+	);
+	if out.kept_facts > 0 {
+		println!(
+			"  kept {} fact(s) — rerun with --force to remove them",
+			out.kept_facts
+		);
+	}
+}
+
+// Routed first for the same reason as `cmd_forget`: a serving daemon's graph is
+// the live one, and a local delete would drop rows from a stale copy while the
+// daemon kept serving the originals.
+pub(super) async fn cmd_forget_source(cfg: &crate::config::Config, source: &str, force: bool) {
+	let (scheme, object_id) = match parse_source_selector(source) {
+		Ok(pair) => pair,
+		Err(e) => return eprintln!("{e}"),
+	};
+	let args = serde_json::json!({"scheme": scheme, "object_id": object_id, "force": force});
+	match route("forget_by_source", args).await {
+		Routed::Done(v) => {
+			return print_forget_source(
+				scheme,
+				object_id,
+				&SourceForget {
+					removed_entities: u64_field(&v, "removed_entities") as usize,
+					removed_edges: u64_field(&v, "removed_edges") as usize,
+					kept_facts: u64_field(&v, "kept_facts") as usize,
+				},
+			)
+		}
+		Routed::Refused(e) => return eprintln!("{e}"),
+		Routed::NoDaemon => {}
+	}
+	with_graph(cfg, |g| {
+		let out = forget_by_source(g, scheme, object_id, force);
+		print_forget_source(scheme, object_id, &out);
+	});
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -512,7 +622,7 @@ mod tests {
 			],
 			&[("a", "b"), ("a", "c")],
 		);
-		let removed = forget_entity(&mut g, "a").expect("non-fact forget succeeds");
+		let removed = forget_entity(&mut g, "a", false).expect("non-fact forget succeeds");
 		assert_eq!(removed, 2, "both incident edges went with a");
 		let kern = g.kerns.get("kx").expect("kern present");
 		assert!(!kern.entities.contains_key("a"), "a is gone from the kern");
@@ -522,7 +632,10 @@ mod tests {
 	#[test]
 	fn forget_refuses_a_fact() {
 		let mut g = graph_with(&[("f", EntityKind::Fact)], &[]);
-		assert_eq!(forget_entity(&mut g, "f"), Err("cannot forget a fact"));
+		assert_eq!(
+			forget_entity(&mut g, "f", false),
+			Err("cannot forget a fact")
+		);
 		assert!(
 			g.kerns.get("kx").unwrap().entities.contains_key("f"),
 			"the fact is left intact"
@@ -534,7 +647,7 @@ mod tests {
 	fn forget_allows_a_remote_fact() {
 		let mut g = graph_in("remote-evilnet-k1", &[("f", EntityKind::Fact)], &[]);
 		assert_eq!(
-			forget_entity(&mut g, "f"),
+			forget_entity(&mut g, "f", false),
 			Ok(0),
 			"a remote Fact must be forgettable"
 		);
@@ -551,7 +664,207 @@ mod tests {
 	#[test]
 	fn forget_unknown_id_is_rejected_not_panicked() {
 		let mut g = graph_with(&[("a", EntityKind::Claim)], &[]);
-		assert_eq!(forget_entity(&mut g, "nope"), Err("thought not found"));
+		assert_eq!(
+			forget_entity(&mut g, "nope", false),
+			Err("thought not found")
+		);
+	}
+
+	fn file_src(path: &str, section: &str) -> Source {
+		Source::File {
+			path: path.into(),
+			section: section.into(),
+			title: String::new(),
+			author: String::new(),
+			url: String::new(),
+		}
+	}
+
+	fn sourced(id: &str, kind: EntityKind, source: Source) -> Entity {
+		Entity {
+			id: id.into(),
+			kind,
+			source,
+			..Default::default()
+		}
+	}
+
+	fn graph_of(kerns: &[(&str, Vec<Entity>)]) -> GraphGnn {
+		let mut g = GraphGnn::new();
+		for (kern_id, entities) in kerns {
+			let mut k = Kern::new(*kern_id, "");
+			for e in entities {
+				k.entities.insert(e.id.clone(), e.clone());
+			}
+			g.register(k);
+		}
+		g
+	}
+
+	// The point of keying on (scheme, object_id) and NOT source_id: source_id
+	// hashes the section too, so a per-section key would forget one chunk of a
+	// document and silently leave the rest.
+	#[test]
+	fn forget_by_source_takes_every_section_of_one_object() {
+		let mut g = graph_of(&[(
+			"kx",
+			vec![
+				sourced("intro", EntityKind::Claim, file_src("notes.md", "intro")),
+				sourced("body", EntityKind::Claim, file_src("notes.md", "body")),
+				sourced(
+					"other",
+					EntityKind::Claim,
+					file_src("elsewhere.md", "intro"),
+				),
+			],
+		)]);
+		add_reason(g.kerns.get_mut("kx").unwrap(), edge("intro", "body", 1.0));
+
+		let out = forget_by_source(&mut g, "file", "notes.md", false);
+
+		assert_eq!(out.removed_entities, 2, "both sections went");
+		assert_eq!(out.removed_edges, 1, "the edge between them cascaded");
+		assert_eq!(out.kept_facts, 0);
+		let kern = g.kerns.get("kx").expect("kern present");
+		assert!(!kern.entities.contains_key("intro"));
+		assert!(!kern.entities.contains_key("body"));
+		assert!(
+			kern.entities.contains_key("other"),
+			"a different object_id is untouched"
+		);
+	}
+
+	// A source's chunks do not all live in one kern — placement is by similarity,
+	// so a scan of a single kern would leave half the document behind.
+	#[test]
+	fn forget_by_source_reaches_across_kerns() {
+		let mut g = graph_of(&[
+			(
+				"k1",
+				vec![sourced(
+					"a",
+					EntityKind::Claim,
+					file_src("notes.md", "intro"),
+				)],
+			),
+			(
+				"k2",
+				vec![sourced(
+					"b",
+					EntityKind::Claim,
+					file_src("notes.md", "body"),
+				)],
+			),
+		]);
+
+		let out = forget_by_source(&mut g, "file", "notes.md", false);
+
+		assert_eq!(out.removed_entities, 2, "both kerns were swept");
+		assert!(!g.kerns.get("k1").unwrap().entities.contains_key("a"));
+		assert!(!g.kerns.get("k2").unwrap().entities.contains_key("b"));
+	}
+
+	// The whole reason `force` exists — and the reason it must never be the
+	// default: without it a legal source deletion leaves the Facts behind, and
+	// the caller has to be told that is what happened.
+	#[test]
+	fn a_local_fact_survives_without_force_and_goes_with_it() {
+		let entities = || {
+			vec![
+				sourced("f", EntityKind::Fact, file_src("notes.md", "intro")),
+				sourced("c", EntityKind::Claim, file_src("notes.md", "body")),
+			]
+		};
+
+		let mut g = graph_of(&[("kx", entities())]);
+		let out = forget_by_source(&mut g, "file", "notes.md", false);
+		assert_eq!(out.removed_entities, 1, "only the Claim went");
+		assert_eq!(out.kept_facts, 1, "the refusal is reported, not swallowed");
+		assert!(
+			g.kerns.get("kx").unwrap().entities.contains_key("f"),
+			"the local Fact is actually still there, not just reported kept"
+		);
+
+		let mut g = graph_of(&[("kx", entities())]);
+		let out = forget_by_source(&mut g, "file", "notes.md", true);
+		assert_eq!(out.removed_entities, 2, "force took the Fact too");
+		assert_eq!(out.kept_facts, 0);
+		assert!(
+			!g.kerns.get("kx").unwrap().entities.contains_key("f"),
+			"force removes the local Fact for real — remove_entity guards it too"
+		);
+	}
+
+	// A remote Fact is a peer's assertion, not durable local knowledge, so it was
+	// never behind the guard `force` lifts. Needing `--force` for one would make
+	// the flag look like the price of deleting anything peer-shaped.
+	#[test]
+	fn a_remote_fact_goes_with_or_without_force() {
+		for force in [false, true] {
+			let mut g = graph_of(&[(
+				"remote-evilnet-k1",
+				vec![sourced(
+					"f",
+					EntityKind::Fact,
+					file_src("notes.md", "intro"),
+				)],
+			)]);
+			let out = forget_by_source(&mut g, "file", "notes.md", force);
+			assert_eq!(out.removed_entities, 1, "force={force}");
+			assert_eq!(out.kept_facts, 0, "force={force}");
+			assert!(!g
+				.kerns
+				.get("remote-evilnet-k1")
+				.unwrap()
+				.entities
+				.contains_key("f"));
+		}
+	}
+
+	// Deleting a source the graph never ingested is a legal no-op, not an error:
+	// the host deletes what it has, and kern reports what it had.
+	#[test]
+	fn an_unknown_source_removes_nothing_and_does_not_error() {
+		let mut g = graph_of(&[(
+			"kx",
+			vec![sourced(
+				"a",
+				EntityKind::Claim,
+				file_src("notes.md", "intro"),
+			)],
+		)]);
+
+		let out = forget_by_source(&mut g, "file", "never-ingested.md", false);
+		assert_eq!((out.removed_entities, out.removed_edges), (0, 0));
+		assert_eq!(out.kept_facts, 0);
+		assert!(
+			g.kerns.get("kx").unwrap().entities.contains_key("a"),
+			"a miss must not take the graph with it"
+		);
+
+		// Same object_id under another scheme is a different source.
+		let inline = forget_by_source(&mut g, "inline", "notes.md", false);
+		assert_eq!(inline.removed_entities, 0, "the scheme is half the key");
+	}
+
+	#[test]
+	fn the_source_selector_is_scheme_colon_slash_slash_object_id() {
+		assert_eq!(
+			parse_source_selector("file:///abs/path/notes.md"),
+			Ok(("file", "/abs/path/notes.md")),
+			"everything after :// is the object_id, slashes and all"
+		);
+		assert_eq!(
+			parse_source_selector("inline://deadbeef"),
+			Ok(("inline", "deadbeef"))
+		);
+
+		for bad in ["notes.md", "file://", "ftp://x", "://x"] {
+			assert!(
+				parse_source_selector(bad).is_err(),
+				"{bad} must be rejected, not guessed at"
+			);
+		}
 	}
 
 	// Proves the printer, not the lookup: both `kern get` paths hand it this shape,

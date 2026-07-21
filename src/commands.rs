@@ -130,8 +130,19 @@ pub enum Commands {
 		id: String,
 	},
 	List,
+	/// Forget one thought by ID, or a whole source with --source.
 	Forget {
-		id: String,
+		id: Option<String>,
+		/// Forget every thought from one source instead: <scheme>://<object_id>.
+		#[arg(long, conflicts_with = "id")]
+		source: Option<String>,
+		/// Also remove local Facts. The only bypass of the Fact guard, and never
+		/// implicit — it needs --source, since a single id names one Fact the
+		/// caller can see, not a source's worth of them. Paired in `dispatch`,
+		/// NOT with clap's `requires`: that does not fire for a SetTrue flag, so
+		/// `forget --force <id>` was accepted and silently ignored.
+		#[arg(long)]
+		force: bool,
 	},
 	Link {
 		from: String,
@@ -525,7 +536,19 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 
 		Commands::Get { id } => graph_ops::cmd_get(cfg, &id).await,
 		Commands::List => graph_ops::cmd_list(cfg),
-		Commands::Forget { id } => graph_ops::cmd_forget(cfg, &id).await,
+		Commands::Forget { id, source, force } => match (id, source) {
+			(_, Some(source)) => graph_ops::cmd_forget_source(cfg, &source, force).await,
+			// A --force the per-id path would silently ignore is worse than no
+			// --force: the caller asked to punch through the Fact guard and got a
+			// refusal that reads like the thought simply was not there.
+			(Some(_), None) if force => eprintln!(
+				"kern forget: --force applies to --source <scheme>://<object_id>, not a single thought ID"
+			),
+			(Some(id), None) => graph_ops::cmd_forget(cfg, &id).await,
+			(None, None) => {
+				eprintln!("kern forget: pass a thought ID or --source <scheme>://<object_id>")
+			}
+		},
 
 		Commands::Link {
 			from,

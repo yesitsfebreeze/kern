@@ -302,14 +302,14 @@ and cold tier live together. Readers never block, writers serialize.
   (`search::query_dim_rejected`, `src/base/search.rs:15`) and logged throttled,
   because the silent no-op is what let the mismatch hide.
 - **Cold tier** — `cold_spill` (`src/base/store.rs:591`) / `cold_get` /
-  `cold_all` / `cold_put_all` / `cold_search` (`src/base/store.rs:629`,
-  brute-force). Bounded by
-  `COLD_MAX_ENTRIES = 50_000`: `cold_cap` (`src/base/store.rs:678`) deletes the
-  oldest rows past the cap, FIFO by `created_at`. The bound itself is
-  deliberate; what changed is that a drop is no longer silent — every eviction
-  increments `cold_evicted` (`:718`), which `health` reports, and the sweep logs
-  once per pass rather than once per row. A dropped non-durable entity is
-  unrecoverable, so the counter is its only trace.
+  `cold_all` / `cold_put_all` / `cold_search` (`:629`, brute-force). Bounded by
+  `COLD_MAX_ENTRIES = 50_000` — *softly*: both write paths (`:596`, `:625`) call
+  `cold_cap_amortized` (`:667`), which skips the scan until the tier passes
+  `max + COLD_CAP_SLACK` (1024, `:20`), so the real ceiling is 51_024. Only then
+  does `cold_cap` (`:678`) decode every row, sort by `created_at` and cut back to
+  `max` — capping per spill cost one full 50k-row decode per single eviction. A
+  drop is never silent: `cold_evicted` (`:718`) feeds `health`, and a dropped
+  non-durable entity is unrecoverable, so the counter is its only trace.
 - **Compaction** (`compact_dir`, `src/base/store.rs:756`) — the only way to
   shrink LMDB's high-water mark; writes a fresh env to a tmp file then
   `swap_compacted` renames with retry. Requires exclusive access (run offline).
@@ -321,10 +321,10 @@ and cold tier live together. Readers never block, writers serialize.
 `src/base/search.rs` (dimension guard), `src/store.rs`
 (per-cwd `Registry` of open stores).
 
-**Gaps.** Single-writer means CLI commands reading the on-disk graph can race a
-live daemon (documented in README). No WAL beyond LMDB's own. Compaction is
-manual/offline. The cold tier is still a hard FIFO bound — the eviction is now
-counted and visible, not prevented, and cold search stays brute-force.
+**Gaps.** Single-writer is enforced, not assumed — `src/base/lock.rs` is an advisory
+lock `reembed`, `gc` and `compact` claim or refuse — but `cmd_hub_merge`
+(`src/commands/admin.rs:648`) and `maybe_self_heal_store` (`src/commands.rs:437`)
+still `save_graph_unguarded` holding none. No WAL but LMDB's; compaction is offline.
 
 ---
 
@@ -593,7 +593,7 @@ so a quiescent kern retries nothing; the climbing `task_failures` count
 **What.** Model Context Protocol server (stdio + HTTP/SSE) exposing the graph
 to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 
-**Tools** (12, defined in `src/mcp/tools*.rs`, dispatched in `mcp.rs`
+**Tools** (14, defined in `src/mcp/tools*.rs`, dispatched in `mcp.rs`
 `call_tool`):
 
 | Tool | File | Purpose |
@@ -602,6 +602,7 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 | `ingest` | `tools_mutate.rs` | Add text. `object_id` update semantics, free-text `hint` chunking context (`descriptor` accepted as serde alias), optional `retention_secs` TTL (integer seconds; `0`/absent = never) resolved to an absolute `valid_until` once, before the sync / durable-direct / RAM-queue branch, so all three carry the same deadline. |
 | `link` | `tools_mutate.rs` | Create a reason edge (LLM writes the reason if blank). Edge score is the asserted confidence (agent 0.95; CLI user 1.0), NOT `cosine(from,to)` — a deliberate link connects what similarity cannot, so similarity must not be its strength. |
 | `forget` | `tools_mutate.rs` | Remove a thought + cascade edges (Facts immune). |
+| `forget_by_source` | `tools_mutate.rs` | Remove every thought from one `(scheme, object_id)` — **all sections of it**, since `source_id` hashes the section and keying on one would forget a single chunk of a document. Cascades through the same `forget_entity`; refuses local Facts unless `force`, which is the ONLY bypass of the Fact guard and is never implicit. Returns `removed_entities`/`removed_edges`/`kept_facts` — the last so a refused Fact is reported rather than read as "nothing was there". Exists so `kern forget --source` has somewhere to route. |
 | `degrade` | `tools_mutate.rs` | Down-weight edges along a bad retrieval path (`DEGRADE_*` decay). Returns `decayed_edges` and `removed_edges` — the reap count exists so a CLI `degrade` routed through the daemon can print what the local path prints. |
 | `move` | `tools_mutate.rs:389` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
 | `health` | `tools_admin.rs:83` | Graph stats (gravitons/kerns/entities/reasons/unnamed/claim_kinds) **plus the degradation surface**: `queue_depth`, `tasks_done`, `task_avg_ms`, `task_panics`, `last_task_panic`, `task_failures`, `last_task_failure`, `cold_evicted`, `embed_model`, `embed_dim`, `embed_mismatch` (`Server::health_stats`, `src/mcp.rs`). |
@@ -678,7 +679,8 @@ daemon serves: `forget`, `degrade`, `intake drain`, `graviton add`,
 `get` and `query` take their read from it.
 
 **Subcommands** (`Commands` enum, `src/commands.rs`): `ingest`, `query`,
-`search`, `reembed`, `get`, `list`, `forget`, `link`, `intake {status|drain}`,
+`search`, `reembed`, `get`, `list`, `forget [ID | --source <scheme>://<object_id>
+[--force]]`, `link`, `intake {status|drain}`,
 `status`, `health`, `profile`, `gc`, `compact`, `graviton {add|list|remove}`,
 `degrade`, `claim-kind {add|rm}`, `peers`, `register`, `unnamed {list}`, `mcp`,
 `compress`, `daemon`, `hub {status|resolve|unload|merge|stop}`.
@@ -715,6 +717,20 @@ Notable:
   `search` and `list` stay local **by decision** — `search` is the raw-ANN
   probe with no matching tool, `list` prints the on-disk kern tree, and both are
   what a developer reaches for to inspect the store itself.
+
+- `forget --source <scheme>://<object_id> [--force]` (`graph_ops.rs`) — the
+  host-deletion cascade (ROADMAP item 19). Routes to the `forget_by_source` tool
+  first for the same reason plain `forget` does, and both branches print through
+  one `print_forget_source`. The segment after `://` is the raw
+  `Source::object_id()`, not a parsed URI path — that is the half of the pair the
+  graph stores, and re-deriving it from a `ticket://<system>/<id>` spelling would
+  guess. `--force` is paired to `--source` **in `dispatch`, not by clap**: a
+  single id names one Fact the caller can already see, so the bypass only makes
+  sense in bulk — and `#[arg(long, requires = "source")]` does not fire for a
+  `SetTrue` flag (clap 4.6), which silently accepted and ignored
+  `forget --force <id>`. It reaches `remove_entity`'s own fact guard too, not
+  just `forget_entity`'s — lifting only the outer one reports a removal the
+  inner one silently refused.
 
 - `ingest --retention-secs N` (`ingest_cmd.rs`) — expires the ingest after `N`
   seconds by stamping `valid_until`; `0` or the absent flag means never. The
