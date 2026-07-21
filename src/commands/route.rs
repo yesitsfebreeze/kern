@@ -165,6 +165,69 @@ mod tests {
 		);
 	}
 
+	// The read half of item 9. The daemon's graph carries an entity that was
+	// never flushed, so a `get` that reads the store instead of asking the owner
+	// reports "not found" for something that exists.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_routed_get_reads_the_daemons_unflushed_state() {
+		let ep = scratch_endpoint("get");
+		let srv = kern_with_edge();
+		srv
+			.graph
+			.write()
+			.kerns
+			.get_mut("kx")
+			.expect("kern")
+			.entities
+			.insert(
+				"only-in-ram".into(),
+				crate::test_support::entity("only-in-ram"),
+			);
+		serving(srv, &ep).await;
+
+		let out = route_to(&ep, "query", serde_json::json!({"id": "only-in-ram"})).await;
+		let Routed::Done(v) = out else {
+			panic!("a serving daemon must answer the get");
+		};
+		assert_eq!(
+			v.get("id").and_then(|x| x.as_str()),
+			Some("only-in-ram"),
+			"the entity came from the daemon's live graph"
+		);
+	}
+
+	// `kern get` has always accepted a prefix. Routing it must not silently
+	// narrow that to exact-match, or the fix for staleness becomes a miss.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_routed_get_still_resolves_a_prefix() {
+		let ep = scratch_endpoint("prefix");
+		let srv = kern_with_edge();
+		// A full-length id nobody would type, so "9f3c" is a genuine prefix and
+		// not an exact hit that would pass with prefix matching removed.
+		srv
+			.graph
+			.write()
+			.kerns
+			.get_mut("kx")
+			.expect("kern")
+			.entities
+			.insert(
+				"9f3c8d21b4e07a65".into(),
+				crate::test_support::entity("9f3c8d21b4e07a65"),
+			);
+		serving(srv, &ep).await;
+
+		let out = route_to(&ep, "query", serde_json::json!({"id": "9f3c"})).await;
+		let Routed::Done(v) = out else {
+			panic!("a prefix must resolve through the daemon");
+		};
+		assert_eq!(
+			v.get("id").and_then(|x| x.as_str()),
+			Some("9f3c8d21b4e07a65"),
+			"the prefix resolved to the full id"
+		);
+	}
+
 	// A tool error is the daemon's answer, not a reason to go around it.
 	#[tokio::test(flavor = "multi_thread")]
 	async fn a_daemon_tool_error_is_refused_not_downgraded_to_no_daemon() {

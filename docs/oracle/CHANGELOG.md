@@ -2,6 +2,45 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — `kern get` routes to the serving daemon, and the reason the other
+  three reads did not follow is the finding, not an excuse. Item 9's read half
+  says `get`, `list`, `query` and `search` load from disk and can report older
+  than live state. Routing looked like four copies of the `forget` change. It is
+  not: **the daemon's tool surface is narrower than the CLI's read commands**, so
+  a naive route trades staleness for lost capability.
+
+  - `get` — `query{id}` did exact-match only, while `cmd_get` accepts a prefix
+    and falls back to the cold tier. Routing it as-was would have turned a hit
+    into "thought not found". So `find_entity_by_prefix` moved to
+    `src/base/search.rs` and the tool's id path gained both the prefix and the
+    cold fallback *first*; only then did routing become a transport swap instead
+    of a behaviour cut. Both paths now render through one `print_entity_detail`
+    reading the same JSON the tool returns, so routed and local output cannot
+    drift — the same discipline the `forget`/`degrade` printers already had.
+  - `query` — the tool returns `{entities}` and no path chains, so routing it
+    would silently drop the CLI's "--- Connections ---" section. The tool has to
+    return chains before this can move.
+  - `list`, `search` — no tool exists at all. Adding one is a decision about the
+    unauthenticated RPC surface (item 24), not a mechanical port.
+
+  `EntityKind::from_u8` and `ReasonKind::from_i32` exist now because the shared
+  printer decodes the discriminants the MCP payload carries; the payload format
+  is unchanged, so no agent contract moved.
+
+  **The prefix test passed before the code did, and that is the second false
+  green in two changes.** It asked for id `"a"` against an entity named `"a"` —
+  an exact match dressed as a prefix, green with prefix matching removed. It now
+  uses a full-length id and asks for four characters of it, and fails without the
+  widening on "a prefix must resolve through the daemon".
+
+  Evidence: `just check` clean, 829/829 nextest, e2e recall 0.9306 / 0.9722 /
+  0.9471 unchanged, docs-check 588.
+
+  Decided by: verify-before-claiming — every routed read was checked against what
+  the local command actually resolved, which is what exposed the prefix and
+  cold-tier gaps — and name-the-tradeoff for stopping at one of four reads with
+  the blocker for each of the other three written down.
+
 - 2026-07-21 — `kern link` stops clobbering a concurrent writer, closing the one
   half of item 9 that needed no auth. `cmd_link` called the unguarded save, which
   writes the whole kern map with no epoch check, so a daemon commit landing

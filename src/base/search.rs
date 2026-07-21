@@ -170,6 +170,24 @@ pub fn find_entity(g: &GraphGnn, id: &str) -> Option<(Entity, String)> {
 	None
 }
 
+// Exact first, then a unique-enough prefix — how a human types an id they read
+// off a previous result. Lives here rather than in the CLI because the daemon's
+// id lookup has to accept exactly what the CLI accepts: a routed read that
+// resolved fewer ids than the local one would trade staleness for a miss.
+pub fn find_entity_by_prefix(g: &GraphGnn, id: &str) -> Option<(Entity, String)> {
+	if let Some(pair) = find_entity(g, id) {
+		return Some(pair);
+	}
+	for k in g.all() {
+		for t in k.entities.values() {
+			if t.id.starts_with(id) {
+				return Some((t.clone(), k.id.clone()));
+			}
+		}
+	}
+	None
+}
+
 pub fn find_reason(g: &GraphGnn, id: &str) -> Option<(Reason, String)> {
 	if let Some(kid) = g.kern_of_reason(id) {
 		if let Some(kern) = g.loaded(kid) {

@@ -48,6 +48,19 @@ impl EntityKind {
 			_ => None,
 		}
 	}
+
+	// The inverse of the `as u8` the MCP payload carries — a reader decoding that
+	// payload has the discriminant, not the variant.
+	pub fn from_u8(n: u8) -> Option<Self> {
+		match n {
+			0 => Some(EntityKind::Fact),
+			1 => Some(EntityKind::Claim),
+			2 => Some(EntityKind::Document),
+			3 => Some(EntityKind::Question),
+			4 => Some(EntityKind::Conclusion),
+			_ => None,
+		}
+	}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -72,6 +85,20 @@ pub enum ReasonKind {
 }
 
 impl ReasonKind {
+	// The inverse of the `as i32` the MCP edge payload carries.
+	pub fn from_i32(n: i32) -> Option<Self> {
+		match n {
+			0 => Some(ReasonKind::Similarity),
+			1 => Some(ReasonKind::Provenance),
+			2 => Some(ReasonKind::Question),
+			3 => Some(ReasonKind::Spawn),
+			4 => Some(ReasonKind::Supersedes),
+			5 => Some(ReasonKind::Ratification),
+			6 => Some(ReasonKind::Rephrase),
+			_ => None,
+		}
+	}
+
 	pub fn fallback_label(self) -> Option<&'static str> {
 		match self {
 			ReasonKind::Supersedes => Some("superseded by a newer version"),

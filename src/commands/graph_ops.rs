@@ -2,26 +2,12 @@ use crate::base::constants::{DEGRADE_DECAY_BASE, DEGRADE_DECAY_POW, DEGRADE_MIN_
 use crate::base::graph::GraphGnn;
 use crate::base::math::{average_vec, reason_id};
 use crate::base::reason::{add_reason, remove_entity, remove_reason};
-use crate::base::search::find_entity;
-use crate::base::types::{Entity, Kern, Reason, ReasonKind};
+use crate::base::search::{find_entity, find_entity_by_prefix};
+use crate::base::types::{EntityKind, Kern, Reason, ReasonKind};
 use crate::base::util::{explain_relationship_prompt, short_id, truncate};
 
 use super::route::{route, u64_field, Routed};
 use super::{load_graph, with_graph, Client, Endpoint};
-
-fn find_entity_by_prefix(g: &GraphGnn, id: &str) -> Option<(Entity, String)> {
-	if let Some(pair) = find_entity(g, id) {
-		return Some(pair);
-	}
-	for k in g.all() {
-		for t in k.entities.values() {
-			if t.id.starts_with(id) {
-				return Some((t.clone(), k.id.clone()));
-			}
-		}
-	}
-	None
-}
 
 fn print_kern(kern: &Kern, g: &GraphGnn, depth: usize) {
 	let indent = "  ".repeat(depth);
@@ -52,55 +38,84 @@ fn print_kern(kern: &Kern, g: &GraphGnn, depth: usize) {
 	}
 }
 
-pub(super) fn cmd_get(cfg: &crate::config::Config, id: &str) {
+// Routed first, for the same reason `forget` is: while a daemon serves, its
+// in-memory graph is newer than anything this process can load off disk, so a
+// local read reports a state the owner has already moved past.
+pub(super) async fn cmd_get(cfg: &crate::config::Config, id: &str) {
+	match route("query", serde_json::json!({"id": id})).await {
+		Routed::Done(v) => return print_entity_detail(&v),
+		Routed::Refused(e) => return eprintln!("{e}"),
+		Routed::NoDaemon => {}
+	}
 	let g = load_graph(cfg);
-	let (thought, kern_id) = match find_entity_by_prefix(&g, id) {
-		Some(pair) => pair,
-		None => {
-			if let Some(e) = g.store().and_then(|s| s.cold_get(id).ok().flatten()) {
-				println!("ID:     {}", e.id);
-				println!("Kind:   {:?}", e.kind);
-				println!("Score:  {:.4}", e.score);
-				println!("Access: {}", e.access_count.value_i32());
-				println!("Kern:   (cold)");
-				println!("Text:   {}", e.text());
-				return;
-			}
-			eprintln!("thought not found: {id}");
-			return;
+	if let Some((thought, kern_id)) = find_entity_by_prefix(&g, id) {
+		return print_entity_detail(&crate::mcp::entity_detail(&thought, &kern_id, &g));
+	}
+	match g.store().and_then(|s| s.cold_get(id).ok().flatten()) {
+		Some(e) => {
+			let mut v = crate::mcp::entity_detail(&e, "", &g);
+			v["cold"] = serde_json::Value::Bool(true);
+			print_entity_detail(&v);
 		}
+		None => eprintln!("thought not found: {id}"),
+	}
+}
+
+// The one printer both paths use. `cmd_get` reads the same JSON the `query`
+// tool returns whether a daemon produced it or this process did, so the routed
+// and local renderings cannot drift in wording.
+fn print_entity_detail(v: &serde_json::Value) {
+	let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("");
+	let f = |k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
+	let kind = v
+		.get("kind")
+		.and_then(|x| x.as_u64())
+		.and_then(|n| EntityKind::from_u8(n as u8))
+		.map(|k| k.as_str().to_string())
+		.unwrap_or_default();
+	let kern = s("kern");
+
+	println!("ID:     {}", s("id"));
+	println!("Kind:   {kind}");
+	println!("Score:  {:.4}", f("score"));
+	println!(
+		"Access: {}",
+		v.get("access_count").and_then(|x| x.as_i64()).unwrap_or(0)
+	);
+	if v.get("cold").and_then(|x| x.as_bool()) == Some(true) || kern.is_empty() {
+		println!("Kern:   (cold)");
+	} else {
+		println!("Kern:   {}", short_id(kern));
+	}
+	println!("Text:   {}", s("text"));
+
+	let Some(edges) = v.get("edges").and_then(|e| e.as_array()) else {
+		return;
 	};
-
-	println!("ID:     {}", thought.id);
-	println!("Kind:   {:?}", thought.kind);
-	println!("Score:  {:.4}", thought.score);
-	println!("Access: {}", thought.access_count.value_i32());
-	println!("Kern:   {}", short_id(&kern_id));
-	println!("Text:   {}", thought.text());
-
-	if let Some(kern) = g.kerns.get(&kern_id) {
-		let rids = crate::base::reason::collect_reason_ids(kern, &thought.id);
-		if !rids.is_empty() {
-			println!("Edges:");
-			for rid in &rids {
-				if let Some(re) = kern.reasons.get(rid) {
-					let dir = if re.from == thought.id { "->" } else { "<-" };
-					let other = if re.from == thought.id {
-						&re.to
-					} else {
-						&re.from
-					};
-					println!(
-						"  {} {:?} score={:.4} {}  {}",
-						dir,
-						re.kind,
-						re.score,
-						short_id(other),
-						truncate(&re.text, 80),
-					);
-				}
-			}
-		}
+	if edges.is_empty() {
+		return;
+	}
+	println!("Edges:");
+	let id = s("id");
+	for e in edges {
+		let from = e.get("from").and_then(|x| x.as_str()).unwrap_or("");
+		let to = e.get("to").and_then(|x| x.as_str()).unwrap_or("");
+		let dir = if from == id { "->" } else { "<-" };
+		let other = if from == id { to } else { from };
+		let ekind = e
+			.get("kind")
+			.and_then(|x| x.as_i64())
+			.and_then(|n| ReasonKind::from_i32(n as i32))
+			.map(|k| format!("{k:?}"))
+			.unwrap_or_default();
+		println!(
+			"  {} {} score={:.4} {}  {}",
+			dir,
+			ekind,
+			e.get("score").and_then(|x| x.as_f64()).unwrap_or(0.0),
+			short_id(other),
+			truncate(e.get("text").and_then(|x| x.as_str()).unwrap_or(""), 80),
+		);
 	}
 }
 
@@ -353,7 +368,7 @@ pub(crate) fn degrade_entity_reasons(g: &mut GraphGnn, kern_id: &str, id: &str) 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::base::types::{Kern, Reason};
+	use crate::base::types::{Entity, Kern, Reason};
 
 	fn edge(from: &str, to: &str, score: f64) -> Reason {
 		Reason {

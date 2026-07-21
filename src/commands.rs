@@ -515,7 +515,7 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 			reembed::cmd_reembed(cfg, embed_url, embed_model).await
 		}
 
-		Commands::Get { id } => graph_ops::cmd_get(cfg, &id),
+		Commands::Get { id } => graph_ops::cmd_get(cfg, &id).await,
 		Commands::List => graph_ops::cmd_list(cfg),
 		Commands::Forget { id } => graph_ops::cmd_forget(cfg, &id).await,
 

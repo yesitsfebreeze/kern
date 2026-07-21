@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::base::search::find_entity;
+use crate::base::search::find_entity_by_prefix;
 use crate::base::types::EntityKind;
 use crate::base::util::truncate;
 
@@ -128,10 +128,16 @@ impl Server {
 
 		if !p.id.is_empty() {
 			let g = self.graph.read();
-			return match find_entity(&g, &p.id) {
-				Some((thought, kern_id)) => {
-					let detail = entity_detail(&thought, &kern_id, &g);
-					tool_result_json(&detail)
+			// Prefix and cold tier both included so `kern get` can route here
+			// without resolving fewer ids than it did reading the store itself.
+			if let Some((thought, kern_id)) = find_entity_by_prefix(&g, &p.id) {
+				return tool_result_json(&entity_detail(&thought, &kern_id, &g));
+			}
+			return match g.store().and_then(|s| s.cold_get(&p.id).ok().flatten()) {
+				Some(e) => {
+					let mut v = entity_detail(&e, "", &g);
+					v["cold"] = serde_json::Value::Bool(true);
+					tool_result_json(&v)
 				}
 				None => tool_error(&format!("thought not found: {}", p.id)),
 			};
@@ -292,7 +298,7 @@ impl Server {
 	}
 }
 
-fn entity_detail(
+pub(crate) fn entity_detail(
 	thought: &crate::base::types::Entity,
 	kern_id: &str,
 	g: &crate::base::graph::GraphGnn,

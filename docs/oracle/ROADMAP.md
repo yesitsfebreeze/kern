@@ -43,7 +43,7 @@ These need no gossip, no flag and no unusual configuration. Every one produces a
 wrong or missing result with no error, which is why they outrank both the
 security work (armed only with federation on) and every feature.
 
-### 9. Two live writers: `ingest`/`link`/`intake drain` still write locally, reads still come off disk `[surface]`
+### 9. Two live writers: `ingest`/`link`/`intake drain` write locally, `list`/`query`/`search` read off disk `[surface]`
 
 **Decided 2026-07-21, and the decision is implemented for the two commands it
 fits.** The choice named here was between routing the one-shot writes through
@@ -112,9 +112,29 @@ recovery. Both are narrower than the CLI race — hub merge stops both daemons
 first, self-heal runs before the daemon serves — but neither has been proven
 safe, and neither belongs to this item.
 
-What is left here is the read side. `get`, `list`, `query` and `search` still
-load from disk and can report older than live state: the same defect one step
-further down, a stale read rather than a lost write.
+What is left here is the read side, now three commands rather than four.
+`kern get` routes to the daemon as of 2026-07-21 and reads its live graph;
+`list`, `query` and `search` still load from disk and can report older than live
+state — the same defect one step further down, a stale read rather than a lost
+write.
+
+Routing the rest is **not** three more copies of the `get` change, and the
+reason is the constraint this item has been missing: the daemon's tool surface
+is narrower than the CLI's read commands, so a naive route trades staleness for
+lost capability. `get` only became routable after `query{id}` was widened to
+match what `cmd_get` resolves — a prefix, and the cold tier
+(`src/base/search.rs`'s `find_entity_by_prefix`, and the `cold_get` fallback in
+`src/mcp/tools_query.rs`). Each remaining read carries its own version of that
+debt:
+
+- **`query`** — `tool_query` returns `{entities}` with no path chains, so a
+  routed `kern query` would silently lose its "--- Connections ---" section.
+  The tool must return chains first. No auth needed; this is the next one.
+- **`search`** — no tool. `cmd_search` is raw top-k vector search
+  (`search_all_unlocked`), which `query`'s modes do not reproduce.
+- **`list`** — no tool. It prints the whole kern tree, so exposing it is a
+  wider disclosure than `query`'s per-entity reads and belongs with item 24's
+  decision about the unauthenticated socket, not before it.
 
 ---
 
