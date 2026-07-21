@@ -348,7 +348,7 @@ hook — the write is always a caller's call.
 | `ingest` | Add text. Supports `object_id` update semantics and a free-text `hint` for chunking context. |
 | `link` | Create a reason edge between two thoughts (LLM writes the reason if blank). The edge is stored and walkable and shows up in a result's chain; it does not change ranking today. |
 | `forget` | Remove a thought and cascade its edges. Facts are immune. |
-| `degrade` | Name the thought at the end of a bad result and every edge incident on it decays, hardest first; an edge that falls below threshold is removed (`src/commands/graph_ops.rs:254`). Entity-scoped — there is no way to name one path among several. |
+| `degrade` | Name the thought at the end of a bad result and every edge incident on it decays, hardest first; an edge that falls below threshold is removed (`degrade_entity_reasons`, `src/commands/graph_ops.rs:285`). Entity-scoped — there is no way to name one path among several. |
 | `move` | Relocate a thought to another kern by `id` and `to_kern`, carrying its outgoing edges and restamping cross-kern references. |
 | `graviton` | Manage gravitons (named focus attractors; replaced the single per-kern "purpose"): `list` (default), `add` (name + text — phrase or full document — + optional mass), `remove` (name). |
 | `claim_kind` | Register/remove a claim kind; registered kinds extend the built-in set distillation may emit. |

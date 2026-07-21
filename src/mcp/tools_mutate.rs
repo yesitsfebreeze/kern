@@ -364,12 +364,15 @@ impl Server {
 			None => return tool_error(&format!("thought not found: {}", p.query_id)),
 		};
 
-		let (decayed, _removed) =
+		let (decayed, removed) =
 			crate::commands::graph_ops::degrade_entity_reasons(&mut g, &kern_id, &p.query_id);
 		drop(g);
 		(self.save_fn)();
 
-		tool_result_json(&serde_json::json!({"decayed_edges": decayed}))
+		tool_result_json(&serde_json::json!({
+			"decayed_edges": decayed,
+			"removed_edges": removed,
+		}))
 	}
 
 	pub(crate) fn tool_move(&self, args: &serde_json::Value) -> serde_json::Value {

@@ -43,31 +43,51 @@ These need no gossip, no flag and no unusual configuration. Every one produces a
 wrong or missing result with no error, which is why they outrank both the
 security work (armed only with federation on) and every feature.
 
-### 9. Two live writers: the admin half is closed, the serving half is not `[surface]`
+### 9. Two live writers: the route exists; `ingest` and `link` cannot take it yet `[surface]`
 
-**Half done.** The destructive entrance is shut. `src/base/lock.rs` is an
-advisory writer lock over the data dir (std `File::try_lock`, no dependency;
-MSRV 1.82 -> 1.89), held for the daemon's lifetime and taken by every
-direct-writer admin command — `reembed`, `compact`, `gc` refuse while it is
-held and name the holder. `kern status` reports daemon, hub and lock. The lock
-is an OS file lock, so a kill releases it and no stale-lock cleanup exists to
-get wrong.
+**Decided 2026-07-21, and the decision is implemented for the two commands it
+fits.** The choice named here was between routing the one-shot writes through
+the daemon's RPC and teaching them to detect a daemon and refuse. Routing won,
+for the reason the item already gave: refusing makes the CLI useless whenever a
+daemon runs, which is always. `src/commands/route.rs` is that route —
+`route(name, args)` probes `Endpoint::kern()` once, never spawns, and returns
+`Done` / `Refused` / `NoDaemon`, so an absent daemon is the ordinary case and a
+daemon that answers owns the write outright (a tool error is reported, never
+retried against the store behind its back). `kern forget` and `kern degrade`
+take it (`cmd_forget`, `cmd_degrade` in `src/commands/graph_ops.rs`); the local
+path is the `NoDaemon` fallback and prints through the same two printers, so
+the two paths cannot drift in wording.
 
-What is left is the *non-destructive* entrance, which the lock deliberately
-does not close: one-shot write commands (`ingest`, `link`, `forget`, `degrade`,
-`intake drain`) still open the store directly while a daemon holds newer state.
-They reconcile rather than refuse — `save_graph_guarded` refuses a stale flush
-(`src/commands.rs`) and they reload and retry — because refusing them would
-make the CLI unusable whenever a daemon runs, which is always. So the CLI can
-still read a graph older than the daemon's live state and report from it. Two
-candidate closures: route those commands through the daemon's RPC when one is
-serving (correct, and makes `kern mcp`'s standalone fallback the only remaining
-direct writer), or teach them to detect a serving daemon and say so. The first
-is right; it is a bigger change than the lock and wants its own decision.
+The destructive entrance was already shut and stays shut: `src/base/lock.rs` is
+an advisory writer lock over the data dir (std `File::try_lock`, no dependency;
+MSRV 1.82 -> 1.89), held for the daemon's lifetime, and `reembed`, `compact`,
+`gc` refuse while it is held and name the holder. `kern status` reports daemon,
+hub and lock.
 
-Also still open: `kern mcp`'s standalone fallback opens the same store as a
-second writer (`src/commands/mcp_cmd.rs`), and it is a long-lived one, unlike
-the one-shots.
+**What is left, and why it is not just more of the same.** `ingest` and `link`
+cannot ride this route as it stands, because the RPC's only mutation surface is
+`call_tool` — the *agent* boundary. `tool_ingest` clamps against `AGENT_SOURCE`
+"regardless of what `p.source` claims" and `tool_link` writes
+`MAX_AI_CONFIDENCE`, while `cmd_ingest` mints at `clamp_confidence(1.0, "user")`
+and `cmd_link` at `1.0`. Routing them unchanged would silently demote every
+CLI-minted Fact to an agent Claim. Routing them *with* their trust intact means
+putting a trust field on an unauthenticated socket, which is item 24's hole
+widened into an escalation path. So this half is **blocked on item 24**, not on
+effort. `intake drain` has no matching tool and would need one first.
+
+That block is a new sequencing edge pointing *down* the file — item 24 sits in
+tier 3 and this sits in tier 1 — and the list was not reordered for it. The
+edge binds only the `ingest`/`link` half; item 9's other open halves (the
+standalone fallback, read-side staleness) need no auth and keep this position.
+Item 24 does not move up because the trust field is one caller of it, not its
+severity: an unauthenticated socket is armed the same either way.
+
+Also still open, and unaffected by the route: `kern mcp`'s standalone fallback
+opens the same store as a second writer (`run_standalone`,
+`src/commands/mcp_cmd.rs`), and it is long-lived, unlike the one-shots. The
+read-only commands (`get`, `list`, `query`, `search`) still load from disk and
+can report older than live state; that is the same defect one step down in
+severity and is not covered here.
 
 ---
 

@@ -6,6 +6,7 @@ use crate::base::search::find_entity;
 use crate::base::types::{Entity, Kern, Reason, ReasonKind};
 use crate::base::util::{explain_relationship_prompt, short_id, truncate};
 
+use super::route::{route, u64_field, Routed};
 use super::{load_graph, save_graph, with_graph, Client, Endpoint};
 
 fn find_entity_by_prefix(g: &GraphGnn, id: &str) -> Option<(Entity, String)> {
@@ -108,9 +109,21 @@ pub(super) fn cmd_list(cfg: &crate::config::Config) {
 	print_kern(&g.root, &g, 0);
 }
 
-pub(super) fn cmd_forget(cfg: &crate::config::Config, id: &str) {
+fn print_forget(id: &str, removed: u64) {
+	println!("forgot {}  removed {} edges", short_id(id), removed);
+}
+
+// Routed first: while a daemon serves, its in-memory graph is newer than
+// anything this process can load, so a local forget would delete from a stale
+// copy and report a stale edge count.
+pub(super) async fn cmd_forget(cfg: &crate::config::Config, id: &str) {
+	match route("forget", serde_json::json!({"id": id})).await {
+		Routed::Done(v) => return print_forget(id, u64_field(&v, "removed_edges")),
+		Routed::Refused(e) => return eprintln!("{e}"),
+		Routed::NoDaemon => {}
+	}
 	with_graph(cfg, |g| match forget_entity(g, id) {
-		Ok(removed) => println!("forgot {}  removed {} edges", short_id(id), removed),
+		Ok(removed) => print_forget(id, removed as u64),
 		Err(e) => eprintln!("{e}: {id}"),
 	});
 }
@@ -235,7 +248,27 @@ fn link_vector(reason_embed: Option<Vec<f32>>, from_vec: &[f32], to_vec: &[f32])
 	reason_embed.unwrap_or_else(|| average_vec(from_vec, to_vec))
 }
 
-pub(super) fn cmd_degrade(cfg: &crate::config::Config, id: &str) {
+fn print_degrade(id: &str, decayed: u64, removed: u64) {
+	println!(
+		"degraded {}  decayed {} edges, removed {} below threshold",
+		short_id(id),
+		decayed,
+		removed,
+	);
+}
+
+pub(super) async fn cmd_degrade(cfg: &crate::config::Config, id: &str) {
+	match route("degrade", serde_json::json!({"query_id": id})).await {
+		Routed::Done(v) => {
+			return print_degrade(
+				id,
+				u64_field(&v, "decayed_edges"),
+				u64_field(&v, "removed_edges"),
+			)
+		}
+		Routed::Refused(e) => return eprintln!("{e}"),
+		Routed::NoDaemon => {}
+	}
 	with_graph(cfg, |g| {
 		let (_, kern_id) = match find_entity(g, id) {
 			Some(pair) => pair,
@@ -245,12 +278,7 @@ pub(super) fn cmd_degrade(cfg: &crate::config::Config, id: &str) {
 			}
 		};
 		let (decayed, removed) = degrade_entity_reasons(g, &kern_id, id);
-		println!(
-			"degraded {}  decayed {} edges, removed {} below threshold",
-			short_id(id),
-			decayed,
-			removed,
-		);
+		print_degrade(id, decayed as u64, removed as u64);
 	});
 }
 

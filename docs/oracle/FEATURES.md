@@ -546,7 +546,7 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 | `ingest` | `tools_mutate.rs` | Add text. `object_id` update semantics, free-text `hint` chunking context (`descriptor` accepted as serde alias). |
 | `link` | `tools_mutate.rs` | Create a reason edge (LLM writes the reason if blank). Edge score is the asserted confidence (agent 0.95; CLI user 1.0), NOT `cosine(from,to)` — a deliberate link connects what similarity cannot, so similarity must not be its strength. |
 | `forget` | `tools_mutate.rs` | Remove a thought + cascade edges (Facts immune). |
-| `degrade` | `tools_mutate.rs` | Down-weight edges along a bad retrieval path (`DEGRADE_*` decay). |
+| `degrade` | `tools_mutate.rs` | Down-weight edges along a bad retrieval path (`DEGRADE_*` decay). Returns `decayed_edges` and `removed_edges` — the reap count exists so a CLI `degrade` routed through the daemon can print what the local path prints. |
 | `move` | `tools_mutate.rs:377` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
 | `health` | `tools_admin.rs:83` | Graph stats (gravitons/kerns/entities/reasons/unnamed/claim_kinds) **plus the degradation surface**: `queue_depth`, `tasks_done`, `task_avg_ms`, `task_panics`, `last_task_panic`, `task_failures`, `last_task_failure`, `cold_evicted`, `embed_model`, `embed_dim`, `embed_mismatch` (`Server::health_stats`, `src/mcp.rs`). |
 | `graviton` | `tools_admin.rs` | list/add/remove focus attractors (name + text — phrase or full document — + optional mass). Replaced the single per-kern "purpose". |
@@ -615,7 +615,8 @@ reads as zero.
 ## 14. CLI — `active`
 
 **What.** The `kern` binary. Reads the on-disk graph directly (can race a live
-daemon — prefer MCP for live state).
+daemon — prefer MCP for live state). `forget` and `degrade` are the exceptions:
+they hand the write to a serving daemon when there is one.
 
 **Subcommands** (`Commands` enum, `src/commands.rs`): `ingest`, `query`,
 `search`, `reembed`, `get`, `list`, `forget`, `link`, `intake {status|drain}`,
@@ -624,8 +625,16 @@ daemon — prefer MCP for live state).
 `compress`, `daemon`, `hub {status|resolve|unload|merge|stop}`.
 
 **How.** `dispatch` (`src/commands.rs`) routes; per-subcommand handlers in
-`src/commands/{admin,graph_ops,ingest_cmd,intake_cmd,mcp_cmd,mcp_restart,profile_cmd,query,reembed,status}.rs`.
+`src/commands/{admin,graph_ops,ingest_cmd,intake_cmd,mcp_cmd,mcp_restart,profile_cmd,query,reembed,route,status}.rs`.
 Notable:
+
+- **Daemon-first writes** (`src/commands/route.rs`) — `route(name, args)` probes
+  `Endpoint::kern()` once, never spawns, and answers `Done` / `Refused` /
+  `NoDaemon`. `forget` and `degrade` take it: while a daemon serves, the
+  mutation lands in its live in-memory graph over `call_tool` instead of in a
+  second copy this process opened, and a daemon that refuses is reported rather
+  than retried against the store behind it. No daemon -> the pre-existing local
+  path runs, printing through the same printer so the two cannot drift.
 
 - **The writer lock** (`src/base/lock.rs`) — one advisory lock per data dir
   (std `File::try_lock`, MSRV 1.89), held for the daemon's whole lifetime and
@@ -660,13 +669,18 @@ Notable:
 
 **Where.** `src/commands/*`, `src/base/lock.rs`, `src/main.rs`.
 
-**Gaps.** The one-shot write commands (`ingest`, `link`, `forget`, `degrade`,
-`intake drain`) still open the store directly while a daemon holds newer state.
-They deliberately reconcile instead of refusing — the flush guard rejects a
-stale write and they reload and retry — because refusing them would make the
-CLI unusable whenever a daemon runs. So a CLI read can still be older than the
-daemon's live state (`ROADMAP.md` item 9). `unnamed` lists only — there is no
-`promote`.
+**Gaps.** `ingest`, `link` and `intake drain` still open the store directly
+while a daemon holds newer state. They deliberately reconcile instead of
+refusing — the flush guard rejects a stale write and they reload and retry —
+because refusing them would make the CLI unusable whenever a daemon runs.
+`ingest` and `link` cannot take the daemon route the way `forget`/`degrade` do,
+because the RPC's only mutation surface is `call_tool`, the agent boundary:
+`tool_ingest` clamps to `AGENT_SOURCE` and `tool_link` writes
+`MAX_AI_CONFIDENCE`, while the CLI mints at user trust 1.0, so routing them
+unchanged would demote every CLI Fact to an agent Claim, and routing them with
+trust intact needs auth on the socket first. The read-only commands still load
+from disk, so a CLI read can be older than live state (`ROADMAP.md` item 9).
+`unnamed` lists only — there is no `promote`.
 
 ---
 
@@ -1198,9 +1212,11 @@ Ranked by leverage:
 5. **CLI vs daemon race, serving half** — the destructive half is closed:
    `src/base/lock.rs` is an advisory writer lock and `reembed`/`compact`/`gc`
    refuse while a daemon holds it, with `kern status` reporting the holder. The
-   one-shot writes (`ingest`, `link`, `forget`, `degrade`, `intake drain`) still
-   open the store directly and reconcile through the guarded flush, so the CLI
-   can report from a graph older than live state. Open as `ROADMAP.md` item 9.
+   route decided for the rest exists (`src/commands/route.rs`) and `forget` and
+   `degrade` take it. `ingest` and `link` do not — over `call_tool` they would
+   land at agent trust, so that half waits on socket auth (item 24). `intake
+   drain` has no matching tool, and the read-only commands still load from
+   disk. Open as `ROADMAP.md` item 9.
 6. **GNN training is synchronous** on the tick — move to a background thread
    pool or incremental updates to avoid stalling large kerns.
 7. **Distill prompt** is one-shot and global — per-kind prompts +

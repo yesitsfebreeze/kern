@@ -2,6 +2,52 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — item 9's open question is answered: **a one-shot CLI write goes
+  to the serving daemon, it does not learn to refuse.** The item named two
+  candidates and said the first was right without deciding it. Deciding it: the
+  refusal branch is dead on arrival, because a daemon is running essentially
+  always, and a CLI that refuses whenever a daemon runs is a CLI nobody can
+  use. `src/commands/route.rs` is the route — one probe of `Endpoint::kern()`,
+  no spawn, three answers (`Done` / `Refused` / `NoDaemon`). A one-shot must
+  never conjure the daemon it was looking for, so the probe does not retry and
+  does not start anything; an absent socket is the ordinary case, not a fault.
+  A daemon that answers the connect **owns the graph**, so a tool error comes
+  back as `Refused` and is printed — never retried against the store behind the
+  daemon's back, which is precisely the split being closed. `kern forget` and
+  `kern degrade` take the route; the old local path is now the `NoDaemon`
+  branch, and both paths print through one printer so they cannot drift in
+  wording. `tool_degrade` grew `removed_edges` alongside `decayed_edges`: the
+  CLI has always printed a reap count, and a routed degrade that could not read
+  one back would have quietly printed 0 for every reap.
+
+  **What the decision cannot cover, and why that is a finding rather than a
+  shortfall.** `ingest` and `link` cannot ride this route at all, and the reason
+  only shows up once you try. The RPC's sole mutation surface is `call_tool` —
+  the *agent* boundary. `tool_ingest` clamps to `AGENT_SOURCE` "regardless of
+  what `p.source` claims" and `tool_link` writes `MAX_AI_CONFIDENCE`, while
+  `cmd_ingest` mints at `clamp_confidence(1.0, "user")` and `cmd_link` at
+  `1.0`. Route them unchanged and every Fact a human typed at their own
+  terminal silently becomes an agent Claim. Route them with their trust intact
+  and you have put a privilege field on a socket with no auth — item 24's hole
+  turned into an escalation path. So that half is blocked on item 24, and
+  saying so is worth more than shipping the demotion quietly. `intake drain`
+  has no matching tool at all.
+
+  **Tradeoff.** The block points *down* the file — item 24 sits in tier 3, item
+  9 in tier 1 — and the list was not reordered, which is a real cost: the
+  sequencing edge is now stated in prose instead of being visible in the
+  ordering. The alternative is worse. The edge binds only the `ingest`/`link`
+  half; item 9's other open halves (`kern mcp`'s long-lived standalone writer,
+  read-side staleness in `get`/`list`/`query`/`search`) need no auth and hold
+  tier 1 on their own, and item 24's severity is an unauthenticated socket, not
+  the one caller that wants to trust it.
+
+  **Decided by:** name-the-tradeoff. Both candidate closures were plausible and
+  the item had gone a full cycle without choosing between them; the choice only
+  became obvious once the cost of each was written down next to the other, and
+  the same accounting is what exposed that "route everything" silently pays for
+  itself in demoted trust.
+
 - 2026-07-21 — every citation in `ROADMAP.md` re-pointed at what it was cited
   for. `docs_check.py` proves a cited line **exists**; it cannot prove the line
   still **says** the thing. That gap had gone systemic: of the 23 distinct

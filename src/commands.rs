@@ -7,6 +7,7 @@ mod mcp_restart;
 mod profile_cmd;
 mod query;
 mod reembed;
+mod route;
 mod status;
 
 pub(crate) use mcp_cmd::ensure_mcp_registered;
@@ -512,7 +513,7 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 
 		Commands::Get { id } => graph_ops::cmd_get(cfg, &id),
 		Commands::List => graph_ops::cmd_list(cfg),
-		Commands::Forget { id } => graph_ops::cmd_forget(cfg, &id),
+		Commands::Forget { id } => graph_ops::cmd_forget(cfg, &id).await,
 
 		Commands::Link {
 			from,
@@ -555,7 +556,7 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 
 		Commands::Graviton { action } => admin::cmd_graviton(cfg, action).await,
 
-		Commands::Degrade { id } => graph_ops::cmd_degrade(cfg, &id),
+		Commands::Degrade { id } => graph_ops::cmd_degrade(cfg, &id).await,
 		Commands::ClaimKind { action } => admin::cmd_claim_kind(cfg, action),
 		Commands::Peers => admin::cmd_peers(cfg),
 		Commands::Register { path } => admin::cmd_register(cfg, &path),
