@@ -43,10 +43,10 @@ These need no gossip, no flag and no unusual configuration. Every one produces a
 wrong or missing result with no error, which is why they outrank both the
 security work (armed only with federation on) and every feature.
 
-### 9. Two live writers: `ingest`/`link` still write locally `[surface]`
+### 9. Live writers: `ingest`/`link` still write locally `[surface]`
 
-**Decided 2026-07-21, and the decision is implemented for the two commands it
-fits.** The choice named here was between routing the one-shot writes through
+**Decided 2026-07-21, and implemented for every command the route fits.** The
+choice named here was between routing the one-shot writes through
 the daemon's RPC and teaching them to detect a daemon and refuse. Routing won,
 for the reason the item already gave: refusing makes the CLI useless whenever a
 daemon runs, which is always. `src/commands/route.rs` is that route —
@@ -79,6 +79,23 @@ That block is a new sequencing edge pointing *down* the file — item 24 sits in
 tier 3 and this sits in tier 1 — and the list was not reordered for it. Item 24
 does not move up because the trust field is one caller of it, not its severity:
 an unauthenticated socket is armed the same either way.
+
+**Closed 2026-07-21: `graviton add`/`remove` and `claim-kind add`/`rm`.** These
+were the four shipped subcommands that reached `with_graph`
+(`src/commands.rs:442` — load, mutate, `save_graph_unguarded`) with no routing at
+all, so beside a running daemon each one wrote the WHOLE kern map back over
+everything that daemon had committed since the CLI loaded. They needed no new
+tool: the daemon already exposes `graviton` and `claim_kind`
+(`src/mcp/tools_admin.rs`) with matching semantics. `graviton_at` and
+`claim_kind_at` (`src/commands/admin.rs`) now route first and keep `with_graph`
+as the `NoDaemon` fallback, printing through the same four printers so the two
+paths cannot drift. The graviton add routes *before* it embeds — the daemon owns
+the vector it stores, so embedding locally would be a second call to the same
+model for nothing. Not blocked on item 24: neither command asserts trust or mints
+a Fact, unlike `ingest`/`link`. Guarded by
+`e2e/test_graviton_routing.py`, which blinds the CLI's `data_dir` after the
+daemon has opened its store and then makes the daemon flush again — the exact
+sequence in which the graviton used to disappear.
 
 **Closed 2026-07-21: `intake drain`.** It had no tool to route to, so it got one
 — `intake_drain` (`src/mcp/tools_intake.rs`), one immediate pass of
@@ -146,25 +163,46 @@ after `tool_query` learned to return path chains, without which a routed
 route cost a widening of the tool first; that is the shape of the remaining work
 too.
 
-One half remains, and the title names it. `ingest` and `link` (blocked on
-item 24) still write the store directly; `intake drain` joined the route
-2026-07-21 once it was given a tool to route to. Both are one-shot, so the
-exposure is a lost write rather than a lost graph — and every direct-write path
-here is guarded. `cmd_ingest` (`src/commands/ingest_cmd.rs`) and
-`intake drain`'s `flush` (`src/commands/intake_cmd.rs`) retry through
-`persist::flush_guarded`; `cmd_link` joined them 2026-07-21 via
-`link_and_persist` (`src/commands/graph_ops.rs`) and `save_graph_guarded`, so a
-daemon committing underneath any of them gets a refused flush and a reload
-rather than a clobber. The unguarded entry point is now named
-`save_graph_unguarded` and carries its precondition, which is what made the
-remaining two unlocked callers visible: `cmd_hub_merge`
-(`src/commands/admin.rs`) writes a destination graph it holds no lock on, and
-`maybe_self_heal_store` (`src/commands.rs`) rewrites the store during boot
-recovery. Both are narrower than the CLI race — hub merge stops both daemons
-first, self-heal runs before the daemon serves — but neither has been proven
-safe, and neither belongs to this item.
+`ingest` and `link` (blocked on item 24) still write the store directly;
+`intake drain` joined the route 2026-07-21 once it was given a tool to route to.
+Both are one-shot, so the exposure is a lost write rather than a lost graph —
+and both direct-write paths are guarded. `cmd_ingest`
+(`src/commands/ingest_cmd.rs`) and `intake drain`'s `flush`
+(`src/commands/intake_cmd.rs`) retry through `persist::flush_guarded`;
+`cmd_link` joined them 2026-07-21 via `link_and_persist`
+(`src/commands/graph_ops.rs`) and `save_graph_guarded`, so a daemon committing
+underneath any of them gets a refused flush and a reload rather than a clobber.
 
-The item does not close on the read side alone.
+**Corrected 2026-07-21 — "one half remains" was wrong, and so was "the remaining
+two unlocked callers".** The unguarded entry point is named
+`save_graph_unguarded` and carries its precondition, and walking its call sites
+turns up **three** classes, not two. The two this item already named stand and
+still do not belong to it: `cmd_hub_merge` (`src/commands/admin.rs:648`) writes
+a destination graph it holds no lock on, and `maybe_self_heal_store`
+(`src/commands.rs:426`) rewrites the store during boot recovery — hub merge
+stops both daemons first, self-heal runs before the daemon serves, and neither
+has been proven safe.
+
+The third class *is* this item, and it is the half that is **not** blocked on
+item 24. `with_graph` (`src/commands.rs:442`) loads the graph, mutates it and
+calls `save_graph_unguarded` (`:445`) holding no lock at all. `cmd_forget` and
+`cmd_degrade` reach it safely, because they `route` first and only fall into it
+on `NoDaemon` (`src/commands/graph_ops.rs:120`, `:285`). **`kern graviton
+add`/`remove` (`src/commands/admin.rs:241`, `:257`) and `kern claim-kind
+add`/`rm` (`:290`, `:296`) do not route at all**, so beside a running daemon
+they load a snapshot, mutate it, and write the *whole graph* back over whatever
+the daemon has committed since — a full-graph clobber, not a lost write, and the
+exact race the writer lock and the route exist to close. Unlike `ingest` and
+`link` they assert no trust: `graviton` carries a name, seed text and a mass;
+`claim_kind` a name and a description. Neither mints a Fact, so routing them
+widens item 24's hole no more than `intake drain` did, and the tools they would
+route to already exist and already have matching semantics — `graviton`
+(`src/mcp/tools_admin.rs:87`, schema `:39`) and `claim_kind` (`:161`, schema
+`:52`), both dispatched at `src/mcp.rs:181-182`.
+
+So the item's remainder is two halves, not one: `graviton`/`claim_kind`,
+unblocked and mechanical, and `ingest`/`link`, blocked on item 24. The item does
+not close on the read side alone.
 
 ---
 
@@ -202,7 +240,8 @@ populate it. Four parts:
   `entity_detail_by_id(&g, &p.id)` directly, before `build_query_options`
   (`:157`) is ever called — no filter of any kind runs. Without this guard ACL is
   decorative, and the read-side route of item 9 put `kern get` behind this same
-  unfiltered path.
+  unfiltered path. **This is already costing a shipped feature, not only a
+  planned one: item 91 is the same unfiltered path dropping `valid_until`.**
 
 Decide alongside: does the file watcher give `Document` entities a tenant-default
 ACL, or leave them public? Recommend configurable, default public-within-tenant,
@@ -267,9 +306,41 @@ item 22 was named for. The config key is the load-bearing half: per-*source*
 retention is a policy, and a policy expressed only as a per-call argument has to
 be remembered by every caller.
 
+### 91. Retention is enforced on one read surface of two `[retrieval]`
+
+**Found 2026-07-21, walking item 18's "guard the id path" bullet against the
+source.** `drop_expired` has exactly one call site — `src/retrieval/query.rs:196`,
+the ranked path. The id path does not go through it: `tool_query` returns
+`entity_detail_by_id(&g, &p.id)` and returns (`src/mcp/tools_query.rs:129-137`)
+before `build_query_options` is ever built, and neither `entity_detail_by_id`
+(`:306`) nor `find_entity_by_prefix` (`src/base/search.rs:178`) nor the
+`cold_get` fallback consults `valid_until`. So a thought ingested with
+`--retention-secs 60` vanishes from `kern query` after the deadline and is still
+returned, in full, by `kern query --id` / `kern get` and by MCP `query{id}`.
+
+**It does not heal.** GC is heat-based and never reads `valid_until`
+(`is_cold_victim`, `src/tick/stigmergy.rs:35-46`), and its first clause makes
+non-superseded local `Fact`s and `Document`s immune outright. The CLI mints at
+`clamp_confidence(1.0, "user")`, i.e. `Fact` — so a CLI-ingested fact with a
+retention is expired, permanently resident, and permanently readable by id.
+`e2e/test_retention.py` proves the round trip on `kern query` only and never
+asks the id path, which is why item 22 could close green over this.
+
+Ranks here, beside 88 and 89, for the reason 88 gives: it is a correctness gap in
+a shipped flag, reachable only by opting into retention, so it is not tier 1.
+Distinct from 88 — that one is the *write* half (a retention landing on a
+duplicate is dropped), this is the *read* half (a retention that was written is
+ignored). The fix is one filter at one call site, plus one decision: item 17
+skips `drop_expired` "when the query names its own instant so point-in-time
+history stays queryable", and the id path names no instant, so by that rule it
+should filter. The guard must be expiry-only, **not** the full `matches_filter`
+or `filter_delivery` — `kern get` on a superseded thought is a legitimate read
+and `include_history` depends on it. Closing this also gives item 18's fourth
+bullet the filtered id path it needs, without doing item 18.
+
 ### 24. RPC socket has no auth `[surface]`
 
-`FEATURES.md:629-630`. The missing auth is the same boundary as 18's
+`FEATURES.md:648-649`. The missing auth is the same boundary as 18's
 caller-asserted principals — decide them together or the principal stops at the
 MCP surface only. The item's second half is **retired 2026-07-21 — verified
 false**: `KernRpc` does not mirror MCP 1:1 and never did. The contract is four
@@ -355,7 +426,7 @@ no signal on approach.
 `Worker::enqueue` fires `tokio::spawn(async move { tx.send(job).await })` and
 returns immediately (`src/ingest/worker.rs:76-78`). The channel bound is 64
 (`:44`); the spawn set is unbounded. Distinct from the *tick* queue, which is
-bounded at 512 with real backpressure (`FEATURES.md:390`) — the two read as
+bounded at 512 with real backpressure (`FEATURES.md:408-409`) — the two read as
 one and are not.
 
 Beside it: **the distill leg has no timeout budget** (no `timeout` in
@@ -381,7 +452,7 @@ Recorded in `FEATURES.md` gap blocks, planned nowhere:
   are capped at one per parent on the routing path by
   `get_or_spawn_unnamed_child` (`src/base/accept.rs:539`, guarded by
   `src/base/accept.rs:839`); only tick clustering makes more, one per spawnable
-  cluster and deliberately (`src/tick.rs:195`). Per-parent fan-out is a real
+  cluster and deliberately (`src/tick.rs:196`). Per-parent fan-out is a real
   cliff and stays on this item's list; an index lookup was never the cost.
 - `Entity` is a ~30-field flat struct (serialization cost on every store round
   trip) and `Kern` carries no per-kern stats — mean heat, fill ratio — that
@@ -453,7 +524,7 @@ sorts by heat and truncates to `ENTITY_SYNC_BATCH = 32` per heartbeat
 (`src/gossip/handler.rs:156`, sorted `:181`),
 so cold entities may never propagate and a partitioned node that rejoins never
 catches up. (`Fetch` is live — `wire_fetch` installs the handler at
-`src/commands.rs:1003` and the question path issues it — but it is single-id, not a
+`src/commands.rs:1015` and the question path issues it — but it is single-id, not a
 catch-up mechanism.) Two pieces adopted on paper and unscheduled: **back-off
 pacing** with exponential jitter keyed to a divergence estimate
 (`docs/kern/fl-vs-knids-federation.md:163-168`), and **batch-size / push-vs-pull
@@ -491,7 +562,7 @@ peers was treated identically to a brand-new peer"
 (`decisions/pagerank-authority.mdx:96-98`). The full design — an
 `AuthorityTable`, TrustRank seeding, `authority_weight` / `authority_floor`
 config, a `kern authority seed` admin command — is written out at
-`docs/kern/pagerank-authority.md:66-71, 184-198, 216-220, 257` and was never
+`docs/kern/pagerank-authority.md:164, :202-235, :274` and was never
 scheduled. It ranks immediately above the Sybil work because the defences in 39
 are weightings of a signal that does not exist.
 
@@ -567,7 +638,7 @@ fallback and no way to distinguish discovery-failed from no-peers-present
 
 `TcpStream::connect` per call at `src/gossip/transport.rs:37` (`send_msg`) and
 `:45` (`send_and_receive`). No pooling. Separately, the `trnsprt` client has no
-pooling either (`FEATURES.md:887`) — that one is not gossip and is not gated
+pooling either (`FEATURES.md:914-915`) — that one is not gossip and is not gated
 on 33.
 
 ### 47. Hub phase 3: gossip moves hub-side `[hub]`
@@ -583,7 +654,7 @@ port-clash validation in `src/config/serve.rs` to collapse. (Corrected again
 item 84 owns.)
 
 Beside it: **hub↔node version skew is unmanaged** beyond same-binary spawning
-(`FEATURES.md:993-994`).
+(`FEATURES.md:1020-1021`).
 
 ### Decisions owed before the federation build
 
@@ -620,7 +691,7 @@ retired:** `CHANGELOG.md` 2026-07-20 shipped chunk external ids keyed on the ful
 source identity (`source_id()` + chunk index, not the bare section), and CLI
 `kern ingest` deriving its inline source hash from the text. What remains is the
 *dedup* key, not the external id. Beside it: the dedup threshold is global, not
-per-kind (`FEATURES.md:378`).
+per-kind (`FEATURES.md:392`).
 
 ### 49. The distill prompt is one-shot and global `[ingest]`
 
@@ -677,11 +748,11 @@ newline one, and is still blocked on a real document long enough to truncate.
 
 ### 53. Clustering is vector-only `[lifecycle]`
 
-No semantic or structural features (`FEATURES.md:456`), and naming plus
+No semantic or structural features (`FEATURES.md:474`), and naming plus
 enrich are a cold LLM call per kern. The adopted-but-unbuilt upgrade is
 thought-level PageRank feeding the split heuristic — high-rank nodes become
 gravitons, bridge nodes become sub-kerns
-(`docs/kern/pagerank-authority.md:242-247`, `decisions/pagerank-authority.mdx:120-121`).
+(`docs/kern/pagerank-authority.md:258-263`, `decisions/pagerank-authority.mdx:120-121`).
 Graph structure informs ranking today and never informs the tree shape that
 routing depends on.
 
@@ -689,7 +760,7 @@ routing depends on.
 
 The adopted loop-closing design gated forgetting on convergence — `G ≥ 0.6`
 **and** heat below floor for `forget_ttl`
-(`docs/kern/stigmergy-self-improving.md:228-233`). Shipped GC has no gate at all.
+(`docs/kern/stigmergy-self-improving.md:210, :236`). Shipped GC has no gate at all.
 Depends on item 62 (the convergence metric) existing.
 
 ### 55. Two freshness signals, different half-lives, neither ever tuned `[retrieval]`
@@ -755,7 +826,7 @@ permanently erasing a correct path, and nothing records that they happened.
 
 Either side of a classified pair can move and nothing re-runs the call, and no
 tool exposes the supersede chain beyond `include_history` (`FEATURES.md:173-174`).
-Two open questions beside it, from `docs/kern/bayesian-belief.md:145-148`: should
+Two open questions beside it, from `docs/kern/bayesian-belief.md:159-162`: should
 `Reason` edges carry belief symmetrically, and does superseding reset or inherit
 belief?
 
@@ -790,7 +861,7 @@ central product claim, is a design intention
 (`decisions/stigmergy-over-gardening.mdx:128`). Belongs with item 1's
 replacement. Its surfacing half is separate and also unbuilt: export `HeatStats`
 via health and `kern://health`
-(`docs/kern/stigmergy-self-improving.md:263-266`). Item 54 depends on this.
+(`docs/kern/stigmergy-self-improving.md:271`). Item 54 depends on this.
 
 ### 64. Normalize and re-found the scoring stack `[retrieval]`
 
@@ -804,7 +875,7 @@ is the 0.6 blend in item 61.
 
 ### 65. Rank on the lower confidence bound `[retrieval]`
 
-`p − k·√var` instead of the mean (`docs/kern/bayesian-belief.md:135`) — a
+`p − k·√var` instead of the mean (`docs/kern/bayesian-belief.md:149`) — a
 one-line ranking change that makes a single-observation claim stop outranking a
 well-evidenced one at equal mean.
 
@@ -834,6 +905,29 @@ gate — the e2e harness can still judge this.
 Last because none of it affects a running kern. First within its tier because a
 contract nobody enforces is a contract nobody has.
 
+### 92. `test_retention` fails under load and nobody had written it down `[eval]`
+
+`e2e/test_retention.py::test_a_retention_expires_the_fact_out_of_query_results`
+fails intermittently, and only when the CPU-heavy `test_recall.py` runs before
+it. Observed twice on 2026-07-21 by two independent runs — once mid-slice, once
+on a stashed-clean `src/`. A third observer could **not** reproduce it: six
+consecutive `pytest -q e2e/test_recall.py e2e/test_retention.py` runs on
+pristine code, all green. So it is real, load-dependent, and not reliably
+reproducible on demand — which is the worst shape a test can have.
+
+Suspected mechanism, unconfirmed: the test sleeps on Python's `time.sleep`
+(monotonic) and compares against kern's `SystemTime::now()` (wall clock) with a
+2-second margin. Under load on WSL2 the wall clock lags the sleep and the fact
+has not expired yet when the assertion runs. If that is right, the fix is to
+make the margin generous or to drive expiry from an injected instant rather than
+from elapsed real time — a test that races the clock will keep doing so.
+
+It ranks here rather than in a retrieval tier because retention itself is not
+suspected; the harness is. It is written down because the cost is not the
+failure, it is that **the next person to see it red will assume it is this
+flake and wave a real regression through.** An intermittent failure nobody has
+recorded is indistinguishable from a regression nobody has noticed.
+
 ### 70. The oracle pre-commit hook is untracked and has no installer `[process]`
 
 `ORACLE.md` rule 1 is enforced by `.git/hooks/pre-commit`, which lives only in
@@ -848,10 +942,10 @@ does not exist. Wanted: track it under `scripts/` and install it via
 
 The disk graph, the vectors and the bincode metadata can diverge on a mid-write
 crash; there is no WAL and no atomic-rename-per-segment
-(`docs/kern/diskann-disk-index.md:117-118`). Adopted as a known risk, scheduled
+(`docs/kern/diskann-disk-index.md:143`). Adopted as a known risk, scheduled
 nowhere. Beside it: mmap file-locking and flush semantics differ on Windows
-(`:112-113`), and PQ codebook training/drift has no retrain trigger — "a bad
-codebook silently degrades recall" (`:110-113`) — which lands in item 1's lap
+(`:136`), and PQ codebook training/drift has no retrain trigger — "a bad
+codebook silently degrades recall" (`:132-134`) — which lands in item 1's lap
 the moment PQ is promoted out of the non-goals.
 
 ### 76. The watchdog force-exit skips the final guarded flush `[store]`
@@ -882,7 +976,7 @@ unremarked.
 
 Called **once** (corrected 2026-07-21 — it was twice; the second site left with
 the ingest `kind` arg in `216730d`), with the literal `AGENT_SOURCE`
-(`src/mcp/tools_mutate.rs:115`), and it accepts `USER_SOURCE` / `AGENT_SOURCE`
+(`src/mcp/tools_mutate.rs:118`), and it accepts `USER_SOURCE` / `AGENT_SOURCE`
 (`src/base/validate.rs:22`), so it can never fail. Decision:
 thread a real auth identity (item 18/24), or delete. Delete is correct for a
 single local daemon and needs only sign-off.
@@ -935,7 +1029,7 @@ is a real reason nothing is set — eviction drops unpersisted `children` pushes
   requires either promoting them to real per-endpoint config or exposing that
   predicate. Was listed under item 11; it is a different job.
 - Hand-rolled tool schemas; no batch query
-  (`FEATURES.md:588-589`).
+  (`FEATURES.md:607-608`).
 - The LLM client is Ollama-centric with no retry/backoff policy object
   (`FEATURES.md:860-861`).
 - ~~Watcher `.gitignore` parsing is approximate; no rename tracking~~ **(retired
@@ -957,7 +1051,7 @@ is a real reason nothing is set — eviction drops unpersisted `children` pushes
   (`FEATURES.md:1025-1033`).
 - `unnamed` lists only; there is no `promote` (`FEATURES.md:759`).
 - GNN has no GPU path, weights are per-kern rather than shared, and the objective
-  is link-prediction only (`FEATURES.md:547-549`).
+  is link-prediction only (`FEATURES.md:565-566`).
 - Under WSL2 NAT a loopback Ollama URL must be hand-pinned; kern neither rewrites
   nor warns (`FEATURES.md:1068`).
 - RPC socket bind→chmod race — sub-millisecond, umask default — recorded as an
@@ -989,7 +1083,7 @@ and item 1's instrument staying the scorer.
   `howto/mcp.mdx:50`, which says only "Needs `text` or `id`" and then lists the
   filters as if they applied to both.
 - (retired 2026-07-21 — the tables were filled in) the `move` MCP tool is listed
-  in `README.md:352` and `FEATURES.md:572`, and the site's count is now thirteen
+  in `README.md:352` and `FEATURES.md:590`, and the site's count is now thirteen
   (`howto/mcp.mdx:5, :75`), so the "Eleven tools" note is retired with it.
 - `docs/kern/README.md:60` declares the directory holds "never plans"; five of
   its notes contain execution plans, migration stages and phase orderings
@@ -1022,7 +1116,7 @@ and item 1's instrument staying the scorer.
   `FEATURES.md`.
 - (retired 2026-07-21 — all three fixed) `FEATURES.md:54` now lists `Entity`'s
   `acl`; the retired query-cache finding is gone from the file entirely; and
-  `:568` marks prompts and resources "served on the standalone path only",
+  `:608` marks prompts and resources "served on the standalone path only",
   which is item 81's note.
 
 Deferred design calls, still owed, no blocker and no urgency: quarantine
@@ -1280,12 +1374,12 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   scheduled; the three it actually caught were live lies in `FEATURES.md` and
   `SPECIALISTS.md` (CHANGELOG 2026-07-21).
 - **Pulse and Question senders are live.** `broadcast_pulse` / `broadcast_q` built
-  in `start_gossip` (`src/commands.rs:966-1040`), pulse wired into the maintenance
-  tick (`:709`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
+  in `start_gossip` (`src/commands.rs:979-1053`), pulse wired into the maintenance
+  tick (`:721`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
   `broadcast_q` invoked by `do_resolve` (`src/tick/tasks.rs:372`), `handle_question`
   live-dispatched (`src/gossip/handler.rs:44`).
 - **`Fetch` is wired** — `wire_fetch` installs the handler at
-  `src/commands.rs:1003`. Single-id, so it is not anti-entropy (item 36), but it
+  `src/commands.rs:1015`. Single-id, so it is not anti-entropy (item 36), but it
   is not dead.
 - **`union_statements` never existed**; remote heat is no longer pinnable
   (`src/base/merge.rs:20`, applied `:153`).
@@ -1304,9 +1398,9 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   AGENT_SOURCE)` capping at `MAX_AI_CONFIDENCE` 0.95 and `kind` is *derived* from
   confidence, which needs 1.0 for `Fact` (`src/base/math.rs:205-210`,
   `src/base/constants.rs:69`). Only the CLI reaches `Fact`, via
-  `clamp_confidence(1.0, "user")` (`src/commands/ingest_cmd.rs:49`).
+  `clamp_confidence(1.0, "user")` (`src/commands/ingest_cmd.rs:59`).
 - **`conf` is clamped to [0,1]** — `validate_conf` (`src/base/validate.rs:14`)
-  called at `src/mcp/tools_mutate.rs:113`.
+  called at `src/mcp/tools_mutate.rs:116`.
 - **A prose-answering reason model no longer archives deltas having stored
   nothing.** `parse_claims` returns `Option`; a reply with no parseable JSON array
   leaves the delta queued for retry, a well-formed empty array still archives

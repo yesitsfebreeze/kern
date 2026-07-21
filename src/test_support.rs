@@ -51,6 +51,34 @@ pub(crate) fn mcp_server() -> crate::mcp::Server {
 	}
 }
 
+#[cfg(unix)]
+pub(crate) fn scratch_endpoint(tag: &str) -> trnsprt::typed::Endpoint {
+	let dir = std::env::temp_dir().join(format!(
+		"kern-route-{}-{}-{tag}",
+		std::process::id(),
+		crate::base::util::now_ms()
+	));
+	std::fs::create_dir_all(&dir).expect("scratch dir");
+	trnsprt::typed::Endpoint::Unix(dir.join("kern.sock"))
+}
+
+#[cfg(unix)]
+pub(crate) async fn serving(srv: crate::mcp::Server, endpoint: &trnsprt::typed::Endpoint) {
+	use std::sync::Arc;
+	use trnsprt::typed::{bind_kern_listener, BindOutcome};
+
+	let BindOutcome::Bound(listener) = bind_kern_listener(endpoint).await.expect("bind") else {
+		panic!("scratch endpoint already bound");
+	};
+	let handler = crate::rpc::kern_rpc_server::KernRpcHandler::new(
+		Arc::new(srv),
+		Arc::new(tokio::sync::Notify::new()),
+	);
+	tokio::spawn(crate::rpc::kern_rpc_server::serve_kern_rpc_loop(
+		listener, handler,
+	));
+}
+
 pub(crate) fn tool_text(v: &serde_json::Value) -> String {
 	v["content"][0]["text"].as_str().unwrap_or("").to_string()
 }
