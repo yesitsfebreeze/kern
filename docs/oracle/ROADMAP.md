@@ -348,26 +348,73 @@ the importance predicate so the scan visits eligible entities rather than all of
 them — which is precisely why the win tracks eligibility, and why a corpus where
 everything is eligible cannot be helped by an index at all.
 
-### 26. PageRank runs a full power iteration per query, persisted nowhere `[retrieval]`
+### 26. PageRank costs whatever the seeds reach, and there is no cheap answer when they reach everything `[retrieval]`
 
-Up to 25 iterations over the whole entity adjacency on every retrieve, with
-nothing cached between queries (`decisions/pagerank-authority.mdx:102-105`). The
-second query-time cliff, and it was recorded on the site but in no plan.
+**Narrowed 2026-07-21.** The flat per-query cost is gone; what is left is a
+smaller cost with a different shape, stated below so the closed part is not
+re-opened and the open part is not mistaken for the old one.
 
-**Measured 2026-07-21 and it is the FIRST cliff, not the second**
-(`tests/seed_scale.rs`, release, default minus `pagerank_enabled: false`). At
-N=100k it costs a flat **~20 ms per query** — 20.0 / 21.0 / 19.6 / 18.1 ms at
-1 / 10 / 50 / 100% eligibility. Flat is the finding: unlike item 25's scan, the
-cost does not shrink when the query filters hard, because the power iteration
-walks the whole adjacency regardless of how few entities survive the filter. On
-an ordinary filtered query at 1% eligibility it is **6.7× item 25's scan**, and
-`fuse_hybrid` goes from 0.05 ms to 17.68 ms with it on.
+**Measured before, `tests/seed_scale.rs` in release, default minus
+`pagerank_enabled: false`.** At N=100k it cost a flat **~18 ms per query** —
+18.8 / 17.9 / 18.1 / 17.1 ms at 1 / 10 / 50 / 100% eligibility. Flat was the
+finding: the cost did not shrink when the query filtered hard, because the power
+iteration walked the whole adjacency regardless of how few entities survived.
 
-That makes this the highest-value unblocked retrieval work, ahead of item 25,
-which is where the ranking implies it sits and where the numbers now agree.
-Nothing here is cached, so the first cheap closure to weigh is persisting the
-vector and recomputing on a tick rather than per query — the scores change with
-the graph, not with the query, so per-query recomputation is pure waste.
+**Measured after, same harness.** 1.7 / 3.1 / 1.9 / 1.3 ms at the same four
+points; a filtered retrieve went from 24.0 ms to 7.1 ms end to end. Three
+post-change runs put every one of those points in a 1.3–6.0 ms band — the box
+has two sibling worktrees building into the same target directory, so ±2 ms is
+the noise floor and no single point in that band should be read as exact. The
+before numbers do not need the same caveat: they were 17–19 ms at all four
+points, which is outside it. The walk is now confined to the teleport support
+and what it reaches
+(`src/retrieval/pagerank.rs`), which is exact rather than approximate — every
+node outside the reached set holds a literal 0.0, so every term the full-width
+loop added for it was `+0.0`. `confined_iteration_equals_the_full_width_one_bit_for_bit`
+compares the two against each other on bit patterns, not tolerances.
+
+**The item's own proposed closure is unavailable, and this is why.** It read
+"the scores depend on the graph, not the query, so persist the vector and
+recompute on a tick". They do not: the teleport vector is personalised at the
+query's dense and lexical seeds, so a per-graph vector is *global* PageRank —
+already weighed and already rejected on the site, "popular entities top every
+query, relevant or not". A cache of it would not be a faster version of this
+feature, it would be the alternative the feature exists to avoid. Nothing about
+cold start or persistence is decided here because there is nothing correct to
+persist: personalised PageRank is linear in the teleport vector, so the only
+exact cache is one basis vector per seed node, which is O(N) memory apiece and
+~75 misses on a cold query. A cache keyed on the seed set instead would report a
+large win on any harness that repeats a query — which is the only kind of harness
+we have — while doing nothing for real traffic.
+
+**What remains, with its number.** The cost now tracks reach, so a query whose
+seeds reach the whole graph pays the whole graph. The instrument for that is
+`cost_against_full_width_by_fanout` in `src/retrieval/pagerank.rs`, ignored by
+default, at N=100k with 75 seeds:
+
+| out-degree | reached | confined | full-width |
+|---|---|---|---|
+| 1 | 146 | 0.75 ms | 33.5 ms |
+| 4 | 79,659 | 21.9 ms | 24.6 ms |
+| 16 | 99,968 | 37.7 ms | 26.3 ms |
+
+So at full reach it is **1.4× slower** than what it replaced: the confined loops
+index through a list and the full-width ones vectorise over a slice. Dropping
+the per-edge membership probe once the reached set closes (it cannot grow again)
+recovered ~2 ms of that, so the rest is the indirection itself. The fix, if this
+regime ever shows up on a real corpus, is to run the full-width loops once the
+reached set is both closed and near-N — exact for the same `+0.0` reason, at the
+price of a second copy of the loop body that has to stay bit-identical. Not
+taken now: 11 ms on a random 16-regular expander, which is the shape a reason
+graph is least like, does not buy that duplication.
+
+Also unaddressed: three N-sized buffers are still allocated per call, which is
+what the residual ~2 ms at low eligibility is — flat in N, unrelated to reach.
+
+Item 25's "PageRank ÷ scan" table above is now stale in one direction only: it
+is a correct record of what was measured before this change, and the ratios in
+it no longer hold. The scan is the larger cost at every eligibility level tested
+here, which is the ordering that item said the numbers would decide.
 
 ### 27. The GC sweep is superlinear in two remaining places `[lifecycle]`
 
@@ -1032,6 +1079,39 @@ them.
 Neither is a defect in a running kern, which is why this sits in tier 9 — but it
 is the reason every reconcile pass so far has spent most of its effort
 re-pointing citations instead of checking claims.
+
+### 94. A shared `target-dir` can report green on stale code `[process]`
+
+The parallel-cycle worktrees all point `build.target-dir` at the main
+checkout's `target/`, so one warm 11 GB cache serves every tree instead of each
+paying a cold build. The cost was named when it was adopted — cargo takes an
+exclusive lock, so concurrent builds serialize — but a second cost was not:
+**under concurrent access a run can execute a lib-test binary that predates the
+edit under test.** Observed 2026-07-21: a cycle saw `873 passed` with its own
+three new tests absent from the run, and `touch src/lib.rs` changed the count to
+a self-consistent 867.
+
+What it is NOT, checked rather than assumed: not cross-worktree contamination.
+Each tree gets its own binary hash (four distinct `kern-<hash>` lib tests for
+four trees), and `across 7 binaries` is the normal count for this workspace —
+four packages plus integration tests. The main checkout reports 872 where a
+worktree reports 865, which is different code, not a mixed run.
+
+So the failure mode is narrow and nasty: an aggregate count that looks green
+while the binary is stale. **An aggregate pass count is not evidence that a new
+test ran.** The cheap discipline that catches it, and the one used to verify the
+cycle that found this: after changing code, run the new tests BY NAME
+(`cargo nextest run --workspace -E 'test(<name>)'`) and read them in the output.
+A filter that names ten tests and prints ten results cannot be satisfied by a
+stale binary that contains none of them.
+
+Two real closures, neither taken yet. Give each worktree its own `target-dir` —
+correct by construction, costs a cold build per tree and roughly 33 GB. Or keep
+the cache and make the discipline mechanical, e.g. a `just` recipe that runs the
+suite and fails if the binary is older than the newest source file. The first is
+simpler; the second keeps the property the shared cache was adopted for. Not
+decided here because the observation is one incident, and flipping the build
+layout under three live cycles would stall all of them.
 
 ### 92. `test_retention` fails under load and nobody had written it down `[eval]`
 
