@@ -46,7 +46,25 @@
   whenever `FEATURES.md` changes length, and the roadmap should prefer symbol
   names over line numbers wherever a symbol is unique.
 
-  docs-check green at 570 references — the same existence proof as before, which
+  `FEATURES.md`'s own corrections landed alongside this pass in `4ba74a7`, which
+  swept both working trees into one commit. Recorded here because that commit's
+  message describes only the `FEATURES.md` half, and each was re-verified
+  against source rather than taken on trust: HNSW delete is the scrub-and-recycle
+  it is rather than a tombstone (`src/base/hnsw.rs:136`, `scrub_pending` `:153`);
+  the federation gap block drops the closed local-row reach for the two that
+  remain, per-peer rate limiting and a divergence signal (`remote_kern_ids`,
+  `id_matches_body`, and the reject-and-clamp in `handle_pulse` all exist at
+  `src/gossip/handler.rs:544`, `:527`, `:371-377`); the e2e block records that no
+  `xfail` remains (none in `e2e/`); `release.yml` joins the workflow list (it is
+  in `.github/workflows/`); and the LoC stamp moves to 155 tracked `.rs` files,
+  which `git ls-files '*.rs'` confirms.
+
+  One stale name found in passing and deliberately not fixed here, because it is
+  source and not an oracle doc: the test at `src/gossip/handler.rs:993` is still
+  called `handle_pulse_falls_back_to_root_for_an_unknown_kern` after the fallback
+  it names was removed as the security fix, and its body now asserts nothing.
+
+  docs-check green at 572 references — the same existence proof as before, which
   is exactly why it was green at 563 while 22 of 23 anchors pointed at the wrong
   paragraph.
 
