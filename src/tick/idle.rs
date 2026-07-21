@@ -8,8 +8,12 @@ use crate::base::graph::GraphGnn;
 pub fn is_idle(last_access: Option<SystemTime>, now: SystemTime, timeout: Duration) -> bool {
 	match last_access {
 		Some(t) => matches!(now.duration_since(t), Ok(age) if age >= timeout),
-		// Never accessed since load: only the load itself put it here, so age it out.
-		None => true,
+		// EVERY kern on a freshly booted daemon is in this state, so treating
+		// None as idle unloaded the entire graph on the first sweep — and
+		// evict_empty_children then read the unloaded children as dead and
+		// deregistered them, orphaning their entities (the wiped-store bug).
+		// Unknown is not idle; a kern earns idleness from a real access clock.
+		None => false,
 	}
 }
 
@@ -90,7 +94,11 @@ mod tests {
 			!is_idle(Some(now + Duration::from_secs(600)), now, timeout),
 			"clock skew (access in the future) never evicts"
 		);
-		assert!(is_idle(None, now, timeout), "never accessed -> idle");
+		assert!(
+			!is_idle(None, now, timeout),
+			"unknown last access -> resident; None described every kern at boot, \
+			 and sweeping them all was the wiped-store bug"
+		);
 	}
 
 	#[test]

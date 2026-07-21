@@ -546,6 +546,13 @@ impl GraphGnn {
 		self.kerns.get(id)
 	}
 
+	/// Resident-map misses are ambiguous: a kern can be unloaded (on disk,
+	/// reloadable) or genuinely gone. Anything that deletes on a miss must
+	/// check this first — deregister on an unloaded kern erases its disk row.
+	pub fn is_unloaded(&self, id: &str) -> bool {
+		self.unloaded.contains(id)
+	}
+
 	pub fn count(&self) -> usize {
 		self.kerns.len() + self.unloaded.len()
 	}

@@ -254,6 +254,13 @@ fn evict_empty_children(graph: &mut GraphGnn, kern_id: &str) -> bool {
 	let mut alive = Vec::new();
 	let mut evicted = false;
 	for child_id in &children_ids {
+		// An unloaded child is resident on disk, not dead. Treating the map
+		// miss as "does not exist" deregistered it — and deregister deletes
+		// the disk row, so an idle-unloaded kern full of entities was erased.
+		if graph.is_unloaded(child_id) {
+			alive.push(child_id.clone());
+			continue;
+		}
 		let (named, has_thoughts, exists) = match graph.kerns.get(child_id) {
 			Some(c) => (c.is_named(), !c.entities.is_empty(), true),
 			None => (false, false, false),
@@ -617,6 +624,51 @@ mod tests {
 			1,
 			"a named kern's off-core cohesive cluster still spawns",
 		);
+	}
+
+	#[test]
+	fn evict_keeps_an_idle_unloaded_child_registered() {
+		// Regression for the wiped-store bug: the idle sweep unloaded a child
+		// (resident on disk, reloadable), evict then read the map miss as
+		// "dead" and deregistered it — and deregister deletes the disk row.
+		let dir = tempfile::tempdir().unwrap();
+		let mut g = GraphGnn::new();
+		let root_id = g.root.id.clone();
+		let store = crate::base::store::Store::open(&dir.path().to_string_lossy()).unwrap();
+		g.set_store(Arc::new(store));
+
+		let mut child = Kern::new("generic", &root_id);
+		child.graviton_text = "generic".into();
+		child.entities.insert(
+			"t1".into(),
+			Entity {
+				id: "t1".into(),
+				..Default::default()
+			},
+		);
+		g.kerns.insert("generic".into(), child);
+		if let Some(root) = g.kerns.get_mut(&root_id) {
+			root.children.push("generic".into());
+		}
+
+		g.unload("generic").expect("unload spills to the store");
+		assert!(g.is_unloaded("generic"), "precondition: child is unloaded");
+
+		let g = Arc::new(RwLock::new(g));
+		{
+			let mut w = g.write();
+			let evicted = evict_empty_children(&mut w, &root_id);
+			assert!(!evicted, "an unloaded child is not an eviction candidate");
+			let root_children = w.kerns.get(&root_id).unwrap().children.clone();
+			assert!(
+				root_children.contains(&"generic".to_string()),
+				"unloaded child must stay registered under root"
+			);
+		}
+		// And it comes back whole on access.
+		let mut w = g.write();
+		let back = w.get("generic").expect("auto-reload from the store");
+		assert_eq!(back.entities.len(), 1, "entities survive the round-trip");
 	}
 
 	#[test]
