@@ -152,29 +152,6 @@ bound, `cold_spill` is skipped and the victim is removed —
 dropping IS the intended memory bound". Intentional in code, undocumented in
 `README.md:37-38`, which states the guarantee unqualified.
 
-### 7. Fail-open has no error surface anywhere `[surface]`
-
-"Intake and recall no-op on any error" (`concepts/architecture.mdx:42`) is a
-repo-wide policy with no counter, no status field and no log to make a no-op
-distinguishable from a correct empty answer. Items 3–6 are instances; these are
-the rest, each documented and each unfunded until now:
-
-- A dead embed endpoint drops writes and returns nothing at query time, and is
-  indistinguishable from an empty graph (`howto/configure.mdx:212-214`).
-- Stigmergy GC and disk-consolidate skip entirely under an unreadable or
-  backwards clock (`concepts/heat-and-compaction.mdx:88-89`,
-  `concepts/stigmergy.mdx:57-59`) — clock skew stops compaction forever, silently.
-- `min_deliver_score` is bypassed when nothing clears it
-  (`concepts/retrieval.mdx:107`): a query whose entire candidate set is below the
-  quality floor returns that set rather than nothing, unflagged.
-- At the 50k remote-kern ceiling new remote ids are dropped while known ones keep
-  merging (`concepts/federation.mdx:226-228`), with no counter.
-
-Wanted: one error/degradation surface — counters in `HealthStats`
-(`src/base/health.rs:4-10`, currently `{kerns, entities, reasons, unnamed,
-gravitons}`) plus a warn-level log per class — so fail-open stays the behavior
-and stops being invisible.
-
 ### 8. `kern intake` — no way to see or drive the intake `[ingest]`
 
 Nothing reports what is pending, what failed, or why; failures surface only as
@@ -203,53 +180,15 @@ advisory locking; no `flock` or `Status` subcommand exists anywhere in `src/`.
 `README.md:159-161` still presents the auto-spawn fallback as "all you need to
 bring kern up", with no caveat.
 
-### 13. Confine LWW deltas to `remote-*` rows `[federation]`
-
-All four live delta targets iterate `g.all_ids()` — every kern including local
-ones — and mutate the first id match, with no network check:
-`src/gossip/handler.rs:378` (AccessCount), `:394` (TraversalCount), `:407`
-(ReasonScore, arm at `:403`), `:428` (ValidUntil, arm at `:424`). A peer that
-knows an id (they are broadcast) can LWW a **local** entity's `valid_until` and
-its reason scores.
-
-**This is not one bug, and "scope it to `remote-*`" is the wrong blanket fix.**
-Reaching local rows is *intended* for the counters: ids are content hashes, so
-the same fact is a local row on both nodes, and `src/retrieval/score.rs:255`
-emits access deltas for local entities precisely so G-Counter slots merge across
-replicas. Split by target:
-
-- `ValidUntil` / `ReasonScore` (LWW): an unauthenticated peer overwriting local
-  truth buys nothing federation needs. Confine to `remote-*` now — no wire
-  change, no dependency on transport security. **This subsumes decision (a):**
-  LWW-vs-max-join for `Reason.score` stops being purely a trust-signalling
-  question once an untrusted writer can reach a local row.
-- Counters (G-Counter): slot-max is replay-safe by construction, so the exposure
-  is attacker-chosen *slot names*. The real fix binds the slot name to an
-  authenticated peer identity, which genuinely gates on item 33. Until then it
-  is ranking inflation, not truth corruption.
-
-**Blocks item 17.** Enforcing `valid_until` on the default path before this
-lands would arm a remote expire-any-local-claim attack repo-wide. Order is not
-optional.
-
-### 14. Verify entity bodies against their claimed ids `[federation]`
-
-`handle_entity_sync` merges `e.clone()` with no hash check
-(`src/gossip/handler.rs:484-487`); the comment at `:463` literally reads
-"Content↔id binding is NOT verified". Content-addressing is the invariant every
-other federation guarantee rests on — why merge is safe as set-union, why a peer
-"cannot alter text you hold", why statements are never imported. A peer can file
-arbitrary text under an id that does not hash to it. Cheap to close (hash on
-receipt, drop on mismatch) and, unlike most of tier 5, needs no auth.
-
-### 15. `handle_pulse` falls back to the local root kern `[federation]`
-
-An unknown `pulse.kern_id` does not reject — it defaults to `g.root.id`
-(`src/gossip/handler.rs:319-322`) — so a peer sending a garbage kern id deposits
-heat straight into your root kern, with no upper clamp on strength
-(`src/tick/pulse.rs:107-109` only rejects below `PULSE_THRESHOLD`). No design
-intent justifies the fallback. Reject unknown ids, clamp strength, confine
-deposits to `remote-*`.
+Observed live 2026-07-21 during the all-granite reembed of this repo's own
+store: `kern reembed` opens the store directly per its "daemon must be
+stopped" comment, but that precondition is unenforceable — killing the hub
+does not keep it dead, because any surviving `kern mcp` proxy auto-respawns
+it (`hub.auto_start` default true), and the respawned hub then flushed its
+stale in-memory graph over the completed re-embed, losing the rewrite and
+one thought. `reembed` (and any direct-writer admin command) needs the same
+advisory lock this item already calls for, or a hub RPC that performs the
+re-embed inside the single writer.
 
 ### 16. Rate-limit `commit_access` per (producer, thought) `[retrieval]`
 
@@ -257,34 +196,6 @@ The local twin of the counter-inflation exposure in item 13, and the one that
 needs no peer at all: a query adversary can pump one thought's access count
 directly. Adopted on paper at `docs/kern/stigmergy-self-improving.md:271`, never
 scheduled.
-
-### 17. Enforce `valid_until` in retrieval `[retrieval]`
-
-Near-dead code: `matches_filter` honours the field only when a caller passes
-`valid_at` (`src/retrieval/score.rs:168`), and the only caller is the MCP
-`valid_at` param (`src/mcp/tools_query.rs:62`). On the default path, expired
-claims still rank — which makes the ✅ against "Bi-temporal supersede off the
-recall path" in the competitive table below true only of the write path.
-
-**Blocked on item 13.** Not optional.
-
----
-
-# Tier 3 — the embeddable-endpoint track
-
-kern's competitive claim is "everything a hosted service structurally cannot
-do". The flip side is that a hosted service serves *many callers* and kern
-assumes exactly one. This is the second-most-valuable track in the file after
-item 1, because it converts kern from "my agent's memory" into "the memory layer
-any agentic workflow embeds". It ranks below tiers 1–2 because none of it is a
-live defect, and above tier 5 because no shipped host is blocked on federation.
-
-Two constraints hold across all of it. **ACL is caller-asserted** — the daemon
-cannot verify a caller's principals, exactly like the existing
-`validate_fact_source` boundary, so trust ends at the process edge. And **Facts
-are GC-immune, not ACL-immune** — a Fact the requester cannot see must still not
-be returned. Backward compatibility: empty `principals` means *no filter*, not
-*public only*, or every existing single-agent caller goes blind.
 
 ### 18. ACL + request principal — gates everything else in this tier `[surface]`
 
@@ -338,8 +249,9 @@ auto-distilled claims out of retrieval until a human curates them. No
 ### 22. Per-source TTL `[ingest]`
 
 An ingest-time `retention` duration setting `valid_until`. Nearly free — one
-param plus one timestamp — and the bi-temporal expiry path already enforces it
-**once item 17 lands**. Blocked on 17.
+param plus one timestamp — and the bi-temporal expiry path now enforces it on
+every retrieve, so the setting has a reader the moment it has a writer
+(unblocked 2026-07-21; `drop_expired`, `src/retrieval/score.rs`).
 
 ### 23. Surface `(belief, uncertainty)` on `query` `[surface]`
 
@@ -1123,6 +1035,18 @@ Numbers are stable identifiers, retired on close — a closed item leaves its
 number behind rather than compacting the list, because items cite each other by
 number ("blocked on item 13") and renumbering would silently repoint them.
 
+- **Every fail-open path is counted** — was item 7. Dead embed endpoint, clock
+  skew stalling GC, the `min_deliver_score` bypass and the 50k remote ceiling each
+  carry a counter, a throttled log and a health field on MCP, RPC and `kern health`
+  (CHANGELOG 2026-07-21). Fail-open is still the behaviour; it is no longer silent.
+- **An unauthenticated peer cannot reach a local row** — were items 13, 14 and 15.
+  `ValidUntil`/`ReasonScore` LWW deltas confined to `remote-*` (the G-Counters keep
+  their reach by design); entity bodies hash-checked against their claimed id;
+  `handle_pulse` rejects unknown kern ids, confines deposits to `remote-*` and
+  clamps strength. Item 13 was the hard edge that gated item 17.
+- **`valid_until` is enforced on the default recall path** — was item 17.
+  `drop_expired` runs on every retrieve, skipped when the query names its own
+  instant so point-in-time history stays queryable. Unblocks item 22.
 - **The retrieval instrument exists** — was item 1. `e2e/` scored by
   `recall@1`/`recall@5`/`MRR` over a test-authored corpus with no LLM in the
   scoring loop: 0.9583 / 1.0000 / 0.9792, reproducible bit-for-bit. Floors make it

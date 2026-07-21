@@ -2,6 +2,132 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — Roadmap items 7, 13, 14, 15 and 17: the fail-open paths are
+  countable, an unauthenticated peer can no longer reach a local row, and an
+  expired claim stops ranking.
+
+  **Item 7.** Fail-open is the policy — a session always proceeds. Invisible
+  fail-open is the defect, because a no-op is indistinguishable from a correct
+  empty answer. All four paths it named now carry an unconditional counter, a
+  throttled log and a health field on all three surfaces: chunks lost to a dead
+  embed endpoint, entities GC cannot age because their timestamp is in the future
+  (which stalls compaction indefinitely, since nothing else bounds the hot graph),
+  a delivery that bypassed `min_deliver_score` because nothing cleared it, and new
+  remote ids refused at the 50k ceiling while known ones keep merging. That last
+  one warned once per dropped entity — a gossiping peer would have flooded the log
+  it is meant to be visible in, the third instance of that pattern in one day.
+  `kern health` prints its `degraded:` line only when something actually degraded.
+
+  **Item 13** was not one bug, and "scope it to `remote-*`" would have been the
+  wrong blanket fix. Reaching local rows is *intended* for the G-Counters: ids are
+  content hashes, so the same fact is a local row on both nodes and slot-max is
+  what makes access counts converge. The two LWW targets buy federation nothing
+  there, so `ValidUntil` and `ReasonScore` are confined to `remote-*` while the
+  counters keep their reach — their real exposure is attacker-chosen slot names,
+  which needs authenticated identity (item 33) and is ranking inflation, not truth
+  corruption.
+
+  **Item 14.** The comment above `handle_entity_sync` read "Content↔id binding is
+  NOT verified". That binding is why merge is safe as set-union and why a peer
+  cannot alter text you hold. Bodies are hash-checked on receipt — but only ids
+  *shaped* like a content hash are judged, because dropping legitimate remote
+  knowledge is worse than the exposure, and the invariant was verified on the real
+  creation path rather than assumed.
+
+  **Item 15.** `handle_pulse` defaulted an unknown kern id to the LOCAL ROOT, so a
+  peer sending garbage deposited heat straight into it, with no bound on strength.
+  No design intent justified the fallback.
+
+  **Item 17** had to follow 13, and the roadmap said so. Enforcing `valid_until`
+  while LWW deltas could still reach local rows would have armed a remote
+  expire-any-local-claim attack repo-wide. It is now enforced on every retrieve,
+  and deliberately skipped when the query names an instant of its own — a
+  point-in-time query judges validity AT that instant, so a since-expired claim is
+  exactly what it should return.
+
+  **Decided by:** fix-the-root, and verify-before-claiming for the test standard.
+  Every guard here has a paired test asserting the healthy path does *not* trip
+  it, and each was confirmed to fail against the pre-change code. Item 17's call
+  site has its own test, because the predicate tests pass unchanged when the call
+  is deleted — which is precisely how `valid_until` came to be honoured by a
+  function nothing invoked.
+
+- 2026-07-21 — Roadmap item 86 gains a measured cause and loses a guess. The
+  instrument's first finding was that a reason edge changes no ranking. Two causes
+  were isolated; one is fixed.
+
+  Fixed: `expand` pruned a neighbour scoring below `best_seed * decay`, comparing a
+  seed's pure query cosine (up to 1.0) against a neighbour score whose ceiling is
+  `w.reason + w.edge = 0.30` for a neighbour the query does not match directly.
+  Measured 0.2411 against a 0.2500 bar — pruned by 0.0089, with `chains` empty. The
+  bar now comes from the best score seen among *neighbours*.
+
+  Open, and the obvious fix is measured wrong: `visited` allows one pop per entity
+  and `results` keeps the max, so a neighbour that is already a content hit keeps
+  its seed score. Pooling the evidence instead moves all 8 test pairs — 5 into the
+  top five — and drops the exact-match probe from rank 1 to rank 3, which
+  `e2e/test_retrieval.py` caught. The cause is structural: the best-matching entity
+  pops first, so it can only *give* hop evidence, never receive it, and any
+  co-equal pooling penalises the best answer.
+
+  **Decided by:** name-the-tradeoff. Recording why the plausible fix is wrong is
+  worth more than the one rank the partial fix bought, and it is what stops the
+  next attempt repeating it.
+
+- 2026-07-21 — `docs_check.py` validates cross-doc line anchors. It checked line
+  numbers for `src/*.rs:NNN` but not for doc-to-doc citations, so `ROADMAP.md`'s 24
+  `FEATURES.md:NNN` anchors rotted silently when that file shifted ~380 lines. Both
+  the `docs/…` and bare-sibling forms now fail on a line past EOF. The limitation
+  is unchanged and still printed in the tool's own output: an anchor in range but
+  pointing at the wrong line still passes.
+
+  The audit it enabled found `architecture.mdx` listing four fail-open paths as
+  "still silent" that item 7 had just made countable, four `src/*.rs:NNN` anchors
+  pointing at unrelated lines, and — worst — `e2e/test_invariants.py`'s xfail
+  reason still recording the pre-fix multi-hop measurement, which four doc pages
+  then cited for a figure it contradicted. Fixed at the source.
+
+  **Decided by:** verify-before-claiming.
+
+- 2026-07-21 — `kern reembed` now restamps the store when it completes. Found
+  switching this box to all-granite: `check_embed_stamp` deliberately never
+  adopts a new identity on mismatch (a config swap must not rewrite the record
+  of what produced the stored vectors), but `reembed` relied on exactly that
+  path — it rewrote every vector, then saved under a stamp check that refuses
+  to update, so `health` kept reporting MISMATCH forever after a successful
+  re-embed. The completed re-embed is the one legitimate transition, so it now
+  calls `set_embed_stamp` explicitly, and only on full success — a failed cold
+  tier keeps the old stamp precisely so `health` keeps accusing until the
+  re-run. Regression test drives the whole command against a stamped store and
+  a fake embed endpoint. Reproducing this also demonstrated ROADMAP item 9
+  live: a hub respawned by an MCP proxy mid-reembed flushed its stale
+  in-memory graph over the direct write — "daemon must be stopped" is an
+  unenforceable comment while `hub.auto_start` defaults true. Recorded on
+  item 9 rather than patched here.
+  **Decided by:** fix-the-root. The root is the missing stamp transition in
+  the one command whose job is that transition — not a looser stamp check,
+  which would reopen the silent-swap hole the stamp exists to close.
+
+- 2026-07-21 — Live-testing hot reload uncovered and fixed the graph-wipe bug
+  shipped in `248722f`'s idle sweep. Kill chain, each link verified in
+  isolation: (1) `is_idle(None) == true` — but `last_access: None` describes
+  EVERY kern on a freshly booted daemon, so the first maintenance beat
+  idle-unloaded the entire loaded graph ~60s after boot; (2)
+  `evict_empty_children` read the unloaded child's resident-map miss as "does
+  not exist" and deregistered it; (3) `deregister` deletes the on-disk row.
+  Loaded-from-disk graphs died within two ticks; graphs still in RAM from
+  their own ingests never did, which is why the bug survived e2e (fresh
+  stores) and killed the repo's own 42-thought dogfood store. Fixes:
+  `is_idle(None) = false` (unknown is not idle — a kern earns idleness from a
+  real access clock), `evict_empty_children` skips unloaded children via the
+  new `GraphGnn::is_unloaded`, and two load-path hardenings from the same
+  hunt: `graph_from_store` now errors (`StoreError::RootMissing`) instead of
+  silently returning an empty graph stamped with the store's live epoch when
+  rows exist without a root, and `load_graph`'s empty fallback logs at error
+  level instead of silently absorbing. Regression tests pin all four.
+  Verified end-to-end: restart on a populated store + tick + hot reload +
+  successor tick, entities and disk rows stable throughout.
+
 - 2026-07-21 — One word per classification axis: "descriptor" retired. The
   name covered three unrelated things — the claim-type label distill emits,
   the free-text chunking context on ingest, and a root registry nothing read.
