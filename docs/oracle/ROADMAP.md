@@ -198,7 +198,7 @@ exact race the writer lock and the route exist to close. Unlike `ingest` and
 widens item 24's hole no more than `intake drain` did, and the tools they would
 route to already exist and already have matching semantics — `graviton`
 (`src/mcp/tools_admin.rs:87`, schema `:39`) and `claim_kind` (`:161`, schema
-`:52`), both dispatched at `src/mcp.rs:181-182`.
+`:52`), both dispatched at `src/mcp.rs:182-183`.
 
 So the item's remainder is two halves, not one: `graviton`/`claim_kind`,
 unblocked and mechanical, and `ingest`/`link`, blocked on item 24. The item does
@@ -236,17 +236,21 @@ populate it. Four parts:
   (`QueryArgs`, `src/mcp/tools_query.rs:76-107`).
 - Enforce in `matches_filter` (`src/retrieval/score.rs:205-243`), which has no
   ACL predicate.
-- **Guard the id path.** `src/mcp/tools_query.rs:129-137` returns
-  `entity_detail_by_id(&g, &p.id)` directly, before `build_query_options`
-  (`:157`) is ever called — no filter of any kind runs. Without this guard ACL is
-  decorative, and the read-side route of item 9 put `kern get` behind this same
-  unfiltered path. **This has already cost a shipped feature, not only a
-  planned one: "Retention reaches the id read surface" — the retired item 91
-  `[retrieval]`, closed 2026-07-21, not the item 91 `[ingest]` — was this
-  same unfiltered path dropping `valid_until`.** It closed by *flagging* the row
-  rather than filtering it, so it hands this bullet nothing: an ACL denial
-  cannot ride as a flag on the row it denies, and this guard still has to be
-  built.
+- ~~**Guard the id path.**~~ **Done 2026-07-21.** `src/mcp/tools_query.rs:129-149`
+  now builds `QueryOptions` first and runs the resolved row through
+  `retrieval::score::matches_filter` (`src/retrieval/score.rs:205`) before it
+  renders, so the id read honours every filter the ranked read honours —
+  `query {id, kind: "claim"}` on a `Fact` answers `thought not found`
+  (`id_filter_tests`, same file). Previously it returned `entity_detail_by_id`
+  directly and no filter of any kind ran, which made ACL decorative and put
+  `kern get` — routed here by item 9 — behind the same unfiltered path.
+  A bare `query {id}` still filters nothing, because `QueryOptions::default()`
+  leaves `valid_at`/`as_of` unset; that is what preserves the retired item 91
+  `[retrieval]` decision (closed 2026-07-21, not the open item 91 `[ingest]`) to
+  *flag* an expired row rather than hide it. **This bullet no longer blocks the
+  three above, but it does not deliver them:** `matches_filter` still has no ACL
+  predicate, so the routing exists and the rule does not — and the rule is still
+  decided alongside item 24, whose missing socket auth is the same boundary.
 
 Decide alongside: does the file watcher give `Document` entities a tenant-default
 ACL, or leave them public? Recommend configurable, default public-within-tenant,
@@ -1165,7 +1169,7 @@ single local daemon and needs only sign-off.
 (`src/commands/mcp_cmd.rs:290`, `:306`, `:343`) with no `handle_method` override,
 so the trait default returns `None` (`src/trnsprt/src/server.rs:21`). Meanwhile
 `extra_capabilities` advertises `{"resources": {}, "prompts": {}}` (`:346`) to
-match standalone, which *does* serve them (`src/mcp.rs:208-211`, advertised `:157`). Advertised on
+match standalone, which *does* serve them (`src/mcp.rs:211-218`, advertised `:157`). Advertised on
 the normal path, non-functional there. Either forward them or stop advertising.
 
 ### 82. Standalone `kern mcp` runs no gossip `[surface]`
@@ -1475,7 +1479,7 @@ an overall eval score that makes specialization worth funding.
   since a non-superseded `Fact` is immune (`is_cold_victim`,
   `src/tick/stigmergy.rs:35-46`) — is a false statement the caller has no way to
   falsify. So the id path **serves and flags**: `entity_detail`
-  (`src/mcp/tools_query.rs:321`) emits `expired` and `valid_until` whenever a
+  (`src/mcp/tools_query.rs:363`) emits `expired` and `valid_until` whenever a
   retention is set, and `kern get` prints an `Expired:` line
   (`src/commands/graph_ops.rs:67`). Filtering lost because the surface item 9
   deliberately widened — prefix plus cold-tier fallback — would have been

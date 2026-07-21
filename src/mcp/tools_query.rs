@@ -127,11 +127,23 @@ impl Server {
 		};
 
 		if !p.id.is_empty() {
+			// The same filters the ranked read honours, applied to the one row an
+			// id names: `query {id, kind: "claim"}` that answered with a Fact would
+			// make the filter mean one thing on `text` and nothing on `id`.
+			// A bare `query {id}` still serves everything — `QueryOptions::default()`
+			// leaves every filter off, `valid_at`/`as_of` included, so an expired row
+			// keeps arriving flagged rather than filtered.
+			let opts = match build_query_options(&p) {
+				Ok(o) => o,
+				Err(e) => return tool_error(&e),
+			};
 			let g = self.graph.read();
 			// Prefix and cold tier both included so `kern get` can route here
 			// without resolving fewer ids than it did reading the store itself.
-			return match entity_detail_by_id(&g, &p.id) {
-				Some(detail) => tool_result_json(&detail),
+			let hit = resolve_by_id(&g, &p.id)
+				.filter(|hit| retrieval::score::matches_filter(&hit.thought, &opts));
+			return match hit {
+				Some(hit) => tool_result_json(&hit.detail(&g)),
 				None => tool_error(&format!("thought not found: {}", p.id)),
 			};
 		}
@@ -307,15 +319,45 @@ pub(crate) fn entity_detail_by_id(
 	g: &crate::base::graph::GraphGnn,
 	id: &str,
 ) -> Option<serde_json::Value> {
-	if let Some((thought, kern_id)) = find_entity_by_prefix(g, id) {
-		return Some(entity_detail(&thought, &kern_id, g));
+	let hit = resolve_by_id(g, id)?;
+	Some(hit.detail(g))
+}
+
+// A resolved id read, before it is rendered. Resolving and rendering are split
+// so the `query` tool can put the row through `matches_filter` — the same
+// predicate the ranked read uses — while still resolving ids exactly one way.
+struct IdHit {
+	thought: crate::base::types::Entity,
+	kern_id: String,
+	cold: bool,
+}
+
+impl IdHit {
+	fn detail(&self, g: &crate::base::graph::GraphGnn) -> serde_json::Value {
+		let mut v = entity_detail(&self.thought, &self.kern_id, g);
+		if self.cold {
+			// The label is for the printer; the flag is for anything reading the
+			// JSON, which should not have to match on a sentinel kern id.
+			v["cold"] = serde_json::Value::Bool(true);
+		}
+		v
 	}
-	let cold = g.store().and_then(|s| s.cold_get(id).ok().flatten())?;
-	let mut v = entity_detail(&cold, COLD_KERN, g);
-	// The label is for the printer; the flag is for anything reading the JSON,
-	// which should not have to match on a sentinel kern id.
-	v["cold"] = serde_json::Value::Bool(true);
-	Some(v)
+}
+
+fn resolve_by_id(g: &crate::base::graph::GraphGnn, id: &str) -> Option<IdHit> {
+	if let Some((thought, kern_id)) = find_entity_by_prefix(g, id) {
+		return Some(IdHit {
+			thought,
+			kern_id,
+			cold: false,
+		});
+	}
+	let thought = g.store().and_then(|s| s.cold_get(id).ok().flatten())?;
+	Some(IdHit {
+		thought,
+		kern_id: COLD_KERN.to_string(),
+		cold: true,
+	})
 }
 
 fn entity_detail(
@@ -460,6 +502,108 @@ mod envelope_shape_tests {
 			let v = build_entity_json(&ent, 0.0);
 			assert_eq!(v.get("kind").and_then(|x| x.as_str()), Some(k.as_str()));
 		}
+	}
+}
+
+#[cfg(test)]
+mod id_filter_tests {
+	use crate::base::types::{Entity, EntityKind, Kern, Source};
+	use crate::mcp::Server;
+	use crate::test_support::tool_text as text;
+
+	fn server_with(thought: Entity) -> Server {
+		let srv = crate::test_support::mcp_server();
+		let mut k = Kern::new("kx", "");
+		k.entities.insert(thought.id.clone(), thought);
+		srv.graph.write().kerns.insert("kx".into(), k);
+		srv
+	}
+
+	fn fact(id: &str) -> Entity {
+		Entity {
+			id: id.into(),
+			kind: EntityKind::Fact,
+			source: Source::Inline {
+				hash: "h".into(),
+				section: String::new(),
+			},
+			statements: vec!["a settled thing".into()],
+			..Default::default()
+		}
+	}
+
+	fn is_error(out: &serde_json::Value) -> bool {
+		out
+			.get("isError")
+			.and_then(|x| x.as_bool())
+			.unwrap_or(false)
+	}
+
+	fn body(out: &serde_json::Value) -> serde_json::Value {
+		serde_json::from_str(&text(out)).expect("success body is json")
+	}
+
+	#[tokio::test]
+	async fn id_read_drops_a_row_the_kind_filter_excludes() {
+		let srv = server_with(fact("f1"));
+		let out = srv.tool_query(&serde_json::json!({"id": "f1", "kind": "claim"}));
+		assert!(
+			is_error(&out),
+			"a Fact must not survive kind=claim just because it was named by id: {out}"
+		);
+		assert!(text(&out).contains("thought not found"));
+	}
+
+	#[tokio::test]
+	async fn id_read_keeps_a_row_the_filters_admit() {
+		let srv = server_with(fact("f1"));
+		let out = srv.tool_query(&serde_json::json!({
+			"id": "f1", "kind": "fact", "scheme": "inline",
+		}));
+		assert!(!is_error(&out), "matching filters must not hide it: {out}");
+		assert_eq!(body(&out)["id"], serde_json::json!("f1"));
+	}
+
+	#[tokio::test]
+	async fn id_read_reports_a_bad_filter_rather_than_ignoring_it() {
+		let srv = server_with(fact("f1"));
+		let out = srv.tool_query(&serde_json::json!({"id": "f1", "since": "not-a-time"}));
+		assert!(is_error(&out));
+		assert!(
+			text(&out).contains("since"),
+			"names the field: {}",
+			text(&out)
+		);
+	}
+
+	// The retired item 91 decision: retention on the id surface annotates, it does
+	// not hide. Filtering the id read must not smuggle `drop_expired` in behind it
+	// — an unfiltered `QueryOptions` leaves `valid_at`/`as_of` off, so the expired
+	// row still arrives, flagged.
+	#[tokio::test]
+	async fn bare_id_read_still_serves_an_expired_row_flagged() {
+		let mut e = fact("f1");
+		let deadline = crate::base::time::parse_rfc3339("2020-01-01T00:00:00Z").expect("fixed ts");
+		e.valid_until = Some(deadline);
+		let srv = server_with(e);
+
+		let out = srv.tool_query(&serde_json::json!({"id": "f1"}));
+		assert!(
+			!is_error(&out),
+			"'not found' would lie about a row that is demonstrably on disk: {out}"
+		);
+		let v = body(&out);
+		assert_eq!(v["expired"], serde_json::json!(true));
+		assert!(
+			v.get("valid_until").is_some(),
+			"deadline travels with the flag"
+		);
+
+		// Ask for validity explicitly and it is a filter again, like any other.
+		let out = srv.tool_query(&serde_json::json!({
+			"id": "f1", "valid_at": "2026-01-01T00:00:00Z",
+		}));
+		assert!(is_error(&out), "an explicit valid_at does filter: {out}");
 	}
 }
 
