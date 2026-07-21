@@ -43,7 +43,7 @@ These need no gossip, no flag and no unusual configuration. Every one produces a
 wrong or missing result with no error, which is why they outrank both the
 security work (armed only with federation on) and every feature.
 
-### 9. Two live writers: `forget`/`degrade` route to the daemon, the rest do not `[surface]`
+### 9. Two live writers: `ingest`/`link`/`intake drain` still write locally, reads still come off disk `[surface]`
 
 **Decided 2026-07-21, and the decision is implemented for the two commands it
 fits.** The choice named here was between routing the one-shot writes through
@@ -77,17 +77,30 @@ effort. `intake drain` has no matching tool and would need one first.
 
 That block is a new sequencing edge pointing *down* the file — item 24 sits in
 tier 3 and this sits in tier 1 — and the list was not reordered for it. The
-edge binds only the `ingest`/`link` half; item 9's other open halves (the
-standalone fallback, read-side staleness) need no auth and keep this position.
-Item 24 does not move up because the trust field is one caller of it, not its
-severity: an unauthenticated socket is armed the same either way.
+edge binds only the `ingest`/`link` half; item 9's other open halves (`intake
+drain`, read-side staleness) need no auth and keep this position. Item 24 does
+not move up because the trust field is one caller of it, not its severity: an
+unauthenticated socket is armed the same either way.
 
-Also still open, and unaffected by the route: `kern mcp`'s standalone fallback
-opens the same store as a second writer (`run_standalone`,
-`src/commands/mcp_cmd.rs`), and it is long-lived, unlike the one-shots. The
-read-only commands (`get`, `list`, `query`, `search`) still load from disk and
-can report older than live state; that is the same defect one step down in
-severity and is not covered here.
+**Closed 2026-07-21: the standalone fallback.** `kern mcp`'s standalone server
+was the last long-lived second writer, and the route could not save it — it has
+no daemon to hand the write to, and a *sibling* standalone binds no socket, so
+no probe can see one. Only the lock can. `claim_standalone`
+(`src/commands/mcp_cmd.rs`) now claims the dir as `mcp-standalone` **before**
+the graph is read and holds it for the process, and a claim that fails does not
+boot a second writer: it spends one more attach window on the endpoint (the
+usual holder is the daemon this process just spawned, late to bind) and proxies
+to it, or exits 1 naming the holder. The tradeoff, taken deliberately: a
+`kern mcp` that loses this race now gives its client no kern where before it
+gave one that silently overwrote the other's graph. Availability was never the
+thing at risk.
+
+Three things remain, and the title names them. `ingest` and `link` (blocked on
+item 24) and `intake drain` (needs a tool first) still write the store
+directly — one-shot, guarded by `save_graph_guarded`, so they lose a write
+rather than a whole graph. And the read-only commands (`get`, `list`, `query`,
+`search`) still load from disk and can report older than live state: the same
+defect one step further down, a stale read rather than a lost write.
 
 ---
 

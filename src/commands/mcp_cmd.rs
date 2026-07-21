@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex as TokioMutex;
 use trnsprt::kern_rpc::{CallToolReq, KernRpcClient};
-use trnsprt::typed::{AdapterError, JsonEnvelopeCodec};
+use trnsprt::typed::{AdapterError, Endpoint, JsonEnvelopeCodec};
 use trnsprt::{McpError, McpServer, ToolResult, ToolSchema};
 
 use super::load_graph;
@@ -347,7 +347,58 @@ impl McpServer for ProxyServer {
 	}
 }
 
+enum StandaloneEntry {
+	Own(crate::base::lock::WriterLock),
+	Attach(Box<KernRpcClient<JsonEnvelopeCodec>>),
+	Refuse(String),
+}
+
+// The standalone fallback is the one long-lived writer with nothing watching it.
+// It loads the graph once and flushes its own snapshot for hours, so a second
+// one — or one beside a daemon that never answered the attach window — ends with
+// the loser's whole graph landing last. It also has no socket of its own, so a
+// sibling standalone is invisible to every probe; the writer lock is the only
+// thing that can see it. Claim before the load, exactly as the lock requires.
+async fn claim_standalone(
+	data_dir: &str,
+	endpoint: &Endpoint,
+	retries: u32,
+	delay: std::time::Duration,
+) -> StandaloneEntry {
+	let held = match crate::base::lock::acquire(data_dir, "mcp-standalone") {
+		Ok(l) => return StandaloneEntry::Own(l),
+		Err(e) => e,
+	};
+	// The likeliest holder is the daemon this process just spawned, up at last
+	// but after the attach window closed. Proxying to it is strictly better than
+	// dying, so spend one more window before refusing.
+	match KernRpcClient::<JsonEnvelopeCodec>::connect_endpoint_with_retry(endpoint, retries, delay)
+		.await
+	{
+		Ok(c) => StandaloneEntry::Attach(Box::new(c)),
+		Err(_) => StandaloneEntry::Refuse(held.to_string()),
+	}
+}
+
 async fn run_standalone(cfg: &crate::config::Config) {
+	let _writer_lock = match claim_standalone(
+		&cfg.data_dir,
+		&Endpoint::kern(),
+		40,
+		std::time::Duration::from_millis(250),
+	)
+	.await
+	{
+		StandaloneEntry::Own(l) => l,
+		StandaloneEntry::Attach(client) => return run_proxy(*client).await,
+		StandaloneEntry::Refuse(who) => {
+			eprintln!("kern mcp: {who}");
+			eprintln!(
+				"  refusing to serve standalone — a second whole-graph writer overwrites the first"
+			);
+			std::process::exit(1);
+		}
+	};
 	let g = Arc::new(StdRwLock::new(load_graph(cfg)));
 	let llm_client = super::server_llm_client(cfg, cfg.reason_url(), &cfg.reason.model);
 	// Long-lived writer: same stale-flush guard as the daemon — never overwrite
@@ -479,6 +530,93 @@ pub(crate) fn ensure_mcp_registered(cwd: &std::path::Path) {
 		Err(e) => {
 			tracing::warn!(target: "kern.mcp", error = %e, "ensure_mcp_registered: serialize failed")
 		}
+	}
+}
+
+// Item 9's serving half for the one process the RPC route cannot help: the
+// standalone fallback has no daemon to hand the write to, so its only correct
+// answers are "I own the dir" or "I do not start".
+#[cfg(all(test, unix))]
+mod standalone_tests {
+	use super::*;
+	use std::sync::Arc;
+	use std::time::Duration;
+	use trnsprt::typed::{bind_kern_listener, BindOutcome};
+
+	fn scratch_endpoint(tag: &str) -> Endpoint {
+		let dir = std::env::temp_dir().join(format!(
+			"kern-standalone-{}-{}-{tag}",
+			std::process::id(),
+			crate::base::util::now_ms()
+		));
+		std::fs::create_dir_all(&dir).expect("scratch dir");
+		Endpoint::Unix(dir.join("kern.sock"))
+	}
+
+	async fn serving(endpoint: &Endpoint) {
+		let BindOutcome::Bound(listener) = bind_kern_listener(endpoint).await.expect("bind") else {
+			panic!("scratch endpoint already bound");
+		};
+		let handler = crate::rpc::kern_rpc_server::KernRpcHandler::new(
+			Arc::new(crate::test_support::mcp_server()),
+			Arc::new(tokio::sync::Notify::new()),
+		);
+		tokio::spawn(crate::rpc::kern_rpc_server::serve_kern_rpc_loop(
+			listener, handler,
+		));
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn an_unclaimed_data_dir_is_owned_before_the_graph_is_read() {
+		let dir = tempfile::tempdir().unwrap();
+		let out = claim_standalone(
+			dir.path().to_str().unwrap(),
+			&scratch_endpoint("free"),
+			1,
+			Duration::ZERO,
+		)
+		.await;
+		match out {
+			StandaloneEntry::Own(l) => assert!(l.path().ends_with(crate::base::lock::LOCK_FILE)),
+			_ => panic!("nothing holds the dir — the standalone server is its writer"),
+		}
+	}
+
+	// The defect this closes: a sibling standalone holds the dir and serves no
+	// socket, so nothing but the lock can see it. Booting anyway means two whole
+	// graphs in memory and the loser's flush landing last.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_held_dir_with_nothing_serving_refuses_rather_than_writing_beside_it() {
+		let dir = tempfile::tempdir().unwrap();
+		let d = dir.path().to_str().unwrap();
+		let _sibling = crate::base::lock::acquire(d, "mcp-standalone").expect("sibling claims it");
+
+		let out = claim_standalone(d, &scratch_endpoint("held"), 1, Duration::ZERO).await;
+		match out {
+			StandaloneEntry::Refuse(who) => assert!(
+				who.contains("mcp-standalone") && who.contains(&std::process::id().to_string()),
+				"the refusal names the writer already there: {who}"
+			),
+			StandaloneEntry::Own(_) => panic!("became a second whole-graph writer"),
+			StandaloneEntry::Attach(_) => panic!("attached to a socket nobody bound"),
+		}
+	}
+
+	// And the cost of that refusal is bounded: the usual holder is the daemon
+	// this process spawned, late to bind. Proxying to it beats dying.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_held_dir_whose_holder_answers_is_proxied_to_instead() {
+		let dir = tempfile::tempdir().unwrap();
+		let d = dir.path().to_str().unwrap();
+		let _daemon = crate::base::lock::acquire(d, "daemon").expect("the daemon claims it");
+		let ep = scratch_endpoint("late");
+		serving(&ep).await;
+
+		let out = claim_standalone(d, &ep, 5, Duration::from_millis(20)).await;
+		assert!(
+			matches!(out, StandaloneEntry::Attach(_)),
+			"a holder that answers gets the traffic, not a refusal"
+		);
 	}
 }
 

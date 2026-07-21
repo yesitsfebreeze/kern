@@ -2,6 +2,37 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — item 9's last **long-lived** second writer is closed: `kern mcp`'s
+  standalone fallback claims the writer lock before it reads the graph, and does
+  not boot beside a holder. The route landed earlier today could not reach this
+  one, and the reason is the interesting part — a standalone server has no
+  daemon to hand the write to, and a *sibling* standalone binds no socket, so it
+  is invisible to `Endpoint::kern()`, to `kern status`'s daemon probe, and to the
+  hub. The lock is the only thing in the process that can see it. So
+  `claim_standalone` (`src/commands/mcp_cmd.rs`) answers `Own` / `Attach` /
+  `Refuse`: claim the dir as `mcp-standalone` before `load_graph`, or — the
+  holder is usually the daemon this process just spawned, late to bind — spend
+  one more attach window and proxy to it, or exit 1 naming the holder.
+
+  **The tradeoff, taken on purpose.** A `kern mcp` that loses this race now
+  gives its client no kern, where before it gave one that served fine and
+  silently overwrote whatever the other writer grew. That is a real availability
+  loss and it is the right trade: `save_graph_guarded` bounds a one-shot to
+  losing a write, but a standalone holds a whole graph for hours and flushes it
+  wholesale, so the loser's *entire* graph lands last. The attach window is what
+  keeps the cost bounded — the common holder answers, and only a genuine second
+  writer gets the refusal.
+
+  Item 9 narrowed rather than closed. What is left is `ingest`/`link` (blocked on
+  item 24), `intake drain` (no tool exists), and stale reads in
+  `get`/`list`/`query`/`search`. The title was re-pointed at those three.
+
+  **Decided by:** fix-the-root. The reachable-looking fix was to widen the
+  attach window in `cmd_mcp` so the standalone path fires less often; that makes
+  the corruption rarer and leaves it possible. The root is that the standalone
+  server never asked whether anyone else owned the dir, and it is the one writer
+  no probe can answer that for.
+
 - 2026-07-21 — item 9's headline re-scoped to match its own body. The title read
   "the route exists; `ingest` and `link` cannot take it yet", which names one of
   the four things still open. The body lists four: `ingest`/`link` (blocked on

@@ -644,6 +644,15 @@ Notable:
   `kern mcp` proxy, and the respawn flushed its stale graph over a completed
   re-embed. It is an OS file lock, so a killed holder releases it — the file's
   existence is never the lock, and there is no cleanup path.
+- **The standalone MCP server takes it too** (`claim_standalone`,
+  `src/commands/mcp_cmd.rs`) — `kern mcp`'s no-daemon fallback claims the dir as
+  `mcp-standalone` before it reads the graph, and holds it for the process. It
+  is the one writer no probe can find: it binds no socket, so a second one is
+  invisible to everything except the lock. A failed claim spends one more attach
+  window on `Endpoint::kern()` and proxies to whoever answers — normally the
+  daemon this process just spawned, late to bind — and exits 1 naming the holder
+  if nothing does. A client can lose kern that way; it can no longer get one
+  that overwrites another's graph.
 - `status` (`status.rs`) — data dir, socket, whether a daemon serves this
   directory, whether the hub runs, and who holds the writer lock. Says so
   explicitly when a daemon serves without holding the lock, since then the
@@ -1213,10 +1222,14 @@ Ranked by leverage:
    `src/base/lock.rs` is an advisory writer lock and `reembed`/`compact`/`gc`
    refuse while a daemon holds it, with `kern status` reporting the holder. The
    route decided for the rest exists (`src/commands/route.rs`) and `forget` and
-   `degrade` take it. `ingest` and `link` do not — over `call_tool` they would
-   land at agent trust, so that half waits on socket auth (item 24). `intake
-   drain` has no matching tool, and the read-only commands still load from
-   disk. Open as `ROADMAP.md` item 9.
+   `degrade` take it. `kern mcp`'s standalone fallback — the last long-lived
+   second writer, and one no probe can see — now claims the same lock before it
+   reads the graph and refuses to boot beside a holder (`claim_standalone`,
+   `src/commands/mcp_cmd.rs`). `ingest` and `link` do not route — over
+   `call_tool` they would land at agent trust, so that half waits on socket auth
+   (item 24). `intake drain` has no matching tool, and the read-only commands
+   still load from disk. Open as `ROADMAP.md` item 9, now reduced to read-side
+   staleness.
 6. **GNN training is synchronous** on the tick — move to a background thread
    pool or incremental updates to avoid stalling large kerns.
 7. **Distill prompt** is one-shot and global — per-kind prompts +
