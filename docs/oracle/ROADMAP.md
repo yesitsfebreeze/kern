@@ -852,11 +852,37 @@ Recorded in `FEATURES.md` gap blocks, planned nowhere:
 
 ### 32. Tree depth is an unlisted eviction bias `[lifecycle]`
 
-The pulse reaches ~4 levels, so entities in kerns far from the root stop being
-reinforced even though nothing about them changed
-(`concepts/heat-and-compaction.mdx:32-35`). Retention therefore tracks tree
-position, not usage — directly against the stigmergy thesis, and invisible to
-any metric that does not exist yet (item 1).
+**Closed 2026-07-21. The bias was real; its direction and its severity were
+both stated backwards, and the fix the title implies would have made it worse.**
+
+Two corrections to the item as written. The reach is **5 levels, not ~4**:
+strength starts at 1.0, halves per level (`PULSE_DECAY`,
+`src/base/constants.rs:55`) and the walk returns below 0.05 (`PULSE_THRESHOLD`,
+`:56`), so depths 0–4 were all deposited on. And "invisible to any metric that
+does not exist yet (item 1)" was stale — item 1 is closed, the harness exists,
+and this was measurable the whole time. It is now measured:
+`tests/depth_bias.rs` runs the real `pulse` → `commit_access_ids` → `run_gc`
+lifecycle over simulated months, two cohorts per depth with identical usage.
+
+The measurement inverted the item. Deep entities were not decaying unfairly —
+they were decaying *correctly*. Shallow ones could not be collected at all. The
+pulse deposit recurred every 60s, so it never evaporated: equilibrium heat at
+depth 4 was 1939 against a `COLD_HEAT_THRESHOLD` of 0.01, and at depth 0 it was
+31 031. Anything within 4 levels of the root was permanently exempt from cold
+GC, whether or not it had ever been read — which is the vision test "the hot
+graph stays bounded" failing, not merely a fairness question. Any recurring
+deposit above ~1.6e-7 produces that exemption, so no tuning of the deposit size
+could have preserved the pheromone story; propagating *deeper*, which the title
+implies, would have extended the exemption to the whole graph.
+
+So the deposit is gone (`src/tick/pulse.rs`), along with
+`HeatConfig::deposit_traversal`. Access is the only deposit; the pulse still
+fans clustering, GC, reembed and idle-sweep out from the root, so an idle daemon
+still maintains itself. Post-fix, every depth 0–7 evicts its unused cohort on
+the same day and keeps its used cohort. What this did **not** buy: item 83.
+Eviction now fires where it never could, but `max_kerns` and `disk_threshold`
+are still `usize::MAX` and there is still no per-kern entity cap, so nothing
+bounds the graph *deterministically* — only usage does.
 
 ---
 
@@ -1164,7 +1190,7 @@ NDCG sweep meant to tune either was never run
 `docs/kern/stigmergy-self-improving.md:160-170` derives a 1–2 day half-life.
 
 **Restated 2026-07-21 — the old "7-day retention" wording was stale.** The 7 days
-at `src/base/heat.rs:18` is the struct default and is never what runs:
+at `src/base/heat.rs:17` is the struct default and is never what runs:
 `Config::load` applies the preset unconditionally (`src/config/mod.rs:104`,
 `:132`) and `Preset::apply` is the only writer of `heat.half_life_secs`
 (`src/config/preset.rs`). The shipped default is `relaxed` = **30 days**; medium

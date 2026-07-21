@@ -230,9 +230,9 @@ impl Server {
 			Some(q) => q,
 		};
 
-		let mut g = self.graph.write();
+		let g = self.graph.read();
 		let root_id = g.root.id.clone();
-		crate::tick::pulse::pulse_with_heat(q, &mut g, &root_id, strength, &self.cfg.heat);
+		crate::tick::pulse::pulse(q, &g, &root_id, strength);
 		drop(g);
 
 		if let Some(broadcast) = &self.broadcast_pulse {
