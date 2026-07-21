@@ -931,7 +931,7 @@ ever inserted above line 408. `FEATURES.md` only grows, so the bet loses on
 every merge that appends — and when two branches each append and then combine,
 it loses twice over. Four times on 2026-07-21: four anchors, then four more,
 then twenty-seven, then fifteen. `scripts/docs_check.py` was green through all
-of it, correctly — it verifies the line *exists*, and it always does.
+of it, correctly — it verifies the line *exists*, and it always does. <!-- docs-check: anchor-ok -->
 
 The repeated hand re-pointing is not the fix. It is a tax paid on every merge,
 by whoever remembers, and the first time nobody remembers the docs quietly start
@@ -939,19 +939,60 @@ lying again. Two candidate closures:
 
 - **Symbolic anchors.** Cite a heading or a distinctive phrase
   (`` `FEATURES.md#12-mcp-surface` ``) and let the checker resolve it. Immune to
-  insertion; breaks loudly on rename, which is the right failure.
-- **Content-checked anchors.** Keep line numbers but have `docs_check.py` verify
-  the target still relates to the citing sentence. The cheap version already
-  works: compare the words of the citing sentence against the words of the cited
-  line and flag near-zero overlap. It found eleven of eleven in one pass. It also
-  flagged three correct anchors whose targets were short, so it nominates for
-  review rather than gating — a checker that cries wolf gets disabled, and a
-  disabled checker is worse than none.
+  insertion; breaks loudly on rename, which is the right failure. **Still open** —
+  this is the better answer and the larger change, and nothing below replaces it.
+- **Content-checked anchors.** ~~Keep line numbers but have `docs_check.py`
+  verify the target still relates to the citing sentence.~~ **Landed 2026-07-21.**
 
-Symbolic is the better answer and the larger change. Content-checking is
-mechanical and could land today. Neither is a defect in a running kern, which is
-why this sits in tier 9 — but it is the reason every reconcile pass so far has
-spent most of its effort re-pointing citations instead of checking claims.
+**What landed.** `scripts/docs_check.py` now compares the content words of the
+citing block — the whole bullet or paragraph, since the docs wrap at eighty
+columns — against the content words of the cited line(s), and nominates an anchor
+whose target shares too few. Tokens are lowercased, split on `_` and on the
+camelCase boundary, kept at four characters or more, and filtered through a small
+stopword set. The bar depends on what is cited: two shared words for prose
+targets, and for code targets only total silence counts, because prose citing
+code shares almost nothing *by design* — the sentence explains, the line
+implements. On the tree as it stands a two-word bar everywhere nominates 117 of
+654 anchors and is unusable; the split bar nominates 39.
+
+**It nominates, it does not gate.** Nominations print under their own heading and
+leave the exit code alone; `python3 scripts/docs_check.py` still exits 0 with 38
+standing. `--strict-anchors` makes them fatal, for a CI that has decided to trust
+them — not yet. A nomination a human has adjudicated is silenced in place with a
+trailing `docs-check: anchor-ok` comment, the same idiom as the historical page
+marker, and the marker counts only outside backticks so a page may quote it. The
+paragraph above is the first user of that escape: its `FEATURES.md:408-409` is an
+illustration of the disease, not a citation, so it is acquitted rather than fixed
+— and so is this sentence, which repeats it. <!-- docs-check: anchor-ok -->
+
+**Measured false-positive rate: 13 of 39, about 33%.** Adjudicated one at a time
+against the real tree, not estimated. The 26 true ones are the expected shape —
+`FEATURES.md` citing `classify_prompt` at a `return Vec::new();`,
+`bayesian-belief.md` citing `conf_alpha`/`conf_beta` at a `ChunkPart` struct,
+`README.md` citing the cold-tier drop counter at a closing brace; five of the six
+anchors in one `crdts-federation.md` status block are wrong. The 13 false ones
+share one weakness: the anchor is right but the target's distinguishing word is
+under four characters (`acl`, `rrf`, `run_hub`) or is a stem the prose inflects
+(`fn stem` against "stemmer"). Two more are self-inflicted — this item quoting
+`FEATURES.md:408-409` as an example rather than as a citation — and are acquitted
+in place, leaving **38 standing, 12 of them false, 32%**.
+
+**One measured non-win, recorded rather than buried.** Splitting the camelCase
+boundary looks like a strict improvement and is not: it silenced two false
+positives and one *true* one. `bayesian-belief.md:16` cites `src/base/types.rs:66-75`
+for "the seven kinds that exist" while 66-75 is `EntityStatus` and `ReasonKind`
+starts at 76 — a real breakage that now matches on a stray "entity" and no longer
+nominates. Precision moved 64% → 67% and recall moved 27 → 26. It is kept because
+prose and code should tokenise alike, not because the numbers earned it.
+
+A third of the output being wrong is why `--strict-anchors` is opt-in, and it is
+the number to beat before CI adopts it: stemming and a three-character floor with
+a longer stopword list are the obvious next moves, and symbolic anchors retire the
+question entirely.
+
+Neither is a defect in a running kern, which is why this sits in tier 9 — but it
+is the reason every reconcile pass so far has spent most of its effort
+re-pointing citations instead of checking claims.
 
 ### 92. `test_retention` fails under load and nobody had written it down `[eval]`
 
