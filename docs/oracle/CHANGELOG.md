@@ -2,6 +2,29 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — three ROADMAP headings still named defects that had been closed,
+  and the heading is the index. Items 28, 29 and 95 all carried struck-through
+  bodies marked closed while their titles read "GNN training runs synchronously
+  on the tick", "a spilled kern still carries two resident indexes" and "the file
+  watcher bypasses clamp_confidence entirely". Every one of those is now false.
+
+  This matters more than a tidy-up because of how the list is actually used.
+  Slice selection each cycle starts with `grep "^### "` — the titles are what a
+  reader scans and what a dispatcher picks from. A body that says "closed" behind
+  a title that says "broken" is invisible to the only step that reads the file at
+  scale, and the cost is a cycle dispatched at work already done. That nearly
+  happened here: 28, 29 and 95 were all live candidates on this fire's shortlist.
+
+  Retitled to name what REMAINS, following item 27's precedent ("GC eviction pays
+  one LMDB commit per victim" after two of its four bullets closed). 28 becomes
+  the 79.7s propagation cost, 29 becomes the measured refusal, 95 states it is
+  closed. The rule the file needs and now has three examples of: **when an item
+  narrows, the title narrows with it** — a title describing the original defect
+  outlives the defect.
+
+  Decided by: fix-the-root — the stale titles were not the error, the error was
+  updating bodies without updating the index that points at them.
+
 - 2026-07-22 — item 95 closed: ingest confidence is clamped by a guard every
   producer must pass, not by a convention each one remembers. Verified first —
   the watcher's raw `1.0` really did land on Beta(2,1) = 0.6667, a human CLI

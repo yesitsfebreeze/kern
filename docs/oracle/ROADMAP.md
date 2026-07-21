@@ -694,7 +694,7 @@ for reuse (`src/base/hnsw.rs:136-149`, scrub `:153`, alloc reuse `:109-125`),
 guarded by the test "deleted slots were recycled, arena did not grow" (`:755`). The cost is the
 scan, not the accumulation.
 
-### 28. GNN training runs synchronously on the tick `[lifecycle]`
+### 28. GNN training is off the tick; the propagation itself still costs 79.7s at N=4096 `[lifecycle]`
 
 ~~`TaskKind::GnnPropagate => do_gnn_propagate(...)` runs inline in `process_task`
 on the single tick loop, stalling large kerns.~~ **(closed 2026-07-21.)** The
@@ -751,7 +751,7 @@ reads, so it is its own item with its own recall gate, not a rider on this one.
 Also unaddressed: `gnn_train_refused` reaches MCP health only — `kern status`
 and the RPC `HealthRes` do not carry it.
 
-### 29. A spilled kern still carries two resident indexes `[retrieval]`
+### 29. Spilling all three indexes was measured and refused; it costs 122 MB more `[retrieval]`
 
 ~~DiskANN spill is entity-index-only, so the memory ceiling is pushed back, not
 removed.~~ **The premise is true and the remedy is refused, measured 2026-07-21.**
@@ -819,7 +819,7 @@ resident set, `disk_threshold` defaults to `KERN_CAP_DISABLED`
 (`src/config/graph.rs:20`) with no auto-tuning and no signal on approach, and the
 double-storage in finding 3 is the actual O(N) term.
 
-### 95. The file watcher bypasses `clamp_confidence` entirely `[ingest]`
+### 95. Every ingest entrance now clamps — closed 2026-07-22 `[ingest]`
 
 ~~**A raw 1.0 from the watcher.**~~ **Done 2026-07-22.** Confirmed before fixing:
 the sink submitted `1.0`, reaching `beta_params_from_confidence` unclamped and
