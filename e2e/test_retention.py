@@ -45,8 +45,15 @@ def wait_past_deadline(seconds):
 
 	`valid_until` is an absolute instant the reader compares against
 	`SystemTime::now()`, so realtime is the clock that has to move. `time.sleep`
-	waits on the monotonic one, and a host that steps realtime backwards — WSL2's
-	hv time sync does, by ~3s every half minute — leaves a monotonic sleep short.
+	waits on the monotonic one, and a host that steps realtime backwards leaves a
+	monotonic sleep short — WSL2's hv time sync does, running realtime ~3.8% slow
+	and repaying the whole accrued drift in one jump per ~32s. The rate is the
+	constant, not the step, so no fixed margin over a fixed sleep is safe: waiting
+	longer loses proportionally more, and a delayed sync bunches the loss.
+
+	The target is absolute, so a backward step needs no special case — only
+	realtime reaching it ends the wait. The cap is monotonic so a stopped clock
+	fails loudly instead of hanging.
 	"""
 	target = time.time() + seconds
 	cap = time.monotonic() + 4 * seconds + 30

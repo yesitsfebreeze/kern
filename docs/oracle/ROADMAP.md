@@ -1608,7 +1608,7 @@ Neither is a defect in a running kern, which is why this sits in tier 9 — but 
 is the reason every reconcile pass so far has spent most of its effort
 re-pointing citations instead of checking claims.
 
-### 94. A shared `target-dir` can report green on stale code `[process]`
+### 96. A shared `target-dir` can report green on stale code `[process]`
 
 The parallel-cycle worktrees all point `build.target-dir` at the main
 checkout's `target/`, so one warm 11 GB cache serves every tree instead of each
@@ -1677,48 +1677,75 @@ What survives: the by-name discipline. It is cheap, it catches mode 1
 independently of the build layout, and it is what confirmed both cycles that
 found this.
 
-### 92. Tests that race a backward-stepping `CLOCK_REALTIME` — mechanism found, `test_retention` unfixed `[eval]`
+### 92. Tests that race a backward-stepping `CLOCK_REALTIME` — closed 2026-07-22 `[eval]`
 
-`e2e/test_retention.py::test_a_retention_expires_the_fact_out_of_query_results`
-fails intermittently, and only when the CPU-heavy `test_recall.py` runs before
-it. Observed twice on 2026-07-21 by two independent runs — once mid-slice, once
-on a stashed-clean `src/`. A third observer could **not** reproduce it: six
-consecutive `pytest -q e2e/test_recall.py e2e/test_retention.py` runs on
-pristine code, all green. So it is real, load-dependent, and not reliably
-reproducible on demand — which is the worst shape a test can have.
+**Closed. Both tests were already fixed when this item last said one was not,
+and the constant it recorded is wrong by 2.4x.** The mechanism holds:
+`CLOCK_REALTIME` does step backwards here while `CLOCK_MONOTONIC` runs straight.
+What it does not do is step "roughly 2.8 s every 30 s".
 
-**Mechanism identified 2026-07-22, and it is not what this item guessed.** The
-guess was "under load on WSL2 the wall clock lags the sleep". It does not lag —
-**this host steps `CLOCK_REALTIME` backwards by roughly 2.8 s every 30 s.** Found
-while fixing the same class of failure in
-`the_poll_loop_resolves_its_deadline_per_pass_not_once_at_startup`
-(`src/ingest/intake.rs`), where a two-second monotonic sleep could advance
-realtime by under a second.
+Measured two ways sharing no code path. A sampler reading both clocks every
+50 ms and reporting every change in `realtime - monotonic`: over 300.009 s of
+monotonic, **9 backward steps, mean -1.243 s, mean period 32.25 s**, 11.185 s
+of realtime lost. A shell cross-check of `/proc/uptime` against `date(2)` over
+120 s: 3.730 s lost, which is three steps of 1.243 s to a millisecond, reached
+by arithmetic nothing in the sampler touches. A second 240 s window caught the
+informative outlier: one period stretched to 47.45 s and its step grew with it,
+to -1.816 s.
 
-That explains everything the original entry recorded as puzzling: why it fails
-only sometimes, why it correlates with a long preceding test rather than with
-load as such (a longer run spans more backward steps), and why three observers
-could not reproduce it on demand — six consecutive clean runs is an ordinary
-outcome when the trigger fires every half-minute against a two-second margin.
+So **the rate is the invariant, not the step**. `1.243/32.25` is 3.85% and
+`1.816/47.45` is 3.83%: realtime runs ~3.8% slow and the sync repays the entire
+accrued drift in one jump whenever it fires. That reframes the item. A margin is not
+unsafe because a fixed 2.8 s might land inside it; it is unsafe because the loss
+scales with how long you wait, and a delayed sync bunches it.
 
-So the shape of the fix is settled: **any test comparing a monotonic sleep
-against a `SystemTime` deadline on this host is a coin flip**, and widening the
-margin only lengthens the odds. `intake.rs` now waits on the wall clock itself,
-restarting its marker when the clock steps back and capping on the monotonic
-clock so a stopped clock fails loudly rather than hanging. `e2e/test_retention.py`
-wants the same treatment, or an injected instant.
+It also explains the reproduction failures better than the old entry did. The
+pre-fix shape — `time.sleep(RETENTION + 2)`, a 2 s margin over a 5 s retention —
+was run 12 times interleaved with `test_recall.py` against today's rate and
+passed **12 of 12**. One 1.24 s step cannot eat 2 s, and a 7 s window cannot
+hold two steps that are 32 s apart. The six clean runs the original entry filed
+as puzzling were the *expected* outcome; the two observed failures needed a
+stretched sync interval, which the 47.45 s sample proves does occur.
 
-Worth noting what this cost: the item was filed with deliberately conflicting
-evidence — two observations of failure against six clean runs — because neither
-"flaky" nor "fine" was established. Recording the disagreement rather than
-resolving it early is what left the entry accurate enough to update rather than
-rewrite when the real cause turned up in an unrelated file.
+Which means waiting for the flake is not a test. Reproducing it needs the step
+**constructed**: an `LD_PRELOAD` shim over `clock_gettime` subtracting
+`STEP × floor(monotonic / PERIOD)` from `CLOCK_REALTIME` alone. The offset is a
+pure function of the monotonic clock, which is boot-relative, so the pytest
+driver and every `kern` subprocess it spawns see one consistent warped realtime
+while `CLOCK_MONOTONIC` stays untouched. At 2.8 s every 5 s the pre-fix shape
+fails **5 of 5** on its original message — "an expired fact was still
+delivered" — and the shipped shape passes **5 of 5** on that same clock, whole
+file included.
 
-It ranks here rather than in a retrieval tier because retention itself is not
-suspected; the harness is. It is written down because the cost is not the
-failure, it is that **the next person to see it red will assume it is this
-flake and wave a real regression through.** An intermittent failure nobody has
-recorded is indistinguishable from a regression nobody has noticed.
+**Both fixes are in and verified.** `src/ingest/intake.rs` waits on the wall
+clock, restarts its marker on a backward step, and caps on the monotonic clock.
+`e2e/test_retention.py` waits to an *absolute* realtime target — which needs no
+restart, since only realtime reaching the target can end the wait — and then
+polls for the drop, because a step landing between the wait and the query can
+put a passed deadline back in the future. It has done both since 2026-07-21
+17:57 — seven hours before the 2026-07-22 00:37 commit that updated this item to
+say it wanted the treatment. That sentence was written from the item rather than
+from the file, which is the same reading-the-record-instead-of-the-thing mistake
+that put 2.8 s in it.
+
+An injected instant was considered and **declined**, on two counts. `kern query`
+has no `--valid-at`; only the MCP surface does (`src/mcp/tools_query.rs`), so
+the e2e harness cannot reach one without adding a CLI flag for a test's sake.
+And it would measure the wrong path: `drop_expired` (`src/retrieval/score.rs`)
+returns early whenever `valid_at` or `as_of` is set, leaving the work to
+`matches_filter`, so an injected instant exercises the filtered reader while
+production expiry rides the unconditional pass. Trading the real path for a
+mockable one is no fix for a flake that never lived on the real path.
+
+Nothing else here shares the defect. The only other test that sleeps and reads a
+clock is `tick_head_of_line_delay` (`tests/gnn_scale.rs`), which measures with
+`Instant`, and `e2e/conftest.py`'s `wait_until` is monotonic on both sides.
+
+What stands is why this was written down at all: **the next person to see it red
+will assume it is this flake and wave a real regression through.** An
+intermittent failure nobody has recorded is indistinguishable from a regression
+nobody has noticed — and one recorded with a wrong constant is worse, because it
+reads as adjudicated.
 
 ### 70. The oracle pre-commit hook is untracked and has no installer `[process]`
 
