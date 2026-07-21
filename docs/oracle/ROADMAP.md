@@ -227,7 +227,7 @@ latency, which the e2e harness can still claim).
 
 `seed_important` iterates `g.all()` × `kern.entities.values()`
 (`src/retrieval/seed.rs:138-171`), called unconditionally once per retrieve
-(`src/retrieval/answer.rs:185`). Rayon-parallel, but still full-corpus per
+(`src/retrieval/query.rs`, in `retrieve_profiled`). Rayon-parallel, but still full-corpus per
 query. Top structural debt in the repo.
 
 ### 26. PageRank runs a full power iteration per query, persisted nowhere `[retrieval]`
@@ -243,9 +243,12 @@ One item because one sweep pays all four costs:
 - Victim selection is O(entities) per kern per sweep (`src/tick/stigmergy.rs:51-56`).
 - The cold tier is a brute-force cosine scan with no index — `cold_search` decodes
   and scores every row (`src/base/store.rs:515-529`).
-- `cold_cap` decodes the **entire 50k-row cold table** on every individual spill
-  once at capacity (`src/base/store.rs:541-556`, called after each `put` at
-  `:490-494`). Evicting *V* victims at steady state costs *V* full-table decodes.
+- ~~`cold_cap` decodes the entire 50k-row cold table on every individual spill~~
+  **Closed 2026-07-21.** `cold_spill` now calls `cold_cap_amortized`, which trims
+  only once the tier is a slack margin (1024 rows) past the cap and then cuts back
+  to it — one full-table pass per 1024 spills instead of one per spill. The tier
+  may sit up to 2% over its cap between passes; the cap is a disk bound, not a
+  correctness boundary. Direct `cold_cap` callers still get the exact trim.
 - `HnswIndex::delete` is O(nodes × edges) — it scans every node and every layer
   to scrub inbound edges (`src/base/hnsw.rs:124-128`), once per victim, so a
   sweep is O(V · N · E).
@@ -284,8 +287,8 @@ one and are not.
 
 Beside it, and equally unbounded: **the distill leg has no timeout budget and no
 queue-depth metric.** "The LLM call is the only unbounded step on the path"
-(`concepts/acceptance.mdx:189-192`), and all shipped latency work — streaming,
-capped `num_ctx`, warm-keeping — is answer-side only.
+(`concepts/acceptance.mdx:189-192`), and with the answer leg removed (2026-07-21)
+the distill leg is now the only LLM on any path — no latency work has landed on it.
 
 ### 31. Routing and structural debt in the hot types `[retrieval]`
 
@@ -640,7 +643,7 @@ neutral here. Item 64's stemmer swap is the clearest case.
 
 The raw `0.4·content + 0.6·GNN` blend (`src/base/search.rs:25-26`, applied `:39`)
 is fragile across scales; `fuse::rrf` (`src/retrieval/fuse.rs:4`) already fuses
-the seed layer (`src/retrieval/answer.rs:142`) and never reaches `merge_hits`.
+the seed layer (`src/retrieval/query.rs`, `fuse_hybrid_seeds`) and never reaches `merge_hits`.
 **Record the cost:** RRF keeps rank information only, so a dense hit that is
 overwhelmingly better than rank 2 gets no credit for the margin
 (`concepts/retrieval.mdx:88`). This is a trade, not a strict win.
@@ -654,14 +657,6 @@ central product claim, is a design intention
 replacement. Its surfacing half is separate and also unbuilt: export `HeatStats`
 via health and `kern://health`
 (`docs/kern/stigmergy-self-improving.md:263-266`). Item 54 depends on this.
-
-### 63. Gate HyDE off on strong lexical hits `[retrieval]`
-
-`hyde::expand_query` gates only on `hyde_enabled` and query token count
-(`src/retrieval/hyde.rs:11-17`) — no lexical-strength signal, so it costs an LLM
-call when the cheap path already won. Partial mitigation not previously recorded:
-the semantic cache is checked before `query_locked`, so a cache hit *does* skip
-HyDE (`src/mcp/tools_query.rs:186-198`). The lexical half remains.
 
 ### 64. Normalize and re-found the scoring stack `[retrieval]`
 
@@ -679,12 +674,11 @@ is the 0.6 blend in item 61.
 one-line ranking change that makes a single-observation claim stop outranking a
 well-evidenced one at equal mean.
 
-### 66. Silent config ceilings in the retrieval path `[retrieval]`
+### 66. RRF weights and mode blends are configurable but never auto-tuned `[retrieval]`
 
-Two, both of which make a configured value a lie: the rerank pool is hard-capped
-at 32 candidates regardless of configuration (`concepts/retrieval.mdx:117`), and
-RRF weights plus mode blends are configurable but never auto-tuned
-(`FEATURES.md:180`).
+Was two ceilings; the rerank half left with the rerank stage itself
+(2026-07-21). What remains: RRF weights plus mode blends are configurable but
+never auto-tuned (`FEATURES.md:180`).
 
 ### 67. Binary quantization stays non-user-selectable `[retrieval]`
 
@@ -692,16 +686,12 @@ Its recall floor is too low without a rescoring pass; deliberately excluded from
 `parse` (`src/quant.rs:20-21`). Beside it: no int4 path and the quantization
 scale is fixed at encode time (`FEATURES.md:229`).
 
-### 68. No learned rerank model `[retrieval]`
+### 69. Speculative decode for the distill leg `[ingest]`
 
-Every rerank is a cold LLM call (`src/retrieval/rerank.rs:11-40`).
-
-### 69. Speculative decode `[ingest]`
-
-qwen3.5:0.8b draft → 4b generator. The last open lever on answer latency;
-streaming, capped `num_ctx` and warm-keeping are shipped. No `draft` or
-`speculative` anywhere in `src/llm.rs` or `src/config/answer.rs`. Latency is the
-one axis item 1 does not gate — the e2e harness can still judge this.
+qwen3.5:0.8b draft → 4b generator. With the answer leg gone (2026-07-21) the
+only LLM latency that matters is distillation throughput; no `draft` or
+`speculative` anywhere in `src/llm.rs`. Latency is the one axis item 1 does not
+gate — the e2e harness can still judge this.
 
 ---
 
@@ -762,13 +752,6 @@ Called twice, both with the literal `AGENT_SOURCE`
 thread a real auth identity (item 18/24), or delete. Delete is correct for a
 single local daemon and needs only sign-off.
 
-### 80. `QueryOptions::answer_style` has no writer `[surface]`
-
-Recorded as "shipped and retained, eval-only by design" — but the eval that was
-its only writer was deleted in `8d8b19e`. Verified write-nobody: defined at
-`src/retrieval/score.rs:45`, read at `src/retrieval/answer.rs:76` and `:325`, set
-nowhere in `src/` or `e2e/`. Same class as item 79. Keep with a writer, or delete.
-
 ### 81. `resources/list` and `prompts/list` return `-32601` on the proxy path `[surface]`
 
 `ProxyServer` implements `tools_list` / `call_tool` / `extra_capabilities` only
@@ -807,7 +790,7 @@ served that way decays, clusters and GCs normally, and simply does not federate.
   `src/llm.rs`, and the native-vs-compat decision is a private fn there. Warning
   requires either promoting them to real per-endpoint config or exposing that
   predicate. Was listed under item 11; it is a different job.
-- No streaming `answer` over stdio; hand-rolled tool schemas; no batch query
+- Hand-rolled tool schemas; no batch query
   (`FEATURES.md:460-462`).
 - The LLM client is Ollama-centric with no retry/backoff policy object
   (`FEATURES.md:598-600`).
@@ -986,6 +969,12 @@ an overall eval score that makes specialization worth funding.
 4. **This file is the only plan.** New work goes here, not into a new document.
 
 ## Closed and verified — do not re-open
+
+- **The answer leg is deleted** — closes items 63, 68, and 80 (2026-07-21).
+  Synthesis, HyDE, LLM rerank, and the query cache are gone; `query` returns
+  passages/edges/chains and the calling agent synthesizes. Retrieval is
+  LLM-free end to end, which is exactly the path item 1's instrument scores;
+  e2e floors held unchanged through the removal (recall@1 0.9167, MRR 0.9462).
 
 Each of these was listed as open at some point and is not. Kept as one line so a
 future audit does not resurrect it; the proof is the citation.

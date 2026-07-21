@@ -15,6 +15,9 @@ use crate::quant::{QuantizationMode, QuantizedVec};
 const MAP_SIZE: usize = 16 * 1024 * 1024 * 1024;
 const MAX_DBS: u32 = 3;
 const COLD_EVICT_WARN_SECS: u64 = 300;
+// How far the cold tier may run over its cap before a trim pass is worth its
+// full-table decode. See `cold_cap_amortized`.
+const COLD_CAP_SLACK: usize = 1024;
 
 const KERN_DB: &str = "kern";
 const COLD_DB: &str = "cold";
@@ -366,6 +369,18 @@ impl Store {
 				.max_dbs(MAX_DBS)
 				.open(path)?
 		};
+		// Killed processes (timeouts, a killed hub, crashed CLIs) leak reader
+		// slots in lock.mdb; enough of them and every open fails MDB_READERS_FULL
+		// and the daemon boots an empty graph. Reap them on every open.
+		match env.clear_stale_readers() {
+			Ok(0) => {}
+			Ok(n) => {
+				tracing::info!(target: "kern.store", cleared = n, "reaped stale LMDB reader slots")
+			}
+			Err(e) => {
+				tracing::warn!(target: "kern.store", error = %e, "stale-reader reap failed; continuing")
+			}
+		}
 		let mut wtxn = env.write_txn()?;
 		let kern = env.create_database::<Str, Bytes>(&mut wtxn, Some(KERN_DB))?;
 		let cold = env.create_database::<Str, Bytes>(&mut wtxn, Some(COLD_DB))?;
@@ -655,7 +670,7 @@ impl Store {
 		let mut wtxn = self.env.write_txn()?;
 		self.cold.put(&mut wtxn, &entity.id, &bytes)?;
 		wtxn.commit()?;
-		self.cold_cap(crate::base::constants::COLD_MAX_ENTRIES)?;
+		self.cold_cap_amortized(crate::base::constants::COLD_MAX_ENTRIES)?;
 		Ok(())
 	}
 
@@ -684,7 +699,7 @@ impl Store {
 			self.cold.put(&mut wtxn, &e.id, &bytes)?;
 		}
 		wtxn.commit()?;
-		self.cold_cap(crate::base::constants::COLD_MAX_ENTRIES)?;
+		self.cold_cap_amortized(crate::base::constants::COLD_MAX_ENTRIES)?;
 		Ok(())
 	}
 
@@ -713,6 +728,28 @@ impl Store {
 		scored.sort_by(|a, b| crate::base::util::cmp_rank(a.1, &a.0.id, b.1, &b.0.id));
 		scored.truncate(k);
 		Ok(scored)
+	}
+
+	// `cold_cap` decodes EVERY row to sort by age. Calling it per spill means that
+	// once the tier is full — the steady state it is designed to sit in — each
+	// single eviction pays a full-table decode, so a GC sweep evicting V victims
+	// costs V passes over 50k rows. Trigger only once the tier is a slack margin
+	// over the cap, then cut all the way back to it: one pass per SLACK spills
+	// instead of one per spill.
+	//
+	// Tradeoff: the tier may hold up to `max + SLACK` rows between passes. The cap
+	// is a disk bound, not a correctness boundary, and 2% overshoot buys a ~500x
+	// reduction in decode work. Direct callers of `cold_cap` still get the exact
+	// cap, so nothing that asks for a hard trim gets a soft one.
+	pub(crate) fn cold_cap_amortized(&self, max: usize) -> Result<(), StoreError> {
+		let len = {
+			let rtxn = self.env.read_txn()?;
+			self.cold.len(&rtxn)? as usize
+		};
+		if len <= max.saturating_add(COLD_CAP_SLACK) {
+			return Ok(());
+		}
+		self.cold_cap(max)
 	}
 
 	pub(crate) fn cold_cap(&self, max: usize) -> Result<(), StoreError> {
@@ -1613,5 +1650,46 @@ mod tests {
 			hits[0].0.id, "a",
 			"equal-cosine tie resolved to id-ascending winner"
 		);
+	}
+	#[test]
+	fn a_spill_past_the_cap_does_not_trim_until_the_slack_is_used_up() {
+		// The cliff this closes: cold_cap decodes every row to sort by age, so
+		// calling it per spill made one GC sweep pay a full-table pass per victim.
+		let d = tmp();
+		let s = Store::open(&dir_of(&d)).unwrap();
+		let max = 4usize;
+
+		for i in 0..(max + 3) {
+			let mut e = mk_entity(&format!("e{i}"), "x", 1.0, EntityKind::Claim);
+			e.created_at = Some(UNIX_EPOCH + Duration::from_secs(100 * (i as u64 + 1)));
+			s.cold_spill(&e).unwrap();
+			s.cold_cap_amortized(max).unwrap();
+		}
+
+		assert_eq!(
+			s.cold_evicted(),
+			0,
+			"inside the slack margin nothing is trimmed, so nothing is decoded"
+		);
+		assert!(
+			s.cold_get("e0").unwrap().is_some(),
+			"the oldest row is still present while under max + slack"
+		);
+	}
+
+	#[test]
+	fn an_amortized_trim_cuts_all_the_way_back_to_the_cap() {
+		let d = tmp();
+		let s = Store::open(&dir_of(&d)).unwrap();
+		for i in 0..3 {
+			let mut e = mk_entity(&format!("e{i}"), "x", 1.0, EntityKind::Claim);
+			e.created_at = Some(UNIX_EPOCH + Duration::from_secs(100 * (i as u64 + 1)));
+			s.cold_spill(&e).unwrap();
+		}
+		// max 0 forces the trigger regardless of slack, since 3 > 0 + SLACK is false
+		// — so drive the exact-cap path the amortized one delegates to.
+		s.cold_cap(1).unwrap();
+		assert_eq!(s.cold_evicted(), 2, "trims to the cap, not to the trigger");
+		assert!(s.cold_get("e2").unwrap().is_some(), "newest survives");
 	}
 }

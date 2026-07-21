@@ -22,6 +22,28 @@
   acceptable, off-topic-in-generic is preserved, and the retrieval eval
   remains the instrument that will judge whether routing quality matters.
 
+- 2026-07-21 — Roadmap item 27, one of its four costs: the cold tier stops paying
+  a full-table decode per eviction. `cold_cap` sorts by age, which means decoding
+  every row, and `cold_spill` called it after every single put — so at the steady
+  state the tier is *designed* to sit in (full), each eviction re-decoded 50k rows,
+  and a GC sweep evicting V victims paid V passes.
+
+  `cold_cap_amortized` trims only once the tier runs a slack margin past the cap,
+  then cuts all the way back to it: one pass per 1024 spills rather than one per
+  spill. Direct `cold_cap` callers are untouched, so anything asking for a hard
+  trim still gets one.
+
+  **Named tradeoff:** the tier may hold up to `max + 1024` rows between passes —
+  2% over a 50k cap. That is a disk bound rather than a correctness boundary, and
+  it buys roughly a 500x reduction in decode work on the sweep path. If the cap
+  ever becomes a hard limit, the trigger is the one line to change.
+
+  Three of item 27's four costs remain: victim selection is still O(entities) per
+  kern per sweep, `cold_search` is still a brute-force scan, and `HnswIndex::delete`
+  is still O(nodes x edges) per victim.
+
+  **Decided by:** name-the-tradeoff.
+
 - 2026-07-21 — Roadmap item 8, first half: a stuck intake delta now says why.
   `220af94` made the reason model's prose replies retry forever rather than
   silently archiving the capture — the right side of that trade, and stated at the
@@ -244,6 +266,32 @@
   pending direct-intake JSON decodes via the same alias, but external agent
   configs calling the old tool name must update. Kern shard bincode is
   positional, so the `Kern.claim_kinds` field rename is wire-compatible.
+- 2026-07-21 — **The answer leg is deleted; retrieval is the only read
+  path.** `query` returns scored passages, enriched edges, and path chains —
+  no synthesis, ever. The calling agent synthesizes, which is what agents are
+  for: measured today, granite4:3b's synthesized answer confabulated over a
+  correct top-3 retrieval, the same failure that got the LoCoMo bench deleted
+  ("answer quality set the ceiling"). Removed with it, because they only ever
+  ran when `answer=true` and would otherwise be dead code behind silently
+  no-op knobs: HyDE, the LLM rerank, and the semantic query cache — the read
+  path is now LLM-free end to end, the exact path the e2e instrument scores.
+  Also gone: the `[answer]` config role (refused at load with a removal
+  notice), the `--answer` CLI flag, the answer/streaming machinery and CPU-pin
+  logic in `llm.rs` (reason no longer competes with an interactive model for
+  GPU), and `answer_max_facts`/`answer_abstain_hint`/`hyde_*`/`rerank_*`/
+  `query_cache_*` knobs. `retrieval/answer.rs` renamed to
+  `retrieval/query.rs`. Kept deliberately: the `Answer` entity kind (persisted
+  data, append-only law), gossip's question/answer protocol (federation
+  edges), and UNTRUSTED tagging — now applied to *delivered* chains and
+  remote ids, since the trust boundary moved to the synthesizing caller.
+  Closes ROADMAP items 63, 68, 80; halves item 66. Verified: 747 lib tests,
+  e2e floors unchanged through the removal (recall@1 0.9167, recall@5 0.9722,
+  MRR 0.9462) — proof the scored path never used the LLM.
+  **Decided by:** the user, and fix-the-root over patching the answerer: a
+  small local model synthesizing above a big calling model was an
+  architecture error, not a prompt problem. Supersedes the answer role
+  sections of "Lifecycle freshness ships" and every `answer=true` surface.
+
 - 2026-07-21 — Presets become the whole tuning surface, and the default is
   `relaxed`. Supersedes the same-day entry below on two points. (1) The
   overlay-under-scopes design ("any explicit key still wins") is replaced:
