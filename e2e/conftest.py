@@ -34,18 +34,30 @@ class KernProject:
 		self.bin = str(kern_bin)
 		self.cwd = tmp_path / "proj"
 		self.runtime = tmp_path / "run"
+		self.llm_url = llm_url
 		config_home = tmp_path / "config"
 		for d in (self.cwd / ".kern", self.runtime, config_home):
 			d.mkdir(parents=True)
-		(self.cwd / ".kern" / "kern.toml").write_text(
-			f'[embed]\nurl = "{llm_url}"\nmodel = "fake-embed"\n\n'
-			f'[reason]\nurl = "{llm_url}"\nmodel = "fake-reason"\n\n'
-		)
+		self.write_config()
 		self.env = os.environ | {
 			"XDG_RUNTIME_DIR": str(self.runtime),
 			"XDG_CONFIG_HOME": str(config_home),
 		}
-		self._hubs = []
+		self._children = []
+
+	def write_config(self, data_dir=None):
+		"""(Re)write the project kern.toml. `data_dir` is cwd-relative.
+
+		Config is read once per process, at startup — so rewriting this while a
+		daemon runs repoints the *next* CLI invocation without moving the store
+		the daemon already holds open.
+		"""
+		head = f'data_dir = "{data_dir}"\n\n' if data_dir else ""
+		(self.cwd / ".kern" / "kern.toml").write_text(
+			f"{head}"
+			f'[embed]\nurl = "{self.llm_url}"\nmodel = "fake-embed"\n\n'
+			f'[reason]\nurl = "{self.llm_url}"\nmodel = "fake-reason"\n\n'
+		)
 
 	def run(self, *args, timeout=120):
 		out = subprocess.run(
@@ -68,13 +80,47 @@ class KernProject:
 
 	def start_hub(self, *extra):
 		child = self.spawn("hub", *extra)
-		self._hubs.append(child)
+		self._children.append(child)
 		sock = self.runtime / "kern-hub.sock"
 		wait_until(lambda: sock.exists(), 10, f"hub never bound {sock}")
 		return child
 
+	def node_sockets(self):
+		"""Every per-project daemon socket in this project's private runtime dir.
+
+		The name carries an FNV tag of the daemon's cwd (trnsprt::typed::local),
+		which the test has no way to recompute — so it matches on the shape.
+		"""
+		return [
+			p
+			for p in self.runtime.iterdir()
+			if p.name.startswith("kern-") and p.name != "kern-hub.sock"
+		]
+
+	def start_daemon(self):
+		child = self.spawn("--daemon")
+		self._children.append(child)
+		wait_until(
+			lambda: bool(self.node_sockets()),
+			60,
+			f"daemon never bound a socket under {self.runtime}",
+		)
+		return child
+
+	def stop(self, child):
+		"""Kill a child and reap it.
+
+		A killed daemon leaves its socket *file* behind — nothing unlinks it. That
+		is exactly the shape the NoDaemon fallback has to survive in the field, so
+		the test does not clean it up: connect-refused must read as "no daemon".
+		"""
+		child.kill()
+		child.wait()
+		if child in self._children:
+			self._children.remove(child)
+
 	def kill_all(self):
-		for child in self._hubs:
+		for child in self._children:
 			child.kill()
 			child.wait()
 

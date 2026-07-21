@@ -4,8 +4,7 @@ pub mod sse;
 pub mod tools;
 mod tools_admin;
 mod tools_mutate;
-mod tools_query;
-pub(crate) use tools_query::entity_detail;
+pub(crate) mod tools_query;
 mod tools_setup;
 
 use std::io::{BufReader, Read, Write};

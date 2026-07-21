@@ -11,9 +11,10 @@ autonomous properties — self-learning from what is used, structured,
 self-compacting, self-distributing — each the inverse of a RAG chore you'd
 otherwise own. The competitive set is agent memory (Zep/Graphiti, Mem0, Letta),
 not general-purpose vector databases. kern publishes no number against that set
-and has none of its own; what would measure retrieval quality at all is the
-first open question in `ROADMAP.md` ("What measures retrieval quality with no
-LLM in the scoring loop?"), and every other open item lives there too.
+and has none of its own; what measures retrieval quality with no LLM in the
+scoring loop now exists — `e2e/test_recall.py`, the answer to what was
+`ROADMAP.md`'s first question — and it steers work without certifying anything,
+so the claim standard stands unchanged. Every open item lives in `ROADMAP.md`.
 
 ## The test
 
@@ -47,11 +48,12 @@ A change fails the vision if it breaks any of these:
   nodes converge over gossip via the content-addressed CRDT — no central
   server.
 - **One dispatch core.** Every surface (MCP, RPC, CLI, any future one) goes
-  through the single `tools::dispatch` — never a second copy.
+  through the single `mcp::Server::call_tool` — never a second copy.
 - **No quality claim without an instrument.** There is no recorded baseline —
-  it was withdrawn, not superseded — so until a retrieval metric with no LLM in
-  the scoring loop exists (`ROADMAP.md` — "What measures retrieval quality with
-  no LLM in the scoring loop?"), kern claims no quality of any kind: not SOTA,
+  it was withdrawn, not superseded. The scorer that exists (`e2e/test_recall.py`)
+  runs against a bag-of-words embedder: it catches regressions and certifies
+  nothing, so the standard is unchanged by its arrival (`ROADMAP.md` — "no
+  quality claim of any kind") and kern claims no quality of any kind: not SOTA,
   not parity, not regression, not improvement. Latency stays claimable, from the
   e2e harness, multi-seed with error bars.
 - **Per-cwd isolation.** One graph per directory; no cross-project

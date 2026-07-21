@@ -23,7 +23,7 @@ is answered, and `e2e/` is the answer. That closure releases everything it gated
 — items 32, 54, 55 and the whole of tier 8 are now judgeable the way item 86's two
 candidate fixes were: apply, measure, keep only if `recall@1` holds.
 
-Two headings in this file were destroyed by an editing script that cut from an
+A heading in this file was destroyed by an editing script that cut from an
 item to the next one and swallowed the tier boundary between them; Tier 3 is
 restored above its items. Say it here because a lost heading is invisible — the
 items survive and simply appear to rank somewhere they do not. Tier 2 — "the
@@ -43,7 +43,7 @@ These need no gossip, no flag and no unusual configuration. Every one produces a
 wrong or missing result with no error, which is why they outrank both the
 security work (armed only with federation on) and every feature.
 
-### 9. Two live writers: `ingest`/`link`/`intake drain` write locally, `list`/`query`/`search` read off disk `[surface]`
+### 9. Two live writers: `ingest`/`link`/`intake drain` still write locally `[surface]`
 
 **Decided 2026-07-21, and the decision is implemented for the two commands it
 fits.** The choice named here was between routing the one-shot writes through
@@ -77,8 +77,8 @@ effort. `intake drain` has no matching tool and would need one first.
 
 That block is a new sequencing edge pointing *down* the file — item 24 sits in
 tier 3 and this sits in tier 1 — and the list was not reordered for it. The
-edge binds only the `ingest`/`link` half; item 9's other open halves (`intake
-drain`, read-side staleness) need no auth and keep this position. Item 24 does
+edge binds only the `ingest`/`link` half; item 9's other open half (`intake
+drain`) needs no auth and keeps this position. Item 24 does
 not move up because the trust field is one caller of it, not its severity: an
 unauthenticated socket is armed the same either way.
 
@@ -95,7 +95,47 @@ to it, or exits 1 naming the holder. The tradeoff, taken deliberately: a
 gave one that silently overwrote the other's graph. Availability was never the
 thing at risk.
 
-Three things remain, and the title names them. `ingest` and `link` (blocked on
+**Closed 2026-07-21: the read side.** `kern get` and `kern query` route before
+they touch disk (`cmd_get` in `src/commands/graph_ops.rs`, `cmd_query` in
+`src/commands/query.rs`), both over the existing `query` tool — `{id}` for the
+detail read, `{text, mode, k}` for the ranked one. A serving daemon's live graph
+answers; the local load is the `NoDaemon` fallback, and both paths render
+through one printer (`print_detail`, `print_results`) over the tool's own JSON,
+so wording cannot drift. One id resolver serves both
+(`mcp::tools_query::entity_detail_by_id`), which is what stops a routed and a
+local `get` disagreeing about what a prefix means.
+
+Two things that were not free. The `k` had to be sent: the tool defaults to
+`seed_k`, well under the pool the local path delivers, so routing without it
+made `kern query` return 25 hits with a daemon up and 36 without, on the same
+corpus — the hit count silently depending on whether something was serving.
+`retrieval::score::delivery_cap` is now the one owner of that number and both
+sides read it. And routing `query` sends the text to the *daemon's* embedder,
+not this process's: correct, since it owns the index the query hits, but it
+means `--embed-model` on a routed `kern query` is ignored rather than honoured.
+That is the same "the daemon owns it" rule the write half took, and it is
+stated here rather than discovered.
+
+**`search` and `list` stay local, by decision.** Not oversight and not
+deferred work: `search` is the raw-ANN probe with no matching tool behind it,
+and `list` prints the on-disk kern tree. Both are what a developer reaches for
+to inspect *the store*, and routing them would remove the only way to see what
+is actually on disk while a daemon is up — which is also what makes them the
+control in `e2e/test_daemon_reads.py`.
+
+**Neither read was a copy of the `forget` route, and the reason is the
+constraint this item had been missing:** the daemon's tool surface is narrower
+than the CLI's read commands, so a naive route trades staleness for lost
+capability. `get` only became routable after `query{id}` was widened to match
+what `cmd_get` resolves — a prefix, and the cold tier (`find_entity_by_prefix`
+in `src/base/search.rs`, and the `cold_get` fallback both now reach through
+`entity_detail_by_id` in `src/mcp/tools_query.rs`). `query` only became routable
+after `tool_query` learned to return path chains, without which a routed
+`kern query` would have silently lost its "--- Connections ---" section. Each
+route cost a widening of the tool first; that is the shape of the remaining work
+too.
+
+Two things remain, and the title names them. `ingest` and `link` (blocked on
 item 24) and `intake drain` (needs a tool first) still write the store directly.
 They are one-shot, so the exposure is a lost write rather than a lost graph —
 and all three are now guarded. `cmd_ingest` (`src/commands/ingest_cmd.rs`) and
@@ -112,29 +152,7 @@ recovery. Both are narrower than the CLI race — hub merge stops both daemons
 first, self-heal runs before the daemon serves — but neither has been proven
 safe, and neither belongs to this item.
 
-What is left here is the read side, now three commands rather than four.
-`kern get` routes to the daemon as of 2026-07-21 and reads its live graph;
-`list`, `query` and `search` still load from disk and can report older than live
-state — the same defect one step further down, a stale read rather than a lost
-write.
-
-Routing the rest is **not** three more copies of the `get` change, and the
-reason is the constraint this item has been missing: the daemon's tool surface
-is narrower than the CLI's read commands, so a naive route trades staleness for
-lost capability. `get` only became routable after `query{id}` was widened to
-match what `cmd_get` resolves — a prefix, and the cold tier
-(`src/base/search.rs`'s `find_entity_by_prefix`, and the `cold_get` fallback in
-`src/mcp/tools_query.rs`). Each remaining read carries its own version of that
-debt:
-
-- **`query`** — `tool_query` returns `{entities}` with no path chains, so a
-  routed `kern query` would silently lose its "--- Connections ---" section.
-  The tool must return chains first. No auth needed; this is the next one.
-- **`search`** — no tool. `cmd_search` is raw top-k vector search
-  (`search_all_unlocked`), which `query`'s modes do not reproduce.
-- **`list`** — no tool. It prints the whole kern tree, so exposing it is a
-  wider disclosure than `query`'s per-entity reads and belongs with item 24's
-  decision about the unauthenticated socket, not before it.
+The item does not close on the read side alone.
 
 ---
 
@@ -820,8 +838,8 @@ the normal path, non-functional there. Either forward them or stop advertising.
 ### 82. Standalone `kern mcp` runs no gossip `[surface]`
 
 **Corrected:** the previous version said "no maintenance tick and no gossip". The
-tick *is* started (`src/commands/mcp_cmd.rs:404-412`); only gossip is absent
-(`broadcast_q: None` at `:410`, `broadcast_pulse: None` at `:424`). A graph
+tick *is* started (`src/commands/mcp_cmd.rs:455-466`); only gossip is absent
+(`broadcast_q: None` at `:461`, `broadcast_pulse: None` at `:475`). A graph
 served that way decays, clusters and GCs normally, and simply does not federate.
 
 ### 83. Per-kern entity cap is `KERN_CAP_DISABLED` and marked unsafe to enable `[lifecycle]`
@@ -851,12 +869,12 @@ served that way decays, clusters and GCs normally, and simply does not federate.
 - The LLM client is Ollama-centric with no retry/backoff policy object
   (`FEATURES.md:778-779`).
 - Watcher `.gitignore` parsing is approximate; no rename tracking
-  (`FEATURES.md:956-957`).
-- `unnamed` lists only; there is no `promote` (`FEATURES.md:683`).
+  (`FEATURES.md:965-966`).
+- `unnamed` lists only; there is no `promote` (`FEATURES.md:692`).
 - GNN has no GPU path, weights are per-kern rather than shared, and the objective
-  is link-prediction only (`FEATURES.md:528`).
+  is link-prediction only (`FEATURES.md:528-530`).
 - Under WSL2 NAT a loopback Ollama URL must be hand-pinned; kern neither rewrites
-  nor warns (`FEATURES.md:972-974`).
+  nor warns (`FEATURES.md:981`).
 - RPC socket bind→chmod race — sub-millisecond, umask default — recorded as an
   accepted risk (`concepts/security.mdx:40-43`); revisit only if the umask
   alternative stops being worse.
@@ -894,6 +912,12 @@ and item 1's instrument staying the scorer.
   `fl-vs-knids-federation.md:248-254`, `stigmergy-self-improving.md:298-301`,
   `pagerank-authority.md:279-280`). Either the notes lose their plans to this
   file, or the declaration is false. Repo law 4 says the former.
+- `README.md:116` still sells "**tarpc `KernRpc`**" on the front page. There is
+  no tarpc in `Cargo.toml`, in `Cargo.lock` or anywhere in `src/` — the service
+  is generated by this repo's own `service!` macro (`src/trnsprt/macros/`), and
+  `FEATURES.md` §13 says so outright. A dependency we do not have, named where a
+  reader looks first (found 2026-07-21, same sweep that corrected the identical
+  line in `SPECIALISTS.md`).
 - (retired 2026-07-21 — corrected at the source) the four stale `docs/kern/`
   research-note claims are gone: `crdts-federation.md:6-14` now states outright
   that no `PnCounter` was ever built, that `Delta` has a live sender, and that
@@ -913,7 +937,7 @@ and item 1's instrument staying the scorer.
   `FEATURES.md`.
 - (retired 2026-07-21 — all three fixed) `FEATURES.md:54` now lists `Entity`'s
   `acl`; the retired query-cache finding is gone from the file entirely; and
-  `:567-568` marks prompts and resources "served on the standalone path only",
+  `:568` marks prompts and resources "served on the standalone path only",
   which is item 81's note.
 
 Deferred design calls, still owed, no blocker and no urgency: quarantine
@@ -1030,8 +1054,8 @@ an overall eval score that makes specialization worth funding.
 1. **Append-only bincode.** Persisted enums/structs grow by appending only; guard
    schema touches with a round-trip test.
 2. **No pluggable/fallback backend.** All-internal, in-process, self-contained.
-3. **One dispatch core.** Every surface goes through `tools::dispatch`, never a
-   second copy.
+3. **One dispatch core.** Every surface goes through `mcp::Server::call_tool`,
+   never a second copy.
 4. **This file is the only plan.** New work goes here, not into a new document.
 
 ## Closed and verified — do not re-open
@@ -1157,7 +1181,7 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   `SPECIALISTS.md` (CHANGELOG 2026-07-21).
 - **Pulse and Question senders are live.** `broadcast_pulse` / `broadcast_q` built
   in `start_gossip` (`src/commands.rs:966-1040`), pulse wired into the maintenance
-  tick (`:708`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
+  tick (`:709`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
   `broadcast_q` invoked by `do_resolve` (`src/tick/tasks.rs:372`), `handle_question`
   live-dispatched (`src/gossip/handler.rs:44`).
 - **`Fetch` is wired** — `wire_fetch` installs the handler at

@@ -130,15 +130,8 @@ impl Server {
 			let g = self.graph.read();
 			// Prefix and cold tier both included so `kern get` can route here
 			// without resolving fewer ids than it did reading the store itself.
-			if let Some((thought, kern_id)) = find_entity_by_prefix(&g, &p.id) {
-				return tool_result_json(&entity_detail(&thought, &kern_id, &g));
-			}
-			return match g.store().and_then(|s| s.cold_get(&p.id).ok().flatten()) {
-				Some(e) => {
-					let mut v = entity_detail(&e, "", &g);
-					v["cold"] = serde_json::Value::Bool(true);
-					tool_result_json(&v)
-				}
+			return match entity_detail_by_id(&g, &p.id) {
+				Some(detail) => tool_result_json(&detail),
 				None => tool_error(&format!("thought not found: {}", p.id)),
 			};
 		}
@@ -294,11 +287,38 @@ impl Server {
 				.collect()
 		};
 
-		tool_result_json(&serde_json::json!({"entities": entities}))
+		let chains = {
+			let g = self.graph.read();
+			retrieval::query::format_chains(&g, &result.path_chains)
+		};
+
+		tool_result_json(&serde_json::json!({"entities": entities, "chains": chains}))
 	}
 }
 
-pub(crate) fn entity_detail(
+// What the CLI prints for a thought no kern still holds. A cold hit has no kern
+// id, and the label is the one `kern get` has always shown for that case.
+const COLD_KERN: &str = "(cold)";
+
+// The one id resolver behind both the `query` tool and `kern get`: a second one
+// would let the routed and local reads disagree about what an id resolves to —
+// prefix or cold, resolved here or resolved by a daemon, same answer.
+pub(crate) fn entity_detail_by_id(
+	g: &crate::base::graph::GraphGnn,
+	id: &str,
+) -> Option<serde_json::Value> {
+	if let Some((thought, kern_id)) = find_entity_by_prefix(g, id) {
+		return Some(entity_detail(&thought, &kern_id, g));
+	}
+	let cold = g.store().and_then(|s| s.cold_get(id).ok().flatten())?;
+	let mut v = entity_detail(&cold, COLD_KERN, g);
+	// The label is for the printer; the flag is for anything reading the JSON,
+	// which should not have to match on a sentinel kern id.
+	v["cold"] = serde_json::Value::Bool(true);
+	Some(v)
+}
+
+fn entity_detail(
 	thought: &crate::base::types::Entity,
 	kern_id: &str,
 	g: &crate::base::graph::GraphGnn,
@@ -333,7 +353,7 @@ pub(crate) fn entity_detail(
 }
 
 // kind/scheme/status labels are consumed by `kern_rpc::query` — do not drop them.
-pub(super) fn base_entity_json(
+pub(crate) fn base_entity_json(
 	entity: &crate::base::types::Entity,
 	score: f64,
 ) -> serde_json::Value {

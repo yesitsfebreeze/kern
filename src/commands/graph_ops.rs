@@ -2,11 +2,12 @@ use crate::base::constants::{DEGRADE_DECAY_BASE, DEGRADE_DECAY_POW, DEGRADE_MIN_
 use crate::base::graph::GraphGnn;
 use crate::base::math::{average_vec, reason_id};
 use crate::base::reason::{add_reason, remove_entity, remove_reason};
-use crate::base::search::{find_entity, find_entity_by_prefix};
+use crate::base::search::find_entity;
 use crate::base::types::{EntityKind, Kern, Reason, ReasonKind};
 use crate::base::util::{explain_relationship_prompt, short_id, truncate};
+use crate::mcp::tools_query::entity_detail_by_id;
 
-use super::route::{route, u64_field, Routed};
+use super::route::{array_field, f64_field, route, str_field, u64_field, Routed};
 use super::{load_graph, with_graph, Client, Endpoint};
 
 fn print_kern(kern: &Kern, g: &GraphGnn, depth: usize) {
@@ -38,84 +39,63 @@ fn print_kern(kern: &Kern, g: &GraphGnn, depth: usize) {
 	}
 }
 
-// Routed first, for the same reason `forget` is: while a daemon serves, its
-// in-memory graph is newer than anything this process can load off disk, so a
-// local read reports a state the owner has already moved past.
-pub(super) async fn cmd_get(cfg: &crate::config::Config, id: &str) {
-	match route("query", serde_json::json!({"id": id})).await {
-		Routed::Done(v) => return print_entity_detail(&v),
-		Routed::Refused(e) => return eprintln!("{e}"),
-		Routed::NoDaemon => {}
-	}
-	let g = load_graph(cfg);
-	if let Some((thought, kern_id)) = find_entity_by_prefix(&g, id) {
-		return print_entity_detail(&crate::mcp::entity_detail(&thought, &kern_id, &g));
-	}
-	match g.store().and_then(|s| s.cold_get(id).ok().flatten()) {
-		Some(e) => {
-			let mut v = crate::mcp::entity_detail(&e, "", &g);
-			v["cold"] = serde_json::Value::Bool(true);
-			print_entity_detail(&v);
-		}
-		None => eprintln!("thought not found: {id}"),
+// The detail JSON carries kinds as discriminants; the label is what the CLI has
+// always printed, and an unmapped number is shown rather than guessed at.
+fn entity_kind_label(n: u64) -> String {
+	match u8::try_from(n).ok().and_then(EntityKind::from_u8) {
+		Some(k) => format!("{k:?}"),
+		None => n.to_string(),
 	}
 }
 
-// The one printer both paths use. `cmd_get` reads the same JSON the `query`
-// tool returns whether a daemon produced it or this process did, so the routed
-// and local renderings cannot drift in wording.
-fn print_entity_detail(v: &serde_json::Value) {
-	let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("");
-	let f = |k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
-	let kind = v
-		.get("kind")
-		.and_then(|x| x.as_u64())
-		.and_then(|n| EntityKind::from_u8(n as u8))
-		.map(|k| k.as_str().to_string())
-		.unwrap_or_default();
-	let kern = s("kern");
-
-	println!("ID:     {}", s("id"));
-	println!("Kind:   {kind}");
-	println!("Score:  {:.4}", f("score"));
-	println!(
-		"Access: {}",
-		v.get("access_count").and_then(|x| x.as_i64()).unwrap_or(0)
-	);
-	if v.get("cold").and_then(|x| x.as_bool()) == Some(true) || kern.is_empty() {
-		println!("Kern:   (cold)");
-	} else {
-		println!("Kern:   {}", short_id(kern));
+fn reason_kind_label(n: u64) -> String {
+	match i32::try_from(n).ok().and_then(ReasonKind::from_i32) {
+		Some(k) => format!("{k:?}"),
+		None => n.to_string(),
 	}
-	println!("Text:   {}", s("text"));
+}
 
-	let Some(edges) = v.get("edges").and_then(|e| e.as_array()) else {
-		return;
-	};
+fn print_detail(v: &serde_json::Value) {
+	let id = str_field(v, "id");
+	println!("ID:     {id}");
+	println!("Kind:   {}", entity_kind_label(u64_field(v, "kind")));
+	println!("Score:  {:.4}", f64_field(v, "score"));
+	println!("Access: {}", u64_field(v, "access_count"));
+	println!("Kern:   {}", short_id(str_field(v, "kern")));
+	println!("Text:   {}", str_field(v, "text"));
+
+	let edges = array_field(v, "edges");
 	if edges.is_empty() {
 		return;
 	}
 	println!("Edges:");
-	let id = s("id");
 	for e in edges {
-		let from = e.get("from").and_then(|x| x.as_str()).unwrap_or("");
-		let to = e.get("to").and_then(|x| x.as_str()).unwrap_or("");
-		let dir = if from == id { "->" } else { "<-" };
-		let other = if from == id { to } else { from };
-		let ekind = e
-			.get("kind")
-			.and_then(|x| x.as_i64())
-			.and_then(|n| ReasonKind::from_i32(n as i32))
-			.map(|k| format!("{k:?}"))
-			.unwrap_or_default();
+		let from = str_field(e, "from");
+		let outgoing = from == id;
 		println!(
 			"  {} {} score={:.4} {}  {}",
-			dir,
-			ekind,
-			e.get("score").and_then(|x| x.as_f64()).unwrap_or(0.0),
-			short_id(other),
-			truncate(e.get("text").and_then(|x| x.as_str()).unwrap_or(""), 80),
+			if outgoing { "->" } else { "<-" },
+			reason_kind_label(u64_field(e, "kind")),
+			f64_field(e, "score"),
+			short_id(if outgoing { str_field(e, "to") } else { from }),
+			truncate(str_field(e, "text"), 80),
 		);
+	}
+}
+
+// Routed first for the same reason as forget: a serving daemon's graph is newer
+// than anything this process can load, so a local read would print a stale
+// thought — and stale evidence is the defect one step down from a lost write.
+pub(super) async fn cmd_get(cfg: &crate::config::Config, id: &str) {
+	match route("query", serde_json::json!({"id": id})).await {
+		Routed::Done(v) => return print_detail(&v),
+		Routed::Refused(e) => return eprintln!("{e}"),
+		Routed::NoDaemon => {}
+	}
+	let g = load_graph(cfg);
+	match entity_detail_by_id(&g, id) {
+		Some(detail) => print_detail(&detail),
+		None => eprintln!("thought not found: {id}"),
 	}
 }
 
@@ -568,13 +548,33 @@ mod tests {
 		assert_eq!(forget_entity(&mut g, "nope"), Err("thought not found"));
 	}
 
+	// Proves the printer, not the lookup: both `kern get` paths hand it this shape,
+	// so the labels and the edge direction must come back out of the JSON intact.
 	#[test]
-	fn find_entity_by_prefix_resolves_a_unique_prefix() {
-		let g = graph_with(&[("abc123def", EntityKind::Claim)], &[]);
-		let (hit, kern_id) = find_entity_by_prefix(&g, "abc12").expect("prefix resolves");
-		assert_eq!(hit.id, "abc123def");
-		assert_eq!(kern_id, "kx");
-		assert!(find_entity_by_prefix(&g, "abc123def").is_some());
-		assert!(find_entity_by_prefix(&g, "zzz").is_none());
+	fn detail_json_carries_everything_the_get_printer_needs() {
+		let mut g = graph_with(
+			&[("a", EntityKind::Question), ("b", EntityKind::Claim)],
+			&[("a", "b")],
+		);
+		g.kerns
+			.get_mut("kx")
+			.unwrap()
+			.entities
+			.get_mut("a")
+			.unwrap()
+			.set_text("the question".into());
+		let v = entity_detail_by_id(&g, "a").expect("a resolves");
+
+		assert_eq!(entity_kind_label(u64_field(&v, "kind")), "Question");
+		assert_eq!(str_field(&v, "text"), "the question");
+		assert_eq!(str_field(&v, "kern"), "kx");
+		let edges = array_field(&v, "edges");
+		assert_eq!(edges.len(), 1);
+		assert_eq!(str_field(&edges[0], "from"), "a", "edge points outward");
+		assert_eq!(
+			reason_kind_label(u64_field(&edges[0], "kind")),
+			"Similarity"
+		);
+		assert!(entity_detail_by_id(&g, "nope").is_none());
 	}
 }

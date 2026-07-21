@@ -170,10 +170,11 @@ pub fn find_entity(g: &GraphGnn, id: &str) -> Option<(Entity, String)> {
 	None
 }
 
-// Exact first, then a unique-enough prefix — how a human types an id they read
-// off a previous result. Lives here rather than in the CLI because the daemon's
-// id lookup has to accept exactly what the CLI accepts: a routed read that
-// resolved fewer ids than the local one would trade staleness for a miss.
+// Exact first, then a unique-enough prefix: every id kern prints is shortened
+// (`short_id`), so a copied id is normally a prefix. Lives here rather than in
+// the CLI because the daemon's id lookup has to accept exactly what the CLI
+// accepts — a routed read that resolved fewer ids than the local one would
+// trade staleness for a miss.
 pub fn find_entity_by_prefix(g: &GraphGnn, id: &str) -> Option<(Entity, String)> {
 	if let Some(pair) = find_entity(g, id) {
 		return Some(pair);
@@ -376,6 +377,27 @@ mod tests {
 			"returns the entity's home kern, not the ref's"
 		);
 		assert!(find_entity(&g, "nope").is_none());
+	}
+
+	#[test]
+	fn find_entity_by_prefix_resolves_a_unique_prefix() {
+		use crate::base::types::{Entity, Kern};
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("kx", "");
+		k.entities.insert(
+			"abc123def".into(),
+			Entity {
+				id: "abc123def".into(),
+				..Default::default()
+			},
+		);
+		g.kerns.insert("kx".into(), k);
+
+		let (hit, kern_id) = find_entity_by_prefix(&g, "abc12").expect("prefix resolves");
+		assert_eq!(hit.id, "abc123def");
+		assert_eq!(kern_id, "kx");
+		assert!(find_entity_by_prefix(&g, "abc123def").is_some());
+		assert!(find_entity_by_prefix(&g, "zzz").is_none());
 	}
 
 	#[test]

@@ -60,6 +60,21 @@ pub(crate) fn u64_field(v: &serde_json::Value, key: &str) -> u64 {
 	v.get(key).and_then(|x| x.as_u64()).unwrap_or(0)
 }
 
+pub(crate) fn f64_field(v: &serde_json::Value, key: &str) -> f64 {
+	v.get(key).and_then(|x| x.as_f64()).unwrap_or(0.0)
+}
+
+pub(crate) fn str_field<'a>(v: &'a serde_json::Value, key: &str) -> &'a str {
+	v.get(key).and_then(|x| x.as_str()).unwrap_or("")
+}
+
+pub(crate) fn array_field<'a>(v: &'a serde_json::Value, key: &str) -> &'a [serde_json::Value] {
+	v.get(key)
+		.and_then(|x| x.as_array())
+		.map(Vec::as_slice)
+		.unwrap_or(&[])
+}
+
 #[cfg(all(test, unix))]
 mod tests {
 	use super::*;
@@ -165,12 +180,43 @@ mod tests {
 		);
 	}
 
-	// The read half of item 9. The daemon's graph carries an entity that was
-	// never flushed, so a `get` that reads the store instead of asking the owner
-	// reports "not found" for something that exists.
+	// The read half of item 9: `kern get` must read the daemon's live graph, and
+	// the answer must carry everything the CLI prints.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_routed_get_reads_the_serving_daemons_graph() {
+		let ep = scratch_endpoint("get");
+		let srv = kern_with_edge();
+		let graph = srv.graph.clone();
+		serving(srv, &ep).await;
+		graph
+			.write()
+			.kerns
+			.get_mut("kx")
+			.expect("kern")
+			.entities
+			.get_mut("a")
+			.expect("entity")
+			.set_text("only in the daemon".into());
+
+		let out = route_to(&ep, "query", serde_json::json!({"id": "a"})).await;
+		let Routed::Done(v) = out else {
+			panic!("a serving daemon must answer the get");
+		};
+		assert_eq!(str_field(&v, "id"), "a");
+		assert_eq!(
+			str_field(&v, "text"),
+			"only in the daemon",
+			"the text came from the daemon's graph, not from disk"
+		);
+		assert_eq!(str_field(&v, "kern"), "kx");
+		assert_eq!(array_field(&v, "edges").len(), 2, "both incident edges");
+	}
+
+	// An entity the daemon never flushed: a `get` that reads the store instead of
+	// asking the owner reports "not found" for something that exists.
 	#[tokio::test(flavor = "multi_thread")]
 	async fn a_routed_get_reads_the_daemons_unflushed_state() {
-		let ep = scratch_endpoint("get");
+		let ep = scratch_endpoint("get-unflushed");
 		let srv = kern_with_edge();
 		srv
 			.graph
@@ -190,17 +236,18 @@ mod tests {
 			panic!("a serving daemon must answer the get");
 		};
 		assert_eq!(
-			v.get("id").and_then(|x| x.as_str()),
-			Some("only-in-ram"),
+			str_field(&v, "id"),
+			"only-in-ram",
 			"the entity came from the daemon's live graph"
 		);
 	}
 
-	// `kern get` has always accepted a prefix. Routing it must not silently
-	// narrow that to exact-match, or the fix for staleness becomes a miss.
+	// A prefix is what kern itself prints (`short_id`), so the daemon has to
+	// resolve one or every copied id fails the moment a daemon is up — the fix
+	// for staleness would become a miss.
 	#[tokio::test(flavor = "multi_thread")]
 	async fn a_routed_get_still_resolves_a_prefix() {
-		let ep = scratch_endpoint("prefix");
+		let ep = scratch_endpoint("get-prefix");
 		let srv = kern_with_edge();
 		// A full-length id nobody would type, so "9f3c" is a genuine prefix and
 		// not an exact hit that would pass with prefix matching removed.
@@ -222,8 +269,8 @@ mod tests {
 			panic!("a prefix must resolve through the daemon");
 		};
 		assert_eq!(
-			v.get("id").and_then(|x| x.as_str()),
-			Some("9f3c8d21b4e07a65"),
+			str_field(&v, "id"),
+			"9f3c8d21b4e07a65",
 			"the prefix resolved to the full id"
 		);
 	}

@@ -49,8 +49,9 @@ impl EntityKind {
 		}
 	}
 
-	// The inverse of the `as u8` the MCP payload carries — a reader decoding that
-	// payload has the discriminant, not the variant.
+	// The inverse of the `as u8` the MCP payload carries: a reader decoding a
+	// daemon's answer has the discriminant, not the variant, and maps it back
+	// here rather than duplicating the numbering.
 	pub fn from_u8(n: u8) -> Option<Self> {
 		match n {
 			0 => Some(EntityKind::Fact),

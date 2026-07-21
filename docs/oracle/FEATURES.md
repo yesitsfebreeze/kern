@@ -3,7 +3,7 @@
 A full technical scrape of everything that actually exists in the kern source
 today. Organized by subsystem. For each: **what** it does, **how** it works,
 **where** it lives in the code, and **gaps** (known limitations / improvement
-opportunities). Version: `1.1.0`. LoC ~42.0k across 155 tracked `.rs` files.
+opportunities). Version: `1.1.0`. LoC ~42.4k across 156 tracked `.rs` files.
 
 State legend: `active` (runs today), `building` (wired but partial/unverified),
 `off` (present but disabled by default).
@@ -179,8 +179,8 @@ profiled via `src/profile.rs`):
 | 5 | **Expand** | `retrieval/expand.rs:178` | Walk reason edges out from seeds (`PathChain` recording the *why*), scoring neighbors (`score_neighbor`) — plus bounded traversal credit: each examined edge pays its far endpoint `source_score × edge_evidence` (×`traversal_credit_weight`, capped at `traversal_credit_cap`, clamped below the strongest voucher's walk score), which is how a linked neighbour sharing no words with the query reaches the top ranks without ever outranking a direct match. |
 | 6 | **Merge** | `retrieval/merge.rs` | Combine seeds + expanded neighbors into `ScoredEntity` list. |
 | 7 | **Boosts** | `retrieval/score.rs` | `apply_boosts`: confidence × score + **QBST** access/recency boost (`qbst`, capped at 0.1, 24h half-life) + `fact_score_boost` (0.3) for Facts. |
-| 7b | **Gravity** | `retrieval/gravity.rs` | Query-time graviton pull: `score += gravity_weight (0.15) * max_over_gravitons(mass * max(0, cos(entity, graviton_vec)))`. Max, not sum — overlapping gravitons never double-count. `gravity_weight=0` disables (early return, zero cost); no gravitons → no-op. Latency only, from the bench deleted in `8d8b19e` and not reproducible: ~+7% p50 with 5 gravitons. No quality claim accompanies it — the retrieval-quality half of that bench is withdrawn under the claim standard (`ROADMAP.md` — "What measures retrieval quality with no LLM in the scoring loop?"). |
-| 8 | **Filter** | `retrieval/score.rs` | `filter_delivery`: drop superseded; floor at `retrieval.min_deliver_score` (default `0.0` — off); cap at `retrieval.max_deliver_results` (default `25`; MMR keeps a `mmr_pool_size=50` pool when on). Both are config fields (`src/config/retrieval.rs:48-49`), not constants. Query options (source/kind/scheme/time/min_conf) go through `matches_filter` (`retrieval/score.rs`), the single predicate shared with pre-filtered ANN search. |
+| 7b | **Gravity** | `retrieval/gravity.rs` | Query-time graviton pull: `score += gravity_weight (0.15) * max_over_gravitons(mass * max(0, cos(entity, graviton_vec)))`. Max, not sum — overlapping gravitons never double-count. `gravity_weight=0` disables (early return, zero cost); no gravitons → no-op. Latency only, from the bench deleted in `8d8b19e` and not reproducible: ~+7% p50 with 5 gravitons. No quality claim accompanies it — the retrieval-quality half of that bench is withdrawn under the claim standard (`ROADMAP.md` — "no quality claim of any kind"). |
+| 8 | **Filter** | `retrieval/score.rs` | `filter_delivery`: drop superseded; floor at `retrieval.min_deliver_score` (default `0.0` — off); cap at `delivery_cap` = `retrieval.max_deliver_results` (default `25`), or `mmr_pool_size=50` when MMR is on. Both are config fields (`src/config/retrieval.rs:48-49`), not constants. `delivery_cap` is a named function because the CLI reads it too — `cmd_query` sends it as `k` when it routes to a daemon, so the routed and local reads deliver the same number of hits. Query options (source/kind/scheme/time/min_conf) go through `matches_filter` (`retrieval/score.rs`), the single predicate shared with pre-filtered ANN search. |
 | 9 | **Dedup by section** | `retrieval/diversify.rs:6` | Collapse near-duplicate sections. |
 | 10 | **MMR** | `retrieval/diversify.rs:46` | Maximal-marginal-relevance diversification so the `k` results actually differ. |
 | 11 | **Deliver** | `retrieval/query.rs` | Passages + enriched edges + `format_chains` chain text (`QUERY_MAX_CHAINS=5`), remote entities tagged UNTRUSTED for the synthesizing caller. The whole read path is LLM-free by design (2026-07-21): the calling agent synthesizes; an in-kern small-model answerer set the quality ceiling and made retrieval untunable. |
@@ -561,7 +561,7 @@ Plus MCP **prompts** (`src/mcp/prompt.rs`) and **resources** (`src/mcp/resources
 `task_q`/`cfg`; implements `trnsprt::McpServer`. `run`/`run_stdio` use
 the trnsprt framing. `run_sse` (`src/mcp/sse.rs`) serves HTTP/SSE.
 
-**Where.** `src/mcp/*` (2484 LoC, 8 files).
+**Where.** `src/mcp/*` (2346 LoC, 8 files).
 
 **Gaps.** Tool schemas are hand-
 rolled JSON, not derived. No batch query. **Prompts and resources are served on
@@ -601,7 +601,7 @@ the MCP JSON does — `task_panics`/`last_task_panic`,
 (`src/rpc/kern_rpc_server.rs`) accepts on a `LocalListener` and spawns a
 `Channel` per connection.
 
-**Where.** `src/rpc/*` (195 LoC), `src/trnsprt/src/kern_rpc/`
+**Where.** `src/rpc/*` (201 LoC), `src/trnsprt/src/kern_rpc/`
 (`svc.rs` contract, `dto.rs` types, `client_local.rs` connect helpers).
 
 **Gaps.** The socket has no auth — anything that can open the path can call
@@ -635,6 +635,22 @@ Notable:
   second copy this process opened, and a daemon that refuses is reported rather
   than retried against the store behind it. No daemon -> the pre-existing local
   path runs, printing through the same printer so the two cannot drift.
+
+- **Daemon-first reads** (same route, `query` tool) — `get` (`cmd_get`,
+  `graph_ops.rs`) and `query` (`cmd_query`, `query.rs`) route before they touch
+  disk, so a serving daemon's live graph answers instead of the older snapshot
+  this process would load. `get` routes as `query {id}`, `query` as
+  `query {text, mode, k}`. `k` is sent explicitly: the tool's own default is
+  `seed_k`, well under the delivery pool the local path prints, so omitting it
+  would make the hit count depend on whether a daemon happened to be up —
+  `retrieval::score::delivery_cap` is the one owner both sides read it from.
+  Both paths render through one printer over the tool's own JSON
+  (`print_detail`, `print_results`), and one id resolver serves both
+  (`mcp::tools_query::entity_detail_by_id`, prefix-resolving with cold-tier
+  fallback), so a routed and a local read cannot disagree about what an id means.
+  `search` and `list` stay local **by decision** — `search` is the raw-ANN
+  probe with no matching tool, `list` prints the on-disk kern tree, and both are
+  what a developer reaches for to inspect the store itself.
 
 - **The writer lock** (`src/base/lock.rs`) — one advisory lock per data dir
   (std `File::try_lock`, MSRV 1.89), held for the daemon's whole lifetime and
@@ -687,8 +703,10 @@ because the RPC's only mutation surface is `call_tool`, the agent boundary:
 `tool_ingest` clamps to `AGENT_SOURCE` and `tool_link` writes
 `MAX_AI_CONFIDENCE`, while the CLI mints at user trust 1.0, so routing them
 unchanged would demote every CLI Fact to an agent Claim, and routing them with
-trust intact needs auth on the socket first. The read-only commands still load
-from disk, so a CLI read can be older than live state (`ROADMAP.md` item 9).
+trust intact needs auth on the socket first. `get` and `query` no longer read
+stale: both route to a serving daemon over the `query` tool and fall back to the
+disk load only when nothing answers. `search` and `list` still read disk by
+decision — they are the store-inspection commands (`ROADMAP.md` item 9).
 `unnamed` lists only — there is no `promote`.
 
 ---
@@ -1225,11 +1243,15 @@ Ranked by leverage:
    `degrade` take it. `kern mcp`'s standalone fallback — the last long-lived
    second writer, and one no probe can see — now claims the same lock before it
    reads the graph and refuses to boot beside a holder (`claim_standalone`,
-   `src/commands/mcp_cmd.rs`). `ingest` and `link` do not route — over
-   `call_tool` they would land at agent trust, so that half waits on socket auth
-   (item 24). `intake drain` has no matching tool, and the read-only commands
-   still load from disk. Open as `ROADMAP.md` item 9 on exactly those three:
-   `ingest`/`link`, `intake drain`, and stale reads.
+   `src/commands/mcp_cmd.rs`). The read side is done: `get` and `query` route
+   through the same `query` tool and print through one printer, with the local
+   load as the `NoDaemon` fallback; `search` and `list` stay local by decision.
+   `kern link` no longer clobbers a racing commit — it flushes through
+   `save_graph_guarded` (`src/commands/graph_ops.rs`) — but it still does not
+   route, and neither does `ingest`: over `call_tool` they would land at agent
+   trust, so that half waits on socket auth (item 24). `intake drain` has no
+   matching tool. Open as `ROADMAP.md` item 9 on exactly those two:
+   `ingest`/`link` routing and `intake drain`.
 6. **GNN training is synchronous** on the tick — move to a background thread
    pool or incremental updates to avoid stalling large kerns.
 7. **Distill prompt** is one-shot and global — per-kind prompts +
