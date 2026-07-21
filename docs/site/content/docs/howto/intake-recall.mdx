@@ -172,7 +172,7 @@ flowchart TD
     D -->|"no"| E["start it: kern --daemon"]
     D -->|"yes"| F{"reason endpoint reachable?"}
     F -->|"no"| G["fix [reason].url / pull the model"]
-    F -->|"yes"| H["deltas archived but empty — model is not returning JSON"]
+    F -->|"yes"| H["model is replying prose, not JSON — every delta requeues, so the drain never finishes"]
     B -->|"drained, done/ filling"| I{"kern health shows thoughts?"}
     I -->|"no"| J["embed endpoint failing — check logs for kern.ingest"]
     I -->|"yes"| K["graph is fine; recall is the problem"]
@@ -203,10 +203,12 @@ it); is `[intake].enabled` still `true`; is anything actually writing files into
 the intake. Extension no longer gates the drain — anything readable as text is
 taken, `.txt` as a transcript to distill and everything else as a document — but
 a file that is not valid UTF-8 is moved to `.kern/intake/failed/`, so check
-there too. And if deltas are being archived to `done/`
-immediately but the graph is not growing, the model is answering with prose
-instead of JSON — unparseable output counts as "nothing worth keeping", not as
-an error.
+there too. And if `.kern/intake/` never drains while the reason endpoint answers
+fine, the model is replying with prose instead of JSON: a reply the parser finds
+no JSON array in is a format failure, not "nothing worth keeping", so the delta
+is left queued and retried on every pass rather than archived. Nothing is lost,
+but the same files come back forever until the model follows the format —
+`done/` staying empty while `.kern/intake/` grows is the tell.
 
 **Recall comes back empty.** First check whether the graph has anything at all
 with `kern health`. If it does, the usual cause is an embedding mismatch: the

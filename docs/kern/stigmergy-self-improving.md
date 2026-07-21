@@ -292,13 +292,18 @@ make `pulse` deposit heat on traversal, and ship the Gini + top-10
 stability metric so we can finally answer the bell-curve question with
 data. No schema changes — reuse existing `access_count` + `accessed_at`.
 
-## 10. Acceptance checklist
+## 10. What this study delivered
 
-- [x] Decay formula proposed (§3.1, closed-form, one parameter)
-- [x] Integration plan touching `crates/tick/src/pulse.rs` (§6.1)
-- [x] Path-efficiency metric defined + convergence criterion (§5)
-- [ ] Implementation ticket filed (future work)
-- [ ] Offline NDCG sweep to pick `heat_half_life_secs` default (future work)
+- Decay formula (§3.1, closed-form, one parameter).
+- Integration sketch touching `crates/tick/src/pulse.rs` (§6.1).
+- Path-efficiency metric + convergence criterion (§5).
+
+Two things the study deliberately left outside itself, neither scheduled here:
+the offline NDCG sweep that would pick the `heat_half_life_secs` default was
+never run (`ROADMAP.md` — "Two freshness signals, different half-lives, neither
+ever tuned"), and the convergence metric defined in §5 was never built, so the
+self-organisation claim it exists to test is unmeasured (`ROADMAP.md` — "The
+self-organisation claim is unmeasured").
 
 ## References
 
@@ -306,4 +311,4 @@ data. No schema changes — reuse existing `access_count` + `accessed_at`.
 - Theraulaz & Bonabeau, "A brief history of stigmergy", *Artificial Life* 1999.
 - `crates/retrieval/src/score.rs` — current `qbst`
 - `crates/tick/src/pulse.rs` — current pulse
-- `docs/pagerank-authority.md` — federation-level authority (complementary)
+- `docs/kern/pagerank-authority.md` — federation-level authority (complementary)

@@ -31,9 +31,9 @@ your head because they fail differently:
   chart={`
 flowchart TD
     A[".kern/intake/*.txt"] --> B{"distill: one LLM pass"}
-    B -->|"no output at all"| C["leave delta queued, retry later"]
+    B -->|"no output, or no parseable array"| C["leave delta queued, retry later"]
     B -->|"parsed array"| D["typed claims"]
-    B -->|"empty / unparseable"| E["archive, nothing kept"]
+    B -->|"parsed empty array"| E["archive, nothing kept"]
     D --> F["split into chunks + embed"]
     F --> G{"near-duplicate above threshold?"}
     G -->|"yes"| H["reinforce existing entity, add Rephrase edge"]
@@ -63,18 +63,20 @@ dropped rather than stored as blanks.
 
 The return type carries the distinction that makes the intake outage-safe.
 `Some(claims)` means the model answered; `Some([])` means it answered *and*
-judged nothing worth keeping. `None` means there was no output at all — a dead
-endpoint, a timeout — and the caller leaves the delta in the intake directory
-instead of archiving it (`src/ingest/intake.rs:24`). Deltas are archived only
-after every claim they produced committed successfully
+judged nothing worth keeping, which archives the delta. `None` means the reply
+held nothing usable — no output at all from a dead endpoint or a timeout, or a
+reply with no parseable JSON array anywhere in it (`parse_claims`,
+`src/ingest/distill.rs:60`) — and the caller leaves the delta in the intake
+directory instead of archiving it (`src/ingest/intake.rs:24`). Deltas are
+archived only after every claim they produced committed successfully
 (`src/ingest/intake.rs:58`).
 
 <Callout type="warn">
-Output the parser cannot read is treated as "nothing worth keeping", not as
-an outage. A reason model that reliably answers in prose rather than JSON
-will quietly archive deltas having stored nothing. If the intake looks like it
-is running but the graph is not growing, suspect the model's instruction
-following before you suspect the plumbing.
+That safety has a cost worth knowing. A reason model that *persistently* answers
+in prose rather than JSON is treated as a permanent outage: the delta is never
+lost, but it is also never archived, so the intake retries it forever and never
+drains. If the intake directory keeps growing while the graph does not, suspect
+the model's instruction following before you suspect the plumbing.
 </Callout>
 
 ## What a typed claim is

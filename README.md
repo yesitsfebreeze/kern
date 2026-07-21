@@ -1,13 +1,14 @@
 # kern
 
 **A self-learning memory daemon for AI agents.** One long-running process per
-working directory owns a knowledge graph that takes in durable facts from your
-sessions, keeps itself small without gardening, and serves the right context
-back when you need it.
+working directory owns a knowledge graph that your agent writes durable facts
+into, keeps itself small without gardening, and serves the right context back
+when you need it.
 
-kern is not a vector store you bolt onto an app. It is a *memory substrate*: it
-learns on its own, compacts on its own, and (optionally) federates across
-machines on its own.
+kern is not a vector store you bolt onto an app. It is a *memory substrate*: the
+writes are caller-driven — kern captures nothing on its own — and everything
+after them it does on its own: compaction, decay, GC, clustering, re-ranking
+from what you actually use, and (optionally) federation across machines.
 
 ```
 MCP ingest ─────────────────────► typed claims ─┐
@@ -36,7 +37,9 @@ MCP ingest ─────────────────────► ty
   cold, stale, non-durable thoughts (Facts are immune) and spills them to a
   capped cold tier before dropping them — a latest-wins keyed table holding the
   newest 50k entries, so recent evictions stay recoverable while the very oldest
-  eventually age out. Similar thoughts cluster into child kerns. The hot graph
+  eventually age out. Spill-before-drop needs a store: with no store bound
+  (in-memory mode) the victim is dropped outright — dropping *is* the intended
+  memory bound there. Similar thoughts cluster into child kerns. The hot graph
   stays small; the long tail stays cheap.
 
 - **Remembers across time.** Knowledge carries a bi-temporal window. When a new
@@ -45,7 +48,10 @@ MCP ingest ─────────────────────► ty
   with when it stopped being true. A `query` can ask `as_of` a past instant to
   recover what was believed then, or `include_history` to follow the supersede
   chain back through prior revisions. The classification runs in the background
-  tick, so recall stays LLM-free.
+  tick, so recall stays LLM-free. `as_of` is exact over the hot graph and lossy
+  over the cold tail: a revision that was evicted loses its temporal side-map on
+  the way out and comes back reading as valid at every instant, with no signal to
+  the caller which they got.
 
 - **Federates (opt-in).** Multiple nodes share knowledge over LAN gossip with no
   coordinator. Each node heartbeats peers and merges entity bodies via a
@@ -159,8 +165,12 @@ irm https://raw.githubusercontent.com/yesitsfebreeze/kern/master/install.ps1 | i
 **2. Register the MCP server with your client.** `kern mcp` attaches to a
 running daemon if one exists, and otherwise auto-spawns a detached daemon for
 the current directory — so this one command is all you need to bring kern up
-(the installer prints the exact path). Add it as a stdio MCP server in your
-client's config:
+(the installer prints the exact path). Two caveats, both real: an auto-spawned
+daemon has its stdio nulled, so it writes no log anywhere, and if the attach
+fails `kern mcp` falls back to serving the store itself — a second writer
+against the same LMDB environment. A stale flush is refused rather than
+clobbering newer state, but the two writers still exist. Add it as a stdio MCP
+server in your client's config:
 
 ```json
 {
@@ -302,6 +312,7 @@ hook — the write is always a caller's call.
 | `link` | Create a reason edge between two thoughts (LLM writes the reason if blank). |
 | `forget` | Remove a thought and cascade its edges. Facts are immune. |
 | `degrade` | Down-weight the edges along a bad retrieval path — teaches the graph from miss feedback. |
+| `move` | Relocate a thought to another kern by `id` and `to_kern`, carrying its outgoing edges and restamping cross-kern references. |
 | `graviton` | Manage gravitons (named focus attractors; replaced the single per-kern "purpose"): `list` (default), `add` (name + text — phrase or full document — + optional mass), `remove` (name). |
 | `descriptor` | Add/remove a data-type descriptor. |
 | `health` | Graph stats: thought/edge counts, tick heat. |
@@ -325,7 +336,7 @@ that operates itself.
 | **Growth** | Index grows unbounded; you re-index and prune by hand. | Self-compacting: heat decay + stigmergy GC + clustering keep the hot graph small; a capped cold tier preserves the recent tail. |
 | **Staleness** | Stale chunks linger until you rebuild. | Cold, non-durable thoughts decay and evict on their own; Facts persist. |
 | **Feedback** | None — a bad chunk keeps ranking. | `degrade` down-weights bad retrieval paths; access heat re-ranks what you actually use. |
-| **Conflicts / sync** | Single store; multi-node needs external infra. | Content-addressed CRDT + gossip; nodes converge with no coordinator. |
+| **Conflicts / sync** | Single store; multi-node needs external infra. | Content-addressed CRDT + gossip, no coordinator — but no anti-entropy: each heartbeat ships only the hottest 32 entities, so cold ones may never propagate and a node that rejoins after a partition never catches up. |
 | **Scope** | One global index. | One graph per working directory. |
 
 The short version: RAG gives you **search over a corpus you maintain**. kern
@@ -337,10 +348,13 @@ of nearest neighbors.
 
 ## Status
 
-Self-learning and self-compaction run today. Self-distribution is wired and
+Intake, recall and self-compaction run today. Self-distribution is wired and
 enableable, but narrower than the design: entity-body sharing is verified on a
-single host with manually seeded `peers` (the reliable path); multicast
-auto-discovery only pairs nodes sharing the same `network_id`; and the
-Delta/Question/Pulse message kinds plus the fetch RPC are handled on receipt
-but have no live senders yet. Federation tuning at scale (batch size, push vs.
-pull, anti-entropy) is open. Version stays `1.0.0`.
+single host with manually seeded `peers` (the reliable path), and multicast
+auto-discovery only pairs nodes sharing the same `network_id`. The Delta,
+Question and Pulse senders and the fetch RPC are all live; what is missing is
+**anti-entropy** — the sync
+leg ships only the hottest 32 entities per heartbeat, so a cold entity may never
+propagate and a partitioned node that rejoins never catches up. Federation
+tuning at scale (batch size, push vs. pull) is open alongside it; see
+`docs/oracle/ROADMAP.md` — "Anti-entropy". Version `1.1.0`.

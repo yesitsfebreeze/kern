@@ -25,9 +25,9 @@ This document answers three questions:
 2. Where does the analogy break, and why?
 3. What primitives should we steal verbatim vs deliberately reject?
 
-It complements the CRDT study (`docs/crdts-federation.md`), which settles
+It complements the CRDT study (`docs/kern/crdts-federation.md`), which settles
 *how* state merges, and the PageRank study
-(`docs/pagerank-authority.md`), which settles *whose* state is trusted.
+(`docs/kern/pagerank-authority.md`), which settles *whose* state is trusted.
 FL settles a third orthogonal axis: *what can a peer learn from a peer
 without exposing its raw data*.
 
@@ -245,13 +245,16 @@ aggregation for pulses when sensitivity warrants it.
 averaging, shared model assumption, synchronous rounds, gradient
 sketching.
 
-Implementation ordering (subject to separate tickets):
+The stolen set has a natural dependency order, recorded here as analysis — the
+schedule is `ROADMAP.md`'s ("Two FL-derived bounds adopted on paper, neither in
+effect", "No Sybil defence is in effect"). Cheapest and least coupled first:
 
-1. Per-peer ingest clip + budget (small, high value, no new crypto).
-2. Trimmed-mean materialisation for CRDT scalars (piggybacks on the
-   CRDT migration).
+1. Per-peer ingest clip + budget — small, high value, no new crypto.
+2. Trimmed-mean materialisation for CRDT scalars — piggybacks on the
+   CRDT migration, so it wants that migration to exist first.
 3. Provenance log extension to `gossip::ledger`.
-4. Secure-aggregation pulses — only if/when a use case emerges.
+4. Secure-aggregation pulses — dependent on a use case, not on the three
+   above.
 
 ## 9. References
 
@@ -271,5 +274,5 @@ Implementation ordering (subject to separate tickets):
   - `crates/gossip/src/types.rs` — wire envelope.
   - `crates/gossip/src/handler.rs` — merge dispatch.
   - `crates/gossip/src/ledger.rs` — routing / provenance substrate.
-  - `docs/crdts-federation.md` — convergence semantics.
-  - `docs/pagerank-authority.md` — peer authority scoring.
+  - `docs/kern/crdts-federation.md` — convergence semantics.
+  - `docs/kern/pagerank-authority.md` — peer authority scoring.

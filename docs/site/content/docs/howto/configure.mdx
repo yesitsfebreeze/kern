@@ -86,19 +86,25 @@ The project root is the nearest ancestor directory containing `.git`, falling
 back to the nearest containing `.kern` (`src/config/mod.rs:116`) — so kern finds
 the same config whether you launch it from the root or from a subdirectory.
 
-<Callout type="warn" title="Precedence is per-section, not per-key">
-A top-level section present in the project file **replaces** the user file's
-section wholesale — there is no deep merge
-(`src/config/io.rs`). If your user config sets `[reason] url` and
-`key`, and your project config sets only `[reason] model`, the project file
-wins the whole section and your `url` and `key` are gone.
+<Callout type="warn" title="Precedence is per-key, and a redirect drops the key">
+Scopes deep-merge (`src/config/io.rs`): a project key overrides the same user
+key, and keys the project omits are inherited. If your user config sets
+`[reason] url` and `key`, and your project config sets only `[reason] model`,
+your `url` and `key` survive. Arrays and scalars replace wholesale — they are
+leaves, never appended.
 
-Keep any given section entirely in one scope.
+One deliberate exception: **a scope that sets a section's `url` does not inherit
+that section's `key`** (`src/config/secrets.rs`). Otherwise a project config
+committed in a repo you cloned could point `[embed] url` at its own endpoint and
+harvest the credential you set globally — and since `reason_key`/`answer_key`
+fall back to `embed.key`, redirecting any one endpoint would reach it. Redirect
+an endpoint and you supply its key, or go without.
 </Callout>
 
-A config that fails validation does not abort startup: kern logs a warning and
-continues with what it parsed (`src/main.rs:44`). Check stderr on first run
-after editing.
+An invalid config aborts startup: kern prints the offending key to stderr and
+exits **78** (`EX_CONFIG`), for both an unparseable file and one that fails
+validation (`src/main.rs`). An *absent* config is legitimate and still defaults
+silently.
 
 There is no environment-variable override layer. API keys live in plaintext in
 the TOML — treat the file accordingly.

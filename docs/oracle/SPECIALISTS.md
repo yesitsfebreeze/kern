@@ -57,7 +57,7 @@ sets; parallelize only what does not overlap.
 
 ## federation
 
-- **Scope:** `src/gossip/`, `src/trnsprt/`, `src/wire.rs`, `src/crdt.rs`
+- **Scope:** `src/gossip/`, `src/trnsprt/`, `src/gossip/types.rs`, `src/crdt.rs`
   (merge semantics), `docs/site/content/docs/concepts/security.mdx`.
 - **Knows:** LAN gossip heartbeats, content-addressed CRDT entity-body merge,
   multicast discovery and `network_id` pairing, which message kinds have

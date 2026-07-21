@@ -7,7 +7,8 @@ from source-code doc comments, so they double as the canonical "why" for the
 mechanisms they describe.
 
 These are reference material, not a tutorial. For how to *use* kern, start with
-the [README](../../README.md) and the [Memory Bank guide](../site/howto/memory-bank.md);
+the [README](../../README.md) and the
+[Memory Bank guide](../site/content/docs/howto/memory-bank.mdx);
 for what it is and why it exists, read the [Vision](../oracle/VISION.md).
 
 Most notes are point-in-time studies: each opens with a status line saying what

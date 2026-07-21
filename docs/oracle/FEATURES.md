@@ -51,7 +51,11 @@ everywhere, which is what makes conflict-free cross-node merge work.
   `created_at`), `status` (`Active`/`Superseded`), `superseded_by`, `statements`
   (OR-Set of text lines), two vectors (`vector` content, `gnn_vector` structure),
   and provenance (`Source` with `system`/`object_id`/`section`/`title`/`author`/
-  `url`). `kind`/`source` parsed off the source string.
+  `url`). `kind`/`source` parsed off the source string. Also carries an `acl`
+  (`src/base/types.rs:268`; `Acl { scope, users, groups }` at `:94-99`) — the
+  field exists and is persisted, but every writer sets `Acl::default()`
+  (`src/ingest/place.rs:56`, `src/ingest/file_watcher.rs:136`) and nothing reads
+  it, so it is structure without behavior today.
 - `Reason` (`src/base/types.rs:408`) — an edge `from`→`to` with a `kind`
   (`Similarity`/`Provenance`/`Question`/`Spawn`/`Supersedes`/`Ratification`/
   `Rephrase`, `src/base/types.rs:66`), its own vector (mean of endpoints), a
@@ -163,7 +167,7 @@ profiled via `src/profile.rs`):
 | 5 | **Expand** | `retrieval/expand.rs:178` | Walk reason edges out from seeds (`PathChain` recording the *why*), scoring neighbors (`score_neighbor`). Optional **HyDE** (`retrieval/hyde.rs`) generates a hypothetical answer to broaden recall. |
 | 6 | **Merge** | `retrieval/merge.rs` | Combine seeds + expanded neighbors into `ScoredEntity` list. |
 | 7 | **Boosts** | `retrieval/score.rs:79` | `apply_boosts`: confidence × score + **QBST** access/recency boost (`qbst`, capped at 0.1, 24h half-life) + `fact_score_boost` (0.3) for Facts. |
-| 7b | **Gravity** | `retrieval/gravity.rs` | Query-time graviton pull: `score += gravity_weight (0.15) * max_over_gravitons(mass * max(0, cos(entity, graviton_vec)))`. Max, not sum — overlapping gravitons never double-count. `gravity_weight=0` disables (early return, zero cost); no gravitons → no-op. Bench 2026-07-19: recall/NDCG unchanged, ~+7% p50 with 5 gravitons. |
+| 7b | **Gravity** | `retrieval/gravity.rs` | Query-time graviton pull: `score += gravity_weight (0.15) * max_over_gravitons(mass * max(0, cos(entity, graviton_vec)))`. Max, not sum — overlapping gravitons never double-count. `gravity_weight=0` disables (early return, zero cost); no gravitons → no-op. Latency only, from the bench deleted in `8d8b19e` and not reproducible: ~+7% p50 with 5 gravitons. No quality claim accompanies it — the retrieval-quality half of that bench is withdrawn under the claim standard (`ROADMAP.md` — "What measures retrieval quality with no LLM in the scoring loop?"). |
 | 8 | **Filter** | `retrieval/score.rs:93` | Drop superseded; floor at `MIN_DELIVER_SCORE=0.40`; cap at `MAX_DELIVER_RESULTS=10` (MMR keeps a larger pool when on). Apply query options (source/kind/time/min_conf). |
 | 9 | **Dedup by section** | `retrieval/diversify.rs:6` | Collapse near-duplicate sections. |
 | 10 | **MMR** | `retrieval/diversify.rs:46` | Maximal-marginal-relevance diversification so the `k` results actually differ. |
@@ -399,8 +403,8 @@ Trained per-kern on the tick.
   `normalized_adjacency` (symmetric normalized adjacency matrix as a `Tensor`),
   `feature_matrix`.
 - **Layers** — `LinearLayer` (`src/gnn/layer.rs`), `GCNLayer`
-  (`src/gnn/gcn.rs`: linear + optional `LayerNorm` + `Dropout` + `Activation`),
-  `LayerNorm` (`src/gnn/norm.rs`), `Dropout` (`src/gnn/dropout.rs`).
+  (`src/gnn/gcn.rs`: linear + optional `LayerNorm` + `Activation`),
+  `LayerNorm` (`src/gnn/norm.rs`). No dropout ships.
   Activations (`src/gnn/activation.rs`): ReLU/LeakyReLU/GELU/Sigmoid/Tanh +
   derivatives.
 - **Model** (`src/gnn/model.rs`) — `Model::new_residual` stacks
@@ -433,7 +437,7 @@ node-classification objective.
 **What.** Model Context Protocol server (stdio + HTTP/SSE) exposing the graph
 to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 
-**Tools** (10, defined in `src/mcp/tools*.rs`, dispatched in `mcp.rs`
+**Tools** (11, defined in `src/mcp/tools*.rs`, dispatched in `mcp.rs`
 `call_tool`):
 
 | Tool | File | Purpose |
@@ -443,6 +447,7 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 | `link` | `tools_mutate.rs` | Create a reason edge (LLM writes the reason if blank). |
 | `forget` | `tools_mutate.rs` | Remove a thought + cascade edges (Facts immune). |
 | `degrade` | `tools_mutate.rs` | Down-weight edges along a bad retrieval path (`DEGRADE_*` decay). |
+| `move` | `tools_mutate.rs:70` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
 | `health` | `tools_admin.rs` | Graph stats: gravitons/kerns/entities/reasons/unnamed/descriptors. |
 | `graviton` | `tools_admin.rs` | list/add/remove focus attractors (name + text — phrase or full document — + optional mass). Replaced the single per-kern "purpose". |
 | `descriptor` | `tools_admin.rs` | add/remove data-type descriptors. |
@@ -458,7 +463,17 @@ the trnsprt framing. `run_sse` (`src/mcp/sse.rs`) serves HTTP/SSE.
 **Where.** `src/mcp/*` (2213 LoC, 7 files).
 
 **Gaps.** No streaming `answer` over stdio (SSE only). Tool schemas are hand-
-rolled JSON, not derived. No batch query.
+rolled JSON, not derived. No batch query. **Prompts and resources are served on
+the standalone path only.** `ProxyServer` — the path taken whenever a daemon is
+running, i.e. the normal one — implements `tools_list`/`call_tool`/
+`extra_capabilities` and no `handle_method` (`src/commands/mcp_cmd.rs:187-239`),
+so the trait default returns `None` (`src/trnsprt/src/server.rs:21-23`) and
+`resources/list` / `prompts/list` come back `-32601` — while
+`extra_capabilities` still advertises `{"resources": {}, "prompts": {}}`
+(`:233-236`) to match standalone, which does serve them
+(`src/mcp.rs:166-186`). Advertised on the normal path, non-functional there
+(`ROADMAP.md` — "`resources/list` and `prompts/list` return `-32601` on the
+proxy path").
 
 ---
 
@@ -575,7 +590,9 @@ page on the docs site (`docs/site/content/docs/concepts/security.mdx`).
 **Gaps.** No auth/crypto. No anti-entropy merkle/snapshot exchange — EntitySync
 ships the hottest 32 by heat per heartbeat, so cold entities may never
 propagate. No backpressure on remote-id cap (drops new, keeps known). CRDT
-deltas and pulses reach *local* rows, not just `remote-*` (ROADMAP §5) —
+deltas and pulses reach *local* rows, not just `remote-*` (`ROADMAP.md` —
+"Confine LWW deltas to `remote-*` rows", "`handle_pulse` falls back to the local
+root kern") —
 entity bodies are also accepted without checking content against the claimed
 id (`src/gossip/handler.rs:463`).
 
@@ -674,7 +691,8 @@ client→node — the hub is connect-time only, never a proxy hop.
 `src/config/hub.rs`, `e2e/test_hub.py`.
 
 **Gaps.** Gossip still lives in each node; the transport moves hub-side
-together with §5's TLS work (ordering recorded in ROADMAP §5x). Version skew
+together with the TLS work (ordering recorded in `ROADMAP.md` — "Hub phase 3:
+gossip moves hub-side"). Version skew
 hub↔node unmanaged beyond same-binary spawning.
 
 ---
@@ -730,16 +748,19 @@ by the answerer: a grounded run (whole conversation in the prompt, kern
 bypassed) scored 0.187, so answer quality — not memory — set the ceiling, and
 three prompt tweaks moved the score more than any retrieval change.
 
-A replacement is planned around the retrieval layer alone: recall@k / MRR /
-NDCG against LoCoMo's per-turn `evidence` labels, no LLM in the loop. It needs
-turn-level claim provenance, which ingest does not record yet.
+What replaced it is `21a` below: `e2e/` scores retrieval over a corpus the test
+writes itself, so no answerer and no judge sit in the loop. The constraint that
+sank every id-mapping proposal — ingest records no claim→source-turn mapping, so
+turn-level claim provenance does not exist — is sidestepped rather than solved:
+a test that ingests the facts already knows which id is correct.
 
 
 ## 21a. E2E harness (`e2e/`, Python) — `active`
 
-**What.** `just e2e` (pytest) drives the real `kern` binary end to end:
-answer retrieval (ingest → search/query → `--answer` prompt) and the hub
-supervisor lifecycle.
+**What.** `just e2e` (pytest) drives the real `kern` binary end to end, and is
+**the instrument retrieval quality is measured with** (`ROADMAP.md` item 1):
+answer retrieval, the hub supervisor lifecycle, VISION-criterion invariants, and
+a scored recall metric.
 
 **How.** `fake_llm.py` serves the native Ollama API deterministically —
 `/api/embed` returns feature-hashed bag-of-words vectors (token overlap gives
@@ -749,14 +770,28 @@ prompt. `conftest.py` isolates each test in a private project (own
 `XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME`, `.kern/kern.toml` pinned to the fake).
 `test_hub.py` is the ported Rust hub supervisor suite.
 
-**Where.** `e2e/conftest.py`, `e2e/fake_llm.py`, `e2e/test_retrieval.py`,
-`e2e/test_hub.py`, `e2e/requirements.txt`; `justfile` recipes `e2e` and
-`e2e-install`.
+**Measured.** `e2e/test_recall.py` — 36 facts, 72 paraphrase probes, scored
+`recall@1` / `recall@5` / `MRR` against floors, printed on every run (`-s`).
+Current: **0.9583 / 1.0000 / 0.9792**, bit-identical across runs because the fake
+embedder has no RNG and no clock. `e2e/test_invariants.py` asserts the properties
+each `VISION.md` criterion promises — self-recall, content addressing, supersede
+ordering, degrade, Fact durability.
 
-**Gaps.** **Not run in CI** — `.github/workflows/ci.yml` runs
-`cargo test --workspace` only, so this suite is local-only and can rot
-unnoticed; wiring it needs a Python setup step plus a built binary. Windows:
-hub tests skip (unix sockets); retrieval tests unverified there. (The former
+**Where.** `e2e/conftest.py`, `e2e/fake_llm.py`, `e2e/ranking.py`,
+`e2e/test_retrieval.py`, `e2e/test_invariants.py`, `e2e/test_recall.py`,
+`e2e/test_hub.py`, `e2e/requirements.txt`; `justfile` recipes `e2e` and
+`e2e-install`; `.github/workflows/ci.yml` job `e2e`.
+
+**Gaps.** The floors make this a **regression detector, not a quality claim** —
+it can say kern got worse, never that kern is good, and no number here is
+comparable to anything a competitor publishes. The fake embedder is bag-of-words
+hashing, so it measures kern's machinery (fusion, expansion, ranking, dedup,
+supersede, heat) and nothing about a real embedding model's semantics. Two
+VISION criteria cannot be asserted at all: `supersede` and `as_of` are
+unreachable from the CLI (MCP only), so both are `skip` markers naming the
+missing surface. One invariant is a recorded `xfail(strict=True)`: a reason edge
+changes no ranking (`ROADMAP.md` item 86). Windows: hub tests skip (unix
+sockets); retrieval tests unverified there. (The former
 query-ranking xfail is fixed — hybrid fusion rescores seeds by query cosine;
 see CHANGELOG 2026-07-20 — and is now a hard regression test.)
 
@@ -781,12 +816,18 @@ consumption. `NEXT_PUBLIC_BASE_PATH=/kern` in CI for GitHub Pages;
 (deleted 2026-07-20).
 
 **Doc/code contract.** Pages cite exact `src/…:line` locations, so drift is
-mechanically checkable: `scripts/docs_check.py` (recipe `just docs-check`,
-`README.md` included) fails on any citation naming a missing file or a line
-past EOF, any relative page link whose target does not exist, and any link into
-this repo's own files on GitHub that names a file not committed — the check
-that would have caught the month-long dead `install.sh` link. `--selftest` pins
-its three regexes.
+mechanically checkable: `scripts/docs_check.py` fails on any citation naming a
+missing file or a line past EOF, any backticked repo path under
+`docs/`/`scripts/`/`e2e/`/`.github/`/`.pi/` that does not exist, any relative
+`.md`/`.mdx` page link whose target does not exist, and any link into this
+repo's own files on GitHub that names a file not committed — the check that
+would have caught the month-long dead `install.sh` link. It scans every
+documentation directory: `docs/site/content/`, `docs/kern/`, `docs/oracle/` and
+`README.md`. Two escapes carry the citations that are *meant* to name something
+gone — a page holding `<!-- docs-check: historical -->` is skipped whole
+(`CHANGELOG.md`), and a line naming a deletion is excused in place, so a
+present-tense page can still record what it removed. `--selftest` pins the
+regexes and the escapes.
 `.github/workflows/docs-check.yml` runs it on every push and PR, deliberately
 unfiltered by path. Pages state only what exists today (including honest "not
 built"); what is *left* lives solely in `ROADMAP.md` per repo law 4.
@@ -808,9 +849,6 @@ only by audit.
 - **util** (`src/base/util.rs`) — `content_hash`, `now_nanos`, `cmp_rank`
   (deterministic tiebreak on score then id), token estimation.
 - **time** (`src/base/time.rs`) — clock helpers (graceful on unreadable clock).
-- **locks** (`src/base/locks.rs`) — `read_recovered`/`write_recovered` wrappers
-  that survive a poisoned lock by recovering the last good graph (crash-
-  resilience for the daemon).
 - **health** (`src/base/health.rs`) — `graph_health_stats` (graviton/kern/entity/
   reason/unnamed counts).
 - **descriptors / constants** (`src/base/{descriptors,constants}.rs`) — the 7
@@ -828,7 +866,9 @@ Ranked by leverage:
    the scaling cliff at query time.
 2. **Federation security** — add auth + encryption before any real deployment;
    before that, close the local-row reach of CRDT deltas and pulses and verify
-   entity content against claimed ids, neither of which needs auth (ROADMAP §5).
+   entity content against claimed ids, neither of which needs auth (`ROADMAP.md`
+   — "Transport security", "Confine LWW deltas to `remote-*` rows", "Verify
+   entity bodies against their claimed ids").
    Trust model: `docs/site/content/docs/concepts/security.mdx`.
 3. **Per-kern entity cap** — `KERN_CAP_DISABLED` today; a safe cap + escalation
    policy would bound memory deterministically.
@@ -838,14 +878,12 @@ Ranked by leverage:
    pool or incremental updates to avoid stalling large kerns.
 6. **Distill prompt** is one-shot and global — per-descriptor prompts +
    chunking for long deltas would raise claim quality.
-7. **HNSW tombstone compaction** — dead nodes accumulate in-graph; a periodic
-   rebuild-and-swap would reclaim them.
-8. **Query cache keyed on vector hash only** — semantically near-identical
-   queries miss; a small ANN-over-queries layer would raise hit rate.
-9. **No learned rerank model** — every rerank is a cold LLM call; a small
+7. **`HnswIndex::delete` is O(nodes × edges)** — it scans every node and every
+   layer to scrub inbound edges (`src/base/hnsw.rs:124-128`), once per GC
+   victim. (There is nothing to compact: the slot goes on a `free` list and is
+   reused, `:118-138`.)
+8. **No learned rerank model** — every rerank is a cold LLM call; a small
    cross-encoder trained on `degrade` feedback could replace it.
-10. **Two parallel typed transport surfaces** (kern_rpc + search) with
-    overlapping DTOs — consolidate.
 
 ---
 

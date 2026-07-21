@@ -22,14 +22,21 @@ How it works:
   `DISK_CONSOLIDATE_MIN_DELTA`, at most hourly, so the delta stays bounded.
 
 Still standalone (`src/base/diskann.rs`): `build_and_save` + mmap
-`DiskIndex::open`/`search`, recall@10 ≥ 0.90 vs brute force.
+`DiskIndex::open`/`search`. This note previously published a "recall@10 ≥ 0.90
+vs brute force" figure here; it came from tooling that no longer exists and is
+**withdrawn**, not superseded — no current number replaces it, and none may be
+stated until the question in `ROADMAP.md` ("What measures retrieval quality with
+no LLM in the scoring loop?") is answered.
 
-**Not yet done (follow-ups):** `gnn_entity_idx`/`reason_idx` still stay resident
-(entity-only spill); no product quantization yet — `DiskIndex` mmaps full `f32`
-vectors (PQ-in-RAM, the RAM-of-codes optimization below, is the next step).
-Execution plan: `docs/superpowers/plans/2026-06-12-diskann-wiring.md`.
+**Not shipped:** `gnn_entity_idx`/`reason_idx` stay resident (entity-only
+spill), and `DiskIndex` mmaps full `f32` vectors — no product quantization. PQ
+is not a pending next step: it is an explicit **non-goal** in `ROADMAP.md`,
+re-promotable only if a replacement retrieval metric shows a gap it would close.
+The RAM-of-codes decomposition below is retained as reference for that case. The
+resident-index gap is tracked in `ROADMAP.md` — "A spilled kern still carries two
+resident indexes".
 
-> **Reality drift since this doc was written.** The original Phase-1 target below
+> **Reality drift since this doc was written.** The original slice-A target below
 > (replace `cold.rs`'s O(n) JSONL scan) is OBSOLETE: `cold.rs` and `persist.rs`
 > were replaced by an LMDB store (`src/base/store.rs`) with int8-on-disk vectors,
 > and `Store::cold_search` is now a BOUNDED scan (capped by `COLD_MAX_ENTRIES`),
@@ -38,7 +45,8 @@ Execution plan: `docs/superpowers/plans/2026-06-12-diskann-wiring.md`.
 > entity vector on the heap and is rebuilt on load, so RSS and load-time grow with
 > the kern without bound. PQ (vectors compressed in RAM) is still unbuilt; the
 > current `DiskIndex` mmaps full f32 vectors, which already removes them from the
-> resident heap — PQ is a later RAM-of-codes optimization, not a prerequisite.
+> resident heap — PQ is a separable RAM-of-codes optimization, not a
+> prerequisite, and a non-goal today (see above).
 > The "ceiling today" list below is retained for historical context.
 
 ## The ceiling today
@@ -50,8 +58,9 @@ Three things keep the whole corpus in memory and bound it to a single host's RAM
 2. **The graph is a full-RAM bincode blob** (`src/base/persist.rs`). `load_dir`
    decodes an entire kern (`Entity { vector: Vec<f64>, gnn_vector: Vec<f64>, … }`)
    into memory; `save_all` re-encodes it. Load time and RSS scale with corpus.
-3. **The cold tier is an O(n) linear scan** (`src/base/cold.rs`):
-   `search()` reads `cold.jsonl` and computes cosine against every row.
+3. **The cold tier is an O(n) linear scan** (`src/base/store.rs`, absorbed from
+   the since-deleted `src/base/cold.rs`): `cold_search` decodes and scores every
+   row.
 
 Quantization exists but is **scalar int8 only** (`src/quant.rs`:
 `QuantizationMode::{None, Int8}`) — no product quantization yet.
@@ -82,26 +91,34 @@ Standard DiskANN decomposition, mapped onto kern's existing pieces:
 Net: RAM holds PQ codes + the mmap'd page cache, not full vectors. RSS drops from
 `O(N·dim·8)` to `O(N·pq_bytes)`.
 
-## Incremental rollout (lowest risk first)
+## How the design decomposes (analysis, not a schedule)
 
-**Phase 1 — disk ANN over the cold tier.** Replace `cold.rs`'s linear scan with
-a Vamana index built over the cold store. Self-contained: the cold tier is
-already append-only, already a separate file, already the fallback path in
-`query`. Win: cold recall goes from O(n) to O(log n) with no change to the hot
-path. This is the recommended first slice — it exercises the whole Vamana +
-mmap + PQ stack on the least-critical tier.
+The analysis separated into three independent slices, ordered by how much of the
+hot path each one risks. Scheduling is `ROADMAP.md`'s; recorded here is only what
+each slice is and what it buys.
 
-**Phase 2 — disk-backed hot index for large kerns.** A per-kern threshold
-(`[graph] max_resident` or similar): below it, today's in-RAM HNSW; above it,
-the kern's vectors+adjacency spill to disk and `search` runs the disk path. The
-graph metadata (ids, edges, heat, confidence) can stay in RAM far longer than
-the vectors — vectors are the bulk.
+**Slice A — disk ANN over the cold tier.** A Vamana index built over the cold
+store, replacing a linear scan. Self-contained: the cold tier is append-only,
+separately stored, and only the fallback path in `query`. It takes cold recall
+from O(n) to O(log n) with no change to the hot path, and exercises the whole
+Vamana + mmap + PQ stack on the least-critical tier. *Superseded in part by
+reality:* `cold.rs` became the LMDB store and `cold_search` is now a bounded
+scan, so what remains here is the index, not the linear-scan fix — the cost that
+survives is recorded in `ROADMAP.md` — "The GC sweep is superlinear in three
+separate places".
 
-**Phase 3 — streaming inserts + deletes.** DiskANN is batch-built by default;
-kern ingests continuously. Adopt FreshDiskANN semantics: an in-RAM delta index
-for recent inserts, periodic merge into the on-disk Vamana, tombstones for
-`forget`/GC, consolidation on the tick. The tick worker already owns periodic
-maintenance, so the merge/consolidate job slots in next to stigmergy GC.
+**Slice B — disk-backed hot index for large kerns.** A per-kern threshold:
+below it, the in-RAM HNSW; above it, the kern's vectors+adjacency spill to disk
+and `search` runs the disk path. Graph metadata (ids, edges, heat, confidence)
+stays in RAM far longer than the vectors — vectors are the bulk. This is the
+slice that shipped, as the opt-in `VectorBackend::Disk` spill of `entity_idx`
+behind `[graph] disk_threshold` — entity index only.
+
+**Slice C — streaming inserts + deletes.** DiskANN is batch-built by default and
+kern ingests continuously, so the design takes FreshDiskANN semantics: an in-RAM
+delta index for recent inserts, periodic merge into the on-disk Vamana,
+tombstones for `forget`/GC, consolidation on the tick beside stigmergy GC. Also
+shipped, as the `delta`/`tombstones` fields and the `DiskConsolidate` task.
 
 ## Open questions / risks
 
@@ -124,7 +141,7 @@ maintenance, so the merge/consolidate job slots in next to stigmergy GC.
 
 - `src/base/hnsw.rs` — beam search, neighbor pruning, heaps (adapt to 1 layer).
 - `src/quant.rs` — quantization seam + int8; extend with PQ.
-- `src/base/store.rs` — the LMDB store + cold tier (the original Phase-1
+- `src/base/store.rs` — the LMDB store + cold tier (the original slice-A
   target, `src/base/cold.rs`, was absorbed here).
 - `src/base/vector_backend.rs` — the `Resident`/`Disk` backend seam the wiring
   landed on.

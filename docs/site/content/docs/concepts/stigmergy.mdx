@@ -96,7 +96,10 @@ A graviton is a named focus attractor stored as a child kern of the root: a name
 (`graviton_text`), an embedding of its seed text (`graviton_vec`), and a scalar
 `mass` defaulting to `1.0`. You manage them through the `graviton` MCP tool
 (`tool_graviton`, `src/mcp/tools_admin.rs:89`) with `action=list|add|remove`;
-seed text may be a short phrase or an entire document, embedded whole.
+seed text may be a short phrase or a representative passage, embedded whole. Keep
+it under the embedding model's context window: the seed text is embedded in one
+call with no chunking, so anything past that window is truncated and a
+document-length seed becomes an embedding of its opening only.
 
 They act at two points.
 
@@ -173,10 +176,10 @@ model makes routine:
 Two costs were named alongside it. The gossip wire fields renamed from
 `anchor_*` to `graviton_*`, which breaks federation peers that predate the
 change — accepted, as federation is opt-in LAN and pre-1.0. And the query-time
-pass is not free: measured on a workload trace over three-run medians, recall@10
-and NDCG@10 were unchanged with gravity on or off, at roughly **+7% p50 latency
-with five gravitons** and zero cost with none. Gravity is a bias knob, not a
-recall improvement, and the benchmark says so.
+pass is not free: it costs one similarity comparison per graviton per query, and
+nothing at all when a kern has none. Gravity is a bias knob by design, not a
+recall improvement — and no current measurement stands behind either reading of
+it.
 
 ## Observing and forcing it
 

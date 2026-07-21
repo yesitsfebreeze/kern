@@ -94,13 +94,13 @@ The seeds are a set of points. `expand` (`src/retrieval/expand.rs:178`) makes th
 Neighbour scoring (`score_neighbor`, `src/retrieval/expand.rs:305`) is a weighted sum of three terms: the neighbour's own content similarity to the query, the *edge's* vector similarity to the query, and the edge's own confidence plus a log traversal boost. Mode weights come from `Weights::for_mode` (`src/retrieval/seed.rs:37`).
 
 - **Adds:** multi-hop reach and explanation. A fact connected to the query only through an intermediate is unreachable by any top-k over vectors.
-- **Costs:** bounded work per query, but it is the stage that decides multi-hop quality — and per the LoCoMo baseline below, this is where kern currently measures worst.
+- **Costs:** bounded work per query, but it is the stage that decides multi-hop quality — the hardest case the pipeline attempts, and the one no current measurement covers.
 
 ### Merge, boosts, and gravity
 
 `merge` (`src/retrieval/merge.rs:8`) pools seed and expansion scores per entity through a log-sum-exp accumulator, so an entity found by two independent routes earns roughly `+ln(2)`. The result is a magnitude, not a probability, and can exceed 1.0.
 
-`apply_boosts` (`src/retrieval/score.rs:79`) then folds in the non-similarity signals: the score is multiplied by the entity's confidence, plus a QBST access/recency term (`qbst`, `src/retrieval/score.rs:61` — log access count and an exponential recency decay, capped), plus a flat bonus for `Fact` entities. `apply_gravity` (`src/retrieval/gravity.rs:9`) adds a pull toward the kern tree's gravitons, taking the **max** over gravitons rather than the sum so overlapping attractors never double-count. Gravity measured recall- and NDCG-neutral with about +7% p50 latency at five gravitons; it is a routing-coherence signal, not a quality win.
+`apply_boosts` (`src/retrieval/score.rs:79`) then folds in the non-similarity signals: the score is multiplied by the entity's confidence, plus a QBST access/recency term (`qbst`, `src/retrieval/score.rs:61` — log access count and an exponential recency decay, capped), plus a flat bonus for `Fact` entities. `apply_gravity` (`src/retrieval/gravity.rs:9`) adds a pull toward the kern tree's gravitons, taking the **max** over gravitons rather than the sum so overlapping attractors never double-count. Gravity is a routing-coherence signal by design, not a quality win: it costs one similarity comparison per graviton per query, and its effect on ranking quality is currently unmeasured.
 
 ### Filtering, dedup, and MMR
 
@@ -109,7 +109,7 @@ Neighbour scoring (`score_neighbor`, `src/retrieval/expand.rs:305`) is a weighte
 `dedup_by_section` (`src/retrieval/diversify.rs:6`) collapses chunks of the same source section to their best representative. `mmr` (`src/retrieval/diversify.rs:46`) then does maximal marginal relevance over the pool: greedily pick the candidate maximizing `λ·sim(query) − (1−λ)·max sim(already picked)`.
 
 <Callout type="warn">
-`mmr_lambda` is the pipeline's sharpest quality lever. At the old default of 0.45, diversity outweighed relevance and MMR pushed legitimate near-duplicate cluster hits below rank 10 — recall@10 on the workload trace was 0.9250. Raising it to 0.75 took recall@10 to 1.0000 and NDCG@10 to 0.9987 on that same trace. Ingest-time dedup already removes true duplicates, so retrieval-time MMR does not need to sacrifice recall. The trace behind those numbers has since been retired (see the measurement note below); the `0.75` default stands.
+`mmr_lambda` is the pipeline's sharpest quality lever. At the old default of 0.45, diversity outweighed relevance and MMR pushed legitimate near-duplicate cluster hits below rank 10. The default is now 0.75, chosen by design intent rather than by measurement: ingest-time dedup already removes true duplicates, so retrieval-time MMR does not need to sacrifice relevance to buy diversity. Nothing currently measures whether 0.75 is the right value — see the measurement note below.
 </Callout>
 
 ### Rerank, synthesis, and cold backfill
@@ -138,7 +138,7 @@ Three indexes back the pipeline, behind a `VectorBackend` enum (`src/base/vector
 
 `QuantizedVec::encode` (`src/quant.rs:59`) supports three modes (`src/quant.rs:8`): `None` (f32, 4 bytes per dimension), `Int8` (1 byte), and `Binary` (0.125 bytes). Int8 uses a symmetric per-vector scale fixed at encode time, with distance computed directly on the codes (`quantized_cosine_distance`, `src/quant.rs:159`).
 
-What you actually give up is measured, not assumed. `int8_recall_tracks_f64` (`src/base/hnsw.rs:874`) builds parallel f64 and int8 indexes over the same 300-vector corpus and asserts the top-10 sets agree on at least 75% of results across 25 queries. That is the guarantee: **int8 is not lossless, and the test pins the floor rather than claiming parity.** On the workload trace, int8 storage cut vector memory from 400 KiB to 100 KiB with the quality numbers unchanged.
+What you actually give up is measured, not assumed. `int8_recall_tracks_f64` (`src/base/hnsw.rs:874`) builds parallel f64 and int8 indexes over the same 300-vector corpus and asserts the top-10 sets agree on at least 75% of results across 25 queries. That is the guarantee: **int8 is not lossless, and the test pins the floor rather than claiming parity.** Int8 storage is a flat 4× cut in vector memory — one byte per dimension instead of four.
 
 Binary is implemented and tested (`src/base/hnsw.rs:909`) but deliberately **not user-selectable** — `QuantizationMode::parse` (`src/quant.rs:16`) rejects it, because its recall floor is too low without a rescoring pass that does not exist yet.
 
@@ -167,7 +167,7 @@ NDCG against per-turn evidence labels, no LLM in the loop) and is not built
 yet; see the 2026-07-20 CHANGELOG entry.
 
 <Callout type="warn">
-The LoCoMo numbers come from a 7B judge at temperature 0, which is harsher than the lenient judges behind most published figures. That cuts both ways: the gap to 0.6 is real, but comparing a strict-judge number against a lenient-judge one is not a valid comparison in either direction. Never quote a retrieval number that did not come from a run.
+Until that replacement exists, kern makes **no quality claim of any kind** — not SOTA, not parity, not regression, not improvement. Latency claims from the e2e harness stand; ranking-quality claims do not. Judge-scored end-to-end figures are not retrieval figures either, and a strict judge is not comparable to a lenient one in either direction, so a published score from elsewhere is not a target to quote against. Never quote a retrieval number that did not come from a run.
 </Callout>
 
 ## Related

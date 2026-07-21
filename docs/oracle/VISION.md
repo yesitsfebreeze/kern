@@ -1,16 +1,19 @@
 # Vision
 
 kern is a self-learning memory substrate for AI agents: one daemon per working
-directory owns a knowledge graph that takes in durable facts from sessions on
-its own, keeps itself small without gardening, serves the right context back at
-recall time, and optionally federates across machines — local-first,
-self-contained, in-process, no cloud, no query-time LLM required. It is not a
-vector store you operate (chunk, embed, index, prune); it is a process that
-operates itself, defined by four autonomous properties — self-learning,
-structured, self-compacting, self-distributing — each the inverse of a RAG
-chore you'd otherwise own. The competitive set is agent memory (Zep/Graphiti,
-Mem0, Letta), not general-purpose vector databases. The measured gap to that
-set, and every open item that closes it, live in `ROADMAP.md`.
+directory owns a knowledge graph that a caller writes durable facts into, keeps
+itself small without gardening, serves the right context back at recall time,
+and optionally federates across machines — local-first, self-contained,
+in-process, no cloud, no query-time LLM required. Capture is never automatic;
+everything after the write is. It is not a vector store you operate (chunk,
+embed, index, prune); it is a process that operates itself, defined by four
+autonomous properties — self-learning from what is used, structured,
+self-compacting, self-distributing — each the inverse of a RAG chore you'd
+otherwise own. The competitive set is agent memory (Zep/Graphiti, Mem0, Letta),
+not general-purpose vector databases. kern publishes no number against that set
+and has none of its own; what would measure retrieval quality at all is the
+first open question in `ROADMAP.md` ("What measures retrieval quality with no
+LLM in the scoring loop?"), and every other open item lives there too.
 
 ## The test
 
@@ -44,7 +47,11 @@ A change fails the vision if it breaks any of these:
   server.
 - **One dispatch core.** Every surface (MCP, RPC, CLI, any future one) goes
   through the single `tools::dispatch` — never a second copy.
-- **Claims are measured.** No SOTA, parity, or latency claim without a
-  multi-seed run with error bars against the recorded baseline.
+- **No quality claim without an instrument.** There is no recorded baseline —
+  it was withdrawn, not superseded — so until a retrieval metric with no LLM in
+  the scoring loop exists (`ROADMAP.md` — "What measures retrieval quality with
+  no LLM in the scoring loop?"), kern claims no quality of any kind: not SOTA,
+  not parity, not regression, not improvement. Latency stays claimable, from the
+  e2e harness, multi-seed with error bars.
 - **Per-cwd isolation.** One graph per directory; no cross-project
   contamination.

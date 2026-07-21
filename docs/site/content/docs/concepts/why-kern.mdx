@@ -147,7 +147,11 @@ reasoning model.
 
 And the graph forgets. That is the feature, but it means a non-`fact` thought
 you never touch again will eventually leave the hot graph. If you need
-guaranteed permanence for something, it needs to be a fact.
+guaranteed permanence for something, it has to be a fact — and only the CLI
+makes one. `kind` is derived from confidence and a fact needs full confidence
+(`src/base/math.rs:206`), which `kern ingest` reaches because it writes as the
+user; an agent calling the MCP tool is clamped below it. From MCP the levers are
+a `Document` or keeping the thought warm.
 
 ## Maturity — read this before you commit
 

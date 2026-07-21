@@ -2,15 +2,19 @@
 
 Ticket: `A01F62NW` — "Study CRDTs for conflict-free federated kern state"
 
-> **Implementation status (2026-07).** Stage 0/1 shipped: `src/crdt.rs`
-> provides GCounter/PnCounter, `access_count` and `traversal_count` are
-> GCounters, and `src/base/merge.rs` is the content-addressed entity/edge
-> join (counters join, heat and timestamps merge, status follows the
-> `Active < Superseded` lattice). Two deliberate deviations from this study:
-> confidence is **replica-local** — never merged from a peer (anti-poisoning)
-> — and inbound `Delta` messages are handled with a hard value clamp but have
-> **no live sender yet**. OR-Set/LWW fields (Stage 2) and anti-entropy
-> (Stage 3) were not built. Type and path names below predate the
+> **Implementation status (2026-07).** Stages 0/1 shipped: `src/crdt.rs` is
+> `GCounter` plus an `lww_wins` tiebreak and nothing else — **no `PnCounter` was
+> ever built** — `access_count` and `traversal_count` are GCounters, and
+> `src/base/merge.rs` is the content-addressed entity/edge join (counters join,
+> heat and timestamps merge, status follows the `Active < Superseded` lattice).
+> Three deviations from this study, all deliberate: confidence is
+> **replica-local**, never merged from a peer (anti-poisoning); LWW landed as
+> inline lamport-stamped fields on `Entity` rather than as a named
+> `LWWRegister` type; and **OR-Set for `statements` was reversed, not deferred**
+> — see the note in §6 below. `Delta` has a live sender
+> (`gossip::handler::start_delta_flush`, wired at `src/commands.rs:895`), and
+> inbound deltas are still clamped on receipt. Anti-entropy was not built
+> (`ROADMAP.md` — "Anti-entropy"). Type and path names below predate the
 > `Thought`→`Entity` rename and the move from `crates/` to `src/`.
 
 ## 1. Problem
@@ -212,11 +216,14 @@ local mutation and on every incoming delta (`max(local, remote) + 1`).
 The clock travels in every `DeltaPayload` and is the tiebreak in all
 LWW registers. This replaces the current implicit wall-clock LWW.
 
-## 6. Migration plan for `crates/gossip`
+## 6. How the migration decomposes
 
-Staged, each stage shippable and reversible.
+The analysis broke the change into five independently shippable, independently
+reversible stages, recorded here as the decomposition — what each stage is and
+what it depends on. What is scheduled, and in what order, is `ROADMAP.md`'s;
+where a stage did not survive contact with the code, that is noted on the stage.
 
-### Stage 0 — foundations (1–2 days)
+### Stage 0 — foundations (est. 1–2 days)
 
 - Add a tiny `crates/crdt/` utility crate (G-Counter, PN-Counter,
   LWW-Register, OR-Set) — hand-rolled, matches the self-contained
@@ -225,7 +232,7 @@ Staged, each stage shippable and reversible.
 - Pure functions; `merge(&mut self, &Other)` returning `bool` for
   "state changed".
 
-### Stage 1 — shadow counters (1 day)
+### Stage 1 — shadow counters (est. 1 day)
 
 - Internally mirror `access_count` and `traversal_count` into a
   G-Counter held in a side-map keyed by thought/reason id.
@@ -234,21 +241,32 @@ Staged, each stage shippable and reversible.
 - Materialised `i32` remains the read path. Verify convergence in
   integration tests under simulated partition.
 
-### Stage 2 — full CRDT thought/reason (2–4 days)
+### Stage 2 — full CRDT thought/reason (est. 2–4 days)
 
 - Replace raw fields with CRDT-typed fields in `base::types`. `bincode`
   schema bumps a version tag; add a one-shot persist migration.
 - `accept::accept` and dedup path write through the CRDT types.
 - Remove ad-hoc last-writer logic in `refine_edges`.
 
-### Stage 3 — anti-entropy (2 days)
+> **Reversed in part.** The OR-Set-for-`statements` half of this stage is not
+> pending — it was refused on inspection. `id == content_hash(text)` and
+> `statements == [text]`, so a same-id peer already holds identical content and a
+> differing one is asserting content its id does not hash to; importing it would
+> break content-addressing and resurrect locally-cleared statements. `merge_entity`
+> never imports them (`src/base/merge.rs:112`) and `CrdtTarget::Statements` is
+> rejected on receipt (`src/gossip/handler.rs:448`), kept as a refused variant so a
+> peer on an older build cannot inject text under a content-addressed id.
+> Statements converge through full EntitySync bodies instead. The LWW half landed
+> as inline lamport-stamped fields, not as CRDT-typed ones.
+
+### Stage 3 — anti-entropy (est. 2 days)
 
 - Periodic pull: pick a random peer, request `AntiEntropy` for one
   `kern_id`, merge. Uses existing `Fetch` primitive for request framing.
 - Exponential backoff if divergence stays after N rounds (indicates
   partition).
 
-### Stage 4 — remove redundant merge code (0.5 day)
+### Stage 4 — remove redundant merge code (est. 0.5 day)
 
 - Delete the hand-rolled conflict resolution in ingest/retrieval.
 - All merges go through CRDT `merge()`; ordering and delivery semantics
@@ -257,8 +275,9 @@ Staged, each stage shippable and reversible.
 ## 7. Risks and non-goals
 
 - **Garbage collection**: OR-Set tombstones and LWW histories grow
-  unboundedly. Follow-up ticket: time-bounded compaction using
-  `valid_until` / access recency as cues.
+  unboundedly. The analysed remedy is time-bounded compaction using
+  `valid_until` / access recency as cues (`ROADMAP.md` — "CRDT growth and
+  re-embedding across replicas").
 - **GNN weights** (`gnn_weights: Vec<u8>`): model parameters are
   *not* replicated state — they are local derivations. Keep excluded.
 - **Vectors** (`Thought.vector`, `Reason.vector`): LWW is coarse; if
@@ -275,10 +294,16 @@ Staged, each stage shippable and reversible.
 
 **Adopt δ-CRDTs field-by-field, prioritised by risk.** Start with
 G-Counter for `access_count` / `traversal_count` — highest race
-probability, simplest CRDT, zero semantic change. Progress to OR-Set
-for dedup/statements, then LWW for timestamps and scores. The existing
+probability, simplest CRDT, zero semantic change. Then OR-Set for
+dedup/statements, then LWW for timestamps and scores. The existing
 `GossipMessage` envelope absorbs the change additively; no breaking
 wire-format bump is required.
+
+> **Amended by implementation.** The OR-Set-for-`statements` leg of this ordering
+> is void — content-addressed ids make importing remote statement text both
+> unsound and a resurrection vector, so it is refused on both ends (§6, Stage 2).
+> OR-Set for the dedup path and LWW for timestamps/scores stand; LWW shipped as
+> inline lamport-stamped fields rather than a named register type.
 
 ## 9. References
 

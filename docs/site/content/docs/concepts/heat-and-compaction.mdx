@@ -199,9 +199,12 @@ memory bound for an ephemeral graph, not a bug — but it means the
 spill-before-drop guarantee only holds for a persisted kern.
 </Callout>
 
-If you need something to survive unconditionally, ingest it as a `Fact` or a
-`Document`, or keep it warm. Both are levers you control; neither requires you
-to prune anything by hand.
+If you need something to survive unconditionally, ingest it as a `Document`, keep
+it warm, or make it a `Fact` — but `Fact` is a CLI-only lever. `kind` is derived
+from confidence and `Fact` needs a full `1.0` (`src/base/math.rs:206`), which
+only `kern ingest` produces, because it attributes to the `user` source. An MCP
+caller is an agent and is clamped below that ceiling, so no amount of `kind` in
+the call makes one. None of these levers requires you to prune anything by hand.
 
 ## Steady state
 

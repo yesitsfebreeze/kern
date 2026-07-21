@@ -40,9 +40,11 @@ kern graviton add architecture "How the system is structured: components, data f
 kern graviton list
 ```
 
-`text` is embedded whole as the graviton's pull vector, so it can be a phrase, a
-paragraph, or an entire document — a longer, more representative text gives a
-better-placed vector than a single word. An optional `mass` (default `1.0`)
+`text` is embedded whole as the graviton's pull vector, so a representative
+passage places it better than a single word. Keep that passage under the
+embedding model's context window: the text goes through one embed call with no
+chunking, so anything past the window is truncated and a document-length seed
+becomes an embedding of its opening only. An optional `mass` (default `1.0`)
 makes a graviton pull harder: routing compares `distance / mass`, so a graviton
 at `mass = 2.0` claims content from roughly twice as far away.
 
@@ -176,12 +178,21 @@ undifferentiated blob.
 (`src/base/accept.rs:41`). Nothing about seeding is privileged. Each chunk is
 checked graph-wide for a near-duplicate (cosine ≥ `ingest.dedup_threshold`,
 default `0.95`), routed to the graviton whose effective distance is smallest,
-and committed there. Re-running a seed is therefore close to idempotent —
-identical content dedupes rather than duplicating.
+and committed there. Re-running a seed therefore collapses byte-identical
+content rather than duplicating it — and that is the whole guarantee. The check
+is cosine similarity, not identity, and nothing keys on the file the text came
+from, so a reworded version of something already stored dedupes only if it
+happens to land above the threshold, and lands as a second entity if it does
+not.
 
 That also means seeded content participates in contradiction handling like
 everything else: seed a document that contradicts a stored claim and the older
-one is superseded, not silently kept alongside.
+one *may* be superseded. The path fails open to coexistence, though. It needs a
+same-kind near-duplicate above the dedup threshold, and then an unambiguous
+CONTRADICT or UPDATE verdict from the background classifier with no mention of
+RELATED in it. Anything short of that — a hedged verdict, an unparseable one, a
+different `kind`, a rewording too distant to pair — leaves both claims standing
+side by side.
 
 → [Acceptance & routing](../concepts/acceptance.mdx) ·
 [Time & contradiction](../concepts/time.mdx)

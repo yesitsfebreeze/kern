@@ -103,9 +103,11 @@ enableable, but narrower than the design. The load-bearing pieces:
 - **Graph CRDT (implemented).** `base::merge` provides content-addressed,
   conflict-free merge of thought/edge metadata — counters join, heat takes the
   max, status follows the `Active < Superseded` lattice, timestamps min/max.
-  Confidence is deliberately **replica-local** (never imported from a peer) so
-  a compromised node cannot pin a poisoned claim's confidence high
-  federation-wide. Because ids are content hashes, existence is a set union.
+  The ranking signals a peer could set are **stripped on the way in**
+  (`src/base/merge.rs:20`): an entity entering a `remote-*` kern has its heat,
+  access counts and confidence reset to neutral, so heat's max join is moot
+  inbound and a compromised node cannot pin a poisoned claim hot or confident
+  federation-wide. Heat and confidence are earned by local use only. Because ids are content hashes, existence is a set union.
 - **Capped cold tier (implemented).** Stigmergy GC spills cold, abandoned,
   non-durable thoughts to a cold table in the same LMDB store before dropping
   them from the hot graph — a latest-wins keyed table holding the newest 50k

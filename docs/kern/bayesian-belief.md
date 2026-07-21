@@ -83,7 +83,7 @@ new `Contradiction` kind), the update hits `β` instead of `α`.
 
 **Observer weighting** (future): multiply `w` by an observer reputation score
 derived from their agreement with graph consensus over time. This is the same
-mechanism PageRank gives authority in `docs/pagerank-authority.md`; the two
+mechanism PageRank gives authority in `docs/kern/pagerank-authority.md`; the two
 designs compose.
 
 **Decay**: optionally damp `α` and `β` each tick by a factor `γ < 1`. Old

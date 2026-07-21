@@ -275,9 +275,12 @@ Thought-level PageRank (phase 2) feeds `base::split`:
   edges, temporal slashing, no self-loops, ACL push for incremental
   update, local-view-only (no federated consensus).
 - Integration: opt-in scalar (`authority_weight = 0.0` by default) added
-  to `score::apply_boosts`, **or** as a third RRF list. Prefer RRF for
-  cleaner calibration; ship scalar form first since the hook is one line.
-- Phase 2: thought-level rank feeding split heuristics.
+  to `score::apply_boosts`, **or** as a third RRF list. RRF calibrates more
+  cleanly; the scalar form is the cheaper of the two, one line at the hook.
+- Separable second piece: thought-level rank feeding split heuristics — it
+  depends on nothing in the first and is tracked in `ROADMAP.md`
+  ("Clustering is vector-only"). The authority signal itself is tracked as
+  "Peer authority is unbuilt, so Sybil defence has nothing to weight".
 
 ## 10. Acceptance checklist
 

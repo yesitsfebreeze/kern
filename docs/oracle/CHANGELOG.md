@@ -1,5 +1,315 @@
 # Changelog
 
+<!-- docs-check: historical -->
+
+- 2026-07-21 — **kern has an instrument again.** Item 1 asked what measures
+  retrieval quality with no LLM in the scoring loop. The answer is `e2e/`, grown
+  rather than replaced: `fake_llm.py` already served deterministic feature-hashed
+  bag-of-words embeddings — real cosine, identical every run, no GPU — and
+  `test_retrieval.py` already asserted "the matching fact ranks first". That was
+  a retrieval-quality assertion with no model in the scoring loop, sitting
+  unrecognised.
+
+  `e2e/test_recall.py` adds the number: 36 facts across unrelated topics, 72
+  paraphrase probes, scored `recall@1` / `recall@5` / `MRR` against floors set
+  from the measured value. First run and every run since: **0.9583 / 1.0000 /
+  0.9792**, bit-identical. `e2e/test_invariants.py` adds the properties — each
+  named for the `VISION.md` criterion it defends.
+
+  This dissolves the five sub-questions rather than answering them. Ground truth
+  is written by the test, so there is no labelled corpus, no LoCoMo answer key,
+  and — decisively — no dependency on the turn-level claim provenance that does
+  not exist and nobody had scheduled. Ingest non-determinism is out of the loop
+  because the tests ingest directly. Synthesis is out of scope: the fake answer
+  model echoes its prompt, so a test can assert the retrieved context *arrived*,
+  never how it read.
+
+  **Named up front, not discovered later:** the fake embedder is bag-of-words
+  hashing, not a semantic model. This measures kern's machinery — fusion,
+  expansion, ranking, dedup, supersede, heat — and says nothing about how a real
+  embedding model behaves. That is the price of having no model in the loop, and
+  it is the right price. Second limitation, equally on the record: the floors
+  make this a *regression detector*. It can say kern got worse. It cannot say
+  kern is good, and no number here is comparable to anything Zep or Mem0
+  publishes. `VISION.md`'s "no quality claim without an instrument" is now
+  satisfiable for retrieval and still unsatisfied for answering.
+
+  It earned itself immediately. The multi-hop lead — previously smoke, n=8 — is
+  now **measured**: linked and unlinked pairs rank identically to four decimals,
+  reproduced by an independent harness. `kern link` contributes nothing at
+  retrieval. Recorded as `xfail(strict=True)` so it flips loudly when fixed.
+  Two invariants could not be written at all: `supersede` and `as_of` are
+  unreachable from the CLI, MCP only, so they are `skip` markers naming the
+  missing surface rather than fake coverage.
+
+  Items 71/72/73 land with it, because an instrument nothing runs is not an
+  instrument: CI gains a lint job running `just check` (fmt and clippy were
+  enforced by memory alone) and an e2e job, and `.pi/update.sh` — which was
+  gitignored, so the fresh-checkout guarantee it was supposed to provide did not
+  exist — is now tracked as the single exception to the `/.pi/` ignore.
+
+  **Decided by:** verify-before-claiming. Also fixed here because it made the
+  whole gate theatre: the banned-vocabulary CI step could never fail. It grepped
+  a gitignored path, and GNU grep returns 2 for a missing path *even when it
+  matched*, so the `if` never fired on a runner.
+
+- 2026-07-21 — Roadmap items 2, 3, 4 and 6: the tick survives a panic, the
+  embedding-model swap is caught, `as_of` stops lying over the cold tier, and
+  cold evictions are counted.
+
+  **Item 2.** `tick::start` was one bare `tokio::spawn` with no `catch_unwind`
+  and a dropped `JoinHandle`, so one panic ended decay, GC, persist, clustering
+  and the idle sweep for the process lifetime with nothing logged — and
+  `parking_lot` does not poison, so the graph was left half-written and still
+  readable. The loop is now guarded, the fault counted, and the log says plainly
+  that the kern's state may be partially written.
+
+  Containment alone would have been a trap, and review caught it: the first
+  landing removed the `.expect` panics in the GNN forward path by returning zero
+  tensors, which converted a loud crash into `apply_gnn_updates` persisting
+  corrupt weights — a silent wrong answer, the exact class this tier exists to
+  delete. The chain is now fallible end to end (`Model::forward`/`backward`
+  return `Result`), a failed propagation writes nothing, and the per-matmul
+  `error!` that would have emitted ~50 lines per task became one at the
+  propagation boundary. Degradation is surfaced on all three surfaces — MCP, the
+  RPC DTO (appended, back-compat test extended) and `kern health`.
+
+  **Item 3** was the one nearly claimed falsely. The first landing added
+  `check_embed_stamp`, `set_embed_stamp` and `query_dim_ok` with **zero non-test
+  callers**, feeding health fields hardwired to read "healthy" on a store that
+  had exactly the problem. Now bound at every graph open, stamped on flush, and
+  guarded on the hot query path — fail-open and counted, per repo policy, not an
+  abort. Two follow-ups review then caught: the guard was O(all entities) per
+  query memoized on a key every `get_mut` invalidates, making ingest quadratic;
+  and `kern reembed --embed-model X` stamped the *configured* model over vectors
+  built by X, so health reported the wrong dimension and a later open said
+  "Match", masking the swap the stamp exists to catch.
+
+  **Item 4.** `valid_from`/`valid_to`/`invalidated_at` are `#[serde(skip)]` and
+  survived only through `StoredKern.temporal`, so a cold-recovered revision came
+  back with all three `None` and `is_valid_at` answered true at every instant —
+  point-in-time queries exact over the hot graph and silently lossy over the cold
+  tail. The triple now round-trips; legacy rows still decode.
+
+  **Item 6.** Cold eviction past 50k is the intended memory bound and stays; it
+  was simply invisible. Counted, surfaced in health, and logged once per sweep
+  rather than once per row.
+
+  **Decided by:** fix-the-root. Owed and recorded rather than claimed: the
+  infallible `GraphLayer`/`BackwardGraphLayer` impls are now test-only and want
+  deleting, and a permanently-failing kern is still re-enqueued every tick with
+  no backoff — visible via the counter, not yet suppressed.
+
+- 2026-07-21 — A config scope that redirects an endpoint no longer inherits that
+  endpoint's key. This is the tradeoff of the same day's deep-merge decision,
+  found after the fact rather than named before it, which by `name-the-tradeoff`
+  makes it a defect and not a note. Under the old section-replace semantics a
+  project config that set `[embed] url` wiped the user's `[embed] key` as a side
+  effect, and that accident was load-bearing: with deep merge, a `.kern/kern.toml`
+  committed in any repo you clone can point `[embed] url` at its own endpoint and
+  receive the `sk-live-…` you set globally on the first embed call. `reason_key`
+  and `answer_key` fall back to `embed.key` (`src/config/mod.rs`), so redirecting
+  any single endpoint reaches the same secret. For a project whose first claim is
+  local-first, zero-egress, that is the wrong direction to fail in.
+
+  So `src/config/secrets.rs` seals it: a scope that sets a section's `url` does
+  not inherit that section's `key`, and must supply its own or go without.
+  Deliberately narrow — a project setting only `model` still inherits the user's
+  url and key, which is the whole point of layering. Its own file rather than a
+  branch inside `merge_deep`, because deciding what a scope may inherit is not
+  the same job as merging two tables.
+
+  **Decided by:** name-the-tradeoff, and fix-the-root over the alternative of
+  documenting the hazard in `configure.mdx` and leaving the behaviour. Supersedes
+  the unqualified deep merge recorded in the same day's items 10/11/12 entry.
+
+- 2026-07-21 — Roadmap items 10, 11 and 12: the detached daemon gets a log, an
+  invalid config stops startup, and config scopes deep-merge per key.
+
+  **Item 10** is the one that makes the rest of tier 1 observable. `spawn_detached`
+  put `Stdio::null()` on all three fds, and with hub auto-start shipped that is
+  the *default* posture — so every silent defect items 2 through 7 describe is
+  invisible in exactly the configuration most people run. Captured output now
+  appends to a per-arg `hub.log` / `daemon.log`, owner-only, created on demand,
+  never truncated, because a restart must not erase the log explaining why it
+  restarted; a log that cannot be opened falls back to `/dev/null` and says so on
+  the parent's stderr rather than costing the spawn. **The first landing fixed the
+  wrong path** — adversarial review caught that `spawn_daemon` is only the legacy
+  fallback, and the default hub-first route (`kern mcp` → `attach_via_hub` → hub
+  → `src/hub/node.rs`) still nulled all three fds, so the process that actually
+  runs ingest, tick and retrieval was still silent. Both paths now share
+  `src/config/detached_log.rs`. `log_dir` also moved inside `data_dir` rather than
+  above it: taking the parent put `daemon.log` directly in `$HOME` for any
+  relocated store.
+
+  **Item 11.** `main.rs` logged a warning on a failed `validate()` and continued
+  with whatever parsed, and `unwrap_or_default()` discarded genuine parse and IO
+  errors on top. The repo's fail-open policy is scoped to intake and recall — a
+  session must always proceed — and says nothing about booting on settings known
+  to be wrong; continuing there is not failing open, it is failing silently, which
+  is the disease this tier exists to cure. Both now print the offending key to
+  stderr and exit 78 (`EX_CONFIG`). An *absent* config stays legitimate and still
+  defaults silently; `--help` and `--version` still answer under a broken one.
+
+  **Item 12.** `merge_sections` inserted each top-level key wholesale, so a project
+  config setting `[reason] model` destroyed the user's `[reason] url` and `key`.
+  The doc comment admitted it and a test asserted it, which made it an unrecorded
+  decision rather than an oversight. Now `merge_deep` recurses wherever both
+  scopes hold a table; arrays stay leaves, verified rather than assumed —
+  `watcher.roots` and `gossip.peers` are complete lists whose empty case is
+  meaningful, not accumulators. The test asserting the old behaviour was rewritten
+  in place, not deleted.
+
+  Also corrected in the same pass, since both said the opposite of the code the
+  moment it landed: `configure.mdx`'s "Precedence is per-section, not per-key"
+  callout and its "a config that fails validation does not abort startup" line.
+  `docs_check.py` cannot catch that class — it proves a citation exists, never
+  that it still says the thing.
+
+  **Decided by:** fix-the-root. Known-owed and recorded rather than claimed:
+  `serve.mcp_addr` exists as a config field with no reader (`src/commands.rs`),
+  `num_ctx`/`keep_alive`/`num_gpu` cannot warn because they are constants in
+  `src/llm.rs` and not config keys at all, and `src/commands/admin.rs` still
+  swallows a foreign root's config error on the merge path.
+
+- 2026-07-21 — `docs_check.py` now scans every documentation directory, not two
+  of four, and three claims it immediately caught are struck from `FEATURES.md`
+  and `SPECIALISTS.md`. The tool checked `docs/site/content/**.mdx` and
+  `README.md`; `docs/kern/` and `docs/oracle/` — including the roadmap that
+  ranks the work and the feature list that says what exists — were unverified,
+  so the two files whose whole job is to describe reality were the two nothing
+  checked. Extending the scan to 876 references found that `FEATURES.md` claimed
+  a `Dropout` layer at `src/gnn/dropout.rs` and a whole `locks` feature at
+  `src/base/locks.rs` with `read_recovered`/`write_recovered` wrappers "that
+  survive a poisoned lock" — none of which exist in any form, and the last of
+  which is doubly false since `parking_lot` does not poison at all — and that
+  the federation specialist's scope cited `src/wire.rs`, deleted long enough ago
+  that gossip types now live in `src/gossip/types.rs`. Also corrected:
+  `docs/kern/diskann-disk-index.md` cited `src/base/cold.rs` for a cold tier
+  that was absorbed into `src/base/store.rs`; the claim it makes is still true,
+  only the path had moved.
+
+  The extension needed one thing the old tool had no concept of: a citation that
+  is *supposed* to name a file that is gone. A changelog entry recording a
+  deletion must cite the deleted file, and demanding it resolve would mean
+  rewriting the record to satisfy the checker. So `CHANGELOG.md` carries a
+  `<!-- docs-check: historical -->` marker and is skipped whole, and a single
+  line naming a deletion is excused in place — which lets a present-tense file
+  like `ROADMAP.md` say what it removed without either lying or being exempted.
+  Both escapes are pinned by `--selftest`, because an escape nobody tests is a
+  hole nobody sees.
+
+  **Decided by:** verify-before-claiming. A citation nobody checks is a claim
+  nobody verified, and the two files the repo trusts most to describe itself
+  were the ones with no instrument pointed at them. The tool's limitation is
+  stated in its own output rather than left implicit — it proves a cited line
+  exists, never that it still says the thing. Supersedes the previous scope of
+  `scripts/docs_check.py` and roadmap item 74.
+
+- 2026-07-21 — The roadmap is re-founded as one importance-ranked list, and the
+  documentation is reconciled to it. `ORACLE.md` says `ROADMAP.md` holds
+  "decisions ahead, **ordered**"; what it held was nine topical sections grouped
+  by subsystem, inside which nothing said what came first. A reader could learn
+  everything that was open and still not learn what to do next, which is the one
+  question a plan exists to answer. Items are now numbered 1 to 85, item 1 being
+  the most important open thing in the repo, importance falling monotonically
+  from there. Rank is assigned by severity × reach, with sequencing constraints
+  as hard edges — where B cannot precede A, A ranks above B and says so in both
+  entries. Tier headings survive as commentary explaining why a band sits where
+  it does; the number is the plan. Context that is not work — north star,
+  competitive position, non-goals, repo laws — moved below the list, and the
+  `[x]` entries moved into a "Closed and verified — do not re-open" appendix,
+  since a file whose stated job is "what is left" should not open with what is
+  not.
+
+  The reorder was funded by a three-way audit run in parallel over disjoint
+  ground — the docs site, the `FEATURES.md`/`README.md`/`docs/kern/` set, and
+  `src/` — because ordering work by importance is worthless if the inventory is
+  wrong. It was wrong in both directions. **Roughly forty items were appended
+  that no plan had ever held**, most of them documented on the site or in
+  `FEATURES.md`'s own gap blocks as known limitations and funded nowhere: a
+  panicking tick task that silently kills all maintenance for the process
+  lifetime (no `catch_unwind`, dropped `JoinHandle`, and `parking_lot` does not
+  poison, so the graph is left half-written and still readable — now item 2); a
+  fail-open policy with no error surface anywhere; a PageRank power iteration per
+  query; three more superlinear costs inside one GC sweep; an unauthenticated
+  membership-probe oracle on the `Question` path; namespace rotation as unbounded
+  storage; peer authority never built, so the Sybil defences have no signal to
+  weight; and the process gaps that let all of it rot — the oracle's own
+  pre-commit hook is untracked with no installer, so a fresh clone enforces
+  nothing, CI runs neither `fmt` nor `clippy`, and `docs_check.py` scans two of
+  the four documentation directories, leaving `docs/oracle/` and `docs/kern/`
+  citations unchecked. **Four items were factually wrong and are corrected in
+  place, not deleted:** HNSW has no tombstones to compact (`delete` recycles
+  slots via a free list; the real cost is an O(nodes × edges) scan), there is no
+  second typed transport surface to kill (`kern_rpc` is a generic envelope with
+  no DTOs to overlap), standalone `kern mcp` does run its maintenance tick and
+  lacks only gossip, and there is no port-clash validation in `config/serve.rs`
+  for the hub's phase 3 to collapse.
+
+  Reconciled in the same change, at the source of each false claim rather than at
+  the pages that echoed it: the site still published withdrawn LoCoMo and
+  retrieval-bench figures on two pages, still described the prose-archiving
+  data-loss bug fixed the same day in `220af94` — including as a troubleshooting
+  diagnostic that now points the opposite way, since the post-fix symptom is a
+  stuck intake rather than a fast-draining empty one — still told MCP callers to
+  "ingest it as a `Fact`" on a path that clamps confidence below the 1.0 `Fact`
+  needs, still advised seeding a graviton with a whole document when documents
+  truncate at the embed context window, and still called a re-run seed "close to
+  idempotent" against a cosine dedup that any paraphrase evades.
+
+  The same sweep over the rest of the documentation: `README.md` still declared
+  the Delta, Question and Pulse senders dead and the fetch RPC unwired — all four
+  are live, and what is actually missing is anti-entropy — still pinned the
+  version at 1.0.0 against `Cargo.toml`'s 1.1.0, and still stated `as_of`,
+  spill-before-drop and coordinator-free convergence unqualified, each of which
+  this file funds a defect against. `VISION.md`'s opening paragraph still said
+  the daemon "takes in durable facts from sessions on its own" — the exact clause
+  its own test criterion was reworded away from on 2026-07-20 — and its claim
+  criterion still gated on "the recorded baseline", an artifact withdrawn the
+  same day; the criterion now gates on the standard that exists. `FEATURES.md`
+  carried a *plan* for the replacement eval harness, which repo law 4 reserves to
+  this roadmap and which pre-answered an open sub-question of item 1; the plan is
+  stripped and only the present-tense facts remain. It also under-reported the
+  MCP surface as ten tools when eleven exist (`move` was in no table anywhere but
+  the site), omitted `Entity.acl` from a field list claiming to scrape everything
+  that exists, and still ranked a query-cache improvement retired in July. In
+  `docs/kern/`, five research notes contained execution plans, migration stages
+  and phase orderings while the directory's own README declared it holds "never
+  plans"; each is converted to a record of how the design decomposes, with
+  scheduling pointed at roadmap items by title, and four claims stale against
+  current source are corrected — no `PnCounter` exists, `Delta` has a live
+  sender, OR-Set-for-`statements` was reversed rather than deferred, and PQ is a
+  non-goal rather than "the next step". Seven dead relative links across those
+  notes were repaired or dropped. `docs_check.py` passes at 561 references — and
+  note that it verified none of `docs/kern/` or `docs/oracle/`, which is the
+  roadmap item "`docs_check.py` checks two directories out of four".
+
+  Tradeoffs, named. **Item numbers churn on every re-rank**, so every citation
+  from another document must point at an item by title, never by number — the
+  same drift-bait argument that removed a baked reference count from
+  `FEATURES.md`. **A flat list loses subsystem grouping**; track tags plus the
+  fact that dependencies force related items adjacent are the mitigation, and
+  they are weaker than sections were. And the ranking makes one bet explicitly:
+  **federation's security holes sit below the default-path defects because gossip
+  is off by default** — an unauthenticated peer that can LWW a local row is worse
+  in kind than a silently-lying `as_of`, and rarer in practice by the ratio of
+  users who turn gossip on. If that default ever flips, tier 2 and tier 5 move
+  above tier 1 and this entry is the record of why they were not there first.
+
+  Decided by: avoided-question-first (the ordering *is* the avoided question — a
+  file listing sixty open items with no rank has answered everything except which
+  one to do), verify-before-claiming (every unchecked item was re-checked against
+  `src/` before being ranked, which is what surfaced the four wrong ones; no item
+  is ranked on a document's word), fix-the-root (each contradiction corrected in
+  the file that originated it, so the pages that repeated it stop repeating it),
+  name-the-tradeoff (numbering churn, lost grouping, and the gossip-off bet
+  stated above rather than discovered later), parallel-independent-work (three
+  audits over disjoint file sets, because a single pass over four documentation
+  trees and a Rust source tree is one context that runs out). Supersedes the §1–§9
+  topical structure and the "ordered by leverage" note that formerly stood in for
+  a ranking.
+
 - 2026-07-21 — A prose-answering reason model stops silently discarding a delta.
   `distill` returned `Some([])` both when the model emitted a well-formed empty
   JSON array (genuine "nothing worth keeping") and when it replied in prose with
