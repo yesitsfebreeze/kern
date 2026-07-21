@@ -46,7 +46,6 @@ pub(super) async fn cmd_profile(cfg: &crate::config::Config, text: &str, no_llm:
 	let reason_url = cfg.reason_url().to_string();
 	let llm_client = Client::new(
 		Endpoint::new(&reason_url, &cfg.reason.model, cfg.reason_key()),
-		Endpoint::new(cfg.answer_url(), &cfg.answer.model, cfg.answer_key()),
 		Endpoint::new(&cfg.embed.url, &cfg.embed.model, &cfg.embed.key),
 	);
 
@@ -73,14 +72,13 @@ pub(super) async fn cmd_profile(cfg: &crate::config::Config, text: &str, no_llm:
 		(Mode::Reason, "query reason (no llm)"),
 		(Mode::Hybrid, "query hybrid (no llm)"),
 	] {
-		let (_, p) = crate::retrieval::answer::query_profiled(
+		let (_, p) = crate::retrieval::query::query_profiled(
 			&g,
 			&cfg.retrieval,
+			&cfg.heat,
 			&qvec,
 			text,
 			mode,
-			None,
-			None,
 			None,
 		);
 		profiles.push(renamed(p, label));
@@ -92,19 +90,6 @@ pub(super) async fn cmd_profile(cfg: &crate::config::Config, text: &str, no_llm:
 		}
 	} else {
 		let llm_fn: crate::retrieval::LlmFunc = Arc::new(llm_client.complete_func());
-		let embed_fn: crate::retrieval::EmbedFunc = super::embed_fn(&llm_client);
-
-		let (_, p) = crate::retrieval::answer::query_profiled(
-			&g,
-			&cfg.retrieval,
-			&qvec,
-			text,
-			Mode::Hybrid,
-			Some(&llm_fn),
-			Some(&embed_fn),
-			None,
-		);
-		profiles.push(renamed(p, "query hybrid (llm)"));
 
 		let t = Instant::now();
 		let claims = crate::ingest::distill::distill(DISTILL_SAMPLE, &[], &*llm_fn);

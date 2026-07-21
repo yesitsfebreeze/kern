@@ -69,20 +69,4 @@ mod tests {
 		);
 	}
 
-	#[test]
-	fn stale_digest_keys_are_ignored_not_fatal() {
-		let c: IntakeConfig = toml::from_str(
-			r#"
-			poll_secs = 9
-			digest_path = ".kern/digest.md"
-			digest_secs = 30
-			digest_k = 40
-			digest_min_trust = 0.35
-			digest_token_budget = 1500
-			"#,
-		)
-		.expect("pre-removal [intake] section still parses");
-		assert_eq!(c.poll_secs, 9, "live keys still apply");
-		assert!(c.validate().is_ok());
-	}
 }

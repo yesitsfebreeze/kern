@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
 use crate::base::constants;
-use crate::base::heat::HeatConfig;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
@@ -31,7 +30,6 @@ pub struct RetrievalConfig {
 	pub qbst_recency_weight: f64,
 	pub qbst_recency_half_life_secs: u64,
 	pub qbst_cap: f64,
-	pub heat_half_life_secs: u64,
 	pub refine_traversal_weight: f64,
 	pub refine_boost_cap: f64,
 	pub fact_score_boost: f64,
@@ -43,15 +41,6 @@ pub struct RetrievalConfig {
 	pub remote_trust_weight: f64,
 	pub min_deliver_score: f64,
 	pub max_deliver_results: usize,
-	// Facts placed in the answer prompt. Retrieval delivers up to
-	// `max_deliver_results`, so anything below that silently discards evidence
-	// kern already found and ranked.
-	pub answer_max_facts: usize,
-	// Tell the answerer to decline when the context looks insufficient.
-	// Measured 2026-07-20: combined with a small `answer_max_facts` this made the
-	// model abstain on 69% of ANSWERABLE probes — a starved prompt reads as
-	// "the fact does not exist". Off until an A/B shows it earns its place.
-	pub answer_abstain_hint: bool,
 	pub important_min_cosine: f64,
 	pub important_access_threshold: i32,
 	pub weights_content: ModeWeights,
@@ -63,11 +52,6 @@ pub struct RetrievalConfig {
 	pub mmr_enabled: bool,
 	pub mmr_lambda: f64,
 	pub mmr_pool_size: usize,
-	pub rerank_enabled: bool,
-	pub rerank_pool_size: usize,
-	pub hyde_enabled: bool,
-	pub hyde_min_query_tokens: usize,
-	pub hyde_fusion_weight: f64,
 	pub lexical_enabled: bool,
 	pub bm25_k1: f64,
 	pub bm25_b: f64,
@@ -75,8 +59,6 @@ pub struct RetrievalConfig {
 	pub pagerank_damping: f64,
 	pub pagerank_iters: usize,
 	pub pagerank_top_k: usize,
-	pub query_cache_cap: usize,
-	pub query_cache_theta: f64,
 }
 
 impl Default for RetrievalConfig {
@@ -89,7 +71,6 @@ impl Default for RetrievalConfig {
 			qbst_recency_weight: constants::QBST_RECENCY_WEIGHT,
 			qbst_recency_half_life_secs: constants::QBST_RECENCY_HALF_LIFE.as_secs(),
 			qbst_cap: constants::QBST_CAP,
-			heat_half_life_secs: HeatConfig::default().half_life_secs,
 			refine_traversal_weight: constants::REFINE_TRAVERSAL_WEIGHT,
 			refine_boost_cap: constants::REFINE_BOOST_CAP,
 			fact_score_boost: constants::FACT_SCORE_BOOST,
@@ -97,8 +78,6 @@ impl Default for RetrievalConfig {
 			remote_trust_weight: 0.4,
 			min_deliver_score: 0.0,
 			max_deliver_results: 25,
-			answer_max_facts: constants::ANSWER_MAX_THOUGHTS,
-			answer_abstain_hint: false,
 			important_min_cosine: constants::IMPORTANT_MIN_COSINE,
 			important_access_threshold: constants::IMPORTANT_ACCESS_THRESHOLD,
 			weights_content: ModeWeights {
@@ -118,11 +97,6 @@ impl Default for RetrievalConfig {
 			mmr_enabled: true,
 			mmr_lambda: 0.75,
 			mmr_pool_size: 50,
-			rerank_enabled: true,
-			rerank_pool_size: 30,
-			hyde_enabled: true,
-			hyde_min_query_tokens: 6,
-			hyde_fusion_weight: 0.5,
 			lexical_enabled: true,
 			bm25_k1: 1.2,
 			bm25_b: 0.75,
@@ -130,8 +104,6 @@ impl Default for RetrievalConfig {
 			pagerank_damping: 0.85,
 			pagerank_iters: 25,
 			pagerank_top_k: 100,
-			query_cache_cap: constants::QUERY_CACHE_DEFAULT_CAP,
-			query_cache_theta: constants::QUERY_CACHE_DEFAULT_THETA,
 		}
 	}
 }
@@ -152,9 +124,7 @@ impl RetrievalConfig {
 		}
 
 		for (name, v) in [
-			("query_cache_theta", self.query_cache_theta),
 			("mmr_lambda", self.mmr_lambda),
-			("hyde_fusion_weight", self.hyde_fusion_weight),
 			("bm25_b", self.bm25_b),
 			("remote_trust_weight", self.remote_trust_weight),
 		] {
@@ -189,18 +159,6 @@ impl RetrievalConfig {
 		if self.max_deliver_results == 0 {
 			errs.push("max_deliver_results must be >= 1 (0 delivers nothing)".to_string());
 		}
-		if self.answer_max_facts == 0 {
-			errs.push(
-				"answer_max_facts must be >= 1 (0 puts no evidence in the prompt, so every answer abstains)"
-					.to_string(),
-			);
-		}
-		if self.answer_max_facts > self.max_deliver_results {
-			errs.push(format!(
-				"answer_max_facts ({}) exceeds max_deliver_results ({}) — retrieval never delivers that many, so the extra is dead",
-				self.answer_max_facts, self.max_deliver_results,
-			));
-		}
 
 		errs
 	}
@@ -230,24 +188,6 @@ mod tests {
 	}
 
 	#[test]
-	fn out_of_range_unit_interval_fields_are_flagged() {
-		let cfg = RetrievalConfig {
-			query_cache_theta: 1.5,
-			mmr_lambda: -0.1,
-			..Default::default()
-		};
-		let errs = cfg.validate();
-		assert!(
-			errs.iter().any(|e| e.contains("query_cache_theta")),
-			"got {errs:?}"
-		);
-		assert!(
-			errs.iter().any(|e| e.contains("mmr_lambda")),
-			"got {errs:?}"
-		);
-	}
-
-	#[test]
 	fn out_of_range_bm25_params_are_flagged() {
 		let bad_b = RetrievalConfig {
 			bm25_b: 2.0,
@@ -265,41 +205,6 @@ mod tests {
 		assert!(
 			neg_k1.validate().iter().any(|e| e.contains("bm25_k1")),
 			"negative bm25_k1"
-		);
-	}
-
-	#[test]
-	fn answer_fact_budget_is_bounded_by_what_retrieval_delivers() {
-		let none = RetrievalConfig {
-			answer_max_facts: 0,
-			..Default::default()
-		};
-		assert!(
-			none
-				.validate()
-				.iter()
-				.any(|e| e.contains("answer_max_facts")),
-			"0 facts means every answer abstains"
-		);
-
-		let over = RetrievalConfig {
-			answer_max_facts: 40,
-			max_deliver_results: 25,
-			..Default::default()
-		};
-		assert!(
-			over.validate().iter().any(|e| e.contains("dead")),
-			"asking for more facts than retrieval delivers is a config error"
-		);
-
-		let ok = RetrievalConfig {
-			answer_max_facts: 25,
-			max_deliver_results: 25,
-			..Default::default()
-		};
-		assert!(
-			!ok.validate().iter().any(|e| e.contains("answer_max_facts")),
-			"using the full delivered set is valid"
 		);
 	}
 

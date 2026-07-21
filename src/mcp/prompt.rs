@@ -52,9 +52,9 @@ pub(crate) fn handle_prompt_get(
 						"content": {
 							"type": "text",
 							"text": format!(
-								"Use the kern knowledge graph to answer questions about: {topic}\n\n\
+								"Use the kern knowledge graph to recall what is known about: {topic}\n\n\
 								1. Use {q}(\"{topic}\") to see what's already known\n\
-								2. Use {q}(\"{topic}\", answer=true) to get a synthesized answer\n\
+								2. Read the passages and chains yourself — kern does no synthesis\n\
 								3. If knowledge is lacking, use {ing} to add relevant text",
 								q = QUERY_TOOL,
 								ing = INGEST_TOOL,

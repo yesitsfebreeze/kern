@@ -101,7 +101,7 @@ fn process_task(q: &Queue, g: &Arc<RwLock<GraphGnn>>, t: &Task, ctx: &TickContex
 		TaskKind::IdleSweep => {
 			idle::run_idle_sweep(g, Duration::from_secs(ctx.tick_cfg.kern_idle_timeout_secs));
 		}
-		TaskKind::CommitAccess => do_commit_access(g, &t.extra),
+		TaskKind::CommitAccess => do_commit_access(g, &t.extra, &ctx.heat_cfg),
 	}
 }
 

@@ -44,7 +44,6 @@ pub(crate) fn mcp_server() -> crate::mcp::Server {
 		save_fn: Arc::new(|| {}),
 		task_q: None,
 		cfg: Arc::new(crate::config::Config::default()),
-		cache: crate::retrieval::cache::QueryCache::default_shared(),
 		broadcast_pulse: None,
 		last_activity: Arc::new(std::sync::atomic::AtomicU64::new(
 			crate::base::util::now_ms(),

@@ -157,7 +157,6 @@ pub(super) async fn cmd_link(
 
 	let llm_client = Client::new(
 		Endpoint::new(reason_url, reason_model, cfg.reason_key()),
-		Endpoint::default(),
 		Endpoint::new(embed_url, embed_model, &cfg.embed.key),
 	);
 	let mut reason_text = reason.to_string();

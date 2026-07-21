@@ -8,7 +8,7 @@ deterministic, so the same corpus produces the same number on every machine and
 every run.
 
 What this measures is kern's retrieval stack — seeding, graph expansion, fusion,
-reranking, delivery — over a fixed lexical signal. It does NOT measure semantic
+ranking, delivery — over a fixed lexical signal. It does NOT measure semantic
 embedding quality: the fake embedder has none, by design, because a real one
 would make the number a property of the model rather than of kern. So this is a
 regression detector. It cannot say kern is good; it can say kern got worse.

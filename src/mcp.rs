@@ -8,7 +8,7 @@ mod tools_query;
 mod tools_setup;
 
 use std::io::{BufReader, Read, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use parking_lot::RwLock;
 
@@ -19,7 +19,6 @@ use crate::base::graph::GraphGnn;
 use crate::config::Config;
 use crate::ingest;
 use crate::llm;
-use crate::retrieval::cache::QueryCache;
 use crate::tick;
 
 #[derive(Serialize)]
@@ -51,7 +50,6 @@ pub struct Server {
 	pub save_fn: Arc<dyn Fn() + Send + Sync>,
 	pub task_q: Option<Arc<tick::queue::Queue>>,
 	pub cfg: Arc<Config>,
-	pub cache: Arc<Mutex<QueryCache>>,
 	pub broadcast_pulse: Option<PulseBroadcast>,
 	// Epoch ms of the last real tool call (health polls excluded, or the hub's
 	// own idle probe would keep every node alive forever). Seeded at boot so a

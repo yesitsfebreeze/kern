@@ -20,7 +20,6 @@ struct Tuning {
 	seed_k: usize,
 	max_expansions: usize,
 	max_deliver_results: usize,
-	answer_max_facts: usize,
 }
 
 impl Preset {
@@ -32,7 +31,6 @@ impl Preset {
 				seed_k: 25,
 				max_expansions: 800,
 				max_deliver_results: 40,
-				answer_max_facts: 8,
 			},
 			Self::Medium => Tuning {
 				half_life_secs: 7 * 24 * 60 * 60,
@@ -40,7 +38,6 @@ impl Preset {
 				seed_k: 15,
 				max_expansions: 500,
 				max_deliver_results: 25,
-				answer_max_facts: 5,
 			},
 			Self::Tight => Tuning {
 				half_life_secs: 3 * 24 * 60 * 60,
@@ -48,7 +45,6 @@ impl Preset {
 				seed_k: 10,
 				max_expansions: 250,
 				max_deliver_results: 12,
-				answer_max_facts: 4,
 			},
 		}
 	}
@@ -56,12 +52,10 @@ impl Preset {
 	pub(crate) fn apply(&self, cfg: &mut Config) {
 		let t = self.tuning();
 		cfg.heat.half_life_secs = t.half_life_secs;
-		cfg.retrieval.heat_half_life_secs = t.half_life_secs;
 		cfg.ingest.dedup_threshold = t.dedup_threshold;
 		cfg.retrieval.seed_k = t.seed_k;
 		cfg.retrieval.max_expansions = t.max_expansions;
 		cfg.retrieval.max_deliver_results = t.max_deliver_results;
-		cfg.retrieval.answer_max_facts = t.answer_max_facts;
 	}
 }
 
@@ -96,7 +90,6 @@ mod tests {
 		assert_eq!(t.seed_k, r.seed_k);
 		assert_eq!(t.max_expansions, r.max_expansions);
 		assert_eq!(t.max_deliver_results, r.max_deliver_results);
-		assert_eq!(t.answer_max_facts, r.answer_max_facts);
 	}
 
 	#[test]
@@ -110,17 +103,6 @@ mod tests {
 		assert!(t.retrieval.max_deliver_results < m.retrieval.max_deliver_results);
 		assert!(r.ingest.dedup_threshold > m.ingest.dedup_threshold);
 		assert!(t.ingest.dedup_threshold < m.ingest.dedup_threshold);
-	}
-
-	#[test]
-	fn heat_half_life_stays_consistent_between_the_two_places_it_lives() {
-		for p in [Preset::Relaxed, Preset::Medium, Preset::Tight] {
-			let cfg = applied(p);
-			assert_eq!(
-				cfg.heat.half_life_secs, cfg.retrieval.heat_half_life_secs,
-				"{p:?} must set both copies of the half-life"
-			);
-		}
 	}
 
 	#[test]

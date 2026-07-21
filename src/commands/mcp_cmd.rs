@@ -421,10 +421,6 @@ async fn run_standalone(cfg: &crate::config::Config) {
 		save_fn,
 		task_q: Some(q),
 		cfg: Arc::new(cfg.clone()),
-		cache: crate::retrieval::cache::QueryCache::shared(
-			cfg.retrieval.query_cache_cap,
-			cfg.retrieval.query_cache_theta,
-		),
 		broadcast_pulse: None,
 		last_activity: Arc::new(std::sync::atomic::AtomicU64::new(
 			crate::base::util::now_ms(),

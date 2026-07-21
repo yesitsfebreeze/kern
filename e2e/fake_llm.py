@@ -4,7 +4,7 @@ Serves the native API kern speaks to a localhost URL without /v1:
 - POST /api/embed  -> feature-hashed bag-of-words vectors; token overlap
   yields real cosine similarity, so retrieval ranking is meaningful.
 - POST /api/chat   -> echoes the last user message back as the completion,
-  so an answer test can assert the retrieved context reached the prompt.
+  so a test can assert what reached any chat-completion prompt.
 """
 
 import hashlib

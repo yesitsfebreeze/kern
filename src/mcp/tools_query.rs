@@ -3,15 +3,13 @@ use serde::Deserialize;
 use crate::base::search::find_entity;
 use crate::base::types::EntityKind;
 use crate::base::util::truncate;
-use std::sync::Arc;
 
 use crate::retrieval;
-use crate::types::{EmbedFunc, LlmFunc};
 
 pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 	vec![serde_json::json!({
 		"name": "query",
-		"description": "Search the knowledge graph. Returns scored thoughts and optionally an LLM answer. Requires at least one of `text` (semantic/lexical search) or `id` (direct lookup).",
+		"description": "Search the knowledge graph. Returns scored thoughts with edges and path chains — no synthesis: the calling agent reads the passages and synthesizes. Requires at least one of `text` (semantic/lexical search) or `id` (direct lookup).",
 		"inputSchema": {
 			"type": "object",
 			// Mirrors tool_query's runtime "either text or id is required" guard.
@@ -24,15 +22,16 @@ pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 				"id":        {"type": "string", "description": "thought ID for direct lookup"},
 				"k":         {"type": "integer", "description": "number of results (default 5)"},
 				"mode":      {"type": "string", "enum": ["content", "reason", "hybrid"], "description": "retrieval mode (default hybrid)"},
-				"answer":    {"type": "boolean", "description": "synthesize an LLM answer"},
 				"sort":      {"type": "string", "enum": ["", "date", "access", "confidence"], "description": "sort key"},
 				"ascending": {"type": "boolean", "description": "sort ascending (default false)"},
 				"source":    {"type": "string", "description": "filter by source system"},
-				"kind":      {"type": "string", "enum": ["", "normal", "fact", "document"], "description": "filter by thought kind"},
+				"kind":      {"type": "string", "enum": ["", "fact", "claim", "document", "question", "conclusion"], "description": "filter by thought kind"},
 				"since":     {"type": "string", "description": "ISO8601 timestamp; only include thoughts at or after this time"},
 				"before":    {"type": "string", "description": "ISO8601 timestamp; only include thoughts before this time"},
 				"min_conf":  {"type": "number", "description": "minimum confidence 0.0-1.0"},
 				"as_of":     {"type": "string", "description": "ISO8601 timestamp; bi-temporal point query — return only the revision whose validity window [valid_from, valid_to) covered this instant"},
+				"valid_at":  {"type": "string", "description": "ISO8601 timestamp; only include thoughts whose valid_until (TTL) has not passed at this instant"},
+				"scheme":    {"type": "string", "enum": ["file", "ticket", "session", "agent", "inline"], "description": "filter by source scheme"},
 				"include_history": {"type": "boolean", "description": "also return superseded (invalidated) revisions reachable from the active hits, flagged history:true"},
 			},
 		},
@@ -84,14 +83,12 @@ struct QueryArgs {
 	#[serde(default)]
 	mode: String,
 	#[serde(default)]
-	answer: bool,
-	#[serde(default)]
 	sort: String,
 	#[serde(default)]
 	ascending: bool,
 	#[serde(default)]
 	source: String,
-	#[serde(default)]
+	#[serde(default, deserialize_with = "de_kind")]
 	kind: Option<EntityKind>,
 	#[serde(default)]
 	scheme: Option<String>,
@@ -107,6 +104,18 @@ struct QueryArgs {
 	as_of: String,
 	#[serde(default)]
 	include_history: bool,
+}
+
+// The filter takes the stable lowercase labels (`EntityKind::as_str`), not the
+// Rust variant names serde derive would expect.
+fn de_kind<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<EntityKind>, D::Error> {
+	let s = Option::<String>::deserialize(d)?;
+	match s.as_deref() {
+		None | Some("") => Ok(None),
+		Some(v) => EntityKind::parse(v)
+			.map(Some)
+			.ok_or_else(|| serde::de::Error::custom(format!("unknown kind: {v}"))),
+	}
 }
 
 impl Server {
@@ -138,103 +147,42 @@ impl Server {
 		};
 
 		let mode = retrieval::seed::Mode::parse(&p.mode);
-		let answer_on = p.answer;
 		let rcfg = &self.cfg.retrieval;
 
-		let cacheable = query_is_cacheable(answer_on, rcfg.query_cache_cap, &p);
-		let tag = mode as u64;
-		let text_hash = retrieval::cache::hash_text(&p.text);
-
-		let text_hit = if cacheable {
-			let g = self.graph.read();
-			self
-				.cache
-				.lock()
-				.ok()
-				.and_then(|mut c| c.lookup_text(&g, text_hash, tag))
-		} else {
-			None
+		let vec = match crate::llm::block_on_in_place(llm.embed(&p.text)) {
+			Some(Ok(v)) => v,
+			Some(Err(e)) => return tool_error(&format!("embed failed: {e}")),
+			None => return tool_error("no tokio runtime"),
 		};
 
-		let (result, vec): (_, Option<Vec<f32>>) = if let Some(hit) = text_hit {
-			(hit, None)
-		} else {
-			let vec = match crate::llm::block_on_in_place(llm.embed(&p.text)) {
-				Some(Ok(v)) => v,
-				Some(Err(e)) => return tool_error(&format!("embed failed: {e}")),
-				None => return tool_error("no tokio runtime"),
-			};
-
-			let complete = llm.complete_func();
-			let llm_fn: LlmFunc = Arc::new(complete);
-			let llm_embed = llm.clone();
-			let embed_fn: EmbedFunc =
-				Arc::new(
-					move |s: &str| match crate::llm::block_on_in_place(llm_embed.embed(s)) {
-						Some(r) => r.map_err(|e| e.to_string()),
-						None => Err("no tokio runtime".to_string()),
-					},
-				);
-
-			let opts = match build_query_options(&p) {
-				Ok(o) => o,
-				Err(e) => return tool_error(&e),
-			};
-
-			let (llm_arg, embed_arg) = answer_llm_args(answer_on, &llm_fn, &embed_fn);
-
-			// query_locked runs HyDE/rerank/answer with the read lock RELEASED — a slow
-			// LLM must never pin it (starves writers, trips the 30s watchdog).
-			let cached = if cacheable {
-				let g = self.graph.read();
-				self
-					.cache
-					.lock()
-					.ok()
-					.and_then(|mut c| c.lookup(&g, &vec, tag))
-			} else {
-				None
-			};
-			let result = match cached {
-				Some(hit) => hit,
-				None => {
-					let (fresh, epoch) = retrieval::answer::query_locked(
-						&self.graph,
-						rcfg,
-						&vec,
-						&p.text,
-						mode,
-						llm_arg,
-						embed_arg,
-						Some(opts),
-					);
-					if cacheable {
-						// Stamp with the epoch captured at retrieval time, not the live one —
-						// a write during the LLM phase then invalidates this entry.
-						if let Ok(mut c) = self.cache.lock() {
-							c.insert(epoch, text_hash, vec.clone(), tag, fresh.clone());
-						}
-					}
-					// query_locked took only a read lock; access stamps commit off the hot
-					// path via CommitAccess (advisory, skipped without a queue).
-					if let Some(ref q) = self.task_q {
-						let ids: Vec<String> = fresh.entities.iter().map(|s| s.entity.id.clone()).collect();
-						if !ids.is_empty() {
-							q.enqueue(crate::tick::queue::task_commit_access(&ids));
-						}
-					}
-					fresh
-				}
-			};
-			(result, Some(vec))
+		let opts = match build_query_options(&p) {
+			Ok(o) => o,
+			Err(e) => return tool_error(&e),
 		};
+
+		let result = retrieval::query::query_locked(
+			&self.graph,
+			rcfg,
+			&self.cfg.heat,
+			&vec,
+			&p.text,
+			mode,
+			Some(opts),
+		);
+		// query_locked took only a read lock; access stamps commit off the hot
+		// path via CommitAccess (advisory, skipped without a queue).
+		if let Some(ref q) = self.task_q {
+			let ids: Vec<String> = result
+				.entities
+				.iter()
+				.map(|s| s.entity.id.clone())
+				.collect();
+			if !ids.is_empty() {
+				q.enqueue(crate::tick::queue::task_commit_access(&ids));
+			}
+		}
+		let vec = Some(vec);
 		(self.save_fn)();
-
-		let answer_str = if answer_on {
-			result.answer.clone()
-		} else {
-			String::new()
-		};
 
 		let k = if p.k == 0 { rcfg.seed_k } else { p.k };
 
@@ -340,23 +288,7 @@ impl Server {
 				.collect()
 		};
 
-		let mut out = serde_json::json!({"entities": entities});
-		if !answer_str.is_empty() {
-			out["answer"] = serde_json::Value::String(answer_str);
-		}
-		tool_result_json(&out)
-	}
-}
-
-fn answer_llm_args<'a>(
-	answer: bool,
-	llm: &'a LlmFunc,
-	embed: &'a EmbedFunc,
-) -> (Option<&'a LlmFunc>, Option<&'a EmbedFunc>) {
-	if answer {
-		(Some(llm), Some(embed))
-	} else {
-		(None, None)
+		tool_result_json(&serde_json::json!({"entities": entities}))
 	}
 }
 
@@ -414,49 +346,6 @@ pub(super) fn base_entity_json(
 		"scheme": entity.source.scheme(),
 		"status": status_str,
 	})
-}
-
-// Only unfiltered, default-sorted, answer-on queries may cache — any filter/sort
-// changes the result set/order for the same query vector.
-fn query_is_cacheable(answer: bool, cache_cap: usize, p: &QueryArgs) -> bool {
-	answer
-		&& cache_cap > 0
-		&& p.kind.is_none()
-		&& p.scheme.is_none()
-		&& p.source.is_empty()
-		&& p.since.is_empty()
-		&& p.before.is_empty()
-		&& p.valid_at.is_empty()
-		&& p.as_of.is_empty()
-		&& !p.include_history
-		&& p.min_conf == 0.0
-		&& p.sort.is_empty()
-		&& !p.ascending
-}
-
-#[cfg(test)]
-mod answer_gating_tests {
-	use super::answer_llm_args;
-	use crate::types::{EmbedFunc, LlmFunc};
-	use std::sync::Arc;
-
-	#[test]
-	fn answer_false_passes_no_llm_or_embedder() {
-		let llm: LlmFunc = Arc::new(|_: &str| String::new());
-		let embed: EmbedFunc = Arc::new(|_: &str| Ok(Vec::new()));
-		let (l, e) = answer_llm_args(false, &llm, &embed);
-		assert!(l.is_none(), "answer:false must not pass an LLM");
-		assert!(e.is_none(), "answer:false must not pass an embedder");
-	}
-
-	#[test]
-	fn answer_true_passes_llm_and_embedder() {
-		let llm: LlmFunc = Arc::new(|_: &str| String::new());
-		let embed: EmbedFunc = Arc::new(|_: &str| Ok(Vec::new()));
-		let (l, e) = answer_llm_args(true, &llm, &embed);
-		assert!(l.is_some(), "answer:true must pass an LLM");
-		assert!(e.is_some(), "answer:true must pass an embedder");
-	}
 }
 
 #[cfg(test)]
@@ -522,7 +411,6 @@ mod envelope_shape_tests {
 			EntityKind::Claim,
 			EntityKind::Document,
 			EntityKind::Question,
-			EntityKind::Answer,
 			EntityKind::Conclusion,
 		] {
 			let ent = entity_with(k, EntityStatus::Active, Source::default());
@@ -552,57 +440,5 @@ mod time_filter_tests {
 	fn nonempty_malformed_is_hard_error() {
 		let e = parse_time_filter("valid_at", "20XX-06-05T09:00:00Z").unwrap_err();
 		assert!(e.contains("valid_at"), "error names the field: {e}");
-	}
-}
-
-#[cfg(test)]
-mod cacheable_tests {
-	use super::{query_is_cacheable, QueryArgs};
-	use crate::base::types::EntityKind;
-
-	#[test]
-	fn plain_answer_query_is_cacheable() {
-		let p = QueryArgs::default();
-		assert!(
-			query_is_cacheable(true, 256, &p),
-			"unfiltered, default-sorted answer query caches"
-		);
-	}
-
-	#[test]
-	fn answer_off_or_disabled_cache_is_not_cacheable() {
-		let p = QueryArgs::default();
-		assert!(
-			!query_is_cacheable(false, 256, &p),
-			"answer:false is never cached"
-		);
-		assert!(
-			!query_is_cacheable(true, 0, &p),
-			"cache_cap 0 disables caching"
-		);
-	}
-
-	#[test]
-	fn any_filter_or_nondefault_sort_disables_caching() {
-		type Mutator = fn(&mut QueryArgs);
-		let cases: Vec<(&str, Mutator)> = vec![
-			("source", |p| p.source = "github".into()),
-			("kind", |p| p.kind = Some(EntityKind::Fact)),
-			("scheme", |p| p.scheme = Some("file".into())),
-			("since", |p| p.since = "2026-01-01T00:00:00Z".into()),
-			("before", |p| p.before = "2026-01-01T00:00:00Z".into()),
-			("valid_at", |p| p.valid_at = "2026-01-01T00:00:00Z".into()),
-			("min_conf", |p| p.min_conf = 0.5),
-			("sort", |p| p.sort = "date".into()),
-			("ascending", |p| p.ascending = true),
-		];
-		for (name, mutate) in cases {
-			let mut p = QueryArgs::default();
-			mutate(&mut p);
-			assert!(
-				!query_is_cacheable(true, 256, &p),
-				"`{name}` set must disable caching"
-			);
-		}
 	}
 }

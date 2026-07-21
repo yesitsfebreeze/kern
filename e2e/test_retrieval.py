@@ -1,5 +1,5 @@
 """Answer-retrieval e2e: ingest facts through the real binary, then assert
-search, query and the answer path surface the right one. LLM legs are served
+search and query surface the right one. The embed leg is served
 by the deterministic fake in fake_llm.py, so ranking is real cosine ranking."""
 
 from ranking import hits, ingest_all
@@ -58,13 +58,3 @@ def test_query_ranks_the_matching_fact_first(project):
 			f"wrong top hit for {probe!r}: {ranked}"
 		)
 
-
-def test_answer_prompt_carries_the_retrieved_fact(project):
-	# The fake answer model echoes its prompt, so the retrieved context
-	# reaching the answer leg is directly observable in stdout.
-	ingest_facts(project)
-	stdout, stderr = project.run("query", "where does ada store her bicycle", "--answer")
-	assert "--- Answer ---" in stdout, f"no answer section: out={stdout} err={stderr}"
-	answer = stdout.split("--- Answer ---", 1)[1]
-	assert "garden shed" in answer, f"retrieved fact missing from answer prompt: {answer}"
-	assert "where does ada store her bicycle" in answer.lower()

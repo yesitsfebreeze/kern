@@ -40,7 +40,6 @@ class KernProject:
 		(self.cwd / ".kern" / "kern.toml").write_text(
 			f'[embed]\nurl = "{llm_url}"\nmodel = "fake-embed"\n\n'
 			f'[reason]\nurl = "{llm_url}"\nmodel = "fake-reason"\n\n'
-			f'[answer]\nurl = "{llm_url}"\nmodel = "fake-answer"\n'
 		)
 		self.env = os.environ | {
 			"XDG_RUNTIME_DIR": str(self.runtime),

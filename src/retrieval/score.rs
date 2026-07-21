@@ -45,7 +45,6 @@ pub struct QueryOptions {
 	// Superseded-history walk done at the tool layer, NOT a per-entity filter (the ANN never holds superseded entities).
 	pub include_history: bool,
 	// Appended to the synthesis prompt only — never a retrieval filter, so is_active() ignores it.
-	pub answer_style: Option<String>,
 }
 
 impl QueryOptions {
@@ -260,11 +259,10 @@ pub fn apply_query_options<T: Scored>(results: &mut Vec<T>, opts: &QueryOptions)
 	}
 }
 
-pub fn commit_access(results: &mut [ScoredEntity]) {
+pub fn commit_access(results: &mut [ScoredEntity], heat_cfg: &HeatConfig) {
 	let now = SystemTime::now();
-	let half_life_secs = HeatConfig::default().half_life_secs;
 	for r in results.iter_mut() {
-		stamp_access(&mut r.entity, now, half_life_secs);
+		stamp_access(&mut r.entity, now, heat_cfg);
 	}
 }
 
@@ -276,7 +274,7 @@ pub fn commit_access(results: &mut [ScoredEntity]) {
 //
 // Returns false when the stamp was suppressed, so a caller can skip the work it
 // would otherwise do on the back of it.
-fn stamp_access(e: &mut Entity, now: SystemTime, half_life_secs: u64) -> bool {
+fn stamp_access(e: &mut Entity, now: SystemTime, heat_cfg: &HeatConfig) -> bool {
 	let throttled = e
 		.accessed_at
 		.is_some_and(|last| now.duration_since(last).is_ok_and(|d| d < ACCESS_COOLDOWN));
@@ -294,17 +292,16 @@ fn stamp_access(e: &mut Entity, now: SystemTime, half_life_secs: u64) -> bool {
 		e.heat,
 		e.heat_updated_at,
 		now,
-		half_life_secs,
-		HeatConfig::default().deposit_access,
+		heat_cfg.half_life_secs,
+		heat_cfg.deposit_access,
 	);
 	e.heat_updated_at = Some(now);
 	true
 }
 
 // Goes through `kerns` directly, NOT `get_mut`: an access stamp must not bump the mutation epoch (it would invalidate the query cache).
-pub fn commit_access_ids(g: &mut GraphGnn, ids: &[String]) {
+pub fn commit_access_ids(g: &mut GraphGnn, ids: &[String], heat_cfg: &HeatConfig) {
 	let now = SystemTime::now();
-	let half_life_secs = HeatConfig::default().half_life_secs;
 	for id in ids {
 		let Some(kern_id) = g.kern_of_entity(id).map(str::to_string) else {
 			continue;
@@ -319,7 +316,7 @@ pub fn commit_access_ids(g: &mut GraphGnn, ids: &[String]) {
 			} else {
 				e.producer_id.clone()
 			};
-			if !stamp_access(e, now, half_life_secs) {
+			if !stamp_access(e, now, heat_cfg) {
 				continue;
 			}
 			let value = e.access_count.slots().get(&replica).copied().unwrap_or(0);
@@ -565,7 +562,7 @@ mod query_filter_tests {
 		g.index_entity("a", "k");
 		let epoch_before = g.mutation_epoch();
 
-		commit_access_ids(&mut g, &["a".to_string()]);
+		commit_access_ids(&mut g, &["a".to_string()], &HeatConfig::default());
 
 		let live = g.kerns.get("k").unwrap().entities.get("a").unwrap();
 		assert!(
@@ -584,7 +581,7 @@ mod query_filter_tests {
 	#[test]
 	fn commit_access_ids_skips_ids_unknown_to_the_graph() {
 		let mut g = GraphGnn::new();
-		commit_access_ids(&mut g, &["ghost".to_string()]);
+		commit_access_ids(&mut g, &["ghost".to_string()], &HeatConfig::default());
 	}
 
 	#[test]
@@ -640,7 +637,7 @@ mod query_filter_tests {
 		use super::*;
 		use crate::base::merge::merge_remote_entity;
 		use crate::base::types::{mk_entity, Kern};
-		use crate::retrieval::answer::retrieve;
+		use crate::retrieval::query::retrieve;
 		use crate::retrieval::seed::{Mode, Weights};
 
 		const PHANTOM: &str = "remote-evilnet-k1";
@@ -955,15 +952,15 @@ mod query_filter_tests {
 	fn replaying_a_query_cannot_pump_one_thoughts_access_count() {
 		let mut e = ent("hot", EntityKind::Claim, file_src("/a")).entity;
 		let now = SystemTime::now();
-		let hl = HeatConfig::default().half_life_secs;
+		let hl = HeatConfig::default();
 
-		assert!(stamp_access(&mut e, now, hl), "the first access counts");
+		assert!(stamp_access(&mut e, now, &hl), "the first access counts");
 		let after_first = e.access_count.value_i32();
 		let heat_after_first = e.heat;
 
 		for _ in 0..50 {
 			assert!(
-				!stamp_access(&mut e, now, hl),
+				!stamp_access(&mut e, now, &hl),
 				"a replay inside the window is suppressed"
 			);
 		}
@@ -979,15 +976,15 @@ mod query_filter_tests {
 	#[test]
 	fn genuine_reuse_after_the_window_still_counts() {
 		let mut e = ent("used", EntityKind::Claim, file_src("/a")).entity;
-		let hl = HeatConfig::default().half_life_secs;
+		let hl = HeatConfig::default();
 		let now = SystemTime::now();
 
-		assert!(stamp_access(&mut e, now, hl));
+		assert!(stamp_access(&mut e, now, &hl));
 		let first = e.access_count.value_i32();
 
 		let later = now + ACCESS_COOLDOWN + Duration::from_secs(1);
 		assert!(
-			stamp_access(&mut e, later, hl),
+			stamp_access(&mut e, later, &hl),
 			"use outside the window is real use, not a replay"
 		);
 		assert_eq!(e.access_count.value_i32(), first + 1);
@@ -997,10 +994,6 @@ mod query_filter_tests {
 	fn a_never_accessed_thought_is_not_throttled() {
 		let mut e = ent("fresh", EntityKind::Claim, file_src("/a")).entity;
 		assert!(e.accessed_at.is_none(), "precondition");
-		assert!(stamp_access(
-			&mut e,
-			SystemTime::now(),
-			HeatConfig::default().half_life_secs
-		));
+		assert!(stamp_access(&mut e, SystemTime::now(), &HeatConfig::default()));
 	}
 }

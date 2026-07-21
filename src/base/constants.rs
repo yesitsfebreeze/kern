@@ -61,9 +61,6 @@ pub const REFINE_BOOST_CAP: f64 = 0.1;
 pub const IMPORTANT_MIN_COSINE: f64 = 0.20;
 pub const IMPORTANT_ACCESS_THRESHOLD: i32 = 3;
 
-pub const QUERY_CACHE_DEFAULT_CAP: usize = 256;
-pub const QUERY_CACHE_DEFAULT_THETA: f64 = 0.97;
-
 pub const FACT_SCORE_BOOST: f64 = 0.3;
 
 pub const DEFAULT_CONFIDENCE: f64 = 0.5;
@@ -72,8 +69,7 @@ pub const FACT_CONFIDENCE: f64 = 1.0;
 
 pub const PROVENANCE_SCORE: f64 = 0.85;
 
-pub const ANSWER_MAX_CHAINS: usize = 5;
-pub const ANSWER_MAX_THOUGHTS: usize = 5;
+pub const QUERY_MAX_CHAINS: usize = 5;
 
 pub const DEGRADE_DECAY_BASE: f64 = 0.15;
 pub const DEGRADE_DECAY_POW: f64 = 0.75;

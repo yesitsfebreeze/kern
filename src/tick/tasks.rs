@@ -10,6 +10,7 @@ use crate::base::constants::{
 	QUESTION_RESOLVE_THRESHOLD,
 };
 use crate::base::graph::GraphGnn;
+use crate::base::heat::HeatConfig;
 use crate::base::math::reason_id;
 use crate::base::reason::{add_reason, remove_reason};
 use crate::base::search::search_all_unlocked;
@@ -444,7 +445,7 @@ pub fn do_disk_consolidate(g: &Arc<RwLock<GraphGnn>>) {
 	g.write().consolidate_disk_index();
 }
 
-pub fn do_commit_access(g: &Arc<RwLock<GraphGnn>>, extra: &str) {
+pub fn do_commit_access(g: &Arc<RwLock<GraphGnn>>, extra: &str, heat_cfg: &HeatConfig) {
 	let ids: Vec<String> = extra
 		.lines()
 		.filter(|l| !l.is_empty())
@@ -453,7 +454,7 @@ pub fn do_commit_access(g: &Arc<RwLock<GraphGnn>>, extra: &str) {
 	if ids.is_empty() {
 		return;
 	}
-	crate::retrieval::score::commit_access_ids(&mut g.write(), &ids);
+	crate::retrieval::score::commit_access_ids(&mut g.write(), &ids, heat_cfg);
 }
 
 pub fn do_persist(g: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
@@ -755,7 +756,7 @@ mod tests {
 		let epoch_before = g.mutation_epoch();
 		let g = Arc::new(RwLock::new(g));
 
-		do_commit_access(&g, "a");
+		do_commit_access(&g, "a", &HeatConfig::default());
 
 		let gg = g.read();
 		let live = gg.kerns.get(&kid).unwrap().entities.get("a").unwrap();

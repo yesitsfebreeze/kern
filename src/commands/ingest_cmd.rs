@@ -42,7 +42,6 @@ pub(super) async fn cmd_ingest(
 	let g = Arc::new(RwLock::new(load_graph(cfg)));
 	let llm_client = Client::new(
 		Endpoint::new(reason_url, reason_model, reason_key),
-		Endpoint::default(),
 		Endpoint::new(embed_url, embed_model, embed_key),
 	);
 	let worker = crate::ingest::Worker::new(g.clone(), llm_client, None, None, None);

@@ -1,4 +1,3 @@
-mod answer;
 pub mod detached_log;
 mod embed;
 mod gnn;
@@ -17,7 +16,6 @@ mod serve;
 mod tick;
 mod watcher;
 
-pub use answer::{AnswerConfig, DEFAULT_ANSWER_MODEL};
 pub use embed::{EmbedConfig, DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL};
 pub use gnn::GnnConfig;
 pub use gossip::GossipConfig;
@@ -46,7 +44,6 @@ pub struct Config {
 	pub preset: Preset,
 	pub embed: EmbedConfig,
 	pub reason: ReasonConfig,
-	pub answer: AnswerConfig,
 	pub serve: ServeConfig,
 	pub retrieval: RetrievalConfig,
 	pub ingest: IngestConfig,
@@ -90,7 +87,6 @@ impl Config {
 			preset: Preset::default(),
 			embed: EmbedConfig::default(),
 			reason: ReasonConfig::default(),
-			answer: AnswerConfig::default(),
 			serve: ServeConfig::default(),
 			retrieval: RetrievalConfig::default(),
 			ingest: IngestConfig::default(),
@@ -197,22 +193,6 @@ impl Config {
 			&self.embed.key
 		} else {
 			&self.reason.key
-		}
-	}
-
-	pub fn answer_url(&self) -> &str {
-		if self.answer.url.is_empty() {
-			self.reason_url()
-		} else {
-			&self.answer.url
-		}
-	}
-
-	pub fn answer_key(&self) -> &str {
-		if self.answer.key.is_empty() {
-			self.reason_key()
-		} else {
-			&self.answer.key
 		}
 	}
 }

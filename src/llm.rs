@@ -1,4 +1,3 @@
-use futures_util::StreamExt as _;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -37,12 +36,6 @@ fn should_retry_single(err: &LlmError) -> bool {
 	is_transient(err) || matches!(err, LlmError::EmptyEmbedding)
 }
 
-pub struct AnswerParams {
-	pub messages: Vec<(String, String)>,
-	pub stream: bool,
-	pub num_predict: Option<u64>,
-}
-
 #[derive(Default, Clone)]
 pub struct Endpoint {
 	pub url: String,
@@ -71,24 +64,18 @@ struct Inner {
 	reason_model: String,
 	reason_headers: HeaderMap,
 	reason_native: bool,
-	answer_url: String,
-	answer_model: String,
-	answer_headers: HeaderMap,
-	answer_native: bool,
 	embed_url: String,
 	embed_model: String,
 	embed_headers: HeaderMap,
 	embed_native: bool,
 	http: reqwest::Client,
-	reason_gpu: bool,
 	seed: Option<i64>,
 	temperature: Option<f64>,
 	num_ctx: Option<u64>,
 }
 
 impl Client {
-	// answer falls back with its model too (an empty answer model would 400 on `/ask`); embed takes no reason model.
-	pub fn new(reason: Endpoint, answer: Endpoint, embed: Endpoint) -> Self {
+	pub fn new(reason: Endpoint, embed: Endpoint) -> Self {
 		fn or<'a>(v: &'a str, fallback: &'a str) -> &'a str {
 			if v.is_empty() {
 				fallback
@@ -98,12 +85,8 @@ impl Client {
 		}
 		let embed_url = or(&embed.url, &reason.url);
 		let embed_key = or(&embed.key, &reason.key);
-		let answer_url = or(&answer.url, &reason.url);
-		let answer_key = or(&answer.key, &reason.key);
-		let answer_model = or(&answer.model, &reason.model);
 		// wants_native reads the pre-normalize URL: normalize strips the `/v1` that marks OpenAI-compat.
 		let reason_native = wants_native(&reason.url);
-		let answer_native = wants_native(answer_url);
 		let embed_native = wants_native(embed_url);
 		let normalize = |u: &str| {
 			let u = u.trim_end_matches('/');
@@ -122,16 +105,11 @@ impl Client {
 				reason_model: reason.model.clone(),
 				reason_headers: make_headers(&reason.key),
 				reason_native,
-				answer_url: normalize(answer_url),
-				answer_model: answer_model.to_string(),
-				answer_headers: make_headers(answer_key),
-				answer_native,
 				embed_url: normalize(embed_url),
 				embed_model: embed.model.clone(),
 				embed_headers: make_headers(embed_key),
 				embed_native,
 				http,
-				reason_gpu: false,
 				seed: None,
 				temperature: None,
 				num_ctx: None,
@@ -140,9 +118,7 @@ impl Client {
 	}
 
 	pub fn for_eval(mut self, seed: i64) -> Self {
-		let inner = Arc::make_mut(&mut self.inner);
-		inner.reason_gpu = true;
-		inner.seed = Some(seed);
+		Arc::make_mut(&mut self.inner).seed = Some(seed);
 		self
 	}
 
@@ -157,20 +133,8 @@ impl Client {
 		self
 	}
 
-	// CPU-pin reason calls so a distillation burst can't evict the answer model. Dropped when reason
-	// and answer share one runner (same url+model): pinning would strand `/ask` on CPU. Full note in splinter.
-	fn pins_reason_to_cpu(&self) -> bool {
-		if self.inner.reason_gpu {
-			return false;
-		}
-		let shares_answer_runner = self.inner.reason_url == self.inner.answer_url
-			&& self.inner.reason_model == self.inner.answer_model;
-		!shares_answer_runner
-	}
-
 	pub fn new_embed_only(embed_url: &str, embed_model: &str, embed_key: &str) -> Self {
 		Self::new(
-			Endpoint::default(),
 			Endpoint::default(),
 			Endpoint::new(embed_url, embed_model, embed_key),
 		)
@@ -281,9 +245,6 @@ impl Client {
 			let url = format!("{}/api/chat", self.inner.reason_url);
 			let mut options =
 				serde_json::json!({ "num_ctx": self.inner.num_ctx.unwrap_or(REASON_NUM_CTX) });
-			if self.pins_reason_to_cpu() {
-				options["num_gpu"] = 0.into();
-			}
 			if let Some(s) = self.inner.seed {
 				options["seed"] = s.into();
 			}
@@ -330,86 +291,6 @@ impl Client {
 			return Err(LlmError::EmptyCompletion);
 		}
 		Ok(content)
-	}
-
-	pub fn answer(
-		&self,
-		params: AnswerParams,
-	) -> impl futures_core::Stream<Item = Result<String, LlmError>> + Send {
-		let client = self.clone();
-		async_stream::stream! {
-			let msgs: Vec<Value> = params
-				.messages
-				.iter()
-				.map(|(r, c)| serde_json::json!({"role": r, "content": c}))
-				.collect();
-
-			// explicit fn-ptr unifies both arms; closures have distinct anonymous types
-			let (resp, parser): (_, fn(&str) -> Option<ChatLine>) =
-				if client.inner.answer_native {
-					let url = format!("{}/api/chat", client.inner.answer_url);
-					let mut options = serde_json::json!({ "num_ctx": ANSWER_NUM_CTX });
-					if let Some(n) = params.num_predict { options["num_predict"] = n.into(); }
-					let body = serde_json::json!({
-						"model": client.inner.answer_model,
-						"messages": msgs,
-						"stream": params.stream,
-						"think": false,
-						"keep_alive": ANSWER_KEEP_ALIVE,
-						"options": options,
-					});
-					let resp = match client.post_checked(&url, &client.inner.answer_headers, &body, LLM_TIMEOUT).await {
-						Ok(r) => r,
-						Err(e) => { yield Err(e); return; }
-					};
-					if !params.stream {
-						match resp.json::<ChatLine>().await {
-							Ok(line) => match line.content.map(|t| strip_think(&t)).filter(|t| !t.is_empty()) {
-								Some(t) => { yield Ok(t); }
-								None => { yield Err(LlmError::EmptyCompletion); }
-							},
-							Err(e) => { yield Err(LlmError::from(e)); }
-						}
-						return;
-					}
-					(resp, parse_chat_line)
-				} else {
-					let url = format!("{}/v1/chat/completions", client.inner.answer_url);
-					let mut body = serde_json::json!({
-						"model": client.inner.answer_model,
-						"messages": msgs,
-						"stream": params.stream,
-					});
-					if let Some(n) = params.num_predict { body["max_tokens"] = n.into(); }
-					let resp = match client.post_checked(&url, &client.inner.answer_headers, &body, LLM_TIMEOUT).await {
-						Ok(r) => r,
-						Err(e) => { yield Err(e); return; }
-					};
-					if !params.stream {
-						match resp.json::<ChatResponse>().await {
-							Ok(parsed) => {
-								let [c] = parsed.choices;
-								let t = strip_think(&c.message.content);
-								if t.is_empty() { yield Err(LlmError::EmptyCompletion); return; }
-								yield Ok(t);
-							}
-							Err(e) => { yield Err(LlmError::from(e)); }
-						}
-						return;
-					}
-					(resp, parse_sse_delta)
-				};
-			let mut stream = resp.bytes_stream();
-			let mut buf: Vec<u8> = Vec::new();
-			let mut tokens: Vec<String> = Vec::new();
-			while let Some(chunk) = stream.next().await {
-				let chunk = match chunk { Ok(b) => b, Err(e) => { yield Err(LlmError::from(e)); return; } };
-				buf.extend_from_slice(&chunk);
-				let done = drain_stream_lines(&mut buf, &mut tokens, parser);
-				for t in tokens.drain(..) { yield Ok(t); }
-				if done { return; }
-			}
-		}
 	}
 
 	pub fn complete_func(&self) -> impl Fn(&str) -> String + Send + Sync + 'static {
@@ -497,16 +378,10 @@ struct ChatChoiceMessage {
 	content: String,
 }
 
-// Ollama's 32k default KV cache would spill the answer model off the GPU; 8192 keeps it GPU-resident.
-const ANSWER_NUM_CTX: u64 = 8192;
-
-// Keep the answer model resident (`/v1` ignores `keep_alive`); paired with the warm ping so `/ask` never cold-reloads.
-const ANSWER_KEEP_ALIVE: &str = "10m";
-
-// Without a cap Ollama's default-context KV cache can't share an 8 GB GPU with the answer model.
+// Without a cap Ollama's default-context KV cache can't share a small GPU with the reason model.
 const EMBED_NUM_CTX: u64 = 2048;
 
-// Keep the embedder resident; same rationale as `ANSWER_KEEP_ALIVE`.
+// Keep the embedder resident (`/v1` ignores `keep_alive`); avoids cold reloads between calls.
 const EMBED_KEEP_ALIVE: &str = "10m";
 
 const REASON_NUM_CTX: u64 = 8192;
@@ -550,34 +425,6 @@ impl<'de> Deserialize<'de> for ChatLine {
 }
 
 #[derive(Deserialize)]
-struct SseChunk {
-	choices: [SseChoice; 1],
-}
-
-#[derive(Deserialize)]
-struct SseChoice {
-	delta: ContentDelta,
-	finish_reason: Option<String>,
-}
-
-fn parse_sse_delta(line: &str) -> Option<ChatLine> {
-	let data = line.strip_prefix("data: ")?;
-	if data == "[DONE]" {
-		return Some(ChatLine {
-			content: None,
-			done: true,
-		});
-	}
-	let chunk: SseChunk = serde_json::from_str(data).ok()?;
-	let [choice] = chunk.choices;
-	let done = matches!(choice.finish_reason.as_deref(), Some(r) if !r.is_empty());
-	Some(ChatLine {
-		content: choice.delta.content,
-		done,
-	})
-}
-
-#[derive(Deserialize)]
 struct ContentDelta {
 	content: Option<String>,
 }
@@ -596,43 +443,6 @@ fn strip_think(s: &str) -> String {
 	clean.trim().to_string()
 }
 
-fn parse_chat_line(line: &str) -> Option<ChatLine> {
-	if line.is_empty() {
-		return None;
-	}
-	serde_json::from_str(line).ok()
-}
-
-fn drain_stream_lines<F>(buf: &mut Vec<u8>, tokens: &mut Vec<String>, parser: F) -> bool
-where
-	F: Fn(&str) -> Option<ChatLine>,
-{
-	let Some(last_nl) = buf.iter().rposition(|&b| b == b'\n') else {
-		return false;
-	};
-	let mut done = false;
-	for line in buf[..=last_nl]
-		.split(|&b| b == b'\n')
-		.filter(|s| !s.is_empty())
-	{
-		if let Ok(s) = std::str::from_utf8(line) {
-			if let Some(cl) = parser(s.trim_end()) {
-				if let Some(t) = cl.content {
-					if !t.is_empty() {
-						tokens.push(t);
-					}
-				}
-				if cl.done {
-					done = true;
-					break;
-				}
-			}
-		}
-	}
-	buf.drain(..=last_nl);
-	done
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -645,40 +455,6 @@ mod tests {
 		assert_eq!(strip_think("a</think>b</think>final"), "final");
 		assert_eq!(strip_think("answer<think>unclosed trailing"), "answer");
 		assert_eq!(strip_think("<think>only reasoning"), "");
-	}
-
-	#[test]
-	fn chat_line_yields_token_then_done() {
-		assert_eq!(
-			parse_chat_line(r#"{"message":{"role":"assistant","content":"He"},"done":false}"#),
-			Some(ChatLine {
-				content: Some("He".to_string()),
-				done: false
-			})
-		);
-		assert_eq!(
-			parse_chat_line(r#"{"message":{"content":""},"done":true,"done_reason":"stop"}"#),
-			Some(ChatLine {
-				content: Some(String::new()),
-				done: true
-			})
-		);
-		assert_eq!(
-			parse_chat_line(r#"{"message":{"content":"Full answer."},"done":true}"#),
-			Some(ChatLine {
-				content: Some("Full answer.".to_string()),
-				done: true
-			})
-		);
-		assert_eq!(parse_chat_line(""), None);
-		assert_eq!(parse_chat_line("not json"), None);
-		assert_eq!(
-			parse_chat_line(r#"{"message":{},"done":false}"#),
-			Some(ChatLine {
-				content: None,
-				done: false
-			})
-		);
 	}
 
 	#[test]
@@ -723,58 +499,6 @@ mod tests {
 		assert!(!wants_native("http://localhost:8000/v1"));
 		assert!(!wants_native("http://127.0.0.1:8000/v1/"));
 		assert!(!wants_native("https://api.openai.com/v1"));
-	}
-
-	fn client_with(reason: (&str, &str), answer: (&str, &str)) -> Client {
-		Client::new(
-			Endpoint::new(reason.0, reason.1, ""),
-			Endpoint::new(answer.0, answer.1, ""),
-			Endpoint::default(),
-		)
-	}
-
-	#[test]
-	fn distinct_reason_and_answer_models_keep_the_serving_cpu_pin() {
-		let c = client_with(
-			("http://localhost:11434", "qwen2.5:7b"),
-			("http://localhost:11434", "qwen3.5:4b"),
-		);
-		assert!(c.pins_reason_to_cpu());
-	}
-
-	#[test]
-	fn shared_reason_and_answer_model_drops_the_cpu_pin() {
-		let c = client_with(
-			("http://localhost:11434", "granite4:3b"),
-			("http://localhost:11434", "granite4:3b"),
-		);
-		assert!(!c.pins_reason_to_cpu());
-
-		let stock = Client::new(
-			Endpoint::new("http://localhost:11434", "granite4:3b", ""),
-			Endpoint::default(),
-			Endpoint::default(),
-		);
-		assert!(!stock.pins_reason_to_cpu());
-	}
-
-	#[test]
-	fn same_model_on_different_endpoints_keeps_the_cpu_pin() {
-		let c = client_with(
-			("http://localhost:11434", "granite4:3b"),
-			("http://gpu-box:11434", "granite4:3b"),
-		);
-		assert!(c.pins_reason_to_cpu());
-	}
-
-	#[test]
-	fn eval_never_pins_reason_to_cpu() {
-		let c = client_with(
-			("http://localhost:11434", "qwen2.5:7b"),
-			("http://localhost:11434", "qwen3.5:4b"),
-		)
-		.for_eval(7);
-		assert!(!c.pins_reason_to_cpu());
 	}
 
 	#[tokio::test]

@@ -5,8 +5,8 @@ src/commands/query.rs:
 
     1. [0.3405] 14da0c1e89ae  Ada keeps her bicycle in the garden shed
 
-`query` may then append a `--- Connections ---` block and, under --answer,
-a `--- Answer ---` block whose prompt contains its own numbered fact list.
+`query` may then append a `--- Connections ---` block and
+nothing else — the read path emits no synthesized block.
 Those trailing sections are cut before parsing so a prompt echo can never be
 counted as a ranked hit.
 """
@@ -21,7 +21,7 @@ _ID = re.compile(r"^ID:\s+(\S+)$", re.M)
 
 
 def hits(stdout):
-	head = stdout.split("--- Answer ---", 1)[0].split("--- Connections ---", 1)[0]
+	head = stdout.split("--- Connections ---", 1)[0]
 	out = []
 	for line in head.splitlines():
 		m = _HIT.match(line)
@@ -33,7 +33,7 @@ def hits(stdout):
 def connections(stdout):
 	if "--- Connections ---" not in stdout:
 		return ""
-	return stdout.split("--- Connections ---", 1)[1].split("--- Answer ---", 1)[0]
+	return stdout.split("--- Connections ---", 1)[1]
 
 
 def ingest_all(project, texts):
