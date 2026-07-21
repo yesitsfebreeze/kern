@@ -250,6 +250,7 @@ impl Server {
 				kind,
 				p.hint,
 				conf,
+				AGENT_SOURCE,
 				ingest::Config {
 					dedup_threshold: self.cfg.ingest.dedup_threshold,
 					valid_until,
@@ -319,6 +320,7 @@ impl Server {
 			kind,
 			p.hint,
 			conf,
+			AGENT_SOURCE,
 			ingest::Config {
 				dedup_threshold: self.cfg.ingest.dedup_threshold,
 				valid_until,

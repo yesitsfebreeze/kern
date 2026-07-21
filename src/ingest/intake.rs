@@ -191,8 +191,9 @@ async fn drain_entry(
 		// bound is per-claim, because only that one the distiller can know.
 		let mut claim_cfg = cfg.clone();
 		claim_cfg.valid_from = c.valid_from;
+		let tag = src.scheme();
 		let outcome = worker
-			.run(c.text, src, EntityKind::Claim, c.kind, 0.6, claim_cfg)
+			.run(c.text, src, EntityKind::Claim, c.kind, 0.6, tag, claim_cfg)
 			.await;
 		let ok = !matches!(outcome.status, OutcomeStatus::Failed);
 		if !ok {
@@ -223,6 +224,9 @@ async fn drain_document(
 		author: String::new(),
 		url: String::new(),
 	};
+	// Same channel as the watcher, and the same reason: a file dropped into the
+	// intake asserted nothing. This path minted a raw 1.0 too.
+	let tag = src.scheme();
 	let outcome = worker
 		.run(
 			text.to_string(),
@@ -230,6 +234,7 @@ async fn drain_document(
 			EntityKind::Document,
 			String::new(),
 			1.0,
+			tag,
 			cfg.clone(),
 		)
 		.await;

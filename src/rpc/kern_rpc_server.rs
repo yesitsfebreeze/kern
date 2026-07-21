@@ -217,6 +217,7 @@ mod tests {
 				crate::base::types::EntityKind::Claim,
 				String::new(),
 				1.0,
+				"inline",
 				crate::ingest::Config::default(),
 			)
 			.is_some()

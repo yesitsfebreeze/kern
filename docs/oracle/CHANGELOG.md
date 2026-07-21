@@ -2,6 +2,37 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 95 closed: ingest confidence is clamped by a guard every
+  producer must pass, not by a convention each one remembers. Verified first —
+  the watcher's raw `1.0` really did land on Beta(2,1) = 0.6667, a human CLI
+  claim's posterior and above the 0.6500 a deliberate MCP agent gets.
+
+  The item proposed clamping inside `Worker::submit`. That shape was too narrow:
+  `intake.rs`'s `drain_document` minted a raw `1.0` through `run`, so fixing
+  `submit` would have closed one of two live holes and left the identical defect
+  one method over. The clamp went into `Worker`'s private `job()` instead — now
+  the only place a `Job` is built, with `run_with_acl` no longer assembling one
+  by hand — and every entrance takes a `source_tag` it cannot omit. A producer
+  is now asked "who is asserting this?" by the compiler.
+
+  The tag is the channel, `source.scheme()`: not `USER_SOURCE`, because no human
+  asserted a file that changed on disk; not `AGENT_SOURCE`, because an agent's
+  ceiling belongs to a deliberate assertion and a file appearing is not one. No
+  new `"watcher"` constant, because `clamp_confidence` separates only
+  `USER_SOURCE` from everything else — a second name for the same 0.95 would be
+  the label-that-weights-nothing item 20 already refused. The two paths that know
+  their principal name it: CLI `USER_SOURCE`, MCP and direct-intake replay
+  `AGENT_SOURCE`.
+
+  Ranking moved for `Document`s (0.6667 → 0.6500) and not at all for the recall
+  corpus, which is CLI-ingested: 0.9306 / 0.9722 / 0.9471 before and after,
+  bit-identical to the worst-probe list. The recorded baseline stands unchanged.
+  Supersedes item 20's claim that a user-authored claim does not outrank an
+  auto-ingested one — it now does, by 2.6%, which is a rounding error and not
+  yet a trust model.
+
+  Decided by: fix-the-root
+
 - 2026-07-21 — item 83's double-storage half: one vector, shared, 185.6 MB off
   the resident total, paid for with 9% on the index walk.
 
