@@ -6,9 +6,9 @@ instead of today's scalar `confidence` / `score`, and how that tuple updates as
 new observers arrive.
 
 > **Implementation status (2026-07).** Adopted: entities carry Beta-distributed
-> confidence (`conf_alpha`/`conf_beta` at `src/base/types.rs:283-284`, with
-> `observe_support` / `observe_contradict` at `src/base/types.rs:405` and
-> `src/base/types.rs:411`), seeded `(1+conf, 1+(1−conf))` exactly as §3 proposes
+> confidence (`conf_alpha`/`conf_beta` at `src/base/types.rs:292-293`, with
+> `observe_support` / `observe_contradict` at `src/base/types.rs:414` and
+> `src/base/types.rs:420`), seeded `(1+conf, 1+(1−conf))` exactly as §3 proposes
 > (`src/ingest/place.rs:16-18`). Under federation the tuple is deliberately
 > **replica-local** — never merged from a peer (`src/base/merge.rs:93`).
 >
