@@ -61,11 +61,14 @@ pub(crate) fn render_setup(s: &SetupState) -> String {
 			"## Seed gravitons (do this first)\n\
 			\n\
 			Gravitons are the focus areas ingest routes into. Call the `graviton`\n\
-			tool once per area. Adapt the texts to this project; 3-6 is right:\n\
+			tool once per area; 3-6 is right. Seed `text` with EXAMPLE STATEMENTS,\n\
+			one per line, shaped like the claims that should land there — each line\n\
+			is embedded separately and mean-pooled, which routes measurably better\n\
+			than an abstract description. Write examples about THIS project:\n\
 			\n\
-			- {\"action\":\"add\",\"name\":\"decisions\",\"text\":\"Architectural and design decisions, the alternatives considered, and the rationale.\"}\n\
-			- {\"action\":\"add\",\"name\":\"architecture\",\"text\":\"How the system is structured: components, data flow, and the boundaries between them.\"}\n\
-			- {\"action\":\"add\",\"name\":\"preferences\",\"text\":\"How this project wants to be worked on: style, conventions, things to avoid.\"}\n\n",
+			- {\"action\":\"add\",\"name\":\"decisions\",\"text\":\"We chose X over Y because <reason>.\\nWe rejected Z; <reason>.\\nDecision: <choice>, with the rationale recorded.\"}\n\
+			- {\"action\":\"add\",\"name\":\"architecture\",\"text\":\"The <component> owns <responsibility>.\\nData flows from <a> to <b> via <mechanism>.\\nPersistence is <storage layer>.\"}\n\
+			- {\"action\":\"add\",\"name\":\"preferences\",\"text\":\"Code style: <rule>.\\nAlways <practice> before <event>.\\nAvoid <antipattern>.\"}\n\n",
 		);
 	}
 

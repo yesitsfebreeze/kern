@@ -99,10 +99,14 @@ A graviton is a named focus attractor stored as a child kern of the root: a name
 (`graviton_text`), an embedding of its seed text (`graviton_vec`), and a scalar
 `mass` defaulting to `1.0`. You manage them through the `graviton` MCP tool
 (`tool_graviton`, `src/mcp/tools_admin.rs:87`) with `action=list|add|remove`;
-seed text may be a short phrase or a representative passage, embedded whole. Keep
-it under the embedding model's context window: the seed text is embedded in one
-call with no chunking, so anything past that window is truncated and a
-document-length seed becomes an embedding of its opening only.
+seed text should be **example statements, one per line** — each line is embedded
+separately and the normalized mean becomes the pull vector
+(`seed_examples`/`mean_pool`, `src/base/accept.rs`). Measured against
+qwen3-embedding:0.6b: pooled examples sit ~0.39 median cosine distance from
+held-out claims of the same focus, versus ~0.55 for an abstract description
+and worse for the same examples embedded as one blob. A single-line seed is
+still embedded whole; keep any one line under the embedding model's context
+window, since a line is one embed call with no chunking.
 
 They act at two points.
 

@@ -121,7 +121,9 @@ place and you would rather correct it than re-ingest.
 
 **`graviton`** — named focus attractors that queries and ingest gravitate
 toward, replacing the old single per-kern "purpose". `action: "add"` with a name
-and seed `text` (a phrase, a paragraph, or a whole document), optionally a `mass`
+and seed `text` — example statements, one per line, each embedded separately
+and mean-pooled into the pull vector (measurably better placement than an
+abstract description; see [Seed the graph](./seed.mdx)) — optionally a `mass`
 — routing uses cosine distance divided by mass, so a heavier graviton pulls
 harder, and anything matching nothing falls through to `generic`. `list` and
 `remove` do what they say (`src/mcp/tools_admin.rs:41`). This is the main knob

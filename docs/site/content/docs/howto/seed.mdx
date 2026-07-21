@@ -27,26 +27,32 @@ From an MCP session in the project, call the `graviton` tool
 (`src/mcp/tools_admin.rs:41`) once per focus area:
 
 ```json
-{ "action": "add", "name": "decisions",   "text": "Architectural and design decisions, the alternatives considered, and the rationale." }
-{ "action": "add", "name": "architecture", "text": "How the system is structured: components, data flow, and the boundaries between them." }
-{ "action": "add", "name": "preferences",  "text": "How this project wants to be worked on: style, conventions, things to avoid." }
+{ "action": "add", "name": "decisions",   "text": "We chose LMDB over sled because readers never block writers.\nWe rejected a pluggable backend; an external store adds a network hop.\nDecision: contradiction detection runs on the background tick, with rationale recorded." }
+{ "action": "add", "name": "architecture", "text": "One long-running daemon per working directory owns the knowledge graph.\nRetrieval seeds candidates from HNSW and BM25, then expands over reason edges.\nPersistence is a single LMDB environment." }
+{ "action": "add", "name": "preferences",  "text": "Code style: as few comments as possible.\nOne responsibility per file, split early.\nAlways run the exact gate command before claiming green." }
 ```
 
 The equivalent CLI form (`src/commands.rs:209`):
 
 ```bash
-kern graviton add decisions "Architectural and design decisions, the alternatives considered, and the rationale."
-kern graviton add architecture "How the system is structured: components, data flow, and the boundaries between them."
+kern graviton add decisions "We chose LMDB over sled because readers never block writers.
+We rejected a pluggable backend; an external store adds a network hop."
 kern graviton list
 ```
 
-`text` is embedded whole as the graviton's pull vector, so a representative
-passage places it better than a single word. Keep that passage under the
-embedding model's context window: the text goes through one embed call with no
-chunking, so anything past the window is truncated and a document-length seed
-becomes an embedding of its opening only. An optional `mass` (default `1.0`)
-makes a graviton pull harder: routing compares `distance / mass`, so a graviton
-at `mass = 2.0` claims content from roughly twice as far away.
+Seed with **example statements, one per line** — statements shaped like the
+claims you want routed there. A multi-line seed is embedded per line and the
+normalized mean becomes the pull vector (`seed_examples`/`mean_pool`,
+`src/base/accept.rs`). This is measured, not stylistic: against
+qwen3-embedding:0.6b, pooled examples sit ~0.39 median cosine distance from
+held-out claims of the same focus, versus ~0.55 for an abstract description
+("Architectural and design decisions, the alternatives considered…") and
+0.55–0.61 for the same examples embedded as one concatenated blob. A
+single-line seed is embedded whole; keep any one line under the embedding
+model's context window, since each line is one embed call with no chunking.
+An optional `mass` (default `1.0`) makes a graviton pull harder: routing
+compares `distance / mass`, so a graviton at `mass = 2.0` claims content from
+roughly twice as far away.
 
 <Callout type="info" title="Three to six is usually right">
 Too few and everything lands in one bucket; too many and each one is starved.

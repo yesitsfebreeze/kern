@@ -80,9 +80,12 @@ Prefer the MCP tools over the CLI here — the CLI subcommands open the on-disk
 graph directly and can race a live daemon.
 
 Call the `graviton` tool with action `add` for each focus area the graph should
-gravitate around — for example *decisions*, *project state*, *preferences*. The
-`text` you supply is embedded whole as that graviton's pull vector, and an
-optional `mass` (default `1.0`) makes it attract and retain more strongly.
+gravitate around — for example *decisions*, *project state*, *preferences*. Seed
+`text` with **example statements, one per line**: each line is embedded
+separately and mean-pooled into the pull vector, which places the graviton
+measurably closer to real matching claims than an abstract description (see
+[Seed the graph](./seed.mdx)). An optional `mass` (default `1.0`) makes it
+attract and retain more strongly.
 Claims matching no graviton land in a `generic` catch-all; see
 [Acceptance & routing](../concepts/acceptance.mdx) for how that descent works.
 
