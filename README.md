@@ -37,7 +37,7 @@ MCP ingest ─────────────────────► ty
   capped cold tier before dropping them — a latest-wins keyed table holding the
   newest 50k entries, so recent evictions stay recoverable while the very oldest
   eventually age out. Rows pushed out past that cap are counted and reported by
-  `health` (`src/base/store.rs:752`), so the tail's loss rate is observable
+  `health` (`src/base/store.rs:718`), so the tail's loss rate is observable
   rather than silent. Spill-before-drop needs a store: with no store bound
   (in-memory mode) the victim is dropped outright (`src/tick/stigmergy.rs`) —
   dropping *is* the intended memory bound there, and it is counted too, so an
@@ -53,7 +53,7 @@ MCP ingest ─────────────────────► ty
   chain back through prior revisions. The classification runs in the background
   tick, so recall stays LLM-free. `as_of` is exact over both tiers: a cold row
   carries `valid_from`/`valid_to`/`invalidated_at` beside the entity
-  (`src/base/store.rs:169`), so an evicted revision answers the same window it
+  (`src/base/store.rs:148-153`), so an evicted revision answers the same window it
   answered while hot.
 
 - **Federates (opt-in).** Multiple nodes share knowledge over LAN gossip with no
@@ -205,8 +205,8 @@ Recall needs no wiring — it is the `query` MCP tool.
 (embedding, reasoning, intake, tick) works out of the box against a local
 Ollama. The daemon pins itself to the nearest ancestor holding `.git`, else the
 nearest holding `.kern/`, else the launch directory
-(`src/config/mod.rs:138`), and creates `.kern/data/` there on open
-(`src/base/store.rs:352`) plus `.kern/intake/` for the drop dir. `mkdir .kern`
+(`src/config/mod.rs:153-164`), and creates `.kern/data/` there on open
+(`src/base/store.rs:283-284`) plus `.kern/intake/` for the drop dir. `mkdir .kern`
 in a directory that has neither marker if you want the graph somewhere the walk
 would not have chosen. (A `<cwd>/.kern/kern.toml` is only for overriding
 defaults — see *Configure* below.)
@@ -281,7 +281,7 @@ peers = []
 
 The store stamps the embedding model and vector dimension that produced its
 vectors and re-checks them on open and on every flush
-(`src/base/store.rs:473`). A swap is reported, never silently tolerated: the
+(`src/base/store.rs:417`). A swap is reported, never silently tolerated: the
 `health` tool carries `embed_model`, `embed_dim` and `embed_mismatch`, and the
 CLI prints `MISMATCH`. A query vector whose dimension disagrees with the
 index returns no hits rather than nonsense, counted with a throttled log line
@@ -309,7 +309,7 @@ things any client can already do — write a file, call an MCP tool.
 
 Neither is gated on a pre-existing `.kern/`. A daemon pins itself to the nearest
 ancestor holding `.git`, else the nearest holding `.kern/`, else the launch
-directory (`src/config/mod.rs:138`), and then creates the store and intake dirs
+directory (`src/config/mod.rs:153-164`), and then creates the store and intake dirs
 it needs. So a single global registration does reach every project you open
 `kern mcp` in, and every one of them gets a `.kern/` — that is the cost of the
 registration being global, not something kern avoids.

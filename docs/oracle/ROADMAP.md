@@ -392,7 +392,7 @@ Recorded in `FEATURES.md` gap blocks, planned nowhere:
 - ~~Routing does a vector lookup per level, O(depth·log n), and unnamed children
   are unbounded per parent~~ **(retired 2026-07-21 — verified false on both
   counts; the FEATURES gap block it quoted is corrected at `FEATURES.md:120`).**
-  `route_to_child_id` (`src/base/accept.rs:777`) is a linear scan over the
+  `route_to_child_id` (`src/base/accept.rs:867`) is a linear scan over the
   parent's loaded named children against each child's stored `graviton_vec` — no
   index is consulted, so the cost is O(depth · children) and the "cached per-kern
   centroid" the item wanted is what `graviton_vec` already is. Unnamed children
@@ -672,7 +672,7 @@ that reason and not for any damage it does today.
 
 ### 51. Require reason text on supersede `[ingest]`
 
-`ReasonKind::Supersedes` edges are minted at `src/base/accept.rs:438` and `:533`
+`ReasonKind::Supersedes` edges are minted at `src/base/accept.rs:528` and `:623`
 with `fallback_label()` text (`src/base/types.rs:103`), never a caller-supplied
 rationale. The *why* is the thing the graph exists to hold.
 
@@ -750,7 +750,7 @@ also unbuilt.
 ### 57. No evidence decay `[lifecycle]`
 
 `conf_alpha` and `conf_beta` only grow — the sole zeroing is the remote strip
-(`src/base/merge.rs:25-26`) — so stale consensus takes proportionally many new
+(`src/base/merge.rs:28-29`) — so stale consensus takes proportionally many new
 observations to unseat. Tick-based γ damping is an open design
 (`decisions/bayesian-confidence.mdx:137`).
 
@@ -940,6 +940,45 @@ A third of the output being wrong is why `--strict-anchors` is opt-in, and it is
 the number to beat before CI adopts it: stemming and a three-character floor with
 a longer stopword list are the obvious next moves, and symbolic anchors retire the
 question entirely.
+
+**Second pass, 2026-07-21 — the nominations were worked, and both next moves
+landed.** All 38 were opened at the cited line and adjudicated one at a time: 27
+real drift, 11 false. Every one of the 27 was re-pointed and the new target read
+back before it was written down — 29 anchors moved in all, counting the two bare
+`` `:533` ``/`` `:398` `` continuations the regex never sees. Three of the false
+ones were acquitted in place; the other eight the tokeniser can now see for
+itself. `tokens()` keeps three characters instead of four, runs a light suffix
+stripper with consonant-undoubling so `stemmer` and `stemmers` both reach
+`fn stem`, and carries a stopword list grown to match — articles and pronouns are
+back in play at three characters, and Rust's boilerplate (`let`, `pub`, `self`,
+`new`) is there because a match on it says only that the target is Rust.
+
+**Measured on the real tree, before and after, against a hand-adjudicated truth
+set.** Precision 27/38 = **71.1% → 26/29 = 89.7%**. False-positive rate **28.9% →
+10.3%**. Recall, over the 28 breakages known to exist, **27/28 = 96.4% → 26/28 =
+92.9%** — *it went down*. The three-character floor that acquits `acl`, `rrf` and
+`hub` also acquits `gpu`, and `gpu` plus `kern` is enough to reach the two-word
+prose bar and silence a genuinely under-covering anchor (this file citing
+`FEATURES.md:581` for three claims that span 581-582). That is the same trade the
+camelCase note above records, paid a second time, and it is recorded here for the
+same reason. A prose bar of 1 instead of 2 measures 96.3% precision at unchanged
+recall and was **declined**: the truth set holds only five prose-to-prose anchors,
+which is not evidence, it is a sample small enough to fit anything.
+
+**What remains.** Three false positives are structural, not tokenisation, and
+carry the marker rather than a fix: `FEATURES.md:200` cites `if scored.len() < k {`
+for cold backfill and shares nothing with it because the line is a bound check
+whose meaning lives in the lines around it; this file's two retired notes cite a
+`README.md` table row and a `FEATURES.md` bullet for the single word each was
+retired over (`move`, `acl`), one word short of the prose bar. Two of the three
+would need a *block*-shaped target, not a better tokeniser. And the checker still
+cannot see the `bayesian-belief.md:16` class at all — a wrong range that overlaps
+the right one by a word — which is why that one was fixed by hand here rather than
+by the tool. So `--strict-anchors` exits 0 on this tree, but **10.3% is not near
+zero**: adopting it in CI buys a gate that will demand a human acquittal on about
+one nomination in ten and will still go quiet on an off-by-a-range anchor.
+Symbolic anchors remain the better and larger answer, and nothing here replaces
+them.
 
 Neither is a defect in a running kern, which is why this sits in tier 9 — but it
 is the reason every reconcile pass so far has spent most of its effort
@@ -1141,7 +1180,7 @@ is a real reason nothing is set — eviction drops unpersisted `children` pushes
   (`FEATURES.md:1066-1069`).
 - `unnamed` lists only; there is no `promote` (`FEATURES.md:797`).
 - GNN has no GPU path, weights are per-kern rather than shared, and the objective
-  is link-prediction only (`FEATURES.md:581`).
+  is link-prediction only (`FEATURES.md:581-582`).
 - Under WSL2 NAT a loopback Ollama URL must be hand-pinned; kern neither rewrites
   nor warns (`FEATURES.md:1106-1108`).
 - RPC socket bind→chmod race — sub-millisecond, umask default — recorded as an
@@ -1175,6 +1214,7 @@ and item 1's instrument staying the scorer.
 - (retired 2026-07-21 — the tables were filled in) the `move` MCP tool is listed
   in `README.md:352` and `FEATURES.md:607`, and the site's count is now thirteen
   (`howto/mcp.mdx:5, :75`), so the "Eleven tools" note is retired with it.
+  <!-- docs-check: anchor-ok -->
 - `docs/kern/README.md:60` declares the directory holds "never plans"; five of
   its notes contain execution plans, migration stages and phase orderings
   (`diskann-disk-index.md:30, :86-105`, `crdts-federation.md:215-255`,
@@ -1205,7 +1245,7 @@ and item 1's instrument staying the scorer.
   the fetch RPC are live, and `:399` pins the version at `1.1.0`, matching
   `FEATURES.md`.
 - (retired 2026-07-21 — all three fixed) `FEATURES.md:54` now lists `Entity`'s
-  `acl`; the retired query-cache finding is gone from the file entirely; and
+  `acl` <!-- docs-check: anchor-ok -->; the retired query-cache finding is gone from the file entirely; and
   `:625-626` marks prompts and resources "served on the standalone path only",
   which is item 81's note.
 

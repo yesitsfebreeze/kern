@@ -6,16 +6,16 @@ instead of today's scalar `confidence` / `score`, and how that tuple updates as
 new observers arrive.
 
 > **Implementation status (2026-07).** Adopted: entities carry Beta-distributed
-> confidence (`conf_alpha`/`conf_beta` at `src/base/types.rs:262-264`, with
-> `observe_support` / `observe_contradict` at `src/base/types.rs:394` and
-> `src/base/types.rs:400`), seeded `(1+conf, 1+(1−conf))` exactly as §3 proposes
+> confidence (`conf_alpha`/`conf_beta` at `src/base/types.rs:283-284`, with
+> `observe_support` / `observe_contradict` at `src/base/types.rs:405` and
+> `src/base/types.rs:411`), seeded `(1+conf, 1+(1−conf))` exactly as §3 proposes
 > (`src/ingest/place.rs:16-18`). Under federation the tuple is deliberately
 > **replica-local** — never merged from a peer (`src/base/merge.rs:93`).
 >
 > Contradiction detection shipped, but not in either form §2 weighed. There is no
-> `ReasonKind::Contradicts` (`src/base/types.rs:66-75` lists the seven kinds that
+> `ReasonKind::Contradicts` (`src/base/types.rs:77-86` lists the seven kinds that
 > exist), no NLI model and no `stance` argument on ingest: the accept path only
-> ever supports (`src/base/accept.rs:69`). What moves `β` is GNN propagation —
+> ever supports (`src/base/accept.rs:152`). What moves `β` is GNN propagation —
 > each refreshed embedding is compared against the entity's own vector and scores
 > `observe_support` at cosine alignment ≥ 0.5, `observe_contradict` below it
 > (`src/tick/gnn_propagate.rs:153-158`). So the "observer" that can contradict is
