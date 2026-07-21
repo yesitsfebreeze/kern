@@ -129,22 +129,6 @@ re-embed inside the single writer.
 
 ---
 
-# Tier 2 — the last cheap federation fix
-
-Everything else that stood here — confining LWW deltas to `remote-*`, verifying
-entity bodies against their ids, and the `handle_pulse` root-kern fallback — is
-closed. What remains is the local twin of the same exposure, and it needs no peer
-at all.
-
-### 16. Rate-limit `commit_access` per (producer, thought) `[retrieval]`
-
-The local twin of the counter-inflation exposure in item 13, and the one that
-needs no peer at all: a query adversary can pump one thought's access count
-directly. Adopted on paper at `docs/kern/stigmergy-self-improving.md:271`, never
-scheduled.
-
----
-
 # Tier 3 — the embeddable-endpoint track
 
 kern's competitive claim is "everything a hosted service structurally cannot
@@ -1017,6 +1001,11 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   skew stalling GC, the `min_deliver_score` bypass and the 50k remote ceiling each
   carry a counter, a throttled log and a health field on MCP, RPC and `kern health`
   (CHANGELOG 2026-07-21). Fail-open is still the behaviour; it is no longer silent.
+- **`commit_access` is rate-limited** — was item 16. Retrieval stamps every
+  delivered result, so replaying one query pumped a thought's count and heat for
+  free. One reinforcement per thought per minute; genuine reuse across a session
+  still counts. The local twin of item 13's exposure, and the one that needed no
+  peer.
 - **An unauthenticated peer cannot reach a local row** — were items 13, 14 and 15.
   `ValidUntil`/`ReasonScore` LWW deltas confined to `remote-*` (the G-Counters keep
   their reach by design); entity bodies hash-checked against their claimed id;

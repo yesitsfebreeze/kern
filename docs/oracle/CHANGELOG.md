@@ -2,6 +2,25 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — Roadmap item 16: `commit_access` is rate-limited, closing Tier 2.
+  Retrieval stamps every delivered result, so a caller replaying one query pumped
+  that thought's access count *and* its heat without bound — both ranking signals,
+  and "retrieval learns from use" has to mean sustained use rather than repetition.
+  A thought is now reinforced at most once a minute. Adopted on paper in
+  `docs/kern/stigmergy-self-improving.md`'s failure-mode table and never scheduled.
+
+  Both stamping paths already funnelled through `stamp_access`, so the limit lives
+  in one place; it returns whether the stamp took, which also stops
+  `commit_access_ids` pushing a gossip delta for a suppressed increment.
+
+  **Named tradeoff:** genuine rapid re-reads inside the window count once. That is
+  the intent — heat's half-life is measured in days, so a minute of resolution
+  costs nothing real, and the alternative is a signal any caller can mint. A
+  rewound clock is deliberately *not* treated as throttled: heat decay already
+  handles skew, and freezing the counter there would trade one bug for another.
+
+  **Decided by:** fix-the-root.
+
 - 2026-07-21 — Tier 0 is closed and the roadmap's own structure is repaired.
   Item 1 sat in two places at once — open at the top of the ranked list and closed
   in the appendix — which by this file's rules means the decision was never made.

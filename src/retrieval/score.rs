@@ -119,6 +119,14 @@ pub fn is_remote_entity(g: &GraphGnn, entity_id: &str) -> bool {
 		.is_some_and(crate::base::merge::is_remote_kern_id)
 }
 
+// A thought's access count and heat may be reinforced at most once per window.
+// Retrieval stamps every delivered result, so without this a caller replaying one
+// query pumps a single thought's rank for free — the local twin of the federated
+// counter-inflation exposure, and the one that needs no peer at all. Sized to
+// collapse a burst while leaving genuine reuse across a working session
+// countable; heat's half-life is measured in days, so a minute costs nothing real.
+const ACCESS_COOLDOWN: Duration = Duration::from_secs(60);
+
 const BELOW_FLOOR_WARN_SECS: u64 = 60;
 static BELOW_FLOOR: AtomicU64 = AtomicU64::new(0);
 static BELOW_FLOOR_WARN: LogThrottle = LogThrottle::new(BELOW_FLOOR_WARN_SECS);
@@ -260,7 +268,21 @@ pub fn commit_access(results: &mut [ScoredEntity]) {
 	}
 }
 
-fn stamp_access(e: &mut Entity, now: SystemTime, half_life_secs: u64) {
+// Every delivered result is stamped, so replaying one query would otherwise pump
+// a single thought's count and heat without bound. Both are ranking signals, and
+// "retrieval learns from use" has to mean sustained use, not repetition. A
+// future `accessed_at` (rewound clock) is not treated as throttled — heat decay
+// already handles skew, and freezing the counter there would be a second bug.
+//
+// Returns false when the stamp was suppressed, so a caller can skip the work it
+// would otherwise do on the back of it.
+fn stamp_access(e: &mut Entity, now: SystemTime, half_life_secs: u64) -> bool {
+	let throttled = e
+		.accessed_at
+		.is_some_and(|last| now.duration_since(last).is_ok_and(|d| d < ACCESS_COOLDOWN));
+	if throttled {
+		return false;
+	}
 	let replica = if e.producer_id.is_empty() {
 		"local"
 	} else {
@@ -276,6 +298,7 @@ fn stamp_access(e: &mut Entity, now: SystemTime, half_life_secs: u64) {
 		HeatConfig::default().deposit_access,
 	);
 	e.heat_updated_at = Some(now);
+	true
 }
 
 // Goes through `kerns` directly, NOT `get_mut`: an access stamp must not bump the mutation epoch (it would invalidate the query cache).
@@ -296,7 +319,9 @@ pub fn commit_access_ids(g: &mut GraphGnn, ids: &[String]) {
 			} else {
 				e.producer_id.clone()
 			};
-			stamp_access(e, now, half_life_secs);
+			if !stamp_access(e, now, half_life_secs) {
+				continue;
+			}
 			let value = e.access_count.slots().get(&replica).copied().unwrap_or(0);
 			g.push_delta(crate::base::graph::PendingDelta {
 				object_id: id.clone(),
@@ -925,5 +950,57 @@ mod query_filter_tests {
 		};
 		drop_expired(&mut results, Some(&opts), now);
 		assert_eq!(results.len(), 1, "the caller named the instant; honour it");
+	}
+	#[test]
+	fn replaying_a_query_cannot_pump_one_thoughts_access_count() {
+		let mut e = ent("hot", EntityKind::Claim, file_src("/a")).entity;
+		let now = SystemTime::now();
+		let hl = HeatConfig::default().half_life_secs;
+
+		assert!(stamp_access(&mut e, now, hl), "the first access counts");
+		let after_first = e.access_count.value_i32();
+		let heat_after_first = e.heat;
+
+		for _ in 0..50 {
+			assert!(
+				!stamp_access(&mut e, now, hl),
+				"a replay inside the window is suppressed"
+			);
+		}
+
+		assert_eq!(
+			e.access_count.value_i32(),
+			after_first,
+			"50 replays must not move the count"
+		);
+		assert_eq!(e.heat, heat_after_first, "nor the heat");
+	}
+
+	#[test]
+	fn genuine_reuse_after_the_window_still_counts() {
+		let mut e = ent("used", EntityKind::Claim, file_src("/a")).entity;
+		let hl = HeatConfig::default().half_life_secs;
+		let now = SystemTime::now();
+
+		assert!(stamp_access(&mut e, now, hl));
+		let first = e.access_count.value_i32();
+
+		let later = now + ACCESS_COOLDOWN + Duration::from_secs(1);
+		assert!(
+			stamp_access(&mut e, later, hl),
+			"use outside the window is real use, not a replay"
+		);
+		assert_eq!(e.access_count.value_i32(), first + 1);
+	}
+
+	#[test]
+	fn a_never_accessed_thought_is_not_throttled() {
+		let mut e = ent("fresh", EntityKind::Claim, file_src("/a")).entity;
+		assert!(e.accessed_at.is_none(), "precondition");
+		assert!(stamp_access(
+			&mut e,
+			SystemTime::now(),
+			HeatConfig::default().half_life_secs
+		));
 	}
 }
