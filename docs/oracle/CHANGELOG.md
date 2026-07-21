@@ -2,6 +2,116 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — `test_retention`'s intermittent failure is now ROADMAP item 92
+  rather than folklore. Two independent runs saw
+  `test_a_retention_expires_the_fact_out_of_query_results` fail, always with
+  the CPU-heavy `test_recall.py` ahead of it; a third could not reproduce it in
+  six consecutive runs on stashed-clean `src/`. Recorded with that split
+  evidence intact rather than resolved to "flaky" or "fine", because neither is
+  established and the honest state is "real, load-dependent, not reproducible on
+  demand". The reason it is worth an item at all is not the failed run — it is
+  that an unrecorded intermittent failure is indistinguishable from a
+  regression, so the next person to see it red waves through whatever actually
+  broke.
+  Decided by: verify-before-claiming — the implement stage's flake claim was
+  checked rather than accepted, and the check disagreed with it, so both results
+  are in the item.
+
+- 2026-07-21 — `kern graviton add`/`remove` and `kern claim-kind add`/`rm` route
+  through the daemon; item 9's unblocked half closed.
+
+  These four were the last shipped subcommands calling `with_graph` with no
+  routing in front of it. `with_graph` loads, mutates and calls
+  `save_graph_unguarded`, holding no writer lock and doing no epoch check, and
+  it writes the whole kern map — so run beside a daemon, `kern graviton add`
+  did not add a graviton to the live graph, it replaced that graph with a
+  minutes-old copy of itself plus one graviton. The daemon's next persist then
+  dropped the graviton too, because its own graph had never seen it. Both ends
+  of that, from one command.
+
+  No new tool was needed: `graviton` and `claim_kind` already exist on the MCP
+  surface with the same semantics the CLI wants. The shape copied is
+  `cmd_forget`/`cmd_degrade` — route first, `with_graph` only on `NoDaemon`,
+  one printer per outcome so routed and local output cannot drift. The one
+  ordering call worth naming: the graviton add routes *before* it embeds. The
+  daemon embeds with its own client and owns the vector it stores, so embedding
+  first would spend a model call on a vector nobody keeps.
+
+  **The seam that made it testable.** `route()` already delegates to
+  `route_to(&Endpoint::kern(), …)`; `cmd_graviton`/`cmd_claim_kind` now delegate
+  the same way to `graviton_at`/`claim_kind_at`. Without that, a unit test of the
+  routed path would have to reach the process-global `Endpoint::kern()` — cwd
+  plus `XDG_RUNTIME_DIR` — which is neither settable in parallel tests nor
+  distinguishable from a daemon the developer happens to be running.
+
+  **Both new tests were reverted to prove they fail.** The unit tests fail with
+  "the serving daemon's own graph took the write" / "the serving daemon's own
+  graph lost the graviton"; the e2e fails with "the CLI wrote the graviton
+  locally after all", and with the control removed it fails one assertion later
+  with "the daemon's persist dropped the routed graviton" — so both halves carry
+  weight, not just the control. The regression guard was checked the same way by
+  dropping the local persist: "the local add must reach the local store".
+
+- 2026-07-21 — a full semantic sweep of every line anchor in `ROADMAP.md` and
+  `FEATURES.md`, and two claims that did not survive it.
+
+  **Anchors.** Twenty-seven citations pointed at a line that exists and no
+  longer says what it was cited for; `docs-check` was green at 634 references
+  before and after, as it has been every time. Ten were `ROADMAP.md` ->
+  `FEATURES.md` — the predicted rot, and the counts show why: every one of them
+  had drifted *downward* by between 14 and 27 lines, the size of what
+  `FEATURES.md` grew by underneath them. `:390` for the 512-bounded tick queue
+  had landed on a blank line, `:588-589` for "hand-rolled schemas, no batch
+  query" on the `forget`/`degrade` tool-table rows, `:547-549` for the GNN gaps
+  on a *different* GNN paragraph — near enough to read as right, which is the
+  dangerous kind. Re-pointed to `:408-409`, `:607-608`, `:565-566` and the rest.
+
+  The other seventeen were the same failure in `src/` and `docs/kern/`, and they
+  are not merge damage — they are ordinary code motion. `src/tick.rs:195` for
+  `spawn_child_clusters` had slid one line onto a blank; `src/commands.rs:1003`
+  for `wire_fetch` was twelve lines short of the call, `:966-1040` for
+  `start_gossip` thirteen; `src/commands/ingest_cmd.rs:49` for the CLI's
+  `clamp_confidence(1.0, "user")` — the citation that carries the entire
+  "only the CLI reaches `Fact`" argument — was ten lines above it, on a closing
+  brace. `docs/kern/` was worse: the convergence gate `G ≥ 0.6`, the
+  `HeatStats` health export, the DiskANN WAL note and the lower-confidence-bound
+  formula were all cited at lines holding other content.
+
+  **Claim one, retired: "the remaining two unlocked callers."** Item 9 said
+  naming `save_graph_unguarded` had made its two remaining unlocked callers
+  visible. Walking the call sites finds three. The third is `with_graph`
+  (`src/commands.rs:442`), which loads, mutates and writes the whole graph back
+  holding no lock. `cmd_forget` and `cmd_degrade` reach it safely because they
+  route first and land there only on `NoDaemon` — but `kern graviton add`/
+  `remove` and `kern claim-kind add`/`rm` do not route at all. Beside a running
+  daemon they overwrite everything the daemon has committed since they loaded:
+  a full-graph clobber, from four shipped subcommands, in the item whose entire
+  subject is that race. The item's title and its "one half remains" both said
+  `ingest`/`link`; both were undercounting, and both are corrected. This half is
+  **not** blocked on item 24 — `graviton` and `claim_kind` assert no trust, and
+  the tools to route to already exist with matching semantics.
+
+  **Claim two, promoted to item 91: retention is enforced on one read surface of
+  two.** Item 18's "guard the id path" bullet was written as an ACL concern, so
+  it read as a cost of work not yet done. It is not: `drop_expired` has one call
+  site, on the ranked path, and the id path returns `entity_detail_by_id` before
+  any option is built. A thought ingested with `--retention-secs 60` disappears
+  from `kern query` after the deadline and is still served in full by `kern get`.
+  It does not heal — GC never reads `valid_until`, and the CLI mints at
+  confidence 1.0, so the entity is a `Fact` and GC-immune. `e2e/test_retention.py`
+  closed item 22 green because it only ever asked the ranked path. Ranked beside
+  88 and 89 on 88's own reasoning: a correctness gap in a shipped flag, reachable
+  only by opting into retention.
+
+  What both findings have in common is what the pinned pattern predicts one
+  level up. A citation that still resolves is not a citation that is still true,
+  and a *claim* that was true when written is not a claim that is still true
+  either. `docs-check` proves neither; only reading the source does.
+
+  Decided by: verify-before-claiming — every anchor here was opened and read
+  against what the citing sentence asserts, and the two claims that fell were
+  claims nothing in the toolchain was ever going to fail on.
+
 - 2026-07-21 — merging `cycle/2` re-broke four `ROADMAP.md` -> `FEATURES.md`
   anchors that were correct in the branch, and that is a property of the merge
   rather than a mistake by either side. Both branches appended to `FEATURES.md`,

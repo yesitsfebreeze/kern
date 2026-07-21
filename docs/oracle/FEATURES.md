@@ -131,7 +131,7 @@ through `get_or_spawn_unnamed_child` (`src/base/accept.rs:539`), which reuses th
 single holding-pen child and auto-loads an evicted one rather than respawning it
 (three tests hold the line, `src/base/accept.rs:839`, `:894`). Growth comes only
 from tick clustering, which deliberately spawns one *distinct* child per
-spawnable cluster (`spawn_child_clusters`, `src/tick.rs:195`) — bounded per pass
+spawnable cluster (`spawn_child_clusters`, `src/tick.rs:196`) — bounded per pass
 by the cluster count, not by anything per parent.
 
 ---
@@ -566,7 +566,7 @@ Trained per-kern on the tick.
 Weights are per-kern, not shared across the tree. Link prediction only — no
 node-classification objective. *Corrected 2026-07-21:* a repeatedly failing
 propagation does **not** re-enqueue every tick. `GnnPropagate` is enqueued only
-when `do_cluster` did structural work (`if did_structural_work`, `src/tick.rs:168`),
+when `do_cluster` did structural work (`if did_structural_work`, `src/tick.rs:166`),
 so a quiescent kern retries nothing; the climbing `task_failures` count
 (`src/tick/gnn_propagate.rs:46`) is still the only visibility when it does.
 
@@ -656,9 +656,10 @@ reads as zero.
 ## 14. CLI — `active`
 
 **What.** The `kern` binary. Reads the on-disk graph directly (can race a live
-daemon — prefer MCP for live state). Four commands are the exceptions when a
-daemon serves: `forget` and `degrade` hand it the write, and `get` and `query`
-take their read from it.
+daemon — prefer MCP for live state). Nine commands are the exceptions when a
+daemon serves: `forget`, `degrade`, `intake drain`, `graviton add`,
+`graviton remove`, `claim-kind add` and `claim-kind rm` hand it the write, and
+`get` and `query` take their read from it.
 
 **Subcommands** (`Commands` enum, `src/commands.rs`): `ingest`, `query`,
 `search`, `reembed`, `get`, `list`, `forget`, `link`, `intake {status|drain}`,
@@ -672,11 +673,16 @@ Notable:
 
 - **Daemon-first writes** (`src/commands/route.rs`) — `route(name, args)` probes
   `Endpoint::kern()` once, never spawns, and answers `Done` / `Refused` /
-  `NoDaemon`. `forget` and `degrade` take it: while a daemon serves, the
+  `NoDaemon`. `forget`, `degrade`, `graviton add`/`remove` and `claim-kind
+  add`/`rm` take it (the last four via `graviton_at`/`claim_kind_at`,
+  `src/commands/admin.rs`, which take the endpoint the way `route_to` does so
+  the routed path is reachable from a test): while a daemon serves, the
   mutation lands in its live in-memory graph over `call_tool` instead of in a
   second copy this process opened, and a daemon that refuses is reported rather
   than retried against the store behind it. No daemon -> the pre-existing local
-  path runs, printing through the same printer so the two cannot drift.
+  path runs, printing through the same printer so the two cannot drift. The
+  graviton add routes before it embeds: the daemon embeds with its own client,
+  so a local embed first would spend a model call on a vector nobody keeps.
 
 - **Daemon-first reads** (same route, `query` tool) — `get` (`cmd_get`,
   `graph_ops.rs`) and `query` (`cmd_query`, `query.rs`) route before they touch
@@ -1313,8 +1319,12 @@ Ranked by leverage:
 5. **CLI vs daemon race, serving half** — the destructive half is closed:
    `src/base/lock.rs` is an advisory writer lock and `reembed`/`compact`/`gc`
    refuse while a daemon holds it, with `kern status` reporting the holder. The
-   route decided for the rest exists (`src/commands/route.rs`) and `forget` and
-   `degrade` take it. `kern mcp`'s standalone fallback — the last long-lived
+   route decided for the rest exists (`src/commands/route.rs`) and `forget`,
+   `degrade`, `graviton add`/`remove` and `claim-kind add`/`rm` take it — the
+   last four closed 2026-07-21, and they were the ones that mattered most: with
+   no routing at all they reached `with_graph`, which writes the whole kern map
+   back unguarded over whatever the daemon had committed. `kern mcp`'s
+   standalone fallback — the last long-lived
    second writer, and one no probe can see — now claims the same lock before it
    reads the graph and refuses to boot beside a holder (`claim_standalone`,
    `src/commands/mcp_cmd.rs`). The read side is done: `get` and `query` route

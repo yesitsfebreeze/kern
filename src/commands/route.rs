@@ -78,31 +78,7 @@ pub(crate) fn array_field<'a>(v: &'a serde_json::Value, key: &str) -> &'a [serde
 #[cfg(all(test, unix))]
 mod tests {
 	use super::*;
-	use std::sync::Arc;
-	use trnsprt::typed::{bind_kern_listener, BindOutcome};
-
-	fn scratch_endpoint(tag: &str) -> Endpoint {
-		let dir = std::env::temp_dir().join(format!(
-			"kern-route-{}-{}-{tag}",
-			std::process::id(),
-			crate::base::util::now_ms()
-		));
-		std::fs::create_dir_all(&dir).expect("scratch dir");
-		Endpoint::Unix(dir.join("kern.sock"))
-	}
-
-	async fn serving(srv: crate::mcp::Server, endpoint: &Endpoint) {
-		let BindOutcome::Bound(listener) = bind_kern_listener(endpoint).await.expect("bind") else {
-			panic!("scratch endpoint already bound");
-		};
-		let handler = crate::rpc::kern_rpc_server::KernRpcHandler::new(
-			Arc::new(srv),
-			Arc::new(tokio::sync::Notify::new()),
-		);
-		tokio::spawn(crate::rpc::kern_rpc_server::serve_kern_rpc_loop(
-			listener, handler,
-		));
-	}
+	use crate::test_support::{scratch_endpoint, serving};
 
 	fn kern_with_edge() -> crate::mcp::Server {
 		use crate::base::reason::add_reason;

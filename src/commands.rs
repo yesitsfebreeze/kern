@@ -569,7 +569,7 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 		Commands::Graviton { action } => admin::cmd_graviton(cfg, action).await,
 
 		Commands::Degrade { id } => graph_ops::cmd_degrade(cfg, &id).await,
-		Commands::ClaimKind { action } => admin::cmd_claim_kind(cfg, action),
+		Commands::ClaimKind { action } => admin::cmd_claim_kind(cfg, action).await,
 		Commands::Peers => admin::cmd_peers(cfg),
 		Commands::Register { path } => admin::cmd_register(cfg, &path),
 		Commands::Unnamed { action } => admin::cmd_unnamed(cfg, action),

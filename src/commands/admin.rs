@@ -1,5 +1,8 @@
+use trnsprt::typed::Endpoint;
+
 use crate::base::util::short_id;
 
+use super::route::{route_to, Routed};
 use super::{
 	load_graph, save_graph_unguarded, with_graph, ClaimKindAction, Client, GravitonAction,
 	UnnamedAction,
@@ -211,7 +214,22 @@ fn human_bytes(n: u64) -> String {
 	}
 }
 
+fn print_graviton_added(name: &str, mass: f64) {
+	println!("graviton added: {name} (mass {mass})");
+}
+
+fn print_graviton_removed(name: &str) {
+	println!("graviton removed: {name}");
+}
+
 pub(super) async fn cmd_graviton(cfg: &crate::config::Config, action: GravitonAction) {
+	graviton_at(cfg, &Endpoint::kern(), action).await
+}
+
+// Routed first for the same reason as forget: `with_graph` writes the whole kern
+// map back unguarded, so a local graviton edit beside a serving daemon drops
+// everything that daemon has committed since this process loaded.
+async fn graviton_at(cfg: &crate::config::Config, endpoint: &Endpoint, action: GravitonAction) {
 	match action {
 		GravitonAction::Add {
 			name,
@@ -219,6 +237,20 @@ pub(super) async fn cmd_graviton(cfg: &crate::config::Config, action: GravitonAc
 			mass,
 			embed,
 		} => {
+			let mass = mass.unwrap_or(1.0);
+			// Routed before the embed: the daemon owns the vector it stores, and
+			// embedding here would be a second call to the same model for nothing.
+			match route_to(
+				endpoint,
+				"graviton",
+				serde_json::json!({"action": "add", "name": &name, "text": &text, "mass": mass}),
+			)
+			.await
+			{
+				Routed::Done(_) => return print_graviton_added(&name, mass),
+				Routed::Refused(e) => return eprintln!("{e}"),
+				Routed::NoDaemon => {}
+			}
 			let (url, model) = embed.resolve(cfg);
 			let llm_client = Client::new_embed_only(url, model, &cfg.embed.key);
 			// Multi-line seed = example statements, embedded separately and
@@ -237,11 +269,10 @@ pub(super) async fn cmd_graviton(cfg: &crate::config::Config, action: GravitonAc
 				eprintln!("embed: empty or mismatched embeddings");
 				return;
 			};
-			let mass = mass.unwrap_or(1.0);
 			with_graph(cfg, |g| {
 				crate::base::accept::add_graviton_with_mass(g, &name, vec, mass)
 			});
-			println!("graviton added: {name} (mass {mass})");
+			print_graviton_added(&name, mass);
 		}
 		GravitonAction::List => {
 			let g = load_graph(cfg);
@@ -254,9 +285,20 @@ pub(super) async fn cmd_graviton(cfg: &crate::config::Config, action: GravitonAc
 			}
 		}
 		GravitonAction::Remove { name } => {
+			match route_to(
+				endpoint,
+				"graviton",
+				serde_json::json!({"action": "remove", "name": &name}),
+			)
+			.await
+			{
+				Routed::Done(_) => return print_graviton_removed(&name),
+				Routed::Refused(e) => return eprintln!("{e}"),
+				Routed::NoDaemon => {}
+			}
 			let removed = with_graph(cfg, |g| crate::base::accept::remove_graviton(g, &name));
 			if removed {
-				println!("graviton removed: {name}");
+				print_graviton_removed(&name);
 			} else {
 				eprintln!("graviton not found: {name}");
 			}
@@ -284,19 +326,53 @@ pub(crate) fn graviton_rows(g: &crate::base::graph::GraphGnn) -> Vec<GravitonRow
 		.collect()
 }
 
-pub(super) fn cmd_claim_kind(cfg: &crate::config::Config, action: ClaimKindAction) {
+fn print_claim_kind_added(name: &str) {
+	println!("claim kind added: {name}");
+}
+
+fn print_claim_kind_removed(name: &str) {
+	println!("claim kind removed: {name}");
+}
+
+pub(super) async fn cmd_claim_kind(cfg: &crate::config::Config, action: ClaimKindAction) {
+	claim_kind_at(cfg, &Endpoint::kern(), action).await
+}
+
+async fn claim_kind_at(cfg: &crate::config::Config, endpoint: &Endpoint, action: ClaimKindAction) {
 	match action {
 		ClaimKindAction::Add { name, description } => {
+			match route_to(
+				endpoint,
+				"claim_kind",
+				serde_json::json!({"action": "add", "name": &name, "description": &description}),
+			)
+			.await
+			{
+				Routed::Done(_) => return print_claim_kind_added(&name),
+				Routed::Refused(e) => return eprintln!("{e}"),
+				Routed::NoDaemon => {}
+			}
 			with_graph(cfg, |g| {
 				g.root.claim_kinds.insert(name.clone(), description);
 			});
-			println!("claim kind added: {name}");
+			print_claim_kind_added(&name);
 		}
 		ClaimKindAction::Rm { name } => {
+			match route_to(
+				endpoint,
+				"claim_kind",
+				serde_json::json!({"action": "rm", "name": &name}),
+			)
+			.await
+			{
+				Routed::Done(_) => return print_claim_kind_removed(&name),
+				Routed::Refused(e) => return eprintln!("{e}"),
+				Routed::NoDaemon => {}
+			}
 			with_graph(cfg, |g| {
 				g.root.claim_kinds.remove(&name);
 			});
-			println!("claim kind removed: {name}");
+			print_claim_kind_removed(&name);
 		}
 	}
 }
@@ -380,20 +456,26 @@ mod cmd_tests {
 		(dir, cfg)
 	}
 
-	#[test]
-	fn claim_kind_add_then_remove_persists_through_the_graph() {
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn claim_kind_add_then_remove_persists_through_the_graph() {
 		let (_dir, cfg) = temp_cfg();
+		// An endpoint nothing ever bound: the NoDaemon fallback, pinned so the
+		// test can never reach a daemon the developer happens to be running.
+		let ep = crate::test_support::scratch_endpoint("claim-kind-local");
 		// A custom key, not a default: default keys re-inject on every load, so Rm
 		// would appear to fail on the next load.
 		let key = "custom_test_kind";
 
-		cmd_claim_kind(
+		claim_kind_at(
 			&cfg,
+			&ep,
 			ClaimKindAction::Add {
 				name: key.into(),
 				description: "a custom kind".into(),
 			},
-		);
+		)
+		.await;
 		let g = load_graph(&cfg);
 		assert_eq!(
 			g.root.claim_kinds.get(key).map(String::as_str),
@@ -401,11 +483,92 @@ mod cmd_tests {
 			"Add persists the claim kind onto the root",
 		);
 
-		cmd_claim_kind(&cfg, ClaimKindAction::Rm { name: key.into() });
+		claim_kind_at(&cfg, &ep, ClaimKindAction::Rm { name: key.into() }).await;
 		let g = load_graph(&cfg);
 		assert!(
 			!g.root.claim_kinds.contains_key(key),
 			"Rm removes the custom claim kind"
+		);
+	}
+
+	// The half of item 9 this closes: beside a serving daemon the command must
+	// hand the write over, because the local path is `with_graph` — load, mutate,
+	// `save_graph_unguarded` — which writes the whole kern map back with no epoch
+	// check and drops every commit the daemon made since that load.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_routed_claim_kind_add_lands_in_the_daemon_and_never_touches_the_store() {
+		let (_dir, cfg) = temp_cfg();
+		let ep = crate::test_support::scratch_endpoint("claim-kind-routed");
+		let srv = crate::test_support::mcp_server();
+		let graph = srv.graph.clone();
+		crate::test_support::serving(srv, &ep).await;
+
+		claim_kind_at(
+			&cfg,
+			&ep,
+			ClaimKindAction::Add {
+				name: "custom_test_kind".into(),
+				description: "a custom kind".into(),
+			},
+		)
+		.await;
+
+		assert_eq!(
+			graph
+				.read()
+				.root
+				.claim_kinds
+				.get("custom_test_kind")
+				.map(String::as_str),
+			Some("a custom kind"),
+			"the serving daemon's own graph took the write"
+		);
+		assert!(
+			!load_graph(&cfg)
+				.root
+				.claim_kinds
+				.contains_key("custom_test_kind"),
+			"the CLI's store was never written behind the daemon's back"
+		);
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_routed_graviton_remove_lands_in_the_daemon_and_never_touches_the_store() {
+		let (_dir, cfg) = temp_cfg();
+		// The local store carries the same graviton, so a command that fell through
+		// to `with_graph` would visibly delete it here.
+		with_graph(&cfg, |g| {
+			crate::base::accept::add_graviton_with_mass(g, "docs", vec![1.0, 0.0], 1.0)
+		});
+
+		let ep = crate::test_support::scratch_endpoint("graviton-routed");
+		let srv = crate::test_support::mcp_server();
+		let graph = srv.graph.clone();
+		crate::base::accept::add_graviton_with_mass(&mut graph.write(), "docs", vec![1.0, 0.0], 1.0);
+		crate::test_support::serving(srv, &ep).await;
+
+		graviton_at(
+			&cfg,
+			&ep,
+			GravitonAction::Remove {
+				name: "docs".into(),
+			},
+		)
+		.await;
+
+		assert!(
+			graviton_rows(&graph.read()).is_empty(),
+			"the serving daemon's own graph lost the graviton"
+		);
+		assert_eq!(
+			graviton_rows(&load_graph(&cfg))
+				.iter()
+				.map(|r| r.name.clone())
+				.collect::<Vec<_>>(),
+			vec!["docs".to_string()],
+			"the CLI's store is untouched — the daemon owns the write"
 		);
 	}
 
