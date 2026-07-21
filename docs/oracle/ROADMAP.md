@@ -1594,7 +1594,7 @@ What survives: the by-name discipline. It is cheap, it catches mode 1
 independently of the build layout, and it is what confirmed both cycles that
 found this.
 
-### 92. `test_retention` fails under load and nobody had written it down `[eval]`
+### 92. Tests that race a backward-stepping `CLOCK_REALTIME` — mechanism found, `test_retention` unfixed `[eval]`
 
 `e2e/test_retention.py::test_a_retention_expires_the_fact_out_of_query_results`
 fails intermittently, and only when the CPU-heavy `test_recall.py` runs before
@@ -1604,12 +1604,32 @@ consecutive `pytest -q e2e/test_recall.py e2e/test_retention.py` runs on
 pristine code, all green. So it is real, load-dependent, and not reliably
 reproducible on demand — which is the worst shape a test can have.
 
-Suspected mechanism, unconfirmed: the test sleeps on Python's `time.sleep`
-(monotonic) and compares against kern's `SystemTime::now()` (wall clock) with a
-2-second margin. Under load on WSL2 the wall clock lags the sleep and the fact
-has not expired yet when the assertion runs. If that is right, the fix is to
-make the margin generous or to drive expiry from an injected instant rather than
-from elapsed real time — a test that races the clock will keep doing so.
+**Mechanism identified 2026-07-22, and it is not what this item guessed.** The
+guess was "under load on WSL2 the wall clock lags the sleep". It does not lag —
+**this host steps `CLOCK_REALTIME` backwards by roughly 2.8 s every 30 s.** Found
+while fixing the same class of failure in
+`the_poll_loop_resolves_its_deadline_per_pass_not_once_at_startup`
+(`src/ingest/intake.rs`), where a two-second monotonic sleep could advance
+realtime by under a second.
+
+That explains everything the original entry recorded as puzzling: why it fails
+only sometimes, why it correlates with a long preceding test rather than with
+load as such (a longer run spans more backward steps), and why three observers
+could not reproduce it on demand — six consecutive clean runs is an ordinary
+outcome when the trigger fires every half-minute against a two-second margin.
+
+So the shape of the fix is settled: **any test comparing a monotonic sleep
+against a `SystemTime` deadline on this host is a coin flip**, and widening the
+margin only lengthens the odds. `intake.rs` now waits on the wall clock itself,
+restarting its marker when the clock steps back and capping on the monotonic
+clock so a stopped clock fails loudly rather than hanging. `e2e/test_retention.py`
+wants the same treatment, or an injected instant.
+
+Worth noting what this cost: the item was filed with deliberately conflicting
+evidence — two observations of failure against six clean runs — because neither
+"flaky" nor "fine" was established. Recording the disagreement rather than
+resolving it early is what left the entry accurate enough to update rather than
+rewrite when the real cause turned up in an unrelated file.
 
 It ranks here rather than in a retrieval tier because retention itself is not
 suspected; the harness is. It is written down because the cost is not the

@@ -2,6 +2,27 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 92 updated in place rather than rewritten, and retitled to
+  name the mechanism: "Tests that race a backward-stepping `CLOCK_REALTIME`".
+  The item had guessed wall-clock *lag under load*; the cause is the clock
+  stepping backwards ~2.8 s every ~30 s, found in an unrelated file.
+
+  The guess and the finding are both kept, because the difference between them
+  is the useful part. Lag would have been fixed by widening the margin — the
+  item said so. A backward step cannot be: widening only lengthens the odds,
+  since the trigger recurs every half-minute regardless of how long the margin
+  is. Same symptom, opposite remedy.
+
+  It also explains the evidence that made the item look unresolvable. Six
+  consecutive clean runs disproved nothing against a trigger firing twice a
+  minute, and the correlation was never with load — it was with a long preceding
+  test, which simply spans more backward steps. Filing that disagreement instead
+  of resolving it early is why the entry needed an update rather than a
+  correction.
+
+  Decided by: verify-before-claiming — an unconfirmed mechanism was labelled
+  unconfirmed, and survived contact with the real one.
+
 - 2026-07-22 — a flake fix arrived in the MAIN checkout, not a worktree, and
   `cycle.sh reap` refused to run because of it — correctly, and that refusal is
   the reason this is a note rather than a silent clobber. Three cycles were live
