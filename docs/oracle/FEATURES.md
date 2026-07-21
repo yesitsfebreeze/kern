@@ -276,13 +276,13 @@ and cold tier live together. Readers never block, writers serialize.
 
 **How.**
 
-- `Store::open` (`src/base/store.rs:283`) opens the env (`heed` 0.20);
+- `Store::open` (`src/base/store.rs:314`) opens the env (`heed` 0.20);
   `StoredKern`/`StoredVec`/`StoredTemporal`/`ColdRow` are the on-disk bincode
   shapes, each value a version byte followed by a `zstd` frame
   (`encode_at`/`strip_version`, `src/base/store.rs`), vectors int8. Exactly one
   live format, `FORMAT_V5`; any other version byte is rejected, never
   mis-decoded and never migrated.
-- **Guarded flush** (`Store::flush_guarded` `src/base/store.rs:538`,
+- **Guarded flush** (`Store::flush_guarded` `src/base/store.rs:571`,
   `persist::flush_guarded` `src/base/persist.rs:129`) — a snapshot carries an
   expected `mutation_epoch`; if disk advanced under us (another writer /
   external edit), the flush is *refused*, the disk rows are *absorbed* back
@@ -307,16 +307,16 @@ and cold tier live together. Readers never block, writers serialize.
   no hits rather than panicking, but it is *counted*
   (`search::query_dim_rejected`, `src/base/search.rs:15`) and logged throttled,
   because the silent no-op is what let the mismatch hide.
-- **Cold tier** — `cold_spill` (`src/base/store.rs:591`) / `cold_get` /
-  `cold_all` / `cold_put_all` / `cold_search` (`:629`, brute-force). Bounded by
-  `COLD_MAX_ENTRIES = 50_000` — *softly*: both write paths (`:596`, `:625`) call
-  `cold_cap_amortized` (`:667`), which skips the scan until the tier passes
-  `max + COLD_CAP_SLACK` (1024, `:20`), so the real ceiling is 51_024. Only then
-  does `cold_cap` (`:678`) decode every row, sort by `created_at` and cut back to
-  `max` — capping per spill cost one full 50k-row decode per single eviction. A
-  drop is never silent: `cold_evicted` (`:718`) feeds `health`, and a dropped
-  non-durable entity is unrecoverable, so the counter is its only trace.
-- **Compaction** (`compact_dir`, `src/base/store.rs:756`) — the only way to
+- **Cold tier** — `cold_spill` (`src/base/store.rs:624`) / `cold_get` (`:636`) /
+  `cold_all` (`:649`) / `cold_put_all` (`:666`) / `cold_search` (`:684`). Rows are
+  stored without their vector; the vector lives alone in `COLD_VEC_DB` (`:26`), so
+  the full-tier scan scores off raw floats and decodes only the k winners, and
+  `cold_get`/`cold_all` rejoin the halves. Bounded by `COLD_MAX_ENTRIES = 50_000`
+  — *softly*: both write paths (`:632`, `:676`) call `cold_cap_amortized` (`:728`),
+  which skips the scan until the tier passes `max + COLD_CAP_SLACK` (1024, `:20`);
+  only then does `cold_cap` (`:739`) sort by `created_at` and cut back to `max`. A
+  drop is unrecoverable, so `cold_evicted` (`:780`) feeding `health` is its trace.
+- **Compaction** (`compact_dir`, `src/base/store.rs:818`) — the only way to
   shrink LMDB's high-water mark; writes a fresh env to a tmp file then
   `swap_compacted` renames with retry. Requires exclusive access (run offline).
 - **Snapshots** — `snapshot_for_flush` (`src/base/persist.rs:154`) /
@@ -509,7 +509,7 @@ invisible except as work that did not happen.
 Documents are immune while Active** (immunity is revoked once superseded);
 evictions spill to the cold tier before dropping (spill-before-drop). Spill is
 lossless out of RAM, not lossless overall — the cold tier is capped at
-`COLD_MAX_ENTRIES = 50_000` and `Store::cold_cap` (`src/base/store.rs:678`)
+`COLD_MAX_ENTRIES = 50_000` and `Store::cold_cap` (`src/base/store.rs:739`)
 deletes the oldest rows past it, and with no store bound `run_gc` drops the
 victim outright.
 
