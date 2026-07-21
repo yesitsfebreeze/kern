@@ -2,6 +2,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
 	let mut defs = super::tools_query::tool_schemas();
 	defs.extend(super::tools_mutate::tool_schemas());
 	defs.extend(super::tools_admin::tool_schemas());
+	defs.extend(super::tools_setup::tool_schemas());
 	defs
 }
 
@@ -36,6 +37,7 @@ mod tests {
 			"descriptor",
 			"pulse",
 			"gc",
+			"setup",
 		];
 		assert_eq!(names, expected, "tool set must match (order intentional)");
 

@@ -5,6 +5,7 @@ pub mod tools;
 mod tools_admin;
 mod tools_mutate;
 mod tools_query;
+mod tools_setup;
 
 use std::io::{BufReader, Read, Write};
 use std::sync::{Arc, Mutex};
@@ -176,6 +177,7 @@ impl trnsprt::McpServer for Server {
 			"descriptor" => self.tool_descriptor(args),
 			"pulse" => self.tool_pulse(args),
 			"gc" => self.tool_gc(),
+			"setup" => self.tool_setup(),
 			_ => {
 				return Ok(trnsprt::ToolResult {
 					content: vec![
