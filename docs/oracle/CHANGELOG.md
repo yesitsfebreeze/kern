@@ -2,6 +2,31 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — `4e836bb`'s subject is wrong in the same way `3529fce`'s was, and
+  twice makes it a pattern with a clean cause. It reads "source-trust weighting —
+  a user-authored claim should outrank an auto-ingested one at equal heat,
+  defaulting to 1.0", and every clause of that is what the slice **disproved**:
+  user and agent are indistinguishable at scoring time (both mint
+  `Source::Inline`), so no `source_trust_user` key was built — grep finds none —
+  and what shipped is a scheme-keyed `BTreeMap` that is **empty** by default, not
+  1.0.
+
+  The cause is now isolatable. Eight merges reached master today. The two written
+  by automation — `3529fce`, `4e836bb` — copy the slice title verbatim and are
+  both false. The six written by hand after reading the diff are accurate. The
+  difference is not care; it is *input*: a slice title is written before the work
+  and describes a hypothesis, and this loop disproves six hypotheses in ten.
+
+  So the fix is not "write better subjects", it is **never derive a merge subject
+  from the slice**. Anything that must be generated should come from the branch's
+  own commit subjects, which are written after the diff exists. Recorded here
+  because a pushed subject cannot be corrected in place, and `git log` is the
+  first place anyone looks — someone reading these two lines would conclude kern
+  has an importance index and a user-trust knob. It has neither.
+
+  Decided by: verify-before-claiming — both subjects were checked against the
+  tree rather than trusted, and both failed.
+
 - 2026-07-21 — filed item 95 while verifying item 20: the file watcher bypasses
   `clamp_confidence` entirely, so an auto-ingested `Document` lands on Beta(2,1)
   = 0.6667, exactly a human CLI claim's posterior and above the 0.6500 an MCP
