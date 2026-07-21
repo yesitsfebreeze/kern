@@ -177,7 +177,7 @@ underneath any of them gets a refused flush and a reload rather than a clobber.
 two unlocked callers".** The unguarded entry point is named
 `save_graph_unguarded` and carries its precondition, and walking its call sites
 turns up **three** classes, not two. The two this item already named stand and
-still do not belong to it: `cmd_hub_merge` (`src/commands/admin.rs:746`) writes
+still do not belong to it: `cmd_hub_merge` (`src/commands/admin.rs:748`) writes
 a destination graph it holds no lock on, and `maybe_self_heal_store`
 (`src/commands.rs:424`) rewrites the store during boot recovery — hub merge
 stops both daemons first, self-heal runs before the daemon serves, and neither
@@ -188,7 +188,7 @@ item 24. `with_graph` (`src/commands.rs:453`) loads the graph, mutates it and
 calls `save_graph_unguarded` (`:456`) holding no lock at all. `cmd_forget` and
 `cmd_degrade` reach it safely, because they `route` first and only fall into it
 on `NoDaemon` (`src/commands/graph_ops.rs:120`, `:285`). **`kern graviton
-add`/`remove` (`src/commands/admin.rs:241`, `:257`) and `kern claim-kind
+add`/`remove` (`src/commands/admin.rs:243`, `:259`) and `kern claim-kind
 add`/`rm` (`:290`, `:296`) do not route at all**, so beside a running daemon
 they load a snapshot, mutate it, and write the *whole graph* back over whatever
 the daemon has committed since — a full-graph clobber, not a lost write, and the
@@ -198,7 +198,7 @@ exact race the writer lock and the route exist to close. Unlike `ingest` and
 widens item 24's hole no more than `intake drain` did, and the tools they would
 route to already exist and already have matching semantics — `graviton`
 (`src/mcp/tools_admin.rs:87`, schema `:39`) and `claim_kind` (`:161`, schema
-`:52`), both dispatched at `src/mcp.rs:182-183`.
+`:52`), both dispatched at `src/mcp.rs:183-184`.
 
 So the item's remainder is two halves, not one: `graviton`/`claim_kind`,
 unblocked and mechanical, and `ingest`/`link`, blocked on item 24. The item does
@@ -224,21 +224,42 @@ be returned. Default semantics: empty `principals` means *no filter*, not
 
 ### 18. ACL + request principal — gates everything else in this tier `[surface]`
 
-`Entity` already carries `Acl` (`src/base/types.rs:287`; struct `{scope, users,
-groups}` at `:120-124`), and it is only ever written as `Acl::default()`
-(`src/ingest/place.rs:56`, `src/ingest/file_watcher.rs:147`), so nothing can
-populate it. Four parts:
+**Four bullets done 2026-07-21; the item stays open.** `Entity` carries `Acl`
+(struct `{scope, users, groups}`, `src/base/types.rs:120-124`) and it is now
+written from the caller, not hardcoded — but "enforced in `matches_filter`" is
+only worth what the read surfaces that *run* `matches_filter` are worth, and two
+of them did not. Both are fixed below; the ones that still do not are listed at
+the end, and they are what keeps this item open. What shipped:
 
-- Expose `principals` / `scope` on the MCP `ingest` schema
-  (`src/mcp/tools_mutate.rs:19-31`), threaded through `ingest::Job` into
-  `place.rs`.
-- Accept `principals` on `query` — no identity param exists
-  (`QueryArgs`, `src/mcp/tools_query.rs:76-107`).
-- Enforce in `matches_filter` (`src/retrieval/score.rs:205-243`), which has no
-  ACL predicate.
-- ~~**Guard the id path.**~~ **Done 2026-07-21.** `src/mcp/tools_query.rs:129-149`
+- ~~Expose `principals` / `scope` on the MCP `ingest` schema.~~ **Done.**
+  `IngestArgs` takes both; `acl_from_args` (`src/mcp/tools_mutate.rs`) builds the
+  `Acl` on the same pre-branch line as `valid_until`, so the sync, durable-direct
+  and RAM-queue paths all carry it. It rides `ingest::Job::acl`
+  (`src/ingest/worker.rs`) into `new_statement_entity`
+  (`src/ingest/place.rs`), which no longer hardcodes `Acl::default()`.
+  `DirectJob::acl` (`src/ingest/direct.rs`) carries it across the durable hop for
+  the same reason `valid_until` is carried: the caller's principal is gone by the
+  time the drain runs, so dropping it there would silently republish a scoped
+  ingest as public. `Worker::enqueue`/`run` keep their arity and delegate to
+  `enqueue_with_acl`/`run_with_acl` with `Acl::default()` — that is what leaves
+  the file watcher and the intake drain public, per the deferred decision below.
+- ~~Accept `principals` on `query`.~~ **Done.** `QueryArgs.principals`
+  (`src/mcp/tools_query.rs`) → `QueryOptions.principals`
+  (`src/retrieval/score.rs`), validated by the shared `parse_principals`
+  (`src/mcp.rs`) that both surfaces use. A blank entry is a hard error, never a
+  silent skip: it would match the empty `Acl::scope` of every public entity, so
+  accepting it would turn a caller's typo into an access decision.
+- ~~Enforce in `matches_filter`.~~ **Done.** `acl_admits`
+  (`src/retrieval/score.rs`) runs first in `matches_filter`. Both tier-wide rules
+  are enforced and tested in `matches_filter_is_the_per_entity_predicate`: a
+  scoped **Fact** is dropped for a non-member exactly like a scoped Claim
+  (GC-immunity is not ACL-immunity), and an **empty `principals` is no filter at
+  all**, not public-only. `principals` also makes `QueryOptions::is_active()`
+  true, so an ACL-only query takes the pre-filtered ANN path rather than the
+  unfiltered seed path — the same predicate either way.
+- ~~**Guard the id path.**~~ **Done 2026-07-21.** `src/mcp/tools_query.rs:133-153`
   now builds `QueryOptions` first and runs the resolved row through
-  `retrieval::score::matches_filter` (`src/retrieval/score.rs:205`) before it
+  `retrieval::score::matches_filter` (`src/retrieval/score.rs:226`) before it
   renders, so the id read honours every filter the ranked read honours —
   `query {id, kind: "claim"}` on a `Fact` answers `thought not found`
   (`id_filter_tests`, same file). Previously it returned `entity_detail_by_id`
@@ -247,20 +268,70 @@ populate it. Four parts:
   A bare `query {id}` still filters nothing, because `QueryOptions::default()`
   leaves `valid_at`/`as_of` unset; that is what preserves the retired item 91
   `[retrieval]` decision (closed 2026-07-21, not the open item 91 `[ingest]`) to
-  *flag* an expired row rather than hide it. **This bullet no longer blocks the
-  three above, but it does not deliver them:** `matches_filter` still has no ACL
-  predicate, so the routing exists and the rule does not — and the rule is still
-  decided alongside item 24, whose missing socket auth is the same boundary.
+  *flag* an expired row rather than hide it. The ACL predicate landed on this
+  path and the ranked path at once, because both go through `matches_filter`.
 
-Decide alongside: does the file watcher give `Document` entities a tenant-default
-ACL, or leave them public? Recommend configurable, default public-within-tenant,
-since the tenant boundary is the process. `src/ingest/file_watcher.rs:147`
-hardcodes `Acl::default()` today.
+**Coverage is unit tests only, and cannot be more.** `principals` is MCP-only —
+there is no CLI flag — and `e2e/conftest.py` drives the `kern` binary over
+subprocess with no MCP JSON-RPC client, so nothing in `e2e/` can reach this
+surface. Reaching it would mean building an MCP stdio driver fixture, which is
+larger than the feature. The behaviour is pinned by
+`matches_filter_is_the_per_entity_predicate` (`src/retrieval/score.rs`),
+`id_filter_tests` (`src/mcp/tools_query.rs`) and `ingest_acl_tests`
+(`src/mcp/tools_mutate.rs`), the last of which follows an `ingest` carrying
+`principals`/`scope` all the way to the `Acl` on the placed entity.
+
+**Still open, deliberately deferred:** does the file watcher give `Document`
+entities a tenant-default ACL, or leave them public? Recommend configurable,
+default public-within-tenant, since the tenant boundary is the process.
+`src/ingest/file_watcher.rs:150` hardcodes `Acl::default()` — which is that
+recommended default — and `Worker::enqueue`'s public delegation keeps it there
+until the decision is made.
+
+**The dedup rule is decided, not deferred.** The survivor keeps its own ACL —
+an id *is* its content hash, so one text cannot exist under two audiences and no
+other answer is available. The hole was never the entity, it was the `Rephrase`
+edge: `merge_duplicate` stored the incoming text **verbatim** on the survivor, a
+`Reason` carries no ACL of its own, and every surface that renders an entity
+renders its edges (`entity_detail` untruncated, the ranked `edges` array,
+`resource_thought`, `format_chains`). A scoped ingest landing within
+`dedup_threshold` cosine of any public thought therefore published its own text
+to everyone. `merge_duplicate` (`src/base/accept.rs`) now takes the incoming
+`Acl` and skips the rephrase write when it differs from the survivor's, in either
+direction; a support observation is metadata about a statement and still merges,
+the wording does not (`ingest::dedup::tests`). The supersede path was already
+handled: `src/tick/tasks.rs` carries the old entity's `Acl` into
+`build_chunk_entity`, so a rephrase cannot launder a scoped thought into a public
+one.
+
+**Two reads returned entity text without passing the predicate**, found by
+enumerating the read surfaces rather than trusting the single gate — both now
+run `matches_filter`. *Cold-tier backfill* (`src/mcp/tools_query.rs`) pushed
+`Store::cold_search` hits straight into the delivered set; that is a raw cosine
+scan answering no filter, so spilling an entity was the way around every
+predicate the hot path enforces, ACL included. *Path chains* (`format_chains`)
+render the text of every entity on a walk and `retrieve` filtered only
+`results` — the ACL stopped the row and the chain printed it anyway. A chain
+touching a withheld entity is dropped whole: a chain with a hole in it still says
+the withheld thought exists and what it connects.
+
+**Still ungated — this is what keeps the item open.** The MCP **resources**
+surface (`kern://thoughts`, `kern://thought/{id}`, `src/mcp/resources.rs`)
+returns entity text and accepts no `principals` at all, so today the ACL is a
+filter a cooperating client *asks for*, not a boundary imposed on one; deciding
+this means deciding whether resources get a principal or the server gets a
+session principal, which is the same missing-auth boundary as item 24.
+**Gossip egress** replicates a scoped `Entity` to peers with no ACL gate — the
+`Acl` does ride the wire and `merge_entity` never imports a remote ACL over a
+local one, so neither side can widen the other's, but shipping the row at all is
+a trust decision nobody has made. And **`Reason` has no ACL**, so `link`'s
+`explain_relationship_prompt` can still quote a scoped entity's text into an edge
+on a public one.
 
 ### 20. Source-trust weighting `[retrieval]`
 
 User-authored claims should outrank auto-ingested claims of equal heat.
-`apply_boosts` has no source-trust prior (`src/retrieval/score.rs:84-96`). Add
+`apply_boosts` has no source-trust prior (`src/retrieval/score.rs:90-102`). Add
 `source_trust_user` / `_agent` / `_auto` to `RetrievalConfig`, default all `1.0`
 so ranking does not move until configured, and multiply in the boost step —
 **post-fusion, not in RRF**, which is rank-based. Independent of 21; can run
@@ -278,7 +349,7 @@ auto-distilled claims out of retrieval until a human curates them. No
 
 ### 24. RPC socket has no auth `[surface]`
 
-`FEATURES.md:665-666`. The missing auth is the same boundary as 18's
+`FEATURES.md:674-675`. The missing auth is the same boundary as 18's
 caller-asserted principals — decide them together or the principal stops at the
 MCP surface only. The item's second half is **retired 2026-07-21 — verified
 false**: `KernRpc` does not mirror MCP 1:1 and never did. The contract is four
@@ -339,26 +410,73 @@ the importance predicate so the scan visits eligible entities rather than all of
 them — which is precisely why the win tracks eligibility, and why a corpus where
 everything is eligible cannot be helped by an index at all.
 
-### 26. PageRank runs a full power iteration per query, persisted nowhere `[retrieval]`
+### 26. PageRank costs whatever the seeds reach, and there is no cheap answer when they reach everything `[retrieval]`
 
-Up to 25 iterations over the whole entity adjacency on every retrieve, with
-nothing cached between queries (`decisions/pagerank-authority.mdx:102-105`). The
-second query-time cliff, and it was recorded on the site but in no plan.
+**Narrowed 2026-07-21.** The flat per-query cost is gone; what is left is a
+smaller cost with a different shape, stated below so the closed part is not
+re-opened and the open part is not mistaken for the old one.
 
-**Measured 2026-07-21 and it is the FIRST cliff, not the second**
-(`tests/seed_scale.rs`, release, default minus `pagerank_enabled: false`). At
-N=100k it costs a flat **~20 ms per query** — 20.0 / 21.0 / 19.6 / 18.1 ms at
-1 / 10 / 50 / 100% eligibility. Flat is the finding: unlike item 25's scan, the
-cost does not shrink when the query filters hard, because the power iteration
-walks the whole adjacency regardless of how few entities survive the filter. On
-an ordinary filtered query at 1% eligibility it is **6.7× item 25's scan**, and
-`fuse_hybrid` goes from 0.05 ms to 17.68 ms with it on.
+**Measured before, `tests/seed_scale.rs` in release, default minus
+`pagerank_enabled: false`.** At N=100k it cost a flat **~18 ms per query** —
+18.8 / 17.9 / 18.1 / 17.1 ms at 1 / 10 / 50 / 100% eligibility. Flat was the
+finding: the cost did not shrink when the query filtered hard, because the power
+iteration walked the whole adjacency regardless of how few entities survived.
 
-That makes this the highest-value unblocked retrieval work, ahead of item 25,
-which is where the ranking implies it sits and where the numbers now agree.
-Nothing here is cached, so the first cheap closure to weigh is persisting the
-vector and recomputing on a tick rather than per query — the scores change with
-the graph, not with the query, so per-query recomputation is pure waste.
+**Measured after, same harness.** 1.7 / 3.1 / 1.9 / 1.3 ms at the same four
+points; a filtered retrieve went from 24.0 ms to 7.1 ms end to end. Three
+post-change runs put every one of those points in a 1.3–6.0 ms band — the box
+has two sibling worktrees building into the same target directory, so ±2 ms is
+the noise floor and no single point in that band should be read as exact. The
+before numbers do not need the same caveat: they were 17–19 ms at all four
+points, which is outside it. The walk is now confined to the teleport support
+and what it reaches
+(`src/retrieval/pagerank.rs`), which is exact rather than approximate — every
+node outside the reached set holds a literal 0.0, so every term the full-width
+loop added for it was `+0.0`. `confined_iteration_equals_the_full_width_one_bit_for_bit`
+compares the two against each other on bit patterns, not tolerances.
+
+**The item's own proposed closure is unavailable, and this is why.** It read
+"the scores depend on the graph, not the query, so persist the vector and
+recompute on a tick". They do not: the teleport vector is personalised at the
+query's dense and lexical seeds, so a per-graph vector is *global* PageRank —
+already weighed and already rejected on the site, "popular entities top every
+query, relevant or not". A cache of it would not be a faster version of this
+feature, it would be the alternative the feature exists to avoid. Nothing about
+cold start or persistence is decided here because there is nothing correct to
+persist: personalised PageRank is linear in the teleport vector, so the only
+exact cache is one basis vector per seed node, which is O(N) memory apiece and
+~75 misses on a cold query. A cache keyed on the seed set instead would report a
+large win on any harness that repeats a query — which is the only kind of harness
+we have — while doing nothing for real traffic.
+
+**What remains, with its number.** The cost now tracks reach, so a query whose
+seeds reach the whole graph pays the whole graph. The instrument for that is
+`cost_against_full_width_by_fanout` in `src/retrieval/pagerank.rs`, ignored by
+default, at N=100k with 75 seeds:
+
+| out-degree | reached | confined | full-width |
+|---|---|---|---|
+| 1 | 146 | 0.75 ms | 33.5 ms |
+| 4 | 79,659 | 21.9 ms | 24.6 ms |
+| 16 | 99,968 | 37.7 ms | 26.3 ms |
+
+So at full reach it is **1.4× slower** than what it replaced: the confined loops
+index through a list and the full-width ones vectorise over a slice. Dropping
+the per-edge membership probe once the reached set closes (it cannot grow again)
+recovered ~2 ms of that, so the rest is the indirection itself. The fix, if this
+regime ever shows up on a real corpus, is to run the full-width loops once the
+reached set is both closed and near-N — exact for the same `+0.0` reason, at the
+price of a second copy of the loop body that has to stay bit-identical. Not
+taken now: 11 ms on a random 16-regular expander, which is the shape a reason
+graph is least like, does not buy that duplication.
+
+Also unaddressed: three N-sized buffers are still allocated per call, which is
+what the residual ~2 ms at low eligibility is — flat in N, unrelated to reach.
+
+Item 25's "PageRank ÷ scan" table above is now stale in one direction only: it
+is a correct record of what was measured before this change, and the ratios in
+it no longer hold. The scan is the larger cost at every eligibility level tested
+here, which is the ordering that item said the numbers would decide.
 
 ### 27. GC eviction pays one LMDB commit per victim `[lifecycle]`
 
@@ -453,14 +571,31 @@ no signal on approach.
 
 ### 30. Ingest queue `enqueue` detaches with no backpressure `[ingest]`
 
-`Worker::enqueue` fires `tokio::spawn(async move { tx.send(job).await })` and
-returns immediately (`src/ingest/worker.rs:76-78`). The channel bound is 64
-(`:44`); the spawn set is unbounded. Distinct from the *tick* queue, which is
-bounded at 512 with real backpressure (`FEATURES.md:425-426`) — the two read as
-one and are not.
+~~`Worker::enqueue` fires `tokio::spawn(async move { tx.send(job).await })` and
+returns immediately. The channel bound is 64; the spawn set is unbounded.~~
+**(closed 2026-07-21.)** What it actually did was measured before it was
+changed: not a silent drop but unbounded growth. `tokio`'s `send` only errors on
+a closed channel, so every detached task *parked* on a full queue holding its
+whole text — 500 offered to a stalled worker, 500 accepted, nothing refused, and
+that is the failure the new test reproduces when the bound is removed. Now
+`QUEUE_CAP` is the whole bound (`src/ingest/worker.rs:61`): `try_send` refuses
+the newest job rather than detaching (`:128`), the refusal is counted
+(`:131`) and reaches every health surface as `ingest_queue_refused`
+(`src/base/health.rs:81`, `src/mcp.rs:145`, `src/commands/admin.rs:85`). The
+one producer that must not be refused waits instead — `submit` awaits capacity
+(`src/ingest/worker.rs:149`) and the file-watcher sink calls it
+(`src/ingest/file_watcher.rs:77`), because a watcher record has no durable
+backstop; the MCP RAM-queue fallback gets a `tool_error`
+(`src/mcp/tools_mutate.rs:331`). Still distinct from the *tick* queue, which is
+bounded at 512 (`FEATURES.md:434-435`).
 
-Beside it: **the distill leg has no timeout budget** (no `timeout` in
-`src/ingest/distill.rs` or `src/ingest/worker.rs`). The queue-depth half is
+Remaining, and the reason this item is narrowed rather than deleted: **the
+distill leg has no timeout budget** (no `timeout` in
+`src/ingest/distill.rs` or `src/ingest/worker.rs`), so a hung LLM still holds
+the one in-flight slot forever and the bound converts that into refusals rather
+than into an unbounded heap. Also unaddressed: the file watcher enqueues into
+RAM directly instead of through the durable direct intake the MCP path prefers.
+The queue-depth half is
 **narrowed 2026-07-21** — closing item 8 gave `kern intake` a
 `pending=/stuck=/failed=/done=` readout (`src/commands/intake_cmd.rs:43-45`),
 so the file-backed queue reports its depth; the in-process `Worker` channel
@@ -474,22 +609,22 @@ Recorded in `FEATURES.md` gap blocks, planned nowhere:
 
 - ~~Routing does a vector lookup per level, O(depth·log n), and unnamed children
   are unbounded per parent~~ **(retired 2026-07-21 — verified false on both
-  counts; the FEATURES gap block it quoted is corrected at `FEATURES.md:120`).**
-  `route_to_child_id` (`src/base/accept.rs:867`) is a linear scan over the
+  counts; the FEATURES gap block it quoted is corrected at `FEATURES.md:126`).**
+  `route_to_child_id` (`src/base/accept.rs:880`) is a linear scan over the
   parent's loaded named children against each child's stored `graviton_vec` — no
   index is consulted, so the cost is O(depth · children) and the "cached per-kern
   centroid" the item wanted is what `graviton_vec` already is. Unnamed children
   are capped at one per parent on the routing path by
-  `get_or_spawn_unnamed_child` (`src/base/accept.rs:629`, guarded by
-  `src/base/accept.rs:919`); only tick clustering makes more, one per spawnable
+  `get_or_spawn_unnamed_child` (`src/base/accept.rs:642`, guarded by
+  `src/base/accept.rs:932`); only tick clustering makes more, one per spawnable
   cluster and deliberately (`src/tick.rs:196`). Per-parent fan-out is a real
   cliff and stays on this item's list; an index lookup was never the cost.
 - `Entity` is a ~30-field flat struct (serialization cost on every store round
   trip) and `Kern` carries no per-kern stats — mean heat, fill ratio — that
-  clustering could reuse (`FEATURES.md:84-86`).
-- DiskANN is build-once; the lexical index is RAM-only (`FEATURES.md:242-243`).
+  clustering could reuse (`FEATURES.md:90-92`).
+- DiskANN is build-once; the lexical index is RAM-only (`FEATURES.md:248-249`).
 - LMDB compaction is manual and offline-only, and is the only way to shrink the
-  high-water mark (`FEATURES.md:313-315`).
+  high-water mark (`FEATURES.md:319-321`).
 
 ### 32. Tree depth is an unlisted eviction bias `[lifecycle]`
 
@@ -614,7 +749,7 @@ slashing of frequently-superseded producers) were never written at all.
 Remote entities are vector-indexed on insert, so with gossip on, recall output —
 and therefore any agent consuming it — extends to every host on the segment
 (`concepts/security.mdx:247-251`). Bounded by ranking-signal stripping
-(`src/retrieval/score.rs:101-111`), not by exclusion. Decide whether `remote-*`
+(`src/retrieval/score.rs:107-117`), not by exclusion. Decide whether `remote-*`
 should be opt-in-per-query rather than indexed by default.
 
 ### 41. Two FL-derived bounds adopted on paper, neither in effect `[federation]`
@@ -668,7 +803,7 @@ fallback and no way to distinguish discovery-failed from no-peers-present
 
 `TcpStream::connect` per call at `src/gossip/transport.rs:37` (`send_msg`) and
 `:45` (`send_and_receive`). No pooling. Separately, the `trnsprt` client has no
-pooling either (`FEATURES.md:952-953`) — that one is not gossip and is not gated
+pooling either (`FEATURES.md:961-962`) — that one is not gossip and is not gated
 on 33.
 
 ### 47. Hub phase 3: gossip moves hub-side `[hub]`
@@ -684,7 +819,7 @@ port-clash validation in `src/config/serve.rs` to collapse. (Corrected again
 item 84 owns.)
 
 Beside it: **hub↔node version skew is unmanaged** beyond same-binary spawning
-(`FEATURES.md:1058-1059`).
+(`FEATURES.md:1067-1068`).
 
 ### Decisions owed before the federation build
 
@@ -721,7 +856,7 @@ retired:** `CHANGELOG.md` 2026-07-20 shipped chunk external ids keyed on the ful
 source identity (`source_id()` + chunk index, not the bare section), and CLI
 `kern ingest` deriving its inline source hash from the text. What remains is the
 *dedup* key, not the external id. Beside it: the dedup threshold is global, not
-per-kind (`FEATURES.md:407`).
+per-kind (`FEATURES.md:416`).
 
 ### 49. The distill prompt is one-shot and global `[ingest]`
 
@@ -743,7 +878,7 @@ exists nowhere.
 ### 90. `DirectJob` carries `valid_until` but drops `valid_from` `[ingest]`
 
 The durable direct intake serializes one bi-temporal stamp and not the other:
-`DirectJob` (`src/ingest/direct.rs:11-21`) has a `valid_until` and no
+`DirectJob` (`src/ingest/direct.rs:11-27`) has a `valid_until` and no
 `valid_from`, and `drain_direct_once` overlays only the former onto the drain
 loop's `Config`, so `valid_from` is whatever the loop's shared config says —
 always `None`. **Not a live loss**: the only producer of `valid_from` is the
@@ -757,7 +892,7 @@ today.
 
 ### 51. Require reason text on supersede `[ingest]`
 
-`ReasonKind::Supersedes` edges are minted at `src/base/accept.rs:528` and `:623`
+`ReasonKind::Supersedes` edges are minted at `src/base/accept.rs:541` and `:636`
 with `fallback_label()` text (`src/base/types.rs:103`), never a caller-supplied
 rationale. The *why* is the thing the graph exists to hold.
 
@@ -767,7 +902,7 @@ rationale. The *why* is the thing the graph exists to hold.
 source at `src/mcp/tools_admin.rs:116`" with "chunk + mean-pool" as the unbuilt
 upgrade path. Both halves moved in `08c9971`: the acknowledgement comment was
 deleted, and chunk + mean-pool **shipped** for the multi-line case —
-`seed_examples` (`src/base/accept.rs:702-714`) splits a seed on newlines and
+`seed_examples` (`src/base/accept.rs:715-727`) splits a seed on newlines and
 `mean_pool` (`:718`) averages the per-line embeddings, wired at
 `src/mcp/tools_admin.rs:119-136`. Line 116 now carries the mean-pool rationale,
 i.e. the opposite of what it was cited for.
@@ -780,7 +915,7 @@ newline one, and is still blocked on a real document long enough to truncate.
 
 ### 53. Clustering is vector-only `[lifecycle]`
 
-No semantic or structural features (`FEATURES.md:490`), and naming plus
+No semantic or structural features (`FEATURES.md:499`), and naming plus
 enrich are a cold LLM call per kern. The adopted-but-unbuilt upgrade is
 thought-level PageRank feeding the split heuristic — high-rank nodes become
 gravitons, bridge nodes become sub-kerns
@@ -827,7 +962,7 @@ incomplete — no item below produces a wrong answer today.
 ### 56. An agent cannot register disagreement at all `[ingest]`
 
 There is no `Contradicts` reason kind (`src/base/types.rs:77-86`) and no `stance`
-parameter on the ingest schema (`src/mcp/tools_mutate.rs:19-31`);
+parameter on the ingest schema (`src/mcp/tools_mutate.rs:19-33`);
 `observe_contradict` (`src/base/types.rs:411`) has exactly one caller, GNN
 alignment (`src/tick/gnn_propagate.rs:157`). Observer-reputation weighting is
 also unbuilt.
@@ -857,7 +992,7 @@ permanently erasing a correct path, and nothing records that they happened.
 ### 60. No re-classification when a contradiction pair changes `[lifecycle]`
 
 Either side of a classified pair can move and nothing re-runs the call, and no
-tool exposes the supersede chain beyond `include_history` (`FEATURES.md:173-174`).
+tool exposes the supersede chain beyond `include_history` (`FEATURES.md:179-180`).
 Two open questions beside it, from `docs/kern/bayesian-belief.md:159-162`: should
 `Reason` edges carry belief symmetrically, and does superseding reset or inherit
 belief?
@@ -881,10 +1016,10 @@ neutral here. Item 64's stemmer swap is the clearest case.
 Found 2026-07-21 while closing item 91, and *not* caused by it: item 91 removed a
 lexical posting that named a discarded id, and this is what was always missing
 underneath. When either dedup gate merges, `merge_duplicate`
-(`src/base/accept.rs:166-185`) keeps the incoming wording on a `Rephrase` reason
+(`src/base/accept.rs:178-197`) keeps the incoming wording on a `Rephrase` reason
 and nothing else. That reason is minted with `vector: Vec::new()` (`:178`), and
 the tick's enrichment pass returns early unless `kern.entities` can `get` the
-reason's `to` (`src/tick/tasks.rs:334-337`), which a `Rephrase` deliberately
+reason's `to` (`src/tick/tasks.rs:345-348`), which a `Rephrase` deliberately
 leaves empty — so that wording enters neither `LexicalIndex` nor `reason_idx`.
 A user who phrases a recall query in the *merged* document's words, not the
 survivor's, gets nothing back, and every dedup widens that. Both gates
@@ -922,7 +1057,7 @@ via health and `kern://health`
 
 Three that must be judged together, since each moves the others:
 min-max normalize `apply_boosts`, which is purely additive and unnormalized today
-(`score * confidence + boost + fact_bonus`, `src/retrieval/score.rs:84-96`); swap
+(`score * confidence + boost + fact_bonus`, `src/retrieval/score.rs:90-102`); swap
 the hand-rolled stemmer (`src/base/lexical.rs:206`, no stopword list, no
 `rust-stemmers` in `Cargo.toml`) for `rust-stemmers` 1.2.0 + stopwords, which
 needs a BM25 rebuild; and validate-or-remove GNN reranking, whose only expression
@@ -938,13 +1073,13 @@ well-evidenced one at equal mean.
 
 Was two ceilings; the rerank half left with the rerank stage itself
 (2026-07-21). What remains: RRF weights plus mode blends are configurable but
-never auto-tuned (`FEATURES.md:210`).
+never auto-tuned (`FEATURES.md:216`).
 
 ### 67. Binary quantization stays non-user-selectable `[retrieval]`
 
 Its recall floor is too low without a rescoring pass; deliberately excluded from
 `parse` (`src/quant.rs:20-21`). Beside it: no int4 path and the quantization
-scale is fixed at encode time (`FEATURES.md:262`).
+scale is fixed at encode time (`FEATURES.md:268`).
 
 ### 69. Speculative decode for the distill leg `[ingest]`
 
@@ -962,7 +1097,7 @@ contract nobody enforces is a contract nobody has.
 
 ### 93. Line anchors cannot survive a merge, and `docs-check` cannot see it `[process]`
 
-Every citation of the form `` `FEATURES.md:408-409` `` is a bet that nothing is
+Every citation of the form `` `FEATURES.md:417-418` `` is a bet that nothing is
 ever inserted above line 408. `FEATURES.md` only grows, so the bet loses on
 every merge that appends — and when two branches each append and then combine,
 it loses twice over. Four times on 2026-07-21: four anchors, then four more,
@@ -997,7 +1132,7 @@ standing. `--strict-anchors` makes them fatal, for a CI that has decided to trus
 them — not yet. A nomination a human has adjudicated is silenced in place with a
 trailing `docs-check: anchor-ok` comment, the same idiom as the historical page
 marker, and the marker counts only outside backticks so a page may quote it. The
-paragraph above is the first user of that escape: its `FEATURES.md:408-409` is an
+paragraph above is the first user of that escape: its `FEATURES.md:417-418` is an
 illustration of the disease, not a citation, so it is acquitted rather than fixed
 — and so is this sentence, which repeats it. <!-- docs-check: anchor-ok -->
 
@@ -1010,7 +1145,7 @@ anchors in one `crdts-federation.md` status block are wrong. The 13 false ones
 share one weakness: the anchor is right but the target's distinguishing word is
 under four characters (`acl`, `rrf`, `run_hub`) or is a stem the prose inflects
 (`fn stem` against "stemmer"). Two more are self-inflicted — this item quoting
-`FEATURES.md:408-409` as an example rather than as a citation — and are acquitted
+`FEATURES.md:417-418` as an example rather than as a citation — and are acquitted
 in place, leaving **38 standing, 12 of them false, 32%**. <!-- docs-check: anchor-ok -->
 
 **One measured non-win, recorded rather than buried.** Splitting the camelCase
@@ -1044,14 +1179,14 @@ set.** Precision 27/38 = **71.1% → 26/29 = 89.7%**. False-positive rate **28.9
 92.9%** — *it went down*. The three-character floor that acquits `acl`, `rrf` and
 `hub` also acquits `gpu`, and `gpu` plus `kern` is enough to reach the two-word
 prose bar and silence a genuinely under-covering anchor (this file citing
-`FEATURES.md:581` for three claims that span 581-582). That is the same trade the
+`FEATURES.md:590` for three claims that span 581-582). That is the same trade the
 camelCase note above records, paid a second time, and it is recorded here for the
 same reason. A prose bar of 1 instead of 2 measures 96.3% precision at unchanged
 recall and was **declined**: the truth set holds only five prose-to-prose anchors,
 which is not evidence, it is a sample small enough to fit anything.
 
 **What remains.** Three false positives are structural, not tokenisation, and
-carry the marker rather than a fix: `FEATURES.md:200` cites `if scored.len() < k {`
+carry the marker rather than a fix: `FEATURES.md:206` cites `if scored.len() < k {`
 for cold backfill and shares nothing with it because the line is a bound check
 whose meaning lives in the lines around it; this file's two retired notes cite a
 `README.md` table row and a `FEATURES.md` bullet for the single word each was
@@ -1068,6 +1203,64 @@ them.
 Neither is a defect in a running kern, which is why this sits in tier 9 — but it
 is the reason every reconcile pass so far has spent most of its effort
 re-pointing citations instead of checking claims.
+
+### 94. A shared `target-dir` can report green on stale code `[process]`
+
+The parallel-cycle worktrees all point `build.target-dir` at the main
+checkout's `target/`, so one warm 11 GB cache serves every tree instead of each
+paying a cold build. The cost was named when it was adopted — cargo takes an
+exclusive lock, so concurrent builds serialize — but a second cost was not:
+**under concurrent access a run can execute a lib-test binary that predates the
+edit under test.** Observed 2026-07-21: a cycle saw `873 passed` with its own
+three new tests absent from the run, and `touch src/lib.rs` changed the count to
+a self-consistent 867.
+
+**Corrected 2026-07-21, later the same day: it IS cross-worktree contamination,
+and the first version of this item said the opposite.** That earlier paragraph
+argued from the wrong artifact class. Each tree does get its own
+`kern-<hash>` *lib-test binary* — four hashes for four trees — and that was
+checked and is true. But a workspace sub-crate is a different artifact: `trnsprt`
+has the same package name, version and relative path in every tree, so its
+fingerprint matches across them and cargo reuses whichever build got there first.
+
+Two independent observations, both loud:
+
+- `cycle/3` failed to compile with `struct HealthRes has no field named
+  ingest_queue_refused` — a field that existed **only** in `cycle/2`'s source
+  tree. `cycle/3` was linking a sibling's `trnsprt`.
+- `cycle/2` watched `cargo build` report `Fresh trnsprt` against a stale
+  `libtrnsprt-*.rmeta` with **hard-link count 3** while its own `dto.rs` change
+  sat on disk, in a tree that had just compiled cleanly under `cargo nextest`.
+  Two rmetas carrying the field existed under different hashes (check and test
+  profiles); the dev-profile one kept losing to sibling builds with a newer
+  mtime. `touch src/trnsprt/src/kern_rpc/dto.rs` before each build was the
+  workaround it used for every number it reported.
+
+So there are two failure modes, not one:
+
+1. **Stale lib-test binary** — an aggregate count that looks green while the
+   binary predates the edit. Fails *quietly*. **An aggregate pass count is not
+   evidence that a new test ran.** The discipline that catches it: run the new
+   tests BY NAME (`cargo nextest run --workspace -E 'test(<name>)'`) and read
+   each result. A filter naming ten tests and printing ten results cannot be
+   satisfied by a binary containing none of them.
+2. **Foreign sub-crate rlib/rmeta** — one tree links another's `trnsprt`. Fails
+   *loudly* here, because the two sources disagreed about a struct field. That
+   is luck, not safety: a change that stayed type-compatible would have linked
+   silently and produced a green run against a sibling's code.
+
+**Decided: each worktree gets its own `target-dir`.** Three trees were flipped
+the moment the second observation landed, and both stalled builds recovered
+immediately. It costs a cold build per tree and roughly 33 GB against an 11 GB
+shared cache — a straightforward trade once the alternative is "verification
+results that may describe another branch's code". The staleness-guard
+alternative (a `just` recipe failing when the binary is older than the newest
+source) is now moot for the same reason: it would have caught mode 1 and been
+blind to mode 2.
+
+What survives: the by-name discipline. It is cheap, it catches mode 1
+independently of the build layout, and it is what confirmed both cycles that
+found this.
 
 ### 92. `test_retention` fails under load and nobody had written it down `[eval]`
 
@@ -1161,8 +1354,8 @@ itself is pinned — `content_hash` (`src/base/util.rs:3`) is sha256-to-lowercas
 and `util.rs:155` asserts length, alphabet and determinism. What is unpinned is
 every *composition* feeding it, and each one is a different format string: entity
 ids are `content_hash(text)` bare (`src/ingest/place.rs`,
-`src/ingest/file_watcher.rs:115`, `src/ingest/direct.rs:26`,
-`src/ingest/worker.rs:65`), `Source::source_id` is
+`src/ingest/file_watcher.rs:129`, `src/ingest/direct.rs:31`,
+`src/ingest/worker.rs:125`), `Source::source_id` is
 `scheme \x00 object \x00 section` (`src/base/types.rs:248-260`), child and named
 ids are `parent_id + nonce` and `parent_id + name + nonce`
 (`types.rs:493`, `:498`), and the HNSW canon has its own (`src/base/hnsw.rs:525`).
@@ -1190,7 +1383,7 @@ unremarked.
 
 Called **once** (corrected 2026-07-21 — it was twice; the second site left with
 the ingest `kind` arg in `216730d`), with the literal `AGENT_SOURCE`
-(`src/mcp/tools_mutate.rs:131`), and it accepts `USER_SOURCE` / `AGENT_SOURCE`
+(`src/mcp/tools_mutate.rs:150`), and it accepts `USER_SOURCE` / `AGENT_SOURCE`
 (`src/base/validate.rs:22`), so it can never fail. Decision:
 thread a real auth identity (item 18/24), or delete. Delete is correct for a
 single local daemon and needs only sign-off.
@@ -1201,7 +1394,7 @@ single local daemon and needs only sign-off.
 (`src/commands/mcp_cmd.rs:290`, `:306`, `:343`) with no `handle_method` override,
 so the trait default returns `None` (`src/trnsprt/src/server.rs:21`). Meanwhile
 `extra_capabilities` advertises `{"resources": {}, "prompts": {}}` (`:346`) to
-match standalone, which *does* serve them (`src/mcp.rs:211-218`, advertised `:157`). Advertised on
+match standalone, which *does* serve them (`src/mcp.rs:212-219`, advertised `:158`). Advertised on
 the normal path, non-functional there. Either forward them or stop advertising.
 
 ### 82. Standalone `kern mcp` runs no gossip `[surface]`
@@ -1243,9 +1436,9 @@ is a real reason nothing is set — eviction drops unpersisted `children` pushes
   requires either promoting them to real per-endpoint config or exposing that
   predicate. Was listed under item 11; it is a different job.
 - Hand-rolled tool schemas; no batch query
-  (`FEATURES.md:624-625`).
+  (`FEATURES.md:633-634`).
 - The LLM client is Ollama-centric with no retry/backoff policy object
-  (`FEATURES.md:898-899`).
+  (`FEATURES.md:907-908`).
 - ~~Watcher `.gitignore` parsing is approximate; no rename tracking~~ **(retired
   2026-07-21 — verified false on both counts).** `IgnoreRules` builds a real
   `Gitignore` through ripgrep's `ignore` crate
@@ -1257,17 +1450,17 @@ is a real reason nothing is set — eviction drops unpersisted `children` pushes
   renamed file lands as a new `Document` and the old one is neither moved nor
   removed. It duplicates only when the rename *also* edits the file — ids are
   `content_hash(text)`, so an untouched move re-resolves to the same id, while
-  `external_id` is the path (`src/ingest/file_watcher.rs:130`), so a
+  `external_id` is the path (`src/ingest/file_watcher.rs:133`), so a
   move-plus-edit gets a new id under a new external id and supersede never
   fires. It sits in this tier and not in tier 1 because the watcher is **off by
   default** — `WatcherConfig::enabled` is `false` unless a `kern.toml` sets it
   (`src/config/watcher.rs:14-16`) — so it is not a default-path defect
-  (`FEATURES.md:1066-1069`).
-- `unnamed` lists only; there is no `promote` (`FEATURES.md:797`).
+  (`FEATURES.md:1075-1078`).
+- `unnamed` lists only; there is no `promote` (`FEATURES.md:806`).
 - GNN has no GPU path, weights are per-kern rather than shared, and the objective
-  is link-prediction only (`FEATURES.md:581-582`).
+  is link-prediction only (`FEATURES.md:590-591`).
 - Under WSL2 NAT a loopback Ollama URL must be hand-pinned; kern neither rewrites
-  nor warns (`FEATURES.md:1106-1108`).
+  nor warns (`FEATURES.md:1115-1117`).
 - RPC socket bind→chmod race — sub-millisecond, umask default — recorded as an
   accepted risk (`concepts/security.mdx:40-43`); revisit only if the umask
   alternative stops being worse.
@@ -1293,11 +1486,11 @@ and item 1's instrument staying the scorer.
 - `kern hub` appears on no site page, including its 1800s idle-unload default —
   a user whose daemon vanishes has nothing to read. Verified absent: `grep -rl
   "kern hub" docs/site/content/docs/` returns nothing.
-- The `id` path in `query` bypasses every filter (item 18) — undocumented at
-  `howto/mcp.mdx:50`, which says only "Needs `text` or `id`" and then lists the
-  filters as if they applied to both.
+- (retired 2026-07-21 — the id path stopped bypassing filters and the page was
+  corrected in the same change) the `id` path in `query` bypassed every filter
+  (item 18); `howto/mcp.mdx:50` now says every filter applies to an `id` read.
 - (retired 2026-07-21 — the tables were filled in) the `move` MCP tool is listed
-  in `README.md:352` and `FEATURES.md:607`, and the site's count is now thirteen
+  in `README.md:352` and `FEATURES.md:616`, and the site's count is now thirteen
   (`howto/mcp.mdx:5, :75`), so the "Eleven tools" note is retired with it.
   <!-- docs-check: anchor-ok -->
 - `docs/kern/README.md:60` declares the directory holds "never plans"; five of
@@ -1318,7 +1511,7 @@ and item 1's instrument staying the scorer.
   OR-Set for `statements` was *reversed, not deferred*;
   `diskann-disk-index.md:28-29` marks the PQ recall claim **withdrawn**.
 - (retired 2026-07-21 — withdrawn in place) the quality claims item 1's standard
-  forbids no longer survive. `FEATURES.md:195` keeps only the `+7% p50` latency
+  forbids no longer survive. `FEATURES.md:201` keeps only the `+7% p50` latency
   half and says the retrieval-quality half is withdrawn;
   `docs/kern/diskann-disk-index.md:26` says the note "previously published" the
   `recall@10 ≥ 0.90` figure; this file's own "recall@10 A/B" citation was struck
@@ -1511,7 +1704,7 @@ an overall eval score that makes specialization worth funding.
   since a non-superseded `Fact` is immune (`is_cold_victim`,
   `src/tick/stigmergy.rs:35-46`) — is a false statement the caller has no way to
   falsify. So the id path **serves and flags**: `entity_detail`
-  (`src/mcp/tools_query.rs:363`) emits `expired` and `valid_until` whenever a
+  (`src/mcp/tools_query.rs:367`) emits `expired` and `valid_until` whenever a
   retention is set, and `kern get` prints an `Expired:` line
   (`src/commands/graph_ops.rs:67`). Filtering lost because the surface item 9
   deliberately widened — prefix plus cold-tier fallback — would have been
@@ -1523,7 +1716,7 @@ an overall eval score that makes specialization worth funding.
   a real `kern get` printing the expired fact with no marker. The bi-temporal
   escape is now pinned at the call site too, not only on the predicate:
   `retrieve_drops_an_expired_claim_from_the_default_path`
-  (`src/retrieval/query.rs:457`) runs the same corpus twice and asserts an
+  (`src/retrieval/query.rs:468`) runs the same corpus twice and asserts an
   `as_of` query still returns the since-expired claim; neutering the early
   return in `drop_expired` fails that half alone. What this did **not** buy is
   item 18's fourth bullet — that bullet wants ACL enforcement on the id path,
@@ -1713,7 +1906,7 @@ number ("blocked on item 13") and renumbering would silently repoint them.
 - **Pulse and Question senders are live.** `broadcast_pulse` / `broadcast_q` built
   in `start_gossip` (`src/commands.rs:979-1053`), pulse wired into the maintenance
   tick (`:721`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
-  `broadcast_q` invoked by `do_resolve` (`src/tick/tasks.rs:372`), `handle_question`
+  `broadcast_q` invoked by `do_resolve` (`src/tick/tasks.rs:383`), `handle_question`
   live-dispatched (`src/gossip/handler.rs:44`).
 - **`Fetch` is wired** — `wire_fetch` installs the handler at
   `src/commands.rs:1042`. Single-id, so it is not anti-entropy (item 36), but it
@@ -1737,7 +1930,7 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   `src/base/constants.rs:69`). Only the CLI reaches `Fact`, via
   `clamp_confidence(1.0, "user")` (`src/commands/ingest_cmd.rs:59`).
 - **`conf` is clamped to [0,1]** — `validate_conf` (`src/base/validate.rs:14`)
-  called at `src/mcp/tools_mutate.rs:129`.
+  called at `src/mcp/tools_mutate.rs:148`.
 - **A prose-answering reason model no longer archives deltas having stored
   nothing.** `parse_claims` returns `Option`; a reply with no parseable JSON array
   leaves the delta queued for retry, a well-formed empty array still archives

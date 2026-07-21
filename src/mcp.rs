@@ -142,6 +142,7 @@ impl Server {
 			"ingest_dropped_chunks": h.ingest_dropped_chunks,
 			"remote_cap_dropped": h.remote_cap_dropped,
 			"unspilled_drops": h.unspilled_drops,
+			"ingest_queue_refused": h.ingest_queue_refused,
 		})
 	}
 }
@@ -291,6 +292,23 @@ pub(crate) fn tool_error(msg: &str) -> serde_json::Value {
 	})
 }
 
+/// Principal ids, off the wire, for both the `ingest` and the `query` surface.
+///
+/// A blank principal is a hard error rather than a silent skip: it would match
+/// the empty `Acl::scope` of every public entity, so accepting it would turn a
+/// caller's typo into an access decision nobody asked for.
+pub(crate) fn parse_principals(field: &str, raw: &[String]) -> Result<Vec<String>, String> {
+	let mut out = Vec::with_capacity(raw.len());
+	for p in raw {
+		let t = p.trim();
+		if t.is_empty() {
+			return Err(format!("`{field}` must not contain a blank entry"));
+		}
+		out.push(t.to_string());
+	}
+	Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
 	use serde_json::json;
@@ -383,6 +401,7 @@ mod tests {
 			"ingest_dropped_chunks",
 			"remote_cap_dropped",
 			"unspilled_drops",
+			"ingest_queue_refused",
 		] {
 			assert!(!h[key].is_null(), "{key} must reach the MCP surface");
 		}

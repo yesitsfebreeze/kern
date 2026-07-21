@@ -73,14 +73,16 @@ sets; parallelize only what does not overlap.
 
 - **Scope:** `src/mcp/`, `src/rpc/`, `src/commands/`.
 - **Knows:** the one-dispatch-core law (every surface goes through
-  `mcp::Server::call_tool`, never a second copy), the thirteen MCP tools,
+  `mcp::Server::call_tool`, never a second copy), the fourteen MCP tools,
   `KernRpc` over this repo's own `service!` macro (there is no tarpc), the
   advisory writer lock, and which CLI commands still touch disk behind a live
   daemon. *Corrected 2026-07-21 — this said `forget` and `degrade` were the only
-  exceptions, one commit after that stopped being true.* Five commands route
-  (`src/commands/route.rs`): `forget`, `degrade` and `intake drain` write, `get`
-  and `query` read, all five over `call_tool` with the local pass as the
-  `NoDaemon` fallback. `search` and `list` stay local **by decision** — they are
+  exceptions, one commit after that stopped being true; then it said five, one
+  commit after the graviton and claim-kind writes started routing too.* Nine
+  commands route (`src/commands/route.rs`): `forget`, `degrade`, `intake drain`,
+  `graviton add`/`remove` and `claim-kind add`/`rm` write, `get` and `query`
+  read, all nine over `call_tool` with the local pass as the `NoDaemon`
+  fallback. `search` and `list` stay local **by decision** — they are
   the store-inspection commands. `ingest` and `link` still open the store
   directly and are the open half of `ROADMAP.md` item 9, blocked on item 24.
 - **Delegate when:** tool schemas or CLI subcommands.

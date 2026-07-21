@@ -116,7 +116,7 @@ impl ReasonKind {
 	}
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Acl {
 	pub scope: String,
 	pub users: Vec<String>,

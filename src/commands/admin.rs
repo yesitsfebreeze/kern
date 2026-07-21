@@ -71,16 +71,18 @@ pub(super) async fn cmd_health(cfg: &crate::config::Config) {
 		+ h.clock_skew_skips
 		+ h.ingest_dropped_chunks
 		+ h.remote_cap_dropped
-		+ h.unspilled_drops;
+		+ h.unspilled_drops
+		+ h.ingest_queue_refused;
 	if degraded > 0 {
 		println!(
-			"degraded:    {} off-model queries dropped, {} below-floor deliveries, {} clock-skewed entities GC could not age, {} chunks lost to embedding, {} remote ids refused at the cap, {} dropped with nowhere to spill",
+			"degraded:    {} off-model queries dropped, {} below-floor deliveries, {} clock-skewed entities GC could not age, {} chunks lost to embedding, {} remote ids refused at the cap, {} dropped with nowhere to spill, {} ingest jobs refused at the queue bound",
 			h.query_dim_rejected,
 			h.below_floor_deliveries,
 			h.clock_skew_skips,
 			h.ingest_dropped_chunks,
 			h.remote_cap_dropped,
-			h.unspilled_drops
+			h.unspilled_drops,
+			h.ingest_queue_refused
 		);
 	}
 	for line in tick_health_lines(daemon_health().await.as_ref()) {

@@ -53,6 +53,238 @@
   decision rather than a performance one.
 
   Decided by: verify-before-claiming
+- 2026-07-21 — item 94 corrected: the shared `target-dir` **does** leak between
+  worktrees, and the earlier entry saying it does not was wrong. That entry
+  checked the wrong artifact class. Lib-test binaries really do get one hash per
+  tree — four hashes, four trees, verified. But a workspace sub-crate has the
+  same package name, version and relative path everywhere, so `trnsprt`'s
+  fingerprint matches across trees and cargo reuses whichever build landed first.
+
+  Two independent observations forced it. `cycle/3` failed to compile against a
+  field that existed only in `cycle/2`'s source. `cycle/2` watched cargo report
+  `Fresh trnsprt` against a stale rmeta with hard-link count 3 while its own
+  `dto.rs` edit sat on disk, and had to `touch` that file before every build it
+  measured from.
+
+  The second mode is the dangerous one and it is the one the earlier entry ruled
+  out: a tree linking a sibling's crate. It failed loudly here only because the
+  two sources disagreed about a struct field. A type-compatible divergence would
+  have linked silently and produced a green suite against another branch's code —
+  which is the whole verification story of this loop, wrong.
+
+  All three worktrees now have their own `target-dir`. ~33 GB against an 11 GB
+  shared cache, and both stalled builds recovered on the spot. The
+  staleness-guard alternative is moot: it addressed mode 1 and was blind to
+  mode 2. The by-name test discipline survives, because it catches mode 1
+  independently of the build layout and is what confirmed both cycles.
+
+  Decided by: verify-before-claiming — the first version of item 94 asserted
+  "checked rather than assumed" about a check that examined the wrong artifact,
+  and the correction cost two stalled cycles to surface.
+
+- 2026-07-21 — bounded the ingest queue, and answered the question item 30
+  existed to force: **when the queue is full, refuse the newest job — except on
+  the one leg that can be slowed instead, which waits.**
+
+  First the premise, because the item offered two defects and did not say which:
+  it grew, it never dropped. `tokio`'s `send` errors only on a closed channel,
+  so each detached `tokio::spawn` parked on the full queue still holding its
+  whole text. Measured, not reasoned: 500 jobs offered to a worker stalled on a
+  hanging embedder were all 500 accepted. That number is now the revert-check
+  failure of the test that bounds it.
+
+  Refuse-newest wins because the three alternatives each pay somewhere worse.
+  *Block the producer*: correct, and it welds ingest throughput to the slowest
+  thing in the system — the MCP `ingest` tool would sit on embed latency while an
+  agent waits. *Drop the oldest*: discards work already accepted, and the RAM
+  queue is reached exactly when the durable file intake is unavailable, so the
+  discarded job has no disk copy to recover from. *Drop the newest silently*:
+  same loss, and the caller is told "queued". Refusing keeps the loss where the
+  caller can see and retry it; the cost is honest — `enqueue` now returns
+  `Option<String>` and the MCP tool can fail where it never could.
+
+  The file watcher is the exception and gets the waiting form, `submit`. It is
+  the fast producer the bound exists for, nothing is waiting on its return, and
+  its own backlog is coalesced paths rather than job bodies — so stalling it
+  costs less memory than the pileup it replaces, while a refusal there would
+  lose a file nothing re-offers.
+
+  Refusals are counted and surfaced as `ingest_queue_refused` on all three health
+  surfaces, following `unspilled_drops` rather than inventing a shape, with the
+  warn line throttled and the counter exact. A test walks a real refusal from the
+  worker's counter to the RPC DTO an operator polls; it fails when the RPC leg is
+  hardcoded to zero.
+
+  Recall unmoved at 0.9306 / 0.9722 / 0.9471, as it must be — the CLI and intake
+  legs use `run`, which awaits and never touched this path.
+
+  Decided by: name-the-tradeoff — four defensible policies, so the entry records
+  what each rejected one would have cost rather than letting the code imply it.
+
+- 2026-07-21 — merged item 26's confined PageRank, and resolved the `CHANGELOG`
+  collision by rebuilding the union rather than splicing the conflict hunk. Last
+  time the splice silently dropped four entries that lived outside the hunk on
+  screen, and reading the diff did not reveal it — only Ruling 1's before/after
+  count did. So the method is now: take one parent's file whole, prepend only the
+  entries the other parent has that the merge base does not, and state the
+  arithmetic. 166 + 2 + this one = 169.
+
+  Worth writing down because it is the second time a merge has been the thing
+  that damaged the record rather than the work. A conflict in an append-only log
+  is not really a conflict — both sides appended, nothing disagreed — but the
+  three-way markers present it as one, and hand-editing inside them is where
+  entries go missing. The union is computable, so it should be computed.
+
+  What landed: the power iteration confined to the reachable set, bit-identical
+  by the `+0.0` argument, 18.8 ms -> 1.7 ms at 1% eligibility with recall exactly
+  unchanged; item 26 left open on the 1.4x regression at full reach; and item 94,
+  the shared `target-dir` reporting green on stale code. `docs-check` green at
+  691 references with no anchors nominated — the third consecutive merge to break
+  no citations.
+
+  Decided by: fix-the-root — the recurring damage was the resolution method, not
+  the conflicts, so the method changed.
+
+- 2026-07-21 — filed item 94: the shared `target-dir` behind the parallel cycles
+  can report green on stale code. A cycle saw `873 passed` with its own three
+  new tests absent from that run; `touch src/lib.rs` brought the count to a
+  self-consistent 867. Checked before believing the scarier version: this is
+  NOT cross-worktree contamination — four trees produce four distinct binary
+  hashes, and `across 7 binaries` is the normal count for a four-package
+  workspace with integration tests. The main checkout reporting 872 where a
+  worktree reports 865 is different code, not a mixed run.
+
+  The rule this leaves behind is the useful part: **an aggregate pass count is
+  not evidence that a new test ran.** Verifying this cycle used the discipline
+  the item now records — `-E 'test(pagerank)'`, ten tests named and ten results
+  read, which a stale binary containing none of them cannot satisfy.
+
+  Not fixed here. Per-worktree target dirs are correct by construction and cost
+  a cold build each plus ~33 GB; a staleness guard keeps the cache the sharing
+  was adopted for. Flipping the build layout under three live cycles would stall
+  all three, and one incident is not yet a trend.
+
+  Decided by: verify-before-claiming — the reported symptom was taken seriously
+  and the reported cause was not; the cause turned out narrower than claimed,
+  and the narrower version is the one worth defending against.
+
+- 2026-07-21 — item 26 asked for a cached PageRank vector recomputed on a tick,
+  on the stated grounds that "the scores depend on the graph, not on the query".
+  They depend on the query. `fuse_hybrid_seeds` personalises the teleport vector
+  at the query's dense and lexical seeds, so a per-graph vector is the *global*
+  PageRank that `decisions/pagerank-authority.mdx` already weighed and rejected —
+  "popular entities top every query, relevant or not". Caching it would not have
+  been a faster version of this feature; it would have been the alternative the
+  feature exists to avoid, arriving as a performance change with the ranking
+  regression buried inside it.
+
+  So the premise was checked before the work was done, and the closure changed.
+  What ships instead is exact: the power iteration is confined to the teleport
+  support and everything downstream of it. Every node outside that set holds a
+  literal `0.0` in both rank vectors, so every term the full-width loop added for
+  it was `+0.0` and every term it summed was unchanged — walking the reached set
+  in ascending order leaves the surviving terms in the same order, which makes
+  the result identical rather than close. The test compares bit patterns against
+  a verbatim copy of the loop that was replaced, over 108 configurations of
+  graph, seed set, `top_k` and iteration cap. e2e recall is unmoved to four
+  decimals: 0.9306 / 0.9722 / 0.9471.
+
+  Measured, `tests/seed_scale.rs` in release at N=100k: a flat 18.8 / 17.9 /
+  18.1 / 17.1 ms across 1 / 10 / 50 / 100% eligibility became 1.7 / 3.1 / 1.9 /
+  1.3 ms, and a filtered retrieve went 24.0 ms to 7.1 ms. Three post-change runs
+  spread those points over 1.3–6.0 ms, so the band is what is claimed and not
+  any single point in it; the before figures sat at 17–19 ms, well outside it.
+  The cost now tracks
+  reach rather than N, which is a different shape, not a smaller version of the
+  same one — so the tradeoff is stated where it can be found: at full reach the
+  confined walk is **1.4× slower** than what it replaced, because it indexes
+  through a list where the full-width loops vectorise over a slice. That is
+  measured too, by an instrument kept next to the code rather than described in
+  prose, and item 26 stays open on exactly it.
+
+  Decided by: avoided-question-first — the item named its own answer, the
+  avoided question was whether that answer was compatible with the ranking it
+  was not allowed to move, and it was not.
+
+- 2026-07-21 — `Acl` stopped being decorative. It has been on `Entity` since the
+  beginning and was only ever written as `Acl::default()`, so no caller could
+  populate it and no reader consulted it. Item 18's three remaining bullets
+  closed together, because separately each is inert: `ingest` takes `scope` +
+  `principals` and `acl_from_args` builds the `Acl` on the same pre-branch line
+  as `valid_until`, so the sync, durable-direct and RAM-queue paths carry it
+  identically; it rides `ingest::Job::acl` into `new_statement_entity`, which no
+  longer hardcodes a default; `query` takes `principals` into
+  `QueryOptions.principals`; and `acl_admits` runs first in `matches_filter`.
+  One predicate, so the ranked read and the id read got the rule at once — the
+  id path having been routed through `matches_filter` earlier the same day.
+
+  **Two rules the item states, both enforced and both pinned by a test that
+  fails if you delete the rule.** A scoped **`Fact` is dropped for a
+  non-member** — GC-immunity is not ACL-immunity, and nothing in the predicate
+  looks at `kind`. And an **empty `principals` is no filter, not public-only**:
+  a caller who names no principal still reads everything, which is the only
+  reason `kern get` and every existing unscoped read still work.
+  `matches_filter_is_the_per_entity_predicate` asserts the scoped-Fact drop, the
+  member keep and the empty-principals keep; `bare_id_read_still_serves_a_scoped_row`
+  asserts the second rule again on the id surface, where getting it wrong would
+  read as data loss rather than as a policy.
+
+  A blank principal is a hard error (`parse_principals`, shared by both
+  surfaces), not a silent skip — it would match the empty `Acl::scope` of every
+  public entity, so accepting it would turn a typo into an access decision.
+  `DirectJob::acl` carries the ACL across the durable intake hop for the same
+  reason `valid_until` is carried; without it the async path would republish a
+  scoped ingest as public. `src/tick/tasks.rs` carries the old entity's `Acl`
+  into a rephrase, so a supersede cannot launder a scoped thought into a public
+  one. `Worker::enqueue`/`run` keep their arity and delegate to the `_with_acl`
+  forms with `Acl::default()`, which is what deliberately leaves the file
+  watcher and the intake drain public — item 18's own recommended default, and
+  its one still-open decision.
+
+  **Say the coverage plainly: this is unit-tested only, and cannot be more.**
+  `principals` is MCP-only, there is no CLI flag, and `e2e/conftest.py` drives
+  the binary over subprocess with no MCP JSON-RPC client — so no e2e test can
+  reach this surface without an MCP stdio driver fixture larger than the
+  feature. `ingest_acl_tests` is the compensating end-to-end: it drives the real
+  `ingest` tool against a stub embedder and reads the `Acl` off the entity that
+  landed in the graph, so the chain is proven, not the schema.
+
+  **The dedup question is decided, because leaving it open left a leak.** On
+  dedup the survivor keeps its own ACL — an id *is* its content hash, so one
+  text cannot exist under two audiences and there is no other answer available.
+  That makes the `Rephrase` edge the hole, not the entity: `merge_duplicate`
+  stored the incoming text **verbatim** on the survivor, a `Reason` carries no
+  ACL of its own, and every surface that renders an entity renders its edges. A
+  scoped ingest landing within `dedup_threshold` cosine of any public thought
+  published its own text to everyone. `merge_duplicate` now takes the incoming
+  `Acl` and skips the rephrase write when it differs from the survivor's, in
+  either direction; corroboration is metadata about a statement and still
+  merges, the wording does not. `a_scoped_dedup_does_not_write_its_text_onto_a_public_survivor`.
+
+  Two more reads reached entity text without passing the predicate, found by
+  enumerating the read surfaces rather than trusting the one gate.
+  **Cold-tier backfill** (`src/mcp/tools_query.rs`) pushed `Store::cold_search`
+  hits straight into the delivered set — a raw cosine scan that answers no
+  filter, so spilling an entity was the way around every predicate the hot path
+  enforces. **Path chains** (`format_chains`) render the text of every entity on
+  a walk, and `retrieve` filtered only `results`; the ACL stopped the row and the
+  chain printed it anyway. Both now run `matches_filter`; a chain touching a
+  withheld entity is dropped whole, since a chain with a hole still says the
+  withheld thought exists and what it connects.
+
+  Still not gated, and named rather than fixed: the MCP **resources** surface
+  (`kern://thoughts`, `kern://thought/{id}`) returns entity text and takes no
+  `principals` at all, so the ACL is a filter a cooperating client asks for, not
+  a boundary imposed on one; and **gossip egress** replicates a scoped `Entity`
+  to peers ungated (the `Acl` does ride the wire, and `merge_entity` never
+  imports a remote ACL over a local one, so neither side can widen the other's).
+  Both are recorded on item 18, which stays open.
+
+  Decided by: verify-before-claiming — the handed-down mutation table was
+  re-run rather than quoted (all three rules do fail loudly), and the baseline
+  was re-measured at 866, not the number passed down. fix-the-root — one gate
+  that holds is worth less than knowing which reads run it, so the surfaces were
+  enumerated and the three that bypassed it are the actual defect.
 
 - 2026-07-21 — item 89 `[ingest]` closed: retention reaches the two entrances
   that have no caller to pass a flag, and it has a `kern.toml` home the item
@@ -113,15 +345,16 @@
   file on earth can set. The root is *which sections a user may write*, so the
   key went to the sections that describe the sources rather than to the one the
   item happened to name.
+
 - 2026-07-21 — an `id` read now runs the same filters a ranked read runs, and the
   one filter it must never run stays off. `tool_query` returned
   `entity_detail_by_id` and returned *before* `build_query_options` was ever
-  called (`src/mcp/tools_query.rs:129`), so `kind`, `source`, `scheme`,
+  called (`src/mcp/tools_query.rs:133`), so `kind`, `source`, `scheme`,
   `min_conf`, `since`, `before`, `valid_at` and `as_of` were accepted by the
   schema, parsed by nobody, and silently dropped — `query {id, kind: "claim"}`
   answered with a `Fact`. A filter meant one thing on `text` and nothing on
   `id`. The branch now builds `QueryOptions` first and puts the resolved row
-  through `retrieval::score::matches_filter` (`src/retrieval/score.rs:205`) —
+  through `retrieval::score::matches_filter` (`src/retrieval/score.rs:226`) —
   the same predicate the ranked read uses, not a second copy — and a malformed
   `since` is an error on the id path instead of a shrug. Resolution stayed
   single: `entity_detail_by_id` and the tool both go through one new
@@ -148,6 +381,7 @@
   Decided by: fix-the-root — the early return was the root, not the missing
   `kind` check. Special-casing one filter at the branch would have left the next
   one to be dropped the same silent way.
+
 - 2026-07-21 — the pre-commit hook refused this merge twice, and the second
   refusal caught a real loss. Merging `cycle/2` carried its `ROADMAP.md` edits
   into master while adding no new `CHANGELOG.md` entry: the resolution kept both
@@ -901,13 +1135,13 @@
   Retired as verified-false, in place:
 
   - **Routing does not do a vector lookup per level.** `route_to_child_id`
-    (`src/base/accept.rs:777`) is a linear scan over the parent's loaded named
+    (`src/base/accept.rs:790`) is a linear scan over the parent's loaded named
     children against each child's stored `graviton_vec` — no index is consulted.
     The cost is O(depth · children), not O(depth · log n), and the "cached
     per-kern centroid" the gap proposed as its *fix* is what `graviton_vec`
     already is. The item recommended the thing the code already does.
   - **Unnamed children are not unbounded per parent.** The routing path goes
-    through `get_or_spawn_unnamed_child` (`src/base/accept.rs:539`), one reusable
+    through `get_or_spawn_unnamed_child` (`src/base/accept.rs:552`), one reusable
     holding pen, guarded by three tests. Only tick clustering makes more, one per
     spawnable cluster and on purpose (`src/tick.rs:195`).
   - **The watcher's `.gitignore` parsing is not approximate** — `IgnoreRules`
@@ -1231,7 +1465,7 @@
   `:956-957`, `:683`, `:972-974`, `:567-568`. Three source citations went the
   same way: `wire_fetch` is at `src/commands.rs:1003` (`:1002` is
   `start_entity_sync`), cited twice — item 36 and the closed list; `QueryArgs` is
-  `src/mcp/tools_query.rs:76-107`, not a mid-struct slice ending past its own
+  `src/mcp/tools_query.rs:78-111`, not a mid-struct slice ending past its own
   brace; and item 25's `seed_important` range excluded the `g.all()` half of the
   product it describes, now `:127-174`.
 
@@ -1330,7 +1564,7 @@
   verified" block, whose proof-of-closure citations were the ones least likely to
   be re-read and so the ones that had rotted furthest — `start_gossip` cited
   `src/commands.rs:900-930` is at `:966-1040`, `do_resolve` cited `src/tick.rs:64`
-  lives in `src/tick/tasks.rs:372`, `MAX_AI_CONFIDENCE` cited `:62` is `:69`. A
+  lives in `src/tick/tasks.rs:383`, `MAX_AI_CONFIDENCE` cited `:62` is `:69`. A
   closure whose evidence points at the wrong line is a closure nobody can check.
 
   Two claims were false, not merely mis-pointed. **Item 37** opened with "no

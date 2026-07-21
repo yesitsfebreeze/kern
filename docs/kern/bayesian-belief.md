@@ -15,7 +15,7 @@ new observers arrive.
 > Contradiction detection shipped, but not in either form §2 weighed. There is no
 > `ReasonKind::Contradicts` (`src/base/types.rs:77-86` lists the seven kinds that
 > exist), no NLI model and no `stance` argument on ingest: the accept path only
-> ever supports (`src/base/accept.rs:152`). What moves `β` is GNN propagation —
+> ever supports (`src/base/accept.rs:162`). What moves `β` is GNN propagation —
 > each refreshed embedding is compared against the entity's own vector and scores
 > `observe_support` at cosine alignment ≥ 0.5, `observe_contradict` below it
 > (`src/tick/gnn_propagate.rs:153-158`). So the "observer" that can contradict is

@@ -25,11 +25,18 @@ pub(crate) fn edge(from: &str, to: &str) -> Reason {
 	}
 }
 
+// A dead port: nothing in the default rig should reach an embedder.
 pub(crate) fn mcp_server() -> crate::mcp::Server {
+	mcp_server_with_embed_url("http://127.0.0.1:1")
+}
+
+// Same server against a live stub embedder, for tests that have to follow an
+// ingest all the way into the graph rather than stop at the tool boundary.
+pub(crate) fn mcp_server_with_embed_url(url: &str) -> crate::mcp::Server {
 	use parking_lot::RwLock;
 	use std::sync::Arc;
 	let graph = Arc::new(RwLock::new(crate::base::graph::GraphGnn::new()));
-	let embedder = crate::llm::Client::new_embed_only("http://127.0.0.1:1", "test", "");
+	let embedder = crate::llm::Client::new_embed_only(url, "test", "");
 	let worker = Arc::new(crate::ingest::Worker::new(
 		graph.clone(),
 		embedder,
@@ -81,6 +88,17 @@ pub(crate) async fn serving(srv: crate::mcp::Server, endpoint: &trnsprt::typed::
 
 pub(crate) fn tool_text(v: &serde_json::Value) -> String {
 	v["content"][0]["text"].as_str().unwrap_or("").to_string()
+}
+
+// An embed endpoint that never answers. Pins the ingest worker on one job so a
+// test can fill the queue behind it.
+pub(crate) fn hanging_embed_app() -> axum::Router {
+	axum::Router::new().route(
+		"/api/embed",
+		axum::routing::post(|_b: axum::Json<serde_json::Value>| async move {
+			std::future::pending::<axum::Json<serde_json::Value>>().await
+		}),
+	)
 }
 
 pub(crate) async fn spawn_http(app: axum::Router) -> (String, JoinHandle<()>) {

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::base::graph::GraphGnn;
 use crate::base::heat::{self, HeatConfig};
 use crate::base::log_throttle::LogThrottle;
-use crate::base::types::{Entity, EntityKind, EntityStatus};
+use crate::base::types::{Acl, Entity, EntityKind, EntityStatus};
 use crate::base::util::cmp_partial;
 use crate::config::RetrievalConfig;
 use crate::retrieval::expand::{Scored, ScoredEntity};
@@ -44,6 +44,11 @@ pub struct QueryOptions {
 	pub as_of: Option<SystemTime>,
 	// Superseded-history walk done at the tool layer, NOT a per-entity filter (the ANN never holds superseded entities).
 	pub include_history: bool,
+	// The requesting principal's ids (users and groups). EMPTY means NO ACL filter
+	// at all — it does NOT mean "public only". A caller that names no principal
+	// reads everything, which is what keeps `kern get` and every unscoped read
+	// working exactly as before.
+	pub principals: Vec<String>,
 	// Appended to the synthesis prompt only — never a retrieval filter, so is_active() ignores it.
 }
 
@@ -57,6 +62,7 @@ impl QueryOptions {
 			|| self.before.is_some()
 			|| self.valid_at.is_some()
 			|| self.as_of.is_some()
+			|| !self.principals.is_empty()
 	}
 }
 
@@ -201,8 +207,29 @@ pub fn delivery_cap(cfg: &RetrievalConfig) -> usize {
 	}
 }
 
+// An entity carrying no ACL at all is public: every caller reads it. Once it
+// names a scope, a user or a group, the caller has to name one of them back.
+//
+// SECURITY: this is a membership gate, not a ranking signal. A Fact's immunity
+// is to GC alone — a scoped Fact is withheld from a non-member exactly like a
+// scoped Claim.
+fn acl_admits(acl: &Acl, principals: &[String]) -> bool {
+	if acl.scope.is_empty() && acl.users.is_empty() && acl.groups.is_empty() {
+		return true;
+	}
+	principals
+		.iter()
+		.any(|p| *p == acl.scope || acl.users.contains(p) || acl.groups.contains(p))
+}
+
 // Single filter predicate shared by post-filtering and pre-filtered ANN search (`search_all_filtered`) — the two must never diverge.
 pub fn matches_filter(entity: &Entity, opts: &QueryOptions) -> bool {
+	// First, because it is the only predicate here that decides what a caller is
+	// ALLOWED to see rather than what they asked for. Empty `principals` is "no
+	// principal was named", which is no filter — never "public only".
+	if !opts.principals.is_empty() && !acl_admits(&entity.acl, &opts.principals) {
+		return false;
+	}
 	if !opts.source.is_empty() && entity.source.system() != opts.source {
 		return false;
 	}
@@ -470,6 +497,92 @@ mod query_filter_tests {
 				..Default::default()
 			}
 		));
+
+		// --- ACL. A public entity is everyone's; a scoped one is its members'. ---
+		let bob = QueryOptions {
+			principals: vec!["bob".into()],
+			..Default::default()
+		};
+		assert!(
+			matches_filter(&fact_file, &bob),
+			"an entity with no ACL is public — naming a principal must not hide it"
+		);
+
+		let mut scoped = ent("s", EntityKind::Claim, file_src("/s")).entity;
+		scoped.acl = Acl {
+			scope: "acme".into(),
+			users: vec!["alice".into()],
+			groups: vec!["auditors".into()],
+		};
+		assert!(
+			!matches_filter(&scoped, &bob),
+			"a scoped entity is withheld from a caller who names none of its principals"
+		);
+		for member in ["alice", "acme", "auditors"] {
+			assert!(
+				matches_filter(
+					&scoped,
+					&QueryOptions {
+						principals: vec![member.into()],
+						..Default::default()
+					}
+				),
+				"{member} is named by the ACL (user, scope or group) and must be served"
+			);
+		}
+		assert!(
+			matches_filter(
+				&scoped,
+				&QueryOptions {
+					principals: vec!["bob".into(), "alice".into()],
+					..Default::default()
+				}
+			),
+			"any one matching principal admits — principals are a union, not a conjunction"
+		);
+		// The load-bearing default: no principal named is NO filter, not public-only.
+		assert!(
+			matches_filter(&scoped, &QueryOptions::default()),
+			"an empty `principals` filters nothing — an unscoped caller still sees a scoped row"
+		);
+
+		// Fact immunity is to GC alone. It buys nothing against an ACL.
+		let mut scoped_fact = ent("sf", EntityKind::Fact, file_src("/sf")).entity;
+		scoped_fact.acl = Acl {
+			scope: "acme".into(),
+			..Default::default()
+		};
+		assert!(
+			!matches_filter(&scoped_fact, &bob),
+			"a scoped Fact is dropped for a non-member exactly like anything else"
+		);
+		assert!(
+			matches_filter(
+				&scoped_fact,
+				&QueryOptions {
+					principals: vec!["acme".into()],
+					..Default::default()
+				}
+			),
+			"and served to a member"
+		);
+		assert!(
+			matches_filter(&scoped_fact, &QueryOptions::default()),
+			"an unscoped caller still reads it"
+		);
+	}
+
+	#[test]
+	fn principals_make_the_options_active_so_the_ann_prefilters_too() {
+		// `is_active` picks the pre-filtered ANN path over the post-filter. Both run
+		// `matches_filter`, so leaving the ACL out of it would only cost work — but
+		// it would also mean an ACL-only query silently took the unfiltered seed path.
+		assert!(!QueryOptions::default().is_active());
+		assert!(QueryOptions {
+			principals: vec!["alice".into()],
+			..Default::default()
+		}
+		.is_active());
 	}
 
 	#[test]

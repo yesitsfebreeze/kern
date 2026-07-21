@@ -52,10 +52,16 @@ everywhere, which is what makes conflict-free cross-node merge work.
   (OR-Set of text lines), two vectors (`vector` content, `gnn_vector` structure),
   and provenance (`Source` with `system`/`object_id`/`section`/`title`/`author`/
   `url`). `kind`/`source` parsed off the source string. Also carries an `acl`
-  (`src/base/types.rs:287`; `Acl { scope, users, groups }` at `:120-124`) — the
-  field exists and is persisted, but every writer sets `Acl::default()`
-  (`src/ingest/place.rs:56`, `src/ingest/file_watcher.rs:136`) and nothing reads
-  it, so it is structure without behavior today.
+  (`src/base/types.rs:287`; `Acl { scope, users, groups }` at `:120-124`) — as of
+  2026-07-21 it is **written and read**. The MCP `ingest` tool's `scope` /
+  `principals` build it (`acl_from_args`, `src/mcp/tools_mutate.rs`) and it rides
+  `ingest::Job::acl` into `new_statement_entity` (`src/ingest/place.rs:57`);
+  `query`'s `principals` enforce it in `matches_filter` via `acl_admits`
+  (`src/retrieval/score.rs:216`). Two rules: a scoped `Fact` is withheld from a
+  non-member (GC-immunity is not ACL-immunity), and an empty `principals` is *no
+  filter*, not public-only. A dedup keeps the survivor's ACL and drops the
+  `Rephrase` edge across a boundary — a `Reason` has no ACL. The file watcher
+  still writes `Acl::default()`; `ROADMAP.md` item 18 lists what is still ungated.
 - `Reason` (`src/base/types.rs:419`) — an edge `from`→`to` with a `kind`
   (`Similarity`/`Provenance`/`Question`/`Spawn`/`Supersedes`/`Ratification`/
   `Rephrase`, `src/base/types.rs:77-86`), its own vector (mean of endpoints), a
@@ -107,10 +113,10 @@ supersedes an existing one. The core write path every ingestion funnels through.
      `generic` catch-all child (empty graviton vec, never matches on similarity) —
      the root never commits entities itself.
    - At a **named** kern with a graviton: compute `acceptance_probability`
-     (`src/base/accept.rs:893`, softmax over cosine distance vs `inner`/`outer`
+     (`src/base/accept.rs:906`, softmax over cosine distance vs `inner`/`outer`
      radii); below `ACCEPT_FLOOR` (0.5) → spawn an unnamed child and descend.
    - `MAX_ACCEPT_DEPTH = 64` (`src/base/accept.rs:17`) bounds a runaway descent.
-3. **Commit** (`commit_entity`, `src/base/accept.rs:167`) — stamp `root_id`,
+3. **Commit** (`commit_entity`, `src/base/accept.rs:179`) — stamp `root_id`,
    insert into the `entity_idx`/`gnn_entity_idx`, attach a `Similarity` reason to
    the nearest existing neighbor and a `Provenance` reason to the source doc.
 
@@ -119,7 +125,7 @@ supersedes an existing one. The core write path every ingestion funnels through.
 
 **Gaps.** *Both halves of this block were wrong and are corrected 2026-07-21.*
 Routing does **no** index lookup per level: `route_to_child_id`
-(`src/base/accept.rs:867`) is a linear scan over the parent's loaded, named
+(`src/base/accept.rs:880`) is a linear scan over the parent's loaded, named
 children, taking `cosine_distance` against each child's stored `graviton_vec`
 directly. The cost is O(depth · children), not O(depth · log n), and the "cached
 per-kern centroid" the old wording wanted is what `graviton_vec` already is —
@@ -127,9 +133,9 @@ root fan-out is already O(gravitons). The remaining scaling question is the
 per-parent fan-out itself, not an index.
 
 Unnamed children are **not** unbounded on the routing path: `route_entity` goes
-through `get_or_spawn_unnamed_child` (`src/base/accept.rs:629`), which reuses the
+through `get_or_spawn_unnamed_child` (`src/base/accept.rs:642`), which reuses the
 single holding-pen child and auto-loads an evicted one rather than respawning it
-(three tests hold the line, `src/base/accept.rs:919`, `:894`). Growth comes only
+(three tests hold the line, `src/base/accept.rs:932`, `:907`). Growth comes only
 from tick clustering, which deliberately spawns one *distinct* child per
 spawnable cluster (`spawn_child_clusters`, `src/tick.rs:196`) — bounded per pass
 by the cluster count, not by anything per parent.
@@ -144,14 +150,14 @@ stays as history with a stamped `valid_to`; `query` can recover the past via
 
 **How.**
 
-- `supersede_by_contradiction` (`src/base/accept.rs:560`) — inserts the new
+- `supersede_by_contradiction` (`src/base/accept.rs:573`) — inserts the new
   thought, sets the old `status=Superseded`, `superseded_by=new_id`, and
   `stamp_invalidated(now, new_valid_from)` so the window closes exactly when
   the new claim became true. Removes the old id from both vector indexes (so it
   stops seeding) but keeps it in the kern for history. Adds a `Supersedes`
   reason edge with the averaged vector.
-- Classification is LLM-driven (`classify_prompt` `src/base/accept.rs:540` /
-  `parse_contradiction` `src/base/accept.rs:550`) and **fails open to `Related`**
+- Classification is LLM-driven (`classify_prompt` `src/base/accept.rs:553` /
+  `parse_contradiction` `src/base/accept.rs:563`) and **fails open to `Related`**
   (co-exist) — the conservative choice that never loses data. Driven from the
   tick's `do_classify_contradiction` task (`src/tick/tasks.rs:114`) so recall
   stays LLM-free at query time.
@@ -193,11 +199,11 @@ profiled via `src/profile.rs`):
 | 6 | **Merge** | `retrieval/merge.rs` | Combine seeds + expanded neighbors into `ScoredEntity` list. |
 | 7 | **Boosts** | `retrieval/score.rs` | `apply_boosts`: confidence × score + **QBST** access/recency boost (`qbst`, capped at 0.1, 24h half-life) + `fact_score_boost` (0.3) for Facts. |
 | 7b | **Gravity** | `retrieval/gravity.rs` | Query-time graviton pull: `score += gravity_weight (0.15) * max_over_gravitons(mass * max(0, cos(entity, graviton_vec)))`. Max, not sum — overlapping gravitons never double-count. `gravity_weight=0` disables (early return, zero cost); no gravitons → no-op. Latency only, from the bench deleted in `8d8b19e` and not reproducible: ~+7% p50 with 5 gravitons. No quality claim accompanies it — the retrieval-quality half of that bench is withdrawn under the claim standard (`ROADMAP.md` — "no quality claim of any kind"). |
-| 8 | **Filter** | `retrieval/score.rs` | `filter_delivery`: drop superseded; floor at `retrieval.min_deliver_score` (default `0.0` — off); cap at `delivery_cap` = `retrieval.max_deliver_results` (default `25`), or `mmr_pool_size=50` when MMR is on. Both are config fields (`src/config/retrieval.rs:48-49`), not constants. `delivery_cap` is a named function because the CLI reads it too — `cmd_query` sends it as `k` when it routes to a daemon, so the routed and local reads deliver the same number of hits. Query options (source/kind/scheme/time/min_conf) go through `matches_filter` (`retrieval/score.rs`), the single predicate shared with pre-filtered ANN search. |
+| 8 | **Filter** | `retrieval/score.rs` | `filter_delivery`: drop superseded; floor at `retrieval.min_deliver_score` (default `0.0` — off); cap at `delivery_cap` = `retrieval.max_deliver_results` (default `25`), or `mmr_pool_size=50` when MMR is on. Both are config fields (`src/config/retrieval.rs:48-49`), not constants. `delivery_cap` is a named function because the CLI reads it too — `cmd_query` sends it as `k` when it routes to a daemon, so the routed and local reads deliver the same number of hits. Query options (source/kind/scheme/time/min_conf/`principals`) go through `matches_filter` (`retrieval/score.rs`), the single predicate shared with pre-filtered ANN search. The ACL predicate runs first (`acl_admits`, same file): an entity whose `Acl` names no scope, user or group is public, otherwise the caller's `principals` must name one of them. An empty `principals` is **no filter, not public-only** — that is what keeps every principal-less read working — and a Fact is GC-immune, never ACL-immune, so a scoped Fact is withheld from a non-member like anything else. |
 | 9 | **Dedup by section** | `retrieval/diversify.rs:6` | Collapse near-duplicate sections. |
 | 10 | **MMR** | `retrieval/diversify.rs:46` | Maximal-marginal-relevance diversification so the `k` results actually differ. |
-| 11 | **Deliver** | `retrieval/query.rs` | Passages + enriched edges + `format_chains` chain text (`QUERY_MAX_CHAINS=5`), remote entities tagged UNTRUSTED for the synthesizing caller. The whole read path is LLM-free by design (2026-07-21): the calling agent synthesizes; an in-kern small-model answerer set the quality ceiling and made retrieval untunable. |
-| 13 | **Cold backfill** | `src/mcp/tools_query.rs:204` | If hot returns `< k`, cold-tier hits (brute-force `Store::cold_search`, `src/base/store.rs:629`) fill remaining slots, flagged `cold:true`. Skipped on the exact-text fast path, which never embedded a query vector. <!-- docs-check: anchor-ok --> |
+| 11 | **Deliver** | `retrieval/query.rs` | Passages + enriched edges + `format_chains` chain text (`QUERY_MAX_CHAINS=5`), remote entities tagged UNTRUSTED for the synthesizing caller. Chains answer an active filter too (`retrieve`, same file): a chain renders the TEXT of every entity on it, so filtering only the results left it as a second delivery channel — one touching a withheld entity is dropped whole, since a chain with a hole still says the withheld thought exists and what it connects. The whole read path is LLM-free by design (2026-07-21): the calling agent synthesizes; an in-kern small-model answerer set the quality ceiling and made retrieval untunable. |
+| 13 | **Cold backfill** | `src/mcp/tools_query.rs:208` | If hot returns `< k`, cold-tier hits (brute-force `Store::cold_search`, `src/base/store.rs:629`) fill remaining slots, flagged `cold:true` — each first put through `matches_filter`, because `cold_search` is a raw cosine scan that answers no predicate of its own and an unfiltered fill made spilling an entity the way around every filter the hot path enforces. Skipped on the exact-text fast path, which never embedded a query vector. <!-- docs-check: anchor-ok --> |
 | 14 | **Access stamping** | `retrieval/score.rs` | Heat deposits off the hot path: `score::commit_access` stamps delivered hits; the tick's `CommitAccess` task calls `score::commit_access_ids`. |
 
 **Where.** `src/retrieval/*` (4374 LoC, 12 files). Entry: `retrieval::query`
@@ -323,7 +329,7 @@ and cold tier live together. Readers never block, writers serialize.
 
 **Gaps.** Single-writer is enforced, not assumed — `src/base/lock.rs` is an advisory
 lock `reembed`, `gc` and `compact` claim or refuse — but `cmd_hub_merge`
-(`src/commands/admin.rs:746`) and `maybe_self_heal_store` (`src/commands.rs:437`)
+(`src/commands/admin.rs:748`) and `maybe_self_heal_store` (`src/commands.rs:437`)
 still `save_graph_unguarded` holding none. No WAL but LMDB's; compaction is offline.
 
 ---
@@ -347,8 +353,11 @@ Nothing is lost on an LLM outage — the delta stays queued until it succeeds.
   `Some([])` = nothing worth keeping (archive); `None` = no LLM
   output (transient outage, retry). `parse_claims` is lenient (finds the JSON
   array anywhere in the output).
-- **Worker** (`src/ingest/worker.rs`) — async job queue (`enqueue`/`run`),
-  owns the embed + accept path. Defers question/contradiction follow-ups to
+- **Worker** (`src/ingest/worker.rs`) — async job queue bounded at
+  `QUEUE_CAP` = 64 with no detached send behind it. Three offers: `enqueue`
+  refuses when full (`None`, counted as `ingest_queue_refused`), `submit` awaits
+  capacity for a producer that can be slowed instead (the file watcher), `run`
+  awaits the outcome. Owns the embed + accept path. Defers question/contradiction follow-ups to
   the tick via callback closures (`DeferQuestionsFn`/`DeferContradictionFn`).
 - **Embed** (`src/ingest/embed.rs`) — batches texts to the embedding endpoint.
 - **Dedup** (`src/ingest/dedup.rs`) — `find_duplicate` at the preset's dedup
@@ -457,25 +466,25 @@ maintains itself.
   and not a core cluster spawns a distinct unnamed child and migrates its
   members. Unnamed kerns never spawn (bounds descent). Empty unnamed children
   are evicted back to the parent each pass.
-- **Name** (`do_name`, `src/tick/tasks.rs:225`) — LLM names an unnamed kern from
+- **Name** (`do_name`, `src/tick/tasks.rs:236`) — LLM names an unnamed kern from
   its centroid (`cluster::graviton_prompt`) once it crosses the naming
   thresholds (`KERN_NAMING_COHESION_THRESHOLD=0.50`,
   `KERN_NAMING_MIN_CLUSTER_SIZE=5`).
-- **Enrich** (`do_enrich`, `src/tick/tasks.rs:304`) — LLM writes the explanatory
+- **Enrich** (`do_enrich`, `src/tick/tasks.rs:315`) — LLM writes the explanatory
   text for an un-enriched reason edge.
-- **Resolve question** (`do_resolve`, `src/tick/tasks.rs:372`) — open `Question`
+- **Resolve question** (`do_resolve`, `src/tick/tasks.rs:383`) — open `Question`
   edges (`to` empty) get answered by retrieval; if a hit scores above
   `QUESTION_RESOLVE_THRESHOLD=0.80` the edge is closed.
 - **Seed questions** (`do_seed_questions`, `src/tick/tasks.rs:42`) — broadcasts
   open questions to peers (federation).
-- **Commit access** (`do_commit_access`, `src/tick/tasks.rs:444`) — flushes
+- **Commit access** (`do_commit_access`, `src/tick/tasks.rs:455`) — flushes
   queued access-count/heat updates.
 - **Idle sweep** (`src/tick/idle.rs`) — graph-global; unloads kerns idle past
   `tick.kern_idle_timeout_secs`. Residency, not forgetting: an unloaded kern is
   persisted first and reloads on next access.
 - **Persist / reembed / disk consolidate** — `do_persist`
-  (`src/tick/tasks.rs:456`), `do_reembed` (`src/tick/tasks.rs:487`),
-  `do_disk_consolidate` (`src/tick/tasks.rs:440`).
+  (`src/tick/tasks.rs:467`), `do_reembed` (`src/tick/tasks.rs:498`),
+  `do_disk_consolidate` (`src/tick/tasks.rs:451`).
 
 **Where.** `src/tick/*` (2912 LoC, 7 files) + `src/tick.rs` (893 LoC).
 
@@ -598,14 +607,14 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 
 | Tool | File | Purpose |
 | ------ | ------ | --------- |
-| `query` | `tools_query.rs` | Hybrid search, LLM-free; the caller synthesizes. Filters: `mode`/`kind`/`source`/`scheme`/time range/`min_conf`/`valid_at`/`as_of`; `include_history` for supersede chain. Returns edges **and path chains**, and `id` resolves a prefix and the cold tier (`entity_detail_by_id`) — both widenings exist so a CLI `query`/`get` routed through the daemon answers with what the local path answers. An `id` read runs the **same** filters: `src/mcp/tools_query.rs:129-149` builds `QueryOptions` first and puts the resolved row through `retrieval::score::matches_filter`, so `query {id, kind: "claim"}` on a `Fact` answers `thought not found`. A bare `query {id}` filters nothing — `QueryOptions::default()` leaves `valid_at`/`as_of` unset — which is what keeps an expired row served-and-flagged (`expired`/`valid_until`, `entity_detail`, `src/mcp/tools_query.rs:363`) rather than hidden. |
-| `ingest` | `tools_mutate.rs` | Add text. `object_id` update semantics, free-text `hint` chunking context (`descriptor` accepted as serde alias), optional `retention_secs` TTL (integer seconds; `0`/absent = never) resolved to an absolute `valid_until` once, before the sync / durable-direct / RAM-queue branch, so all three carry the same deadline. |
+| `query` | `tools_query.rs` | Hybrid search, LLM-free; the caller synthesizes. Filters: `mode`/`kind`/`source`/`scheme`/time range/`min_conf`/`valid_at`/`as_of`; `include_history` for supersede chain. Returns edges **and path chains**, and `id` resolves a prefix and the cold tier (`entity_detail_by_id`) — both widenings exist so a CLI `query`/`get` routed through the daemon answers with what the local path answers. An `id` read runs the **same** filters: `src/mcp/tools_query.rs:133-153` builds `QueryOptions` first and puts the resolved row through `retrieval::score::matches_filter`, so `query {id, kind: "claim"}` on a `Fact` answers `thought not found`. A bare `query {id}` filters nothing — `QueryOptions::default()` leaves `valid_at`/`as_of` unset — which is what keeps an expired row served-and-flagged (`expired`/`valid_until`, `entity_detail`, `src/mcp/tools_query.rs:367`) rather than hidden. `principals` (string array) is the caller's asserted identity and rides the same predicate, so `query {id, principals: ["bob"]}` on an alice-scoped row answers `thought not found` while a bare `query {id}` still serves it. A blank entry is a hard error (`parse_principals`, `src/mcp.rs`), never a silent skip — it would otherwise match the empty scope of every public entity. **MCP-only: there is no CLI flag, so `e2e/` cannot reach it** (`e2e/conftest.py` drives the binary over subprocess and has no JSON-RPC client); the coverage is unit tests. |
+| `ingest` | `tools_mutate.rs` | Add text. `object_id` update semantics, free-text `hint` chunking context (`hint` is the only spelling — the `descriptor` alias retired in `7de23c0`), optional `retention_secs` TTL (integer seconds; `0`/absent = never) resolved to an absolute `valid_until` once, before the sync / durable-direct / RAM-queue branch, so all three carry the same deadline. Optional `scope` (string) + `principals` (string array) build the `Acl` stamped on every entity the job places (`acl_from_args` → `ingest::Job::acl` → `new_statement_entity`); naming neither leaves the thought public. Resolved on the same pre-branch line as `valid_until` and carried across the durable hop by `DirectJob::acl`, so the async path cannot silently republish a scoped ingest as public. |
 | `link` | `tools_mutate.rs` | Create a reason edge (LLM writes the reason if blank). Edge score is the asserted confidence (agent 0.95; CLI user 1.0), NOT `cosine(from,to)` — a deliberate link connects what similarity cannot, so similarity must not be its strength. |
 | `forget` | `tools_mutate.rs` | Remove a thought + cascade edges (Facts immune). |
 | `forget_by_source` | `tools_mutate.rs` | Remove every thought from one `(scheme, object_id)` — **all sections of it**, since `source_id` hashes the section and keying on one would forget a single chunk of a document. Cascades through the same `forget_entity`; refuses local Facts unless `force`, which is the ONLY bypass of the Fact guard and is never implicit. Returns `removed_entities`/`removed_edges`/`kept_facts` — the last so a refused Fact is reported rather than read as "nothing was there". Exists so `kern forget --source` has somewhere to route. |
 | `degrade` | `tools_mutate.rs` | Down-weight edges along a bad retrieval path (`DEGRADE_*` decay). Returns `decayed_edges` and `removed_edges` — the reap count exists so a CLI `degrade` routed through the daemon can print what the local path prints. |
-| `move` | `tools_mutate.rs:440` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
-| `health` | `tools_admin.rs:83` | Graph stats (gravitons/kerns/entities/reasons/unnamed/claim_kinds) **plus the degradation surface**: `queue_depth`, `tasks_done`, `task_avg_ms`, `task_panics`, `last_task_panic`, `task_failures`, `last_task_failure`, `cold_evicted`, `embed_model`, `embed_dim`, `embed_mismatch` (`Server::health_stats`, `src/mcp.rs`). |
+| `move` | `tools_mutate.rs:444` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
+| `health` | `tools_admin.rs:83` | Graph stats (gravitons/kerns/entities/reasons/unnamed/claim_kinds) **plus the degradation surface**: `queue_depth`, `tasks_done`, `task_avg_ms`, `task_panics`, `last_task_panic`, `task_failures`, `last_task_failure`, `cold_evicted`, `embed_model`, `embed_dim`, `embed_mismatch`, and the seven fail-open counters — `query_dim_rejected`, `below_floor_deliveries`, `clock_skew_skips`, `ingest_dropped_chunks`, `remote_cap_dropped`, `unspilled_drops`, `ingest_queue_refused` — each a path that returns something rather than erroring, so the count is the only way to tell a degraded result from a good one (`Server::health_stats`, `src/mcp.rs:116`). |
 | `graviton` | `tools_admin.rs` | list/add/remove focus attractors (name + text — phrase or full document — + optional mass). Replaced the single per-kern "purpose". |
 | `claim_kind` | `tools_admin.rs` | register/remove claim kinds; registered kinds extend the built-in distill set. |
 | `pulse` | `tools_admin.rs` | Trigger a clustering pass across the tree. |
@@ -616,8 +625,8 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 Plus MCP **prompts** (`src/mcp/prompt.rs`) and **resources** (`src/mcp/resources.rs`).
 
 **Server** (`src/mcp.rs`) — `Server` holds the shared `graph`/`worker`/`llm`/
-`task_q`/`cfg`; implements `trnsprt::McpServer`. `run`/`run_stdio` use
-the trnsprt framing. `run_sse` (`src/mcp/sse.rs`) serves HTTP/SSE.
+`task_q`/`cfg`; implements `trnsprt::McpServer`. `run`/`run_stdio` use the
+trnsprt framing; `run_sse` (`src/mcp/sse.rs`) is bearer-gated Streamable HTTP.
 
 **Where.** `src/mcp/*` (2346 LoC, 8 files).
 

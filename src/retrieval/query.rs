@@ -181,7 +181,7 @@ pub fn retrieve_profiled(
 	let expanded = expand::expand(g, cfg, qvec, &seeds, w);
 	prof.checkpoint("expand");
 	let mut results = merge::merge(g, &seeds, expanded.scored);
-	let chains = expanded.chains;
+	let mut chains = expanded.chains;
 	prof.checkpoint("merge");
 
 	score::apply_boosts(g, cfg, &mut results);
@@ -191,6 +191,17 @@ pub fn retrieve_profiled(
 	if let Some(o) = opts {
 		if o.is_active() {
 			results.retain(|r| score::matches_filter(r.entity, o));
+			// SECURITY: a chain is rendered by `format_chains` as the TEXT of every
+			// entity on it. Filtering only `results` leaves the chain rendering as a
+			// second delivery channel that answers no filter at all — for `kind` that
+			// is a cosmetic leak, for the ACL predicate it is the whole gate. A path
+			// through a withheld entity is dropped whole: a chain with a hole in it
+			// would still say the withheld thought exists and what it connects.
+			chains.retain(|c| {
+				c.nodes.iter().step_by(2).all(|id| {
+					expand::find_entity_ref_in_graph(g, id).is_none_or(|e| score::matches_filter(e, o))
+				})
+			});
 		}
 	}
 	score::drop_expired(&mut results, opts, std::time::SystemTime::now());
@@ -523,6 +534,111 @@ mod tests {
 			ids.contains(&"expired"),
 			"a query that names its own instant judges validity THERE — dropping the \
 			 since-expired claim would make history unqueryable: {ids:?}"
+		);
+	}
+
+	// A chain is a SECOND delivery channel: `format_chains` renders the text of
+	// every entity on the path, and nothing about it is a result. Filtering only
+	// `results` left the ACL predicate stopping the row and the chain printing it
+	// anyway — the filter would read as protection while protecting nothing.
+	#[test]
+	fn an_acl_filtered_entity_does_not_leak_through_a_path_chain() {
+		use crate::base::types::Acl;
+
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		{
+			let k = g.kerns.get_mut(&root).expect("root kern");
+			let mut open = mk_entity(
+				"open",
+				"ada keeps her bicycle in the shed",
+				1.0,
+				EntityKind::Claim,
+			);
+			open.vector = vec![1.0, 0.0];
+			open.gnn_vector = vec![1.0, 0.0];
+			k.entities.insert("open".into(), open);
+
+			// Orthogonal to the query, so it is never a SEED — the only way it can
+			// enter the walk is by the edge, which is exactly the path that builds a
+			// chain and the path the ACL predicate has to cover.
+			let mut secret = mk_entity(
+				"secret",
+				"the vault code is 4815162342",
+				1.0,
+				EntityKind::Claim,
+			);
+			secret.vector = vec![0.0, 1.0];
+			secret.gnn_vector = vec![0.0, 1.0];
+			secret.acl = Acl {
+				scope: "acme".into(),
+				..Default::default()
+			};
+			k.entities.insert("secret".into(), secret);
+
+			add_reason(
+				k,
+				Reason {
+					from: "open".into(),
+					to: "secret".into(),
+					id: "r1".into(),
+					text: "relates to".into(),
+					kind: ReasonKind::Similarity,
+					score: 0.9,
+					..Default::default()
+				},
+			);
+		}
+		for id in ["open", "secret"] {
+			g.index_entity(id, &root);
+		}
+		g.rebuild_index();
+
+		let cfg = crate::config::RetrievalConfig::default();
+		let w = Weights {
+			content: 0.70,
+			reason: 0.15,
+			edge: 0.15,
+		};
+
+		// Precondition: unfiltered, the walk reaches the scoped thought and prints it.
+		let open_read = retrieve(
+			&g,
+			&cfg,
+			&[1.0, 0.0],
+			"ada bicycle shed",
+			Mode::Hybrid,
+			None,
+			w,
+		);
+		assert!(
+			open_read.chain_text.contains("vault code"),
+			"precondition: the walk does reach it and the chain does render its text: {:?}",
+			open_read.chain_text
+		);
+
+		let bob = crate::retrieval::score::QueryOptions {
+			principals: vec!["bob".into()],
+			..Default::default()
+		};
+		let out = retrieve(
+			&g,
+			&cfg,
+			&[1.0, 0.0],
+			"ada bicycle shed",
+			Mode::Hybrid,
+			Some(&bob),
+			w,
+		);
+		let ids: Vec<&str> = out.results.iter().map(|r| r.entity.id.as_str()).collect();
+		assert!(
+			!ids.contains(&"secret"),
+			"the scoped thought is withheld from the results: {ids:?}"
+		);
+		assert!(
+			!out.chain_text.contains("vault code"),
+			"and from the chains, which render text and answer to no result filter: {:?}",
+			out.chain_text
 		);
 	}
 }
