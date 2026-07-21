@@ -3,6 +3,7 @@ pub mod resources;
 pub mod sse;
 pub mod tools;
 mod tools_admin;
+mod tools_intake;
 mod tools_mutate;
 pub(crate) mod tools_query;
 mod tools_setup;
@@ -181,6 +182,7 @@ impl trnsprt::McpServer for Server {
 			"claim_kind" => self.tool_claim_kind(args),
 			"pulse" => self.tool_pulse(args),
 			"gc" => self.tool_gc(),
+			"intake_drain" => self.tool_intake_drain(),
 			"setup" => self.tool_setup(),
 			_ => {
 				return Ok(trnsprt::ToolResult {

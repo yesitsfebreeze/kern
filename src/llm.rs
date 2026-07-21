@@ -133,6 +133,10 @@ impl Client {
 		self
 	}
 
+	pub fn has_reason(&self) -> bool {
+		!self.inner.reason_url.is_empty()
+	}
+
 	pub fn new_embed_only(embed_url: &str, embed_model: &str, embed_key: &str) -> Self {
 		Self::new(
 			Endpoint::default(),

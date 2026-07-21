@@ -6,6 +6,7 @@ use parking_lot::RwLock;
 use crate::base::store::FlushOutcome;
 use crate::ingest::intake_status::{scan, Report};
 
+use super::route::{route, u64_field, Routed};
 use super::{load_graph, Client, Endpoint, IntakeAction};
 
 const WRITE_RETRIES: u32 = 5;
@@ -95,6 +96,45 @@ async fn drain(
 		return;
 	}
 
+	let archived = match route("intake_drain", serde_json::json!({})).await {
+		Routed::Done(v) => u64_field(&v, "archived") as usize,
+		Routed::Refused(e) => return eprintln!("{e}"),
+		Routed::NoDaemon => {
+			drain_locally(
+				cfg,
+				dir,
+				&before,
+				embed_url,
+				embed_model,
+				reason_url,
+				reason_model,
+			)
+			.await
+		}
+	};
+
+	let after = scan(dir, SystemTime::now());
+	println!(
+		"drained {archived} of {} pending; {} still queued ({} stuck)",
+		before.pending.len(),
+		after.pending.len(),
+		after.stuck()
+	);
+	print_report(&cfg.intake.dir, &after, cfg.intake.enabled);
+}
+
+// The `NoDaemon` half: nothing is serving, so this process owns the queue and
+// the graph both. The queue itself is on disk either way, which is why only the
+// archived count crosses the socket and both paths print through the same tail.
+async fn drain_locally(
+	cfg: &crate::config::Config,
+	dir: &std::path::Path,
+	before: &Report,
+	embed_url: &str,
+	embed_model: &str,
+	reason_url: &str,
+	reason_model: &str,
+) -> usize {
 	let g = Arc::new(RwLock::new(load_graph(cfg)));
 	let llm_client = Client::new(
 		Endpoint::new(reason_url, reason_model, cfg.reason_key()),
@@ -130,15 +170,7 @@ async fn drain(
 	.await;
 
 	flush(&g, cfg);
-
-	let after = scan(dir, SystemTime::now());
-	println!(
-		"drained {archived} of {} pending; {} still queued ({} stuck)",
-		before.pending.len(),
-		after.pending.len(),
-		after.stuck()
-	);
-	print_report(&cfg.intake.dir, &after, cfg.intake.enabled);
+	archived
 }
 
 // Same guarded retry as `cmd_ingest`: this opens the store directly, so a

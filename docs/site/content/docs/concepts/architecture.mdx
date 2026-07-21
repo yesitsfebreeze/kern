@@ -43,9 +43,9 @@ Entities live in **kerns**, a tree of buckets. Root is a pure dispatcher; named 
 
 Updated or contradicted claim is **superseded**, never removed — the old revision keeps its validity window; query `as_of` or `include_history`. The update-vs-contradiction call needs an LLM, so it runs in the tick, never on the read path. See [Time & contradiction](./time.mdx).
 
-## Twelve MCP tools
+## Thirteen MCP tools
 
-`query`, `ingest`, `link`, `forget` (Facts are immune), `degrade`, `move`, `health`, `graviton`, `claim_kind`, `pulse`, `gc`, `setup`. Transports: stdio default, HTTP/SSE opt-in. See [MCP tools](../howto/mcp.mdx).
+`query`, `ingest`, `link`, `forget` (Facts are immune), `degrade`, `move`, `health`, `graviton`, `claim_kind`, `pulse`, `gc`, `intake_drain`, `setup`. Transports: stdio default, HTTP/SSE opt-in. See [MCP tools](../howto/mcp.mdx).
 
 ## Fail-open, but counted
 

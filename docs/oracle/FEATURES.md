@@ -117,9 +117,22 @@ supersedes an existing one. The core write path every ingestion funnels through.
 **Where.** `src/base/accept.rs` (1452 LoC). Radii defaults in `constants.rs`
 (`KERN_INNER_RADIUS=0.15`, `KERN_OUTER_RADIUS=0.35`).
 
-**Gaps.** Routing does a vector lookup per level (O(depth·log n)); a cached
-per-kern centroid could make root-level fan-out O(gravitons). Unnamed children
-are currently unbounded per parent (only emptied by cluster eviction).
+**Gaps.** *Both halves of this block were wrong and are corrected 2026-07-21.*
+Routing does **no** index lookup per level: `route_to_child_id`
+(`src/base/accept.rs:777`) is a linear scan over the parent's loaded, named
+children, taking `cosine_distance` against each child's stored `graviton_vec`
+directly. The cost is O(depth · children), not O(depth · log n), and the "cached
+per-kern centroid" the old wording wanted is what `graviton_vec` already is —
+root fan-out is already O(gravitons). The remaining scaling question is the
+per-parent fan-out itself, not an index.
+
+Unnamed children are **not** unbounded on the routing path: `route_entity` goes
+through `get_or_spawn_unnamed_child` (`src/base/accept.rs:539`), which reuses the
+single holding-pen child and auto-loads an evicted one rather than respawning it
+(three tests hold the line, `src/base/accept.rs:839`, `:894`). Growth comes only
+from tick clustering, which deliberately spawns one *distinct* child per
+spawnable cluster (`spawn_child_clusters`, `src/tick.rs:195`) — bounded per pass
+by the cluster count, not by anything per parent.
 
 ---
 
@@ -205,9 +218,9 @@ cold backfill.
 
 **How.**
 
-- **HNSW** (`src/base/hnsw.rs`, 944 LoC) — id-stable, deterministic-build
-  graph ANN. `insert` (`:140`) / `delete` (`:118`) / `search` (`:222`) /
-  `search_filtered` (`:247`, pre-filtered ANN that shares one filter predicate
+- **HNSW** (`src/base/hnsw.rs`, 1042 LoC) — id-stable, deterministic-build
+  graph ANN. `insert` (`:166`) / `delete` (`:136`) / `search` (`:248`) /
+  `search_filtered` (`:273`, pre-filtered ANN that shares one filter predicate
   with post-filtering). Quantization-aware: stores `QuantizedVec` (int8) when
   configured. `structure_digest` for parity checks.
 - **DiskANN** (`src/base/diskann.rs`, 609 LoC) — disk-resident graph index.
@@ -354,9 +367,11 @@ Nothing is lost on an LLM outage — the delta stays queued until it succeeds.
   last error), quarantined and done. Without this a delta retried forever is
   indistinguishable from one not yet picked up.
 - **CLI** (`src/commands/intake_cmd.rs`) — `kern intake` (alias `intake
-  status`) prints that report; `kern intake drain` runs one pass in-process via
-  `intake::drain_now`, sharing `drain_once` with the daemon loop, and flushes
-  through the same guarded retry as `cmd_ingest`.
+  status`) prints that report; `kern intake drain` forces one pass. It routes to
+  the daemon's `intake_drain` tool when one is serving — one drainer, never two
+  distilling the same file — and falls back to `drain_locally`, an in-process
+  `intake::drain_now` flushed through the same guarded retry as `cmd_ingest`.
+  Both share `drain_once` with the daemon loop, and both print the same tail.
 
 **Where.** `src/ingest/*` (2836 LoC, 12 files). Spawned by `spawn_intake`
 (`src/commands.rs`); driven manually by `src/commands/intake_cmd.rs`.
@@ -432,10 +447,16 @@ maintains itself.
 
 **Where.** `src/tick/*` (2912 LoC, 7 files) + `src/tick.rs` (893 LoC).
 
-**Gaps.** `KERN_CAP_DISABLED` (`src/base/constants.rs:30`) — no per-kern entity
-cap; the sentinel comment marks a finite cap "currently unsafe". Clustering is
-vector-only; no semantic/structural features. Naming/enrich are LLM-cold per
-kern. Only `GnnPropagate` reports a *contained* failure today
+**Gaps.** `KERN_CAP_DISABLED` (`src/base/constants.rs:30`) is a **kern-eviction**
+sentinel, not an entity cap — corrected 2026-07-21, the old wording named the
+wrong thing. Its own comment says so, and its two readers are `max_loaded_kerns`
+(how many kerns stay resident, `enforce_kern_cap`, `src/base/graph.rs:216`) and
+`disk_threshold` (the per-kern entity count that triggers a DiskANN spill,
+`src/base/graph.rs:296`). Both default to it, so neither eviction nor spill is
+armed by default. A per-kern *entity* cap does not exist for local kerns at all;
+the only one in the tree is `GOSSIP_REMOTE_KERN_ENTITY_CAP` for `remote-*`.
+Clustering is vector-only; no semantic/structural features. Naming/enrich are
+LLM-cold per kern. Only `GnnPropagate` reports a *contained* failure today
 (`src/tick/gnn_propagate.rs:46`); every other task's early return is still
 invisible except as work that did not happen.
 
@@ -527,8 +548,11 @@ Trained per-kern on the tick.
 
 **Gaps.** Training is synchronous on the tick (can stall a large kern). No GPU.
 Weights are per-kern, not shared across the tree. Link prediction only — no
-node-classification objective. A repeatedly failing propagation re-enqueues
-every tick; only the climbing `task_failures` count makes that visible.
+node-classification objective. *Corrected 2026-07-21:* a repeatedly failing
+propagation does **not** re-enqueue every tick. `GnnPropagate` is enqueued only
+when `do_cluster` did structural work (`if did_structural_work`, `src/tick.rs:168`),
+so a quiescent kern retries nothing; the climbing `task_failures` count
+(`src/tick/gnn_propagate.rs:46`) is still the only visibility when it does.
 
 ---
 
@@ -553,6 +577,7 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 | `claim_kind` | `tools_admin.rs` | register/remove claim kinds; registered kinds extend the built-in distill set. |
 | `pulse` | `tools_admin.rs` | Trigger a clustering pass across the tree. |
 | `gc` | `tools_admin.rs:178` | Live reap of empty/orphan kerns (`GraphGnn::gc_empty_kerns_counted`); reports `reaped`/`before`/`after` and the live `data.mdb` size, since LMDB keeps freed pages until a restart or `kern compact`. |
+| `intake_drain` | `tools_intake.rs` | One immediate pass of the daemon's own intake drain (`ingest::intake::drain_now`), returning `archived`. Exists so `kern intake drain` has somewhere to route: the CLI's in-process pass reads the same queue directory and archives the same entries as the daemon's poll loop, so both distill the file and both race the archive move. |
 | `setup` | `tools_setup.rs` | Agent-facing installer: returns idempotent wiring instructions (seed gravitons, install the capture rule/hook in the host, verify) plus this project's current [done]/[todo] state. kern never writes host config; the calling agent does the wiring. |
 
 Plus MCP **prompts** (`src/mcp/prompt.rs`) and **resources** (`src/mcp/resources.rs`).
@@ -694,8 +719,8 @@ Notable:
 
 **Where.** `src/commands/*`, `src/base/lock.rs`, `src/main.rs`.
 
-**Gaps.** `ingest`, `link` and `intake drain` still open the store directly
-while a daemon holds newer state. They deliberately reconcile instead of
+**Gaps.** `ingest` and `link` still open the store directly while a daemon
+holds newer state (`intake drain` routes since 2026-07-21). They deliberately reconcile instead of
 refusing — the flush guard rejects a stale write and they reload and retry —
 because refusing them would make the CLI unusable whenever a daemon runs.
 `ingest` and `link` cannot take the daemon route the way `forget`/`degrade` do,
@@ -730,9 +755,9 @@ thought ingested on node A becomes searchable on node B under the same id.
   (default `7475`, `src/config/gossip.rs:66`) every
   `GOSSIP_DISCOVERY_INTERVAL=10s`. Only pairs nodes sharing the same
   `network_id`.
-- **Handler** (`src/gossip/handler.rs`) — `start_announce` (`:107`),
-  `start_entity_sync` (`:147`, broadcasts top-32 hottest entities every
-  heartbeat), `start_delta_flush` (`:191`, drains `GraphGnn`'s pending CRDT
+- **Handler** (`src/gossip/handler.rs`) — `start_announce` (`:110`),
+  `start_entity_sync` (`:185`, broadcasts top-32 hottest entities every
+  heartbeat), `start_delta_flush` (`:222`, drains `GraphGnn`'s pending CRDT
   deltas), and inbound
   handlers for Sphere/Question/Pulse/PeerExchange/Fetch/CrdtDelta/EntitySync.
 - **CRDTs** (`src/crdt.rs`) — `GCounter`, plus the shared `lww_wins` comparison
@@ -778,8 +803,14 @@ page on the docs site (`docs/site/content/docs/concepts/security.mdx`).
 
 **Gaps.** No auth/crypto. No anti-entropy merkle/snapshot exchange — EntitySync
 ships the hottest 32 by heat per heartbeat, so cold entities may never
-propagate. No backpressure on remote-id cap (drops new, keeps known). No
-per-peer rate limit and no divergence signal (`ROADMAP.md` — "Backpressure,
+propagate. No backpressure on remote-id cap (drops new, keeps known). *Corrected
+2026-07-21 — "no per-peer rate limit" was false and this repo's own `ROADMAP.md`
+said so:* a per-origin budget ships and runs, but only on the `Question` path
+(`RateLimiter`, `src/gossip/rate.rs`, 30/min, checked at
+`src/gossip/handler.rs:318`). The `Delta` path — the one that takes the write
+lock — has none, and `origin` is self-declared so the budget is evadable by
+rotating it. No divergence signal at all (`HealthStats`, `src/base/health.rs:4`,
+has no such field) (`ROADMAP.md` — "Backpressure,
 divergence metric, and delta write-lock starvation"). The unauthenticated
 local-row reach is closed: LWW deltas only touch `remote-*` kerns
 (`remote_kern_ids`), `handle_pulse` rejects an unknown kern id and clamps the
@@ -794,13 +825,13 @@ receipt (`id_matches_body`, `src/gossip/handler.rs`).
 Ollama by default; fail-open everywhere.
 
 **How.** `Client` (`src/llm.rs:57`) — `embed` (`:143`) / `embed_batch` (`:187`)
-against the embedding endpoint, `complete` (`:279`, reason / distillation),
-`complete_func` (`:415`, sync closure for the tick/ingest blocking bridges).
-`is_transient` (`:20`) classifies retryable errors. `Endpoint` (`:47`) holds
-url/model/key; `new_embed_only` (`:171`) builds a client for `reembed`.
-`for_eval(seed)` (`:142`) makes it deterministic.
+against the embedding endpoint, `complete` (`:243`, reason / distillation),
+`complete_func` (`:296`, sync closure for the tick/ingest blocking bridges).
+`is_transient` (`:19`) classifies retryable errors. `Endpoint` (`:40`) holds
+url/model/key; `new_embed_only` (`:136`) builds a client for `reembed`.
+`for_eval(seed)` (`:120`) makes it deterministic.
 
-**Where.** `src/llm.rs` (861 LoC).
+**Where.** `src/llm.rs` (585 LoC).
 
 **Gaps.** Ollama-centric; OpenAI-compatible only via manual url/key. No
 retry/backoff policy object. The embedding dimension still locks the graph and
@@ -967,21 +998,35 @@ hub↔node unmanaged beyond same-binary spawning.
 
 ---
 
-## 19. File watcher (`watcher` crate) — `active`
+## 19. File watcher (`watcher` crate) — `active`, off by default
 
 **What.** Watches repo roots and turns file events into ingest records.
+**Opt-in** (recorded 2026-07-21 — this section was marked plain `active` and
+never said so): `WatcherConfig::enabled` is a `bool` behind `#[derive(Default)]`,
+so it is `false` unless a `kern.toml` sets it, and `effective_roots` returns an
+empty list while it is (`src/config/watcher.rs:14-16`). Everything below runs
+only in a deployment that turned it on — which is what ranks its gaps, the same
+way `Federation` says "off by default" rather than leaving it to be inferred.
 
 **How.** `FileWatcher` (`src/watcher/src/watcher.rs`) wraps `notify`, emits
-`WatchEvent`s (`event.rs`: Create/Modify/Remove). `IgnoreRules`
-(`ignore_rules.rs:5`, built `from_roots` reading `.gitignore`-style patterns)
+`WatchEvent`s (`event.rs`: `Created`/`Modified`/`Deleted`/`Renamed {from, to}`).
+`IgnoreRules` (`ignore_rules.rs:5`, built `from_roots` over ripgrep's `ignore`
+crate — a real `Gitignore` per root for `.gitignore` and `.kernignore`)
 filters noise. `IngestPipeline` (`pipeline.rs:24`) debounces, caps at
 `MAX_INGEST_BYTES=1MB` (`pipeline.rs:7`), and pushes `IngestRecord`s to an
 `IngestSink` (kern's is `KernFileWatcherSink`).
 
 **Where.** `src/watcher/` (workspace member, 1012 LoC including tests).
 
-**Gaps.** `.gitignore` parsing is approximate (no full spec). No rename
-tracking.
+**Gaps.** *Both claims here were stale and are corrected 2026-07-21.* `.gitignore`
+parsing is **not** approximate — `IgnoreRules` builds a real `Gitignore` through
+ripgrep's `ignore` crate (`src/watcher/src/ignore_rules.rs:3`, matched `:49`), so
+it is the full spec; the only deliberate deviation is the unconditional `.git`
+skip (`:40`). Renames **are** tracked at the event layer —
+`WatchKind::Renamed {from, to}` (`src/watcher/src/event.rs:9`) carries both
+endpoints. What is actually missing is graph-level re-keying: `build_record`
+ingests `to` and discards `from` (`src/watcher/src/pipeline.rs:48`), so a rename
+lands as a new `Document` and the old one is neither moved nor removed.
 
 ---
 
@@ -1234,8 +1279,13 @@ Ranked by leverage:
    are done: LWW deltas confined to `remote-*`, pulses id-checked and clamped,
    remote bodies hash-verified against their claimed ids.
    Trust model: `docs/site/content/docs/concepts/security.mdx`.
-4. **Per-kern entity cap** — `KERN_CAP_DISABLED` today; a safe cap + escalation
-   policy would bound memory deterministically.
+4. **Nothing bounds memory deterministically** — corrected 2026-07-21, this
+   entry named the wrong knob. `KERN_CAP_DISABLED` (`src/base/constants.rs:30`)
+   is a *kern-eviction* sentinel, not a per-kern entity cap: it defaults both
+   `max_loaded_kerns` (`enforce_kern_cap`, `src/base/graph.rs:216`) and
+   `disk_threshold` (spill trigger, `:296`) to `usize::MAX`, so neither eviction
+   nor DiskANN spill is armed. A per-kern entity cap for local kerns does not
+   exist at all. A safe cap + escalation policy is still the wanted fix.
 5. **CLI vs daemon race, serving half** — the destructive half is closed:
    `src/base/lock.rs` is an advisory writer lock and `reembed`/`compact`/`gc`
    refuse while a daemon holds it, with `kern status` reporting the holder. The
@@ -1249,9 +1299,9 @@ Ranked by leverage:
    `kern link` no longer clobbers a racing commit — it flushes through
    `save_graph_guarded` (`src/commands/graph_ops.rs`) — but it still does not
    route, and neither does `ingest`: over `call_tool` they would land at agent
-   trust, so that half waits on socket auth (item 24). `intake drain` has no
-   matching tool. Open as `ROADMAP.md` item 9 on exactly those two:
-   `ingest`/`link` routing and `intake drain`.
+   trust, so that half waits on socket auth (item 24). `intake drain` got its
+   `intake_drain` tool 2026-07-21 and routes. Open as `ROADMAP.md` item 9 on
+   `ingest`/`link` routing alone.
 6. **GNN training is synchronous** on the tick — move to a background thread
    pool or incremental updates to avoid stalling large kerns.
 7. **Distill prompt** is one-shot and global — per-kind prompts +

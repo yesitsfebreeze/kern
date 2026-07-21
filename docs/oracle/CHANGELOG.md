@@ -2,6 +2,136 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — `kern intake drain` routes through the daemon. It is the last
+  part of item 9 that was never blocked on anything but a missing tool, and the
+  defect it closes is a race rather than staleness: `drain_once` reads the intake
+  directory and archives each entry it commits, so a CLI drain running beside the
+  daemon's own poll loop distilled the same transcript twice — two LLM calls —
+  and then raced it for the archive move. `intake_drain`
+  (`src/mcp/tools_intake.rs`) is one immediate pass of `ingest::intake::drain_now`
+  inside the daemon, returning `archived`; `drain` (`src/commands/intake_cmd.rs`)
+  routes first and falls back to the in-process pass, now `drain_locally`, on
+  `NoDaemon`.
+
+  **The tradeoff, taken rather than re-decided:** this puts a mutation on the
+  unauthenticated RPC socket (item 24). `gc` and `pulse` are already there, and
+  `drain` takes no arguments — no caller-supplied content, no trust claim, the
+  queue directory comes from the daemon's own config — so unlike `ingest`/`link`
+  it does not widen item 24's hole in a new way. Those two stay blocked.
+
+  Only the archived count crosses the socket. The graph is the daemon's, but the
+  queue is a directory both processes can already see, so the before/after scan
+  and the whole report stay local and both paths print through one shared tail —
+  routed and local output cannot drift because they are the same lines.
+
+  Two things the e2e needed and one it exposed. The fake LLM echoed every chat
+  prompt back, which the distill prompt can never accept: `parse_claims` spans
+  the first `[` to the last `]`, and the prompt's own "output []" puts prose
+  inside that span, so an echoed distill prompt always parses as garbage and no
+  `.txt` transcript could ever have drained under test. `fake_llm.distilled`
+  answers that one prompt in its own contract. And `e2e/conftest.py` hard-coded
+  `<repo>/target/debug/kern`, which is a directory that never gets written when
+  `build.target-dir` points at a shared cache — it now asks `cargo metadata`.
+
+  Each new test was watched failing against reverted code before being kept:
+  routing removed → `the drained claim never reached the daemon: out=no results`;
+  dispatch arm removed → `err=unknown tool: intake_drain` (reachable only after
+  an `#[allow(dead_code)]`, because `-D warnings` fails the build on the orphaned
+  method first — a tighter guard than the test); schema removed →
+  `intake_drain must appear in tool_schemas() exactly once`. The `NoDaemon` test
+  passes under all three reverts by design: it guards the fallback, not the
+  route.
+
+  `cargo nextest run --workspace` 833 passed. `cargo test --doc --workspace` ok.
+  `just check` clean. `just docs-check` 628 references, selftest OK. `just e2e`
+  21 passed, 4 skipped, floors unmoved: recall@1 0.9306, recall@5 0.9722,
+  MRR 0.9471.
+
+  Decided by: name-the-tradeoff — the socket cost is recorded here instead of
+  being re-argued at the next mutation, and the reason it is narrower than
+  `ingest`/`link` is stated rather than assumed.
+
+- 2026-07-21 — a semantic reconcile of the oracle files, on the premise
+  `docs_check.py` states about itself: it proves a cited line **exists**, never
+  that it still **says** what it was cited for. Every claim in `FEATURES.md` and
+  `ROADMAP.md` asserting a current gap was opened against its source. Five were
+  false, and the pattern in them is worth more than any single fix: **a gap block
+  outlives the gap.** The code that closed it moved on; the sentence describing
+  it did not, and nothing in the toolchain can tell the difference. All five had
+  survived several reconciles that read the prose instead of the source.
+
+  Retired as verified-false, in place:
+
+  - **Routing does not do a vector lookup per level.** `route_to_child_id`
+    (`src/base/accept.rs:777`) is a linear scan over the parent's loaded named
+    children against each child's stored `graviton_vec` — no index is consulted.
+    The cost is O(depth · children), not O(depth · log n), and the "cached
+    per-kern centroid" the gap proposed as its *fix* is what `graviton_vec`
+    already is. The item recommended the thing the code already does.
+  - **Unnamed children are not unbounded per parent.** The routing path goes
+    through `get_or_spawn_unnamed_child` (`src/base/accept.rs:539`), one reusable
+    holding pen, guarded by three tests. Only tick clustering makes more, one per
+    spawnable cluster and on purpose (`src/tick.rs:195`).
+  - **The watcher's `.gitignore` parsing is not approximate** — `IgnoreRules`
+    builds a real `Gitignore` from ripgrep's `ignore` crate
+    (`src/watcher/src/ignore_rules.rs:3`) — **and renames are tracked**,
+    `WatchKind::Renamed {from, to}` (`src/watcher/src/event.rs:9`). What is
+    actually missing is narrower and now says so: a rename is not re-keyed in the
+    graph, so `build_record` (`src/watcher/src/pipeline.rs:48`) ingests `to`,
+    discards `from`, and leaves a duplicate Document behind.
+  - **Gossip has a per-peer rate limit.** `RateLimiter` (`src/gossip/rate.rs`,
+    30/min) runs on every inbound `Question` (`src/gossip/handler.rs:318`).
+    `FEATURES.md` said there was none while `ROADMAP.md` items 34 and 37 both
+    described it in detail — the two files contradicted each other in the tree,
+    which `ORACLE.md` calls an unmade decision, not a typo. Settled in both: the
+    true claim is narrower, the `Delta` path (the one that takes the write lock)
+    has no budget.
+  - **A failing GNN propagation does not re-enqueue every tick.**
+    `GnnPropagate` is enqueued only when `do_cluster` did structural work
+    (`src/tick.rs:168`), so a quiescent kern retries nothing.
+
+  Renamed because the symbol meant something else: **`KERN_CAP_DISABLED` is not
+  a per-kern entity cap.** Its own comment calls it a kern-eviction sentinel. It
+  disarms `max_loaded_kerns` (`enforce_kern_cap`, `src/base/graph.rs:216`) and
+  `disk_threshold` (the DiskANN spill trigger, `:296`). Item 83 is retitled to
+  what is true — nothing bounds memory deterministically — and a per-kern
+  *entity* cap for local kerns does not exist at all.
+
+  **The anchor re-point that ran two commits ago moved five citations onto lines
+  that exist and say something else**, which is the exact failure this pass is
+  for and the reason existence-checking cannot be the last word: `FEATURES.md`
+  `:692` for "`unnamed` has no `promote`" landed on the daemon boot list, `:981`
+  for the WSL2 note landed on a `**Where.**` line, `:832-833` for connection
+  pooling landed on a module list, and the version-skew and watcher anchors had
+  swapped places. Eighteen `ROADMAP.md` → `FEATURES.md` anchors are re-pointed at
+  the text they cite. So are the stale intra-file ones: `src/base/hnsw.rs`
+  (944 → 1042 LoC, four functions ~26 lines off), `src/llm.rs` (861 → 585 LoC,
+  five symbols moved) and three `src/gossip/handler.rs` starters.
+
+  `SPECIALISTS.md`'s `surface` brief said `forget` and `degrade` were the only
+  commands that route — true until the commit directly below this entry, which
+  added `get` and `query`. A specialist brief is read as authority before the
+  code is, so it is corrected in the same pass that found it stale.
+
+  One state label corrected, which is the finding that ranks the rest: **§19's
+  file watcher is marked `active` and is off by default.** `WatcherConfig::enabled`
+  is a `bool` behind `#[derive(Default)]` (`src/config/watcher.rs`), so nothing
+  in that section runs unless a `kern.toml` turns it on. `Federation` says "off
+  by default" in its own heading; the watcher did not, and a gap in an opt-in
+  subsystem does not rank with a gap on the default path. That is why the rename
+  finding above sits in item 84 rather than tier 1 — and the finding is now
+  stated precisely: it duplicates only on a move *plus* an edit, because ids are
+  `content_hash(text)` and an untouched move re-resolves to the same id, while
+  `external_id` is the path, so a move-plus-edit gets a new id under a new
+  external id and supersede never fires.
+
+  No code changed. `just docs-check` 626 references, selftest OK.
+
+  Decided by: verify-before-claiming — every gap claim was read against the
+  source that closed it rather than against the document that repeated it, and
+  the five false ones were all reachable from a citation that a passing
+  `docs-check` had already blessed.
+
 - 2026-07-21 — the read-side routing was built twice, by two sessions that could
   not see each other, and the merge is a reconciliation rather than a pick. Both
   branches routed `kern get` through the `query` tool with the local load as the

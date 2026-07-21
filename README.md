@@ -355,6 +355,7 @@ hook — the write is always a caller's call.
 | `health` | Graph stats plus degradation signals: thought/edge/unnamed counts, tick queue depth and latency, task panics and failures with the last of each, cold evictions, and the stored embedding model/dimension with its `embed_mismatch` flag. |
 | `pulse` | Trigger a clustering pass across the kern tree. |
 | `gc` | Reap empty/orphan kerns from the running daemon's graph and persist, live. Returns before/after kern counts and the `data.mdb` size. |
+| `intake_drain` | Drain `.kern/intake/` now instead of at the next poll: distil queued `.txt` transcripts, ingest other readable files whole, archive what committed. `kern intake drain` routes through this so only one process ever drains the queue. |
 | `setup` | Returns wiring instructions for the calling agent — seed gravitons, install the capture rule, verify — with the steps already done marked. kern never writes a host's config itself (`src/mcp/tools_setup.rs:3`). |
 
 ---

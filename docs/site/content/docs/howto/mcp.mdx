@@ -2,7 +2,7 @@
 title: "Wire up MCP"
 ---
 
-Get your agent listing kern's twelve tools against the project's graph. Start from a project with `.kern/` — see [Install & run](./install-run.mdx).
+Get your agent listing kern's thirteen tools against the project's graph. Start from a project with `.kern/` — see [Install & run](./install-run.mdx).
 
 ## 1. Register the server
 
@@ -65,6 +65,7 @@ Standalone fallback is a second writer against the same LMDB environment — a s
 - **`pulse`** — force a clustering pass now. Useful after a bulk seed.
 - **`setup`** — wiring instructions for the calling agent: seed gravitons, install the capture hook, verify with an ingest/health/query round-trip. Idempotent — reports what is already `[done]`. Once per new project or agent host.
 - **`gc`** — reap empty/orphan kerns live. Returns before/after counts and `data.mdb` size (may not drop — LMDB returns disk only on compaction: next restart or offline `kern compact`).
+- **`intake_drain`** — drain `.kern/intake/` now rather than at the next poll: queued `.txt` transcripts distilled, other readable files ingested whole, whatever committed archived into `done/`. No arguments; returns `archived`. `kern intake drain` routes through this, so the CLI and the daemon never drain the same file twice.
 
 <Callout type="info">
 Default loop: `query` to recall, `ingest` durable conclusions, `degrade` on a misfire; leave `pulse`/`gc` to the tick unless you just bulk-loaded.
@@ -72,7 +73,7 @@ Default loop: `query` to recall, `ingest` durable conclusions, `degrade` on a mi
 
 ## 4. Verify
 
-List tools in your client — expect all twelve. Or drive stdio:
+List tools in your client — expect all thirteen. Or drive stdio:
 
 ```bash
 printf '%s\n' \
