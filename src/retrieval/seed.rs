@@ -6,8 +6,12 @@ use crate::base::search::{
 };
 use crate::config::RetrievalConfig;
 use crate::retrieval::score::{matches_filter, QueryOptions};
+use rayon::iter::Either;
 use rayon::prelude::*;
 use std::collections::HashMap;
+
+// Below this an in-kern split costs more than the walk it splits; see `seed_important`.
+const PARALLEL_SCAN_MIN_ENTITIES: usize = 65_536;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -137,13 +141,13 @@ pub fn seed_important(
 	let active_filter = opts.filter(|o| o.is_active());
 	let mut hits: Vec<EntityHit> = kerns
 		.par_iter()
-		.flat_map_iter(|kern| {
+		.flat_map(|kern| {
 			// SECURITY: a peer picks its own kind, so a remote Fact does not inherit the
 			// Fact bypass of the access gate. Merge zeroes remote access_count, so this
 			// leaves remote entities gated on access they can never accrue remotely —
 			// they enter the seed pool only once LOCAL use earns it.
 			let remote_kern = kern.is_remote();
-			kern.entities.values().filter_map(move |t| {
+			let gate = move |t: &crate::base::types::Entity| -> Option<EntityHit> {
 				if !t.has_vector() {
 					return None;
 				}
@@ -158,15 +162,29 @@ pub fn seed_important(
 					return None;
 				}
 				let score = cosine(query_vec, &t.vector);
-				if score >= min_cos {
-					Some(EntityHit {
-						entity_id: t.id.clone(),
-						score,
-					})
-				} else {
-					None
-				}
-			})
+				(score >= min_cos).then(|| EntityHit {
+					entity_id: t.id.clone(),
+					score,
+				})
+			};
+			// `flat_map_iter` over `g.all()` parallelises over KERNS only, so the ordinary
+			// single-kern corpus walked the whole graph on one thread however many cores
+			// were free. Splitting inside the kern costs a fixed ~0.2 ms of rayon setup,
+			// which on a small corpus exceeds the entire scan — measured 0.22x at N=1k and
+			// 0.43x at N=10k against 1.6-2.8x at N=100k. So the split is earned by size,
+			// and everything under the threshold keeps exactly the walk it already had.
+			if kern.entities.len() >= PARALLEL_SCAN_MIN_ENTITIES {
+				Either::Left(kern.entities.par_iter().filter_map(move |(_, t)| gate(t)))
+			} else {
+				Either::Right(
+					kern
+						.entities
+						.values()
+						.filter_map(gate)
+						.collect::<Vec<_>>()
+						.into_par_iter(),
+				)
+			}
 		})
 		.collect();
 	hits.sort_by(|a, b| crate::base::util::cmp_rank(a.score, &a.entity_id, b.score, &b.entity_id));
@@ -211,6 +229,83 @@ mod tests {
 		}
 		g.kerns.insert("kx".into(), k);
 		g
+	}
+
+	fn xorshift(s: &mut u64) -> u64 {
+		*s ^= *s << 13;
+		*s ^= *s >> 7;
+		*s ^= *s << 17;
+		*s
+	}
+
+	// Three kerns (one remote), empty vectors, both kinds, access spread across the
+	// gate — every branch of the predicate is populated. Stays under
+	// PARALLEL_SCAN_MIN_ENTITIES on purpose: this covers the gate and the serial
+	// walk, and `the_in_kern_parallel_split_selects_exactly_what_the_serial_walk_does`
+	// covers the split.
+	fn generated_graph(seed: u64, n: usize) -> GraphGnn {
+		let mut s = seed
+			.wrapping_mul(6364136223846793005)
+			.wrapping_add(1442695040888963407)
+			| 1;
+		let mut g = GraphGnn::new();
+		let names = ["kx", "ky", "remote-peer-k1"];
+		let mut kerns: Vec<Kern> = names.iter().map(|id| Kern::new(*id, "")).collect();
+		for i in 0..n {
+			let vector = if i % 17 == 0 {
+				Vec::new()
+			} else {
+				(0..8)
+					.map(|_| (xorshift(&mut s) % 2000) as f32 / 1000.0 - 1.0)
+					.collect()
+			};
+			let e = ent(
+				&format!("e{i:05}"),
+				vector,
+				xorshift(&mut s) % 8,
+				i % 4 == 0,
+			);
+			kerns[i % names.len()].entities.insert(e.id.clone(), e);
+		}
+		for k in kerns {
+			g.kerns.insert(k.id.clone(), k);
+		}
+		g
+	}
+
+	// The gate, spelled out sequentially. Deliberately NOT sharing code with
+	// seed_important: a reference that calls the thing under test proves nothing.
+	fn reference_important(
+		g: &GraphGnn,
+		cfg: &RetrievalConfig,
+		q: &[f32],
+		opts: Option<&QueryOptions>,
+	) -> Vec<(String, f64)> {
+		let active = opts.filter(|o| o.is_active());
+		let mut out: Vec<(String, f64)> = Vec::new();
+		for kern in g.all() {
+			let remote = kern.is_remote();
+			for t in kern.entities.values() {
+				if !t.has_vector() {
+					continue;
+				}
+				if let Some(o) = active {
+					if !matches_filter(t, o) {
+						continue;
+					}
+				}
+				let privileged = t.is_fact() && !remote;
+				if !privileged && t.access_count.value_i32() < cfg.important_access_threshold {
+					continue;
+				}
+				let score = cosine(q, &t.vector);
+				if score >= cfg.important_min_cosine {
+					out.push((t.id.clone(), score));
+				}
+			}
+		}
+		out.sort_by(|a, b| crate::base::util::cmp_rank(a.1, &a.0, b.1, &b.0));
+		out
 	}
 
 	fn cfg() -> RetrievalConfig {
@@ -422,5 +517,155 @@ mod tests {
 			"the higher-scoring entity sorts first"
 		);
 		assert!(out[0].score >= out[1].score, "descending by score");
+	}
+
+	#[test]
+	fn parallel_importance_scan_equals_the_sequential_scan_it_replaces() {
+		let q = vec![0.4f32, -0.2, 0.7, 0.1, -0.5, 0.3, 0.0, 0.6];
+		let fact_only = QueryOptions {
+			kind: Some(EntityKind::Fact),
+			..Default::default()
+		};
+		let mut compared = 0usize;
+		for seed in 0u64..6 {
+			let g = generated_graph(seed, 2400);
+			for (min_cos, threshold) in [(-1.0, 0), (-0.2, 3), (0.25, 4), (0.8, 6)] {
+				let cfg = RetrievalConfig {
+					important_min_cosine: min_cos,
+					important_access_threshold: threshold,
+					..Default::default()
+				};
+				for opts in [None, Some(&fact_only)] {
+					let got = seed_important(&g, &cfg, &q, opts);
+					let want = reference_important(&g, &cfg, &q, opts);
+					assert_eq!(
+						got.len(),
+						want.len(),
+						"seed {seed} min_cos {min_cos} threshold {threshold} filtered {}: selection size differs",
+						opts.is_some()
+					);
+					for (a, b) in got.iter().zip(want.iter()) {
+						assert_eq!(a.entity_id, b.0, "same id in the same rank position");
+						// Bit-exact: a reordered sum would be a different scan, not a faster one.
+						assert_eq!(a.score.to_bits(), b.1.to_bits(), "same score for {}", b.0);
+					}
+					compared += got.len();
+				}
+			}
+		}
+		assert!(
+			compared > 5000,
+			"the property compared a non-trivial selection: {compared}"
+		);
+	}
+
+	// The generated graph above stays under PARALLEL_SCAN_MIN_ENTITIES, so it proves
+	// the gate and the serial branch. One kern over the threshold is the only way to
+	// reach the in-kern split at all — without this, both branches could disagree
+	// forever and every test here would still pass.
+	#[test]
+	fn the_in_kern_parallel_split_selects_exactly_what_the_serial_walk_does() {
+		let n = PARALLEL_SCAN_MIN_ENTITIES + 1_000;
+		let mut s = 0x9E3779B97F4A7C15u64;
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("kx", "");
+		for i in 0..n {
+			let vector: Vec<f32> = (0..8)
+				.map(|_| (xorshift(&mut s) % 2000) as f32 / 1000.0 - 1.0)
+				.collect();
+			let e = ent(
+				&format!("e{i:06}"),
+				vector,
+				xorshift(&mut s) % 8,
+				i % 4 == 0,
+			);
+			k.entities.insert(e.id.clone(), e);
+		}
+		g.kerns.insert("kx".into(), k);
+		assert!(
+			g.all()
+				.iter()
+				.any(|k| k.entities.len() >= PARALLEL_SCAN_MIN_ENTITIES),
+			"the corpus must cross the split threshold or this test exercises the serial branch"
+		);
+
+		let q = vec![0.4f32, -0.2, 0.7, 0.1, -0.5, 0.3, 0.0, 0.6];
+		for (min_cos, threshold) in [(-0.2, 3), (0.5, 4)] {
+			let cfg = RetrievalConfig {
+				important_min_cosine: min_cos,
+				important_access_threshold: threshold,
+				..Default::default()
+			};
+			let got = seed_important(&g, &cfg, &q, None);
+			let want = reference_important(&g, &cfg, &q, None);
+			assert_eq!(
+				got.len(),
+				want.len(),
+				"min_cos {min_cos}: selection size differs"
+			);
+			for (a, b) in got.iter().zip(want.iter()) {
+				assert_eq!(a.entity_id, b.0, "same id in the same rank position");
+				assert_eq!(a.score.to_bits(), b.1.to_bits(), "same score for {}", b.0);
+			}
+			assert!(!got.is_empty(), "min_cos {min_cos} selected something");
+		}
+	}
+
+	#[test]
+	fn an_eligibility_change_is_reflected_with_no_epoch_bump() {
+		// The access stamp on delivery (`score::commit_access_ids`) mutates
+		// access_count WITHOUT bumping mutation_epoch, by design. Any memo of the
+		// importance gate keyed on that epoch is therefore stale forever for the one
+		// mutation that creates importance in the first place. This pins the scan
+		// against that.
+		let cfg = cfg();
+		let q = [1.0f32, 0.0];
+		let ids = |g: &GraphGnn| -> Vec<String> {
+			seed_important(g, &cfg, &q, None)
+				.into_iter()
+				.map(|h| h.entity_id)
+				.collect()
+		};
+		let mut g = graph_with(vec![
+			ent("climber", vec![1.0, 0.0], 2, false),
+			ent("demoted", vec![1.0, 0.0], 0, true),
+		]);
+		let epoch = g.mutation_epoch();
+		assert_eq!(
+			ids(&g),
+			vec!["demoted".to_string()],
+			"the Fact starts important, the under-threshold Claim does not"
+		);
+
+		g.kerns
+			.get_mut("kx")
+			.unwrap()
+			.entities
+			.get_mut("climber")
+			.unwrap()
+			.access_count
+			.increment("t", 3);
+		assert_eq!(
+			g.mutation_epoch(),
+			epoch,
+			"an access stamp does not bump the epoch — the premise of this test"
+		);
+		assert!(
+			ids(&g).contains(&"climber".to_string()),
+			"crossing the access threshold makes an entity important on the very next retrieve"
+		);
+
+		g.kerns
+			.get_mut("kx")
+			.unwrap()
+			.entities
+			.get_mut("demoted")
+			.unwrap()
+			.kind = EntityKind::Claim;
+		assert_eq!(g.mutation_epoch(), epoch, "still no epoch bump");
+		assert!(
+			!ids(&g).contains(&"demoted".to_string()),
+			"a Fact demoted to an unaccessed Claim stops being important immediately"
+		);
 	}
 }
