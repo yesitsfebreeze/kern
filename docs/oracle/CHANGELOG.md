@@ -2,6 +2,45 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — the 38 nominations were worked, and the two fixes item 93 named
+  landed. Every anchor was opened at the cited line and adjudicated by reading
+  it: **27 real drift, 11 false**. All 27 were re-pointed and the new target read
+  back before it was written — 29 anchors moved, counting two bare `:NNN`
+  continuations the regex cannot see. `bayesian-belief.md:16` was fixed by hand
+  as promised: `src/base/types.rs:66-75` is `EntityStatus`, `ReasonKind` begins
+  at 77, and the checker still cannot see that breakage because the stray
+  "entity" match is still there.
+
+  The tokeniser now keeps three characters instead of four and runs a light
+  suffix stripper with consonant-undoubling, so `stemmer` and `stemmers` both
+  reach `fn stem` and `acl`, `rrf`, `hub`, `dim` and `gpu` are words again. The
+  stopword list grew to match: three-letter articles and pronouns are back in
+  play, and Rust's boilerplate (`let`, `pub`, `self`, `new`) is in the list
+  because a match on it proves only that the target is Rust. Eight of the eleven
+  false positives disappear on their own; three carry the acquittal marker,
+  because their targets are a bound check and two single-word table lookups —
+  shapes no tokeniser reaches.
+
+  **Measured, before and after, against a hand-adjudicated truth set: precision
+  71.1% → 89.7%, false-positive rate 28.9% → 10.3%, and recall 96.4% → 92.9%.**
+  Recall *went down*. The three-character floor that acquits `acl` also acquits
+  `gpu`, and `gpu` plus `kern` clears the two-word prose bar over an anchor that
+  genuinely under-covers what cites it. That is the camelCase trade paid a second
+  time and it is written down the same way. A prose bar of 1 measures 96.3%
+  precision at unchanged recall and was declined — five prose-to-prose anchors is
+  a sample, not evidence.
+
+  Each new rule was proved by breaking it: reverting the floor, disabling
+  undoubling, dropping the stemmer, and removing `new` from the stopwords each
+  make `--selftest` fail with the assertion written for it, and the fixture
+  carries a firing case beside every quiet one. `--strict-anchors` exits 0 on
+  this tree, but 10.3% is not near zero and the claim is not made: symbolic
+  anchors are still the answer.
+
+  Decided by: verify-before-claiming — every re-point names a line that was read
+  back, and the recall regression is reported because it was measured, not
+  because it flattered the change.
+
 - 2026-07-21 — `docs-check` now reads the line it is pointed at. Item 93's
   second candidate closure landed: every anchor carrying a line number gets its
   citing block's content words compared against the cited line's, and an anchor

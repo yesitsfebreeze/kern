@@ -107,7 +107,7 @@ supersedes an existing one. The core write path every ingestion funnels through.
      `generic` catch-all child (empty graviton vec, never matches on similarity) —
      the root never commits entities itself.
    - At a **named** kern with a graviton: compute `acceptance_probability`
-     (`src/base/accept.rs:803`, softmax over cosine distance vs `inner`/`outer`
+     (`src/base/accept.rs:893`, softmax over cosine distance vs `inner`/`outer`
      radii); below `ACCEPT_FLOOR` (0.5) → spawn an unnamed child and descend.
    - `MAX_ACCEPT_DEPTH = 64` (`src/base/accept.rs:17`) bounds a runaway descent.
 3. **Commit** (`commit_entity`, `src/base/accept.rs:167`) — stamp `root_id`,
@@ -119,7 +119,7 @@ supersedes an existing one. The core write path every ingestion funnels through.
 
 **Gaps.** *Both halves of this block were wrong and are corrected 2026-07-21.*
 Routing does **no** index lookup per level: `route_to_child_id`
-(`src/base/accept.rs:777`) is a linear scan over the parent's loaded, named
+(`src/base/accept.rs:867`) is a linear scan over the parent's loaded, named
 children, taking `cosine_distance` against each child's stored `graviton_vec`
 directly. The cost is O(depth · children), not O(depth · log n), and the "cached
 per-kern centroid" the old wording wanted is what `graviton_vec` already is —
@@ -144,14 +144,14 @@ stays as history with a stamped `valid_to`; `query` can recover the past via
 
 **How.**
 
-- `supersede_by_contradiction` (`src/base/accept.rs:470`) — inserts the new
+- `supersede_by_contradiction` (`src/base/accept.rs:560`) — inserts the new
   thought, sets the old `status=Superseded`, `superseded_by=new_id`, and
   `stamp_invalidated(now, new_valid_from)` so the window closes exactly when
   the new claim became true. Removes the old id from both vector indexes (so it
   stops seeding) but keeps it in the kern for history. Adds a `Supersedes`
   reason edge with the averaged vector.
-- Classification is LLM-driven (`classify_prompt` `src/base/accept.rs:450` /
-  `parse_contradiction` `src/base/accept.rs:460`) and **fails open to `Related`**
+- Classification is LLM-driven (`classify_prompt` `src/base/accept.rs:540` /
+  `parse_contradiction` `src/base/accept.rs:550`) and **fails open to `Related`**
   (co-exist) — the conservative choice that never loses data. Driven from the
   tick's `do_classify_contradiction` task (`src/tick/tasks.rs:114`) so recall
   stays LLM-free at query time.
@@ -197,7 +197,7 @@ profiled via `src/profile.rs`):
 | 9 | **Dedup by section** | `retrieval/diversify.rs:6` | Collapse near-duplicate sections. |
 | 10 | **MMR** | `retrieval/diversify.rs:46` | Maximal-marginal-relevance diversification so the `k` results actually differ. |
 | 11 | **Deliver** | `retrieval/query.rs` | Passages + enriched edges + `format_chains` chain text (`QUERY_MAX_CHAINS=5`), remote entities tagged UNTRUSTED for the synthesizing caller. The whole read path is LLM-free by design (2026-07-21): the calling agent synthesizes; an in-kern small-model answerer set the quality ceiling and made retrieval untunable. |
-| 13 | **Cold backfill** | `src/mcp/tools_query.rs:192` | If hot returns `< k`, cold-tier hits (brute-force `Store::cold_search`, `src/base/store.rs:629`) fill remaining slots, flagged `cold:true`. Skipped on the exact-text fast path, which never embedded a query vector. |
+| 13 | **Cold backfill** | `src/mcp/tools_query.rs:192` | If hot returns `< k`, cold-tier hits (brute-force `Store::cold_search`, `src/base/store.rs:629`) fill remaining slots, flagged `cold:true`. Skipped on the exact-text fast path, which never embedded a query vector. <!-- docs-check: anchor-ok --> |
 | 14 | **Access stamping** | `retrieval/score.rs` | Heat deposits off the hot path: `score::commit_access` stamps delivered hits; the tick's `CommitAccess` task calls `score::commit_access_ids`. |
 
 **Where.** `src/retrieval/*` (4374 LoC, 12 files). Entry: `retrieval::query`
@@ -466,7 +466,7 @@ maintains itself.
 - **Resolve question** (`do_resolve`, `src/tick/tasks.rs:372`) — open `Question`
   edges (`to` empty) get answered by retrieval; if a hit scores above
   `QUESTION_RESOLVE_THRESHOLD=0.80` the edge is closed.
-- **Seed questions** (`do_seed_questions`, `src/tick/tasks.rs:41`) — broadcasts
+- **Seed questions** (`do_seed_questions`, `src/tick/tasks.rs:42`) — broadcasts
   open questions to peers (federation).
 - **Commit access** (`do_commit_access`, `src/tick/tasks.rs:444`) — flushes
   queued access-count/heat updates.

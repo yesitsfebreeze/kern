@@ -12,9 +12,9 @@ Ticket: `A01F62NW` — "Study CRDTs for conflict-free federated kern state"
 > inline lamport-stamped fields on `Entity` rather than as a named
 > `LWWRegister` type; and **OR-Set for `statements` was reversed, not deferred**
 > — see the note in §6 below. `Delta` has a live sender
-> (`gossip::handler::start_delta_flush` at `src/gossip/handler.rs:191`, wired at
-> `src/commands.rs:974`), and inbound deltas are still clamped on receipt
-> (`GOSSIP_CRDT_DELTA_MAX`, `src/gossip/handler.rs:353`). Anti-entropy was not built
+> (`gossip::handler::start_delta_flush` at `src/gossip/handler.rs:222`, wired at
+> `src/commands.rs:1016`), and inbound deltas are still clamped on receipt
+> (`GOSSIP_CRDT_DELTA_MAX`, `src/gossip/handler.rs:407`). Anti-entropy was not built
 > (`ROADMAP.md` — "Anti-entropy"). Type and path names below predate the
 > `Thought`→`Entity` rename and the move from `crates/` to `src/`.
 
@@ -255,7 +255,7 @@ where a stage did not survive contact with the code, that is noted on the stage.
 > differing one is asserting content its id does not hash to; importing it would
 > break content-addressing and resurrect locally-cleared statements. `merge_entity`
 > never imports them (`src/base/merge.rs:112`) and `CrdtTarget::Statements` is
-> rejected on receipt (`src/gossip/handler.rs:448`), kept as a refused variant so a
+> rejected on receipt (`src/gossip/handler.rs:502`), kept as a refused variant so a
 > peer on an older build cannot inject text under a content-addressed id.
 > Statements converge through full EntitySync bodies instead. The LWW half landed
 > as inline lamport-stamped fields, not as CRDT-typed ones.
