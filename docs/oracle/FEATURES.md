@@ -52,18 +52,18 @@ everywhere, which is what makes conflict-free cross-node merge work.
   (OR-Set of text lines), two vectors (`vector` content, `gnn_vector` structure),
   and provenance (`Source` with `system`/`object_id`/`section`/`title`/`author`/
   `url`). `kind`/`source` parsed off the source string. Also carries an `acl`
-  (`src/base/types.rs:268`; `Acl { scope, users, groups }` at `:95`) — the
+  (`src/base/types.rs:259`; `Acl { scope, users, groups }` at `:92-96`) — the
   field exists and is persisted, but every writer sets `Acl::default()`
   (`src/ingest/place.rs:56`, `src/ingest/file_watcher.rs:136`) and nothing reads
   it, so it is structure without behavior today.
 - `Reason` (`src/base/types.rs:408`) — an edge `from`→`to` with a `kind`
   (`Similarity`/`Provenance`/`Question`/`Spawn`/`Supersedes`/`Ratification`/
   `Rephrase`, `src/base/types.rs:66`), its own vector (mean of endpoints), a
-  `traversal_count` GCounter (`src/base/types.rs:424`), and a CRDT `score`.
+  `traversal_count` GCounter (`src/base/types.rs:403`), and a CRDT `score`.
   `is_enriched`/`is_remote` flags. There is no `Contradiction` edge kind —
   `Related` is a `ContradictionClass` verdict, not an edge, and a deferred
   contradiction candidate is carried by a `Rephrase` edge.
-- `Kern` (`src/base/types.rs:456`) — a container node in the kern tree:
+- `Kern` (`src/base/types.rs:434`) — a container node in the kern tree:
   `entities` + `reasons` maps, `children` ids, a `graviton_vec`/`graviton_text` + `mass` (default 1.0),
   radii (`inner_radius`/`outer_radius`) for acceptance gating, and an
   `access_count`. Root, named children, and unnamed (spill) children are all
@@ -74,7 +74,7 @@ everywhere, which is what makes conflict-free cross-node merge work.
   source routing, a Lamport clock (a plain `AtomicU64` field driven by
   `bump_lamport`/`observe_lamport`, `src/base/graph.rs:443`/`:450` — there is no
   `Lamport` type), a `mutation_epoch`, pending CRDT deltas, the bound embedding
-  model name (`set_embed_model`/`embed_model`, `src/base/graph.rs:203`), and an
+  model name (`set_embed_model`/`embed_model`, `src/base/graph.rs:204`), and an
   optional bound `Store` (LMDB) for hot/cold tiers + disk fallback.
 
 **Where.** `src/base/types.rs` (880 LoC), `src/base/graph.rs` (1325 LoC),
@@ -107,7 +107,7 @@ supersedes an existing one. The core write path every ingestion funnels through.
      `generic` catch-all child (empty graviton vec, never matches on similarity) —
      the root never commits entities itself.
    - At a **named** kern with a graviton: compute `acceptance_probability`
-     (`src/base/accept.rs:753`, softmax over cosine distance vs `inner`/`outer`
+     (`src/base/accept.rs:803`, softmax over cosine distance vs `inner`/`outer`
      radii); below `ACCEPT_FLOOR` (0.5) → spawn an unnamed child and descend.
    - `MAX_ACCEPT_DEPTH = 64` (`src/base/accept.rs:17`) bounds a runaway descent.
 3. **Commit** (`commit_entity`, `src/base/accept.rs:167`) — stamp `root_id`,
@@ -180,11 +180,11 @@ profiled via `src/profile.rs`):
 | 6 | **Merge** | `retrieval/merge.rs` | Combine seeds + expanded neighbors into `ScoredEntity` list. |
 | 7 | **Boosts** | `retrieval/score.rs` | `apply_boosts`: confidence × score + **QBST** access/recency boost (`qbst`, capped at 0.1, 24h half-life) + `fact_score_boost` (0.3) for Facts. |
 | 7b | **Gravity** | `retrieval/gravity.rs` | Query-time graviton pull: `score += gravity_weight (0.15) * max_over_gravitons(mass * max(0, cos(entity, graviton_vec)))`. Max, not sum — overlapping gravitons never double-count. `gravity_weight=0` disables (early return, zero cost); no gravitons → no-op. Latency only, from the bench deleted in `8d8b19e` and not reproducible: ~+7% p50 with 5 gravitons. No quality claim accompanies it — the retrieval-quality half of that bench is withdrawn under the claim standard (`ROADMAP.md` — "What measures retrieval quality with no LLM in the scoring loop?"). |
-| 8 | **Filter** | `retrieval/score.rs` | `filter_delivery`: drop superseded; floor at `retrieval.min_deliver_score` (default `0.0` — off); cap at `retrieval.max_deliver_results` (default `25`; MMR keeps a `mmr_pool_size=50` pool when on). Both are config fields (`src/config/retrieval.rs:44-45`), not constants. Query options (source/kind/scheme/time/min_conf) go through `matches_filter` (`retrieval/score.rs`), the single predicate shared with pre-filtered ANN search. |
+| 8 | **Filter** | `retrieval/score.rs` | `filter_delivery`: drop superseded; floor at `retrieval.min_deliver_score` (default `0.0` — off); cap at `retrieval.max_deliver_results` (default `25`; MMR keeps a `mmr_pool_size=50` pool when on). Both are config fields (`src/config/retrieval.rs:48-49`), not constants. Query options (source/kind/scheme/time/min_conf) go through `matches_filter` (`retrieval/score.rs`), the single predicate shared with pre-filtered ANN search. |
 | 9 | **Dedup by section** | `retrieval/diversify.rs:6` | Collapse near-duplicate sections. |
 | 10 | **MMR** | `retrieval/diversify.rs:46` | Maximal-marginal-relevance diversification so the `k` results actually differ. |
 | 11 | **Deliver** | `retrieval/query.rs` | Passages + enriched edges + `format_chains` chain text (`QUERY_MAX_CHAINS=5`), remote entities tagged UNTRUSTED for the synthesizing caller. The whole read path is LLM-free by design (2026-07-21): the calling agent synthesizes; an in-kern small-model answerer set the quality ceiling and made retrieval untunable. |
-| 13 | **Cold backfill** | `src/mcp/tools_query.rs:242` | If hot returns `< k`, cold-tier hits (brute-force `Store::cold_search`, `src/base/store.rs:685`) fill remaining slots, flagged `cold:true`. Skipped on the exact-text fast path, which never embedded a query vector. |
+| 13 | **Cold backfill** | `src/mcp/tools_query.rs:199` | If hot returns `< k`, cold-tier hits (brute-force `Store::cold_search`, `src/base/store.rs:629`) fill remaining slots, flagged `cold:true`. Skipped on the exact-text fast path, which never embedded a query vector. |
 | 14 | **Access stamping** | `retrieval/score.rs` | Heat deposits off the hot path: `score::commit_access` stamps delivered hits; the tick's `CommitAccess` task calls `score::commit_access_ids`. |
 
 **Where.** `src/retrieval/*` (4374 LoC, 12 files). Entry: `retrieval::query`
@@ -257,13 +257,13 @@ and cold tier live together. Readers never block, writers serialize.
 
 **How.**
 
-- `Store::open` (`src/base/store.rs:351`) opens the env (`heed` 0.20);
+- `Store::open` (`src/base/store.rs:283`) opens the env (`heed` 0.20);
   `StoredKern`/`StoredVec`/`StoredTemporal`/`ColdRow` are the on-disk bincode
   shapes, each value a version byte followed by a `zstd` frame
   (`encode_at`/`strip_version`, `src/base/store.rs`), vectors int8. Exactly one
   live format, `FORMAT_V5`; any other version byte is rejected, never
   mis-decoded and never migrated.
-- **Guarded flush** (`Store::flush_guarded` `src/base/store.rs:594`,
+- **Guarded flush** (`Store::flush_guarded` `src/base/store.rs:538`,
   `persist::flush_guarded` `src/base/persist.rs:129`) — a snapshot carries an
   expected `mutation_epoch`; if disk advanced under us (another writer /
   external edit), the flush is *refused*, the disk rows are *absorbed* back
@@ -271,7 +271,7 @@ and cold tier live together. Readers never block, writers serialize.
   snapshot from clobbering newer on-disk state.
 - **Embedding stamp.** The store records the model and vector dimension it was
   built with (`EmbedStamp`, its own meta key so an unstamped store reads as
-  *unknown*, never as a mismatch). `check_embed_stamp` (`src/base/store.rs:473`)
+  *unknown*, never as a mismatch). `check_embed_stamp` (`src/base/store.rs:417`)
   runs at open via `persist::check_graph_stamp` (`src/base/persist.rs:93`),
   wired from `commands::bind_embed_model`: an **unstamped** store adopts the
   configured model and says so once; a **differing** model or dimension sets a
@@ -280,7 +280,7 @@ and cold tier live together. Readers never block, writers serialize.
   stamp is treated as unknown, not as unstamped — adopting over it would erase
   the identity of the stored vectors. `kern reembed` stamps the model it
   *actually embedded with*, not the configured one
-  (`src/commands/reembed.rs:59`), so `health` can never report a false identity.
+  (`src/commands/reembed.rs:66-80`), so `health` can never report a false identity.
 - **Query dimension guard** (`src/base/search.rs:23` `dim_guard`) — `cosine`
   truncates to the shorter side, so an off-model query vector would score noise
   and rank it as recall. Every graph vector search checks the query dimension
@@ -288,16 +288,16 @@ and cold tier live together. Readers never block, writers serialize.
   no hits rather than panicking, but it is *counted*
   (`search::query_dim_rejected`, `src/base/search.rs:15`) and logged throttled,
   because the silent no-op is what let the mismatch hide.
-- **Cold tier** — `cold_spill` (`src/base/store.rs:647`) / `cold_get` /
-  `cold_all` / `cold_put_all` / `cold_search` (`src/base/store.rs:685`,
+- **Cold tier** — `cold_spill` (`src/base/store.rs:591`) / `cold_get` /
+  `cold_all` / `cold_put_all` / `cold_search` (`src/base/store.rs:629`,
   brute-force). Bounded by
-  `COLD_MAX_ENTRIES = 50_000`: `cold_cap` (`src/base/store.rs:712`) deletes the
+  `COLD_MAX_ENTRIES = 50_000`: `cold_cap` (`src/base/store.rs:678`) deletes the
   oldest rows past the cap, FIFO by `created_at`. The bound itself is
   deliberate; what changed is that a drop is no longer silent — every eviction
-  increments `cold_evicted` (`:752`), which `health` reports, and the sweep logs
+  increments `cold_evicted` (`:718`), which `health` reports, and the sweep logs
   once per pass rather than once per row. A dropped non-durable entity is
   unrecoverable, so the counter is its only trace.
-- **Compaction** (`compact_dir`, `src/base/store.rs:790`) — the only way to
+- **Compaction** (`compact_dir`, `src/base/store.rs:756`) — the only way to
   shrink LMDB's high-water mark; writes a fresh env to a tmp file then
   `swap_compacted` renames with retry. Requires exclusive access (run offline).
 - **Snapshots** — `snapshot_for_flush` (`src/base/persist.rs:154`) /
@@ -392,8 +392,8 @@ maintains itself.
   half-written, which is exactly what the error line says (the graph lock does
   not poison, so `AssertUnwindSafe` is deliberate). A panicking task's duration
   is *not* fed to `task_avg_ms` — averaging work that never finished would make
-  the metric lie as failures climb. `tick_sync` (`src/tick.rs:301`) is the
-  synchronous one-shot variant; `enqueue_all` (`:292`) fans a Cluster task out
+  the metric lie as failures climb. `tick_sync` (`src/tick.rs:308`) is the
+  synchronous one-shot variant; `enqueue_all` (`:299`) fans a Cluster task out
   to every non-empty kern.
 - **Maintenance tick** (`spawn_maintenance_tick`, `src/commands.rs`) — periodic
   driver at `TICK_INTERVAL_SECS=60` (0 = event-driven only): pulses heat, gates
@@ -410,25 +410,25 @@ maintains itself.
   and not a core cluster spawns a distinct unnamed child and migrates its
   members. Unnamed kerns never spawn (bounds descent). Empty unnamed children
   are evicted back to the parent each pass.
-- **Name** (`do_name`, `src/tick/tasks.rs:224`) — LLM names an unnamed kern from
+- **Name** (`do_name`, `src/tick/tasks.rs:225`) — LLM names an unnamed kern from
   its centroid (`cluster::graviton_prompt`) once it crosses the naming
   thresholds (`KERN_NAMING_COHESION_THRESHOLD=0.50`,
   `KERN_NAMING_MIN_CLUSTER_SIZE=5`).
-- **Enrich** (`do_enrich`, `src/tick/tasks.rs:303`) — LLM writes the explanatory
+- **Enrich** (`do_enrich`, `src/tick/tasks.rs:304`) — LLM writes the explanatory
   text for an un-enriched reason edge.
-- **Resolve question** (`do_resolve`, `src/tick/tasks.rs:371`) — open `Question`
+- **Resolve question** (`do_resolve`, `src/tick/tasks.rs:372`) — open `Question`
   edges (`to` empty) get answered by retrieval; if a hit scores above
   `QUESTION_RESOLVE_THRESHOLD=0.80` the edge is closed.
 - **Seed questions** (`do_seed_questions`, `src/tick/tasks.rs:41`) — broadcasts
   open questions to peers (federation).
-- **Commit access** (`do_commit_access`, `src/tick/tasks.rs:447`) — flushes
+- **Commit access** (`do_commit_access`, `src/tick/tasks.rs:444`) — flushes
   queued access-count/heat updates.
 - **Idle sweep** (`src/tick/idle.rs`) — graph-global; unloads kerns idle past
   `tick.kern_idle_timeout_secs`. Residency, not forgetting: an unloaded kern is
   persisted first and reloads on next access.
 - **Persist / reembed / disk consolidate** — `do_persist`
-  (`src/tick/tasks.rs:459`), `do_reembed` (`src/tick/tasks.rs:490`),
-  `do_disk_consolidate` (`src/tick/tasks.rs:443`).
+  (`src/tick/tasks.rs:456`), `do_reembed` (`src/tick/tasks.rs:487`),
+  `do_disk_consolidate` (`src/tick/tasks.rs:440`).
 
 **Where.** `src/tick/*` (2912 LoC, 7 files) + `src/tick.rs` (893 LoC).
 
@@ -447,7 +447,7 @@ invisible except as work that did not happen.
 Documents are immune while Active** (immunity is revoked once superseded);
 evictions spill to the cold tier before dropping (spill-before-drop). Spill is
 lossless out of RAM, not lossless overall — the cold tier is capped at
-`COLD_MAX_ENTRIES = 50_000` and `Store::cold_cap` (`src/base/store.rs:712`)
+`COLD_MAX_ENTRIES = 50_000` and `Store::cold_cap` (`src/base/store.rs:678`)
 deletes the oldest rows past it, and with no store bound `run_gc` drops the
 victim outright.
 
@@ -459,7 +459,7 @@ A failed spill keeps the victim hot and retries next pass. Runs on the
 maintenance tick gated by `STIGMERGY_GC_INTERVAL = 1 hour` and clock validity.
 
 Past the cold cap the drop is **counted, not silent**: `cold_cap` increments
-`Store::cold_evicted` (`src/base/store.rs:752`) per deleted row and warns once
+`Store::cold_evicted` (`src/base/store.rs:718`) per deleted row and warns once
 per sweep, and `health` reports the running total on all three surfaces (MCP
 JSON, `HealthRes`, `kern health`). The bound itself is unchanged and intentional.
 
@@ -730,14 +730,14 @@ seeded `peers` (the reliable path). Multicast discovery only pairs same-
 `network_id` nodes. The **Delta, Pulse and Question senders are all live**
 (`src/gossip/handler.rs`, wired from `src/commands.rs`, driven from
 `src/tick/tasks.rs`). The **fetch RPC is live**: `wire_fetch`
-(`src/gossip/handler.rs:50`) installs the handler at startup
-(`src/commands.rs`) and `spawn_fetch_entity` (`src/gossip/handler.rs:71`)
+(`src/gossip/handler.rs:53`) installs the handler at startup
+(`src/commands.rs`) and `spawn_fetch_entity` (`src/gossip/handler.rs:74`)
 issues fetches from the question path. OR-Set deltas for `statements` are
 **dead on both ends by design, not by omission**: `id == content_hash(text)`,
 so a same-id peer has identical content by construction and a differing one is
 asserting content its id does not hash to. The sender emits empty
-(`src/gossip/handler.rs:216`) and the receiver rejects the target
-(`src/gossip/handler.rs:448`), kept as a refused variant so an older peer
+(`src/gossip/handler.rs:247`) and the receiver rejects the target
+(`src/gossip/handler.rs:502`), kept as a refused variant so an older peer
 cannot inject text under a content-addressed id. Statements converge through
 full EntitySync bodies. Federation tuning at scale (batch size, push vs pull,
 anti-entropy) is open.
@@ -766,7 +766,7 @@ receipt (`id_matches_body`, `src/gossip/handler.rs`).
 **What.** One client wrapping two endpoints (reason / embed) against
 Ollama by default; fail-open everywhere.
 
-**How.** `Client` (`src/llm.rs:64`) — `embed` (`:179`) / `embed_batch` (`:223`)
+**How.** `Client` (`src/llm.rs:57`) — `embed` (`:143`) / `embed_batch` (`:187`)
 against the embedding endpoint, `complete` (`:279`, reason / distillation),
 `complete_func` (`:415`, sync closure for the tick/ingest blocking bridges).
 `is_transient` (`:20`) classifies retryable errors. `Endpoint` (`:47`) holds

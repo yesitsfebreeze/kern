@@ -199,7 +199,7 @@ Up to 25 iterations over the whole entity adjacency on every retrieve, with
 nothing cached between queries (`decisions/pagerank-authority.mdx:102-105`). The
 second query-time cliff, and it was recorded on the site but in no plan.
 
-### 27. The GC sweep is superlinear in three separate places `[lifecycle]`
+### 27. The GC sweep is superlinear in two remaining places `[lifecycle]`
 
 One item because one sweep pays all four costs. **Two are closed**; the two that
 remain are the scans, not the accumulation:
@@ -299,8 +299,8 @@ sender. `crdt.rs` is still 90 LoC of `GCounter` only; the LWW semantics live as
 inline fields, not named types. Fine. The OR-Set-for-`statements` plan was
 **reversed, not deferred**: `id == content_hash(text)`, so importing remote
 statement text both breaks content-addressing and resurrects locally-cleared
-statements. Merge never imports them (`src/base/merge.rs:112`) and the wire
-target is rejected on receipt (`src/gossip/handler.rs:448`), kept as a refused
+statements. Merge never imports them (`src/base/merge.rs:115`) and the wire
+target is rejected on receipt (`src/gossip/handler.rs:502`), kept as a refused
 variant so an older peer cannot inject text under a content-addressed id.
 
 ### 33. Transport security `[federation]`
@@ -349,22 +349,26 @@ the push-only choice was never revisited.
 
 ### 37. Backpressure, divergence metric, and delta write-lock starvation `[federation]`
 
-No per-peer rate limit anywhere; `HealthStats` has no divergence field
+The only per-origin budget is the `Question` one item 34 records
+(`src/gossip/handler.rs:318`, 30/min); the `Delta` path — the one that takes the
+write lock — has none. `HealthStats` has no divergence field
 (`src/base/health.rs:4-34`). Sharper than previously recorded: the four
-`for kern_id in g.all_ids()` loops in `handle_crdt_delta`
-(`src/gossip/handler.rs:378, 394, 407, 428`) run under the graph **write** lock,
-once per inbound delta, unlimited — a cheap remote write-lock-starvation vector
+full-corpus loops in `handle_crdt_delta` (`src/gossip/handler.rs:432`, `:448`,
+`:461`, `:482` — two `g.all_ids()`, two `remote_kern_ids(&g)`, which is
+`all_ids()` filtered at `:545`) run under the graph **write** lock, once per
+inbound delta, unlimited — a cheap remote write-lock-starvation vector
 independent of the local-row mutation in item 13.
 
 ~~Beside it: `start_entity_sync` clones the entire local corpus every
 heartbeat~~ **Closed 2026-07-21.** `hottest_local` selects over references and
 deep-clones only the winners — linear, with the same comparator and therefore the
 same chosen set. The rest of this item (per-peer rate limits, a divergence field
-on `HealthStats`, and the write-lock starvation from the four `all_ids()` loops in
-`handle_crdt_delta`) is still open.
+on `HealthStats`, and the write-lock starvation from the four full-corpus loops in
+`handle_crdt_delta`) is still open. The `Delta` path still has no per-origin
+budget; only `Question` does.
 
 (Remote heat is no longer pinnable: entry to a `remote-*` kern strips heat,
-access counts and confidence to neutral — `src/base/merge.rs:20`, applied `:139`.
+access counts and confidence to neutral — `src/base/merge.rs:20`, applied `:153`.
 The pin risk that remains is item 15's unclamped `Pulse`.)
 
 ### 38. Peer authority is unbuilt, so Sybil defence has nothing to weight `[federation]`
@@ -525,7 +529,7 @@ exists nowhere.
 ### 51. Require reason text on supersede `[ingest]`
 
 `ReasonKind::Supersedes` edges are minted at `src/base/accept.rs:438` and `:533`
-with `fallback_label()` text (`src/base/types.rs:80`), never a caller-supplied
+with `fallback_label()` text (`src/base/types.rs:75`), never a caller-supplied
 rationale. The *why* is the thing the graph exists to hold.
 
 ### 52. A single-line graviton seed still truncates at the embed context window `[ingest]`
@@ -752,7 +756,7 @@ single local daemon and needs only sign-off.
 `ProxyServer` implements `tools_list` / `call_tool` / `extra_capabilities` only
 (`src/commands/mcp_cmd.rs:290`, `:306`, `:343`) with no `handle_method` override,
 so the trait default returns `None` (`src/trnsprt/src/server.rs:21`). Meanwhile
-`extra_capabilities` advertises `{"resources": {}, "prompts": {}}` (`:343-345`) to
+`extra_capabilities` advertises `{"resources": {}, "prompts": {}}` (`:346`) to
 match standalone, which *does* serve them (`src/mcp.rs:208-211`, advertised `:157`). Advertised on
 the normal path, non-functional there. Either forward them or stop advertising.
 
@@ -1095,15 +1099,15 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   scheduled; the three it actually caught were live lies in `FEATURES.md` and
   `SPECIALISTS.md` (CHANGELOG 2026-07-21).
 - **Pulse and Question senders are live.** `broadcast_pulse` / `broadcast_q` built
-  in `start_gossip` (`src/commands.rs:900-930`), pulse wired into the maintenance
-  tick (`:658`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:226`),
-  `broadcast_q` invoked by `do_resolve` (`src/tick.rs:64`), `handle_question`
-  live-dispatched (`src/gossip/handler.rs:41`).
+  in `start_gossip` (`src/commands.rs:966-1040`), pulse wired into the maintenance
+  tick (`:708`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
+  `broadcast_q` invoked by `do_resolve` (`src/tick/tasks.rs:372`), `handle_question`
+  live-dispatched (`src/gossip/handler.rs:44`).
 - **`Fetch` is wired** — `wire_fetch` installs the handler at
   `src/commands.rs:1002`. Single-id, so it is not anti-entropy (item 36), but it
   is not dead.
 - **`union_statements` never existed**; remote heat is no longer pinnable
-  (`src/base/merge.rs:20`, applied `:139`).
+  (`src/base/merge.rs:20`, applied `:153`).
 - **The query cache already matches paraphrases.** `QueryCache::lookup` keyed on
   cosine ≥ `theta` (0.97) against the stored query vector; `lookup_text` was a
   pre-embed fast path, not the only key. Historical: the cache itself was
@@ -1118,10 +1122,10 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   unreachable regardless, since the MCP path runs `clamp_confidence(p.conf,
   AGENT_SOURCE)` capping at `MAX_AI_CONFIDENCE` 0.95 and `kind` is *derived* from
   confidence, which needs 1.0 for `Fact` (`src/base/math.rs:205-210`,
-  `src/base/constants.rs:62`). Only the CLI reaches `Fact`, via
-  `clamp_confidence(1.0, "user")` (`src/commands/ingest_cmd.rs:47`).
-- **`conf` is clamped to [0,1]** — `validate_conf` (`src/base/validate.rs:18`)
-  called at `src/mcp/tools_mutate.rs:115`.
+  `src/base/constants.rs:69`). Only the CLI reaches `Fact`, via
+  `clamp_confidence(1.0, "user")` (`src/commands/ingest_cmd.rs:49`).
+- **`conf` is clamped to [0,1]** — `validate_conf` (`src/base/validate.rs:14`)
+  called at `src/mcp/tools_mutate.rs:113`.
 - **A prose-answering reason model no longer archives deltas having stored
   nothing.** `parse_claims` returns `Option`; a reply with no parseable JSON array
   leaves the delta queued for retry, a well-formed empty array still archives
