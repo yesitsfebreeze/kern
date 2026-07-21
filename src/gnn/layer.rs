@@ -43,6 +43,12 @@ impl LinearLayer {
 		}
 	}
 
+	pub fn try_forward(&mut self, input: &Tensor) -> Result<Tensor, GnnError> {
+		let out = input.matmul(&self.weight)?.add_row_vec(&self.bias)?;
+		self.last_input = Some(input.clone());
+		Ok(out)
+	}
+
 	pub fn try_backward(&mut self, d_out: &Tensor) -> Result<Tensor, GnnError> {
 		let input = self
 			.last_input
@@ -61,9 +67,14 @@ impl LinearLayer {
 
 impl Layer for LinearLayer {
 	fn forward(&mut self, input: &Tensor) -> Tensor {
-		self.last_input = Some(input.clone());
-		let out = input.matmul(&self.weight).expect("linear forward matmul");
-		out.add_row_vec(&self.bias).expect("linear forward bias")
+		match self.try_forward(input) {
+			Ok(t) => t,
+			Err(e) => {
+				tracing::debug!(error = %e, "LinearLayer forward failed; returning zero activations");
+				self.last_input = None;
+				Tensor::zeros(input.rows, self.weight.cols)
+			}
+		}
 	}
 
 	fn parameters(&self) -> Vec<&Tensor> {
@@ -80,7 +91,7 @@ impl Backward for LinearLayer {
 		match self.try_backward(d_out) {
 			Ok(t) => t,
 			Err(e) => {
-				tracing::error!(error = %e, "LinearLayer backward failed; returning zero gradient");
+				tracing::debug!(error = %e, "LinearLayer backward failed; returning zero gradient");
 				// dInput is (n_samples, in_features); in_features == weight.rows.
 				Tensor::zeros(d_out.rows, self.weight.rows)
 			}
@@ -157,6 +168,20 @@ mod tests {
 			"zero_grads clears d_weight in place"
 		);
 		assert!(l.d_bias.data.iter().all(|&b| b == 0.0));
+	}
+
+	#[test]
+	fn forward_with_mismatched_input_width_zeroes_instead_of_panicking() {
+		let mut l = layer(4, 3);
+		let _ = l.forward(&Tensor::zeros(2, 4));
+
+		let y = l.forward(&Tensor::zeros(2, 5));
+		assert_eq!((y.rows, y.cols), (2, 3), "n_samples x out_features");
+		assert!(y.data.iter().all(|&v| v == 0.0));
+		assert!(matches!(
+			l.try_backward(&Tensor::zeros(2, 3)).unwrap_err(),
+			GnnError::MissingForwardState(_)
+		));
 	}
 
 	#[test]

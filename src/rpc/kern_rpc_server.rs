@@ -67,6 +67,13 @@ impl KernRpc for KernRpcHandler {
 				.unwrap_or("")
 				.to_string();
 			let u64_at = |k: &str| payload.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+			let str_at = |k: &str| {
+				payload
+					.get(k)
+					.and_then(|v| v.as_str())
+					.unwrap_or("")
+					.to_string()
+			};
 			HealthRes {
 				ok: true,
 				data_dir,
@@ -76,6 +83,20 @@ impl KernRpc for KernRpcHandler {
 				queue_depth: u64_at("queue_depth"),
 				tasks_done: u64_at("tasks_done"),
 				task_avg_ms: u64_at("task_avg_ms"),
+				task_panics: u64_at("task_panics"),
+				last_task_panic: str_at("last_task_panic"),
+				task_failures: u64_at("task_failures"),
+				last_task_failure: str_at("last_task_failure"),
+				cold_evicted: u64_at("cold_evicted"),
+				embed_model: str_at("embed_model"),
+				embed_dim: u64_at("embed_dim"),
+				embed_mismatch: payload
+					.get("embed_mismatch")
+					.and_then(|v| v.as_bool())
+					.unwrap_or(false),
+				build_id: crate::base::identity::build_id(),
+				config_id: crate::base::identity::config_id(&kern.cfg),
+				uptime_ms: crate::base::identity::uptime_ms(),
 			}
 		}
 	}
@@ -138,5 +159,34 @@ pub async fn serve_kern_rpc_loop(mut listener: LocalListener, handler: KernRpcHa
 				tracing::warn!(target: "kern.kern_rpc", error = %e, "serve loop");
 			}
 		});
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::tick::queue::{task, Queue, TaskKind};
+
+	#[tokio::test]
+	async fn health_carries_every_degradation_signal_to_the_rpc_surface() {
+		let mut srv = crate::test_support::mcp_server();
+		let q = Arc::new(Queue::new(8));
+		q.record_task_panic(&task(TaskKind::Cluster, "k1"), "boom");
+		q.record_task_failure(&task(TaskKind::GnnPropagate, "k2"), "train epoch 0 forward");
+		srv.task_q = Some(q);
+
+		let handler = KernRpcHandler::new(Arc::new(srv), Arc::new(tokio::sync::Notify::new()));
+		let res = handler.health().await;
+
+		assert!(res.ok);
+		assert_eq!(res.task_panics, 1);
+		assert_eq!(res.last_task_panic, "Cluster[k1]: boom");
+		assert_eq!(res.task_failures, 1);
+		assert_eq!(
+			res.last_task_failure,
+			"GnnPropagate[k2]: train epoch 0 forward"
+		);
+		assert_eq!(res.cold_evicted, 0);
+		assert!(!res.embed_mismatch);
 	}
 }

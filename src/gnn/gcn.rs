@@ -40,7 +40,28 @@ impl GCNLayer {
 		}
 	}
 
+	pub fn try_forward_graph(&mut self, g: &Graph, features: &Tensor) -> Result<Tensor, GnnError> {
+		let norm_adj = g.normalized_adjacency();
+		let agg = norm_adj.matmul(features)?;
+		self.last_norm_adj = Some(norm_adj);
+
+		let mut h = self.linear.try_forward(&agg)?;
+		if let Some(ref mut n) = self.norm {
+			h = n.forward(&h);
+		}
+		self.last_pre_act = Some(h.clone());
+		if let Some(a) = self.act {
+			h = h.apply(|x| a.forward(x));
+		}
+		Ok(h)
+	}
+
 	pub fn try_backward_graph(&mut self, _g: &Graph, d_out: &Tensor) -> Result<Tensor, GnnError> {
+		let norm_adj = self
+			.last_norm_adj
+			.as_ref()
+			.ok_or(GnnError::MissingForwardState("gcn::last_norm_adj"))?
+			.transpose();
 		let mut grad = d_out.clone();
 		if let Some(a) = self.act {
 			let pre_act = self
@@ -50,32 +71,26 @@ impl GCNLayer {
 			grad = act_deriv_mul(a, &grad, pre_act);
 		}
 		if let Some(ref mut n) = self.norm {
-			grad = n.backward(&grad);
+			grad = n.try_backward(&grad)?;
 		}
-		let d_agg = self.linear.backward(&grad);
-		let norm_adj = self
-			.last_norm_adj
-			.as_ref()
-			.ok_or(GnnError::MissingForwardState("gcn::last_norm_adj"))?;
-		Ok(norm_adj.transpose().matmul(&d_agg)?)
+		let d_agg = self.linear.try_backward(&grad)?;
+		Ok(norm_adj.matmul(&d_agg)?)
 	}
 }
 
 impl GraphLayer for GCNLayer {
 	fn forward_graph(&mut self, g: &Graph, features: &Tensor) -> Tensor {
-		let norm_adj = g.normalized_adjacency();
-		let agg = norm_adj.matmul(features).expect("GCN adj*features");
-		self.last_norm_adj = Some(norm_adj);
-
-		let mut h = self.linear.forward(&agg);
-		if let Some(ref mut n) = self.norm {
-			h = n.forward(&h);
+		match self.try_forward_graph(g, features) {
+			Ok(t) => t,
+			Err(e) => {
+				tracing::debug!(error = %e, "GCNLayer forward_graph failed; returning zero activations");
+				// Drop any stale cache so a later backward takes the MissingForwardState
+				// path instead of multiplying against a shape this forward never produced.
+				self.last_norm_adj = None;
+				self.last_pre_act = None;
+				Tensor::zeros(g.num_nodes(), self.linear.weight.cols)
+			}
 		}
-		self.last_pre_act = Some(h.clone());
-		if let Some(a) = self.act {
-			h = h.apply(|x| a.forward(x));
-		}
-		h
 	}
 
 	fn parameters(&self) -> Vec<&Tensor> {
@@ -100,7 +115,7 @@ impl BackwardGraphLayer for GCNLayer {
 		match self.try_backward_graph(g, d_out) {
 			Ok(t) => t,
 			Err(e) => {
-				tracing::error!(error = %e, "GCNLayer backward_graph failed; returning zero gradient");
+				tracing::debug!(error = %e, "GCNLayer backward_graph failed; returning zero gradient");
 				// dInput is (num_nodes, in_features); in_features == linear.weight.rows.
 				Tensor::zeros(g.num_nodes(), self.linear.weight.rows)
 			}
@@ -167,6 +182,27 @@ mod tests {
 			layer.last_pre_act.is_some(),
 			"pre-activation cached for backward"
 		);
+	}
+
+	#[test]
+	fn forward_graph_with_mismatched_features_zeroes_instead_of_panicking() {
+		let g = two_node_graph();
+		let mut rng = StdRng::seed_from_u64(3);
+		let mut layer = GCNLayer::with_rng(2, 3, None, false, &mut rng);
+		let good = Tensor::new(2, 2, vec![1.0, 0.0, 0.0, 1.0]).unwrap();
+		let _ = layer.forward_graph(&g, &good);
+
+		// 3 rows against a 2-node adjacency: the aggregation cannot be formed.
+		let bad = Tensor::zeros(3, 2);
+		let out = layer.forward_graph(&g, &bad);
+		assert_eq!((out.rows, out.cols), (2, 3), "num_nodes x out_features");
+		assert!(out.data.iter().all(|&v| v == 0.0));
+		assert!(matches!(
+			layer
+				.try_backward_graph(&g, &Tensor::ones(2, 3))
+				.unwrap_err(),
+			GnnError::MissingForwardState(_)
+		));
 	}
 
 	#[test]

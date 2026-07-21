@@ -32,6 +32,25 @@ pub struct Task {
 	pub extra: String,
 }
 
+// A task that died (panic) or gave up (contained error). Both are degraded
+// maintenance an operator must be able to see without scraping logs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskFault {
+	pub kind: TaskKind,
+	pub kern_id: String,
+	pub message: String,
+}
+
+impl std::fmt::Display for TaskFault {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		if self.kern_id.is_empty() {
+			write!(f, "{:?}: {}", self.kind, self.message)
+		} else {
+			write!(f, "{:?}[{}]: {}", self.kind, self.kern_id, self.message)
+		}
+	}
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct TaskKey {
 	kind: TaskKind,
@@ -53,6 +72,8 @@ pub struct Queue {
 	pending: Mutex<HashMap<TaskKey, bool>>,
 	inflight: std::sync::atomic::AtomicUsize,
 	stats: Mutex<(i64, Duration)>,
+	panics: Mutex<(u64, Option<TaskFault>)>,
+	failures: Mutex<(u64, Option<TaskFault>)>,
 }
 
 impl Queue {
@@ -64,6 +85,8 @@ impl Queue {
 			pending: Mutex::new(HashMap::new()),
 			inflight: std::sync::atomic::AtomicUsize::new(0),
 			stats: Mutex::new((0, Duration::ZERO)),
+			panics: Mutex::new((0, None)),
+			failures: Mutex::new((0, None)),
 		}
 	}
 
@@ -125,6 +148,34 @@ impl Queue {
 		};
 		(count, avg)
 	}
+
+	pub fn record_task_panic(&self, t: &Task, message: &str) {
+		record(&self.panics, t, message);
+	}
+
+	pub fn panics(&self) -> (u64, Option<TaskFault>) {
+		self.panics.lock().clone()
+	}
+
+	// A task that returned instead of dying: it re-enqueues every tick, so an
+	// unbounded repeat is only visible as a climbing count.
+	pub fn record_task_failure(&self, t: &Task, message: &str) {
+		record(&self.failures, t, message);
+	}
+
+	pub fn failures(&self) -> (u64, Option<TaskFault>) {
+		self.failures.lock().clone()
+	}
+}
+
+fn record(slot: &Mutex<(u64, Option<TaskFault>)>, t: &Task, message: &str) {
+	let mut s = slot.lock();
+	s.0 += 1;
+	s.1 = Some(TaskFault {
+		kind: t.kind,
+		kern_id: t.kern_id.clone(),
+		message: message.to_string(),
+	});
 }
 
 pub fn task(kind: TaskKind, kern_id: &str) -> Task {
@@ -202,5 +253,60 @@ mod tests {
 		let (count, avg_ms) = q.metrics();
 		assert_eq!(count, 2);
 		assert_eq!(avg_ms, 20, "average latency = (10 + 30) / 2 ms");
+	}
+
+	#[test]
+	fn a_fresh_queue_reports_no_panics() {
+		let q = Queue::new(8);
+		let (count, last) = q.panics();
+		assert_eq!(count, 0);
+		assert!(
+			last.is_none(),
+			"idle maintenance is not degraded maintenance"
+		);
+	}
+
+	#[test]
+	fn record_task_panic_counts_and_keeps_the_latest() {
+		let q = Queue::new(8);
+		q.record_task_panic(&task(TaskKind::Cluster, "k1"), "first boom");
+		q.record_task_panic(&task(TaskKind::GnnPropagate, "k2"), "second boom");
+
+		let (count, last) = q.panics();
+		assert_eq!(count, 2, "every panic counts");
+		let last = last.expect("the most recent panic is retained");
+		assert_eq!(last.kind, TaskKind::GnnPropagate);
+		assert_eq!(last.kern_id, "k2");
+		assert_eq!(last.message, "second boom");
+		assert_eq!(last.to_string(), "GnnPropagate[k2]: second boom");
+	}
+
+	#[test]
+	fn failures_count_separately_from_panics() {
+		let q = Queue::new(8);
+		assert_eq!(q.failures(), (0, None), "a fresh queue has failed nothing");
+
+		q.record_task_failure(&task(TaskKind::GnnPropagate, "k1"), "train epoch 0 forward");
+		q.record_task_panic(&task(TaskKind::Cluster, "k2"), "boom");
+
+		let (failed, last) = q.failures();
+		assert_eq!(failed, 1, "the contained failure is counted");
+		assert_eq!(
+			last.expect("retained").to_string(),
+			"GnnPropagate[k1]: train epoch 0 forward"
+		);
+		assert_eq!(
+			q.panics().0,
+			1,
+			"a panic never lands in the failure counter"
+		);
+	}
+
+	#[test]
+	fn a_graph_global_task_panic_renders_without_an_empty_kern_slot() {
+		let q = Queue::new(8);
+		q.record_task_panic(&task(TaskKind::IdleSweep, ""), "boom");
+		let last = q.panics().1.expect("recorded");
+		assert_eq!(last.to_string(), "IdleSweep: boom");
 	}
 }

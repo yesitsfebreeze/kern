@@ -26,6 +26,39 @@ pub struct HealthRes {
 	// stops moving, so read it as a baseline, never as current load.
 	#[serde(default)]
 	pub task_avg_ms: u64,
+	// Degraded maintenance. A panic killed its task; a failure ended it early and
+	// re-enqueues forever. Empty string = none recorded, including on old daemons.
+	#[serde(default)]
+	pub task_panics: u64,
+	#[serde(default)]
+	pub last_task_panic: String,
+	#[serde(default)]
+	pub task_failures: u64,
+	#[serde(default)]
+	pub last_task_failure: String,
+	// Store health: cold rows the FIFO cap dropped, and the embedding stamp the
+	// index was built with. `embed_mismatch` means the live model is not that one.
+	#[serde(default)]
+	pub cold_evicted: u64,
+	#[serde(default)]
+	pub embed_model: String,
+	#[serde(default)]
+	pub embed_dim: u64,
+	#[serde(default)]
+	pub embed_mismatch: bool,
+	// Staleness identity. `build_id` fingerprints the running executable,
+	// `config_id` the resolved config, so an edited kern.toml reads as stale
+	// even when the binary did not move. Empty from daemons predating the
+	// fields — and empty must never be treated as a mismatch, or every attach
+	// to an older daemon would restart it.
+	#[serde(default)]
+	pub build_id: String,
+	#[serde(default)]
+	pub config_id: String,
+	// Ms since the daemon booted. Guards the auto-restart against thrash when
+	// two clients with different builds alternate. 0 = unknown, do not restart.
+	#[serde(default)]
+	pub uptime_ms: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -61,10 +94,58 @@ mod dto_serde_tests {
 		assert_eq!(h.queue_depth, 0, "absent field defaults, never errors");
 		assert_eq!(h.tasks_done, 0);
 		assert_eq!(h.task_avg_ms, 0);
+		assert_eq!(h.task_panics, 0);
+		assert!(h.last_task_panic.is_empty());
+		assert_eq!(h.task_failures, 0);
+		assert!(h.last_task_failure.is_empty());
+		assert_eq!(h.cold_evicted, 0);
+		assert!(h.embed_model.is_empty());
+		assert_eq!(h.embed_dim, 0);
+		assert!(!h.embed_mismatch, "an old daemon is not a mismatching one");
+		assert!(h.build_id.is_empty(), "unknown build, not a stale one");
+		assert!(h.config_id.is_empty());
+		assert_eq!(h.uptime_ms, 0);
 
 		let ancient = r#"{"ok":true}"#;
 		let h2: HealthRes = serde_json::from_str(ancient).expect("only `ok` is required");
 		assert!(h2.ok);
 		assert_eq!(h2.task_avg_ms, 0);
+	}
+
+	#[test]
+	fn every_health_field_round_trips_through_json() {
+		let src = HealthRes {
+			ok: true,
+			data_dir: "/d".into(),
+			kerns: 1,
+			entities: 2,
+			idle_ms: 3,
+			queue_depth: 4,
+			tasks_done: 5,
+			task_avg_ms: 6,
+			task_panics: 7,
+			last_task_panic: "GnnPropagate[k]: boom".into(),
+			task_failures: 8,
+			last_task_failure: "GnnPropagate[k]: train epoch 0 forward".into(),
+			cold_evicted: 9,
+			embed_model: "qwen3".into(),
+			embed_dim: 1024,
+			embed_mismatch: true,
+			build_id: "a1b2c3d4e5f60718".into(),
+			config_id: "0f1e2d3c4b5a6978".into(),
+			uptime_ms: 90_000,
+		};
+		let back: HealthRes = serde_json::from_str(&serde_json::to_string(&src).unwrap()).unwrap();
+		assert_eq!(back.task_panics, 7);
+		assert_eq!(back.last_task_panic, src.last_task_panic);
+		assert_eq!(back.task_failures, 8);
+		assert_eq!(back.last_task_failure, src.last_task_failure);
+		assert_eq!(back.cold_evicted, 9);
+		assert_eq!(back.embed_model, "qwen3");
+		assert_eq!(back.embed_dim, 1024);
+		assert!(back.embed_mismatch);
+		assert_eq!(back.build_id, src.build_id);
+		assert_eq!(back.config_id, src.config_id);
+		assert_eq!(back.uptime_ms, 90_000);
 	}
 }

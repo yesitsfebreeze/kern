@@ -74,6 +74,34 @@ impl Server {
 	}
 }
 
+#[derive(Default)]
+struct TickHealth {
+	queue_depth: u64,
+	tasks_done: u64,
+	task_avg_ms: u64,
+	task_panics: u64,
+	last_task_panic: Option<String>,
+	task_failures: u64,
+	last_task_failure: Option<String>,
+}
+
+impl TickHealth {
+	fn of(q: &Arc<tick::queue::Queue>) -> Self {
+		let (done, avg_ms) = q.metrics();
+		let (task_panics, last_panic) = q.panics();
+		let (task_failures, last_failure) = q.failures();
+		Self {
+			queue_depth: q.pending_count() as u64,
+			tasks_done: done.max(0) as u64,
+			task_avg_ms: avg_ms.max(0) as u64,
+			task_panics,
+			last_task_panic: last_panic.map(|p| p.to_string()),
+			task_failures,
+			last_task_failure: last_failure.map(|f| f.to_string()),
+		}
+	}
+}
+
 impl Server {
 	pub fn run(&self, input: impl Read, output: impl Write) {
 		let mut reader = BufReader::with_capacity(1024 * 1024, input);
@@ -89,17 +117,7 @@ impl Server {
 		let g = self.graph.read();
 		let h = crate::base::health::graph_health_stats(&g);
 		let descriptors = g.root.descriptors.len();
-		let (queue_depth, tasks_done, task_avg_ms) = match &self.task_q {
-			Some(q) => {
-				let (done, avg_ms) = q.metrics();
-				(
-					q.pending_count() as u64,
-					done.max(0) as u64,
-					avg_ms.max(0) as u64,
-				)
-			}
-			None => (0, 0, 0),
-		};
+		let tick = self.task_q.as_ref().map(TickHealth::of).unwrap_or_default();
 		serde_json::json!({
 			"gravitons": h.gravitons,
 			"kerns": h.kerns,
@@ -107,9 +125,17 @@ impl Server {
 			"reasons": h.reasons,
 			"unnamed": h.unnamed,
 			"descriptors": descriptors,
-			"queue_depth": queue_depth,
-			"tasks_done": tasks_done,
-			"task_avg_ms": task_avg_ms,
+			"queue_depth": tick.queue_depth,
+			"tasks_done": tick.tasks_done,
+			"task_avg_ms": tick.task_avg_ms,
+			"task_panics": tick.task_panics,
+			"last_task_panic": tick.last_task_panic,
+			"task_failures": tick.task_failures,
+			"last_task_failure": tick.last_task_failure,
+			"cold_evicted": h.cold_evicted,
+			"embed_model": h.embed_model,
+			"embed_dim": h.embed_dim,
+			"embed_mismatch": h.embed_mismatch,
 		})
 	}
 }
@@ -284,5 +310,63 @@ mod tests {
 			r.content.is_empty(),
 			"a non-array content is ignored, not panicked on"
 		);
+	}
+
+	#[tokio::test]
+	async fn health_reports_degraded_maintenance_after_a_task_panic() {
+		use crate::tick::queue::{task, Queue, TaskKind};
+		use std::sync::Arc;
+
+		let mut srv = crate::test_support::mcp_server();
+		let q = Arc::new(Queue::new(8));
+		srv.task_q = Some(q.clone());
+
+		let h = srv.health_stats();
+		assert_eq!(h["task_panics"], 0);
+		assert!(h["last_task_panic"].is_null(), "healthy queue reports null");
+
+		q.record_task_panic(&task(TaskKind::GnnPropagate, "k1"), "adj*features");
+
+		let h = srv.health_stats();
+		assert_eq!(h["task_panics"], 1);
+		assert_eq!(h["last_task_panic"], "GnnPropagate[k1]: adj*features");
+	}
+
+	#[tokio::test]
+	async fn health_reports_contained_task_failures_beside_panics() {
+		use crate::tick::queue::{task, Queue, TaskKind};
+		use std::sync::Arc;
+
+		let mut srv = crate::test_support::mcp_server();
+		let q = Arc::new(Queue::new(8));
+		srv.task_q = Some(q.clone());
+
+		let h = srv.health_stats();
+		assert_eq!(h["task_failures"], 0);
+		assert!(h["last_task_failure"].is_null());
+
+		q.record_task_failure(
+			&task(TaskKind::GnnPropagate, "k1"),
+			"could not sample negative edges",
+		);
+
+		let h = srv.health_stats();
+		assert_eq!(h["task_failures"], 1);
+		assert_eq!(
+			h["last_task_failure"],
+			"GnnPropagate[k1]: could not sample negative edges"
+		);
+		assert_eq!(h["task_panics"], 0, "a failure is not a panic");
+	}
+
+	#[tokio::test]
+	async fn health_carries_the_store_signals_to_the_mcp_surface() {
+		let srv = crate::test_support::mcp_server();
+		let h = srv.health_stats();
+		for key in ["cold_evicted", "embed_model", "embed_dim", "embed_mismatch"] {
+			assert!(!h[key].is_null(), "{key} must reach the MCP surface");
+		}
+		assert_eq!(h["cold_evicted"], 0);
+		assert_eq!(h["embed_mismatch"], false);
 	}
 }

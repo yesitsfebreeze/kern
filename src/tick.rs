@@ -42,13 +42,44 @@ pub fn start(
 	let mut rx = q.take_receiver().expect("receiver already taken");
 	tokio::spawn(async move {
 		while let Some(t) = rx.recv().await {
-			let started = Instant::now();
 			q.dequeued(&t);
-			process_task(&q, &g, &t, &ctx);
-			q.record_task_latency(started.elapsed());
-			q.done();
+			run_guarded(&q, &t, || process_task(&q, &g, &t, &ctx));
 		}
 	})
+}
+
+// A panicking task must cost one task, not every future tick. `AssertUnwindSafe` is
+// deliberate: the graph lock does not poison, so the loop resumes over state the dead
+// task may have half-written — which is exactly what the error line reports.
+fn run_guarded(q: &Queue, t: &Task, run: impl FnOnce()) {
+	let started = Instant::now();
+	match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+		// `task_avg_ms` answers "how long does maintenance take"; feeding it the
+		// duration of work that never finished makes it lie as failures climb.
+		Ok(()) => q.record_task_latency(started.elapsed()),
+		Err(payload) => {
+			let message = panic_message(payload.as_ref());
+			tracing::error!(
+				target: "kern.tick",
+				kind = ?t.kind,
+				kern = %t.kern_id,
+				panic = %message,
+				"tick task panicked; maintenance continues but this kern's graph state may be partially written"
+			);
+			q.record_task_panic(t, &message);
+		}
+	}
+	q.done();
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+	if let Some(s) = payload.downcast_ref::<&str>() {
+		(*s).to_string()
+	} else if let Some(s) = payload.downcast_ref::<String>() {
+		s.clone()
+	} else {
+		"unknown panic payload".to_string()
+	}
 }
 
 fn process_task(q: &Queue, g: &Arc<RwLock<GraphGnn>>, t: &Task, ctx: &TickContext) {
@@ -737,6 +768,97 @@ mod tests {
 				.contains_key("e1"),
 			"a rejected move leaves the parent intact"
 		);
+	}
+
+	#[test]
+	fn a_panicking_task_is_contained_counted_and_still_accounted_for() {
+		let q = Queue::new(8);
+		let boom = task(TaskKind::GnnPropagate, "k");
+		assert!(q.enqueue(boom.clone()));
+		q.dequeued(&boom);
+
+		run_guarded(&q, &boom, || panic!("gnn exploded"));
+
+		let (count, last) = q.panics();
+		assert_eq!(count, 1, "the panic is counted, not swallowed");
+		let last = last.expect("the panic is retained for health reporting");
+		assert_eq!(last.kind, TaskKind::GnnPropagate);
+		assert_eq!(last.kern_id, "k");
+		assert_eq!(last.message, "gnn exploded");
+		assert_eq!(
+			q.metrics().0,
+			0,
+			"a panicking task contributes no duration to the success mean"
+		);
+	}
+
+	#[test]
+	fn the_tick_loop_body_survives_a_panic_and_runs_the_next_task() {
+		let q = Queue::new(8);
+		let boom = task(TaskKind::Cluster, "dead");
+		let next = task(TaskKind::Persist, "alive");
+
+		run_guarded(&q, &boom, || panic!("boom"));
+		let mut ran = false;
+		run_guarded(&q, &next, || ran = true);
+
+		assert!(ran, "the task after a panicking one still runs");
+		assert_eq!(q.panics().0, 1, "only the panicking task is counted");
+	}
+
+	// `run_guarded` in isolation proves nothing about the loop: only this test fails
+	// if `start` goes back to calling `process_task` unguarded.
+	#[tokio::test]
+	async fn start_contains_a_panicking_task_and_keeps_draining_the_queue() {
+		let mut graph = GraphGnn::new();
+		let mut k = crate::base::types::Kern::new("k", "");
+		let mut e = Entity {
+			id: "e1".into(),
+			..Default::default()
+		};
+		e.dirty = true;
+		e.statements = vec!["needs a vector".into()];
+		k.entities.insert("e1".into(), e);
+		graph.kerns.insert("k".into(), k);
+		graph.index_entity("e1", "k");
+		let g = Arc::new(RwLock::new(graph));
+
+		let q = Arc::new(Queue::new(8));
+		assert!(q.enqueue(task(TaskKind::Reembed, "k")));
+		assert!(q.enqueue(queue::task_commit_access(&["e1".to_string()])));
+
+		let ctx = TickContext {
+			llm: None,
+			embed: Some(Arc::new(|_: &str| panic!("embed exploded"))),
+			broadcast_q: None,
+			gnn_cfg: GnnConfig::defaults(),
+			tick_cfg: TickConfig::default(),
+			heat_cfg: HeatConfig::default(),
+		};
+		start(q.clone(), g.clone(), ctx);
+
+		for _ in 0..200 {
+			if q.panics().0 == 1 && g.read().kerns["k"].entities["e1"].accessed_at.is_some() {
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(5)).await;
+		}
+
+		let (count, last) = q.panics();
+		assert_eq!(count, 1, "the panicking task is counted by the live loop");
+		assert_eq!(last.expect("retained").kind, TaskKind::Reembed);
+		assert_eq!(
+			g.read().kerns["k"].entities["e1"].access_count.value(),
+			1,
+			"the task queued behind the panicking one still ran"
+		);
+	}
+
+	#[test]
+	fn panic_message_reads_str_string_and_unknown_payloads() {
+		assert_eq!(panic_message(&"literal"), "literal");
+		assert_eq!(panic_message(&"formatted".to_string()), "formatted");
+		assert_eq!(panic_message(&7u8), "unknown panic payload");
 	}
 
 	#[test]

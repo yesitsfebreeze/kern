@@ -32,7 +32,7 @@ pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 	vec![
 		serde_json::json!({
 			"name": "health",
-			"description": "Graph statistics: thought/edge counts, tick heat, unnamed count.",
+			"description": "Graph statistics plus degradation signals: thought/edge counts, unnamed count, tick queue depth and latency, task panics/failures, cold evictions, and the embedding-model stamp with its mismatch flag.",
 			"inputSchema": {"type": "object", "properties": {}},
 		}),
 		serde_json::json!({

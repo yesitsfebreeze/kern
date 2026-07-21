@@ -28,9 +28,22 @@ pub fn do_gnn_propagate(q: &Queue, g: &Arc<RwLock<GraphGnn>>, kern_id: &str, cfg
 		_ => return,
 	};
 
-	if let Ok(res) = propagate::run_learned_propagation(&snap, cfg) {
-		if !res.updates.is_empty() {
-			apply_gnn_updates(q, g, kern_id, res.updates, res.weights);
+	// On Err nothing is applied: half-trained embeddings and the weights that
+	// produced them would be persisted and re-read on every following tick.
+	match propagate::run_learned_propagation(&snap, cfg) {
+		Ok(res) => {
+			if !res.updates.is_empty() {
+				apply_gnn_updates(q, g, kern_id, res.updates, res.weights);
+			}
+		}
+		Err(e) => {
+			tracing::error!(
+				target: "kern.gnn",
+				kern = %kern_id,
+				error = %e,
+				"learned propagation failed; embeddings and weights left untouched"
+			);
+			q.record_task_failure(&task(TaskKind::GnnPropagate, kern_id), &e);
 		}
 	}
 }
@@ -262,6 +275,58 @@ mod tests {
 			cosine_align(&[0.0, 0.0], &[1.0, 1.0]),
 			0.5,
 			"zero-norm -> 0.5"
+		);
+	}
+
+	#[test]
+	fn a_failed_propagation_writes_nothing_and_is_recorded_as_a_degradation() {
+		let mut k = kern_with_n(3);
+		// Every pair is a positive edge, so no negative edge can be sampled.
+		add_reason(
+			&mut k,
+			Reason {
+				from: "e0".into(),
+				to: "e2".into(),
+				id: "e0->e2".into(),
+				..Default::default()
+			},
+		);
+		k.gnn_weights = vec![7, 7, 7];
+		let mut g = GraphGnn::new();
+		g.kerns.insert("k".into(), k);
+		let g = Arc::new(RwLock::new(g));
+		let q = Queue::new(16);
+		let cfg = GnnConfig {
+			min_thoughts: 2,
+			..GnnConfig::defaults()
+		};
+
+		do_gnn_propagate(&q, &g, "k", &cfg);
+
+		{
+			let gg = g.read();
+			let kern = &gg.kerns["k"];
+			assert_eq!(
+				kern.gnn_weights,
+				vec![7, 7, 7],
+				"a failed run must not persist weights over the good ones"
+			);
+			assert!(
+				kern.entities.values().all(|e| e.gnn_vector.is_empty()),
+				"no embedding is degraded by a run that never finished"
+			);
+		}
+
+		let (failed, last) = q.failures();
+		assert_eq!(failed, 1, "the failure is counted, not just logged");
+		assert!(
+			last.expect("retained").message.contains("negative edges"),
+			"the last error is kept for health reporting"
+		);
+		let mut rx = q.take_receiver().unwrap();
+		assert!(
+			rx.try_recv().is_err(),
+			"no Persist is enqueued when nothing changed"
 		);
 	}
 

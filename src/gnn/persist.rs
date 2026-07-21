@@ -112,10 +112,7 @@ mod tests {
 
 	fn small_model(seed: u64) -> Model {
 		let mut rng = StdRng::seed_from_u64(seed);
-		Model::new(
-			vec![Box::new(GCNLayer::with_rng(4, 3, None, false, &mut rng))],
-			None,
-		)
+		Model::new(vec![GCNLayer::with_rng(4, 3, None, false, &mut rng)], None)
 	}
 
 	#[test]

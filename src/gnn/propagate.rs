@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::gnn::activation::Activation;
-use crate::gnn::backward::BackwardGraphLayer;
 use crate::gnn::gcn::GCNLayer;
 use crate::gnn::graph::Graph;
 use crate::gnn::loss::link_prediction_grad;
@@ -73,9 +72,8 @@ pub fn run_learned_propagation(
 		return Err("could not sample negative edges".into());
 	}
 
-	let l1: Box<dyn BackwardGraphLayer> =
-		Box::new(GCNLayer::new(dim, hidden, Some(Activation::Relu), true));
-	let l2: Box<dyn BackwardGraphLayer> = Box::new(GCNLayer::new(hidden, dim, None, false));
+	let l1 = GCNLayer::new(dim, hidden, Some(Activation::Relu), true);
+	let l2 = GCNLayer::new(hidden, dim, None, false);
 	let mut model = Model::new(vec![l1, l2], None);
 
 	if !snap.weights.is_empty() {
@@ -88,11 +86,15 @@ pub fn run_learned_propagation(
 	let neg = neg_edges.clone();
 	let mut optim = Adam::new(cfg.train_learning_rate);
 
-	for _epoch in 0..cfg.train_epochs {
+	for epoch in 0..cfg.train_epochs {
 		model.zero_grads();
-		let predicted = model.forward(&snap.graph, &snap.features);
+		let predicted = model
+			.forward(&snap.graph, &snap.features)
+			.map_err(|e| format!("train epoch {epoch} forward: {e}"))?;
 		let d_out = link_prediction_grad(&predicted, &pos, &neg);
-		model.backward(&snap.graph, &d_out);
+		model
+			.backward(&snap.graph, &d_out)
+			.map_err(|e| format!("train epoch {epoch} backward: {e}"))?;
 
 		let grads: Vec<Tensor> = model.param_grads().iter().map(|t| (*t).clone()).collect();
 		let grad_refs: Vec<&Tensor> = grads.iter().collect();
@@ -101,7 +103,9 @@ pub fn run_learned_propagation(
 		optim.step(&mut params, &grad_refs);
 	}
 
-	let emb = model.forward(&snap.graph, &snap.features);
+	let emb = model
+		.forward(&snap.graph, &snap.features)
+		.map_err(|e| format!("inference forward: {e}"))?;
 	let mut updates = HashMap::new();
 
 	for (i, id) in snap.ids.iter().enumerate() {
@@ -239,6 +243,28 @@ mod tests {
 			assert_eq!(v.len(), dim);
 			assert!(v.iter().all(|x| x.is_finite()), "updates must be finite");
 		}
+	}
+
+	// The production path is `Model::forward`/`Model::backward`, not the `try_*`
+	// layer methods: a mismatch there used to decay to zeros and still persist.
+	#[test]
+	fn a_feature_graph_shape_mismatch_aborts_instead_of_training_on_zeros() {
+		let dim = 8;
+		let mut snap = tiny_snapshot(6, dim);
+		snap.features = Tensor::zeros(7, dim);
+		let cfg = GnnConfig {
+			train_epochs: DEFAULT_TRAIN_EPOCHS,
+			..GnnConfig::defaults()
+		};
+
+		let err = match run_learned_propagation(&snap, &cfg) {
+			Err(e) => e,
+			Ok(_) => panic!("a shape mismatch must fail the whole propagation"),
+		};
+		assert!(
+			err.starts_with("train epoch 0 forward:"),
+			"the first epoch aborts, so one diagnostic is emitted, not one per matmul; got {err}"
+		);
 	}
 
 	#[test]
