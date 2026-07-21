@@ -2,6 +2,30 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — `3529fce`'s subject says "item 25, the importance scan indexed"
+  and **no index was built**. The merge subject was generated from the slice
+  title — the work that was *asked for* — rather than from the diff, which
+  refused the index on evidence and parallelised the inner loop instead. Checked
+  before writing this: no `importance_index` symbol exists anywhere in `src/`,
+  and `an_eligibility_change_is_reflected_with_no_epoch_bump` — the test that
+  exists specifically to fail if someone memoises this scan — is present and
+  green.
+
+  Recorded because `git log` is the first place anyone looks and that subject is
+  a lie about the tree. `ROADMAP.md` item 25 and the entry below it are both
+  accurate; only the commit subject is wrong, and a commit subject cannot be
+  corrected in place once it is pushed. So the correction lives here, where the
+  next reader of the history will also be looking.
+
+  The general shape is worth naming: **a slice title is a hypothesis, and this
+  loop keeps disproving them.** Four perf items today ended somewhere other than
+  where their title pointed — 25 twice, 26's premise, 27's first bullet. Any
+  automation that names a merge after the slice rather than the diff will
+  therefore be wrong precisely on the passes where the work was most useful.
+
+  Decided by: verify-before-claiming — the subject asserted an index, the tree
+  was checked for one, and it is not there.
+
 - 2026-07-21 — item 25 narrowed, and the index it asked for deliberately not
   built. Re-measuring after item 26 confirmed the scan now dominates every
   eligibility level — 39.7 / 60.1 / 72.1 / 71.2% of retrieve at N=100k, against
