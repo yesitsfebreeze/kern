@@ -39,7 +39,7 @@ That single trade explains the whole system:
 | IDs are content hashes | Identical text is the same node everywhere. Merge becomes set union — no coordinator needed to federate. |
 | Heat + decay + GC | Nobody prunes by hand, so the graph has to decide what to forget itself. |
 | All-internal, no pluggable backend | Mounting an external store adds a network hop to the one path that must stay sub-ms. |
-| Fail open everywhere | Memory that breaks a session is worse than memory that misses. Intake and recall no-op on any error. |
+| Fail open everywhere | Memory that breaks a session is worse than memory that misses. Intake and recall no-op on any error — several of those no-ops are now counted (see below); the rest are still silent. |
 
 ## The flow, in one line
 
@@ -95,40 +95,67 @@ have one.
 
 ### Boot
 
-`src/main.rs:10` is the only real binary. Order matters at every step:
+`src/main.rs:25` is the only real binary. Order matters at every step:
 
-1. Tracing to **stderr** (`main.rs:12`) — stdout is reserved for JSON-RPC.
-2. Tokio multi-thread runtime, hard floor of 4 workers (`main.rs:22-27`) — blocking bridges each pin a worker.
-3. Re-pin cwd to the nearest ancestor holding `.kern` (`main.rs:33-42`).
-4. Load + validate config (`main.rs:43-50`).
-5. `Cli::parse()` (`main.rs:51`), then dispatch (`main.rs:53-57`).
+1. Tracing to **stderr** (`src/main.rs:27`) — stdout is reserved for JSON-RPC.
+2. Tokio multi-thread runtime, hard floor of 4 workers (`src/main.rs:37-42`) — blocking bridges each pin a worker.
+3. Re-pin cwd to the nearest ancestor holding `.git`, falling back to `.kern` (`src/main.rs:47-57`).
+4. `Cli::parse()` (`src/main.rs:59`) — before the config load, so `--help` and `--version` still answer in a repo whose config is broken.
+5. Load + validate config (`src/main.rs:60-66`), then dispatch (`src/main.rs:68-72`).
+
+**A bad config is fatal.** `boot_config` (`src/main.rs:16`) treats an unreadable,
+unparseable or invalid config as a hard stop: the offending key goes to stderr
+and the process exits **78** (`EX_CONFIG`, `src/main.rs:7`). An *absent* config
+is legitimate and still defaults silently — `load` already handles it, so every
+error it returns is a real one.
 
 **Bare `kern` with no subcommand is the daemon.** Only `Daemon` and "nothing"
 reach `run_server`; everything else goes through the single command dispatch
-table (`commands.rs:441-553`).
+table (`commands.rs:451-556`).
 
-`bootstrap` (`commands.rs:555-665`), in order and for reasons:
+`bootstrap` (`commands.rs:565-682`), in order and for reasons:
 
 | Step | Anchor | Why here |
 |---|---|---|
-| `maybe_self_heal_store` | `:558` | Compaction swaps `data.mdb`; only before any env open is the dir held exclusively. |
-| `spawn_watchdog` | `:560` | OS thread, force-exits on ~30s async stall (`:744-782`) so a peer can take the hub. |
-| Build LLM client | `:561-577` | Embed/answer models always come from config, never the CLI (`:571`). |
-| `spawn_keepalive` | `:579` | 240s ping — Ollama unloads a model at ~5min idle. |
-| **`Registry::open`** | `:600` → `store.rs:57` | The real assembly point: graph load, the single guarded `save_fn`, tick queue, deferral closures, ingest `Worker`, `tick::start`, `enqueue_all`. |
-| Reap empty kerns | `:614` | |
-| MCP server, watcher, intake, gossip, maintenance tick | `:630-658` | |
+| `maybe_self_heal_store` | `:574` | Compaction swaps `data.mdb`; only before any env open is the dir held exclusively. |
+| `spawn_watchdog` | `:577` → `:823` | OS thread, force-exits (101) on ~30s async stall (`:853`) so a peer can take the hub. |
+| Build LLM client | `:580-595` | Embed/answer models always come from config, never the CLI. |
+| `spawn_keepalive` | `:596` → `:866` | 240s ping — Ollama unloads a model at ~5min idle. |
+| **`Registry::open`** | `:617` → `store.rs:57` | The real assembly point: graph load, the single guarded `save_fn`, tick queue, deferral closures, ingest `Worker`, `tick::start`, `enqueue_all`. |
+| Reap empty kerns | `:631` | |
+| Watcher, intake, gossip, MCP server, maintenance tick | `:647-675` | |
 
-`run_server` (`:667`) binds `kern.sock` **synchronously** (`:687-712`) so a
+`run_server` (`:684`) binds `kern.sock` **synchronously** (`:736-745`) so a
 second daemon short-circuits on `AlreadyRunning` before spinning up scaffolding.
 
-> Divergence: standalone `kern mcp` (`commands/mcp_cmd.rs:240-326`) builds its
+> Divergence: standalone `kern mcp` (`commands/mcp_cmd.rs:350`) builds its
 > own server with `tick::start` but **no maintenance tick and no gossip**
-> (`spawn_maintenance_tick` appears only at `commands.rs:658`).
+> (`spawn_maintenance_tick` appears only at `commands.rs:675`).
+
+**Staying current.** Two mechanisms keep a long-lived daemon from serving stale
+code or stale config — the failure that makes every shipped fix look like it
+did nothing:
+
+- **Client-side auto-restart.** `kern mcp` compares the daemon's
+  `(build_id, config_id)` — an executable fingerprint and a hash of the
+  resolved config — against its own on attach (`commands/mcp_restart.rs`,
+  identity from `base/identity.rs`). A mismatched daemon older than 15s is
+  gracefully replaced; younger ones are held so two differing builds cannot
+  restart each other in a loop. `[hub] auto_restart = false` reduces this to a
+  warning. Daemons predating the handshake report empty ids and are never
+  restarted — unknown is not stale.
+- **Hot reload** (Unix, `[reload] enabled`, default on). The daemon polls its
+  own binary (`takeover.rs`); when a new build lands at the same path (two
+  stable polls, so a mid-link torn file never fires), it drains, runs the
+  final guarded flush, spawns the successor with the listening socket as an
+  inherited fd, and exits. Connects arriving during the successor's boot queue
+  in the kernel backlog instead of failing; the MCP proxy reconnects severed
+  connections and retries once (`commands/mcp_cmd.rs`). Windows has no fd
+  handoff — the client-side restart covers it there.
 
 ### The surface
 
-Eleven MCP tools, order asserted by test (`mcp/tools.rs:20-40`):
+Twelve MCP tools, order asserted by test (`mcp/tools.rs:20-41`):
 
 | Tool | Handler |
 |---|---|
@@ -143,10 +170,19 @@ Eleven MCP tools, order asserted by test (`mcp/tools.rs:20-40`):
 | `descriptor` | `tools_admin.rs:149` |
 | `pulse` | `tools_admin.rs:206` |
 | `gc` | `tools_admin.rs:178` |
+| `setup` | `tools_setup.rs` — agent-facing wiring instructions |
 
 Plus 4 resources (`resources.rs:8-35`) and 1 prompt (`prompt.rs:9`).
-Transports: stdio (`mcp.rs:84`), HTTP/SSE when `--mcp-addr` is set
-(`commands.rs:718-724`).
+Transports: stdio (`mcp.rs:113`), HTTP/SSE when `--mcp-addr` is set
+(`commands.rs:768-775`).
+
+`health` is also the degradation surface. `health_stats` (`src/mcp.rs:117`)
+returns, beside the graph counts, the tick queue depth and average task latency,
+`task_panics` / `task_failures` with the most recent of each rendered, the
+process-lifetime `cold_evicted` total, and the stored `embed_model` /
+`embed_dim` with an `embed_mismatch` flag. The same fields cross the RPC
+boundary as `HealthRes` (`src/rpc/kern_rpc_server.rs:86-95`) and are printed by
+`kern health` (`src/commands/admin.rs:47-63`).
 
 **One dispatch core.** Every surface — MCP, RPC, CLI — routes through the same
 dispatch. A second copy is a repo law violation, not a style preference: two
@@ -173,7 +209,7 @@ copies drift, and the drifted one is always the one in production.
    (`:128-136`). Below root, `effective_distance = cosine_distance / mass`
    (`:20-22`) against `ACCEPT_FLOOR = 0.5`.
 6. **Persist** after *every* job (`worker.rs:133-135`) via
-   `save_graph_guarded` (`commands.rs:281`): snapshot under a read guard,
+   `save_graph_guarded` (`commands.rs:291`): snapshot under a read guard,
    drop the guard, `flush_guarded` compares the on-disk epoch, `RefusedStale`
    absorbs and retries, 5 rounds. This is what stops a stale in-memory snapshot
    from overwriting newer disk state.
@@ -211,29 +247,45 @@ mmr                          :234
 and recency (capped 0.1, `config/retrieval.rs:88-91`). Mode weights (`:104-114`)
 — hybrid is content 0.50 / reason 0.30 / edge 0.20. Per-neighbor score is
 `w.content*cos + w.reason*cos + w.edge*edge_score`, and `edge_score` adds a log
-traversal boost (`expand.rs:305-329`).
+traversal boost (`expand.rs:315-339`). The beam bar is `frontier_best * decay`,
+taken from the best *neighbour* score rather than the best seed (`expand.rs:199`).
 
 Defaults on: lexical, mmr (λ 0.75), rerank, hyde, pagerank.
 
 ### Maintenance tick
 
-`spawn_maintenance_tick` (`commands.rs:942-979`), every `tick.interval_secs`
+`spawn_maintenance_tick` (`commands.rs:1021-1058`), every `tick.interval_secs`
 (default 60, `base/constants.rs:27`; 0 disables). Per beat, in order:
 
-1. `reconcile_if_stale` (`:961`) — **first**, or a per-kern persist writes stale
+1. `reconcile_if_stale` (`:1040`) — **first**, or a per-kern persist writes stale
    rows over newer disk.
-2. Read root id, `pulse` under the write lock (`:968`).
-3. Broadcast pulse (`:970`), `enqueue_all` (`:973`), `snapshot_if_dirty` (`:976`).
+2. Read root id, `pulse` under the write lock (`:1047`).
+3. Broadcast pulse (`:1050`), `enqueue_all` (`:1052`), `snapshot_if_dirty` (`:1055`).
 
-Tasks drain one at a time off an mpsc queue (`tick.rs:37-52`); 13 kinds
-dispatched at `tick.rs:54-74`.
+Tasks drain one at a time off an mpsc queue (`tick.rs:37-49`); 13 kinds
+dispatched at `tick.rs:87-105`.
 
-`do_cluster` (`tick.rs:77-137`) is the ordering lesson worth reading: select
+**A panicking task costs one task, not the loop.** Every task runs inside
+`run_guarded` (`src/tick.rs:54`), which wraps `process_task` in `catch_unwind`.
+Before, one panic killed the single draining task and decay, GC, persist,
+clustering and the idle sweep stopped for the process lifetime with nothing
+said. Now the panic is logged with its kind and kern and counted on the queue
+(`record_task_panic`, `src/tick/queue.rs:152`); a task that *returns* an error
+instead of dying is counted separately (`record_task_failure`, `:162`), because
+that one re-enqueues every beat and is only visible as a climbing number. Both
+counters, and the most recent fault of each, surface on `health`. The
+`AssertUnwindSafe` is deliberate: the graph lock does not poison, so the loop
+resumes over state the dead task may have half-written — which is exactly what
+the error line says.
+
+`do_cluster` (`tick.rs:108-169`) is the ordering lesson worth reading: select
 clusters → spawn children → collect follow-ups → evict empty → **drop the lock**
-(`:110`) → enqueue Name/Cluster/Enrich/ResolveQuestion → **persist children
-before the parent** (`:126-135`). Parent-first plus a crash erases migrated
+(`:141`) → enqueue Name/Cluster/Enrich/ResolveQuestion → **persist children
+before the parent** (`:158-163`). Parent-first plus a crash erases migrated
 entities; child-first merely duplicates them briefly. GnnPropagate runs only if
-structural work actually happened (`:124-137`).
+structural work actually happened (`:166-168`), and its forward/backward chain is
+fallible end to end — a failed propagation writes nothing rather than persisting
+corrupt weights (`src/gnn/model.rs`, `src/tick/gnn_propagate.rs`).
 
 **Heat** (`base/heat.rs:25-38`) is exponential — `heat * exp(-ln2 * dt /
 half_life)`, half-life 7 days (`:18`) — and decays **lazily on read**, not per
@@ -242,15 +294,26 @@ tick, so an idle graph costs nothing.
 **Bi-temporal fields** (`base/types.rs:290-297`): `valid_from`/`valid_to` are
 world time, `invalidated_at` is transaction time. All three are
 `#[serde(skip)]` — load-bearing, it keeps bincode byte-identical to
-pre-temporal snapshots; `StoredKern`'s side-map persists them instead. Supersede
-is a status flip plus `superseded_by` (`accept.rs:346`); superseded rows are
-filtered at delivery (`score.rs:119`) but stay readable via `include_history` /
-`as_of`.
+pre-temporal snapshots. Two carriers restore them: `StoredKern`'s side-map on
+the hot row (`base/store.rs:211`) and `ColdRow` on a spilled entity
+(`base/store.rs:170`). The second is why `as_of` is now exact over the cold
+tail too — a cold-recovered revision used to come back with all three unset and
+answer `is_valid_at` true at every instant. Rows written before `FORMAT_V4`
+still decode as bare entities with no stamps (`decode_cold`,
+`base/store.rs:197`). Supersede is a status flip plus `superseded_by`
+(`accept.rs:346`); superseded rows are filtered at delivery (`score.rs:132`) but
+stay readable via `include_history` / `as_of`.
+
+**Cold-tier eviction is counted.** `cold_cap` (`base/store.rs:712`) holds the
+cold table to `COLD_MAX_ENTRIES = 50_000` newest-by-`created_at` and the bound
+itself is intentional, but a dropped non-durable entity is unrecoverable, so the
+count is its only trace: every drop increments `cold_evicted` and the warn line
+is throttled to one per sweep rather than one per row.
 
 ### Federation (off by default)
 
 Enabled only via config (`config/gossip.rs:62`); `start_gossip`
-(`commands.rs:858-940`) spawns five 30s loops: heartbeat, announce, entity_sync,
+(`commands.rs:937`) spawns five 30s loops: heartbeat, announce, entity_sync,
 delta_flush, discovery.
 
 **Send.** A mutation calls `push_delta` (`base/graph.rs:404`), coalesced by
@@ -299,11 +362,43 @@ id claims are rejected as hijacks (`merge.rs:167-176`).
   per-kern versions are unsound under HyDE.
 - **Watchdog** — an OS thread force-exits (101) on a 30s async stall so a peer
   can take the hub.
+- **The index knows what embedded it** — model and dimension are stamped in the
+  store on flush and checked at open (`check_embed_stamp`,
+  `src/base/store.rs:473`). A swap sets a durable `embed_mismatch` flag rather
+  than aborting, and the query path drops a vector whose dimension disagrees
+  with the index instead of searching truncated noise (`dim_guard`,
+  `src/base/search.rs:23`), counting every drop in `query_dim_rejected`. An
+  *unstamped* store adopts the current model — that is a legacy store, not a
+  mismatch. `kern reembed` restamps with the model it actually embedded with.
 
 Notes: `diskann.rs` backs the optional `VectorBackend::Disk` spill for the entity
 index (`[graph] disk_threshold`, **off by default** — resident HNSW is the
 default path). `[graph] max_kerns` defaults to `usize::MAX` (cap off); empty-kern
 GC keeps it from bloating.
+
+### How much of fail-open is visible
+
+Fail-open is still the behavior everywhere — a session always proceeds. What
+changed is that it is no longer invisible: every degradation below returns
+something rather than erroring, so a counter is the only way to tell a degraded
+answer from a good one.
+
+**Counted, throttle-logged, and on all three `health` surfaces** (the MCP tool,
+the RPC DTO, and `kern health`): a panicking maintenance task; a maintenance task
+that gives up with an error; a cold row dropped past the 50k cap; an embedding
+model that does not match the one the index was built with; a query vector
+rejected by the dimension guard; chunks lost because the embed endpoint was dead
+(`ingest_dropped_chunks`); entities GC could not age because their timestamp is in
+the future, which stalls compaction (`clock_skew_skips`); a delivery that bypassed
+`min_deliver_score` because nothing cleared it (`below_floor_deliveries`); and new
+remote ids refused at the 50k remote-kern ceiling while known ones keep merging
+(`remote_cap_dropped`).
+
+`kern health` prints its `degraded:` line only when one of these is nonzero, so a
+healthy kern stays quiet.
+
+Counting is not the same as fixing. Each of these still degrades — the point is
+that it now says so.
 
 ---
 
@@ -458,9 +553,10 @@ graph TB
 
     %% ===== persistence / tiering =====
     subgraph STORE["Persistence (.kern LMDB env) + tiering"]
-        KF["Store: data.mdb + lock.mdb<br/>named DBs kern|cold|meta<br/>zstd(bincode) values, int8 vectors<br/>single-writer + epoch-guarded flush"]
+        KF["Store: data.mdb + lock.mdb<br/>named DBs kern|cold|meta<br/>zstd(bincode) values, int8 vectors<br/>embed model+dim stamped in meta<br/>single-writer + epoch-guarded flush"]
         UNL["QUARANTINE: unloaded set<br/>auto-reload on get(); root never evicted"]
-        COLD["COLD db: latest-wins keyed, cap 50k newest"]
+        COLD["COLD db: ColdRow (entity + temporal triple)<br/>latest-wins keyed, cap 50k newest, evictions counted"]
+        LOGS["logs/: hub.log, daemon.log<br/>append-only, 0600, detached children only"]
         KF -->|LRU enforce_kern_cap| UNL
         UNL -->|load_kern| KF
         KF --- COLD
@@ -508,7 +604,7 @@ graph TB
     WARM --> ANS_M
 
     %% ===== config =====
-    CFG["Config (.kern): [embed][reason][answer][serve]<br/>[retrieval][ingest][gossip][tick][heat][gnn][graph][watcher][intake]"]
+    CFG["Config (.kern): preset + [embed][reason][answer][serve]<br/>[gossip][tick][gnn][graph][watcher][intake][hub][reload]<br/>heat/ingest/retrieval are preset-owned; scopes deep-merge per key; invalid =&gt; exit 78"]
     CFG -.tunes.-> RETR
     CFG -.tunes.-> INGEST
     CFG -.tunes.-> TICK

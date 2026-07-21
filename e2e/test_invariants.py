@@ -92,12 +92,17 @@ def test_identical_text_ingested_twice_is_one_node(project):
 
 @pytest.mark.xfail(
 	strict=True,
-	reason="ROADMAP item 1 multi-hop lead ('only 4/8 linked pairs were linked within 2 "
-	"hops'). Measured here 2026-07-21: 2/8 reach the top 5, and the same 2 reach it "
-	"with the links removed — an explicit `kern link` edge moves neither rank nor "
-	"score, to four decimals, on any of the 8 pairs. The edge is persisted (it prints "
-	"in `kern get`), so the miss is on the retrieval side, not ingest-side edge "
-	"creation as the lead assumed. Flips to a failure when that is fixed.",
+	reason="ROADMAP item 86. Of the two causes measured 2026-07-21, one is fixed and "
+	"one is open. Fixed: the beam threshold was `best_seed * decay`, comparing a "
+	"seed's pure query cosine (up to 1.0) against a neighbour score whose ceiling is "
+	"w.reason + w.edge = 0.30 — measured 0.2411 against a 0.2500 bar, so the walk was "
+	"structurally dead whenever a seed matched well. `frontier_best` now takes the bar "
+	"from the best score seen among neighbours. Open: `visited` allows one pop per "
+	"entity and `results` keeps the max, so a neighbour that is already a content hit "
+	"keeps its seed score and the edge adds nothing. Net effect today: 1 of 8 pairs "
+	"moves (rank 22 -> 21); the other 7 do not. Pooling the evidence instead moves all "
+	"8 but drops the exact-match probe from rank 1 to rank 3, so it is not the fix. "
+	"Flips to a failure when a walk can pay without outranking a direct match.",
 )
 def test_a_reason_edge_makes_its_neighbour_reachable(project):
 	"""'A graph, not a bag — recall can walk them.' Probing with A's own text puts

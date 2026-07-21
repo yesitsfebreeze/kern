@@ -47,9 +47,9 @@ The important detail, and one the README glosses: this fires **only for short qu
 
 ### Dense seeding — approximate nearest neighbours over two vector spaces
 
-`seed_with_important` (`src/retrieval/seed.rs:51`) reaches `search_all_unlocked` (`src/base/search.rs:57`), which runs the query against **two** indexes: the content-vector index and the GNN-vector index, then combines them in `merge_hits` (`src/base/search.rs:28`) at a fixed 0.4 content / 0.6 structure blend (`src/base/search.rs:25`).
+`seed_with_important` (`src/retrieval/seed.rs:51`) reaches `search_all_unlocked` (`src/base/search.rs:92`), which runs the query against **two** indexes: the content-vector index and the GNN-vector index, then combines them in `merge_hits` (`src/base/search.rs:63`) at a fixed 0.4 content / 0.6 structure blend (`src/base/search.rs:60-61`).
 
-When query options are active — a source, a kind, a confidence floor, a time window — the search switches to `search_all_filtered` (`src/base/search.rs:75`), which applies the predicate *during* the ANN traversal rather than after it. Post-filtering an unfiltered top-k is the classic filtered-ANN bug: ask for 15 and filter down to 2. The shared predicate lives in one place (`matches_keep`, `src/retrieval/seed.rs:77`) and is reused by the lexical seed and the post-filter so the three can never disagree.
+When query options are active — a source, a kind, a confidence floor, a time window — the search switches to `search_all_filtered` (`src/base/search.rs:110`), which applies the predicate *during* the ANN traversal rather than after it. Post-filtering an unfiltered top-k is the classic filtered-ANN bug: ask for 15 and filter down to 2. The shared predicate lives in one place (`matches_keep`, `src/retrieval/seed.rs:77`) and is reused by the lexical seed and the post-filter so the three can never disagree.
 
 - **Adds:** semantic recall — matches that share no words with the query.
 - **Costs:** two graph traversals per query; the 2026-07-16 hot-path profiling pass attributed roughly 40 µs of a 103 µs query to this stage (the bench doc has since been retired along with the saturated trace — see the measurement note below).
@@ -78,7 +78,7 @@ Two honest caveats. It is O(N) on every retrieve — at corpus scale it needs an
 
 `pagerank` (`src/retrieval/pagerank.rs:28`) runs a **personalized** PageRank: the teleport vector is the query's own dense and lexical seeds, weighted by their scores (`teleport_vector`, `src/retrieval/pagerank.rs:5`), damping 0.85, up to 25 iterations with early exit once the rank vector stops moving. Dangling mass is redistributed along the teleport vector rather than uniformly (`src/retrieval/pagerank.rs:58`), which is what keeps the personalization from washing out.
 
-This is what pure vector similarity structurally cannot do. Cosine distance asks "what looks like the query"; PageRank asks "what does the neighbourhood of things that look like the query keep pointing at". A well-cited hub two hops from every seed scores highly even if its own text matches nothing. The design rationale, including what was deliberately *not* built (DB-level authority, TrustRank seeding, Sybil defences), is in [PageRank for authority](../decisions/pagerank-authority.mdx).
+This is what pure vector similarity structurally cannot do. Cosine distance asks "what looks like the query"; PageRank asks "what does the neighbourhood of things that look like the query keep pointing at". A well-cited hub two hops from every seed earns rank mass even if its own text matches nothing — the unit tests pin that. Whether it reaches a *delivered* result is a separate question, and the one end-to-end measurement that exists says the graph-structure signals barely move the outcome: see the expansion callout below. The design rationale, including what was deliberately *not* built (DB-level authority, TrustRank seeding, Sybil defences), is in [PageRank for authority](../decisions/pagerank-authority.mdx).
 
 ### RRF fusion — combining lists whose scores mean different things
 
@@ -89,18 +89,42 @@ A BM25 score, a cosine similarity, and a PageRank mass are not comparable number
 
 ### Expansion — following the reasons
 
-The seeds are a set of points. `expand` (`src/retrieval/expand.rs:178`) makes them a subgraph: a best-first beam walk out along reason edges from every seed, up to `max_expansions` (500), pruning any neighbour scoring below `global_best * decay` (0.25). Each surviving path is materialized as a `PathChain` — the actual sequence of entities and the labelled edges between them — which is what later gets rendered into the answer prompt as *why* these facts belong together.
+The seeds are a set of points. `expand` (`src/retrieval/expand.rs:178`) makes them a subgraph: a best-first beam walk out along reason edges from every seed, up to `max_expansions` (500), pruning any neighbour scoring below `frontier_best * decay` (0.25), where `frontier_best` is the best score seen among *neighbours* rather than among seeds. Each surviving path is materialized as a `PathChain` — the actual sequence of entities and the labelled edges between them — which is what later gets rendered into the answer prompt as *why* these facts belong together.
 
-Neighbour scoring (`score_neighbor`, `src/retrieval/expand.rs:305`) is a weighted sum of three terms: the neighbour's own content similarity to the query, the *edge's* vector similarity to the query, and the edge's own confidence plus a log traversal boost. Mode weights come from `Weights::for_mode` (`src/retrieval/seed.rs:37`).
+Neighbour scoring (`score_neighbor`, `src/retrieval/expand.rs:315`) is a weighted sum of three terms: the neighbour's own content similarity to the query, the *edge's* vector similarity to the query, and the edge's own confidence plus a log traversal boost. Mode weights come from `Weights::for_mode` (`src/retrieval/seed.rs:37`).
 
-- **Adds:** multi-hop reach and explanation. A fact connected to the query only through an intermediate is unreachable by any top-k over vectors.
-- **Costs:** bounded work per query, but it is the stage that decides multi-hop quality — the hardest case the pipeline attempts, and the one no current measurement covers.
+- **Adds:** explanation. Each delivered result can be shown with the labelled edges that led to it rather than as a bare snippet.
+- **Costs:** bounded work per query.
+
+<Callout type="warn" title="A reason edge still cannot lift its neighbour into the results">
+Measured, not suspected. `e2e/test_invariants.py` ingests A and B, creates an
+A→B reason edge, and probes with text that matches A only — so the edge is the
+only thing that can surface B. Over 8 such pairs, the edge currently moves one
+of them, by one rank. The invariant stays a strict `xfail`.
+
+One of the two causes is closed. The beam threshold used to be `best_seed ×
+decay`, comparing a seed's pure query cosine (up to 1.0) against a neighbour
+score whose ceiling is `w.reason + w.edge = 0.30` for a neighbour the query does
+not match directly — measured at 0.2411 against a 0.2500 bar, so whenever a seed
+matched well the walk was structurally dead. `frontier_best`
+(`src/retrieval/expand.rs:199`) now takes the bar from the best score seen among
+*neighbours*, so the first hop off any seed is always explored.
+
+The open cause is that `visited` allows one pop per entity and `results` keeps
+the **max** per entity (`src/retrieval/expand.rs:189`), so an entity reached both
+by content seeding and across an edge keeps its seed score and the edge
+contributes nothing. Pooling the two instead moves all 8 pairs — and drops the
+exact-match probe from rank 1 to rank 3, which the recall suite caught. So:
+**no claim that traversal improves what is recalled is true today.** Item 86 in
+[`ROADMAP.md`](https://github.com/yesitsfebreeze/kern/blob/master/docs/oracle/ROADMAP.md)
+carries both findings.
+</Callout>
 
 ### Merge, boosts, and gravity
 
 `merge` (`src/retrieval/merge.rs:8`) pools seed and expansion scores per entity through a log-sum-exp accumulator, so an entity found by two independent routes earns roughly `+ln(2)`. The result is a magnitude, not a probability, and can exceed 1.0.
 
-`apply_boosts` (`src/retrieval/score.rs:79`) then folds in the non-similarity signals: the score is multiplied by the entity's confidence, plus a QBST access/recency term (`qbst`, `src/retrieval/score.rs:61` — log access count and an exponential recency decay, capped), plus a flat bonus for `Fact` entities. `apply_gravity` (`src/retrieval/gravity.rs:9`) adds a pull toward the kern tree's gravitons, taking the **max** over gravitons rather than the sum so overlapping attractors never double-count. Gravity is a routing-coherence signal by design, not a quality win: it costs one similarity comparison per graviton per query, and its effect on ranking quality is currently unmeasured.
+`apply_boosts` (`src/retrieval/score.rs:85`) then folds in the non-similarity signals: the score is multiplied by the entity's confidence, plus a QBST access/recency term (`qbst`, `src/retrieval/score.rs:64` — log access count and an exponential recency decay, capped), plus a flat bonus for `Fact` entities. `apply_gravity` (`src/retrieval/gravity.rs:9`) adds a pull toward the kern tree's gravitons, taking the **max** over gravitons rather than the sum so overlapping attractors never double-count. Gravity is a routing-coherence signal by design, not a quality win: it costs one similarity comparison per graviton per query, and its effect on ranking quality is currently unmeasured.
 
 ### Filtering, dedup, and MMR
 
@@ -109,7 +133,7 @@ Neighbour scoring (`score_neighbor`, `src/retrieval/expand.rs:305`) is a weighte
 `dedup_by_section` (`src/retrieval/diversify.rs:6`) collapses chunks of the same source section to their best representative. `mmr` (`src/retrieval/diversify.rs:46`) then does maximal marginal relevance over the pool: greedily pick the candidate maximizing `λ·sim(query) − (1−λ)·max sim(already picked)`.
 
 <Callout type="warn">
-`mmr_lambda` is the pipeline's sharpest quality lever. At the old default of 0.45, diversity outweighed relevance and MMR pushed legitimate near-duplicate cluster hits below rank 10. The default is now 0.75, chosen by design intent rather than by measurement: ingest-time dedup already removes true duplicates, so retrieval-time MMR does not need to sacrifice relevance to buy diversity. Nothing currently measures whether 0.75 is the right value — see the measurement note below.
+`mmr_lambda` is the pipeline's sharpest quality lever. At the old default of 0.45, diversity outweighed relevance and MMR pushed legitimate near-duplicate cluster hits below rank 10. The default is now 0.75, chosen by design intent rather than by measurement: ingest-time dedup already removes true duplicates, so retrieval-time MMR does not need to sacrifice relevance to buy diversity. Nothing sweeps it. The recall baseline below runs with this value, so a change to it is *detectable* as a move in that number — which is not the same as knowing 0.75 is right.
 </Callout>
 
 ### Rerank, synthesis, and cold backfill
@@ -118,7 +142,7 @@ Neighbour scoring (`score_neighbor`, `src/retrieval/expand.rs:305`) is a weighte
 
 `synthesize` (`src/retrieval/answer.rs:265`) builds the answer prompt from the path chains plus the top thoughts. Two abstention behaviours are worth knowing: the prompt instructs the model to reply with the exact `NO_ANSWER` string when the context does not contain the answer, and an empty context short-circuits to that string with no LLM call at all (`src/retrieval/answer.rs:282`) — cheaper and more reliable than asking a model to notice it has nothing.
 
-Finally, if the hot graph returned fewer than `k` results, the MCP query tool backfills from the cold tier (`src/mcp/tools_query.rs:251`), a bounded brute-force cosine scan over LMDB (`src/base/store.rs:515`). Those hits are flagged `cold:true` so callers can tell.
+Finally, if the hot graph returned fewer than `k` results, the MCP query tool backfills from the cold tier (`src/mcp/tools_query.rs:251`), a bounded brute-force cosine scan over LMDB (`src/base/store.rs:685`). Those hits are flagged `cold:true` so callers can tell. A cold row now carries the bi-temporal triple alongside the entity (`ColdRow`, `src/base/store.rs:170`), so an `as_of` filter is exact over a backfilled hit rather than treating it as valid at every instant.
 
 ### The query cache
 
@@ -154,20 +178,38 @@ That second vector is what the dense seed weights at 0.6. The effect is that two
 
 ## What this actually measures
 
-**No recorded retrieval baseline currently exists.** The synthetic workload
-trace and the LoCoMo eval were both deleted on 2026-07-20: the LoCoMo score
-collapsed ingest, retrieval and answering into one LLM-judged number dominated
-by the answerer (a grounded run with the whole conversation in the prompt and
-kern bypassed scored 0.187, versus 0.027 for kern on the same slice), and the
-synthetic trace had saturated at recall@10 1.0 — no longer a hard enough test
-to detect a regression. Numbers previously quoted here measured a pipeline
-whose dominant term was not retrieval, so they are withdrawn rather than
-restated. The replacement measures the retrieval layer alone (recall@k / MRR /
-NDCG against per-turn evidence labels, no LLM in the loop) and is not built
-yet; see the 2026-07-20 CHANGELOG entry.
+`e2e/` is the retrieval instrument. `e2e/test_recall.py` drives `kern query`
+over a corpus the test itself authors — so it knows the correct text for every
+probe — and scores recall@1, recall@5 and MRR by rank arithmetic over the
+binary's own stdout, with **no LLM anywhere in the scoring loop**. Recorded
+2026-07-21 and reproducible bit-for-bit: recall@1 **0.9583**, recall@5
+**1.0000**, MRR **0.9792**. Beside it, `e2e/test_invariants.py` asserts one
+property per `VISION.md` criterion; its first finding is the reason-edge
+result in the expansion section above.
+
+Two limits travel with that number, and it means nothing without both:
+
+- **The floors make it a regression detector, not a quality claim.** They sit
+  below the measured values on purpose. The suite can say kern got worse; it can
+  never say kern is good.
+- **The embedder is a feature-hashed bag of words** (`e2e/fake_llm.py`), chosen
+  so the number is identical on every machine. It therefore measures kern's
+  machinery over a fixed lexical signal, not a real embedding model's semantics.
+
+The earlier numbers stay withdrawn. The synthetic workload trace and the LoCoMo
+eval were both deleted on 2026-07-20: the LoCoMo score collapsed ingest,
+retrieval and answering into one LLM-judged number dominated by the answerer (a
+grounded run with the whole conversation in the prompt and kern bypassed scored
+0.187, versus 0.027 for kern on the same slice), and the synthetic trace had
+saturated at recall@10 1.0.
 
 <Callout type="warn">
-Until that replacement exists, kern makes **no quality claim of any kind** — not SOTA, not parity, not regression, not improvement. Latency claims from the e2e harness stand; ranking-quality claims do not. Judge-scored end-to-end figures are not retrieval figures either, and a strict judge is not comparable to a lenient one in either direction, so a published score from elsewhere is not a target to quote against. Never quote a retrieval number that did not come from a run.
+No number on this page is comparable to anything Zep, Mem0 or Letta publish —
+different corpus, different embedder, different scoring. kern makes **no quality
+claim of any kind**: not SOTA, not parity, not "better than". A judge-scored
+end-to-end figure is not a retrieval figure either, and a strict judge is not
+comparable to a lenient one in either direction. Never quote a retrieval number
+that did not come from a run.
 </Callout>
 
 ## Related

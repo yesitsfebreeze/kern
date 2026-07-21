@@ -2,9 +2,10 @@
 
 The notes in this directory are the design rationale behind kern's
 self-organizing and federated behavior — the models, proofs, and trade-off
-analyses that the implementation is built on. Several are referenced directly
-from source-code doc comments, so they double as the canonical "why" for the
-mechanisms they describe.
+analyses that the implementation is built on. No source file cites them. The
+site's [Decisions](../site/content/docs/decisions/index.mdx) section carries one
+page per note and is where a decision's current standing is written; these notes
+keep the reasoning that produced it.
 
 These are reference material, not a tutorial. For how to *use* kern, start with
 the [README](../../README.md) and the
@@ -13,8 +14,9 @@ for what it is and why it exists, read the [Vision](../oracle/VISION.md).
 
 Most notes are point-in-time studies: each opens with a status line saying what
 has shipped since, and code paths inside them may reference the older `crates/`
-workspace layout (everything now lives under `src/`). The decisions still stand
-as the rationale of record.
+workspace layout (everything now lives under `src/`). The bodies are left as
+written; where measurement has since contradicted a decision, the status line
+says so and the body does not.
 
 ## Self-organization
 
@@ -22,8 +24,10 @@ as the rationale of record.
   heat / decay / evict / cluster loop that keeps the hot graph small without
   manual gardening. Implemented by `tick::stigmergy`.
 - **[PageRank for authority](pagerank-authority.md)** — how graph centrality
-  weights retrieval (shipped as personalised PageRank at seed fusion), plus the
-  unbuilt federated-trust design.
+  was meant to weight retrieval. Personalised PageRank runs at seed fusion, but a
+  reason edge is measured to move ranking barely at all (1 of 8 pairs, by one
+  rank), so the weighting is close to unobserved; the federated-trust half is
+  unbuilt.
 - **[Bayesian belief](bayesian-belief.md)** — multi-observer truth convergence:
   how confidence updates as independent observations accumulate.
 - **[Wikipedia edit-convergence](wikipedia-edit-convergence.md)** — the
@@ -42,6 +46,13 @@ as the rationale of record.
   for the on-disk ANN index, now wired as the opt-in `VectorBackend::Disk`
   spill for the entity index (off by default; see `base::diskann` and
   `base::vector_backend`).
+
+## Runbooks
+
+- **[Running kern against vLLM](vllm.md)** — the one page here that is not a
+  design study: how a `[reason]` / `[answer]` / `[embed]` leg points at an
+  OpenAI-compatible server, and the WSL2 flags each of which clears one vLLM
+  startup failure.
 
 ## Planning
 

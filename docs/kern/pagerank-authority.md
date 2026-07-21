@@ -18,6 +18,23 @@ optional additive prior in retrieval scoring, never as the sole rank signal.
 > them as unbuilt work with a reference implementation in git history, not as
 > defences that were lost. For the current trust model see the
 > [Security](https://yesitsfebreeze.github.io/kern/concepts/security) page.
+>
+> **Measured 2026-07-21: the graph half of that fusion barely changes ranking.**
+> Across 8 pairs, creating a reason edge A→B moved neither B's rank nor its score
+> — identical to four decimals with the edge and without it. Two causes were
+> isolated; one is fixed (a beam threshold that compared the seed and neighbour
+> score scales against each other, so a well-matching seed pruned the whole walk),
+> and after it 1 of the 8 pairs moves, by one rank. The other 7 are the open cause:
+> a neighbour that is already a content hit keeps its seed score, because expansion
+> takes the max per entity rather than combining the two pieces of evidence. Recorded
+> as a strict xfail (`e2e/test_invariants.py`) and as item 86 in `ROADMAP.md`. The
+> edge is created and walkable; it still does not meaningfully reach ranking. One reason it cannot reach
+> the *score* is visible in the seed path: RRF settles which entities seed, then
+> every survivor is rescored by plain query cosine before re-entering the pipeline
+> (`src/retrieval/answer.rs:148-152`), so a PageRank list can only change
+> membership. Whether it changes membership under a new edge is not established.
+> Read the shipped personalised PageRank as wired and running, not as a retrieval
+> signal with a demonstrated effect — and read §6 below as an unvalidated design.
 > Code paths below reference the pre-1.0 `crates/` layout.
 
 ---

@@ -29,8 +29,10 @@ PAGE_DIRS = [
 REF = re.compile(r"`(src/[A-Za-z0-9_/.-]+\.rs)(?::(\d+)(?:-(\d+))?)?`")
 REPO_PATH = re.compile(
     r"`((?:docs|scripts|e2e|\.github|\.pi)/[A-Za-z0-9_/.-]+"
-    r"\.(?:md|mdx|py|toml|yml|yaml|sh|json|txt|lock))(?::\d+(?:-\d+)?)?`"
+    r"\.(?:md|mdx|py|toml|yml|yaml|sh|json|txt|lock))(?::(\d+)(?:-(\d+))?)?`"
 )
+# A bare `FILE.md:NNN` with no directory — how ROADMAP.md indexes into FEATURES.md.
+SIBLING_REF = re.compile(r"`([A-Z][A-Za-z0-9_.-]*\.mdx?):(\d+)(?:-(\d+))?`")
 LINK = re.compile(r"\]\((\.\.?/[^)\s#]+\.mdx?)(?:#[^)\s]*)?\)")
 SELF_URL = re.compile(
     r"https://(?:raw\.githubusercontent\.com/yesitsfebreeze/kern"
@@ -83,8 +85,30 @@ def check_page(page: Path, failures: list[str]) -> int:
                 )
         for m in REPO_PATH.finditer(text):
             total += 1
-            if not (ROOT / m.group(1)).is_file():
+            target = ROOT / m.group(1)
+            cited = m.group(3) or m.group(2)
+            if not target.is_file():
                 failures.append(f"{rel}:{lineno}: missing file {m.group(1)}")
+            elif cited and int(cited) > lines_of(target):
+                failures.append(
+                    f"{rel}:{lineno}: {m.group(1)}:{cited} beyond EOF "
+                    f"({lines_of(target)} lines)"
+                )
+        for m in SIBLING_REF.finditer(text):
+            total += 1
+            # Beside the citing page first, then the repo root — `README.md:159` in
+            # docs/oracle/ROADMAP.md means the top-level README.
+            target = page.parent / m.group(1)
+            if not target.is_file():
+                target = ROOT / m.group(1)
+            cited = m.group(3) or m.group(2)
+            if not target.is_file():
+                failures.append(f"{rel}:{lineno}: missing sibling {m.group(1)}")
+            elif int(cited) > lines_of(target):
+                failures.append(
+                    f"{rel}:{lineno}: {m.group(1)}:{cited} beyond EOF "
+                    f"({lines_of(target)} lines)"
+                )
         for m in LINK.finditer(text):
             total += 1
             if not (page.parent / m.group(1)).resolve().is_file():
@@ -116,10 +140,14 @@ def selftest() -> None:
         ("src/base/types.rs", "291", "296")
     ]
     assert REF.findall("src/base/merge.rs:20 unquoted") == []
-    assert REPO_PATH.findall("`docs/kern/vllm.md:17-20` and `scripts/docs_check.py`") == [
-        "docs/kern/vllm.md",
-        "scripts/docs_check.py",
+    assert [m[0] for m in REPO_PATH.findall(
+        "`docs/kern/vllm.md:17-20` and `scripts/docs_check.py`"
+    )] == ["docs/kern/vllm.md", "scripts/docs_check.py"]
+    assert SIBLING_REF.findall("see `FEATURES.md:733-736` and `ROADMAP.md:12`") == [
+        ("FEATURES.md", "733", "736"),
+        ("ROADMAP.md", "12", ""),
     ]
+    assert SIBLING_REF.findall("`FEATURES.md`") == [], "a bare name has no line to check"
     assert REPO_PATH.findall("`docs/site/out/`") == [], "a directory is not a citation"
     assert REPO_PATH.findall("`src/base/merge.rs`") == [], "src is REF's job"
     assert LINK.findall("[a](./federation.mdx) [b](../howto/mcp.mdx#gossip)") == [
