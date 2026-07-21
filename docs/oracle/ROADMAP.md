@@ -770,7 +770,7 @@ for reuse (`src/base/hnsw.rs:136-149`, scrub `:153`, alloc reuse `:109-125`),
 guarded by the test "deleted slots were recycled, arena did not grow" (`:755`). The cost is the
 scan, not the accumulation.
 
-### 28. GNN training is off the tick; the propagation itself still costs 79.7s at N=4096 `[lifecycle]`
+### 28. GNN training is off the tick and linear in edges; only the `gnn_train_refused` surface gap is left `[lifecycle]`
 
 ~~`TaskKind::GnnPropagate => do_gnn_propagate(...)` runs inline in `process_task`
 on the single tick loop, stalling large kerns.~~ **(closed 2026-07-21.)** The
@@ -814,18 +814,61 @@ re-inserted into `gnn_entity_idx` by the apply step, undoing the supersede
 removal. `apply_gnn_updates` now re-checks status at write time
 (`src/tick/gnn_propagate.rs:155`).
 
-Remaining, and the reason this item is closed rather than deleted: **the cost
-itself is untouched.** A propagation still takes 79.7s at N=4096; it just no
-longer takes maintenance with it. The cost is quadratic in entities because
-`normalized_adjacency` materialises a dense N x N `Tensor`
-(`src/gnn/graph.rs:133-167`) which every `try_forward_graph` then multiplies
-(`src/gnn/gcn.rs:44-45`) — while the real graph is sparse, since ingest gives
-each entity at most one similarity edge (`add_similarity_reason`,
-`src/base/accept.rs:378`). A sparse adjacency would make training linear in
-edges instead of quadratic in nodes, but it changes the numerics the ranking
-reads, so it is its own item with its own recall gate, not a rider on this one.
-Also unaddressed: `gnn_train_refused` reaches MCP health only — `kern status`
-and the RPC `HealthRes` do not carry it.
+~~Remaining: **the cost itself is untouched.** A propagation still takes 79.7s at
+N=4096.~~ **(closed 2026-07-22.)** The adjacency is now stored as its nonzeros
+(`normalized_adjacency_sparse`, `src/gnn/graph.rs:178`; `SparseMatrix`,
+`src/gnn/sparse.rs:14`) and `try_forward_graph` multiplies that
+(`src/gnn/gcn.rs:45`). One propagation, same instrument as before
+(`gnn_train_scale`), both arms run back to back in one session so they saw the
+same machine: **5.4s → 3.9s at N=1024, 20.5s → 7.4s at 2048, 73.4s → 11.6s at
+4096** — 6.3x at the size the item was written around. The resident adjacency
+falls from 134 MB to 0.33 MB.
+
+Those were taken under load average ~9 on 8 cores, and the ratio is
+load-dependent in a way worth writing down, because the two arms no longer have
+the same bottleneck. Dense is bandwidth-bound on a 134 MB matrix and barely
+notices contention — its 73.4s here against 79.7s recorded on a quieter machine.
+Sparse is CPU-bound on the linear layers and does notice: the same after-numbers
+on an idle machine are **1.6s / 3.3s / 6.6s**, i.e. 12.1x at N=4096. The 6.3x is
+the honest floor; 12.1x is what an unloaded daemon gets.
+
+The item's own diagnosis was directionally right and specifically wrong, which
+is why it was measured first (`gnn_cost_breakdown`, `tests/gnn_scale.rs`). It
+blamed *materialising* the dense matrix. Materialising was the **smallest** of
+the three dense costs at N=4096: 11.1% of the propagation, against 65.5% for the
+multiply and 12.8% for the per-backward `transpose` the item never mentions.
+Together 89.4%, so the remedy was right; had anyone optimised only the named
+term, 79.7s would have become 71s.
+
+**Bit-identical, and that is the recall gate.** The aggregation is the only
+computation that changed, and `sparse_and_dense_products_are_bit_identical`
+(`src/gnn/sparse.rs`) asserts over `to_bits()`, not a tolerance, that the sparse
+and dense products agree exactly — in both orientations, at widths 1/5/17/384,
+on a degree-2 ring, a complete graph and a graph with a zero-degree sink. Two
+properties carry it: the entry is the same `1.0 / (sqrt(di) * sqrt(dj))`
+expression over a degree the dense form reaches by summing that many exact
+`1.0`s, and columns ascend inside a row, so the sparse product visits the same
+nonzeros in the same order the dense one does. The terms it skips are exactly
+the stored zeros, and `x + 0.0 * b == x` for a `+0.0`-seeded accumulator and
+finite `b` — item 26's argument, same shape. Identical inputs through identical
+downstream code give identical outputs, so `gnn_vector` is unchanged to the last
+bit and ranking cannot move.
+
+The e2e recall harness is green and unchanged (0.9306 / 0.9722 / 0.9471 before
+and after) but is **not** evidence here: its corpus is 36 facts and
+`min_thoughts` is 128, so no propagation runs in it at all. Worth knowing that
+the recall gate the previous author asked for does not exist at that corpus size.
+
+Also unaddressed, and now the whole of this item: `gnn_train_refused` reaches
+MCP health only — `kern status` and the RPC `HealthRes` do not carry it.
+
+Two consequences left deliberately unbuilt. The dense `normalized_adjacency`
+(`src/gnn/graph.rs:134`) is no longer on any production path; it is kept as the
+reference the equivalence test compares against, because a reference that lives
+in the test can drift from the thing that shipped and this one cannot. And the
+trainer is one `std::thread` rather than a pool specifically because "each
+training allocates a dense `num_entities^2` adjacency — 134MB at N=4096" — that
+reason is now false, so the concurrency choice is re-openable on its own merits.
 
 ### 29. Spilling all three indexes was measured and refused; it costs 122 MB more `[retrieval]`
 
@@ -1710,6 +1753,30 @@ copied forward unexamined.
 What survives: the by-name discipline. It is cheap, it catches mode 1
 independently of the build layout, and it is what confirmed both cycles that
 found this.
+
+### 97. The e2e harness cannot exercise the GNN at all `[eval]`
+
+`DEFAULT_MIN_THOUGHTS` is 128 (`src/gnn/propagate.rs:16`) and the recall corpus
+is 36 facts (`e2e/test_recall.py:199`), so **no GNN propagation runs in `e2e/`,
+in any column.** Every "recall unchanged" result reported for a GNN change to
+date is a true green about nothing: the code under test never executed.
+
+Found by the item 28 slice, which had been given a recall gate as its safety bar
+and discovered the gate was vacuous. That change shipped on a bit-identity proof
+instead — the right call, and the reason the gap surfaced at all rather than
+being papered over by a green suite.
+
+What this costs: `gnn_vector` feeds retrieval, so a GNN change that alters
+ranking has no automated detector. The bit-identity standard covers changes that
+claim to be exact; it says nothing about a change that intends to move ranking,
+which is precisely when a recall gate would matter.
+
+Two closures, neither obviously right. Lower `min_thoughts` in an e2e-only
+config so the existing corpus trains — cheap, but it measures a 36-node graph,
+which is not the regime any real propagation runs in. Or grow the corpus past
+128 — honest, but it lengthens every e2e run and the recall floors would need
+re-deriving against a corpus nobody has measured yet. The second is probably
+right and is not free.
 
 ### 92. Tests that race a backward-stepping `CLOCK_REALTIME` — closed 2026-07-22 `[eval]`
 

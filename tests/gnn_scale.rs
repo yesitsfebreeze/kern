@@ -5,9 +5,10 @@
 //
 //   cargo test --release --test gnn_scale -- --ignored --nocapture
 //
-// Two questions, one test each:
+// Three questions, one test each:
 //   1. what does one `GnnPropagate` cost as the kern grows (`gnn_train_scale`)
-//   2. what waits behind it on the single tick loop (`tick_head_of_line_delay`)
+//   2. which part of it is the cost (`gnn_cost_breakdown`)
+//   3. what waits behind it on the single tick loop (`tick_head_of_line_delay`)
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -43,8 +44,9 @@ fn dense_vec(seed: usize) -> Vec<f32> {
 
 // Ingest gives each accepted entity at most one similarity edge to its top-1
 // neighbour (`add_similarity_reason`, `src/base/accept.rs:378-411`), so the
-// real graph is sparse: degree ~2. `deg` is the knob because the dense N x N
-// adjacency this code builds is insensitive to it — that is the finding.
+// real graph is sparse: degree ~2. `deg` is the knob because the adjacency used
+// to be a dense N x N matrix insensitive to it; since 2026-07-22 it is stored as
+// its nonzeros, so `deg` is now what the propagation actually scales in.
 fn kern_with(n: usize, deg: usize) -> Kern {
 	let mut k = Kern::new("kx", "");
 	k.graviton_text = "named".into();
@@ -120,11 +122,89 @@ fn gnn_train_scale() {
 					.count()
 			})
 			.unwrap_or(0);
+		let adj_mb = {
+			let k = &g.read().kerns["kx"];
+			let snap = kern::tick::gnn_propagate::build_gnn_snapshot(k, &cfg);
+			snap
+				.map(|s| s.graph.normalized_adjacency_sparse().nnz())
+				.unwrap_or(0) as f64
+				* 16.0
+				/ 1.0e6
+		};
 		println!(
 			"N={n:<6} deg=2  propagate={ms:10.1}ms  ({:6.2}s)  updated={updated}  \
-			 adjacency={:.1}MB",
+			 adjacency={adj_mb:.2}MB sparse (dense would be {:.1}MB)",
 			ms / 1000.0,
 			(n * n * 8) as f64 / 1.0e6
+		);
+	}
+}
+
+// Where the propagation's time goes, dense against sparse. The item blames
+// `normalized_adjacency` *materialising* a dense N x N Tensor, but materialising,
+// multiplying and transposing are three different costs and only one of them can
+// be the dominant term. Both adjacency forms are timed per call and attributed by
+// the call counts the code fixes: `train_epochs + 1` forwards x 2 GCN layers, and
+// `train_epochs` backwards x 2. `full` runs the shipping path.
+#[test]
+#[ignore = "minutes in release; run explicitly with --ignored"]
+fn gnn_cost_breakdown() {
+	let cfg = GnnConfig::defaults();
+	let hidden = (DIM / 2).clamp(16, 256);
+	let e = cfg.train_epochs as f64;
+	// forwards: (E+1) x [layer1 wide, layer2 narrow]; backwards: E x the same two.
+	let builds = 2.0 * (e + 1.0);
+	let matmuls = (e + 1.0) + e;
+	let transposes = 2.0 * e;
+
+	for n in [1024usize, 2048, 4096] {
+		let k = kern_with(n, 2);
+		let snap = kern::tick::gnn_propagate::build_gnn_snapshot(&k, &cfg).expect("snapshot builds");
+		let narrow = kern::gnn::tensor::Tensor::zeros(n, hidden);
+
+		let t = Instant::now();
+		let dense = snap.graph.normalized_adjacency();
+		let d_build = t.elapsed().as_secs_f64() * 1000.0;
+		let t = Instant::now();
+		let _ = dense.matmul(&snap.features).unwrap();
+		let _ = dense.matmul(&narrow).unwrap();
+		let d_mm = t.elapsed().as_secs_f64() * 1000.0;
+		let t = Instant::now();
+		let _ = dense.transpose();
+		let d_tr = t.elapsed().as_secs_f64() * 1000.0;
+		drop(dense);
+
+		let t = Instant::now();
+		let sparse = snap.graph.normalized_adjacency_sparse();
+		let s_build = t.elapsed().as_secs_f64() * 1000.0;
+		let t = Instant::now();
+		let _ = sparse.matmul(&snap.features).unwrap();
+		let _ = sparse.matmul(&narrow).unwrap();
+		let s_mm = t.elapsed().as_secs_f64() * 1000.0;
+		let t = Instant::now();
+		let _ = sparse.transpose();
+		let s_tr = t.elapsed().as_secs_f64() * 1000.0;
+
+		let d_total = d_build * builds + d_mm * matmuls + d_tr * transposes;
+		let s_total = s_build * builds + s_mm * matmuls + s_tr * transposes;
+
+		let t = Instant::now();
+		let full = kern::gnn::propagate::run_learned_propagation(&snap, &cfg).expect("propagation");
+		let full_ms = t.elapsed().as_secs_f64() * 1000.0;
+		assert!(!full.updates.is_empty());
+
+		println!(
+			"N={n:<6} edges={:<7} nnz={:<8} full={full_ms:10.1}ms  \
+			 non_adjacency={:.1}ms\n  \
+			 build      dense 1x{d_build:8.2}ms  sparse 1x{s_build:8.3}ms   x{builds:.0}\n  \
+			 matmul     dense 1x{d_mm:8.2}ms  sparse 1x{s_mm:8.3}ms   x{matmuls:.0}\n  \
+			 transpose  dense 1x{d_tr:8.2}ms  sparse 1x{s_tr:8.3}ms   x{transposes:.0}\n  \
+			 ATTRIBUTED dense  {d_total:10.1}ms  sparse  {s_total:9.1}ms   \
+			 ({:.1}% of a dense propagation was adjacency)",
+			snap.graph.edges.len(),
+			sparse.nnz(),
+			full_ms - s_total,
+			100.0 * d_total / (full_ms - s_total + d_total),
 		);
 	}
 }

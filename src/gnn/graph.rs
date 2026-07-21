@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::gnn::sparse::SparseMatrix;
 use crate::gnn::tensor::Tensor;
 use rayon::prelude::*;
 
@@ -164,6 +165,42 @@ impl Graph {
 			rows: n,
 			cols: n,
 		}
+	}
+
+	/// The same matrix as [`Graph::normalized_adjacency`], stored as its nonzeros.
+	///
+	/// Bit-identical to the dense form by construction: degree is the row's
+	/// distinct-target count, which the dense version reaches by summing that many
+	/// exact `1.0`s, and the entry is the same `1.0 / (sqrt(di) * sqrt(dj))`
+	/// expression. Entries the dense version zeroes — a target whose own degree is
+	/// zero — are dropped rather than stored, which the dense product treats as the
+	/// `+0.0` term it is.
+	pub fn normalized_adjacency_sparse(&self) -> SparseMatrix {
+		let n = self.nodes.len();
+		let mut targets: Vec<Vec<usize>> = vec![Vec::new(); n];
+		for e in &self.edges {
+			targets[self.node_idx[&e.source]].push(self.node_idx[&e.target]);
+		}
+		for t in &mut targets {
+			t.sort_unstable();
+			t.dedup();
+		}
+		let deg: Vec<f64> = targets.iter().map(|t| t.len() as f64).collect();
+		let per_row: Vec<Vec<(usize, f64)>> = targets
+			.par_iter()
+			.enumerate()
+			.map(|(i, t)| {
+				let di = deg[i];
+				if di <= 0.0 {
+					return Vec::new();
+				}
+				t.iter()
+					.filter(|&&j| deg[j] > 0.0)
+					.map(|&j| (j, 1.0 / (di.sqrt() * deg[j].sqrt())))
+					.collect()
+			})
+			.collect();
+		SparseMatrix::from_rows(n, n, per_row)
 	}
 }
 

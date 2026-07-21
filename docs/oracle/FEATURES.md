@@ -542,11 +542,11 @@ Trained per-kern on the tick.
 
 **How.**
 
-- **Graph** (`src/gnn/graph.rs`) — `add_node` (`:38`) / `add_edge` (`:50`) /
-  `add_self_loops` (`:110`) / `normalized_adjacency` (`:133`, symmetric
-  normalized adjacency matrix as a `Tensor`), `feature_matrix` (`:82`).
+- **Graph** (`src/gnn/graph.rs`) — `add_node` (`:39`) / `add_edge` (`:51`) /
+  `add_self_loops` (`:111`) / `feature_matrix` (`:83`) / the symmetric normalized
+  adjacency, sparse (`:178`, what trains) and dense (`:134`, its reference).
 - **Layers** — `LinearLayer` (`src/gnn/layer.rs:17`), `GCNLayer`
-  (`src/gnn/gcn.rs:9`: linear + optional `LayerNorm` + `Activation`),
+  (`src/gnn/gcn.rs:10`: linear + optional `LayerNorm` + `Activation`),
   `LayerNorm` (`src/gnn/norm.rs:5`). No dropout ships.
   `Activation` (`src/gnn/activation.rs:27`) is exactly two variants — `Relu` and
   `Sigmoid` — each with its derivative. Nothing else is implemented.
@@ -582,12 +582,12 @@ Trained per-kern on the tick.
   versioned `WEIGHT_FILE_VERSION=1` with typed `PersistError` variants for
   version, parameter-count and per-parameter shape mismatch. There is no
   separate weight *file* API — the blob rides the kern.
-- **Tensor** (`src/gnn/tensor.rs`) — own 2D tensor + matmul.
+- **Tensor** (`src/gnn/tensor.rs`) — own 2D tensor + matmul. `SparseMatrix` (`src/gnn/sparse.rs:14`) is the CSR counterpart the GCN aggregation runs on; its columns ascend inside a row, so `matmul` (`:53`) and `transpose` (`:84`) visit the same nonzeros in the same order the dense product does and the swap is bit-identical rather than merely close.
 
-**Where.** `src/gnn/*` (2450 LoC, 13 files). Driven by
+**Where.** `src/gnn/*` (2766 LoC, 14 files). Driven by
 `tick::gnn_propagate::do_gnn_propagate`.
 
-**Gaps.** Training is quadratic in a kern's entities — 79.7s at 4096 (`tests/gnn_scale.rs`); off the tick since 2026-07-21 (`src/tick/trainer.rs`). No GPU.
+**Gaps.** Training is linear in edges since 2026-07-22 — 73.4s → 11.6s at 4096 measured back to back under load, 6.6s idle (`tests/gnn_scale.rs`); off the tick since 2026-07-21 (`src/tick/trainer.rs`). No GPU.
 Weights are per-kern, not shared across the tree. Link prediction only — no
 node-classification objective. *Corrected 2026-07-21:* a repeatedly failing
 propagation does **not** re-enqueue every tick. `GnnPropagate` is enqueued only
