@@ -188,7 +188,15 @@ pub fn expand<'a>(
 	let mut visited: HashSet<u32> = HashSet::new();
 	let mut results: HashMap<u32, f64> = HashMap::new();
 	let mut chains: Vec<PathChain> = Vec::new();
-	let mut global_best: f64 = 0.0;
+	// Best score SEEN AMONG NEIGHBOURS, never among seeds. Seed scores are a pure
+	// query cosine (up to 1.0); a neighbour's is `w.content*cos + w.reason*cos +
+	// w.edge*edge`, so with the default weights a neighbour the query does not
+	// match directly cannot exceed w.reason + w.edge = 0.30. Pruning it against
+	// `best_seed * decay` = 0.25 compared two different scales and killed the walk
+	// whenever a seed matched well — which is the common case. Measured: a linked
+	// pair scored 0.2411 against a 0.2500 threshold, so traversal contributed
+	// nothing and linked/unlinked corpora ranked identically.
+	let mut frontier_best: f64 = 0.0;
 
 	for s in seeds {
 		let ent = interner.intern(&s.entity_id);
@@ -226,10 +234,7 @@ pub fn expand<'a>(
 			*entry = item.score;
 		}
 
-		if item.score > global_best {
-			global_best = item.score;
-		}
-		let threshold = global_best * decay;
+		let threshold = frontier_best * decay;
 
 		if arena[item.chain as usize].parent != NO_PARENT {
 			chains.push(PathChain {
@@ -277,6 +282,11 @@ pub fn expand<'a>(
 			let score = score_neighbor(query_vec, neighbor, reason, w, refine_tw, refine_cap);
 			if score < threshold {
 				continue;
+			}
+			// Only after it survives, so the first neighbour off any seed is always
+			// explored and the bar is set by the frontier rather than by the seeds.
+			if score > frontier_best {
+				frontier_best = score;
 			}
 			let chain = arena.len() as u32;
 			arena.push(ChainNode {
@@ -458,4 +468,44 @@ mod tests {
 			"a multi-hop chain (entity, reason, entity) is recorded"
 		);
 	}
+	#[test]
+	fn a_strong_seed_no_longer_prunes_the_walk_off_it() {
+		// The seed scale (pure query cosine, up to 1.0) and the neighbour scale
+		// (0.70*content + 0.15*reason + 0.15*edge, so at most 0.30 for a neighbour
+		// the query does not match) are different scales. Thresholding one against
+		// the other killed traversal whenever a seed matched well.
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("kx", "");
+		k.entities.insert("a".into(), ent("a", vec![1.0, 0.0]));
+		// Orthogonal to the query: reachable only across the edge.
+		k.entities.insert("b".into(), ent("b", vec![0.0, 1.0]));
+		let mut r = edge("a", "b", 0.9);
+		r.vector = vec![0.7, 0.7];
+		add_reason(&mut k, r);
+		g.kerns.insert("kx".into(), k);
+
+		let cfg = RetrievalConfig::default();
+		let seeds = [EntityHit {
+			entity_id: "a".into(),
+			score: 1.0,
+		}];
+		let w = Weights {
+			content: 0.70,
+			reason: 0.15,
+			edge: 0.15,
+		};
+		let res = expand(&g, &cfg, &[1.0, 0.0], &seeds, w);
+
+		let ids: HashSet<&str> = res.scored.iter().map(|s| s.entity.id.as_str()).collect();
+		assert!(
+			ids.contains("b"),
+			"a neighbour off a perfectly-matching seed must still be walked; \
+			 got {ids:?}"
+		);
+		assert!(
+			!res.chains.is_empty(),
+			"and the walk must be recorded as a chain"
+		);
+	}
+
 }
