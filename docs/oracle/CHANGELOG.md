@@ -22,6 +22,27 @@
   acceptable, off-topic-in-generic is preserved, and the retrieval eval
   remains the instrument that will judge whether routing quality matters.
 
+- 2026-07-21 — Roadmap item 37, its cheapest half: the gossip heartbeat stops
+  deep-cloning the whole corpus to send 32 rows. `start_entity_sync` cloned every
+  local entity, sorted the lot, and truncated — O(N) clones plus O(N log N) per
+  heartbeat, under the graph read lock, for a payload of fixed size. `hottest_local`
+  selects over references and clones only the winners: linear, using the same total
+  comparator, so the chosen set and its order are unchanged.
+
+  The batch size stays hard-coded at 32 and is now labelled as such rather than
+  read as tuned. With no divergence estimate there is nothing to tune it against,
+  and batch size belongs to the anti-entropy question (item 36).
+
+  Writing the helper introduced a latent panic — `select_nth_unstable_by(n - 1)`
+  underflows at `n == 0`, unreachable at the shipped batch size but not a thing to
+  leave in a general helper. Guarded, with a test.
+
+  The rest of item 37 is untouched and still listed: no per-peer rate limit, no
+  divergence field, and the write-lock starvation from the four `all_ids()` loops
+  in `handle_crdt_delta`.
+
+  **Decided by:** fix-the-root.
+
 - 2026-07-21 — Roadmap item 27, second of its four costs: `HnswIndex::delete`
   stops scanning the whole arena per victim. It scrubbed inbound edges by walking
   every node and every layer, once per delete, so a GC sweep was

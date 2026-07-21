@@ -147,6 +147,38 @@ pub fn start_announce(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 	});
 }
 
+// Rows per heartbeat. Hard-coded rather than tuned: with no divergence estimate
+// there is nothing to tune it against, and batch size is part of the anti-entropy
+// question in `ROADMAP.md`, not a knob to guess at here.
+const ENTITY_SYNC_BATCH: usize = 32;
+
+// Select the hottest N, then clone only those. The previous version deep-cloned
+// EVERY local entity and sorted the lot to keep 32 — O(N) clones plus O(N log N),
+// every heartbeat, while holding the graph read lock, for a payload of fixed size.
+// References cost a pointer each; `select_nth_unstable_by` is linear and uses the
+// same total comparator as the old sort, so the chosen set and its order are
+// unchanged.
+fn hottest_local(g: &GraphGnn, n: usize) -> Vec<crate::base::types::Entity> {
+	let mut refs: Vec<&crate::base::types::Entity> = g
+		.kerns
+		.iter()
+		.filter(|(kid, _)| !crate::base::merge::is_remote_kern_id(kid))
+		.flat_map(|(_, k)| k.entities.values())
+		.collect();
+	let by_heat = |a: &&crate::base::types::Entity, b: &&crate::base::types::Entity| {
+		crate::base::util::cmp_rank(a.heat as f64, &a.id, b.heat as f64, &b.id)
+	};
+	if n == 0 {
+		return Vec::new();
+	}
+	if refs.len() > n {
+		refs.select_nth_unstable_by(n - 1, by_heat);
+		refs.truncate(n);
+	}
+	refs.sort_by(by_heat);
+	refs.into_iter().cloned().collect()
+}
+
 pub fn start_entity_sync(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 	let mut stop = node.stop_rx.clone();
 	tokio::spawn(async move {
@@ -156,17 +188,10 @@ pub fn start_entity_sync(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 				_ = interval.tick() => {
 					let payload = {
 						let g = graph.read();
-						let mut entities: Vec<crate::base::types::Entity> = g
-							.kerns
-							.iter()
-							.filter(|(kid, _)| !kid.starts_with("remote-"))
-							.flat_map(|(_, k)| k.entities.values().cloned())
-							.collect();
+						let entities = hottest_local(&g, ENTITY_SYNC_BATCH);
 						if entities.is_empty() {
 							None
 						} else {
-							entities.sort_by(|a, b| crate::base::util::cmp_rank(a.heat as f64, &a.id, b.heat as f64, &b.id));
-							entities.truncate(32);
 							Some(EntitySyncPayload {
 								network_id: g.network_id.clone(),
 								kern_id: g.root.id.clone(),
@@ -1025,6 +1050,76 @@ mod tests {
 		assert!(
 			!ids.iter().any(|k| k == &g.root.id),
 			"least of all the root kern"
+		);
+	}
+	#[test]
+	fn hottest_local_picks_the_top_n_and_skips_remote_kerns() {
+		use crate::base::types::{Entity, Kern};
+		let mut g = GraphGnn::new();
+		let local = g.root.id.clone();
+		{
+			let k = g.kerns.get_mut(&local).expect("root");
+			for i in 0..10u32 {
+				k.entities.insert(
+					format!("e{i}"),
+					Entity {
+						id: format!("e{i}"),
+						heat: i as f32,
+						..Default::default()
+					},
+				);
+			}
+		}
+		let phantom = "remote-netA-k1";
+		g.register(Kern::new(phantom, &local));
+		if let Some(k) = g.kerns.get_mut(phantom) {
+			k.entities.insert(
+				"hot-remote".into(),
+				Entity {
+					id: "hot-remote".into(),
+					heat: 999.0,
+					..Default::default()
+				},
+			);
+		}
+
+		let got = hottest_local(&g, 3);
+
+		assert_eq!(
+			got.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+			vec!["e9", "e8", "e7"],
+			"hottest first"
+		);
+		assert!(
+			!got.iter().any(|e| e.id == "hot-remote"),
+			"a peer's row must never be gossiped back out as ours, however hot"
+		);
+	}
+
+	#[test]
+	fn hottest_local_returns_everything_when_under_the_batch() {
+		use crate::base::types::Entity;
+		let mut g = GraphGnn::new();
+		let local = g.root.id.clone();
+		{
+			let k = g.kerns.get_mut(&local).expect("root");
+			for i in 0..2u32 {
+				k.entities.insert(
+					format!("e{i}"),
+					Entity {
+						id: format!("e{i}"),
+						heat: i as f32,
+						..Default::default()
+					},
+				);
+			}
+		}
+		// n - 1 would underflow select_nth if the guard were missing.
+		assert_eq!(hottest_local(&g, 32).len(), 2);
+		assert!(hottest_local(&GraphGnn::new(), 32).is_empty());
+		assert!(
+			hottest_local(&g, 0).is_empty(),
+			"a zero batch must return nothing, not underflow select_nth"
 		);
 	}
 }

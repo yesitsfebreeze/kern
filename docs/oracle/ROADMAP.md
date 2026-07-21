@@ -382,11 +382,12 @@ No per-peer rate limit anywhere; `HealthStats` has no divergence field
 once per inbound delta, unlimited — a cheap remote write-lock-starvation vector
 independent of the local-row mutation in item 13.
 
-Beside it: `start_entity_sync` clones the **entire local corpus** every heartbeat
-to send 32 rows — `.flat_map(|(_, k)| k.entities.values().cloned())` then sort
-then `truncate(32)`, under the read lock (`src/gossip/handler.rs:155-169`). O(N)
-allocations plus O(N log N) sort per heartbeat, scaling with corpus size for a
-fixed payload.
+~~Beside it: `start_entity_sync` clones the entire local corpus every
+heartbeat~~ **Closed 2026-07-21.** `hottest_local` selects over references and
+deep-clones only the winners — linear, with the same comparator and therefore the
+same chosen set. The rest of this item (per-peer rate limits, a divergence field
+on `HealthStats`, and the write-lock starvation from the four `all_ids()` loops in
+`handle_crdt_delta`) is still open.
 
 (Remote heat is no longer pinnable: entry to a `remote-*` kern strips heat,
 access counts and confidence to neutral — `src/base/merge.rs:20`, applied `:139`.
