@@ -2,6 +2,38 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — a flake fix arrived in the MAIN checkout, not a worktree, and
+  `cycle.sh reap` refused to run because of it — correctly, and that refusal is
+  the reason this is a note rather than a silent clobber. Three cycles were live
+  at the time; reaping into a dirty tree would have mixed an unattributed change
+  into someone else's merge.
+
+  The change itself is good and is kept.
+  `the_poll_loop_resolves_its_deadline_per_pass_not_once_at_startup` slept two
+  seconds on the monotonic clock and compared against `valid_until`, an absolute
+  `SystemTime`. It now waits on the wall clock and restarts its marker if the
+  clock steps backwards, with a thirty-second monotonic cap so a stopped clock
+  fails loudly instead of hanging.
+
+  The environmental finding is worth more than the fix: **this box steps
+  `CLOCK_REALTIME` backwards roughly 2.8 s every 30 s.** That is almost certainly
+  the mechanism behind ROADMAP item 92 — `e2e/test_retention.py` failing
+  intermittently under load, which three observers could not reproduce on demand
+  and which was filed with deliberately conflicting evidence. Item 92 guessed
+  "wall-clock lag under load on WSL2". It was not lag; it is the clock going
+  backwards. Any test comparing a monotonic sleep against a `SystemTime` deadline
+  on this host is a coin flip, and there are others.
+
+  What is not fine is the delivery. A writer outside the worktrees is invisible
+  to the claim ledger, so two of today's collisions and now this all share one
+  cause: the isolation only binds writers that go through it. The reap gate
+  caught this one because a dirty tree is loud. A change committed straight to
+  master would not have been.
+
+  Decided by: verify-before-claiming — the change was verified green and kept on
+  its merits, and the way it arrived is recorded separately from whether it was
+  right.
+
 - 2026-07-22 — three ROADMAP headings still named defects that had been closed,
   and the heading is the index. Items 28, 29 and 95 all carried struck-through
   bodies marked closed while their titles read "GNN training runs synchronously
