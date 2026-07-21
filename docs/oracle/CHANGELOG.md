@@ -2,6 +2,37 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — verification pass over the standalone-lock commit (`c375c5e`).
+  The code and the tests hold: `just check` clean, 826/826 nextest with the
+  three new `standalone_tests` among them, doctests clean, 16 passed / 4 skipped
+  e2e with recall@1 0.9306, recall@5 0.9722, MRR 0.9471 — bit-identical to the
+  0.9306 / 0.9722 / 0.9471 item 86 recorded as the current master baseline, and
+  above every floor (0.9000 / 0.9500 / 0.9200), 0 unretrieved.
+  `just docs-check` green on 579 references.
+
+  Two doc claims did not hold and were corrected. **`FEATURES.md` §23 item 5**
+  closed with "Open as `ROADMAP.md` item 9, now reduced to read-side staleness"
+  two sentences after listing `ingest`/`link` and `intake drain` as also open —
+  the paragraph contradicted itself, and the shorter claim is the one a reader
+  keeps. It now names all three. **`ROADMAP.md` item 9** said the three
+  remaining direct writers are "one-shot, guarded by `save_graph_guarded`, so
+  they lose a write rather than a whole graph". Two of the three are:
+  `cmd_ingest` and `intake drain`'s `flush` both retry through
+  `persist::flush_guarded`. `cmd_link` does not — it calls the unguarded
+  `save_graph` (`src/commands/graph_ops.rs:195` -> `persist::save_all` ->
+  `Store::save_all_kerns`), which writes the whole kern map with no epoch check.
+  So a `kern link` racing the daemon still clobbers, and the item now says so
+  and flags it as the one piece of item 9 that needs neither auth nor a new
+  tool. The tradeoff paragraph above ("`save_graph_guarded` bounds a one-shot to
+  losing a write") is left standing as written — it is true of the guard, and
+  rewriting a landed entry hides that the exception was found later, not known
+  at the time.
+
+  **Decided by:** verify-before-claiming. The claim checked was the prose
+  against the call graph rather than against the neighbouring prose, which is
+  the only way "guarded" gets caught: the two commands anyone would spot-check
+  are guarded, and the third is the one that reads like it must be.
+
 - 2026-07-21 — item 9's last **long-lived** second writer is closed: `kern mcp`'s
   standalone fallback claims the writer lock before it reads the graph, and does
   not boot beside a holder. The route landed earlier today could not reach this

@@ -96,11 +96,20 @@ gave one that silently overwrote the other's graph. Availability was never the
 thing at risk.
 
 Three things remain, and the title names them. `ingest` and `link` (blocked on
-item 24) and `intake drain` (needs a tool first) still write the store
-directly — one-shot, guarded by `save_graph_guarded`, so they lose a write
-rather than a whole graph. And the read-only commands (`get`, `list`, `query`,
-`search`) still load from disk and can report older than live state: the same
-defect one step further down, a stale read rather than a lost write.
+item 24) and `intake drain` (needs a tool first) still write the store directly.
+They are one-shot, so the exposure is a lost write rather than a lost graph —
+but only two of the three are guarded, and the difference matters. `cmd_ingest`
+(`src/commands/ingest_cmd.rs`) and `intake drain`'s `flush`
+(`src/commands/intake_cmd.rs`) retry through `persist::flush_guarded`, so a
+daemon that committed underneath them gets a refused flush and a reload.
+`cmd_link` does not: it calls the **unguarded** `save_graph`
+(`src/commands/graph_ops.rs:195` -> `persist::save_all`), which writes the whole
+kern map with no epoch check, so a `kern link` racing the daemon still clobbers.
+Giving `cmd_link` the same guarded retry needs no auth and is not blocked on
+item 24 — it is the cheapest thing left in this item. And the read-only commands
+(`get`, `list`, `query`, `search`) still load from disk and can report older
+than live state: the same defect one step further down, a stale read rather than
+a lost write.
 
 ---
 

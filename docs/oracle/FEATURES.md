@@ -1228,8 +1228,8 @@ Ranked by leverage:
    `src/commands/mcp_cmd.rs`). `ingest` and `link` do not route — over
    `call_tool` they would land at agent trust, so that half waits on socket auth
    (item 24). `intake drain` has no matching tool, and the read-only commands
-   still load from disk. Open as `ROADMAP.md` item 9, now reduced to read-side
-   staleness.
+   still load from disk. Open as `ROADMAP.md` item 9 on exactly those three:
+   `ingest`/`link`, `intake drain`, and stale reads.
 6. **GNN training is synchronous** on the tick — move to a background thread
    pool or incremental updates to avoid stalling large kerns.
 7. **Distill prompt** is one-shot and global — per-kind prompts +
