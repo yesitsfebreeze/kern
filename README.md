@@ -117,7 +117,7 @@ returns fewer than `k`.
 
 A background **tick** (default 60s) drives decay, eviction, and clustering — an
 idle daemon still maintains itself. A task that panics is caught, counted and
-named rather than taking the loop down with it (`src/tick.rs:54`), so one bad
+named rather than taking the loop down with it (`src/tick.rs:65`), so one bad
 maintenance pass costs one task instead of every future tick; `health` reports
 the panic and failure counts with the last of each. Persistence is **LMDB** (via
 [heed](https://github.com/meilisearch/heed)) — an ACID, multi-process embedded

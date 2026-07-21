@@ -5,6 +5,7 @@ pub mod pulse;
 pub mod queue;
 pub mod stigmergy;
 pub mod tasks;
+pub mod trainer;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -41,10 +42,20 @@ pub fn start(
 ) -> tokio::task::JoinHandle<()> {
 	let mut rx = q.take_receiver().expect("receiver already taken");
 	tokio::spawn(async move {
+		// Owned by the loop: aborting the tick handle drops the sender, which ends
+		// the trainer thread rather than leaving it holding this store's graph.
+		let trainer = gnn_trainer(&q, &g, &ctx);
 		while let Some(t) = rx.recv().await {
 			q.dequeued(&t);
-			run_guarded(&q, &t, || process_task(&q, &g, &t, &ctx));
+			run_guarded(&q, &t, || process_task(&q, &g, &t, &ctx, Some(&trainer)));
 		}
+	})
+}
+
+fn gnn_trainer(q: &Arc<Queue>, g: &Arc<RwLock<GraphGnn>>, ctx: &TickContext) -> trainer::Trainer {
+	let (tq, tg, cfg) = (q.clone(), g.clone(), ctx.gnn_cfg);
+	trainer::Trainer::spawn(q.clone(), move |kern_id| {
+		do_gnn_propagate(&tq, &tg, kern_id, &cfg)
 	})
 }
 
@@ -72,7 +83,7 @@ fn run_guarded(q: &Queue, t: &Task, run: impl FnOnce()) {
 	q.done();
 }
 
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 	if let Some(s) = payload.downcast_ref::<&str>() {
 		(*s).to_string()
 	} else if let Some(s) = payload.downcast_ref::<String>() {
@@ -82,7 +93,15 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 	}
 }
 
-fn process_task(q: &Queue, g: &Arc<RwLock<GraphGnn>>, t: &Task, ctx: &TickContext) {
+// `trainer` is `None` only on the synchronous drain (`tick_sync`), whose contract
+// is that the work is done when it returns; there the propagation runs inline.
+fn process_task(
+	q: &Queue,
+	g: &Arc<RwLock<GraphGnn>>,
+	t: &Task,
+	ctx: &TickContext,
+	trainer: Option<&trainer::Trainer>,
+) {
 	let (llm, embed) = (ctx.llm.as_ref(), ctx.embed.as_ref());
 	match t.kind {
 		TaskKind::Cluster => do_cluster(q, g, &t.kern_id, &ctx.tick_cfg, llm, embed),
@@ -94,7 +113,12 @@ fn process_task(q: &Queue, g: &Arc<RwLock<GraphGnn>>, t: &Task, ctx: &TickContex
 		TaskKind::Enrich => do_enrich(q, g, &t.kern_id, &t.extra, llm, embed),
 		TaskKind::ResolveQuestion => do_resolve(q, g, &t.kern_id, &t.extra, ctx.broadcast_q.as_ref()),
 		TaskKind::Persist => do_persist(g, &t.kern_id),
-		TaskKind::GnnPropagate => do_gnn_propagate(q, g, &t.kern_id, &ctx.gnn_cfg),
+		TaskKind::GnnPropagate => match trainer {
+			Some(tr) => {
+				tr.submit(&t.kern_id);
+			}
+			None => do_gnn_propagate(q, g, &t.kern_id, &ctx.gnn_cfg),
+		},
 		TaskKind::StigmergyGc => stigmergy::run_gc(g, &t.kern_id, &ctx.heat_cfg),
 		TaskKind::Reembed => do_reembed(g, &t.kern_id, embed),
 		TaskKind::DiskConsolidate => do_disk_consolidate(g),
@@ -328,7 +352,7 @@ pub fn tick_sync(
 	let mut rx = q.take_receiver().unwrap();
 	while let Ok(t) = rx.try_recv() {
 		q.dequeued(&t);
-		process_task(&q, &gg, &t, &ctx);
+		process_task(&q, &gg, &t, &ctx, None);
 		q.done();
 	}
 }
@@ -904,6 +928,107 @@ mod tests {
 			1,
 			"the task queued behind the panicking one still ran"
 		);
+	}
+
+	// Moving a task off the loop must not quietly mean it never runs. The
+	// assertion is on the EFFECT — `gnn_vector` populated — so a hand-off that
+	// merely returns fails here no matter how long the test waits.
+	#[tokio::test]
+	async fn a_gnn_propagate_handed_off_the_loop_still_lands_its_embeddings() {
+		use crate::base::types::{mk_entity, EntityKind};
+
+		let mut graph = GraphGnn::new();
+		let mut k = Kern::new("k", "");
+		for i in 0..4 {
+			let id = format!("e{i}");
+			k.entities
+				.insert(id.clone(), mk_entity(&id, &id, 0.0, EntityKind::Claim));
+		}
+		for i in 0..3 {
+			let (from, to) = (format!("e{i}"), format!("e{}", i + 1));
+			add_reason(
+				&mut k,
+				Reason {
+					id: format!("{from}->{to}"),
+					from,
+					to,
+					..Default::default()
+				},
+			);
+		}
+		graph.kerns.insert("k".into(), k);
+		let g = Arc::new(RwLock::new(graph));
+
+		let q = Arc::new(Queue::new(8));
+		let ctx = TickContext {
+			llm: None,
+			embed: None,
+			broadcast_q: None,
+			gnn_cfg: GnnConfig {
+				min_thoughts: 2,
+				train_epochs: 2,
+				..GnnConfig::defaults()
+			},
+			tick_cfg: TickConfig::default(),
+			heat_cfg: HeatConfig::default(),
+		};
+		start(q.clone(), g.clone(), ctx);
+		assert!(q.enqueue(task(TaskKind::GnnPropagate, "k")));
+
+		let mut landed = false;
+		for _ in 0..600 {
+			landed = g.read().kerns["k"]
+				.entities
+				.values()
+				.all(|e| !e.gnn_vector.is_empty());
+			if landed {
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+		assert!(
+			landed,
+			"the propagation still has to happen once it stops running on the loop"
+		);
+		assert!(
+			!g.read().kerns["k"].gnn_weights.is_empty(),
+			"and its trained weights still reach the kern"
+		);
+	}
+
+	// The arm itself, with no timing margin to hide behind: the runner never
+	// returns, so `process_task` can only return if it handed the propagation to
+	// the trainer instead of running it. Put the training back on the loop and the
+	// handshake below is never sent.
+	#[test]
+	fn the_gnn_arm_hands_the_propagation_off_instead_of_running_it_on_the_loop() {
+		let q = Queue::new(8);
+		let g = Arc::new(RwLock::new(GraphGnn::new()));
+		let (sink, reached) = std::sync::mpsc::sync_channel::<()>(1);
+		let trainer = trainer::Trainer::spawn(Arc::new(Queue::new(8)), move |_| {
+			let _ = sink.send(());
+			std::thread::sleep(Duration::from_secs(3600));
+		});
+		let ctx = TickContext {
+			llm: None,
+			embed: None,
+			broadcast_q: None,
+			gnn_cfg: GnnConfig::defaults(),
+			tick_cfg: TickConfig::default(),
+			heat_cfg: HeatConfig::default(),
+		};
+
+		process_task(
+			&q,
+			&g,
+			&task(TaskKind::GnnPropagate, "k"),
+			&ctx,
+			Some(&trainer),
+		);
+
+		reached
+			.recv_timeout(Duration::from_secs(5))
+			.expect("the propagation must reach the trainer, not the loop");
 	}
 
 	#[test]

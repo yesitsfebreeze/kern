@@ -143,6 +143,7 @@ impl Server {
 			"remote_cap_dropped": h.remote_cap_dropped,
 			"unspilled_drops": h.unspilled_drops,
 			"ingest_queue_refused": h.ingest_queue_refused,
+			"gnn_train_refused": crate::tick::trainer::gnn_train_refused(),
 		})
 	}
 }
