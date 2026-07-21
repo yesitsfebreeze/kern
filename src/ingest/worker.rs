@@ -392,6 +392,86 @@ mod tests {
 		);
 	}
 
+	const STUB_VEC: [f32; 3] = [0.1, 0.2, 0.3];
+
+	// Every text embeds to the same vector, so both dedup gates fire on content
+	// identity without depending on a live model.
+	fn fixed_vec_app() -> axum::Router {
+		axum::Router::new().route(
+			"/api/embed",
+			axum::routing::post(|body: axum::Json<serde_json::Value>| async move {
+				let n = body
+					.0
+					.get("input")
+					.and_then(|v| v.as_array())
+					.map(|a| a.len())
+					.unwrap_or(1);
+				let embs: Vec<Vec<f32>> = (0..n).map(|_| STUB_VEC.to_vec()).collect();
+				axum::Json(serde_json::json!({ "embeddings": embs }))
+			}),
+		)
+	}
+
+	fn job_for(text: &str) -> Job {
+		Job {
+			text: text.into(),
+			source: session_source(),
+			kind: EntityKind::Claim,
+			hint: String::new(),
+			confidence: 1.0,
+			config: Config::default(),
+			result_tx: None,
+		}
+	}
+
+	#[tokio::test]
+	async fn a_second_gate_dedup_reports_deduped_and_the_surviving_id() {
+		let graph = Arc::new(RwLock::new(GraphGnn::new()));
+		let (url, _server) = crate::test_support::spawn_http(fixed_vec_app()).await;
+		let embedder = LlmClient::new_embed_only(&url, "m", "");
+
+		let first = job_for("alpha beta gamma");
+		let out = process(&graph, &embedder, &None, &None, &first).await;
+		assert_eq!(out.status, OutcomeStatus::Committed, "the survivor lands");
+		let sid = util::content_hash(&first.text);
+
+		// Hide the survivor from `find_duplicate` (which reads entity_idx alone)
+		// while leaving it visible to accept_with_dedup's wider scan — the exact
+		// shape that walks past gate 1 into commit_entity's dup branch.
+		{
+			let mut g = graph.write();
+			g.entity_idx.delete(&sid);
+			g.gnn_entity_idx.insert(sid.clone(), STUB_VEC.to_vec());
+			assert!(
+				g.entity_idx.is_empty(),
+				"fixture is only honest while gate 1 has nothing left to hit"
+			);
+		}
+
+		let second = job_for("alpha beta gamma, restated");
+		let out = process(&graph, &embedder, &None, &None, &second).await;
+
+		assert_eq!(
+			graph
+				.read()
+				.all()
+				.iter()
+				.map(|k| k.entities.len())
+				.sum::<usize>(),
+			1,
+			"gate 2 dropped the incoming document"
+		);
+		assert_eq!(
+			out.doc_id, sid,
+			"the ack must name the survivor, not a content hash the graph never stored"
+		);
+		assert_eq!(
+			out.status,
+			OutcomeStatus::Deduped,
+			"a second-gate dedup is a dedup — reporting Committed lies about what happened"
+		);
+	}
+
 	#[tokio::test]
 	async fn run_assembles_a_failed_outcome_when_document_embedding_fails() {
 		let graph = Arc::new(RwLock::new(GraphGnn::new()));

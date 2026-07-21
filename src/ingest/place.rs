@@ -118,23 +118,32 @@ pub(crate) async fn place_document(
 
 	let root_id = graph.read().root.id.clone();
 
-	let lex = {
+	let tid = thought.id.clone();
+	let joined = thought.statements.join(" ");
+
+	let (result, lex) = {
 		let mut g = graph.write();
 		// Stamp AFTER accept, against the id that actually entered the graph: the
 		// second dedup gate drops `thought` whole, so a delta minted beforehand
 		// would gossip a ValidUntil for an id no kern holds. That branch tightens
 		// the survivor itself, inside merge_duplicate.
-		let result = accept::accept_with_dedup(&mut g, &root_id, thought.clone(), "", dedup_threshold);
-		if !result.deduped {
-			accept::merge_valid_until(&mut g, &result.entity_id, job.config.valid_until);
+		let r = accept::accept_with_dedup(&mut g, &root_id, thought, "", dedup_threshold);
+		if !r.deduped {
+			accept::merge_valid_until(&mut g, &r.entity_id, job.config.valid_until);
 		}
-		g.lexical()
+		let l = g.lexical();
+		(r, l)
 	};
-	if let Some(lex) = lex {
-		lex.insert(&thought.id, &thought.statements.join(" "));
+	// Only the id that entered the graph gets indexed or acked. On a gate-2 dedup
+	// `tid` was discarded whole, so lexically indexing it would hand retrieval a
+	// dead id, and returning it would ack a document no kern holds.
+	if !result.deduped {
+		if let Some(lex) = lex {
+			lex.insert(&tid, &joined);
+		}
 	}
 
-	(Some(doc_id.to_string()), None)
+	(Some(result.entity_id), None)
 }
 
 pub(crate) fn document_kind(job: &Job) -> (EntityKind, i32) {
@@ -202,11 +211,12 @@ pub(crate) fn place_chunks(
 			let l = g.lexical();
 			(r, l)
 		};
-		if let Some(lex) = lex {
-			lex.insert(&tid, &joined);
-		}
-
+		// Same rule as place_document: a deduped chunk was discarded whole, so its
+		// content hash names nothing — indexing it hands retrieval a dead id.
 		if !result.deduped {
+			if let Some(lex) = lex {
+				lex.insert(&tid, &joined);
+			}
 			if let Some(defer) = defer_questions {
 				defer(&result.entity_id);
 			}
@@ -626,14 +636,7 @@ mod tests {
 		ingest_chunk(&g, SURVIVOR, None);
 		let sid = util::content_hash(SURVIVOR);
 
-		// Hide the survivor from `find_duplicate` (which reads entity_idx alone)
-		// while leaving it visible to accept_with_dedup's wider scan — the exact
-		// shape that walks past gate 1 into commit_entity's dup branch.
-		{
-			let mut gg = g.write();
-			gg.entity_idx.delete(&sid);
-			gg.gnn_entity_idx.insert(sid.clone(), DUP_VEC.to_vec());
-		}
+		hide_from_gate_one(&g, &sid);
 		valid_until_delta_ids(&g);
 
 		let placed = ingest_chunk(&g, NEAR_DUP, Some(deadline));
@@ -659,6 +662,86 @@ mod tests {
 			valid_until_delta_ids(&g),
 			vec![sid],
 			"one delta, against the survivor — never the discarded incoming id"
+		);
+	}
+
+	// Embeds every text to DUP_VEC, so place_document's gates fire on the
+	// fixture's geometry instead of on a live model.
+	fn fixed_vec_app() -> axum::Router {
+		axum::Router::new().route(
+			"/api/embed",
+			axum::routing::post(|body: axum::Json<serde_json::Value>| async move {
+				let n = body
+					.0
+					.get("input")
+					.and_then(|v| v.as_array())
+					.map(|a| a.len())
+					.unwrap_or(1);
+				let embs: Vec<Vec<f32>> = (0..n).map(|_| DUP_VEC.to_vec()).collect();
+				axum::Json(serde_json::json!({ "embeddings": embs }))
+			}),
+		)
+	}
+
+	// Same rig as the delta test above: hide the survivor from `find_duplicate`,
+	// which reads entity_idx alone, so the incoming entity walks past gate 1 into
+	// accept_with_dedup's wider scan.
+	fn hide_from_gate_one(g: &Arc<RwLock<GraphGnn>>, sid: &str) {
+		let mut gg = g.write();
+		gg.entity_idx.delete(sid);
+		gg.gnn_entity_idx.insert(sid.to_string(), DUP_VEC.to_vec());
+		assert!(
+			gg.entity_idx.is_empty(),
+			"fixture is only honest while gate 1 has nothing left to hit"
+		);
+	}
+
+	fn lexical_ids_for(g: &Arc<RwLock<GraphGnn>>, term: &str) -> Vec<String> {
+		let lex = g.read().lexical().expect("in-ram lexical index");
+		lex
+			.search(term, 10)
+			.into_iter()
+			.map(|h| h.entity_id)
+			.collect()
+	}
+
+	#[tokio::test]
+	async fn place_document_second_gate_returns_the_survivor_and_indexes_no_orphan() {
+		let g = empty_graph();
+		ingest_chunk(&g, SURVIVOR, None);
+		let sid = util::content_hash(SURVIVOR);
+		hide_from_gate_one(&g, &sid);
+
+		let (url, _server) = crate::test_support::spawn_http(fixed_vec_app()).await;
+		let embedder = LlmClient::new_embed_only(&url, "m", "");
+		let doc_id = util::content_hash(NEAR_DUP);
+		let (id, fail) = place_document(&g, &embedder, &job(NEAR_DUP, 1.0), &doc_id, 0.95, None).await;
+
+		assert!(fail.is_none(), "the stub embedder answers");
+		assert_eq!(total_entity_count(&g), 1, "gate 2 dropped the incoming doc");
+		assert_eq!(
+			id,
+			Some(sid),
+			"the returned id must be the one that actually entered the graph"
+		);
+		assert!(
+			!lexical_ids_for(&g, "restated").contains(&doc_id),
+			"the discarded content hash names nothing in the graph — indexing it hands retrieval a dead id"
+		);
+	}
+
+	#[test]
+	fn place_chunks_second_gate_keeps_the_discarded_id_out_of_the_lexical_index() {
+		let g = empty_graph();
+		ingest_chunk(&g, SURVIVOR, None);
+		let sid = util::content_hash(SURVIVOR);
+		hide_from_gate_one(&g, &sid);
+
+		assert_eq!(ingest_chunk(&g, NEAR_DUP, None), 1);
+		assert_eq!(total_entity_count(&g), 1, "gate 2 deduped");
+		assert!(
+			!lexical_ids_for(&g, "restated").contains(&util::content_hash(NEAR_DUP)),
+			"the discarded content hash names nothing in the graph — indexing it hands retrieval a dead id"
 		);
 	}
 

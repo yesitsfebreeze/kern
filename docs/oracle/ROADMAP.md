@@ -204,43 +204,6 @@ So the item's remainder is two halves, not one: `graviton`/`claim_kind`,
 unblocked and mechanical, and `ingest`/`link`, blocked on item 24. The item does
 not close on the read side alone.
 
-### 91. The second dedup gate lies about what it did, twice `[ingest]`
-
-Found 2026-07-21 while closing item 88, which fixed what that gate did to a
-*retention* and deliberately left these two alone — they are older, wider, and
-not what item 88 was scoped to. Both are on the plain ingest path — no flag, no
-retention, no gossip — and both fail without a word.
-
-**It reports `committed` when it deduped.** `place_document` returns
-`Some(existing_id)` only for the *first* gate (`src/ingest/place.rs:101`); every
-other exit returns `Some(doc_id)` (`:137`), including the one where
-`accept_with_dedup` deduped. `finalize_doc_identity` decides dedup by
-`surviving_id != content_id` (`src/ingest/worker.rs:208`), so an id equal to the
-content hash reads as a fresh commit. The caller is told it stored a new
-document when the document was merged into another one, and is handed an id that
-belongs to nothing.
-
-**It puts the discarded id in the lexical index.** `place_document:134` and
-`place_chunks:206` both `lex.insert` unconditionally, after a branch that may
-have dropped the entity whole. `merge` resolves seeds through
-`find_entity_ref_in_graph` (`src/retrieval/merge.rs:24`) and silently drops what
-it cannot find, so this yields no phantom result — it spends a slot of the BM25
-top-k on a ghost, quietly lowering effective lexical recall. That the current
-e2e floors (0.9306 / 0.9722 / 0.9471) did not move is a statement about a
-36-fact corpus, not a bound on the effect.
-
-Ranks below item 9 because item 9 can lose a write and this cannot, and above
-tier 3 because it needs no opting in: the second gate is reached whenever the
-GNN-propagated vector of an existing entity is nearer the incoming raw vector
-than that entity's own raw vector is — `find_duplicate` searches `entity_idx`
-alone (`src/ingest/dedup.rs:14-16`), `find_duplicate_hit` searches
-`entity_idx ∪ gnn_entity_idx` (`src/base/search.rs:97-107`), and
-`tick/gnn_propagate.rs:169` fills the second one on the ordinary tick. The two
-halves are one fix: have `place_document` return the id that actually entered
-the graph, and gate the `lex.insert` on `!result.deduped` — the same `deduped`
-flag item 88 already threads to the line above it. Cheap, but it changes what a
-caller is told, so it wants a test on the reported status, not only on the store.
-
 ---
 
 # Tier 3 — the embeddable-endpoint track
@@ -353,13 +316,62 @@ half the harness can already claim.
 `seed_important` iterates `g.all()` × `kern.entities.values()`
 (`src/retrieval/seed.rs:127-174`), called unconditionally once per retrieve
 (`src/retrieval/query.rs`, in `retrieve_profiled`). Rayon-parallel, but still full-corpus per
-query. Top structural debt in the repo.
+query.
+
+**Measured 2026-07-21 before touching it** (`tests/seed_scale.rs`, release,
+20 reps per configuration). The cliff is real and it is O(N × eligible):
+
+| N | eligible | `seed_important` | share of retrieve |
+|---|---|---|---|
+| 10k | 1% | 0.14 ms | 10.7% |
+| 10k | 100% | 2.61 ms | 53.1% |
+| 100k | 1% | 2.98 ms | 12.3% |
+| 100k | 100% | 34.42 ms | 54.6% |
+
+So the item is justified at scale — but **it is not the top structural debt it
+claimed to be, and the same run says why.** Item 26's PageRank is a *flat* ~20 ms
+per query at N=100k, independent of eligibility (measured as default minus
+`pagerank_enabled: false`: 20.0 / 21.0 / 19.6 / 18.1 ms across 1/10/50/100%).
+The scan only overtakes it once more than half the corpus is eligible:
+
+| N=100k | scan | PageRank | PageRank ÷ scan |
+|---|---|---|---|
+| 1% eligible | 2.98 ms | 20.03 ms | 6.7× |
+| 10% eligible | 8.61 ms | 21.02 ms | 2.4× |
+| 50% eligible | 18.40 ms | 19.56 ms | 1.1× |
+| 100% eligible | 34.41 ms | 18.11 ms | 0.5× |
+
+A filtered query — the ordinary case — is dominated by PageRank, not by this
+scan. **Item 26 should be done first**, and this item's "top structural debt in
+the repo" claim is withdrawn: it was asserted, never measured. Ranking is not
+changed here because position is rank and reordering wants its own decision;
+this note is the evidence for that decision when it is taken.
+
+Indexing this is still worth doing after 26. The shape wanted is an index over
+the importance predicate so the scan visits eligible entities rather than all of
+them — which is precisely why the win tracks eligibility, and why a corpus where
+everything is eligible cannot be helped by an index at all.
 
 ### 26. PageRank runs a full power iteration per query, persisted nowhere `[retrieval]`
 
 Up to 25 iterations over the whole entity adjacency on every retrieve, with
 nothing cached between queries (`decisions/pagerank-authority.mdx:102-105`). The
 second query-time cliff, and it was recorded on the site but in no plan.
+
+**Measured 2026-07-21 and it is the FIRST cliff, not the second**
+(`tests/seed_scale.rs`, release, default minus `pagerank_enabled: false`). At
+N=100k it costs a flat **~20 ms per query** — 20.0 / 21.0 / 19.6 / 18.1 ms at
+1 / 10 / 50 / 100% eligibility. Flat is the finding: unlike item 25's scan, the
+cost does not shrink when the query filters hard, because the power iteration
+walks the whole adjacency regardless of how few entities survive the filter. On
+an ordinary filtered query at 1% eligibility it is **6.7× item 25's scan**, and
+`fuse_hybrid` goes from 0.05 ms to 17.68 ms with it on.
+
+That makes this the highest-value unblocked retrieval work, ahead of item 25,
+which is where the ranking implies it sits and where the numbers now agree.
+Nothing here is cached, so the first cheap closure to weigh is persisting the
+vector and recomputing on a tick rather than per query — the scores change with
+the graph, not with the query, so per-query recomputation is pure waste.
 
 ### 27. The GC sweep is superlinear in two remaining places `[lifecycle]`
 
@@ -692,7 +704,7 @@ chunked at all.
 
 ### 50. Intake distillation lacks relative-date resolution `[ingest]`
 
-The prompt injects no current date (`src/ingest/distill.rs:29-47`), and
+The prompt injects no current date (`src/ingest/distill.rs:43-48`), and
 `valid_from` is only requested when the statement states an absolute date — so
 dropped text containing "last Tuesday" stores unresolved. The eval path got this
 and the product path never did; the eval path is now deleted, so the capability
@@ -724,12 +736,12 @@ source at `src/mcp/tools_admin.rs:116`" with "chunk + mean-pool" as the unbuilt
 upgrade path. Both halves moved in `08c9971`: the acknowledgement comment was
 deleted, and chunk + mean-pool **shipped** for the multi-line case —
 `seed_examples` (`src/base/accept.rs:702-714`) splits a seed on newlines and
-`mean_pool` (`:626`) averages the per-line embeddings, wired at
+`mean_pool` (`:718`) averages the per-line embeddings, wired at
 `src/mcp/tools_admin.rs:119-136`. Line 116 now carries the mean-pool rationale,
 i.e. the opposite of what it was cited for.
 
 What is left is the case `seed_examples` deliberately does not split: a seed
-with fewer than two non-empty lines is embedded whole (`:619-621`), so one long
+with fewer than two non-empty lines is embedded whole (`:709-711`), so one long
 paragraph still goes to the model as a single call and truncates past its
 context window with no signal. Chunking *that* wants a length-based split, not a
 newline one, and is still blocked on a real document long enough to truncate.
@@ -831,6 +843,29 @@ among themselves by expected effect, not by confidence.
 What the instrument still cannot judge, and what that costs: the fake embedder is
 bag-of-words, so a change that only a real embedding model would reward looks
 neutral here. Item 64's stemmer swap is the clearest case.
+
+### 94. A near-duplicate's alternate wording is stored but indexed nowhere `[retrieval]`
+
+Found 2026-07-21 while closing item 91, and *not* caused by it: item 91 removed a
+lexical posting that named a discarded id, and this is what was always missing
+underneath. When either dedup gate merges, `merge_duplicate`
+(`src/base/accept.rs:166-185`) keeps the incoming wording on a `Rephrase` reason
+and nothing else. That reason is minted with `vector: Vec::new()` (`:178`), and
+the tick's enrichment pass returns early unless `kern.entities` can `get` the
+reason's `to` (`src/tick/tasks.rs:334-337`), which a `Rephrase` deliberately
+leaves empty — so that wording enters neither `LexicalIndex` nor `reason_idx`.
+A user who phrases a recall query in the *merged* document's words, not the
+survivor's, gets nothing back, and every dedup widens that. Both gates
+have behaved this way since dedup existed; the fix is one `lex.insert` of the
+rephrase text against the **survivor's** id, in `merge_duplicate` where both
+gates already meet.
+
+Ranks first in this tier because it is the only entry here that is a strict
+addition rather than a trade — it adds a posting that names a live entity and
+changes no existing score — and because its blast radius is every merge, not
+one stage of one query shape. Measure it the way this tier requires: the e2e
+corpus has no near-duplicate pair today, so the probe has to be added with the
+fix or the number cannot move either way.
 
 ### 61. Move `merge_hits` onto RRF `[retrieval]`
 
@@ -1387,6 +1422,28 @@ an overall eval score that makes specialization worth funding.
 
 ## Closed and verified — do not re-open
 
+- **The second dedup gate no longer lies about what it did** — was item 91
+  `[ingest]` (the third item to carry that number), closed 2026-07-21. Both
+  halves shipped in `src/ingest/place.rs`. `place_document` returns
+  `Some(result.entity_id)` instead of an unconditional `Some(doc_id)`, so
+  `finalize_doc_identity` — which infers dedup from `surviving_id != content_id`
+  and was **correct all along, merely fed a lying id** — now reports `Deduped`
+  where it reported `Committed`. And both `lex.insert` calls are gated on
+  `!result.deduped`. Gating the index is the right half rather than reindexing
+  the discarded id under the survivor, because the discarded id names nothing:
+  `seed_lexical` (`src/retrieval/seed.rs:96`) does not filter by graph presence,
+  so the ghost reached `fuse::rrf`, was rescored to `0.0` by
+  `find_entity_ref_in_graph`'s `unwrap_or(0.0)` (`src/retrieval/query.rs:118-120`)
+  and *displaced* a live seed. Removing it is a strict win; carrying the wording
+  onto the survivor is a separate, larger fix, filed as item 94.
+  Proven by reverting each half separately: restoring `Some(doc_id.to_string())`
+  fails `a_second_gate_dedup_reports_deduped_and_the_surviving_id` on
+  `left: 0302188…` / `right: 64989cc…` and leaves the chunk test green;
+  ungating the two `lex.insert`s fails
+  `place_chunks_second_gate_keeps_the_discarded_id_out_of_the_lexical_index`
+  alone. `place_document` also stopped cloning the whole `Entity` under the
+  write guard — `tid`/`joined` are read off it before the lock, mirroring
+  `place_chunks`; nothing in that hoist reads guard-held state.
 - **Deleting a source cascades into the graph** — was item 19, closed
   2026-07-21. `forget_by_source(scheme, object_id, force)`
   (`src/commands/graph_ops.rs`) resolves every entity whose `Source` matches the
@@ -1457,10 +1514,10 @@ an overall eval score that makes specialization worth funding.
   green, neutering gate 2 fails only the gate-2 test, and removing the
   `push_delta` fails all three delta assertions including the fresh-placement
   one. `e2e/test_retention.py::test_a_deduped_ingest_still_applies_its_retention`
-  fails loudly with the merge neutered. What this did *not* buy is item 91
-  `[ingest]` — the open one, not the retired `[retrieval]` 91 listed above: the
-  same gate still reports `committed` on a dedup and still leaves the discarded
-  id in the lexical index.
+  fails loudly with the merge neutered. What this did *not* buy was item 91
+  `[ingest]` — not the `[retrieval]` 91 listed above: the same gate still
+  reported `committed` on a dedup and still left the discarded id in the
+  lexical index. That closed separately, later the same day.
 - **Per-source TTL has a writer** — was item 22, closed 2026-07-21. The reader
   (`score::drop_expired`) had been waiting for one; `valid_until` is now set at
   ingest from a `retention_secs` on the MCP `ingest` schema and a
