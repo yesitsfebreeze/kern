@@ -226,7 +226,7 @@ be returned. Default semantics: empty `principals` means *no filter*, not
 
 `Entity` already carries `Acl` (`src/base/types.rs:287`; struct `{scope, users,
 groups}` at `:120-124`), and it is only ever written as `Acl::default()`
-(`src/ingest/place.rs:56`, `src/ingest/file_watcher.rs:136`), so nothing can
+(`src/ingest/place.rs:56`, `src/ingest/file_watcher.rs:147`), so nothing can
 populate it. Four parts:
 
 - Expose `principals` / `scope` on the MCP `ingest` schema
@@ -250,7 +250,7 @@ populate it. Four parts:
 
 Decide alongside: does the file watcher give `Document` entities a tenant-default
 ACL, or leave them public? Recommend configurable, default public-within-tenant,
-since the tenant boundary is the process. `src/ingest/file_watcher.rs:136`
+since the tenant boundary is the process. `src/ingest/file_watcher.rs:147`
 hardcodes `Acl::default()` today.
 
 ### 20. Source-trust weighting `[retrieval]`
@@ -271,19 +271,6 @@ config + an
 auto-distilled claims out of retrieval until a human curates them. No
 `ReviewState`, `exclude_pending` or `promote` exists in `src/`. Requires 18's
 `QueryOptions` work first — review filters are more `matches_filter` predicates.
-
-### 89. Retention exists on two entrances of four, and in no config `[ingest]`
-
-`retention_secs` is on the MCP `ingest` schema and the `kern ingest` flag. It is
-absent from the `.txt` distillation path (`drain_entry`,
-`src/ingest/intake.rs:131` — the per-claim `Config` there sets `valid_from` from
-the distilled claim and nothing else), from the file-watcher sink
-(`src/ingest/file_watcher.rs`), and from `IngestConfig`
-(`src/config/ingest.rs:7`, whose only key is `dedup_threshold`), so a host
-cannot say "everything from this source expires in 30 days" — the exact sentence
-item 22 was named for. The config key is the load-bearing half: per-*source*
-retention is a policy, and a policy expressed only as a per-call argument has to
-be remembered by every caller.
 
 ### 24. RPC socket has no auth `[surface]`
 
@@ -471,7 +458,7 @@ sorts by heat and truncates to `ENTITY_SYNC_BATCH = 32` per heartbeat
 (`src/gossip/handler.rs:156`, sorted `:181`),
 so cold entities may never propagate and a partitioned node that rejoins never
 catches up. (`Fetch` is live — `wire_fetch` installs the handler at
-`src/commands.rs:1038` and the question path issues it — but it is single-id, not a
+`src/commands.rs:1042` and the question path issues it — but it is single-id, not a
 catch-up mechanism.) Two pieces adopted on paper and unscheduled: **back-off
 pacing** with exponential jitter keyed to a divergence estimate
 (`docs/kern/fl-vs-knids-federation.md:163-168`), and **batch-size / push-vs-pull
@@ -667,8 +654,10 @@ always `None`. **Not a live loss**: the only producer of `valid_from` is the
 distillation path (`intake.rs:191`, from `distill.rs`), which calls the worker
 directly and never goes through `direct/`, and the MCP `ingest` schema has no
 `valid_from` field to lose. It is a hole that opens the moment either of those
-changes — which item 50 and item 89 would both do. Ranks here, next to 50, for
-that reason and not for any damage it does today.
+changes — which item 50 would do. (The retired item 89 did not: it gave the
+drain loop's shared `Config` a standing `valid_until` and left `valid_from`
+alone.) Ranks here, next to 50, for that reason and not for any damage it does
+today.
 
 ### 51. Require reason text on supersede `[ingest]`
 
@@ -926,7 +915,7 @@ share one weakness: the anchor is right but the target's distinguishing word is
 under four characters (`acl`, `rrf`, `run_hub`) or is a stem the prose inflects
 (`fn stem` against "stemmer"). Two more are self-inflicted — this item quoting
 `FEATURES.md:408-409` as an example rather than as a citation — and are acquitted
-in place, leaving **38 standing, 12 of them false, 32%**.
+in place, leaving **38 standing, 12 of them false, 32%**. <!-- docs-check: anchor-ok -->
 
 **One measured non-win, recorded rather than buried.** Splitting the camelCase
 boundary looks like a strict improvement and is not: it silenced two false
@@ -1172,7 +1161,7 @@ is a real reason nothing is set — eviction drops unpersisted `children` pushes
   renamed file lands as a new `Document` and the old one is neither moved nor
   removed. It duplicates only when the rename *also* edits the file — ids are
   `content_hash(text)`, so an untouched move re-resolves to the same id, while
-  `external_id` is the path (`src/ingest/file_watcher.rs:119`), so a
+  `external_id` is the path (`src/ingest/file_watcher.rs:130`), so a
   move-plus-edit gets a new id under a new external id and supersede never
   fires. It sits in this tier and not in tier 1 because the watcher is **off by
   default** — `WatcherConfig::enabled` is `false` unless a `kern.toml` sets it
@@ -1476,10 +1465,35 @@ an overall eval score that makes specialization worth funding.
   and on the chunk path as well as the document path, which were two separate
   hardcoded `None`s. `e2e/test_retention.py` proves the round trip against the
   real binary: recallable before the deadline, gone after, with a control fact
-  that stays. What the item did *not* buy became items 88, 89 and 90; 88 —
-  the dedup branch swallowing a retention — closed the same day, and what is
-  still open is that only two of four entrances offer retention and no config
-  key does (89), and that `DirectJob` still drops `valid_from` (90).
+  that stays. What the item did *not* buy became items 88, 89 and 90; 88 — the
+  dedup branch swallowing a retention — and 89 — the other two entrances, and
+  the missing config key — both closed the same day, and what is still open is
+  that `DirectJob` drops `valid_from` (90).
+- **Retention reaches all four entrances, from a key a `kern.toml` can set** —
+  was item 89, closed 2026-07-21. The `.txt` distillation path and the
+  file-watcher sink had no caller to pass a flag: `drain_entry` cloned the
+  queue's `Config` and overwrote only `valid_from`, and `KernFileWatcherSink`
+  handed the worker `IngestRunConfig::default()` outright. Both now carry one,
+  through `Config::with_retention` onto the existing
+  `valid_until_from_retention` — still one duration→instant conversion, so the
+  four entrances cannot drift. **The key could not go where this item said.** It
+  named `IngestConfig`, but `load_with_user` refuses a user-written `[heat]`,
+  `[ingest]` or `[retrieval]` section outright, so the half the item itself
+  called load-bearing would have shipped unsettable; it went to `[intake]` and
+  `[watcher]`, the sections that name the sources, and
+  `a_real_kern_toml_can_set_per_source_retention` loads a real file rather than
+  trusting the struct. Resolved per drain pass and per watched record, never at
+  daemon start — hoisting it back above the intake loop collapses two
+  transcripts queued two seconds apart onto one deadline and fails
+  `the_poll_loop_resolves_its_deadline_per_pass_not_once_at_startup`. **Two
+  things this did not buy.** The file-watcher half is unit-covered only —
+  `WatcherConfig::enabled` is `false` by default and nothing in `e2e/` starts a
+  watcher, so `the_sink_stamps_the_configured_retention_on_what_it_ingests` is
+  the whole proof for that entrance. And a durable `direct/` job still cannot
+  inherit a standing policy: `drain_direct_once` overlays `job.valid_until` over
+  the loop's config, and an absent flag and `--retention-secs 0` are both `None`
+  on the wire, so per-call wins with no way to defer. Deliberate — the flag is
+  the more specific statement — but it is a seam, not an absence.
 - **The intake is visible and drivable** — was item 8, closed 2026-07-21.
   `kern intake` (alias `kern intake status`) prints pending with age, the last
   error for anything stuck, quarantined `failed/` entries and the `done` count;
@@ -1606,7 +1620,7 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   `broadcast_q` invoked by `do_resolve` (`src/tick/tasks.rs:372`), `handle_question`
   live-dispatched (`src/gossip/handler.rs:44`).
 - **`Fetch` is wired** — `wire_fetch` installs the handler at
-  `src/commands.rs:1038`. Single-id, so it is not anti-entropy (item 36), but it
+  `src/commands.rs:1042`. Single-id, so it is not anti-entropy (item 36), but it
   is not dead.
 - **`union_statements` never existed**; remote heat is no longer pinnable
   (`src/base/merge.rs:20`, applied `:153`).

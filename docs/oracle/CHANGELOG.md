@@ -2,6 +2,66 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — item 89 `[ingest]` closed: retention reaches the two entrances
+  that have no caller to pass a flag, and it has a `kern.toml` home the item
+  itself pointed at the wrong section for. A `.txt` transcript and a watched
+  file are dropped by nobody in particular — there is no call site to hand a
+  `--retention-secs`, so their TTL can only be a standing policy. Neither had
+  one: `drain_entry` cloned the queue's `Config` and overwrote only
+  `valid_from`, and `KernFileWatcherSink` handed the worker
+  `IngestRunConfig::default()` outright, two hardcoded no-TTLs. Both now read
+  `Config::with_retention`, which delegates to the existing
+  `valid_until_from_retention`, so there is still exactly one duration→instant
+  conversion and the four entrances cannot drift.
+
+  **The key could not go where the item said to put it, and that is the whole
+  decision.** Item 89 named `IngestConfig` — `[ingest]`. But
+  `Config::load_with_user` refuses a user-written `[heat]`, `[ingest]` or
+  `[retrieval]` section outright (`src/config/mod.rs:121-126`): those are
+  preset-owned and `Preset::apply` is their only writer. A `retention_secs`
+  beside `dedup_threshold` would therefore have been settable by no `kern.toml`
+  in existence, and the half the item itself called load-bearing would have
+  shipped dead on arrival. It went to `[intake]` and `[watcher]` instead —
+  per-source retention is keyed by *source*, not a preset dial, and those two
+  sections are exactly the ones that name the sources and that a user is allowed
+  to write. `a_real_kern_toml_can_set_per_source_retention` proves it by
+  loading a real file through `load_with_user`, not by constructing the struct.
+  `src/config/mod.rs` also now actually calls `watcher.validate()`, which it
+  never did; both sections refuse an unrepresentable retention at boot rather
+  than logging it once per drain pass forever.
+
+  **Where `with_retention` is called matters more than what it returns.** The
+  deadline is an absolute instant, so a config built once above the intake poll
+  loop — where it lived — would hand every transcript a deadline measured from
+  daemon boot, expiring a month-old delta and a minute-old one at the same
+  moment. The config moved inside the loop; the sink resolves per record. Proven
+  by reverting each half, not by the tests passing: hoisting the config back
+  above the loop collapses two transcripts queued two seconds apart onto a
+  single deadline and fails
+  `the_poll_loop_resolves_its_deadline_per_pass_not_once_at_startup` alone, and
+  reverting `kern intake drain`'s wiring to a literal `0` fails the new e2e with
+  "still delivered well past its retention deadline" while its no-policy control
+  stays green.
+
+  Named, not closed over: the file-watcher half is **unit-covered only**.
+  `WatcherConfig::enabled` is `false` by default and nothing in `e2e/` starts a
+  watcher, so `the_sink_stamps_the_configured_retention_on_what_it_ingests` is
+  the entire proof for that entrance. A durable `direct/` job also still cannot
+  inherit a standing policy — `drain_direct_once` overlays `job.valid_until`
+  over the loop's config, and an absent flag and `--retention-secs 0` are
+  indistinguishable on the wire. 868 tests pass against a true baseline of 862
+  (not the 866-with-a-skip this cycle was briefed with; there is no `#[ignore]`
+  in the tree), and the e2e floors are unmoved at 0.9306 / 0.9722 / 0.9471 —
+  which for a 36-fact corpus is a statement that nothing regressed, not a
+  measurement of this change. Also removed: a stray diff3 `|||||||` conflict
+  marker that this branch's own merge (`8ecd15f`) left in this file. Master
+  never had it.
+  Decided by: fix-the-root — the item's literal instruction was to add a key to
+  `IngestConfig`, and obeying it would have produced a config key that no config
+  file on earth can set. The root is *which sections a user may write*, so the
+  key went to the sections that describe the sources rather than to the one the
+  item happened to name.
+
 - 2026-07-21 — item 91 `[ingest]` closed: the second dedup gate stopped lying,
   on both counts. What it was lying about was an **id**. `place_document`
   returned an unconditional `Some(doc_id)` — the content hash of the text the
@@ -46,7 +106,6 @@
   Decided by: name-the-tradeoff — "gate the insert" and "reindex under the
   survivor" are not the same fix, and closing the item on the first without
   filing the second would have banked a silent recall gap as done work.
-||||||| 21e5b35
 - 2026-07-21 — the acquittal marker silenced a real breakage on its first
   contested use, and the merge caught it. `cycle/1` adjudicated
   `FEATURES.md:608` as a false positive and stamped it

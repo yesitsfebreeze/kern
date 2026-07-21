@@ -953,7 +953,10 @@ fn spawn_file_watcher(cfg: &crate::config::Config, worker: &Arc<crate::ingest::W
 	let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 	let roots = cfg.watcher.effective_roots(&cwd);
 	let ignore = IgnoreRules::from_roots(&roots);
-	let sink = Arc::new(KernFileWatcherSink::new(worker.clone()));
+	let sink = Arc::new(KernFileWatcherSink::new(
+		worker.clone(),
+		cfg.watcher.retention_secs,
+	));
 	tokio::spawn(async move {
 		if let Err(e) = run_file_watcher(roots, ignore, sink).await {
 			tracing::warn!(target: "kern.file_watcher", error = %e, "watcher exited");
@@ -992,6 +995,7 @@ fn spawn_intake(
 		llm_fn.clone(),
 		Some(claim_kinds),
 		dedup,
+		cfg.intake.retention_secs,
 		poll,
 		done_retention,
 	));

@@ -164,6 +164,7 @@ async fn drain_locally(
 		llm_fn.as_ref(),
 		&extra_kinds,
 		cfg.ingest.dedup_threshold,
+		cfg.intake.retention_secs,
 		Duration::from_secs(cfg.intake.done_retention_secs),
 		SystemTime::now(),
 	)

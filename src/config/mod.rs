@@ -173,6 +173,10 @@ impl Config {
 		}
 		self.ingest.validate().map_err(|e| format!("ingest: {e}"))?;
 		self.intake.validate().map_err(|e| format!("intake: {e}"))?;
+		self
+			.watcher
+			.validate()
+			.map_err(|e| format!("watcher: {e}"))?;
 		let retrieval = self.retrieval.validate();
 		if !retrieval.is_empty() {
 			return Err(format!("retrieval: {}", retrieval.join("; ")));
@@ -393,6 +397,27 @@ mod tests {
 				"[{section}] must be refused with a pointer to presets: {msg}"
 			);
 		}
+	}
+
+	// The load-bearing half of per-source retention: a policy a `kern.toml`
+	// cannot express is a policy nobody has. `[ingest]` is refused outright by
+	// the guard above, so the key lives in the two sections that describe the
+	// sources themselves — and this proves a real file reaches the struct.
+	#[test]
+	fn a_real_kern_toml_can_set_per_source_retention() {
+		let dir = root_with(
+			"[intake]\nretention_secs = 2592000\n\n[watcher]\nenabled = true\nretention_secs = 86400\n",
+		);
+		let root = dir.path().canonicalize().unwrap();
+		let cfg = Config::load_with_user(&root.join("no-such-user.toml"), &root)
+			.expect("a user-writable section must load");
+
+		assert_eq!(
+			cfg.intake.retention_secs, 2_592_000,
+			"30 days on the intake"
+		);
+		assert_eq!(cfg.watcher.retention_secs, 86_400, "a day on the watcher");
+		assert!(cfg.validate().is_ok(), "and the loaded config validates");
 	}
 
 	#[test]
