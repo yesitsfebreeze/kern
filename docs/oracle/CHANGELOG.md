@@ -2,6 +2,35 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — item 25 was measured before being implemented, and the
+  measurement said to do item 26 instead. `seed_important`'s O(N) scan is real
+  — 34 ms and 55% of retrieve at N=100k with the whole corpus eligible — but it
+  is O(N x eligible), so it shrinks exactly when a query filters. Item 26's
+  PageRank does not: it is a flat ~20 ms per query at N=100k whether 1% or 100%
+  of the corpus survives the filter, because the power iteration walks the whole
+  adjacency regardless. On an ordinary filtered query that is 6.7x the scan.
+
+  So item 25's standing claim to be "top structural debt in the repo" is
+  withdrawn as unmeasured, and both items now carry the table. **No index was
+  written.** Building one would have been a real speedup for the one workload
+  where an index cannot help — a corpus where everything is eligible — and no
+  help for the common one.
+
+  The instrument is kept as `tests/seed_scale.rs`, `#[ignore]`d because it is
+  ~11 minutes in release. It is kept rather than deleted for the reason it
+  existed: both items are perf claims, and a perf claim whose instrument was
+  thrown away cannot be rechecked when the numbers move. It is also why the
+  first attempt at this slice died — run under a plain `cargo test`, in debug,
+  a 100k-entity build never finished and the agent was killed as stalled. The
+  harness now says so at the top.
+
+  Ranking is deliberately NOT reordered here. Position is rank in this file, so
+  moving 26 above 25 is a decision of its own; this entry is the evidence for
+  it, not the act.
+
+  Decided by: verify-before-claiming — the item asserted a cliff and a priority,
+  and only one of the two survived contact with a measurement.
+
 - 2026-07-21 — `docs-check` now reads the line it is pointed at. Item 93's
   second candidate closure landed: every anchor carrying a line number gets its
   citing block's content words compared against the cited line's, and an anchor
