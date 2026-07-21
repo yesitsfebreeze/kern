@@ -2,6 +2,73 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — `FEATURES.md` stated the acceptance radii as
+  `KERN_INNER_RADIUS=0.15, KERN_OUTER_RADIUS=0.35`; `src/base/constants.rs:40-41`
+  say 0.35 and 0.75. Both numbers wrong, by more than a factor of two, on the
+  constants that decide whether an entity joins a kern or spawns a new one.
+
+  Found by the item 31 slice while measuring routing, and flagged rather than
+  fixed because it sat outside that slice's section. Fixed here in the same
+  worktree, with the source anchor added so the next drift is nominated instead
+  of merely wrong: `docs-check` verifies a cited line still says what the citing
+  sentence claims, and this line cited nothing at all.
+
+  Worth the entry because of what it says about the check's reach. Nine hundred
+  tests, an anchor nominator and a citation checker all passed over this for the
+  entire life of the file — none of them compares a documented *value* against
+  the constant it names. Anchored prose gets checked; unanchored prose is
+  unfalsifiable. The cheap discipline that follows: when a doc states a number
+  from source, cite the source line, or the number is a rumour.
+
+  Decided by: verify-before-claiming — a stated constant is a claim, and this one
+  had never been checked against the thing it claims.
+
+- 2026-07-22 — item 31's last surviving bullet, "per-parent fan-out in routing is
+  a real cliff", is retired unfixed. `tests/route_fanout.rs` (release,
+  `--ignored`) prices it two ways, and the item is right about the structure and
+  wrong about the cost.
+
+  **The width is real and nothing bounds it.** Root fan-out tracks the number of
+  distinct cohesive topics almost exactly: 8 topics -> 8 named children, 64 ->
+  55, 256 -> 191, driving the real accept → cluster → name → promote loop.
+  `GRAVITON_DEDUP_THRESHOLD` collapses only topics whose graviton names embed
+  within 0.85 of each other — a fact about the corpus, not a cap. Disabling
+  promotion does not shrink the width, it moves it one level down into `generic`.
+
+  **The cost of that width is linear and small.** A child costs 0.14-0.18us
+  across runs, on an accept that costs 1.4-2.1ms at 20k entities: ~2% at 191
+  children, ~5% at 512, ~24% at 4096 — and a graph with 4096 distinct themes
+  holds far more than 20k entities, so the real fraction is lower still. Ingest is two HNSW searches and
+  two inserts; routing is a rounding error beside them. A slope, not a cliff.
+
+  **And the scan the item blames is not where even that goes.** Running the same
+  descent with the children unnamed — identical walk, cosine skipped — moves the
+  per-child figure by -0.009, -0.001 and +0.003us on three runs — zero every
+  time. The width is paid in two `Vec<String>` clones per descent and a linear
+  resident-map probe for the generic child, not in `cosine_distance` against `graviton_vec`. That is the
+  third time this item has named the wrong line; its two 2026-07-21 retirements
+  were misattributions too. The pattern is that every version of it was written
+  from the shape of the code rather than from a run.
+
+  So no index over children shipped. Naming the tradeoff that was declined: an
+  index is write-path work on every spawn and every rename, and what it buys
+  back is a comparison that measures as free. If the slope ever matters, the
+  lever is deleting the clone, and item 31 now says so instead of pointing at
+  the index. Supersedes the "real cliff" claim recorded under item 31 on
+  2026-07-21.
+
+  Recorded because the first draft of this entry claimed the opposite — that
+  fan-out was sublinear and `TICK_MAX_CLUSTER_SAMPLE` suppressed it. That came
+  from a generator whose 32-word vocabulary made distinct topics produce
+  identical graviton names, which the 0.85 gate then collapsed. It was caught
+  only by trying to make the assertion fail and finding it could not be, which
+  is the entire reason that step exists.
+
+  Decided by: verify-before-claiming — the cliff was measured before it was
+  climbed, the instrument that priced the width also proved the named cause was
+  not it, and the first conclusion was withdrawn when its revert-check would not
+  fail.
+
 - 2026-07-21 — `4e836bb`'s subject is wrong in the same way `3529fce`'s was, and
   twice makes it a pattern with a clean cause. It reads "source-trust weighting —
   a user-authored claim should outrank an auto-ingested one at equal heat,

@@ -121,7 +121,7 @@ supersedes an existing one. The core write path every ingestion funnels through.
    the nearest existing neighbor and a `Provenance` reason to the source doc.
 
 **Where.** `src/base/accept.rs` (1452 LoC). Radii defaults in `constants.rs`
-(`KERN_INNER_RADIUS=0.15`, `KERN_OUTER_RADIUS=0.35`).
+(`KERN_INNER_RADIUS=0.35`, `KERN_OUTER_RADIUS=0.75`, `src/base/constants.rs:40-41`).
 
 **Gaps.** *Both halves of this block were wrong and are corrected 2026-07-21.*
 Routing does **no** index lookup per level: `route_to_child_id`
