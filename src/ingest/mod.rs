@@ -12,7 +12,7 @@ pub mod split;
 pub mod worker;
 
 pub use crate::types::LlmFunc;
-pub use config::Config;
+pub use config::{valid_until_from_retention, Config};
 pub use outcome::{FailureReport, Outcome, OutcomeStatus};
 pub(crate) use worker::Job;
 pub use worker::Worker;

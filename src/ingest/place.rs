@@ -110,7 +110,7 @@ pub(crate) async fn place_document(
 		job.source.clone(),
 		external_id,
 		job.confidence,
-		None,
+		job.config.valid_until,
 		unlinked,
 	);
 	thought.valid_from = job.config.valid_from;
@@ -194,7 +194,7 @@ pub(crate) fn place_chunks(
 			&job.source,
 			&external_id,
 			job.confidence,
-			None,
+			job.config.valid_until,
 		);
 		thought.valid_from = job.config.valid_from;
 		let tid = thought.id.clone();
@@ -431,6 +431,67 @@ mod tests {
 			total_entity_count(&g),
 			2,
 			"below the configured dedup threshold -> stored as a new entity, not dropped"
+		);
+	}
+
+	fn placed_deadlines(g: &Arc<RwLock<GraphGnn>>) -> Vec<Option<SystemTime>> {
+		let gg = g.read();
+		gg.all()
+			.iter()
+			.flat_map(|k| k.entities.values().map(|e| e.valid_until))
+			.collect()
+	}
+
+	#[test]
+	fn a_configured_retention_stamps_valid_until_on_every_placed_entity() {
+		let deadline = SystemTime::now() + std::time::Duration::from_secs(3600);
+		let g = empty_graph();
+		let mut j = job("doc", 1.0);
+		j.config.valid_until = Some(deadline);
+		place_chunks(
+			&g,
+			None,
+			None,
+			&j,
+			&["alpha beta".to_string()],
+			&[vec![1.0, 0.0, 0.0]],
+			"doc1",
+			0.95,
+		);
+		assert_eq!(
+			placed_deadlines(&g),
+			vec![Some(deadline)],
+			"the ingest-time retention reaches the entity"
+		);
+		let gg = g.read();
+		let stamped = gg
+			.all()
+			.iter()
+			.flat_map(|k| k.entities.values())
+			.all(|e| e.valid_until_lamport > 0 && !e.valid_until_producer.is_empty());
+		assert!(
+			stamped,
+			"the existing LWW stamping fired for the new writer"
+		);
+	}
+
+	#[test]
+	fn no_retention_leaves_valid_until_unset() {
+		let g = empty_graph();
+		place_chunks(
+			&g,
+			None,
+			None,
+			&job("doc", 1.0),
+			&["alpha beta".to_string()],
+			&[vec![1.0, 0.0, 0.0]],
+			"doc1",
+			0.95,
+		);
+		assert_eq!(
+			placed_deadlines(&g),
+			vec![None],
+			"a default ingest sets no valid_until"
 		);
 	}
 

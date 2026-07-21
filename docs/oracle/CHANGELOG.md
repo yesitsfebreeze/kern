@@ -2,6 +2,61 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — item 22 closed: per-source TTL has a writer. The reader half
+  (`score::drop_expired`) had been enforcing `valid_until` on every retrieve
+  against a field nothing ever set — `new_statement_entity` was called with a
+  literal `None` from both the document path and the chunk path, and the LWW
+  lamport/producer stamping and pending delta sitting right above those calls
+  had never fired once. They fire now.
+
+  **The unit is integer seconds, not a duration string, and that was the
+  decision.** `retention: "30d"` reads better in a tool schema and is what a
+  host would write in a config file. It was rejected because kern has no
+  duration parser and every duration in the tree is already a bare `u64` named
+  `*_secs` — `poll_secs`, `done_retention_secs`, `COLD_EVICT_WARN_SECS`. Adding
+  a string form for this one field would mean either a parser nothing else
+  uses, or two spellings of "how long" in the same config. `retention_secs` it
+  is, in both entrances. If a `kern.toml` key later wants `"30d"` (item 89),
+  the parser is a strictly additive layer above `valid_until_from_retention`,
+  which stays the one conversion from duration to instant.
+
+  **Absolute on the wire, duration at the boundary.** `DirectJob` — the durable
+  direct-intake payload, and the *default* async MCP path, since
+  `intake.enabled` defaults true — carries the resolved `valid_until`, not the
+  seconds. A duration serialized into a file that may sit a whole poll interval
+  before it drains would restart on the drain, and the deadline the caller
+  asked for would depend on how busy the daemon was. For the same reason the
+  CLI resolves the deadline **once, before** the guarded write-retry loop: a
+  refused-stale flush reloads and re-runs the whole ingest, and a deadline
+  computed inside that loop would slide out by however long the retry took.
+  `0` means never, matching every other unset knob; a duration that overflows
+  the clock is an error that writes nothing, rather than degrading to no TTL —
+  which is the one failure mode a retention feature must not have.
+
+  **Decided by:** verify-before-claiming. Two things the implementation report
+  asserted were checked by breaking them rather than by reading them. Reverting
+  `place.rs` to its two hardcoded `None`s makes `e2e/test_retention.py` fail on
+  the expiry assertion, not on setup — so the e2e proves the writer, not merely
+  that the binary runs. Reverting the per-job `Config` overlay in
+  `drain_direct_once` makes `drain_direct_once_ingests_and_archives_end_to_end`
+  fail on "the retention survives the durable intake round-trip" — so the
+  direct-intake leg is load-bearing and tested, not decoration. Also checked
+  against the live surface rather than the schema source: `tools/list` over
+  `--mcp-stdio` returns `retention_secs` as an `integer` with `required:
+  ["text"]`, and `kern ingest --help` lists the flag with its `0 = never`
+  wording. e2e floors unmoved: 0.9306 / 0.9722 / 0.9471.
+
+  **The reported flake did not reproduce, and the mechanism given for it is
+  impossible.** `base::store::tests::a_cold_tier_pinned_at_capacity_counts_every_eviction_but_logs_once`
+  was reported failing once and attributed to a process-global "log once" guard
+  raced by a concurrent test. There is no such guard: `cold_evict_warn` is a
+  per-`Store` instance field (`src/base/store.rs:276`) holding a 300-second
+  `LogThrottle`, the test's subscriber is thread-local, and nextest runs every
+  test in its own process — nothing concurrent can reach it. Ten full-suite runs
+  and twenty-five isolated runs were all green, and `src/base/` is outside this
+  diff entirely, so the code is byte-identical to the base commit. Recorded as
+  unreproduced rather than as fixed or as explained.
+
 - 2026-07-21 — the read-side routing was built twice, by two sessions that could
   not see each other, and the merge is a reconciliation rather than a pick. Both
   branches routed `kern get` through the `query` tool with the local load as the

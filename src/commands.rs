@@ -103,6 +103,8 @@ pub enum Commands {
 		text: Vec<String>,
 		#[arg(long)]
 		file: Option<String>,
+		#[arg(long, help = "expire this ingest after N seconds (0 = never)")]
+		retention_secs: Option<u64>,
 		#[command(flatten)]
 		llm: LlmArgs,
 	},
@@ -477,12 +479,18 @@ pub(crate) fn server_llm_client(
 
 pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 	match cmd {
-		Commands::Ingest { text, file, llm } => {
+		Commands::Ingest {
+			text,
+			file,
+			retention_secs,
+			llm,
+		} => {
 			let (embed_url, embed_model, reason_url, reason_model) = llm.resolve(cfg);
 			ingest_cmd::cmd_ingest(
 				cfg,
 				text,
 				file,
+				retention_secs.unwrap_or(0),
 				embed_url,
 				embed_model,
 				reason_url,

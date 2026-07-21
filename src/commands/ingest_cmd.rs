@@ -16,6 +16,7 @@ pub(super) async fn cmd_ingest(
 	cfg: &crate::config::Config,
 	text_parts: Vec<String>,
 	file: Option<String>,
+	retention_secs: u64,
 	embed_url: &str,
 	embed_model: &str,
 	reason_url: &str,
@@ -39,6 +40,15 @@ pub(super) async fn cmd_ingest(
 		return;
 	}
 
+	// Resolved once, before the retry loop: a retry must not push the deadline out.
+	let valid_until = match crate::ingest::valid_until_from_retention(retention_secs) {
+		Ok(v) => v,
+		Err(e) => {
+			eprintln!("{e}");
+			return;
+		}
+	};
+
 	let g = Arc::new(RwLock::new(load_graph(cfg)));
 	let llm_client = Client::new(
 		Endpoint::new(reason_url, reason_model, reason_key),
@@ -54,7 +64,7 @@ pub(super) async fn cmd_ingest(
 		section: String::new(),
 	};
 
-	let mut outcome = run_once(&worker, &g, &text, &src, kind, conf, cfg).await;
+	let mut outcome = run_once(&worker, &g, &text, &src, kind, conf, cfg, valid_until).await;
 	for attempt in 0..WRITE_RETRIES {
 		// Guard against the epoch observed at LOAD time, not a re-read at flush time —
 		// else a writer that committed in between gets overwritten unseen.
@@ -71,7 +81,7 @@ pub(super) async fn cmd_ingest(
 					let fresh = super::reload_graph(cfg, &w);
 					*w = fresh;
 				}
-				outcome = run_once(&worker, &g, &text, &src, kind, conf, cfg).await;
+				outcome = run_once(&worker, &g, &text, &src, kind, conf, cfg, valid_until).await;
 			}
 			Ok(FlushOutcome::RefusedStale {
 				disk_epoch,
@@ -104,6 +114,7 @@ pub(super) async fn cmd_ingest(
 	}
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_once(
 	worker: &crate::ingest::Worker,
 	_g: &Arc<RwLock<crate::base::graph::GraphGnn>>,
@@ -112,6 +123,7 @@ async fn run_once(
 	kind: crate::base::types::EntityKind,
 	conf: f64,
 	cfg: &crate::config::Config,
+	valid_until: Option<std::time::SystemTime>,
 ) -> crate::ingest::outcome::Outcome {
 	worker
 		.run(
@@ -120,14 +132,18 @@ async fn run_once(
 			kind,
 			String::new(),
 			conf,
-			ingest_config(cfg),
+			ingest_config(cfg, valid_until),
 		)
 		.await
 }
 
-fn ingest_config(cfg: &crate::config::Config) -> crate::ingest::Config {
+fn ingest_config(
+	cfg: &crate::config::Config,
+	valid_until: Option<std::time::SystemTime>,
+) -> crate::ingest::Config {
 	crate::ingest::Config {
 		dedup_threshold: cfg.ingest.dedup_threshold,
+		valid_until,
 		..Default::default()
 	}
 }
@@ -140,7 +156,7 @@ mod tests {
 	fn ingest_config_carries_dedup_threshold_from_cfg() {
 		let mut cfg = crate::config::Config::default();
 		cfg.ingest.dedup_threshold = 0.87;
-		let ic = ingest_config(&cfg);
+		let ic = ingest_config(&cfg, None);
 		assert_eq!(
 			ic.dedup_threshold, 0.87,
 			"dedup_threshold comes from the user config"
@@ -150,6 +166,21 @@ mod tests {
 		assert_ne!(
 			0.87, default_dedup,
 			"test value differs from the default, so the assertion is meaningful"
+		);
+	}
+
+	#[test]
+	fn ingest_config_carries_the_resolved_retention_deadline() {
+		let cfg = crate::config::Config::default();
+		assert_eq!(
+			ingest_config(&cfg, None).valid_until,
+			None,
+			"no --retention-secs -> no valid_until"
+		);
+		let deadline = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+		assert_eq!(
+			ingest_config(&cfg, Some(deadline)).valid_until,
+			Some(deadline)
 		);
 	}
 }

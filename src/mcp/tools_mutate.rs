@@ -27,6 +27,7 @@ pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 					"url":        {"type": "string", "description": "URL reference"},
 					"conf":       {"type": "number", "description": "confidence weight 0.0-1.0 (default 0.5)"},
 					"hint": {"type": "string", "description": "free-text hint describing the content, folded into the chunking prompt"},
+					"retention_secs": {"type": "integer", "description": "expire this ingest after N seconds — sets valid_until, after which retrieval drops it (0 or absent = never)"},
 					"sync":       {"type": "boolean", "description": "block until ingest completes (default false)"},
 				},
 			},
@@ -104,6 +105,8 @@ struct IngestArgs {
 	#[serde(default)]
 	hint: String,
 	#[serde(default)]
+	retention_secs: u64,
+	#[serde(default)]
 	sync: bool,
 }
 
@@ -155,6 +158,11 @@ impl Server {
 			return tool_error(&e);
 		}
 
+		let valid_until = match ingest::valid_until_from_retention(p.retention_secs) {
+			Ok(v) => v,
+			Err(e) => return tool_error(&e),
+		};
+
 		// MCP callers are agents; clamp against AGENT_SOURCE regardless of what
 		// `p.source` claims — the caller's source string cannot escalate to USER_SOURCE trust.
 		let (conf, kind) = clamp_confidence(p.conf, AGENT_SOURCE);
@@ -199,6 +207,7 @@ impl Server {
 				conf,
 				ingest::Config {
 					dedup_threshold: self.cfg.ingest.dedup_threshold,
+					valid_until,
 					..Default::default()
 				},
 			);
@@ -234,6 +243,7 @@ impl Server {
 				kind,
 				hint: p.hint.clone(),
 				confidence: conf,
+				valid_until,
 			};
 			match crate::ingest::direct::intake_direct(&direct_dir, &job) {
 				Ok(doc_id) => {
@@ -264,6 +274,7 @@ impl Server {
 			conf,
 			ingest::Config {
 				dedup_threshold: self.cfg.ingest.dedup_threshold,
+				valid_until,
 				..Default::default()
 			},
 		);

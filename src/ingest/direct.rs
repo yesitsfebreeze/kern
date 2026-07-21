@@ -15,6 +15,10 @@ pub struct DirectJob {
 	pub kind: EntityKind,
 	pub hint: String,
 	pub confidence: f64,
+	// Absolute, not a duration: the deadline was fixed when the caller asked,
+	// and this payload may sit in the intake for a whole poll interval first.
+	#[serde(default)]
+	pub valid_until: Option<std::time::SystemTime>,
 }
 
 pub fn intake_direct(direct_dir: &Path, job: &DirectJob) -> std::io::Result<String> {
@@ -67,6 +71,10 @@ pub async fn drain_direct_once(
 				continue;
 			}
 		};
+		let job_cfg = crate::ingest::Config {
+			valid_until: job.valid_until,
+			..cfg.clone()
+		};
 		let outcome = worker
 			.run(
 				job.text,
@@ -74,7 +82,7 @@ pub async fn drain_direct_once(
 				job.kind,
 				job.hint,
 				job.confidence,
-				cfg.clone(),
+				job_cfg,
 			)
 			.await;
 		if matches!(outcome.status, OutcomeStatus::Failed) {
@@ -111,6 +119,7 @@ mod tests {
 			kind: EntityKind::Claim,
 			hint: "audit-finding".into(),
 			confidence: 0.7,
+			valid_until: None,
 		}
 	}
 
@@ -159,7 +168,10 @@ mod tests {
 
 		let dir = tempdir().unwrap();
 		let direct = dir.path().join("direct");
-		let doc_id = intake_direct(&direct, &job("the spawn gate shipped today")).expect("accepted");
+		let deadline = std::time::SystemTime::now() + Duration::from_secs(3600);
+		let mut j = job("the spawn gate shipped today");
+		j.valid_until = Some(deadline);
+		let doc_id = intake_direct(&direct, &j).expect("accepted");
 
 		let cfg = crate::ingest::Config {
 			dedup_threshold: 0.95,
@@ -177,6 +189,13 @@ mod tests {
 		assert!(
 			total > 0,
 			"the payload flowed through the worker into the graph"
+		);
+		assert!(
+			g.all()
+				.iter()
+				.flat_map(|k| k.entities.values())
+				.all(|e| e.valid_until == Some(deadline)),
+			"the retention survives the durable intake round-trip"
 		);
 
 		server.abort();
