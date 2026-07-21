@@ -47,6 +47,124 @@
   entity mutation is unobservable and that the scan was not parallel at all;
   building the index on an epoch that cannot see the mutation would have shipped
   a silent recall bug instead of fixing either.
+- 2026-07-21 — item 27 `[lifecycle]` narrowed to one bullet it never contained.
+  Both remaining claims were measured first (`tests/gc_scale.rs`, release, new
+  here alongside `tests/seed_scale.rs`). **Victim selection does not dominate and
+  was not touched**: 3.8 ms at 100k entities against a 6 045 ms sweep, 0.06% of
+  it, and linear rather than superlinear — one predicate per entity once per GC
+  interval. No index was written, and none would have worked: eligibility is
+  decayed heat, a function of `now` and each entity's own `heat_updated_at`, so
+  no static ordering survives the clock advancing. That is the second perf claim
+  in this file withdrawn by its own instrument, after item 25.
+
+  **The cold-tier scan did dominate, but not for the stated reason, and the fix
+  is not an index.** `cold_search` cost 470 ms per call at the 50k cap, on the
+  *recall* path — it fires whenever the hot tier underfills `k`. 87–99% of that
+  was bincode-decoding a whole `Entity` per row to reach a vector, not the cosine
+  arithmetic: `cold_all`, the same decode with no scoring, cost 343 ms of the
+  393 ms. So vectors moved out of the row into their own LMDB table; the scan
+  scores off raw little-endian floats and decodes only the k winners. 470 ms →
+  28 ms at 50k rows, 72 → 6 ms at 10k. Still a full scan, deliberately: the cold
+  tier exists to *not* be resident, and an ANN over it would put the index back.
+
+  **What it costs.** One extra `put` per spill, inside the transaction that was
+  already being committed, so no added commit and no added fsync — across three
+  paired release runs the per-spill time difference stayed inside run-to-run
+  noise (2.3–9.8 ms either way), which is to say it is not measurable. The cost
+  is disk: the side table holds vectors uncompressed where the row zstd'd them.
+  At 5 000 spills of 384-dim *dense* vectors — what an embedding model returns —
+  20.63 MB → 21.34 MB, +3.4%. On a highly compressible vector distribution it is
+  far worse: the sparse fixture went 0.95 MB → 21.34 MB, 22×. Memory moved the
+  other way: a search now buffers 50k `(id, score)` pairs instead of 50k decoded
+  entities, tens of MB less peak. The store format is bumped to `FORMAT_V6`
+  rather than migrated, per the alpha no-compatibility rule; old stores are
+  rejected cleanly and reingested.
+
+  Selection equivalence is pinned by
+  `cold_search_selects_exactly_what_the_linear_scan_did`, which compares the new
+  path against the old linear scan over a 600-row generated tier — ids, scores
+  *and* vectors, across 8 queries × 5 values of k, with wrong-dimension, empty
+  and deliberately tied vectors in the fixture. Comparing vectors is not
+  decoration: an earlier version compared only ids and scores and passed with the
+  vector join deleted. `pytest -q -s e2e` returns 0.9306 / 0.9722 / 0.9471,
+  unchanged, which is what says GC still forgets exactly what it forgot before.
+
+  Supersedes item 27's title and its two open bullets. What is left is the cost
+  the measurement actually found and the item never listed: `cold_spill` opens
+  and commits one LMDB write transaction per victim, 3–10 ms each, 279 s for a
+  80 000-victim sweep. Batching it is easy — `cold_put_all` already does — and is
+  left open on purpose, because one transaction for the whole list turns
+  per-victim spill-before-drop into all-or-nothing, and that is a retention
+  decision rather than a performance one.
+
+  Decided by: verify-before-claiming
+- 2026-07-21 — item 94 corrected: the shared `target-dir` **does** leak between
+  worktrees, and the earlier entry saying it does not was wrong. That entry
+  checked the wrong artifact class. Lib-test binaries really do get one hash per
+  tree — four hashes, four trees, verified. But a workspace sub-crate has the
+  same package name, version and relative path everywhere, so `trnsprt`'s
+  fingerprint matches across trees and cargo reuses whichever build landed first.
+
+  Two independent observations forced it. `cycle/3` failed to compile against a
+  field that existed only in `cycle/2`'s source. `cycle/2` watched cargo report
+  `Fresh trnsprt` against a stale rmeta with hard-link count 3 while its own
+  `dto.rs` edit sat on disk, and had to `touch` that file before every build it
+  measured from.
+
+  The second mode is the dangerous one and it is the one the earlier entry ruled
+  out: a tree linking a sibling's crate. It failed loudly here only because the
+  two sources disagreed about a struct field. A type-compatible divergence would
+  have linked silently and produced a green suite against another branch's code —
+  which is the whole verification story of this loop, wrong.
+
+  All three worktrees now have their own `target-dir`. ~33 GB against an 11 GB
+  shared cache, and both stalled builds recovered on the spot. The
+  staleness-guard alternative is moot: it addressed mode 1 and was blind to
+  mode 2. The by-name test discipline survives, because it catches mode 1
+  independently of the build layout and is what confirmed both cycles.
+
+  Decided by: verify-before-claiming — the first version of item 94 asserted
+  "checked rather than assumed" about a check that examined the wrong artifact,
+  and the correction cost two stalled cycles to surface.
+
+- 2026-07-21 — bounded the ingest queue, and answered the question item 30
+  existed to force: **when the queue is full, refuse the newest job — except on
+  the one leg that can be slowed instead, which waits.**
+
+  First the premise, because the item offered two defects and did not say which:
+  it grew, it never dropped. `tokio`'s `send` errors only on a closed channel,
+  so each detached `tokio::spawn` parked on the full queue still holding its
+  whole text. Measured, not reasoned: 500 jobs offered to a worker stalled on a
+  hanging embedder were all 500 accepted. That number is now the revert-check
+  failure of the test that bounds it.
+
+  Refuse-newest wins because the three alternatives each pay somewhere worse.
+  *Block the producer*: correct, and it welds ingest throughput to the slowest
+  thing in the system — the MCP `ingest` tool would sit on embed latency while an
+  agent waits. *Drop the oldest*: discards work already accepted, and the RAM
+  queue is reached exactly when the durable file intake is unavailable, so the
+  discarded job has no disk copy to recover from. *Drop the newest silently*:
+  same loss, and the caller is told "queued". Refusing keeps the loss where the
+  caller can see and retry it; the cost is honest — `enqueue` now returns
+  `Option<String>` and the MCP tool can fail where it never could.
+
+  The file watcher is the exception and gets the waiting form, `submit`. It is
+  the fast producer the bound exists for, nothing is waiting on its return, and
+  its own backlog is coalesced paths rather than job bodies — so stalling it
+  costs less memory than the pileup it replaces, while a refusal there would
+  lose a file nothing re-offers.
+
+  Refusals are counted and surfaced as `ingest_queue_refused` on all three health
+  surfaces, following `unspilled_drops` rather than inventing a shape, with the
+  warn line throttled and the counter exact. A test walks a real refusal from the
+  worker's counter to the RPC DTO an operator polls; it fails when the RPC leg is
+  hardcoded to zero.
+
+  Recall unmoved at 0.9306 / 0.9722 / 0.9471, as it must be — the CLI and intake
+  legs use `run`, which awaits and never touched this path.
+
+  Decided by: name-the-tradeoff — four defensible policies, so the entry records
+  what each rejected one would have cost rather than letting the code imply it.
 
 - 2026-07-21 — merged item 26's confined PageRank, and resolved the `CHANGELOG`
   collision by rebuilding the union rather than splicing the conflict hunk. Last

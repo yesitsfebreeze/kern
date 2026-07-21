@@ -313,7 +313,7 @@ impl Server {
 			}
 		}
 
-		let doc_id = self.worker.enqueue_with_acl(
+		let Some(doc_id) = self.worker.enqueue_with_acl(
 			p.text,
 			src,
 			kind,
@@ -325,7 +325,11 @@ impl Server {
 				..Default::default()
 			},
 			acl,
-		);
+		) else {
+			// Loud, not a `status` field in a success envelope: the caller has to
+			// re-offer this text, and a caller that must act cannot be told quietly.
+			return tool_error("ingest queue full; the text was not accepted, retry");
+		};
 		tool_result_json(&serde_json::json!({
 			"status": "queued",
 			"doc_id": doc_id,

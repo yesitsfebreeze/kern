@@ -90,6 +90,17 @@ pub(crate) fn tool_text(v: &serde_json::Value) -> String {
 	v["content"][0]["text"].as_str().unwrap_or("").to_string()
 }
 
+// An embed endpoint that never answers. Pins the ingest worker on one job so a
+// test can fill the queue behind it.
+pub(crate) fn hanging_embed_app() -> axum::Router {
+	axum::Router::new().route(
+		"/api/embed",
+		axum::routing::post(|_b: axum::Json<serde_json::Value>| async move {
+			std::future::pending::<axum::Json<serde_json::Value>>().await
+		}),
+	)
+}
+
 pub(crate) async fn spawn_http(app: axum::Router) -> (String, JoinHandle<()>) {
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let addr = listener.local_addr().unwrap();

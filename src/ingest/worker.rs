@@ -1,4 +1,5 @@
 use crate::base::graph::GraphGnn;
+use crate::base::log_throttle::LogThrottle;
 use crate::base::types::*;
 use crate::base::util;
 use crate::ingest::config::Config;
@@ -27,11 +28,46 @@ pub(crate) struct Job {
 	pub(crate) result_tx: Option<oneshot::Sender<Outcome>>,
 }
 
+#[allow(clippy::too_many_arguments)]
+fn job(
+	text: String,
+	source: Source,
+	kind: EntityKind,
+	hint: String,
+	confidence: f64,
+	config: Config,
+	acl: Acl,
+) -> Job {
+	Job {
+		text,
+		source,
+		kind,
+		hint,
+		confidence,
+		config,
+		acl,
+		result_tx: None,
+	}
+}
+
 // Runs on the commit path — must be cheap (enqueue only).
 pub type DeferQuestionsFn = Arc<dyn Fn(&str) + Send + Sync>;
 
 // Args are (kern_id, rephrase_reason_id); no hook = fail open.
 pub type DeferContradictionFn = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
+// In-flight jobs the distill/embed leg may be behind on. The bound is the whole
+// bound: nothing detaches past it.
+const QUEUE_CAP: usize = 64;
+const REFUSED_WARN_SECS: u64 = 60;
+static QUEUE_REFUSED: AtomicU64 = AtomicU64::new(0);
+static REFUSED_WARN: LogThrottle = LogThrottle::new(REFUSED_WARN_SECS);
+
+// Jobs `enqueue` refused because the queue was full. The refusal is returned to
+// the caller, but only the count says how often a producer outran the LLM leg.
+pub fn ingest_queue_refused() -> u64 {
+	QUEUE_REFUSED.load(Ordering::Relaxed)
+}
 
 pub struct Worker {
 	tx: mpsc::Sender<Job>,
@@ -45,7 +81,7 @@ impl Worker {
 		defer_contradiction: Option<DeferContradictionFn>,
 		save_fn: Option<Arc<dyn Fn() + Send + Sync>>,
 	) -> Self {
-		let (tx, rx) = mpsc::channel(64);
+		let (tx, rx) = mpsc::channel(QUEUE_CAP);
 		tokio::spawn(run_loop(
 			graph,
 			embedder,
@@ -57,6 +93,9 @@ impl Worker {
 		Self { tx }
 	}
 
+	// `None` = refused, queue full. A synchronous producer cannot wait on the LLM
+	// leg without becoming as slow as it, and there is no oldest job worth
+	// discarding for a newer one, so the newest is refused and the caller decides.
 	pub fn enqueue(
 		&self,
 		text: String,
@@ -65,7 +104,7 @@ impl Worker {
 		hint: String,
 		confidence: f64,
 		config: Config,
-	) -> String {
+	) -> Option<String> {
 		self.enqueue_with_acl(text, source, kind, hint, confidence, config, Acl::default())
 	}
 
@@ -82,23 +121,43 @@ impl Worker {
 		confidence: f64,
 		config: Config,
 		acl: Acl,
-	) -> String {
+	) -> Option<String> {
 		let doc_id = util::content_hash(&text);
-		let job = Job {
-			text,
-			source,
-			kind,
-			hint,
-			confidence,
-			config,
-			acl,
-			result_tx: None,
-		};
-		let tx = self.tx.clone();
-		tokio::spawn(async move {
-			let _ = tx.send(job).await;
-		});
-		doc_id
+		if self
+			.tx
+			.try_send(job(text, source, kind, hint, confidence, config, acl))
+			.is_err()
+		{
+			let total = QUEUE_REFUSED.fetch_add(1, Ordering::Relaxed) + 1;
+			if REFUSED_WARN.allow() {
+				tracing::warn!(
+					target: "kern.ingest",
+					cap = QUEUE_CAP,
+					total_refused = total,
+					"ingest queue full; refusing the job (further refusals counted, not logged)"
+				);
+			}
+			return None;
+		}
+		Some(doc_id)
+	}
+
+	// The waiting form of `enqueue`, for a producer that can be slowed instead of
+	// refused. The file watcher is one: nothing is waiting on it, and its backlog
+	// is coalesced paths rather than job bodies, so stalling it is cheaper than
+	// losing a file that nothing will re-offer.
+	pub async fn submit(
+		&self,
+		text: String,
+		source: Source,
+		kind: EntityKind,
+		hint: String,
+		confidence: f64,
+		config: Config,
+	) -> Option<String> {
+		let doc_id = util::content_hash(&text);
+		let job = job(text, source, kind, hint, confidence, config, Acl::default());
+		self.tx.send(job).await.ok().map(|()| doc_id)
 	}
 
 	pub async fn run(
@@ -380,7 +439,54 @@ mod tests {
 			1.0,
 			Config::default(),
 		);
-		assert_eq!(doc_id, util::content_hash(&text));
+		assert_eq!(doc_id, Some(util::content_hash(&text)));
+	}
+
+	// The trap this test exists to avoid: offering fewer jobs than the bound
+	// passes whether or not a bound exists. OFFERED is many times QUEUE_CAP, so
+	// an unbounded `enqueue` accepts all 500 and fails both assertions.
+	#[tokio::test]
+	async fn enqueue_refuses_past_the_queue_bound_and_counts_the_refusal() {
+		const OFFERED: usize = 500;
+
+		let (url, _server) =
+			crate::test_support::spawn_http(crate::test_support::hanging_embed_app()).await;
+		let embedder = LlmClient::new_embed_only(&url, "m", "");
+		let worker = Worker::new(
+			Arc::new(RwLock::new(GraphGnn::new())),
+			embedder,
+			None,
+			None,
+			None,
+		);
+
+		let before = ingest_queue_refused();
+		let mut accepted = 0usize;
+		for i in 0..OFFERED {
+			let got = worker.enqueue(
+				format!("document number {i}"),
+				session_source(),
+				EntityKind::Claim,
+				String::new(),
+				1.0,
+				Config::default(),
+			);
+			if got.is_some() {
+				accepted += 1;
+			}
+			// Let the run loop take its one job and park on the hanging embedder.
+			tokio::task::yield_now().await;
+		}
+
+		assert!(
+			(QUEUE_CAP..=QUEUE_CAP + 1).contains(&accepted),
+			"the bound bounds: at most the {QUEUE_CAP} queued plus the one in flight, accepted {accepted} of {OFFERED}"
+		);
+		assert_eq!(
+			ingest_queue_refused() - before,
+			(OFFERED - accepted) as u64,
+			"every refusal is counted, or a full queue is a degradation nobody can see"
+		);
 	}
 
 	fn outcome_with(status: OutcomeStatus) -> Outcome {

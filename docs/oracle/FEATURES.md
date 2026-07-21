@@ -276,13 +276,13 @@ and cold tier live together. Readers never block, writers serialize.
 
 **How.**
 
-- `Store::open` (`src/base/store.rs:283`) opens the env (`heed` 0.20);
+- `Store::open` (`src/base/store.rs:314`) opens the env (`heed` 0.20);
   `StoredKern`/`StoredVec`/`StoredTemporal`/`ColdRow` are the on-disk bincode
   shapes, each value a version byte followed by a `zstd` frame
   (`encode_at`/`strip_version`, `src/base/store.rs`), vectors int8. Exactly one
   live format, `FORMAT_V5`; any other version byte is rejected, never
   mis-decoded and never migrated.
-- **Guarded flush** (`Store::flush_guarded` `src/base/store.rs:538`,
+- **Guarded flush** (`Store::flush_guarded` `src/base/store.rs:571`,
   `persist::flush_guarded` `src/base/persist.rs:129`) — a snapshot carries an
   expected `mutation_epoch`; if disk advanced under us (another writer /
   external edit), the flush is *refused*, the disk rows are *absorbed* back
@@ -307,16 +307,16 @@ and cold tier live together. Readers never block, writers serialize.
   no hits rather than panicking, but it is *counted*
   (`search::query_dim_rejected`, `src/base/search.rs:15`) and logged throttled,
   because the silent no-op is what let the mismatch hide.
-- **Cold tier** — `cold_spill` (`src/base/store.rs:591`) / `cold_get` /
-  `cold_all` / `cold_put_all` / `cold_search` (`:629`, brute-force). Bounded by
-  `COLD_MAX_ENTRIES = 50_000` — *softly*: both write paths (`:596`, `:625`) call
-  `cold_cap_amortized` (`:667`), which skips the scan until the tier passes
-  `max + COLD_CAP_SLACK` (1024, `:20`), so the real ceiling is 51_024. Only then
-  does `cold_cap` (`:678`) decode every row, sort by `created_at` and cut back to
-  `max` — capping per spill cost one full 50k-row decode per single eviction. A
-  drop is never silent: `cold_evicted` (`:718`) feeds `health`, and a dropped
-  non-durable entity is unrecoverable, so the counter is its only trace.
-- **Compaction** (`compact_dir`, `src/base/store.rs:756`) — the only way to
+- **Cold tier** — `cold_spill` (`src/base/store.rs:624`) / `cold_get` (`:636`) /
+  `cold_all` (`:649`) / `cold_put_all` (`:666`) / `cold_search` (`:684`). Rows are
+  stored without their vector; the vector lives alone in `COLD_VEC_DB` (`:26`), so
+  the full-tier scan scores off raw floats and decodes only the k winners, and
+  `cold_get`/`cold_all` rejoin the halves. Bounded by `COLD_MAX_ENTRIES = 50_000`
+  — *softly*: both write paths (`:632`, `:676`) call `cold_cap_amortized` (`:728`),
+  which skips the scan until the tier passes `max + COLD_CAP_SLACK` (1024, `:20`);
+  only then does `cold_cap` (`:739`) sort by `created_at` and cut back to `max`. A
+  drop is unrecoverable, so `cold_evicted` (`:780`) feeding `health` is its trace.
+- **Compaction** (`compact_dir`, `src/base/store.rs:818`) — the only way to
   shrink LMDB's high-water mark; writes a fresh env to a tmp file then
   `swap_compacted` renames with retry. Requires exclusive access (run offline).
 - **Snapshots** — `snapshot_for_flush` (`src/base/persist.rs:154`) /
@@ -329,7 +329,7 @@ and cold tier live together. Readers never block, writers serialize.
 
 **Gaps.** Single-writer is enforced, not assumed — `src/base/lock.rs` is an advisory
 lock `reembed`, `gc` and `compact` claim or refuse — but `cmd_hub_merge`
-(`src/commands/admin.rs:746`) and `maybe_self_heal_store` (`src/commands.rs:437`)
+(`src/commands/admin.rs:748`) and `maybe_self_heal_store` (`src/commands.rs:437`)
 still `save_graph_unguarded` holding none. No WAL but LMDB's; compaction is offline.
 
 ---
@@ -353,8 +353,11 @@ Nothing is lost on an LLM outage — the delta stays queued until it succeeds.
   `Some([])` = nothing worth keeping (archive); `None` = no LLM
   output (transient outage, retry). `parse_claims` is lenient (finds the JSON
   array anywhere in the output).
-- **Worker** (`src/ingest/worker.rs`) — async job queue (`enqueue`/`run`),
-  owns the embed + accept path. Defers question/contradiction follow-ups to
+- **Worker** (`src/ingest/worker.rs`) — async job queue bounded at
+  `QUEUE_CAP` = 64 with no detached send behind it. Three offers: `enqueue`
+  refuses when full (`None`, counted as `ingest_queue_refused`), `submit` awaits
+  capacity for a producer that can be slowed instead (the file watcher), `run`
+  awaits the outcome. Owns the embed + accept path. Defers question/contradiction follow-ups to
   the tick via callback closures (`DeferQuestionsFn`/`DeferContradictionFn`).
 - **Embed** (`src/ingest/embed.rs`) — batches texts to the embedding endpoint.
 - **Dedup** (`src/ingest/dedup.rs`) — `find_duplicate` at the preset's dedup
@@ -506,7 +509,7 @@ invisible except as work that did not happen.
 Documents are immune while Active** (immunity is revoked once superseded);
 evictions spill to the cold tier before dropping (spill-before-drop). Spill is
 lossless out of RAM, not lossless overall — the cold tier is capped at
-`COLD_MAX_ENTRIES = 50_000` and `Store::cold_cap` (`src/base/store.rs:678`)
+`COLD_MAX_ENTRIES = 50_000` and `Store::cold_cap` (`src/base/store.rs:739`)
 deletes the oldest rows past it, and with no store bound `run_gc` drops the
 victim outright.
 
@@ -610,8 +613,8 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 | `forget` | `tools_mutate.rs` | Remove a thought + cascade edges (Facts immune). |
 | `forget_by_source` | `tools_mutate.rs` | Remove every thought from one `(scheme, object_id)` — **all sections of it**, since `source_id` hashes the section and keying on one would forget a single chunk of a document. Cascades through the same `forget_entity`; refuses local Facts unless `force`, which is the ONLY bypass of the Fact guard and is never implicit. Returns `removed_entities`/`removed_edges`/`kept_facts` — the last so a refused Fact is reported rather than read as "nothing was there". Exists so `kern forget --source` has somewhere to route. |
 | `degrade` | `tools_mutate.rs` | Down-weight edges along a bad retrieval path (`DEGRADE_*` decay). Returns `decayed_edges` and `removed_edges` — the reap count exists so a CLI `degrade` routed through the daemon can print what the local path prints. |
-| `move` | `tools_mutate.rs:440` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
-| `health` | `tools_admin.rs:83` | Graph stats (gravitons/kerns/entities/reasons/unnamed/claim_kinds) **plus the degradation surface**: `queue_depth`, `tasks_done`, `task_avg_ms`, `task_panics`, `last_task_panic`, `task_failures`, `last_task_failure`, `cold_evicted`, `embed_model`, `embed_dim`, `embed_mismatch`, and the six fail-open counters — `query_dim_rejected`, `below_floor_deliveries`, `clock_skew_skips`, `ingest_dropped_chunks`, `remote_cap_dropped`, `unspilled_drops` — each a path that returns something rather than erroring, so the count is the only way to tell a degraded result from a good one (`Server::health_stats`, `src/mcp.rs:116`). |
+| `move` | `tools_mutate.rs:444` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
+| `health` | `tools_admin.rs:83` | Graph stats (gravitons/kerns/entities/reasons/unnamed/claim_kinds) **plus the degradation surface**: `queue_depth`, `tasks_done`, `task_avg_ms`, `task_panics`, `last_task_panic`, `task_failures`, `last_task_failure`, `cold_evicted`, `embed_model`, `embed_dim`, `embed_mismatch`, and the seven fail-open counters — `query_dim_rejected`, `below_floor_deliveries`, `clock_skew_skips`, `ingest_dropped_chunks`, `remote_cap_dropped`, `unspilled_drops`, `ingest_queue_refused` — each a path that returns something rather than erroring, so the count is the only way to tell a degraded result from a good one (`Server::health_stats`, `src/mcp.rs:116`). |
 | `graviton` | `tools_admin.rs` | list/add/remove focus attractors (name + text — phrase or full document — + optional mass). Replaced the single per-kern "purpose". |
 | `claim_kind` | `tools_admin.rs` | register/remove claim kinds; registered kinds extend the built-in distill set. |
 | `pulse` | `tools_admin.rs` | Trigger a clustering pass across the tree. |
