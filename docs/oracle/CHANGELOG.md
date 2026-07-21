@@ -2,6 +2,26 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — Graviton routing measured dead and recalibrated. A 40-claim
+  labelled corpus against qwen3-embedding:0.6b showed intended
+  claim-to-graviton cosine distances of 0.29-0.69 while the acceptance
+  midpoint sat at 0.25 ((0.15+0.35)/2) — routing required cosine similarity
+  >= 0.75, which no real match reaches, so 100% of ingest fell to `generic`
+  and the kern tree never formed. Three changes, each carrying its number:
+  (1) radii 0.15/0.35 -> 0.35/0.75, midpoint 0.55 — admits real matches,
+  still rejects off-topic (measured >= 0.57) with margin; existing kerns keep
+  their stored radii until reseeded. (2) Multi-line graviton seeds are now
+  example statements, embedded per line and mean-pooled: median intended
+  distance 0.39 vs 0.55 for an abstract description and 0.55-0.61 for the
+  same examples embedded as one concatenated blob — pooling separate embeds
+  is the win, concatenation muddies it. (3) Routing ties inside the inner
+  radius (probability saturates at 1.0) now break by effective distance, so
+  mass stays meaningful when several gravitons fully accept. Named honestly:
+  even calibrated, best-match accuracy tops out ~60-70% on entangled
+  categories (decisions vs architecture); a sibling-bucket landing is
+  acceptable, off-topic-in-generic is preserved, and the retrieval eval
+  remains the instrument that will judge whether routing quality matters.
+
 - 2026-07-21 — Roadmap item 16: `commit_access` is rate-limited, closing Tier 2.
   Retrieval stamps every delivered result, so a caller replaying one query pumped
   that thought's access count *and* its heat without bound — both ranking signals,

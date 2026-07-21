@@ -204,12 +204,21 @@ pub(super) async fn cmd_graviton(cfg: &crate::config::Config, action: GravitonAc
 		} => {
 			let (url, model) = embed.resolve(cfg);
 			let llm_client = Client::new_embed_only(url, model, &cfg.embed.key);
-			let vec = match llm_client.embed(&text).await {
-				Ok(v) => v,
-				Err(e) => {
-					eprintln!("embed: {e}");
-					return;
+			// Multi-line seed = example statements, embedded separately and
+			// mean-pooled (see accept::seed_examples for the measurement).
+			let mut vecs = Vec::new();
+			for ex in crate::base::accept::seed_examples(&text) {
+				match llm_client.embed(&ex).await {
+					Ok(v) => vecs.push(v),
+					Err(e) => {
+						eprintln!("embed: {e}");
+						return;
+					}
 				}
+			}
+			let Some(vec) = crate::base::accept::mean_pool(&vecs) else {
+				eprintln!("embed: empty or mismatched embeddings");
+				return;
 			};
 			let mass = mass.unwrap_or(1.0);
 			with_graph(cfg, |g| {

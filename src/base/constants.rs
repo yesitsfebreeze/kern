@@ -29,8 +29,16 @@ pub const TICK_INTERVAL_SECS: u64 = 60;
 // "no kern-eviction cap" sentinel. A finite cap is currently unsafe.
 pub const KERN_CAP_DISABLED: usize = usize::MAX;
 
-pub const KERN_INNER_RADIUS: f64 = 0.15;
-pub const KERN_OUTER_RADIUS: f64 = 0.35;
+// Measured 2026-07-21 against qwen3-embedding:0.6b on a 40-claim labelled
+// corpus: intended claim-to-graviton cosine distances run 0.29-0.69 (median
+// ~0.55 for description seeds, ~0.39 for mean-pooled example seeds), while
+// off-topic claims stay >= 0.57. The old 0.15/0.35 put the acceptance midpoint
+// at 0.25 — BELOW every real match, so routing never fired and everything fell
+// to generic. Midpoint (inner+outer)/2 = 0.55 admits real matches and still
+// rejects off-topic with margin. Stored per-kern: existing kerns keep their
+// old radii until reseeded.
+pub const KERN_INNER_RADIUS: f64 = 0.35;
+pub const KERN_OUTER_RADIUS: f64 = 0.75;
 
 pub const ACCEPT_FLOOR: f64 = 0.5;
 

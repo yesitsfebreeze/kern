@@ -112,14 +112,26 @@ impl Server {
 				if p.name.is_empty() || p.text.is_empty() {
 					return tool_error("add requires name and text");
 				}
-				// ponytail: long documents embed as one call and the embed model
-				// truncates past its context window; chunk+mean-pool is the upgrade path.
+				// A multi-line seed is a list of example statements: each line is
+				// embedded separately and mean-pooled, which places the graviton
+				// ~0.16 cosine closer to real matching claims than embedding the
+				// text whole (measured — see seed_examples).
+				let examples = crate::base::accept::seed_examples(&p.text);
 				let vec = match &self.llm {
-					Some(llm) => match crate::llm::block_on_in_place(llm.embed(&p.text)) {
-						Some(Ok(v)) => v,
-						Some(Err(e)) => return tool_error(&format!("embed failed: {e}")),
-						None => return tool_error("no tokio runtime"),
-					},
+					Some(llm) => {
+						let mut vecs = Vec::with_capacity(examples.len());
+						for ex in &examples {
+							match crate::llm::block_on_in_place(llm.embed(ex)) {
+								Some(Ok(v)) => vecs.push(v),
+								Some(Err(e)) => return tool_error(&format!("embed failed: {e}")),
+								None => return tool_error("no tokio runtime"),
+							}
+						}
+						match crate::base::accept::mean_pool(&vecs) {
+							Some(v) => v,
+							None => return tool_error("empty or mismatched embeddings"),
+						}
+					}
 					None => return tool_error("no embed client configured"),
 				};
 				let mut g = self.graph.write();

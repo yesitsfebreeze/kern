@@ -603,6 +603,51 @@ pub(crate) fn add_graviton(g: &mut GraphGnn, name: &str, vec: Vec<f32>) {
 	add_graviton_with_mass(g, name, vec, 1.0)
 }
 
+/// A multi-line graviton seed is a list of example statements, one per line.
+/// Measured (2026-07-21, qwen3-embedding:0.6b): the mean of per-example
+/// embeddings sits ~0.39 median cosine distance from held-out claims of the
+/// same focus, vs ~0.55 for an abstract description and ~0.55-0.61 for the
+/// same examples embedded as one concatenated blob. Pooling separate embeds
+/// is the win; concatenation muddies it.
+pub(crate) fn seed_examples(text: &str) -> Vec<String> {
+	let lines: Vec<String> = text
+		.lines()
+		.map(str::trim)
+		.filter(|l| !l.is_empty())
+		.map(str::to_string)
+		.collect();
+	if lines.len() < 2 {
+		vec![text.trim().to_string()]
+	} else {
+		lines
+	}
+}
+
+/// Normalized mean of the example embeddings. Empty input or mismatched
+/// dimensions yield None — the caller falls back to a single whole-text embed.
+pub(crate) fn mean_pool(vecs: &[Vec<f32>]) -> Option<Vec<f32>> {
+	let first = vecs.first()?;
+	let dim = first.len();
+	if dim == 0 || vecs.iter().any(|v| v.len() != dim) {
+		return None;
+	}
+	let n = vecs.len() as f32;
+	let mut mean: Vec<f32> = vec![0.0; dim];
+	for v in vecs {
+		for (m, x) in mean.iter_mut().zip(v) {
+			*m += x / n;
+		}
+	}
+	let norm = mean.iter().map(|x| x * x).sum::<f32>().sqrt();
+	if norm == 0.0 {
+		return None;
+	}
+	for m in &mut mean {
+		*m /= norm;
+	}
+	Some(mean)
+}
+
 pub(crate) fn add_graviton_with_mass(g: &mut GraphGnn, name: &str, vec: Vec<f32>, mass: f64) {
 	if let Some(existing) = find_graviton_by_name(g, name) {
 		if let Some(k) = g.get_mut(&existing) {
@@ -732,6 +777,7 @@ pub(crate) fn remove_graviton(g: &mut GraphGnn, name: &str) -> bool {
 fn route_to_child_id(children: &[String], g: &GraphGnn, vec: &[f32]) -> Option<String> {
 	let mut best_id = None;
 	let mut best_p = 0.0;
+	let mut best_d = f64::MAX;
 	for id in children {
 		let c = match g.loaded(id) {
 			Some(k) if k.is_named() && !k.graviton_vec.is_empty() => k,
@@ -739,8 +785,12 @@ fn route_to_child_id(children: &[String], g: &GraphGnn, vec: &[f32]) -> Option<S
 		};
 		let dist = effective_distance(cosine_distance(vec, &c.graviton_vec), c.mass);
 		let p = acceptance_probability(dist, c.inner_radius, c.outer_radius);
-		if p > best_p {
+		// The probability saturates at 1.0 inside the inner radius, so ties
+		// there are real; effective distance breaks them, keeping mass
+		// meaningful when several gravitons all fully accept.
+		if p > best_p || (p == best_p && dist < best_d) {
 			best_p = p;
+			best_d = dist;
 			best_id = Some(id.clone());
 		}
 	}
@@ -1375,6 +1425,37 @@ mod tests {
 			g.loaded(&r.placed_in).unwrap().graviton_text,
 			"near",
 			"mass 1.0 everywhere reproduces plain nearest-distance routing"
+		);
+	}
+
+	#[test]
+	fn seed_examples_splits_lines_and_keeps_single_text_whole() {
+		assert_eq!(
+			seed_examples("one example.\n  two example.  \n\nthree."),
+			vec!["one example.", "two example.", "three."]
+		);
+		assert_eq!(
+			seed_examples("a single description with no newlines"),
+			vec!["a single description with no newlines"]
+		);
+		assert_eq!(
+			seed_examples("  padded single line  \n"),
+			vec!["padded single line"],
+			"one non-empty line embeds whole, not as a one-element pool"
+		);
+	}
+
+	#[test]
+	fn mean_pool_normalizes_and_rejects_mismatched_dims() {
+		let v = mean_pool(&[vec![1.0, 0.0], vec![0.0, 1.0]]).unwrap();
+		let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+		assert!((norm - 1.0).abs() < 1e-6, "pooled vector is unit-norm");
+		assert!((v[0] - v[1]).abs() < 1e-6, "equal contribution");
+		assert!(mean_pool(&[]).is_none());
+		assert!(mean_pool(&[vec![1.0, 0.0], vec![1.0]]).is_none());
+		assert!(
+			mean_pool(&[vec![1.0, 0.0], vec![-1.0, 0.0]]).is_none(),
+			"opposite examples cancel to zero — refuse rather than emit garbage"
 		);
 	}
 
