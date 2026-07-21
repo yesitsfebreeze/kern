@@ -50,7 +50,7 @@ sets; parallelize only what does not overlap.
 
 - **Scope:** `src/ingest/`, `src/llm.rs`, `src/watcher/`.
 - **Knows:** the intake and its outage-safe queueing, the one-pass
-  distillation into typed claims, descriptors and gravitons, Ollama endpoints
+  distillation into typed claims, claim kinds and gravitons, Ollama endpoints
   (reason/embed/answer split), streaming, `num_ctx` caps, warm-keeping.
 - **Delegate when:** distillation quality, claim typing, LLM latency, or
   model/endpoint wiring.

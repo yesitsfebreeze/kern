@@ -2,6 +2,89 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — One word per classification axis: "descriptor" retired. The
+  name covered three unrelated things — the claim-type label distill emits,
+  the free-text chunking context on ingest, and a root registry nothing read.
+  Now: `Claim.kind` + `claim_kind` tool/CLI + `root.claim_kinds` for the type
+  axis; `hint` for the prompt-context axis (ingest param, worker job field,
+  `split.rs`); gravitons untouched (topic axis). The registry stops being
+  dead: registered kinds are offered to the distillation LLM alongside
+  `DEFAULT_KINDS` and accepted by `parse_claims` (`spawn_intake` passes a
+  kinds closure into `intake::run`). Supersedes the "descriptor" vocabulary
+  everywhere (tool name, CLI subcommand, health stat key, MCP resource URI —
+  now `kern://local/claim-kinds`). **Decided by:** fix-the-root — the fix is
+  the taxonomy, not a doc note atop the ambiguity. Tradeoffs named: breaking
+  rename of the MCP tool (`descriptor` → `claim_kind`), CLI subcommand and
+  health JSON key; the ingest param keeps a `descriptor` serde alias and
+  pending direct-intake JSON decodes via the same alias, but external agent
+  configs calling the old tool name must update. Kern shard bincode is
+  positional, so the `Kern.claim_kinds` field rename is wire-compatible.
+- 2026-07-21 — Presets become the whole tuning surface, and the default is
+  `relaxed`. Supersedes the same-day entry below on two points. (1) The
+  overlay-under-scopes design ("any explicit key still wins") is replaced:
+  `Preset::apply` (`src/config/preset.rs`) is now the only writer of heat
+  half-life, dedup threshold, and retrieval breadth, and the `[heat]`,
+  `[ingest]`, `[retrieval]` sections are refused at load with a pointer to
+  `preset` — a loud error over a silently-ignored key, consistent with the
+  exit-78 boot gate. The per-knob escape hatch is deleted deliberately:
+  thirty knobs nobody can defend individually are the configuration surface
+  kern exists to not have. (2) The default preset is `relaxed` (30d
+  half-life, 0.98 dedup, seed_k 25 / 800 expansions / 40 results / 8 answer
+  facts) — for a memory tool, losing a fact costs more than surfacing a
+  noisy one, so keep-more is the posture a configless user should land on.
+  **Decided by:** name-the-tradeoff. Named: (a) knob sweeps for tuning
+  experiments now require a code change, not a config edit — acceptable
+  because the e2e instrument drives built binaries anyway; (b) the LoCoMo
+  baseline (0.137, 2026-07-20) was measured on the medium-era defaults,
+  and configless runs now exercise `relaxed` — the next instrument run must
+  either pin `preset = "medium"` for comparability or re-baseline, tracked
+  in ROADMAP item 87.
+
+- 2026-07-21 — Config presets ship: a top-level `preset =
+  "relaxed"|"medium"|"tight"` key picks a whole memory posture in one line
+  instead of hand-tuning ~30 retrieval/heat/ingest knobs. Implemented as an
+  overlay layer UNDER the config scopes (defaults < preset < user < project,
+  `src/config/preset.rs`), so any explicitly set key still wins and the
+  layering machinery already tested in `io.rs` carries it. `medium` is the
+  empty overlay — the shipped defaults ARE medium, so the two can never
+  drift. Relaxed: 30d heat half-life, 0.98 dedup, broader search, 40
+  results / 8 answer facts. Tight: 3d half-life, 0.90 dedup, narrower
+  search, 12 results / 4 answer facts. Unknown names refuse to load, same
+  as any invalid config. The `setup` MCP tool now offers the tiers to the
+  wiring agent.
+  **Decided by:** name-the-tradeoff. The tradeoff, named: relaxed/tight
+  values are hand-picked judgment, not eval-measured — the LoCoMo
+  instrument has only run against medium, and medium stays byte-identical
+  to the baseline defaults precisely so the presets can ship without
+  invalidating it. Measuring the outer tiers is a `ROADMAP` question, not a
+  blocker. Supersedes nothing; before this the only options were defaults
+  or per-knob surgery.
+
+- 2026-07-21 — Lifecycle freshness ships: identity handshake, client-side
+  auto-restart, Unix hot reload, and the `setup` MCP tool. Trigger was a
+  measured dogfooding outage: the repo's own daemon ran 36 hours against a
+  dead LLM endpoint because `.kern/kern.toml` was written after boot and
+  nothing ever rereads config — every shipped fix was invisible to the running
+  process. Root cause is staleness with no detector, so the fix is an identity
+  the client can compare: `build_id` fingerprints the executable (len+mtime,
+  not semver — all dev builds report the same version; not path — `cargo
+  install` hardlinks `target/release`), `config_id` hashes the resolved
+  config, both ride `HealthRes` append-only. `kern mcp` compares on attach and
+  gracefully replaces a mismatched daemon; tradeoffs named: a 15s uptime floor
+  stops two differing builds restarting each other forever, empty ids (older
+  daemons) are Hold not Stale, and every failure falls open to proxying.
+  Hot reload closes the other half — a daemon that outlives its binary: the
+  daemon polls its own path and hands the bound socket to a freshly spawned
+  successor as an inherited fd (backlog holds connects during the successor's
+  boot; the proxy reconnects and retries once). Measured handover 39ms.
+  Windows gets no fd handoff; auto-restart covers it. The hub reaper also now
+  drops nodes whose root directory vanished (seven 20h-old e2e hub orphans
+  observed with deleted cwds). The `setup` tool is the agent-agnostic
+  installer decided over per-host plugins: one instruction set returned to
+  the calling agent (current [done]/[todo] state, graviton seeding, capture
+  rule for the host's instruction file, verify loop) — kern never writes a
+  host's config; the agent does the wiring. MCP surface is now twelve tools.
+
 - 2026-07-21 — **kern has an instrument again.** Item 1 asked what measures
   retrieval quality with no LLM in the scoring loop. The answer is `e2e/`, grown
   rather than replaced: `fake_llm.py` already served deterministic feature-hashed

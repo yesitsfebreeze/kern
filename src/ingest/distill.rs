@@ -1,12 +1,12 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Claim {
 	pub text: String,
-	pub descriptor: String,
+	pub kind: String,
 	pub valid_from: Option<std::time::SystemTime>,
 }
 
-// The claim kinds the distill prompt may emit.
-pub const DESCRIPTORS: [&str; 7] = [
+// The built-in claim kinds; registered kinds (root.claim_kinds) extend this set.
+pub const DEFAULT_KINDS: [&str; 7] = [
 	"preference",
 	"decision",
 	"project",
@@ -16,20 +16,34 @@ pub const DESCRIPTORS: [&str; 7] = [
 	"procedural",
 ];
 
+fn kind_list(extra_kinds: &[String]) -> String {
+	let mut kinds: Vec<&str> = DEFAULT_KINDS.to_vec();
+	for k in extra_kinds {
+		if !kinds.contains(&k.as_str()) {
+			kinds.push(k);
+		}
+	}
+	kinds.join(", ")
+}
+
 /// `Some([])` = the LLM emitted a well-formed JSON array holding nothing worth
 /// keeping (archive). `None` = no usable output — an empty response OR a prose
 /// reply with no parseable JSON array (a weak model ignoring the format is a soft
 /// outage, not a genuine "nothing"): the caller must retry, never archive, so the
 /// delta is not silently lost.
-pub fn distill(conversation: &str, llm: &dyn Fn(&str) -> String) -> Option<Vec<Claim>> {
+pub fn distill(
+	conversation: &str,
+	extra_kinds: &[String],
+	llm: &dyn Fn(&str) -> String,
+) -> Option<Vec<Claim>> {
 	if conversation.trim().is_empty() {
 		return Some(Vec::new());
 	}
+	let kinds = kind_list(extra_kinds);
 	let prompt = format!(
 		"Extract durable, reusable knowledge from this conversation between a \
 user and an AI coding assistant. Output ONLY a JSON array. Each element must be \
-{{\"text\": \"<one self-contained statement>\", \"kind\": \"<one of: preference, \
-decision, project, fact, code-fact, reference, procedural>\"}}. Optionally add \
+{{\"text\": \"<one self-contained statement>\", \"kind\": \"<one of: {kinds}>\"}}. Optionally add \
 \"valid_from\": \"<ISO8601 date>\" ONLY when the statement itself says when it \
 became true (e.g. \"since March 2026\", \"as of v2\"); omit it otherwise. \
 Include only knowledge worth \
@@ -50,14 +64,14 @@ markdown.\n\nCONVERSATION:\n{conversation}\n"
 	if raw.trim().is_empty() {
 		return None;
 	}
-	parse_claims(&raw)
+	parse_claims(&raw, extra_kinds)
 }
 
 /// `None` = the reply held no parseable JSON array (prose or malformed span) — a
 /// format failure the caller must retry, not archive. `Some(vec)` = an array
 /// parsed; the vec may be empty once empty-text items are filtered, which is a
 /// genuine "nothing worth keeping".
-pub(crate) fn parse_claims(raw: &str) -> Option<Vec<Claim>> {
+pub(crate) fn parse_claims(raw: &str, extra_kinds: &[String]) -> Option<Vec<Claim>> {
 	let (start, end) = match (raw.find('['), raw.rfind(']')) {
 		(Some(s), Some(e)) if e > s => (s, e),
 		_ => return None,
@@ -91,7 +105,7 @@ pub(crate) fn parse_claims(raw: &str) -> Option<Vec<Claim>> {
 			.and_then(|v| v.as_str())
 			.unwrap_or("fact")
 			.trim();
-		let descriptor = if DESCRIPTORS.contains(&kind_raw) {
+		let kind = if DEFAULT_KINDS.contains(&kind_raw) || extra_kinds.iter().any(|k| k == kind_raw) {
 			kind_raw.to_string()
 		} else {
 			"fact".to_string()
@@ -104,7 +118,7 @@ pub(crate) fn parse_claims(raw: &str) -> Option<Vec<Claim>> {
 			.and_then(|s| crate::base::time::parse_rfc3339(s).ok());
 		out.push(Claim {
 			text,
-			descriptor,
+			kind,
 			valid_from,
 		});
 	}
@@ -124,34 +138,58 @@ mod tests {
 		let llm = stub(
 			r#"[{"text":"User prefers tabs","kind":"preference"},{"text":"kern owns the graph","kind":"code-fact"}]"#,
 		);
-		let claims = distill("some conversation", &llm).expect("some");
+		let claims = distill("some conversation", &[], &llm).expect("some");
 		assert_eq!(claims.len(), 2);
 		assert_eq!(claims[0].text, "User prefers tabs");
-		assert_eq!(claims[0].descriptor, "preference");
-		assert_eq!(claims[1].descriptor, "code-fact");
+		assert_eq!(claims[0].kind, "preference");
+		assert_eq!(claims[1].kind, "code-fact");
 	}
 
 	#[test]
 	fn procedural_kind_maps_through() {
 		let llm = stub(r#"[{"text":"Always run cargo test before committing","kind":"procedural"}]"#);
-		let claims = distill("c", &llm).expect("some");
+		let claims = distill("c", &[], &llm).expect("some");
 		assert_eq!(claims.len(), 1);
-		assert_eq!(claims[0].descriptor, "procedural");
-		assert!(DESCRIPTORS.contains(&"procedural"));
+		assert_eq!(claims[0].kind, "procedural");
+		assert!(DEFAULT_KINDS.contains(&"procedural"));
 	}
 
 	#[test]
 	fn unknown_kind_falls_back_to_fact() {
 		let llm = stub(r#"[{"text":"x","kind":"banana"}]"#);
-		let claims = distill("c", &llm).expect("some");
-		assert_eq!(claims[0].descriptor, "fact");
+		let claims = distill("c", &[], &llm).expect("some");
+		assert_eq!(claims[0].kind, "fact");
+	}
+
+	#[test]
+	fn registered_kind_is_accepted_and_offered_to_the_llm() {
+		let seen = std::sync::Mutex::new(String::new());
+		let llm = |p: &str| {
+			*seen.lock().unwrap() = p.to_string();
+			r#"[{"text":"finding X","kind":"audit-finding"}]"#.to_string()
+		};
+		let extra = vec!["audit-finding".to_string()];
+		let claims = distill("c", &extra, &llm).expect("some");
+		assert_eq!(claims[0].kind, "audit-finding");
+		assert!(
+			seen.lock().unwrap().contains("audit-finding"),
+			"registered kind is listed in the prompt"
+		);
+	}
+
+	#[test]
+	fn kind_list_dedups_registered_defaults() {
+		let extra = vec!["fact".to_string(), "custom".to_string()];
+		let list = kind_list(&extra);
+		assert_eq!(list.matches("fact").count(), 2, "fact + code-fact only");
+		assert!(list.ends_with(", custom"));
 	}
 
 	#[test]
 	fn prose_reply_signals_retry_not_archive() {
 		let llm = stub("I could not find anything useful, sorry!");
 		assert!(
-			distill("c", &llm).is_none(),
+			distill("c", &[], &llm).is_none(),
 			"a prose reply with no JSON array is a format failure — retry, never archive"
 		);
 	}
@@ -162,7 +200,7 @@ mod tests {
 		// delta to be archived having stored nothing.
 		let llm = stub("The user prefers tabs, and they decided to deploy on Fridays.");
 		assert!(
-			distill("a real conversation", &llm).is_none(),
+			distill("a real conversation", &[], &llm).is_none(),
 			"non-JSON reply carrying real knowledge signals retry, so nothing is silently lost"
 		);
 	}
@@ -170,31 +208,31 @@ mod tests {
 	#[test]
 	fn empty_conversation_skips_llm() {
 		let llm = stub(r#"[{"text":"should not appear","kind":"fact"}]"#);
-		assert!(distill("   \n  ", &llm).expect("some").is_empty());
+		assert!(distill("   \n  ", &[], &llm).expect("some").is_empty());
 	}
 
 	#[test]
 	fn empty_llm_response_signals_retry() {
 		let llm = stub("");
-		assert!(distill("a real conversation worth keeping", &llm).is_none());
+		assert!(distill("a real conversation worth keeping", &[], &llm).is_none());
 	}
 
 	#[test]
 	fn whitespace_llm_response_signals_retry() {
 		let llm = stub("   \n\t ");
-		assert!(distill("a real conversation", &llm).is_none());
+		assert!(distill("a real conversation", &[], &llm).is_none());
 	}
 
 	#[test]
 	fn genuine_empty_array_is_some_empty() {
 		let llm = stub("[]");
-		assert_eq!(distill("a real conversation", &llm), Some(Vec::new()));
+		assert_eq!(distill("a real conversation", &[], &llm), Some(Vec::new()));
 	}
 
 	#[test]
 	fn tolerates_prose_around_json() {
 		let llm = stub("Here you go:\n[{\"text\":\"a\",\"kind\":\"fact\"}]\nHope that helps");
-		let claims = distill("c", &llm).expect("some");
+		let claims = distill("c", &[], &llm).expect("some");
 		assert_eq!(claims.len(), 1);
 		assert_eq!(claims[0].text, "a");
 	}
@@ -204,7 +242,7 @@ mod tests {
 		let good = stub(
 			r#"[{"text":"we moved to spaces","kind":"decision","valid_from":"2026-03-01T00:00:00Z"}]"#,
 		);
-		let claims = distill("c", &good).expect("some");
+		let claims = distill("c", &[], &good).expect("some");
 		assert_eq!(claims.len(), 1);
 		assert!(
 			claims[0].valid_from.is_some(),
@@ -213,27 +251,30 @@ mod tests {
 
 		let garbage = stub(r#"[{"text":"x","kind":"fact","valid_from":"since March"}]"#);
 		assert_eq!(
-			distill("c", &garbage).expect("some")[0].valid_from,
+			distill("c", &[], &garbage).expect("some")[0].valid_from,
 			None,
 			"an unparseable valid_from is ignored, not fatal"
 		);
 
 		let absent = stub(r#"[{"text":"y","kind":"fact"}]"#);
-		assert_eq!(distill("c", &absent).expect("some")[0].valid_from, None);
+		assert_eq!(
+			distill("c", &[], &absent).expect("some")[0].valid_from,
+			None
+		);
 	}
 
 	#[test]
 	fn absent_kind_falls_back_to_fact() {
 		let llm = stub(r#"[{"text":"x"}]"#);
-		let claims = distill("c", &llm).expect("some");
+		let claims = distill("c", &[], &llm).expect("some");
 		assert_eq!(claims.len(), 1);
-		assert_eq!(claims[0].descriptor, "fact");
+		assert_eq!(claims[0].kind, "fact");
 	}
 
 	#[test]
 	fn empty_or_missing_text_is_skipped() {
 		let llm = stub(r#"[{"text":"","kind":"fact"},{"kind":"fact"},{"text":"keep","kind":"fact"}]"#);
-		let claims = distill("c", &llm).expect("some");
+		let claims = distill("c", &[], &llm).expect("some");
 		assert_eq!(claims.len(), 1);
 		assert_eq!(claims[0].text, "keep");
 	}
@@ -241,7 +282,7 @@ mod tests {
 	#[test]
 	fn single_nested_array_is_unwrapped() {
 		let llm = stub(r#"[[{"text":"a","kind":"fact"}]]"#);
-		let claims = distill("c", &llm).expect("some");
+		let claims = distill("c", &[], &llm).expect("some");
 		assert_eq!(claims.len(), 1);
 		assert_eq!(claims[0].text, "a");
 	}
@@ -250,7 +291,7 @@ mod tests {
 	fn multiple_sibling_arrays_signal_retry() {
 		let two_siblings = stub(r#"[{"text":"a","kind":"fact"}] [{"text":"b","kind":"fact"}]"#);
 		assert!(
-			distill("c", &two_siblings).is_none(),
+			distill("c", &[], &two_siblings).is_none(),
 			"sibling arrays span to invalid JSON — a format failure, so retry not archive",
 		);
 	}
@@ -261,7 +302,9 @@ mod tests {
 		// genuine no-claims result rather than retrying forever.
 		let array_of_arrays = stub(r#"[[{"text":"a","kind":"fact"}],[{"text":"b","kind":"fact"}]]"#);
 		assert!(
-			distill("c", &array_of_arrays).expect("some").is_empty(),
+			distill("c", &[], &array_of_arrays)
+				.expect("some")
+				.is_empty(),
 			"a len-2 array-of-arrays is neither unwrapped nor merged",
 		);
 	}

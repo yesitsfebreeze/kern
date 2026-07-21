@@ -471,7 +471,7 @@ pub struct Kern {
 	pub by_from: HashMap<String, Vec<String>>,
 	pub by_to: HashMap<String, Vec<String>>,
 	pub source_index: HashMap<String, String>,
-	pub descriptors: HashMap<String, String>,
+	pub claim_kinds: HashMap<String, String>,
 
 	#[serde(default)]
 	pub gnn_weights: Vec<u8>,
@@ -509,7 +509,7 @@ pub struct KernPreMass {
 	pub by_from: HashMap<String, Vec<String>>,
 	pub by_to: HashMap<String, Vec<String>>,
 	pub source_index: HashMap<String, String>,
-	pub descriptors: HashMap<String, String>,
+	pub claim_kinds: HashMap<String, String>,
 	#[serde(default)]
 	pub gnn_weights: Vec<u8>,
 }
@@ -533,7 +533,7 @@ impl From<Kern> for KernPreMass {
 			by_from: k.by_from,
 			by_to: k.by_to,
 			source_index: k.source_index,
-			descriptors: k.descriptors,
+			claim_kinds: k.claim_kinds,
 			gnn_weights: k.gnn_weights,
 		}
 	}
@@ -557,7 +557,7 @@ impl From<KernPreMass> for Kern {
 			by_from: o.by_from,
 			by_to: o.by_to,
 			source_index: o.source_index,
-			descriptors: o.descriptors,
+			claim_kinds: o.claim_kinds,
 			gnn_weights: o.gnn_weights,
 			mass: 1.0,
 			last_access: None,
@@ -643,7 +643,7 @@ impl Kern {
 			by_from: HashMap::new(),
 			by_to: HashMap::new(),
 			source_index: HashMap::new(),
-			descriptors: HashMap::new(),
+			claim_kinds: HashMap::new(),
 			gnn_weights: Vec::new(),
 			mass: 1.0,
 			last_access: None,

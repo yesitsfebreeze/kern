@@ -2,8 +2,7 @@
 
 **A self-learning memory daemon for AI agents.** One long-running process per
 working directory owns a knowledge graph that your agent writes durable facts
-into, keeps itself small without gardening, and serves the right context back
-when you need it.
+into, keeps itself small without gardening, and serves back on recall.
 
 kern is not a vector store you bolt onto an app. It is a *memory substrate*: the
 writes are caller-driven — kern captures nothing on its own — and everything
@@ -37,10 +36,12 @@ MCP ingest ─────────────────────► ty
   cold, stale, non-durable thoughts (Facts are immune) and spills them to a
   capped cold tier before dropping them — a latest-wins keyed table holding the
   newest 50k entries, so recent evictions stay recoverable while the very oldest
-  eventually age out. Spill-before-drop needs a store: with no store bound
-  (in-memory mode) the victim is dropped outright — dropping *is* the intended
-  memory bound there. Similar thoughts cluster into child kerns. The hot graph
-  stays small; the long tail stays cheap.
+  eventually age out. Rows pushed out past that cap are counted and reported by
+  `health` (`src/base/store.rs:752`), so the tail's loss rate is observable
+  rather than silent. Spill-before-drop needs a store: with no store bound
+  (in-memory mode) the victim is dropped outright (`src/tick/stigmergy.rs:63`) —
+  dropping *is* the intended memory bound there. Similar thoughts cluster into
+  child kerns. The hot graph stays small; the long tail stays cheap.
 
 - **Remembers across time.** Knowledge carries a bi-temporal window. When a new
   claim updates or contradicts a stored one of the same kind, kern supersedes the
@@ -48,10 +49,12 @@ MCP ingest ─────────────────────► ty
   with when it stopped being true. A `query` can ask `as_of` a past instant to
   recover what was believed then, or `include_history` to follow the supersede
   chain back through prior revisions. The classification runs in the background
-  tick, so recall stays LLM-free. `as_of` is exact over the hot graph and lossy
-  over the cold tail: a revision that was evicted loses its temporal side-map on
-  the way out and comes back reading as valid at every instant, with no signal to
-  the caller which they got.
+  tick, so recall stays LLM-free. `as_of` is exact over both tiers: a cold row
+  carries `valid_from`/`valid_to`/`invalidated_at` beside the entity
+  (`src/base/store.rs:169`), so an evicted revision answers the same window it
+  answered while hot. One gap remains — a row spilled by a build older than the
+  V4 cold format decodes as a bare entity with no stamps
+  (`src/base/store.rs:197`) and reads as valid at every instant.
 
 - **Federates (opt-in).** Multiple nodes share knowledge over LAN gossip with no
   coordinator. Each node heartbeats peers and merges entity bodies via a
@@ -85,11 +88,17 @@ work.
 A query runs a hybrid pipeline, all hand-rolled, dependencies deliberately
 minimal:
 
-1. **Seed** — vector (HNSW) + lexical (BM25) candidate generation. The dense
-   score blends the content vector with a **GNN** vector (0.4/0.6) that a
-   background tick keeps re-embedding from graph structure.
-2. **Expand** — walk reason edges out from the seeds; optionally **HyDE** a
-   hypothetical answer to broaden recall.
+1. **Seed** — vector (HNSW) + lexical (BM25) candidate generation. For a node
+   present in both indices the dense score blends the content vector with a
+   **GNN** vector 0.4/0.6 (`src/base/search.rs:60`); a node in only one index
+   keeps that index's score. The GNN vector is what a background tick keeps
+   re-embedding from graph structure.
+2. **Expand** — walk reason edges out from the seeds
+   (`src/retrieval/expand.rs:178`) and return the traversal chain as provenance;
+   optionally **HyDE** a hypothetical answer to broaden recall. Measured: adding
+   a reason edge between two thoughts changes no delivered ranking — linked and
+   unlinked pairs score identically to four decimals. The edge is created and is
+   walkable; it does not reach the score. Open — see `docs/oracle/ROADMAP.md`.
 3. **Fuse** — reciprocal-rank fusion of the vector and lexical lists, with
    PageRank centrality weighting the fused seeds.
 4. **Rerank** (optional) — an LLM reranker reorders the head of the list.
@@ -107,7 +116,10 @@ returns fewer than `k`.
 - **tarpc `KernRpc`** over a per-cwd socket for other local clients.
 
 A background **tick** (default 60s) drives decay, eviction, and clustering — an
-idle daemon still maintains itself. Persistence is **LMDB** (via
+idle daemon still maintains itself. A task that panics is caught, counted and
+named rather than taking the loop down with it (`src/tick.rs:54`), so one bad
+maintenance pass costs one task instead of every future tick; `health` reports
+the panic and failure counts with the last of each. Persistence is **LMDB** (via
 [heed](https://github.com/meilisearch/heed)) — an ACID, multi-process embedded
 KV. Hot graph and cold tier live together in one LMDB environment
 (`data.mdb` + `lock.mdb`) per data dir; vectors are stored int8, values are
@@ -165,12 +177,15 @@ irm https://raw.githubusercontent.com/yesitsfebreeze/kern/master/install.ps1 | i
 **2. Register the MCP server with your client.** `kern mcp` attaches to a
 running daemon if one exists, and otherwise auto-spawns a detached daemon for
 the current directory — so this one command is all you need to bring kern up
-(the installer prints the exact path). Two caveats, both real: an auto-spawned
-daemon has its stdio nulled, so it writes no log anywhere, and if the attach
-fails `kern mcp` falls back to serving the store itself — a second writer
-against the same LMDB environment. A stale flush is refused rather than
-clobbering newer state, but the two writers still exist. Add it as a stdio MCP
-server in your client's config:
+(the installer prints the exact path). A detached child writes its stdout and
+stderr to an owner-only append log under `<data_dir>/logs/`
+(`src/config/detached_log.rs:23`) — `hub.log` for the machine hub, `daemon.log`
+for a node, `.kern/data/logs/` by default — so a spawn that dies leaves a trace.
+One caveat is still real: if the attach fails, `kern mcp` falls back to serving
+the store itself (`src/commands/mcp_cmd.rs:46`), a second writer against the
+same LMDB environment. A stale flush is refused rather than clobbering newer
+state, but the two writers still exist. Add it as a stdio MCP server in your
+client's config:
 
 ```json
 {
@@ -185,13 +200,15 @@ writes a conversation delta to `<cwd>/.kern/intake/*` feeds the intake. Wire it
 whatever way your client supports (a hook, a wrapper, or a manual `kern ingest`).
 Recall needs no wiring — it is the `query` MCP tool.
 
-**4. Opt the project in.** No config file is needed — every default (embedding,
-reasoning, intake, tick) works out of the box against a local Ollama. The
-daemon gates on the `.kern/` directory: it is created automatically the first
-time the daemon persists, or `mkdir .kern` to opt in immediately. Once it
-exists, the intake and recall activate for that project. (A
-`<cwd>/.kern/kern.toml` is only for overriding defaults — see *Configure*
-below.)
+**4. Know where the graph lands.** No config file is needed — every default
+(embedding, reasoning, intake, tick) works out of the box against a local
+Ollama. The daemon pins itself to the nearest ancestor holding `.git`, else the
+nearest holding `.kern/`, else the launch directory
+(`src/config/mod.rs:138`), and creates `.kern/data/` there on open
+(`src/base/store.rs:352`) plus `.kern/intake/` for the drop dir. `mkdir .kern`
+in a directory that has neither marker if you want the graph somewhere the walk
+would not have chosen. (A `<cwd>/.kern/kern.toml` is only for overriding
+defaults — see *Configure* below.)
 
 **5. Seed the graph** (see *Seed the graph* below), then start a session. From
 then on, store facts by calling the `ingest` MCP tool (or drop transcripts into
@@ -219,7 +236,21 @@ working. New projects need no migration — the LMDB store is created automatica
 Configuration is **optional** — with no config file at all, kern ingests and
 recalls with the defaults shown below. To override, create
 `<cwd>/.kern/kern.toml` (project scope) or `<XDG_CONFIG>/kern/kern.toml`
-(user scope; project sections win):
+(user scope).
+
+The two scopes **deep merge per key** (`src/config/io.rs:46`): a project that
+sets one field of a section keeps the user's other fields in that section.
+Arrays and scalars are leaves — the project value replaces, never appends, so
+`gossip.peers` and `watcher.roots` are complete lists rather than accumulators.
+One deliberate exception: a scope that sets a section's `url` does not inherit
+that section's `key` (`src/config/secrets.rs:15`). A cloned repo that redirects
+an endpoint must supply its own credential or go without.
+
+An **absent** config is legitimate and defaults silently. A config that is
+present but unreadable or invalid **aborts startup** with exit 78 (`EX_CONFIG`)
+and the offending key on stderr (`src/main.rs:16`) — booting on settings known
+to be wrong is failing silently, not failing open. `--help` and `--version`
+still answer in a repo whose config is broken.
 
 ```toml
 [reason]
@@ -256,6 +287,16 @@ discovery_port = 7475
 peers = []
 ```
 
+The store stamps the embedding model and vector dimension that produced its
+vectors and re-checks them on open and on every flush
+(`src/base/store.rs:473`). A swap is reported, never silently tolerated: the
+`health` tool carries `embed_model`, `embed_dim` and `embed_mismatch`, and the
+CLI prints `MISMATCH`. A query vector whose dimension disagrees with the
+index returns no hits rather than nonsense, counted with a throttled log line
+(`src/base/search.rs:23`). An unstamped store adopts the configured model — that
+is not a mismatch. `kern reembed` rewrites the vectors and stamps the model it
+actually embedded with, not the configured one (`src/commands/reembed.rs:59`).
+
 > **Before enabling gossip**, read the
 > [Security](https://yesitsfebreeze.github.io/kern/concepts/security) page —
 > the full trust model, including exactly what a malicious peer can and cannot
@@ -264,8 +305,8 @@ peers = []
 
 ### Intake & recall
 
-kern is agent-agnostic. There is no client-specific plugin; you wire the intake
-and recall to whatever you use via two simple files.
+kern is agent-agnostic. There is no client-specific plugin; both halves are
+things any client can already do — write a file, call an MCP tool.
 
 - **Intake** — drop a conversation delta as a `.txt` file in
   `<cwd>/.kern/intake/`. The daemon drains it, distills typed claims out of it,
@@ -274,9 +315,12 @@ and recall to whatever you use via two simple files.
 - **Recall** — call the `query` MCP tool. It is relevance-targeted against the
   live graph and keeps provenance on every result.
 
-Both no-op outside a directory with a `.kern/` folder, so a single global
-registration is safe across every project — only directories where a kern is
-(or has been) active get touched.
+Neither is gated on a pre-existing `.kern/`. A daemon pins itself to the nearest
+ancestor holding `.git`, else the nearest holding `.kern/`, else the launch
+directory (`src/config/mod.rs:138`), and then creates the store and intake dirs
+it needs. So a single global registration does reach every project you open
+`kern mcp` in, and every one of them gets a `.kern/` — that is the cost of the
+registration being global, not something kern avoids.
 
 **Requirements:** the `kern` CLI on `PATH` and a running embedding endpoint
 (Ollama by default) for recall.
@@ -295,9 +339,10 @@ daemon). From an MCP session in the project:
    thoughts near a graviton by `gravity_weight * mass * cos`. Memories that
    match no graviton land in `generic`; dense `generic` clusters auto-promote to
    new gravitons over time.
-2. Add the typed descriptors you want the intake to emit — call `descriptor` (action
-   `add`) once each for the kinds you use: `preference`, `decision`, `project`,
-   `fact`, `code-fact`, `reference`, `procedural`.
+2. Optionally register extra claim kinds beyond the built-ins (`preference`,
+   `decision`, `project`, `fact`, `code-fact`, `reference`, `procedural`) —
+   call `claim_kind` (action `add`) once per custom kind; distillation offers
+   registered kinds to the LLM alongside the built-ins.
 
 After seeding, populate the graph by calling the `ingest` MCP tool during a
 session, or by dropping transcripts into `.kern/intake/`. kern ships no session
@@ -308,16 +353,17 @@ hook — the write is always a caller's call.
 | Tool | Purpose |
 | ------ | --------- |
 | `query` | Search the graph. Scored thoughts + optional LLM answer. Filter by `mode`, `kind`, `source`, time range, `min_conf`, and `as_of` (bi-temporal point-in-time); set `include_history` to also return superseded revisions (flagged `history:true`). |
-| `ingest` | Add text. Supports `object_id` update semantics and `descriptor` chunking context. |
-| `link` | Create a reason edge between two thoughts (LLM writes the reason if blank). |
+| `ingest` | Add text. Supports `object_id` update semantics and a free-text `hint` for chunking context. |
+| `link` | Create a reason edge between two thoughts (LLM writes the reason if blank). The edge is stored and walkable and shows up in a result's chain; it does not change ranking today. |
 | `forget` | Remove a thought and cascade its edges. Facts are immune. |
-| `degrade` | Down-weight the edges along a bad retrieval path — teaches the graph from miss feedback. |
+| `degrade` | Name the thought at the end of a bad result and every edge incident on it decays, hardest first; an edge that falls below threshold is removed (`src/commands/graph_ops.rs:254`). Entity-scoped — there is no way to name one path among several. |
 | `move` | Relocate a thought to another kern by `id` and `to_kern`, carrying its outgoing edges and restamping cross-kern references. |
 | `graviton` | Manage gravitons (named focus attractors; replaced the single per-kern "purpose"): `list` (default), `add` (name + text — phrase or full document — + optional mass), `remove` (name). |
-| `descriptor` | Add/remove a data-type descriptor. |
-| `health` | Graph stats: thought/edge counts, tick heat. |
+| `claim_kind` | Register/remove a claim kind; registered kinds extend the built-in set distillation may emit. |
+| `health` | Graph stats plus degradation signals: thought/edge/unnamed counts, tick queue depth and latency, task panics and failures with the last of each, cold evictions, and the stored embedding model/dimension with its `embed_mismatch` flag. |
 | `pulse` | Trigger a clustering pass across the kern tree. |
 | `gc` | Reap empty/orphan kerns from the running daemon's graph and persist, live. Returns before/after kern counts and the `data.mdb` size. |
+| `setup` | Returns wiring instructions for the calling agent — seed gravitons, install the capture rule, verify — with the steps already done marked. kern never writes a host's config itself (`src/mcp/tools_setup.rs:3`). |
 
 ---
 
@@ -332,17 +378,17 @@ that operates itself.
 | **Ingestion** | Manual: you run a chunk-and-embed job over a corpus. | Caller-driven: an agent calls `ingest`, or a dropped transcript distills into typed claims via the intake — no re-indexing job. |
 | **Unit stored** | Raw text chunks. | Distilled facts/decisions/preferences + *reason edges* between them. |
 | **Retrieval** | top-k vector similarity. | Hybrid vector + BM25 with GNN-blended seeds, edge expansion, RRF + PageRank fusion, optional LLM rerank, diversify. |
-| **Structure** | A flat bag of vectors. | A knowledge graph — recall can follow *why* one fact connects to another. |
+| **Structure** | A flat bag of vectors. | A knowledge graph — a result carries the reason chain connecting it back to a seed, so recall shows *why* one fact reaches another. The chain is provenance, not score: an edge changes no ranking today (see *Retrieval* above). |
 | **Growth** | Index grows unbounded; you re-index and prune by hand. | Self-compacting: heat decay + stigmergy GC + clustering keep the hot graph small; a capped cold tier preserves the recent tail. |
 | **Staleness** | Stale chunks linger until you rebuild. | Cold, non-durable thoughts decay and evict on their own; Facts persist. |
-| **Feedback** | None — a bad chunk keeps ranking. | `degrade` down-weights bad retrieval paths; access heat re-ranks what you actually use. |
+| **Feedback** | None — a bad chunk keeps ranking. | `degrade` punishes a bad result's delivered score (entity-scoped, not path-scoped); access heat re-ranks what you actually use. |
 | **Conflicts / sync** | Single store; multi-node needs external infra. | Content-addressed CRDT + gossip, no coordinator — but no anti-entropy: each heartbeat ships only the hottest 32 entities, so cold ones may never propagate and a node that rejoins after a partition never catches up. |
 | **Scope** | One global index. | One graph per working directory. |
 
 The short version: RAG gives you **search over a corpus you maintain**. kern
 gives you **memory that maintains itself** — it decides what is durable, forgets
-what isn't, and connects facts with reasons instead of leaving you a flat list
-of nearest neighbors.
+what isn't, and stores the reason connecting one fact to another so a result can
+show its chain instead of arriving as a bare nearest neighbor.
 
 ---
 
@@ -358,3 +404,18 @@ leg ships only the hottest 32 entities per heartbeat, so a cold entity may never
 propagate and a partitioned node that rejoins never catches up. Federation
 tuning at scale (batch size, push vs. pull) is open alongside it; see
 `docs/oracle/ROADMAP.md` — "Anti-entropy". Version `1.1.0`.
+
+**Measurement.** `e2e/test_recall.py` scores recall@1 / recall@5 / MRR over a
+corpus the test itself authors, with no LLM anywhere in the scoring loop — it
+ingests the facts, so it knows the right answer for each probe, and scoring is
+rank arithmetic over the binary's own stdout. Currently 0.9583 / 1.0000 /
+0.9792, reproducible bit-for-bit; CI gates on floors below those. Two limits
+travel with that number and cannot be dropped from it. The floors make it a
+**regression detector, not a quality claim** — it can say kern got worse, never
+that kern is good, and it is comparable to nothing anyone else publishes.
+And the embedder in the loop is `e2e/fake_llm.py`'s feature-hashed bag of words,
+deterministic and semantically empty by design, so the number measures kern's
+retrieval machinery over a fixed lexical signal, not a real embedding model's
+semantics. `e2e/test_invariants.py` asserts one property per `docs/oracle/VISION.md`
+criterion, and the properties kern does not yet satisfy are recorded there as
+skips and xfails rather than dropped.

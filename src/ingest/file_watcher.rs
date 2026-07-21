@@ -59,13 +59,13 @@ impl IngestSink for KernFileWatcherSink {
 			url: source_uri,
 		};
 
-		let descriptor = language_hint.unwrap_or_default();
+		let hint = language_hint.unwrap_or_default();
 
 		self.worker.enqueue(
 			content,
 			source,
 			EntityKind::Document,
-			descriptor,
+			hint,
 			1.0,
 			IngestRunConfig::default(),
 		);

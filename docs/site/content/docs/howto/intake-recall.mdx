@@ -25,7 +25,10 @@ is needed.
 <Callout type="warn">
 The embedding model's dimension is locked into the graph on first ingest.
 Switching embedding models later requires `kern reembed` — otherwise stored
-vectors mismatch new queries and search silently returns nothing.
+vectors mismatch new queries and search returns nothing useful. It is not
+silent: the store stamps the model it was built with, `kern health` prints
+`MISMATCH` beside the `embed:` line, and a query vector of the wrong dimension
+is dropped and counted rather than searched as truncated noise.
 </Callout>
 
 You also need the `kern` binary on `PATH`.
@@ -34,7 +37,7 @@ You also need the `kern` binary on `PATH`.
 
 kern is per-directory. It gates on a `.kern/` folder, and the daemon pins itself
 to the nearest ancestor holding a `.git` or `.kern` directory
-(`src/config/mod.rs:116`), so launching from a subdirectory still finds the
+(`Config::resolve_root`, `src/config/mod.rs`), so launching from a subdirectory still finds the
 right graph.
 
 ```bash
@@ -70,7 +73,7 @@ RUST_LOG=kern=info kern --daemon
 Expect log lines on stderr, never stdout: stdout is reserved for JSON-RPC when
 running as an MCP server.
 
-## 3. Seed gravitons and descriptors
+## 3. Seed gravitons and claim kinds
 
 Do this once, from an MCP session in the project, against the running daemon.
 Prefer the MCP tools over the CLI here — the CLI subcommands open the on-disk
@@ -83,18 +86,19 @@ optional `mass` (default `1.0`) makes it attract and retain more strongly.
 Claims matching no graviton land in a `generic` catch-all; see
 [Acceptance & routing](../concepts/acceptance.mdx) for how that descent works.
 
-The seven claim kinds the intake can emit are compiled in and need no
-registration (`src/ingest/distill.rs:9`): `preference`, `decision`, `project`,
-`fact`, `code-fact`, `reference`, `procedural`. Registering a `descriptor` is a
-separate thing — it gives a direct `ingest` a chunking context, so add one per
-claim type only if you also ingest that material directly.
+Seven claim kinds are built in and need no registration
+(`src/ingest/distill.rs:9`): `preference`, `decision`, `project`, `fact`,
+`code-fact`, `reference`, `procedural`. Register extra kinds with `claim_kind`
+when your material needs its own vocabulary — registered kinds are offered to
+the distillation LLM alongside the built-ins. For a direct `ingest`, chunking
+context is the free-text `hint` parameter, not a kind.
 
 The CLI equivalents exist for offline setup, with the daemon stopped:
 
 ```bash
 kern graviton add decisions "architectural choices and their rationale" --mass 1.5
 kern graviton list
-kern descriptor add decision "a choice made, with why"
+kern claim-kind add incident "a production incident: what broke and the fix"
 ```
 
 ## 4. Drop a session into the intake
@@ -143,10 +147,24 @@ gravitons:     decisions, project state, preferences
 kerns:       5
 thoughts:    47 (unnamed: 3)
 reasons:     91
-descriptors: 7
+claim kinds: 0
+embed:       qwen3-embedding:0.6b (dim 1024)
+evicted:     0 cold rows dropped
+tick:        queue 0 | done 312 | avg 8 ms
+degraded:    0 panics | 0 failures
   kern:decisions  thoughts:12  reasons:24
   kern:generic  thoughts:9  reasons:15
 ```
+
+The last four lines are the degradation surface. `embed:` names the model the
+index was actually built with and appends `MISMATCH: the index was built with a
+different model` when the configured model is a different one. `evicted:` counts
+cold rows this process dropped past the 50k cap — unrecoverable, so the count is
+their only trace. `tick:` and `degraded:` come from the running daemon over RPC;
+with none serving this directory they collapse to
+`tick: (no daemon serving this directory)`. Any non-zero panic or failure count
+means maintenance kept running but something is dying, and the line under it
+names the task and kern.
 
 The signals worth reading:
 
@@ -193,9 +211,9 @@ Windows host gateway (`ip route show default | awk '{print $3}'`) in
 
 There is one configuration that disables distillation outright: blanking both
 `[reason].url` and `[embed].url`, since reason falls back to the embed endpoint
-(`src/config/mod.rs:146`). The daemon logs an explicit warning under
+(`Config::reason_url`, `src/config/mod.rs`). The daemon logs an explicit warning under
 `kern.intake` when this happens and deltas simply accumulate until you restart
-with an endpoint configured (`src/commands.rs:835`).
+with an endpoint configured (`src/commands.rs:916`).
 
 **Nothing is landing in the graph at all.** Check in order: does `.kern/` exist in the
 directory the daemon pinned to (a subdirectory launch re-pins upward and logs
@@ -213,8 +231,11 @@ but the same files come back forever until the model follows the format —
 **Recall comes back empty.** First check whether the graph has anything at all
 with `kern health`. If it does, the usual cause is an embedding mismatch: the
 graph was built with one embedding model and is being queried with another, so
-every cosine degenerates. Run `kern reembed` to rebuild vectors under the
-current model. If the graph has content and the embedding model matches, widen
+every cosine degenerates. You do not have to guess — the store stamps the model
+and dimension it was built with, and `kern health` prints `MISMATCH` beside the
+`embed:` line when the configured model is a different one. Run `kern reembed`
+to rebuild vectors under the current model; it restamps with the model it
+actually used. If the graph has content and the embedding model matches, widen
 the query — `min_conf` gates out freshly distilled claims, which start at 0.6
 and sit low until repeated observation reinforces them.
 

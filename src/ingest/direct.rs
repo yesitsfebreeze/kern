@@ -13,7 +13,8 @@ pub struct DirectJob {
 	pub text: String,
 	pub source: Source,
 	pub kind: EntityKind,
-	pub descriptor: String,
+	#[serde(alias = "descriptor")]
+	pub hint: String,
 	pub confidence: f64,
 }
 
@@ -72,7 +73,7 @@ pub async fn drain_direct_once(
 				job.text,
 				job.source,
 				job.kind,
-				job.descriptor,
+				job.hint,
 				job.confidence,
 				cfg.clone(),
 			)
@@ -109,7 +110,7 @@ mod tests {
 				section: String::new(),
 			},
 			kind: EntityKind::Claim,
-			descriptor: "audit-finding".into(),
+			hint: "audit-finding".into(),
 			confidence: 0.7,
 		}
 	}

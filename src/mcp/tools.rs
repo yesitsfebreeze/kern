@@ -34,7 +34,7 @@ mod tests {
 			"move",
 			"health",
 			"graviton",
-			"descriptor",
+			"claim_kind",
 			"pulse",
 			"gc",
 			"setup",
@@ -91,7 +91,7 @@ mod tests {
 			("forget", &["id"]),
 			("degrade", &["query_id"]),
 			("move", &["id", "to_kern"]),
-			("descriptor", &["action", "name"]),
+			("claim_kind", &["action", "name"]),
 		];
 		for (name, fields) in want {
 			let tool = defs

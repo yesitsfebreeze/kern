@@ -107,7 +107,7 @@ pub(super) async fn cmd_profile(cfg: &crate::config::Config, text: &str, no_llm:
 		profiles.push(renamed(p, "query hybrid (llm)"));
 
 		let t = Instant::now();
-		let claims = crate::ingest::distill::distill(DISTILL_SAMPLE, &*llm_fn);
+		let claims = crate::ingest::distill::distill(DISTILL_SAMPLE, &[], &*llm_fn);
 		let n = claims.map(|c| c.len()).unwrap_or(0);
 		profiles.push(flat(&format!("distill ({n} claims)"), ms(t)));
 	}

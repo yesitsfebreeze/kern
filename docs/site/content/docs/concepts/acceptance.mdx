@@ -81,11 +81,12 @@ the model's instruction following before you suspect the plumbing.
 
 ## What a typed claim is
 
-A claim is a self-contained statement plus a descriptor naming what *kind* of
-knowledge it is, plus an optional instant at which it became true. The
-descriptor vocabulary is fixed at seven values (`src/ingest/distill.rs:9`):
+A claim is a self-contained statement plus a kind naming what *kind* of
+knowledge it is, plus an optional instant at which it became true. Seven kinds
+are built in (`src/ingest/distill.rs:9`); kinds registered via the `claim_kind`
+tool extend the set:
 
-| Descriptor | What it holds |
+| Kind | What it holds |
 | --- | --- |
 | `preference` | How the user wants things done. |
 | `decision` | A choice made, ideally with its rationale. |
@@ -95,7 +96,7 @@ descriptor vocabulary is fixed at seven values (`src/ingest/distill.rs:9`):
 | `reference` | An external pointer worth keeping. |
 | `procedural` | A learned workflow, rule, or convention — how we do X. |
 
-Any `kind` the model invents outside that set falls back to `fact` rather than
+Any `kind` the model invents outside the built-in + registered set falls back to `fact` rather than
 being rejected (`src/ingest/distill.rs:87`), so a hallucinated label costs you
 type precision but never the claim itself. `valid_from` is parsed only when it
 is a real ISO timestamp; a value like `"since March"` is ignored without
@@ -105,7 +106,7 @@ failing the claim, which is what feeds the bi-temporal window described in
 Each claim is then enqueued as its own ingest job at confidence `0.6`
 (`src/ingest/intake.rs:144`) — lower than a directly ingested document, because
 a claim is a model's reading of a conversation, not something you asserted. The
-descriptor rides along on the claim's `Source::Session`, so provenance records
+kind rides along on the claim's `Source::Session`, so provenance records
 which kind produced it.
 
 ## Routing: where a claim lands
@@ -180,7 +181,7 @@ lines happened to fall (`src/ingest/split.rs:28` — the on-commit split is
 deliberately heuristic, never a second LLM call). Those chunks carry the
 conversation's noise into the vector space: greetings, tool output, and
 half-finished thoughts all get embeddings and all compete for recall slots. They
-also carry no type, which forecloses everything downstream — descriptor-aware
+also carry no type, which forecloses everything downstream — kind-aware
 routing, the same-kind supersede guard, `valid_from`, and any query filtered by
 `kind`. And they carry no consolidation: five phrasings of one fact become five
 neighbours at cosine 0.93, just under the dedup threshold, permanently.
@@ -195,7 +196,7 @@ The cost of distilling is real and worth naming plainly:
 - **A model dependency.** Transcript distillation without a reason endpoint does not run at all;
   deltas accumulate unprocessed until one is configured.
 - **Non-determinism.** The same delta distilled twice yields different claim
-  sets. The parser's leniency and the descriptor fallback exist because the
+  sets. The parser's leniency and the kind fallback exist because the
   output is not a contract.
 
 What it buys back is that everything after distillation is deterministic. Once a

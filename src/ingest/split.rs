@@ -1,6 +1,6 @@
-pub fn split(text: &str, descriptor: &str, llm: Option<&dyn Fn(&str) -> String>) -> Vec<String> {
+pub fn split(text: &str, hint: &str, llm: Option<&dyn Fn(&str) -> String>) -> Vec<String> {
 	if let Some(llm_fn) = llm {
-		let result = llm_split(text, descriptor, llm_fn);
+		let result = llm_split(text, hint, llm_fn);
 		if !result.is_empty() {
 			return result;
 		}
@@ -8,11 +8,11 @@ pub fn split(text: &str, descriptor: &str, llm: Option<&dyn Fn(&str) -> String>)
 	paragraph_split(text)
 }
 
-pub(crate) fn llm_split(text: &str, descriptor: &str, llm: &dyn Fn(&str) -> String) -> Vec<String> {
-	let context = if descriptor.is_empty() {
+pub(crate) fn llm_split(text: &str, hint: &str, llm: &dyn Fn(&str) -> String) -> Vec<String> {
+	let context = if hint.is_empty() {
 		String::new()
 	} else {
-		format!(" This text describes {descriptor}.")
+		format!(" This text describes {hint}.")
 	};
 	let prompt = format!(
 		"Extract the key factual statements from the following text.{context} \
@@ -102,7 +102,7 @@ mod tests {
 	}
 
 	#[test]
-	fn llm_split_folds_descriptor_into_the_prompt() {
+	fn llm_split_folds_hint_into_the_prompt() {
 		let seen = std::cell::RefCell::new(String::new());
 		let llm = |p: &str| {
 			*seen.borrow_mut() = p.to_string();
@@ -111,7 +111,7 @@ mod tests {
 		let _ = llm_split("body", "rust code", &llm);
 		assert!(
 			seen.borrow().contains("describes rust code"),
-			"descriptor is named in the prompt"
+			"hint is named in the prompt"
 		);
 		let _ = llm_split("body", "", &llm);
 		assert!(!seen.borrow().contains("describes"));

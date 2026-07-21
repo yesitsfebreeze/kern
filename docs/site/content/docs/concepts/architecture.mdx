@@ -167,7 +167,7 @@ Twelve MCP tools, order asserted by test (`mcp/tools.rs:20-41`):
 | `move` | `tools_mutate.rs:377` |
 | `health` | `tools_admin.rs:83` |
 | `graviton` | `tools_admin.rs:87` |
-| `descriptor` | `tools_admin.rs:149` |
+| `claim_kind` | `tools_admin.rs:149` |
 | `pulse` | `tools_admin.rs:206` |
 | `gc` | `tools_admin.rs:178` |
 | `setup` | `tools_setup.rs` — agent-facing wiring instructions |
@@ -444,7 +444,7 @@ graph TB
 
     %% ===== ingest pipeline =====
     subgraph INGEST["Ingest pipeline (ingest::Worker)"]
-        Q["Worker job (mpsc)<br/>text, Source, kind, descriptor, conf"]
+        Q["Worker job (mpsc)<br/>text, Source, kind, hint, conf"]
         SPLIT["split::split → chunks"]
         PDOC["place_document (embed doc)"]
         DDOC{"find_duplicate<br/>entity_idx k=1 ef=64 ≥0.95?"}

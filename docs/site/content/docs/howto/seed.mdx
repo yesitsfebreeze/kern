@@ -6,7 +6,7 @@ kern normally fills its graph a session at a time, through the intake. This page
 covers the other direction: pushing an existing body of knowledge — design docs,
 an architecture decision log, a README, a pile of notes — into a fresh graph in
 one go, so the first session already has something to recall. At the end you
-will have gravitons, descriptors, and your existing material in the graph, and
+will have gravitons, claim kinds, and your existing material in the graph, and
 you will have verified it landed.
 
 ## Before you start
@@ -54,26 +54,28 @@ You do not have to get the set right up front — dense `generic` clusters
 promote themselves into new gravitons over time.
 </Callout>
 
-## Step 2 — Add descriptors
+## Step 2 — Register claim kinds (optional)
 
-A descriptor is a named chunking context. Passing `descriptor: "decision"` with
-an ingest tells kern what kind of text it is looking at, which shapes how the
-content is interpreted on the way in. Register the kinds you intend to use:
+Distillation labels every claim with a kind. The built-ins (`preference`,
+`decision`, `project`, `fact`, `code-fact`, `reference`, `procedural`) cover
+most material; register extra kinds with `claim_kind` when yours needs its own
+vocabulary — registered kinds are offered to the distillation LLM alongside the
+built-ins:
 
 ```json
-{ "action": "add", "name": "decision", "description": "An architectural or design decision. The decision itself, the alternatives considered, the rationale, and any trade-offs." }
-{ "action": "add", "name": "doc",      "description": "Documentation such as a README or manual. Subject, key concepts, usage, and any caveats." }
+{ "action": "add", "name": "incident",  "description": "A production incident: what broke, the impact, and the remediation." }
+{ "action": "add", "name": "benchmark", "description": "A measured performance result and the conditions it was measured under." }
 ```
 
 Or via the CLI (`src/commands.rs:225`):
 
 ```bash
-kern descriptor add decision "An architectural or design decision, its alternatives, and its rationale."
-kern descriptor rm decision
+kern claim-kind add incident "A production incident: what broke, the impact, and the remediation."
+kern claim-kind rm incident
 ```
 
-Names are free-form — pick a vocabulary that matches your material and reuse it
-consistently.
+For per-ingest chunking context, pass the free-text `hint` on the `ingest` call
+("This text describes …") — that is a prompt hint, not a kind.
 
 ## Step 3 — Push the content in
 
@@ -91,7 +93,7 @@ optional provenance:
   "source": "file",
   "object_id": "docs/decisions/0007-storage-engine.md",
   "title": "ADR 7 — storage engine",
-  "descriptor": "decision",
+  "hint": "an architecture decision record",
   "sync": true
 }
 ```
@@ -176,8 +178,8 @@ undifferentiated blob.
 
 **Every chunk goes through the same acceptance path as anything else**
 (`src/base/accept.rs:41`). Nothing about seeding is privileged. Each chunk is
-checked graph-wide for a near-duplicate (cosine ≥ `ingest.dedup_threshold`,
-default `0.95`), routed to the graviton whose effective distance is smallest,
+checked graph-wide for a near-duplicate (cosine ≥ the preset's dedup
+threshold — `0.98` on the default `relaxed`, `src/config/preset.rs`), routed to the graviton whose effective distance is smallest,
 and committed there. Re-running a seed therefore collapses byte-identical
 content rather than duplicating it — and that is the whole guarantee. The check
 is cosine similarity, not identity, and nothing keys on the file the text came
@@ -205,8 +207,10 @@ Call the `health` MCP tool, or run:
 kern health
 ```
 
-which prints the data directory, the graviton names, and the kern / thought /
-reason / descriptor counts, then a per-kern breakdown. Two things to look at:
+which prints the data directory, the graviton names, the kern / thought /
+reason / claim-kind counts, the embedding model and dimension the index was
+built with, the cold-eviction total and the tick's queue and fault counts, then
+a per-kern breakdown. Three things to look at:
 
 - **Thought count moved** by roughly what you expect. A count of zero after a
   seed run means embedding failed — check the endpoint in
@@ -214,6 +218,9 @@ reason / descriptor counts, then a per-kern breakdown. Two things to look at:
 - **Thoughts are distributed across gravitons**, not all sitting in one. Every
   thought landing in the same place usually means the graviton texts are too
   similar to each other, or you seeded content before the gravitons existed.
+- **No `MISMATCH` on the `embed:` line.** A bulk seed embedded under a different
+  model than the one the graph was built with lands vectors that no query can
+  reach. Run `kern reembed` before trusting the counts.
 
 Then confirm the content is actually retrievable:
 

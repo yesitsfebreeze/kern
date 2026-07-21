@@ -26,9 +26,9 @@ pub fn resource_definitions() -> Vec<serde_json::Value> {
 			"mimeType": "application/json",
 		}),
 		serde_json::json!({
-			"uri": "kern://local/descriptors",
-			"name": "Descriptors",
-			"description": "All registered data-type descriptors",
+			"uri": "kern://local/claim-kinds",
+			"name": "Claim kinds",
+			"description": "All registered claim kinds (built-ins not included)",
 			"mimeType": "application/json",
 		}),
 	]
@@ -60,9 +60,9 @@ pub(crate) fn handle_resource_read(
 			resource_content(&params.uri, &resource_thoughts(server)),
 		),
 		"kern://local/kerns" => ok(id, resource_content(&params.uri, &resource_kerns(server))),
-		"kern://local/descriptors" => ok(
+		"kern://local/claim-kinds" => ok(
 			id,
-			resource_content(&params.uri, &resource_descriptors(server)),
+			resource_content(&params.uri, &resource_claim_kinds(server)),
 		),
 		_ => {
 			if let Some(tid) = params.uri.strip_prefix("thought://") {
@@ -135,9 +135,9 @@ fn resource_kerns(server: &Server) -> String {
 	serde_json::to_string(&summaries).unwrap_or_default()
 }
 
-fn resource_descriptors(server: &Server) -> String {
+fn resource_claim_kinds(server: &Server) -> String {
 	let g = server.graph.read();
-	serde_json::to_string(&g.root.descriptors).unwrap_or_default()
+	serde_json::to_string(&g.root.claim_kinds).unwrap_or_default()
 }
 
 fn resource_thought(server: &Server, id: &str) -> String {

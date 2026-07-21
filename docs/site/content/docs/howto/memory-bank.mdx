@@ -91,9 +91,10 @@ directory without a `.kern/` folder, so a single global registration is safe
 across all your projects.
 
 Seed the graph once via MCP: add a few `graviton`s — named top-level buckets the
-root routes matching memories into (anything unmatched lands in `generic`) — and
-the typed descriptors (`preference`, `decision`, `project`, `fact`, `code-fact`,
-`reference`, `procedural`).
+root routes matching memories into (anything unmatched lands in `generic`).
+Distillation labels claims with a built-in set of kinds (`preference`,
+`decision`, `project`, `fact`, `code-fact`, `reference`, `procedural`); register
+extra ones with `claim_kind` if your material needs them.
 
 ## Status & known limits
 
@@ -112,19 +113,23 @@ enableable, but narrower than the design. The load-bearing pieces:
   non-durable thoughts to a cold table in the same LMDB store before dropping
   them from the hot graph — a latest-wins keyed table holding the newest 50k
   entries, so recent evictions stay recoverable while the very oldest
-  eventually age out. Recall reaches it two ways: `kern get <id>` rehydrates
-  by id, and the `query` tool fills remaining result slots from a cosine
-  search over the cold tier (marked `cold:true`) when the hot graph returns
-  fewer than `k`.
+  eventually age out — and every row dropped past the cap increments a
+  `cold_evicted` counter on `health`, because that drop is unrecoverable and
+  the count is its only trace. Recall reaches the tier two ways: `kern get <id>`
+  rehydrates by id, and the `query` tool fills remaining result slots from a
+  cosine search over the cold tier (marked `cold:true`) when the hot graph
+  returns fewer than `k`.
 - **Bi-temporal invalidation (implemented).** When a same-kind near-duplicate
   updates or contradicts a stored claim, the background tick *supersedes* the old
   revision instead of deleting it: it flips to `Superseded`, stamps `valid_to`
   (when it stopped being true) and `invalidated_at` (when kern learned of it),
   evicts it from the ANN, and links the pair with a `Supersedes` edge. Invalidated
   history loses its GC immunity and spills to the cold tier — invalidated is not
-  deleted. The `query` tool adds `as_of` (return the revision whose validity
-  window covered a past instant) and `include_history` (also return superseded
-  revisions reachable from the active hits, marked `history:true`). The
+  deleted, and the spilled row carries its temporal triple with it, so a
+  cold-recovered revision still answers a point-in-time query correctly. The
+  `query` tool adds `as_of` (return the revision whose validity window covered a
+  past instant) and `include_history` (also return superseded revisions
+  reachable from the active hits, marked `history:true`). The
   update-vs-contradiction call is a background reason-LLM classification, so recall
   stays LLM-free; with no LLM configured a differing near-dup is kept as a
   `Rephrase` edge exactly as before (fail open).

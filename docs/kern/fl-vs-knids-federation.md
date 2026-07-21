@@ -200,7 +200,7 @@ LWW keyed on (model_id, lamport) instead — already in the CRDT plan.
 
 FL requires every client to run the same architecture. kern explicitly
 allows heterogeneous nodes — different embedding models, different GNN
-dimensions, different descriptor sets. The GNN layer's weights are
+dimensions, different claim-kind sets. The GNN layer's weights are
 **excluded from federation** for this exact reason (see CRDT study §7).
 
 ### 6.5 Synchronous rounds

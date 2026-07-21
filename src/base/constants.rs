@@ -111,4 +111,4 @@ pub const DISK_CONSOLIDATE_MIN_DELTA: usize = 10_000;
 pub const USER_SOURCE: &str = "user";
 pub const AGENT_SOURCE: &str = "agent";
 // "agent" as a source is canonically AGENT_SOURCE — do NOT add a second const
-// with the same value (it silently collides in the descriptor map).
+// with the same value (it silently collides in the source map).

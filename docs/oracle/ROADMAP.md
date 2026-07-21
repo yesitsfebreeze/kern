@@ -94,22 +94,55 @@ These need no gossip, no flag and no unusual configuration. Every one produces a
 wrong or missing result with no error, which is why they outrank both the
 security work (armed only with federation on) and every feature.
 
-### 86. `link` contributes nothing at retrieval `[retrieval]`
+### 86. A reason edge still cannot lift its neighbour into the results `[retrieval]`
 
-**Measured, not suspected.** The first finding the new instrument produced
-(`e2e/test_invariants.py`, recorded `xfail(strict=True)`): ingest A and B, create
-a reason edge A->B, probe with text matching A only, and B ranks *identically to
-four decimals* whether or not the edge exists. Reproduced by an independent
-harness over 8 pairs — every B had the same (rank, score) in both worlds.
+**Measured, and half fixed.** The first finding the new instrument produced
+(`e2e/test_invariants.py`, recorded `xfail(strict=True)`): probe with A's own
+text, and B — linked A->B, sharing no content words — ranked *identically to four
+decimals* with and without the edge, across 8 pairs.
 
-This is the successor to the deleted work's multi-hop lead, which was smoke at
-n=8 and guessed at "ingest-side edge creation". The guess is now half-refuted:
-the edge *is* created (`kern get` shows it), it simply does not reach ranking.
-So the defect is in expansion or fusion, not in ingest.
+Two independent causes were isolated. The first is fixed; the second is why this
+item is still open.
 
-It ranks here because "a graph, not a bag — recall can walk them" is a `VISION.md`
-criterion, and the walk currently changes no outcome. Every hop-dependent claim in
-the repo rests on this.
+**Cause 1 — the beam threshold compared two different scales. FIXED.**
+`expand` pruned a neighbour whose score fell below `global_best * decay`, where
+`global_best` was set by the best *seed*: a pure query cosine, up to 1.0. But a
+neighbour scores `w.content*cos(q,n) + w.reason*cos(q,edge) + w.edge*edge_score`,
+so with the default weights a neighbour the query does **not** match directly has
+a ceiling of `0.15 + 0.15 = 0.30` against a threshold of `0.25`. Measured on a
+minimal graph: neighbour 0.2411 against threshold 0.2500 — pruned by 0.0089, and
+`chains` came back empty. Whenever a seed matched well, which is the common case,
+the walk was structurally dead. The threshold is now taken from the best score
+seen *among neighbours*, so the first hop off any seed is always explored and the
+bar is set by the frontier. Regression test:
+`expand::tests::a_strong_seed_no_longer_prunes_the_walk_off_it`.
+
+**Cause 2 — traversal evidence is discarded, not combined. OPEN, and the naive
+fix is measured wrong.** `visited` allows exactly one pop per entity and
+`results` keeps `max` per entity, so when B is *already* a content hit — 7 of the
+8 pairs were — the seed score wins the max and the edge contributes nothing.
+Effect of cause 1's fix alone: 1 of 8 pairs moved (rank 22 -> 21). The other 7 are
+this.
+
+Pooling the evidence instead of taking the max makes all 8 move, dramatically —
+5 of 8 reach the top 5, e.g. rank 14 -> 4 and 7 -> 2. **It also regresses the
+primary metric**, and the instrument caught it: the exact-match probe "where does
+ada store her bicycle" fell from rank 1 to rank 3 behind two unrelated facts
+(`e2e/test_retrieval.py`). The reason is structural and must be designed around,
+not tuned away: the best-matching entity pops *first*, so by the time its
+neighbours are expanded it is already `visited` and can never *receive* hop
+evidence, only give it. Any co-equal pooling therefore systematically penalises
+the best answer.
+
+So the open question is a design one: **how does a walk pay without letting a
+well-connected node outrank a direct match?** A bounded bonus rather than
+co-equal evidence, evidence weighted by hop distance, or giving the seed its own
+traversal credit before it is consumed. Whatever is chosen, the bar is now
+concrete and cheap to check: all 8 pairs must move, `recall@1` must hold at
+0.9583, and `test_query_ranks_the_matching_fact_first` must stay green.
+
+It ranks here because "a graph, not a bag — recall can walk them" is a
+`VISION.md` criterion, and the walk still changes almost no outcome.
 
 ### 5. In-memory mode drops entities with no spill `[lifecycle]`
 
@@ -622,11 +655,11 @@ retired:** `CHANGELOG.md` 2026-07-20 shipped chunk external ids keyed on the ful
 source identity (`source_id()` + chunk index, not the bare section), and CLI
 `kern ingest` deriving its inline source hash from the text. What remains is the
 *dedup* key, not the external id. Beside it: the dedup threshold is global, not
-per-descriptor (`FEATURES.md:305-306`).
+per-kind (`FEATURES.md:305-306`).
 
 ### 49. The distill prompt is one-shot and global `[ingest]`
 
-One `format!` over the whole conversation, no per-descriptor branch, no chunking
+One `format!` over the whole conversation, no per-kind branch, no chunking
 (`src/ingest/distill.rs:28-47`). The `kind` taxonomy has overlapping categories
 (decision/project, fact/code-fact) and label accuracy was measured at ~33% even
 at 7B — **that figure came from the deleted harness and is unreproducible; treat
@@ -917,6 +950,22 @@ served that way decays, clusters and GCs normally, and simply does not federate.
 - RPC socket bind→chmod race — sub-millisecond, umask default — recorded as an
   accepted risk (`concepts/security.mdx:40-43`); revisit only if the umask
   alternative stops being worse.
+
+### 87. Do the preset tiers earn their numbers, now that `relaxed` is the default? `[eval]`
+
+**Deciding behavior: verify-before-claiming.**
+
+The preset tiers shipped 2026-07-21 with hand-picked values, and the default
+flipped from the medium-era values to `relaxed` the same day
+(`src/config/preset.rs`). Every prior measurement — including the LoCoMo
+0.137 baseline — ran on medium-era defaults, and a configless run now
+exercises `relaxed`. Question: run the retrieval suite once per preset;
+first decide whether the standing baseline is re-pinned to `preset =
+"medium"` or re-recorded on `relaxed`, then adjust any knob whose tier value
+scores worse than medium on the posture it claims to serve (relaxed →
+recall, tight → precision). Preset values live in code now, so adjustments
+are commits, not config edits. Blocked on nothing; gated only on an idle GPU
+and item 1's instrument staying the scorer.
 
 ### 85. Documentation owed, tracked here so it is not lost `[docs]`
 

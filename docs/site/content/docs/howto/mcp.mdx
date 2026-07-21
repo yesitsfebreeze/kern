@@ -2,7 +2,7 @@
 title: "Wire up MCP"
 ---
 
-By the end of this page your agent will list kern's eleven tools and be able to
+By the end of this page your agent will list kern's twelve tools and be able to
 query and write the project's graph mid-session. You will also know which tool to
 reach for when, and what to check when the client shows zero tools.
 
@@ -26,7 +26,7 @@ kern speaks MCP over stdio. Point your client at the binary:
 
 That is the repo's own `.mcp.json`, verbatim. The daemon writes exactly this
 entry itself on startup if the file is missing the `kern` key —
-`ensure_mcp_registered` (`src/commands/mcp_cmd.rs:327`) only inserts absent keys,
+`ensure_mcp_registered` (`src/commands/mcp_cmd.rs:437`) only inserts absent keys,
 so a customised entry of yours is never overwritten.
 
 Windows is the same config; the client resolves `kern` from PATH the same way.
@@ -62,8 +62,8 @@ silently. Start a daemon by hand and check the socket exists.
 
 ## 3. The tools
 
-Eleven tools, defined in `src/mcp/tools*.rs` and dispatched in one place —
-`call_tool`, `src/mcp.rs:133`. Your client can introspect every schema; what it
+Twelve tools, defined in `src/mcp/tools*.rs` and dispatched in one place —
+`call_tool`, `src/mcp.rs:160`. Your client can introspect every schema; what it
 cannot tell you is when to reach for which.
 
 ### Reading
@@ -82,14 +82,21 @@ Reach past the plain `text` search when you need precision:
 - `include_history: true` when you want the superseded revisions alongside the
   live ones, flagged `history: true` — the honest answer to "did this change?"
 
-**`health`** — graviton, kern, entity, reason, unnamed and descriptor counts. Use
-it as a liveness probe and to sanity-check that ingestion is landing.
+**`health`** — graviton, kern, entity, reason, unnamed and claim-kind counts,
+plus the degradation signals: tick queue depth and average task latency,
+`task_panics` / `task_failures` with the most recent of each rendered, the
+`cold_evicted` total, and the `embed_model` / `embed_dim` the index was built
+with alongside an `embed_mismatch` flag. Use it as a liveness probe, to
+sanity-check that ingestion is landing, and to tell a degraded daemon from a
+healthy one — kern fails open, so a panicking maintenance task keeps the daemon
+serving and shows up only here.
 
 ### Writing
 
 **`ingest`** — put text into the graph. Pass `object_id` when the text is a
 revision of something already stored: that is what gives you update semantics
-instead of a duplicate node. `descriptor` selects a chunking context, `conf`
+instead of a duplicate node. `hint` is free text folded into the chunking
+prompt ("This text describes …"), `conf`
 weights the claim, and `sync: true` blocks until the ingest completes rather than
 returning as soon as it is queued (`src/mcp/tools_mutate.rs:16`).
 
@@ -120,13 +127,21 @@ harder, and anything matching nothing falls through to `generic`. `list` and
 `remove` do what they say (`src/mcp/tools_admin.rs:41`). This is the main knob
 for telling a project's memory what it is *about*.
 
-**`descriptor`** — register a data-type descriptor (`add` with a markdown
-`description`, or `rm`). Descriptors give `ingest` a chunking context for
-structured material.
+**`claim_kind`** — register a claim kind (`add` with a markdown `description`,
+or `rm`). Registered kinds extend the built-in set (`preference`, `decision`,
+`project`, `fact`, `code-fact`, `reference`, `procedural`) that transcript
+distillation may label claims with.
 
 **`pulse`** — force a clustering pass across the tree, enqueuing cluster tasks
 for every kern with thoughts. The background tick does this on its own; call it
 after a bulk seed when you do not want to wait.
+
+**`setup`** — returns step-by-step wiring instructions for the calling agent:
+seed gravitons, install the capture rule or hook in the host's instruction
+file, verify with an ingest/health/query round-trip. Idempotent — it reports
+what is already `[done]` for this project (`src/mcp/tools_setup.rs`). Call it
+once per new project or new agent host; the agent does the wiring, kern never
+writes into a host's config itself.
 
 **`gc`** — reap empty and orphan kerns from the running daemon's graph and
 persist, live, no restart needed. Returns before/after kern counts and the
@@ -142,7 +157,7 @@ conclusions as you reach them, `degrade` when a recall misfires, and leave
 
 ## 4. Verify the tools are live
 
-Ask your client to list tools; you should see all eleven. From a shell, drive the
+Ask your client to list tools; you should see all twelve. From a shell, drive the
 stdio surface directly:
 
 ```bash
@@ -172,7 +187,7 @@ Work down this list:
    shell PATH. Run `kern --help` from a plain login shell; if that works but the
    client does not, use an absolute `command`.
 2. **Did the client capture stdout?** kern's stdio surface speaks JSON-RPC on
-   stdout, and logs go to stderr for exactly that reason (`src/main.rs:11`).
+   stdout, and logs go to stderr for exactly that reason (`src/main.rs:27`).
    Anything your shell profile prints on startup will corrupt the stream — do not
    wrap the command in a shell that echoes.
 3. **Is the working directory right?** The daemon and its socket are per-cwd. A
@@ -181,14 +196,21 @@ Work down this list:
    the launch directory.
 4. **Is a stale socket blocking the attach?** If the daemon died hard, remove
    `$XDG_RUNTIME_DIR/kern-*.sock` and let `kern mcp` respawn.
-5. **Read the logs.** `RUST_LOG=kern=info kern mcp` prints whether it went proxy
+5. **Did the config abort the boot?** An unparseable or invalid `kern.toml`
+   makes every `kern` invocation exit **78** with the offending key on stderr,
+   `kern mcp` included, so the client sees a process that dies immediately.
+   Deleting the file is a valid fix — an absent config boots on defaults.
+6. **Read the logs.** `RUST_LOG=kern=info kern mcp` prints whether it went proxy
    (`kern.mcp_proxy` "attached to running daemon") or fell back to standalone
-   (`kern.mcp` "auto-spawn failed").
+   (`kern.mcp` "auto-spawn failed"). The daemon `kern mcp` spawned for you is
+   detached, but not silent: its stdout and stderr append to
+   `.kern/data/logs/daemon.log` (and the hub's to `hub.log`), owner-only, so the
+   reason a spawn failed survives the next restart.
 
 <Callout type="warn" title="Prompts and resources are stdio-standalone only">
 The server advertises `resources` and `prompts` capabilities, and the
 standalone path serves them — `kern://local/health`, `.../thoughts`,
-`.../kerns`, `.../descriptors` plus a `research` prompt. In **proxy** mode,
+`.../kerns`, `.../claim-kinds` plus a `research` prompt. In **proxy** mode,
 the normal path when a daemon is running, `resources/list` and `prompts/list`
 are not forwarded and return `-32601 method not found`. Do not build on them;
 the tools are the stable surface.

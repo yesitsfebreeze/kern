@@ -8,7 +8,13 @@ use crate::ingest::outcome::OutcomeStatus;
 use crate::ingest::Worker;
 use crate::types::LlmFunc;
 
-pub fn extract_claims(path: &Path, llm: &dyn Fn(&str) -> String) -> Option<(String, Vec<Claim>)> {
+pub type ClaimKindsFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+
+pub fn extract_claims(
+	path: &Path,
+	extra_kinds: &[String],
+	llm: &dyn Fn(&str) -> String,
+) -> Option<(String, Vec<Claim>)> {
 	let text = match read_text(path)? {
 		Text::Content(t) => t,
 		Text::Binary => return None,
@@ -18,7 +24,7 @@ pub fn extract_claims(path: &Path, llm: &dyn Fn(&str) -> String) -> Option<(Stri
 		.and_then(|s| s.to_str())
 		.unwrap_or("session")
 		.to_string();
-	let claims = match distill(&text, llm) {
+	let claims = match distill(&text, extra_kinds, llm) {
 		Some(c) => c,
 		None => {
 			tracing::warn!(target: "kern.ingest.intake", path = %path.display(), "distill got no LLM output; leaving delta in intake for retry");
@@ -102,6 +108,7 @@ async fn drain_entry(
 	failed: &Path,
 	worker: &Worker,
 	llm: Option<&LlmFunc>,
+	extra_kinds: &[String],
 	cfg: &crate::ingest::Config,
 ) -> bool {
 	if !path.is_file() {
@@ -127,7 +134,7 @@ async fn drain_entry(
 		tracing::warn!(target: "kern.ingest.intake", path = %path.display(), "transcript needs a reason LLM to distill; leaving in intake");
 		return false;
 	};
-	let (stem, claims) = match extract_claims(path, llm.as_ref()) {
+	let (stem, claims) = match extract_claims(path, extra_kinds, llm.as_ref()) {
 		Some(v) => v,
 		None => return false,
 	};
@@ -136,12 +143,12 @@ async fn drain_entry(
 		let src = Source::Session {
 			session_id: format!("session:{stem}"),
 			section: String::new(),
-			title: format!("session://{}", c.descriptor),
+			title: format!("session://{}", c.kind),
 		};
 		let mut claim_cfg = cfg.clone();
 		claim_cfg.valid_from = c.valid_from;
 		let outcome = worker
-			.run(c.text, src, EntityKind::Claim, c.descriptor, 0.6, claim_cfg)
+			.run(c.text, src, EntityKind::Claim, c.kind, 0.6, claim_cfg)
 			.await;
 		let ok = !matches!(outcome.status, OutcomeStatus::Failed);
 		if !ok {
@@ -188,11 +195,13 @@ async fn drain_document(
 	finalize(path, done, &[ok])
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drain_once(
 	intake_dir: &Path,
 	done: &Path,
 	worker: &Worker,
 	llm: Option<&LlmFunc>,
+	extra_kinds: &[String],
 	cfg: &crate::ingest::Config,
 	done_retention: Duration,
 	now: SystemTime,
@@ -207,7 +216,7 @@ async fn drain_once(
 	let failed = intake_dir.join("failed");
 	let mut archived = 0;
 	for ent in entries.flatten() {
-		if drain_entry(&ent.path(), done, &failed, worker, llm, cfg).await {
+		if drain_entry(&ent.path(), done, &failed, worker, llm, extra_kinds, cfg).await {
 			archived += 1;
 		}
 	}
@@ -221,6 +230,7 @@ pub async fn run(
 	intake_dir: PathBuf,
 	worker: Arc<Worker>,
 	llm: Option<LlmFunc>,
+	claim_kinds: Option<ClaimKindsFn>,
 	dedup_threshold: f64,
 	interval: Duration,
 	done_retention: Duration,
@@ -232,11 +242,13 @@ pub async fn run(
 		..Default::default()
 	};
 	loop {
+		let extra_kinds = claim_kinds.as_ref().map(|f| f()).unwrap_or_default();
 		drain_once(
 			&intake_dir,
 			&done,
 			&worker,
 			llm.as_ref(),
+			&extra_kinds,
 			&cfg,
 			done_retention,
 			SystemTime::now(),
@@ -294,7 +306,7 @@ mod tests {
 		let dir = tempdir().unwrap();
 		let delta = dir.path().join("sess-1.txt");
 		std::fs::write(&delta, "user: hi\nassistant: here is a fact").unwrap();
-		let (stem, claims) = extract_claims(&delta, &stub_two).expect("some");
+		let (stem, claims) = extract_claims(&delta, &[], &stub_two).expect("some");
 		assert_eq!(stem, "sess-1");
 		assert_eq!(claims.len(), 2);
 	}
@@ -303,7 +315,7 @@ mod tests {
 	fn extract_missing_file_is_none() {
 		let dir = tempdir().unwrap();
 		let missing = dir.path().join("nope.txt");
-		assert!(extract_claims(&missing, &stub_two).is_none());
+		assert!(extract_claims(&missing, &[], &stub_two).is_none());
 	}
 
 	#[test]
@@ -312,7 +324,7 @@ mod tests {
 		let delta = dir.path().join("sess-outage.txt");
 		std::fs::write(&delta, "user: remember my API key lives in vault X").unwrap();
 		let down = |_q: &str| String::new();
-		assert!(extract_claims(&delta, &down).is_none());
+		assert!(extract_claims(&delta, &[], &down).is_none());
 		assert!(delta.exists(), "delta must remain for retry after outage");
 	}
 
@@ -322,7 +334,7 @@ mod tests {
 		let delta = dir.path().join("sess-empty.txt");
 		std::fs::write(&delta, "user: hi\nassistant: hello").unwrap();
 		let nothing = |_q: &str| "[]".to_string();
-		let (stem, claims) = extract_claims(&delta, &nothing).expect("some");
+		let (stem, claims) = extract_claims(&delta, &[], &nothing).expect("some");
 		assert_eq!(stem, "sess-empty");
 		assert!(claims.is_empty());
 	}
@@ -398,6 +410,7 @@ mod tests {
 			&done,
 			&worker,
 			Some(&llm),
+			&[],
 			&cfg,
 			Duration::from_secs(3600),
 			SystemTime::now(),
@@ -457,6 +470,7 @@ mod tests {
 			&done,
 			&worker,
 			None,
+			&[],
 			&cfg,
 			Duration::from_secs(3600),
 			SystemTime::now(),

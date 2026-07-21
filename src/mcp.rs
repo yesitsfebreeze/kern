@@ -117,7 +117,7 @@ impl Server {
 	pub(crate) fn health_stats(&self) -> serde_json::Value {
 		let g = self.graph.read();
 		let h = crate::base::health::graph_health_stats(&g);
-		let descriptors = g.root.descriptors.len();
+		let claim_kinds = g.root.claim_kinds.len();
 		let tick = self.task_q.as_ref().map(TickHealth::of).unwrap_or_default();
 		serde_json::json!({
 			"gravitons": h.gravitons,
@@ -125,7 +125,7 @@ impl Server {
 			"entities": h.entities,
 			"reasons": h.reasons,
 			"unnamed": h.unnamed,
-			"descriptors": descriptors,
+			"claim_kinds": claim_kinds,
 			"queue_depth": tick.queue_depth,
 			"tasks_done": tick.tasks_done,
 			"task_avg_ms": tick.task_avg_ms,
@@ -179,7 +179,7 @@ impl trnsprt::McpServer for Server {
 			"move" => self.tool_move(args),
 			"health" => self.tool_health(),
 			"graviton" => self.tool_graviton(args),
-			"descriptor" => self.tool_descriptor(args),
+			"claim_kind" => self.tool_claim_kind(args),
 			"pulse" => self.tool_pulse(args),
 			"gc" => self.tool_gc(),
 			"setup" => self.tool_setup(),

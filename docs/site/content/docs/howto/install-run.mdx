@@ -61,7 +61,7 @@ after the first flush.
 <Callout type="info">
 The binary walks up from your cwd to the nearest ancestor holding `.git`
 (falling back to the nearest holding `.kern/`) and re-pins itself there before
-loading anything — `Config::resolve_root`, `src/config/mod.rs:116`. Launching from a
+loading anything — `Config::resolve_root`, `src/config/mod.rs`. Launching from a
 subdirectory therefore attaches to the project's graph instead of booting an
 empty one.
 </Callout>
@@ -90,6 +90,15 @@ auto-spawns a detached one if there is none (`src/commands/mcp_cmd.rs:11`), so
 registering the MCP server is usually the only step — see
 [Wire up MCP](./mcp.mdx).
 
+<Callout type="warn" title="A bad config stops the boot">
+Every `kern` invocation loads the config before it does anything else. An
+unparseable `kern.toml`, or one that fails validation, prints the offending key
+to stderr and exits **78** (`EX_CONFIG`) — it does not warn and continue
+(`src/main.rs:16`). An *absent* config is legitimate and boots on defaults, so
+deleting the file is a valid fix. `--help` and `--version` still answer, because
+argument parsing runs first.
+</Callout>
+
 ## What starts up
 
 <Mermaid
@@ -104,7 +113,7 @@ flowchart LR
 `}
 />
 
-`run_server` (`src/commands.rs:667`) binds the socket first, then brings up the
+`run_server` (`src/commands.rs:684`) binds the socket first, then brings up the
 watchdog, the LLM keepalive, the file watcher, the intake, gossip, the
 maintenance tick, and the MCP surface.
 
@@ -119,6 +128,7 @@ Everything is under `<project>/.kern/`:
 | `.kern/intake/*` | Dropped files waiting to be drained: `.txt` distilled as transcripts, anything else stored as documents. |
 | `.kern/kern.toml` | Optional config overrides. Absent by default. |
 | `.kern/data/mcp-token` | Bearer token for the HTTP/SSE surface, minted on first use. |
+| `.kern/data/logs/*.log` | stdout+stderr of detached children: `daemon.log`, `hub.log`. Owner-only, append-only. |
 
 The intake path is cwd-relative by contract and is *not* derived from
 `data_dir` (`src/config/intake.rs`) — the MCP server resolves it against the
@@ -140,14 +150,28 @@ kern: another daemon already running at /run/user/1000/kern-3f2a91c4.sock — ex
 ```
 
 That check happens before any further scaffolding spins up
-(`src/commands.rs:687`), so a duplicate start is cheap and harmless.
+(`src/commands.rs:736-745`), so a duplicate start is cheap and harmless.
 
 ## Is it healthy?
 
-Ask the running daemon through MCP — the `health` tool returns graviton, kern,
-entity, reason, unnamed and descriptor counts (`src/mcp.rs:88`). Non-zero
-entities means the graph has content; a growing `unnamed` count means clustering
-has work queued.
+Ask the running daemon through MCP, or run `kern health`. Both report the same
+`HealthStats` (`src/mcp.rs:117`, `src/commands/admin.rs:33`): graviton, kern,
+entity, reason, unnamed and claim-kind counts, plus the degradation signals —
+tick queue depth, tasks done and average latency, `task_panics` and
+`task_failures` with the most recent of each, `cold_evicted`, and the stored
+`embed_model` / `embed_dim` with a mismatch flag.
+
+Read it as follows. Non-zero entities means the graph has content. A growing
+`unnamed` count means clustering has work queued. A non-zero panic or failure
+count means maintenance is degraded — it kept running, which is the point, but
+something is dying every beat. A climbing `cold_evicted` means the 50k cold cap
+is dropping the oldest non-durable thoughts for good. `MISMATCH` on the `embed:`
+line means the index was built with a different model than the one configured;
+run `kern reembed`.
+
+`kern health` reads the on-disk graph directly and asks the daemon only for the
+tick figures. With no daemon serving this directory it prints
+`tick: (no daemon serving this directory)` rather than blocking.
 
 Two more signals that need no client:
 
@@ -156,7 +180,7 @@ Two more signals that need no client:
   a delta stays queued until a pass succeeds.
 
 Logs go to **stderr** via `tracing`, filtered by `RUST_LOG` and defaulting to
-`warn` (`src/main.rs:12`). Turn them up when something looks stuck:
+`warn` (`src/main.rs:27`). Turn them up when something looks stuck:
 
 ```bash
 RUST_LOG=kern=info kern --daemon
@@ -164,9 +188,18 @@ RUST_LOG=kern=info kern --daemon
 
 The targets worth knowing: `kern.kern_rpc` (socket bind), `kern.intake`
 (intake), `kern.persist` (a refused stale flush), `kern.mcp` (proxy vs
-standalone). A daemon auto-spawned by `kern mcp` is detached with null stdio, so
-it has **no** log at all — start it yourself with a redirect when you need to see
-one.
+standalone), `kern.tick` (a maintenance task that panicked), `kern.store` (cold
+evictions, an embedding-model mismatch).
+
+A **detached** child keeps its output. `kern mcp` spawning a daemon, and the hub
+spawning a per-root node, both redirect stdout and stderr into
+`<data_dir>/logs/<arg>.log` — `.kern/data/logs/daemon.log` and
+`.kern/data/logs/hub.log` by default (`src/config/detached_log.rs:23`,
+`Config::log_dir`, `src/config/mod.rs`). The files are opened owner-only
+(`0600`) and **appended**, never truncated, so a restart does not erase the log
+explaining why it restarted. If the log cannot be opened the spawn still
+happens — the child's output is discarded and the reason is printed on the
+parent's stderr.
 
 <Callout type="warn" title="There is no `kern status`">
 Nothing tells you whether a daemon is running for this directory. Check for
@@ -186,7 +219,7 @@ commands** (`kern reembed`, `kern compact`, `kern migrate`).
 
 Ctrl-C in the foreground, or `pkill -f 'kern --daemon'` when detached. On
 shutdown the daemon runs one final guarded flush and prints `shutting down...`
-then `done` (`src/commands.rs:734`). Let it finish — killing with `SIGKILL`
+then `done` (`src/commands.rs:788`). Let it finish — killing with `SIGKILL`
 during the flush drops whatever was still only in RAM.
 
 ## Starting over

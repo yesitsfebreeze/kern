@@ -26,7 +26,7 @@ pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 					"title":      {"type": "string", "description": "human-readable title"},
 					"url":        {"type": "string", "description": "URL reference"},
 					"conf":       {"type": "number", "description": "confidence weight 0.0-1.0 (default 0.5)"},
-					"descriptor": {"type": "string", "description": "Descriptor key for chunking context"},
+					"hint": {"type": "string", "description": "free-text hint describing the content, folded into the chunking prompt"},
 					"sync":       {"type": "boolean", "description": "block until ingest completes (default false)"},
 				},
 			},
@@ -101,8 +101,8 @@ struct IngestArgs {
 	url: String,
 	#[serde(default)]
 	conf: f64,
-	#[serde(default)]
-	descriptor: String,
+	#[serde(default, alias = "descriptor")]
+	hint: String,
 	#[serde(default)]
 	sync: bool,
 	#[serde(default)]
@@ -203,7 +203,7 @@ impl Server {
 				p.text,
 				src,
 				kind,
-				p.descriptor,
+				p.hint,
 				conf,
 				ingest::Config {
 					dedup_threshold: self.cfg.ingest.dedup_threshold,
@@ -240,7 +240,7 @@ impl Server {
 				text: p.text.clone(),
 				source: src.clone(),
 				kind,
-				descriptor: p.descriptor.clone(),
+				hint: p.hint.clone(),
 				confidence: conf,
 			};
 			match crate::ingest::direct::intake_direct(&direct_dir, &job) {
@@ -268,7 +268,7 @@ impl Server {
 			p.text,
 			src,
 			kind,
-			p.descriptor,
+			p.hint,
 			conf,
 			ingest::Config {
 				dedup_threshold: self.cfg.ingest.dedup_threshold,

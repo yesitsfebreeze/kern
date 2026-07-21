@@ -15,7 +15,7 @@ struct GravitonArgs {
 }
 
 #[derive(Deserialize)]
-struct DescArgs {
+struct ClaimKindArgs {
 	action: String,
 	name: String,
 	#[serde(default)]
@@ -49,14 +49,14 @@ pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 			},
 		}),
 		serde_json::json!({
-			"name": "descriptor",
-			"description": "Add or remove a data-type descriptor.",
+			"name": "claim_kind",
+			"description": "Register or remove a claim kind. Registered kinds extend the built-in set (preference, decision, project, fact, code-fact, reference, procedural) that transcript distillation may label claims with.",
 			"inputSchema": {
 				"type": "object",
 				"required": ["action", "name"],
 				"properties": {
 					"action":      {"type": "string", "enum": ["add", "rm"], "description": "add or remove"},
-					"name":        {"type": "string", "description": "descriptor name"},
+					"name":        {"type": "string", "description": "claim kind name"},
 					"description": {"type": "string", "description": "markdown description (required for add)"},
 				},
 			},
@@ -146,8 +146,8 @@ impl Server {
 		}
 	}
 
-	pub(crate) fn tool_descriptor(&self, args: &serde_json::Value) -> serde_json::Value {
-		let p: DescArgs = match serde_json::from_value(args.clone()) {
+	pub(crate) fn tool_claim_kind(&self, args: &serde_json::Value) -> serde_json::Value {
+		let p: ClaimKindArgs = match serde_json::from_value(args.clone()) {
 			Ok(v) => v,
 			Err(e) => return tool_error(&format!("invalid arguments: {e}")),
 		};
@@ -158,14 +158,14 @@ impl Server {
 					return tool_error("description required for add");
 				}
 				let mut g = self.graph.write();
-				g.root.descriptors.insert(p.name.clone(), p.description);
+				g.root.claim_kinds.insert(p.name.clone(), p.description);
 				drop(g);
 				(self.save_fn)();
 				tool_result_json(&serde_json::json!({"added": p.name}))
 			}
 			"rm" => {
 				let mut g = self.graph.write();
-				g.root.descriptors.remove(&p.name);
+				g.root.claim_kinds.remove(&p.name);
 				drop(g);
 				(self.save_fn)();
 				tool_result_json(&serde_json::json!({"removed": p.name}))
@@ -232,7 +232,7 @@ impl Server {
 }
 
 #[cfg(test)]
-mod descriptor_tests {
+mod claim_kind_tests {
 	use std::sync::{
 		atomic::{AtomicUsize, Ordering},
 		Arc,
@@ -257,7 +257,7 @@ mod descriptor_tests {
 	}
 
 	#[tokio::test]
-	async fn health_stats_aggregates_entities_and_descriptors() {
+	async fn health_stats_aggregates_entities_and_claim_kinds() {
 		use crate::base::types::{Entity, Kern};
 		let (srv, _c) = make_server();
 		{
@@ -278,10 +278,10 @@ mod descriptor_tests {
 				},
 			);
 			g.kerns.insert("kx".into(), k);
-			g.root.descriptors.insert("code".into(), "source".into());
+			g.root.claim_kinds.insert("code".into(), "source".into());
 		}
 		let stats = srv.health_stats();
-		assert_eq!(stats["descriptors"], 1, "root descriptor counted");
+		assert_eq!(stats["claim_kinds"], 1, "root claim kind counted");
 		assert_eq!(
 			stats["entities"].as_u64().unwrap(),
 			2,
@@ -322,9 +322,9 @@ mod descriptor_tests {
 	}
 
 	#[tokio::test]
-	async fn add_inserts_descriptor_and_calls_save() {
+	async fn add_inserts_claim_kind_and_calls_save() {
 		let (srv, counter) = make_server();
-		let out = srv.tool_descriptor(
+		let out = srv.tool_claim_kind(
 			&serde_json::json!({"action": "add", "name": "code", "description": "source code snippets"}),
 		);
 		assert!(!is_error(&out));
@@ -333,7 +333,7 @@ mod descriptor_tests {
 		assert_eq!(counter.load(Ordering::SeqCst), 1);
 		let g = srv.graph.read();
 		assert_eq!(
-			g.root.descriptors.get("code").map(String::as_str),
+			g.root.claim_kinds.get("code").map(String::as_str),
 			Some("source code snippets")
 		);
 	}
@@ -342,7 +342,7 @@ mod descriptor_tests {
 	async fn add_empty_description_returns_error_no_save() {
 		let (srv, counter) = make_server();
 		let out =
-			srv.tool_descriptor(&serde_json::json!({"action": "add", "name": "code", "description": ""}));
+			srv.tool_claim_kind(&serde_json::json!({"action": "add", "name": "code", "description": ""}));
 		assert!(is_error(&out));
 		assert!(text(&out).contains("description required"));
 		assert_eq!(counter.load(Ordering::SeqCst), 0);
@@ -351,30 +351,30 @@ mod descriptor_tests {
 	#[tokio::test]
 	async fn add_missing_required_field_returns_deser_error() {
 		let (srv, _) = make_server();
-		let out = srv.tool_descriptor(&serde_json::json!({"action": "add"}));
+		let out = srv.tool_claim_kind(&serde_json::json!({"action": "add"}));
 		assert!(is_error(&out));
 		assert!(text(&out).contains("invalid arguments"));
 	}
 
 	#[tokio::test]
-	async fn rm_removes_existing_descriptor_and_calls_save_twice() {
+	async fn rm_removes_existing_claim_kind_and_calls_save_twice() {
 		let (srv, counter) = make_server();
-		srv.tool_descriptor(
+		srv.tool_claim_kind(
 			&serde_json::json!({"action": "add", "name": "notes", "description": "markdown notes"}),
 		);
-		let out = srv.tool_descriptor(&serde_json::json!({"action": "rm", "name": "notes"}));
+		let out = srv.tool_claim_kind(&serde_json::json!({"action": "rm", "name": "notes"}));
 		assert!(!is_error(&out));
 		let body: serde_json::Value = serde_json::from_str(&text(&out)).unwrap();
 		assert_eq!(body["removed"], "notes");
 		assert_eq!(counter.load(Ordering::SeqCst), 2);
 		let g = srv.graph.read();
-		assert!(!g.root.descriptors.contains_key("notes"));
+		assert!(!g.root.claim_kinds.contains_key("notes"));
 	}
 
 	#[tokio::test]
 	async fn rm_nonexistent_is_noop_but_still_calls_save() {
 		let (srv, counter) = make_server();
-		let out = srv.tool_descriptor(&serde_json::json!({"action": "rm", "name": "ghost"}));
+		let out = srv.tool_claim_kind(&serde_json::json!({"action": "rm", "name": "ghost"}));
 		assert!(!is_error(&out));
 		let body: serde_json::Value = serde_json::from_str(&text(&out)).unwrap();
 		assert_eq!(body["removed"], "ghost");
@@ -384,7 +384,7 @@ mod descriptor_tests {
 	#[tokio::test]
 	async fn unknown_action_returns_error() {
 		let (srv, _) = make_server();
-		let out = srv.tool_descriptor(&serde_json::json!({"action": "list", "name": "x"}));
+		let out = srv.tool_claim_kind(&serde_json::json!({"action": "list", "name": "x"}));
 		assert!(is_error(&out));
 		assert!(text(&out).contains("action must be add or rm"));
 	}

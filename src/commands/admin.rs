@@ -1,7 +1,7 @@
 use crate::base::util::short_id;
 
 use super::{
-	load_graph, save_graph, with_graph, Client, DescriptorAction, GravitonAction, UnnamedAction,
+	load_graph, save_graph, with_graph, ClaimKindAction, Client, GravitonAction, UnnamedAction,
 };
 
 pub(super) fn cmd_compress(src: &str, mode_str: &str, out: Option<&str>) {
@@ -43,7 +43,7 @@ pub(super) async fn cmd_health(cfg: &crate::config::Config) {
 	println!("kerns:       {}", h.kerns);
 	println!("thoughts:    {} (unnamed: {})", h.entities, h.unnamed);
 	println!("reasons:     {}", h.reasons);
-	println!("descriptors: {}", g.root.descriptors.len());
+	println!("claim kinds: {}", g.root.claim_kinds.len());
 	println!(
 		"embed:       {} (dim {}){}",
 		if h.embed_model.is_empty() {
@@ -256,19 +256,19 @@ pub(crate) fn graviton_rows(g: &crate::base::graph::GraphGnn) -> Vec<GravitonRow
 		.collect()
 }
 
-pub(super) fn cmd_descriptor(cfg: &crate::config::Config, action: DescriptorAction) {
+pub(super) fn cmd_claim_kind(cfg: &crate::config::Config, action: ClaimKindAction) {
 	match action {
-		DescriptorAction::Add { name, description } => {
+		ClaimKindAction::Add { name, description } => {
 			with_graph(cfg, |g| {
-				g.root.descriptors.insert(name.clone(), description);
+				g.root.claim_kinds.insert(name.clone(), description);
 			});
-			println!("descriptor added: {name}");
+			println!("claim kind added: {name}");
 		}
-		DescriptorAction::Rm { name } => {
+		ClaimKindAction::Rm { name } => {
 			with_graph(cfg, |g| {
-				g.root.descriptors.remove(&name);
+				g.root.claim_kinds.remove(&name);
 			});
-			println!("descriptor removed: {name}");
+			println!("claim kind removed: {name}");
 		}
 	}
 }
@@ -353,31 +353,31 @@ mod cmd_tests {
 	}
 
 	#[test]
-	fn descriptor_add_then_remove_persists_through_the_graph() {
+	fn claim_kind_add_then_remove_persists_through_the_graph() {
 		let (_dir, cfg) = temp_cfg();
 		// A custom key, not a default: default keys re-inject on every load, so Rm
 		// would appear to fail on the next load.
 		let key = "custom_test_kind";
 
-		cmd_descriptor(
+		cmd_claim_kind(
 			&cfg,
-			DescriptorAction::Add {
+			ClaimKindAction::Add {
 				name: key.into(),
 				description: "a custom kind".into(),
 			},
 		);
 		let g = load_graph(&cfg);
 		assert_eq!(
-			g.root.descriptors.get(key).map(String::as_str),
+			g.root.claim_kinds.get(key).map(String::as_str),
 			Some("a custom kind"),
-			"Add persists the descriptor onto the root",
+			"Add persists the claim kind onto the root",
 		);
 
-		cmd_descriptor(&cfg, DescriptorAction::Rm { name: key.into() });
+		cmd_claim_kind(&cfg, ClaimKindAction::Rm { name: key.into() });
 		let g = load_graph(&cfg);
 		assert!(
-			!g.root.descriptors.contains_key(key),
-			"Rm removes the custom descriptor"
+			!g.root.claim_kinds.contains_key(key),
+			"Rm removes the custom claim kind"
 		);
 	}
 

@@ -167,6 +167,14 @@ fn graph_from_store(
 
 	let loaded_epoch = store.read_epoch();
 	if !kerns.contains_key("root") {
+		// Rows without a root is a bad read, not a fresh store. Returning an
+		// empty graph stamped with the store's live epoch made it unfalsifiably
+		// "current": reconcile saw nothing stale, and the first dirty flush
+		// overwrote every row on disk with nothing. Error instead — the caller's
+		// fallback boots at epoch 0, where the guarded flush refuses and absorbs.
+		if !kerns.is_empty() {
+			return Err(crate::base::store::StoreError::RootMissing { kerns: kerns.len() });
+		}
 		let mut g = GraphGnn::new();
 		g.data_dir = dir.to_string();
 		g.set_store(store);
@@ -311,9 +319,9 @@ pub fn merged_root(g: &GraphGnn) -> Kern {
 	merged.graviton_vec = g.root.graviton_vec.clone();
 	merged.inner_radius = g.root.inner_radius;
 	merged.outer_radius = g.root.outer_radius;
-	// REPLACE, don't union: a union re-adds descriptors from the stale map base,
-	// so a removal on g.root (`descriptor rm`) never persists.
-	merged.descriptors = g.root.descriptors.clone();
+	// REPLACE, don't union: a union re-adds claim kinds from the stale map base,
+	// so a removal on g.root (`claim-kind rm`) never persists.
+	merged.claim_kinds = g.root.claim_kinds.clone();
 	merged
 }
 
@@ -450,18 +458,18 @@ mod tests {
 		let mut g = GraphGnn::new();
 		let mut stale = g.root.clone();
 		stale.graviton_text = String::new();
-		stale.descriptors.clear();
+		stale.claim_kinds.clear();
 		g.register(stale);
 		g.root.graviton_text = "guiding purpose".to_string();
 		g.root
-			.descriptors
+			.claim_kinds
 			.insert("chat".to_string(), "desc".to_string());
 
 		let merged = merged_root(&g);
 		assert_eq!(merged.id, g.root.id);
 		assert_eq!(merged.graviton_text, "guiding purpose");
 		assert_eq!(
-			merged.descriptors.get("chat").map(String::as_str),
+			merged.claim_kinds.get("chat").map(String::as_str),
 			Some("desc")
 		);
 	}
@@ -472,14 +480,14 @@ mod tests {
 		let mut g = GraphGnn::new();
 		g.data_dir = dir.path().to_string_lossy().to_string();
 		g.root.graviton_text = "P".to_string();
-		g.root.descriptors.insert("k".to_string(), "v".to_string());
+		g.root.claim_kinds.insert("k".to_string(), "v".to_string());
 
 		fs::create_dir_all(&g.data_dir).unwrap();
 		save_kern(&g.data_dir, &merged_root(&g)).unwrap();
 
 		let reloaded = load_kern(&g.data_dir, &g.root.id).unwrap();
 		assert_eq!(reloaded.graviton_text, "P");
-		assert_eq!(reloaded.descriptors.get("k").map(String::as_str), Some("v"));
+		assert_eq!(reloaded.claim_kinds.get("k").map(String::as_str), Some("v"));
 	}
 
 	#[test]
@@ -501,6 +509,34 @@ mod tests {
 		assert_eq!(back.inner_radius, 0.15);
 		assert_eq!(back.outer_radius, 0.55);
 		assert!(back.is_named() && back.has_graviton());
+	}
+
+	#[test]
+	fn rows_without_root_error_instead_of_loading_empty() {
+		// Regression for the wiped-store bug: a bad read that saw kern rows but
+		// no root used to return an EMPTY graph stamped with the store's live
+		// epoch. Reconcile then saw nothing stale and the first dirty flush
+		// overwrote every row on disk with nothing. It must be an error.
+		use crate::base::store::{Store, StoreError};
+		let dir = tempdir().unwrap();
+		let d = dir.path().to_string_lossy().to_string();
+		let store = Store::open(&d).unwrap();
+		store.save_one_kern(&Kern::new("orphan", "root")).unwrap();
+		drop(store);
+
+		match load_dir(&d) {
+			Err(StoreError::RootMissing { kerns }) => assert_eq!(kerns, 1),
+			Err(e) => panic!("wrong error for rootless non-empty store: {e}"),
+			Ok(_) => panic!("rootless non-empty store must refuse to load"),
+		}
+	}
+
+	#[test]
+	fn a_truly_empty_store_still_loads_as_a_fresh_graph() {
+		let dir = tempdir().unwrap();
+		let d = dir.path().to_string_lossy().to_string();
+		let g = load_dir(&d).expect("an empty store is a fresh store, not an error");
+		assert!(g.loaded("root").is_some() || g.map().is_empty());
 	}
 
 	#[test]

@@ -289,7 +289,7 @@ mod tests {
 			text: text.into(),
 			source: session_source(),
 			kind: EntityKind::Claim,
-			descriptor: String::new(),
+			hint: String::new(),
 			confidence,
 			config: Config::default(),
 			result_tx: None,

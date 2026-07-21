@@ -8,7 +8,7 @@ use super::tool_result_json;
 pub(crate) struct SetupState {
 	pub gravitons: Vec<String>,
 	pub thoughts: u64,
-	pub descriptors: u64,
+	pub claim_kinds: u64,
 	pub intake_dir: String,
 	pub mcp_registered: bool,
 }
@@ -46,9 +46,9 @@ pub(crate) fn render_setup(s: &SetupState) -> String {
 		}
 	));
 	out.push_str(&format!(
-		"- {} descriptors registered ({})\n",
-		check(s.descriptors > 0),
-		s.descriptors
+		"- {} claim kinds registered ({})\n",
+		check(s.claim_kinds > 0),
+		s.claim_kinds
 	));
 	out.push_str(&format!(
 		"- {} memory has content ({} thoughts)\n\n",
@@ -58,7 +58,7 @@ pub(crate) fn render_setup(s: &SetupState) -> String {
 
 	if s.gravitons.is_empty() {
 		out.push_str(
-			"## 1. Seed gravitons (do this first)\n\
+			"## Seed gravitons (do this first)\n\
 			\n\
 			Gravitons are the focus areas ingest routes into. Call the `graviton`\n\
 			tool once per area. Adapt the texts to this project; 3-6 is right:\n\
@@ -70,7 +70,7 @@ pub(crate) fn render_setup(s: &SetupState) -> String {
 	}
 
 	out.push_str(
-		"## 2. Wire capture into your host\n\
+		"## Wire capture into your host\n\
 		\n\
 		kern captures nothing on its own — you feed it. Two entry points:\n\
 		\n\
@@ -104,7 +104,7 @@ pub(crate) fn render_setup(s: &SetupState) -> String {
 	);
 
 	out.push_str(
-		"## 3. Verify\n\
+		"## Verify\n\
 		\n\
 		1. Call `ingest` with {\"text\":\"kern setup verified for this project.\",\"sync\":true} — expect status committed.\n\
 		2. Call `health` — expect `thoughts` to have increased.\n\
@@ -112,6 +112,17 @@ pub(crate) fn render_setup(s: &SetupState) -> String {
 		\n\
 		If ingest fails: the embedding endpoint is down or misconfigured — check\n\
 		`.kern/kern.toml` [embed] and see the `health` embed_mismatch flag.\n\n",
+	);
+
+	out.push_str(
+		"## Tune (optional)\n\
+		\n\
+		Memory tuning is one line in `.kern/kern.toml` — the preset owns every\n\
+		heat/dedup/retrieval knob; there are no individual keys to set:\n\
+		\n\
+		- `preset = \"relaxed\"` — the default: keep more, deliver more, forget slower\n\
+		- `preset = \"medium\"` — balanced\n\
+		- `preset = \"tight\"` — aggressive dedup, faster decay, fewer but sharper results\n\n",
 	);
 
 	out.push_str(
@@ -128,13 +139,13 @@ pub(crate) fn render_setup(s: &SetupState) -> String {
 
 impl crate::mcp::Server {
 	pub(crate) fn tool_setup(&self) -> serde_json::Value {
-		let (gravitons, thoughts, descriptors) = {
+		let (gravitons, thoughts, claim_kinds) = {
 			let g = self.graph.read();
 			let h = crate::base::health::graph_health_stats(&g);
 			(
 				h.gravitons,
 				h.entities as u64,
-				g.root.descriptors.len() as u64,
+				g.root.claim_kinds.len() as u64,
 			)
 		};
 		let intake_dir = self.cfg.intake.dir.clone();
@@ -144,7 +155,7 @@ impl crate::mcp::Server {
 		let state = SetupState {
 			gravitons,
 			thoughts,
-			descriptors,
+			claim_kinds,
 			intake_dir,
 			mcp_registered,
 		};
@@ -168,7 +179,7 @@ mod tests {
 		SetupState {
 			gravitons: gravitons.iter().map(|s| s.to_string()).collect(),
 			thoughts,
-			descriptors: 0,
+			claim_kinds: 0,
 			intake_dir: ".kern/intake".into(),
 			mcp_registered: true,
 		}
@@ -177,7 +188,7 @@ mod tests {
 	#[test]
 	fn fresh_project_gets_the_seeding_step() {
 		let text = render_setup(&state(&[], 0));
-		assert!(text.contains("## 1. Seed gravitons"));
+		assert!(text.contains("## Seed gravitons"));
 		assert!(text.contains("[todo] gravitons seeded (none)"));
 		assert!(text.contains("[todo] memory has content"));
 	}
@@ -185,7 +196,7 @@ mod tests {
 	#[test]
 	fn seeded_project_skips_the_seeding_step() {
 		let text = render_setup(&state(&["decisions", "architecture"], 12));
-		assert!(!text.contains("## 1. Seed gravitons"));
+		assert!(!text.contains("## Seed gravitons"));
 		assert!(text.contains("[done] gravitons seeded (decisions, architecture)"));
 		assert!(text.contains("[done] memory has content (12 thoughts)"));
 	}
@@ -194,10 +205,11 @@ mod tests {
 	fn capture_and_verify_are_always_present() {
 		for s in [state(&[], 0), state(&["a"], 5)] {
 			let text = render_setup(&s);
-			assert!(text.contains("## 2. Wire capture into your host"));
-			assert!(text.contains("## 3. Verify"));
+			assert!(text.contains("## Wire capture into your host"));
+			assert!(text.contains("## Verify"));
 			assert!(text.contains(".kern/intake"), "intake dir must be inlined");
 			assert!(text.contains("degrade"));
+			assert!(text.contains("## Tune"), "preset tiers are offered");
 		}
 	}
 }

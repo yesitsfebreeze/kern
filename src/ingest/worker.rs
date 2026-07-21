@@ -17,7 +17,7 @@ pub(crate) struct Job {
 	pub(crate) text: String,
 	pub(crate) source: Source,
 	pub(crate) kind: EntityKind,
-	pub(crate) descriptor: String,
+	pub(crate) hint: String,
 	pub(crate) confidence: f64,
 	pub(crate) config: Config,
 	pub(crate) result_tx: Option<oneshot::Sender<Outcome>>,
@@ -58,7 +58,7 @@ impl Worker {
 		text: String,
 		source: Source,
 		kind: EntityKind,
-		descriptor: String,
+		hint: String,
 		confidence: f64,
 		config: Config,
 	) -> String {
@@ -67,7 +67,7 @@ impl Worker {
 			text,
 			source,
 			kind,
-			descriptor,
+			hint,
 			confidence,
 			config,
 			result_tx: None,
@@ -84,7 +84,7 @@ impl Worker {
 		text: String,
 		source: Source,
 		kind: EntityKind,
-		descriptor: String,
+		hint: String,
 		confidence: f64,
 		config: Config,
 	) -> Outcome {
@@ -93,7 +93,7 @@ impl Worker {
 			text,
 			source,
 			kind,
-			descriptor,
+			hint,
 			confidence,
 			config,
 			result_tx: Some(result_tx),
@@ -224,7 +224,7 @@ async fn process(
 	let doc_id = util::content_hash(&job.text);
 
 	// Heuristic split ONLY — an LLM split would add a per-document LLM call on the commit path.
-	let chunks = split::split(&job.text, &job.descriptor, None);
+	let chunks = split::split(&job.text, &job.hint, None);
 
 	let (doc_thought, doc_fail) = place_document(
 		graph,

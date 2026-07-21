@@ -154,9 +154,9 @@ pub enum Commands {
 	Degrade {
 		id: String,
 	},
-	Descriptor {
+	ClaimKind {
 		#[command(subcommand)]
-		action: DescriptorAction,
+		action: ClaimKindAction,
 	},
 	Peers,
 	Register {
@@ -223,7 +223,7 @@ pub enum GravitonAction {
 }
 
 #[derive(Subcommand)]
-pub enum DescriptorAction {
+pub enum ClaimKindAction {
 	Add { name: String, description: String },
 	Rm { name: String },
 }
@@ -244,7 +244,16 @@ pub(crate) fn apply_graph_config(g: &mut GraphGnn, cfg: &crate::config::GraphCon
 pub(crate) fn load_graph(cfg: &crate::config::Config) -> GraphGnn {
 	let mut g = match crate::base::persist::load_dir(&cfg.data_dir) {
 		Ok(g) => g,
-		Err(_) => {
+		Err(e) => {
+			// The empty fallback boots at epoch 0, so its flushes are refused
+			// against a non-empty store and absorb disk instead — but a silent
+			// fallback here is how a wiped store went undiagnosed. Say it.
+			tracing::error!(
+				target: "kern.persist",
+				error = %e,
+				data_dir = %cfg.data_dir,
+				"graph load failed — starting empty at epoch 0 (flushes will refuse and absorb)"
+			);
 			let mut g = GraphGnn::new();
 			g.data_dir = cfg.data_dir.clone();
 			if let Ok(store) = crate::base::store::Store::open(&cfg.data_dir) {
@@ -528,7 +537,7 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 		Commands::Graviton { action } => admin::cmd_graviton(cfg, action).await,
 
 		Commands::Degrade { id } => graph_ops::cmd_degrade(cfg, &id),
-		Commands::Descriptor { action } => admin::cmd_descriptor(cfg, action),
+		Commands::ClaimKind { action } => admin::cmd_claim_kind(cfg, action),
 		Commands::Peers => admin::cmd_peers(cfg),
 		Commands::Register { path } => admin::cmd_register(cfg, &path),
 		Commands::Unnamed { action } => admin::cmd_unnamed(cfg, action),
@@ -568,7 +577,11 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 	crate::base::identity::mark_start();
 	// Must run BEFORE any env opens: the compaction swaps data.mdb, and only
 	// here — post kern.sock win, pre env open — is the dir held exclusively.
-	maybe_self_heal_store(cfg);
+	// Skipped on takeover: the predecessor holds the env for a few more ms and
+	// just flushed cleanly, so there is nothing to heal and no exclusivity.
+	if !crate::takeover::is_takeover_boot() {
+		maybe_self_heal_store(cfg);
+	}
 
 	spawn_watchdog();
 	let reason_url = if cli.reason_url.is_empty() {
@@ -642,7 +655,7 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 
 	spawn_file_watcher(cfg, &worker);
 
-	spawn_intake(cfg, &worker, &llm_fn);
+	spawn_intake(cfg, &worker, &llm_fn, &g);
 
 	// Gossip starts before the server is built: the server captures the pulse
 	// broadcaster by value, so a server built first can only ever hold None.
@@ -698,31 +711,64 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	}
 
 	// kern.sock bound synchronously so `AlreadyRunning` short-circuits before more
-	// scaffolding spins up.
+	// scaffolding spins up. On a takeover boot the listener is inherited as fd 0
+	// instead — binding would race the socket the predecessor handed us.
+	#[cfg(unix)]
+	let mut handover_fd: Option<std::os::fd::OwnedFd>;
 	{
 		let handler = crate::rpc::KernRpcHandler::new(mcp_server.clone(), shutdown.clone());
 		let endpoint = trnsprt::typed::Endpoint::kern();
-		match trnsprt::typed::bind_kern_listener(&endpoint).await {
-			Ok(trnsprt::typed::BindOutcome::Bound(listener)) => {
-				tracing::info!(
-					target: "kern.kern_rpc",
-					endpoint = %endpoint.display(),
-					"listening"
-				);
-				tokio::spawn(crate::rpc::serve_kern_rpc_loop(listener, handler));
+		#[cfg(unix)]
+		let bound = if crate::takeover::is_takeover_boot() {
+			match trnsprt::typed::adopt_kern_listener(&endpoint) {
+				Ok(listener) => {
+					tracing::info!(
+						target: "kern.kern_rpc",
+						endpoint = %endpoint.display(),
+						"adopted listener from predecessor (hot reload)"
+					);
+					Some(listener)
+				}
+				Err(e) => {
+					tracing::error!(target: "kern.kern_rpc", error = %e, "takeover adoption failed");
+					return;
+				}
 			}
-			Ok(trnsprt::typed::BindOutcome::AlreadyRunning) => {
-				eprintln!(
-					"kern: another daemon already running at {} — exiting",
-					endpoint.display()
-				);
-				return;
-			}
-			Err(e) => {
-				tracing::error!(target: "kern.kern_rpc", error = %e, "bind failed");
-				return;
-			}
+		} else {
+			None
+		};
+		#[cfg(not(unix))]
+		let bound: Option<trnsprt::typed::LocalListener> = None;
+
+		let listener = match bound {
+			Some(l) => l,
+			None => match trnsprt::typed::bind_kern_listener(&endpoint).await {
+				Ok(trnsprt::typed::BindOutcome::Bound(listener)) => {
+					tracing::info!(
+						target: "kern.kern_rpc",
+						endpoint = %endpoint.display(),
+						"listening"
+					);
+					listener
+				}
+				Ok(trnsprt::typed::BindOutcome::AlreadyRunning) => {
+					eprintln!(
+						"kern: another daemon already running at {} — exiting",
+						endpoint.display()
+					);
+					return;
+				}
+				Err(e) => {
+					tracing::error!(target: "kern.kern_rpc", error = %e, "bind failed");
+					return;
+				}
+			},
+		};
+		#[cfg(unix)]
+		{
+			handover_fd = listener.dup_fd().ok();
 		}
+		tokio::spawn(crate::rpc::serve_kern_rpc_loop(listener, handler));
 	}
 
 	if cli.mcp_stdio {
@@ -738,8 +784,37 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 			});
 		}
 
+		let takeover = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+		#[cfg(unix)]
+		if cfg.reload.enabled {
+			crate::takeover::spawn_self_watch(shutdown.clone(), takeover.clone(), cfg.reload.poll_secs);
+		}
+
 		println!("kern running in daemon mode (ctrl-c to stop)");
 		shutdown.notified().await;
+
+		drop(q);
+		eprintln!("shutting down...");
+		// Shut down through the store's guarded closure so a stale daemon's final
+		// flush can't wipe a graph the CLI grew on disk (the SIGTERM data-loss path).
+		save_fn();
+
+		#[cfg(unix)]
+		if takeover.load(std::sync::atomic::Ordering::SeqCst) {
+			match handover_fd.take().map(crate::takeover::spawn_successor) {
+				Some(Ok(())) => {
+					eprintln!("handing over to new binary");
+					// exit() on purpose: a normal return runs LocalListener's
+					// Drop, which unlinks the socket path the successor's
+					// inherited fd is bound to.
+					std::process::exit(0);
+				}
+				Some(Err(e)) => eprintln!("hot reload failed ({e}) — plain shutdown"),
+				None => eprintln!("hot reload failed (no listener fd) — plain shutdown"),
+			}
+		}
+		eprintln!("done");
+		return;
 	}
 
 	drop(q);
@@ -839,6 +914,7 @@ fn spawn_intake(
 	cfg: &crate::config::Config,
 	worker: &Arc<crate::ingest::Worker>,
 	llm_fn: &Option<crate::ingest::LlmFunc>,
+	g: &SharedGraph,
 ) {
 	if !cfg.intake.enabled {
 		return;
@@ -856,10 +932,14 @@ fn spawn_intake(
 	let dedup = cfg.ingest.dedup_threshold;
 	let poll = std::time::Duration::from_secs(cfg.intake.poll_secs);
 	let done_retention = std::time::Duration::from_secs(cfg.intake.done_retention_secs);
+	let g_c = g.clone();
+	let claim_kinds: crate::ingest::intake::ClaimKindsFn =
+		Arc::new(move || g_c.read().root.claim_kinds.keys().cloned().collect());
 	tokio::spawn(crate::ingest::intake::run(
 		intake,
 		worker_c,
 		llm_fn.clone(),
+		Some(claim_kinds),
 		dedup,
 		poll,
 		done_retention,
