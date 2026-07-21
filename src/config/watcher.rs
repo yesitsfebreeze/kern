@@ -7,9 +7,20 @@ use serde::{Deserialize, Serialize};
 pub struct WatcherConfig {
 	pub enabled: bool,
 	pub roots: Vec<String>,
+	// The TTL stamped on every document this watcher sinks — the watched roots
+	// are one source, so their retention is one policy. Same reason as
+	// `intake.retention_secs` for living here and not in the preset-owned
+	// `[ingest]`: that section refuses to load from a user's `kern.toml`.
+	// 0 = no TTL. Derived `Default` gives 0, which is the shipped behaviour.
+	pub retention_secs: u64,
 }
 
 impl WatcherConfig {
+	pub fn validate(&self) -> Result<(), String> {
+		crate::ingest::valid_until_from_retention(self.retention_secs)?;
+		Ok(())
+	}
+
 	pub fn effective_roots(&self, cwd: &Path) -> Vec<PathBuf> {
 		if !self.enabled {
 			return Vec::new();
@@ -30,7 +41,7 @@ mod tests {
 	fn effective_roots_falls_back_to_cwd_when_enabled_and_empty() {
 		let cfg = WatcherConfig {
 			enabled: true,
-			roots: vec![],
+			..Default::default()
 		};
 		assert_eq!(
 			cfg.effective_roots(Path::new("/proj")),
@@ -43,6 +54,7 @@ mod tests {
 		let cfg = WatcherConfig {
 			enabled: true,
 			roots: vec!["a".into(), "b".into()],
+			..Default::default()
 		};
 		assert_eq!(
 			cfg.effective_roots(Path::new("/proj")),
@@ -56,6 +68,7 @@ mod tests {
 		let cfg = WatcherConfig {
 			enabled: false,
 			roots: vec!["a".into()],
+			..Default::default()
 		};
 		assert!(
 			cfg.effective_roots(Path::new("/proj")).is_empty(),

@@ -364,19 +364,19 @@ Nothing is lost on an LLM outage — the delta stays queued until it succeeds.
   (LLM-assisted when given), `direct.rs` handles `.kern/intake/direct/` synchronous
   ingest (`drain_direct_once`).
 - **Per-source TTL** (`src/ingest/config.rs`) — `ingest::Config` carries a
-  `valid_until`, and `valid_until_from_retention(secs)` is the one conversion
-  from the caller's duration to that absolute instant, so the CLI flag and the
-  MCP field cannot drift. `0` (or absent) means no TTL; a duration that
-  overflows the clock is an error, never a silent no-TTL. `new_statement_entity`
-  stamps it on both the document and the chunk path (`place.rs:106`, `:229`),
-  where the existing `valid_until` LWW lamport/producer stamping and pending
-  delta finally have a writer to fire for. `DirectJob` carries the resolved
-  instant, not the duration, because a durable direct job may sit in the intake
-  for a whole poll interval before it is drained — `drain_direct_once` overlays
-  it onto the drain loop's shared `Config` per job. The reader half is
-  `score::drop_expired`.
+  `valid_until`; `valid_until_from_retention(secs)` is the one conversion from
+  the caller's duration to that absolute instant, so the four entrances cannot
+  drift. `0`/absent = no TTL; an overflowing duration errors, never a silent
+  no-TTL. `new_statement_entity` stamps it on both the document and the chunk
+  path (`place.rs:106`, `:239`), where the existing LWW lamport/producer
+  stamping and pending delta finally have a writer; the reader half is
+  `score::drop_expired`. `DirectJob` carries the resolved instant, which
+  `drain_direct_once` overlays per job. The two entrances with no caller to pass
+  a flag take a standing policy instead: `[intake]` / `[watcher] retention_secs`
+  via `Config::with_retention`, per drain pass and per record so no deadline
+  dates to daemon boot, validated at load, never the preset-owned `[ingest]`.
 - **File watcher sink** (`src/ingest/file_watcher.rs`) — `KernFileWatcherSink`
-  adapts the repo file watcher into ingest jobs.
+  adapts the watcher into ingest jobs, stamping `[watcher] retention_secs`.
 - **Outcome** (`src/ingest/outcome.rs`) — `OutcomeStatus` (`Committed`/`Partial`/`Deduped`/`Failed`, `src/ingest/outcome.rs:2`),
   `FailureReport::document_permanent` for non-retryable errors.
 - **Status & sidecars** (`src/ingest/intake_status.rs`) — every path that leaves
@@ -410,10 +410,10 @@ ingest can only ever *shorten* a deadline. There is no way to lengthen one
 through ingest; that needs an explicit update path, or `forget` + re-ingest.
 
 **Gaps.** Distill prompt is one-shot; long deltas may truncate. No per-kind
-prompt tuning. Dedup threshold is global, not per-kind. Retention still reaches
-only two of four entrances — the `.txt` distillation path and the file watcher
-offer no retention, and there is no `kern.toml` default for it (ROADMAP item
-89) — and `DirectJob` carries `valid_until` but drops `valid_from` (item 90).
+prompt tuning. Dedup threshold is global, not per-kind. Retention now reaches
+all four entrances, but the file-watcher one is unit-covered only — nothing in
+`e2e/` starts a watcher, since it is off by default — and `DirectJob` carries
+`valid_until` but drops `valid_from` (item 90).
 Separately, a near-duplicate's alternate wording survives only on a `Rephrase`
 reason and is indexed neither lexically nor densely (item 94).
 

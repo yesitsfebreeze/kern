@@ -33,6 +33,20 @@ pub fn valid_until_from_retention(retention_secs: u64) -> Result<Option<SystemTi
 }
 
 impl Config {
+	/// The same conversion, resolved *now*, for the entrances whose retention is
+	/// a standing policy rather than a per-call argument. Long-lived callers (the
+	/// intake poll loop, the file watcher) must build one per pass: resolving it
+	/// once at startup would stamp a file seen on day 30 with a deadline measured
+	/// from boot. `Config::validate` refuses an unrepresentable retention at
+	/// load, so an error here is a caller that skipped it — say so, then no TTL.
+	pub fn with_retention(mut self, retention_secs: u64) -> Self {
+		self.valid_until = valid_until_from_retention(retention_secs).unwrap_or_else(|e| {
+			tracing::error!(target: "kern.ingest", error = %e, "unusable retention_secs; ingesting with no TTL");
+			None
+		});
+		self
+	}
+
 	pub fn validate(&self) -> Result<(), String> {
 		if !(0.0..=1.0).contains(&self.dedup_threshold) {
 			return Err(format!(
@@ -97,6 +111,30 @@ mod tests {
 			Config::default().valid_until,
 			None,
 			"a default ingest sets no valid_until"
+		);
+	}
+
+	#[test]
+	fn with_retention_carries_a_standing_policy_onto_the_config() {
+		let before = SystemTime::now();
+		let cfg = Config {
+			dedup_threshold: 0.9,
+			..Default::default()
+		}
+		.with_retention(3600);
+		let got = cfg
+			.valid_until
+			.expect("a policy retention yields a deadline");
+		assert!(
+			got >= before + Duration::from_secs(3600),
+			"the deadline is resolved at call time, not at startup"
+		);
+		assert_eq!(cfg.dedup_threshold, 0.9, "the other knobs survive");
+
+		assert_eq!(
+			Config::default().with_retention(0).valid_until,
+			None,
+			"no configured policy means no TTL"
 		);
 	}
 

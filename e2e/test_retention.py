@@ -27,6 +27,11 @@ ID_PROBE = "The oncall handset lives in the second drawer of the Helsinki desk"
 DEDUPED = "Vault rotation for the staging cluster is owned by Rui"
 DEDUPED_NEAR = "vault rotation for the staging cluster is owned by rui."
 
+# The intake half: these arrive as `.txt` transcripts under a source policy, not
+# as `kern ingest` arguments, so no `--retention-secs` is ever passed for them.
+INTAKE_EPHEMERAL = "The spare archive key is taped beneath the third shelf"
+INTAKE_DURABLE = "Ada keeps her bicycle in the garden shed behind the house"
+
 RETENTION = 5
 
 
@@ -150,6 +155,63 @@ def test_a_deduped_ingest_still_applies_its_retention(project):
 
 	wait_past_deadline(RETENTION)
 	wait_until_dropped(project, DEDUPED, DEDUPED)
+
+
+def queue_transcript(project, name, claim):
+	"""Drop a `.txt` session transcript the fake reason model distils into `claim`.
+
+	`fake_llm.distilled` turns every `assistant:` line into one claim whose text
+	is that line, so the stored claim is predictable enough to query for.
+	"""
+	intake = project.cwd / ".kern" / "intake"
+	intake.mkdir(parents=True, exist_ok=True)
+	(intake / name).write_text(f"user: tell me something\nassistant: {claim}\n")
+	return intake
+
+
+def test_a_source_retention_policy_expires_what_the_intake_drain_distills(project):
+	"""The config half of item 89, at the entrance the flag cannot reach.
+
+	Every other case in this file drives `kern ingest --retention-secs` — a
+	per-call argument on an entrance that already worked. A queue has no caller
+	to pass a flag: the transcript is a file someone dropped in a directory, so
+	its TTL can only come from `[intake] retention_secs`. Before this landed,
+	`drain_entry` built its per-claim config from a queue config nothing ever
+	put a deadline on, and a distilled claim never expired.
+	"""
+	project.write_config(intake_retention_secs=RETENTION)
+	intake = queue_transcript(project, "sess-ttl.txt", INTAKE_EPHEMERAL)
+
+	stdout, stderr = project.run("intake", "drain")
+	assert "drained 1 of 1 pending" in stdout, f"out={stdout} err={stderr}"
+	assert (intake / "done" / "sess-ttl.txt").exists(), f"not archived: {stdout}"
+
+	found, stdout, stderr = texts_for(project, INTAKE_EPHEMERAL)
+	assert INTAKE_EPHEMERAL in found, (
+		f"the distilled claim never reached the graph: out={stdout} err={stderr}"
+	)
+
+	wait_past_deadline(RETENTION)
+	wait_until_dropped(project, INTAKE_EPHEMERAL, INTAKE_EPHEMERAL)
+
+
+def test_an_intake_drain_with_no_policy_sets_no_ttl(project):
+	"""The control: absent `retention_secs`, a drained transcript is permanent.
+
+	Without it, a drain that expired everything would pass the test above.
+	"""
+	intake = queue_transcript(project, "sess-forever.txt", INTAKE_DURABLE)
+
+	stdout, stderr = project.run("intake", "drain")
+	assert "drained 1 of 1 pending" in stdout, f"out={stdout} err={stderr}"
+	assert (intake / "done" / "sess-forever.txt").exists(), f"not archived: {stdout}"
+
+	wait_past_deadline(RETENTION + 2)
+
+	found, stdout, stderr = texts_for(project, INTAKE_DURABLE)
+	assert INTAKE_DURABLE in found, (
+		f"an unconfigured queue must stamp no valid_until: out={stdout} err={stderr}"
+	)
 
 
 def test_a_default_ingest_never_expires(project):

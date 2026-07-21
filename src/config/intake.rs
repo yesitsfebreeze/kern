@@ -9,6 +9,14 @@ pub struct IntakeConfig {
 	pub dir: String,
 	pub poll_secs: u64,
 	pub done_retention_secs: u64,
+	// The TTL stamped on everything this queue ingests — "everything from this
+	// source expires in 30 days", said once instead of on every call. Distinct
+	// from `done_retention_secs`, which prunes the archived *files*: this one is
+	// `valid_until` on the entity. 0 = no TTL, matching `--retention-secs`.
+	// It lives here rather than in `[ingest]` because `Config::load_with_user`
+	// refuses a user-written `[ingest]` section outright — that one is
+	// preset-owned, and a key no `kern.toml` can set is a key that ships dead.
+	pub retention_secs: u64,
 }
 
 impl Default for IntakeConfig {
@@ -18,6 +26,7 @@ impl Default for IntakeConfig {
 			dir: ".kern/intake".into(),
 			poll_secs: 5,
 			done_retention_secs: 7 * 24 * 60 * 60,
+			retention_secs: 0,
 		}
 	}
 }
@@ -27,6 +36,9 @@ impl IntakeConfig {
 		if self.enabled && self.poll_secs == 0 {
 			return Err("poll_secs must be > 0 (0 busy-loops the intake drain)".into());
 		}
+		// Refuse a retention that can never become a deadline at boot, rather
+		// than logging it once per drain pass for the life of the daemon.
+		crate::ingest::valid_until_from_retention(self.retention_secs)?;
 		Ok(())
 	}
 }
@@ -42,6 +54,25 @@ mod tests {
 		assert_eq!(c.dir, ".kern/intake");
 		assert_eq!(c.poll_secs, 5);
 		assert_eq!(c.done_retention_secs, 604_800, "7 days in seconds");
+		assert_eq!(c.retention_secs, 0, "no standing TTL unless a host asks");
+	}
+
+	#[test]
+	fn validate_rejects_a_retention_that_can_never_become_a_deadline() {
+		let unusable = IntakeConfig {
+			retention_secs: u64::MAX,
+			..Default::default()
+		};
+		assert!(
+			unusable.validate().unwrap_err().contains("overflows"),
+			"a retention no clock can represent is refused at load, not per drain"
+		);
+
+		let thirty_days = IntakeConfig {
+			retention_secs: 30 * 24 * 60 * 60,
+			..Default::default()
+		};
+		assert!(thirty_days.validate().is_ok(), "a real policy is accepted");
 	}
 
 	#[test]
