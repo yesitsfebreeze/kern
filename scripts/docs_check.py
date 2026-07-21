@@ -7,17 +7,29 @@ committed. Exit 1 with a report if anything is dead.
 
 Scans every documentation directory the repo has — the site, `docs/kern/`,
 `docs/oracle/` and `README.md` — because a citation nobody checks is a citation
-that rots. What this cannot prove: that a cited line still *says* the thing it
-was cited for. Existence only.
+that rots. Existence is the only thing it can *fail* on.
 
 Two escapes, because some citations are *supposed* to name a file that is gone.
 A page carrying `<!-- docs-check: historical -->` is skipped whole: a changelog
 entry recording a deletion must cite the deleted file, and a point-in-time note
 describes the tree as it was. A single line naming a deletion is excused in
-place, so a present-tense page can still say what it removed."""
+place, so a present-tense page can still say what it removed.
+
+Beyond existence there is a second, weaker question: does the cited line still
+*say* the thing it was cited for? A line anchor is a bet that nothing is ever
+inserted above it, and appending to a growing file loses that bet silently —
+the line still exists, it just says something else now. So every anchor with a
+line number also gets a content check: the words of the citing bullet against
+the words of the cited line(s). Near-zero overlap is *nominated*, not failed.
+Short targets legitimately score low, and a checker that cries wolf gets turned
+off, so nominations are printed under their own heading and leave the exit code
+alone. `--strict-anchors` makes them fatal for a CI that has decided to trust
+them. A nomination a human has adjudicated is silenced in place with a trailing
+`docs-check: anchor-ok` comment, in the same idiom as the historical marker."""
 
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -41,13 +53,120 @@ SELF_URL = re.compile(
 HISTORICAL = "<!-- docs-check: historical -->"
 GONE = re.compile(r"\b(deleted|removed|withdrawn|absorbed|superseded by)\b", re.I)
 
+# A nomination a human has looked at and kept. Inline, on the citing line, so the
+# verdict lives next to the thing it acquits.
+ANCHOR_OK = "docs-check: anchor-ok"
+CODE_SPAN = re.compile(r"`[^`]*`")
+BULLET = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s|#{1,6}\s|\|)")
+WORD = re.compile(r"[A-Za-z0-9]+")
+# `ReasonKind` has to reach a sentence that says "reason kind", or every doc line
+# naming a type in prose scores zero against the line declaring it. Measured, this
+# is a near-wash and not the win it looks like: against the real tree it silenced
+# two false positives and one true one (`bayesian-belief.md:16`, whose target now
+# matches on a stray "entity"). Kept because prose and code should tokenise alike,
+# not because the numbers demanded it.
+CAMEL = re.compile(r"[a-z0-9]+|[A-Z][a-z0-9]*")
+# Only words of four or more letters ever survive tokenisation, so this set needs
+# no articles or prepositions — just the connective tissue that shows up in every
+# sentence and would otherwise manufacture agreement out of nothing.
+STOPWORDS = frozenset(
+    """about also because been before both cannot could does done each else even
+    every from have here into itself just like made make many more most much must
+    none only other over same should some still such than that their them then
+    there these they this those through under until very what when where which
+    while will with would your line lines file files
+    """.split()
+)
+# The bar depends on what is being cited, because prose and code disagree by
+# construction. Two documents describing the same thing reuse its words; two
+# shared words is the bar the prototype cleared, catching eleven of eleven real
+# FEATURES.md breakages. Prose citing *code* shares almost nothing on purpose —
+# the sentence explains, the line implements — so measured against the real tree
+# a two-word bar nominates 117 anchors, nearly all of them correct. For code the
+# only believable signal is total silence: a target that shares no content word
+# at all is a brace, a fragment, or drift.
+PROSE_OVERLAP = 2
+CODE_OVERLAP = 1
+PROSE_SUFFIXES = (".md", ".mdx", ".txt")
+
 line_counts: dict[Path, int] = {}
+file_lines: dict[Path, list[str]] = {}
 
 
 def lines_of(path: Path) -> int:
     if path not in line_counts:
         line_counts[path] = sum(1 for _ in path.open(encoding="utf-8", errors="replace"))
     return line_counts[path]
+
+
+def text_of(path: Path) -> list[str]:
+    if path not in file_lines:
+        file_lines[path] = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return file_lines[path]
+
+
+def tokens(text: str) -> set[str]:
+    """Content words: lowercase, four characters or more, connectives dropped.
+    `merge_claims` and `mergeClaims` both reach a sentence saying "merge claims",
+    because snake_case splits on the underscore and camelCase on the case."""
+    out: set[str] = set()
+    for raw in WORD.findall(text):
+        for w in CAMEL.findall(raw) + [raw]:
+            w = w.lower()
+            if len(w) >= 4 and w not in STOPWORDS:
+                out.add(w)
+    return out
+
+
+def blocks_of(lines: list[str]) -> list[tuple[int, int]]:
+    """Split a page into citing contexts: a bullet, a table row, a heading, or a
+    paragraph. A citation is judged against the whole block it sits in, not its
+    own line, because the docs wrap prose at eighty columns and the sentence that
+    explains an anchor routinely starts two lines above it."""
+    spans: list[tuple[int, int]] = []
+    start = None
+    for i, text in enumerate(lines):
+        if not text.strip():
+            if start is not None:
+                spans.append((start, i))
+                start = None
+            continue
+        if start is not None and BULLET.match(text):
+            spans.append((start, i))
+            start = i
+        elif start is None:
+            start = i
+    if start is not None:
+        spans.append((start, len(lines)))
+    return spans
+
+
+def block_at(spans: list[tuple[int, int]], idx: int) -> tuple[int, int]:
+    for lo, hi in spans:
+        if lo <= idx < hi:
+            return lo, hi
+    return idx, idx + 1
+
+
+def acquitted(text: str) -> bool:
+    """The marker counts only outside backticks, so a page may quote it while
+    explaining it — the same discipline that keeps `is_historical` honest."""
+    return ANCHOR_OK in CODE_SPAN.sub("", text)
+
+
+def nominate(
+    context: str, citation: str, target: Path, start: int, end: int
+) -> tuple[int, set[str]] | None:
+    """Does the cited line still relate to the sentence citing it? Compare content
+    words. Returns the shared words when they are too few to believe, else None."""
+    body = text_of(target)[start - 1 : end]
+    # The citation itself is metadata, not argument: `src/retrieval/walk.rs:12`
+    # would otherwise match any target line containing the word "walk".
+    prose = tokens(context.replace(citation, " "))
+    said = tokens("\n".join(body))
+    shared = prose & said
+    bar = PROSE_OVERLAP if target.suffix in PROSE_SUFFIXES else CODE_OVERLAP
+    return (len(shared), shared) if len(shared) < bar else None
 
 
 def pages() -> list[Path]:
@@ -63,12 +182,37 @@ def is_historical(lines: list[str]) -> bool:
     return any(l.strip() == HISTORICAL for l in lines)
 
 
-def check_page(page: Path, failures: list[str]) -> int:
-    rel = page.relative_to(ROOT)
+def check_page(page: Path, failures: list[str], nominations: list[str] | None = None) -> int:
+    try:
+        rel: Path | str = page.relative_to(ROOT)
+    except ValueError:  # a selftest fixture living outside the repo
+        rel = page
     lines = page.read_text(encoding="utf-8").splitlines()
     if is_historical(lines):
         return 0
+    spans = blocks_of(lines)
     total = 0
+
+    def anchor(m: re.Match[str], target: Path, lineno: int, label: str) -> None:
+        """Existence is settled by the caller; this asks whether the words agree."""
+        if nominations is None or not m.group(2):
+            return
+        lo, hi = block_at(spans, lineno - 1)
+        # The citing line is inside its own block, so one sweep acquits both.
+        if any(acquitted(l) for l in lines[lo:hi]):
+            return
+        start, end = int(m.group(2)), int(m.group(3) or m.group(2))
+        if start < 1 or start > lines_of(target):
+            return
+        verdict = nominate("\n".join(lines[lo:hi]), m.group(0), target, start, end)
+        if verdict is not None:
+            count, shared = verdict
+            witness = ", ".join(sorted(shared)) if shared else "nothing"
+            nominations.append(
+                f"{rel}:{lineno}: {label} shares {count} word(s) with its target "
+                f"({witness}) — {text_of(target)[start - 1].strip()[:60]!r}"
+            )
+
     for lineno, text in enumerate(lines, 1):
         if GONE.search(text):
             continue
@@ -83,6 +227,8 @@ def check_page(page: Path, failures: list[str]) -> int:
                     f"{rel}:{lineno}: {m.group(1)}:{cited} beyond EOF "
                     f"({lines_of(target)} lines)"
                 )
+            else:
+                anchor(m, target, lineno, f"{m.group(1)}:{m.group(2)}")
         for m in REPO_PATH.finditer(text):
             total += 1
             target = ROOT / m.group(1)
@@ -94,6 +240,8 @@ def check_page(page: Path, failures: list[str]) -> int:
                     f"{rel}:{lineno}: {m.group(1)}:{cited} beyond EOF "
                     f"({lines_of(target)} lines)"
                 )
+            else:
+                anchor(m, target, lineno, f"{m.group(1)}:{m.group(2)}")
         for m in SIBLING_REF.finditer(text):
             total += 1
             # Beside the citing page first, then the repo root — `README.md:159` in
@@ -109,6 +257,8 @@ def check_page(page: Path, failures: list[str]) -> int:
                     f"{rel}:{lineno}: {m.group(1)}:{cited} beyond EOF "
                     f"({lines_of(target)} lines)"
                 )
+            else:
+                anchor(m, target, lineno, f"{m.group(1)}:{m.group(2)}")
         for m in LINK.finditer(text):
             total += 1
             if not (page.parent / m.group(1)).resolve().is_file():
@@ -120,15 +270,31 @@ def check_page(page: Path, failures: list[str]) -> int:
     return total
 
 
-def main() -> int:
+def main(strict: bool = False) -> int:
     failures: list[str] = []
-    total = sum(check_page(p, failures) for p in pages())
+    nominations: list[str] = []
+    total = sum(check_page(p, failures, nominations) for p in pages())
+    code = 0
     if failures:
         print(f"{len(failures)}/{total} dead references:")
         print("\n".join(failures))
-        return 1
-    print(f"docs-check: {total} references exist (existence only — not that they still say it)")
-    return 0
+        code = 1
+    else:
+        print(f"docs-check: {total} references exist")
+    if nominations:
+        print()
+        print(f"nominated for review — {len(nominations)} anchor(s) whose target no longer")
+        print("reads like the sentence citing it. These are SUSPICIONS, not failures:")
+        print("a short or terse target legitimately shares few words. A human decides.")
+        print("Keep one by appending `<!-- docs-check: anchor-ok -->` to its line.")
+        print("\n".join("  " + n for n in nominations))
+        if strict:
+            print()
+            print("--strict-anchors: failing on the nominations above.")
+            code = 1
+    elif code == 0:
+        print("docs-check: no anchors nominated for review")
+    return code
 
 
 def selftest() -> None:
@@ -171,11 +337,84 @@ def selftest() -> None:
     assert not is_historical(
         ["a page holding `" + HISTORICAL + "` is skipped whole (`CHANGELOG.md`)"]
     ), "describing the marker inline must not exempt the page"
+    anchor_selftest()
     print("selftest OK")
+
+
+# A page that cites its sibling twice: once at a line that says what the sentence
+# says, once at a line that says something else entirely — the exact shape a merge
+# produces when it appends above an anchor. Written to disk rather than asserted in
+# the abstract, so the fixture exercises the same code path `main` does.
+FIXTURE_TARGET = """\
+# Features
+
+Retention expires a fact out of query results once its horizon passes.
+
+The gossip transport batches deltas before it hands them to the wire.
+"""
+FIXTURE_PAGE = """\
+# Notes
+
+- Retention expires the fact out of query results once the horizon
+  passes (`FEATURES.md:3`).
+- The gossip transport batches deltas before the wire sees them
+  (`FEATURES.md:5`).
+- Retention expires the fact out of query results once the horizon
+  passes (`FEATURES.md:5`).
+- Retention expires the fact out of query results once the horizon
+  passes (`FEATURES.md:5`). <!-- docs-check: anchor-ok -->
+"""
+
+
+def anchor_selftest() -> None:
+    assert tokens("Retention expires the fact") == {"retention", "expires", "fact"}, (
+        "short words and stopwords drop out"
+    )
+    assert tokens("merge_claims") == {"merge", "claims"}, "snake_case splits"
+    assert tokens("ReasonKind") == {"reason", "kind", "reasonkind"}, "camelCase splits"
+    assert blocks_of(["- a", "  cont", "- b", "", "para"]) == [(0, 2), (2, 3), (4, 5)]
+    assert acquitted("cited (`X.md:3`) <!-- docs-check: anchor-ok -->")
+    assert not acquitted("silence one with `<!-- docs-check: anchor-ok -->`"), (
+        "quoting the marker must not silence the page explaining it"
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        (d / "FEATURES.md").write_text(FIXTURE_TARGET, encoding="utf-8")
+        page = d / "NOTES.md"
+        page.write_text(FIXTURE_PAGE, encoding="utf-8")
+        failures: list[str] = []
+        nominations: list[str] = []
+        check_page(page, failures, nominations)
+        assert failures == [], f"every fixture line exists: {failures}"
+        # Line 8 is the mismatch — retention prose pointed at the gossip line.
+        assert len(nominations) == 1, f"exactly one nomination expected, got {nominations}"
+        assert ":8:" in nominations[0] and "FEATURES.md:5" in nominations[0], nominations[0]
+        assert "gossip transport batches" in nominations[0], (
+            "the nomination must quote the line it doubts"
+        )
+        # Line 3 cites the line that says what it says; line 5 cites gossip prose at
+        # the gossip line; line 10 is the same breakage as line 8, adjudicated.
+        for good in (":3:", ":5:", ":10:"):
+            assert not any(good in n for n in nominations), f"{good} must not be nominated"
+
+        # Code targets ride a lower bar, so prove both sides of it separately.
+        rs = d / "accept.rs"
+        rs.write_text("pub fn accept(g: &mut GraphGnn) {\n}\n", encoding="utf-8")
+        drifted = nominate("The accept path stamps the reason.", "`x`", rs, 2, 2)
+        assert drifted == (0, set()), f"a closing brace shares nothing: {drifted}"
+        assert nominate("The accept path stamps the reason.", "`x`", rs, 1, 1) is None, (
+            "one shared word acquits a code target — prose and code agree by name only"
+        )
+        assert nominate("Retention expires the fact.", "`x`", rs, 1, 1) == (0, set()), (
+            "an unrelated sentence over the same line is still nominated"
+        )
+        line_counts.clear()
+        file_lines.clear()
 
 
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         selftest()
         sys.exit(0)
-    sys.exit(main())
+    sys.exit(main(strict="--strict-anchors" in sys.argv))

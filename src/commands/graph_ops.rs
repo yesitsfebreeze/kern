@@ -62,6 +62,12 @@ fn print_detail(v: &serde_json::Value) {
 	println!("Score:  {:.4}", f64_field(v, "score"));
 	println!("Access: {}", u64_field(v, "access_count"));
 	println!("Kern:   {}", short_id(str_field(v, "kern")));
+	if v.get("expired").and_then(serde_json::Value::as_bool) == Some(true) {
+		println!(
+			"Expired: retention deadline passed at {} — `kern query` no longer returns this",
+			u64_field(v, "valid_until")
+		);
+	}
 	println!("Text:   {}", str_field(v, "text"));
 
 	let edges = array_field(v, "edges");
@@ -889,5 +895,46 @@ mod tests {
 			"Similarity"
 		);
 		assert!(entity_detail_by_id(&g, "nope").is_none());
+	}
+
+	// The id path has no `drop_expired` in front of it and never will — it answers
+	// a named row, not "what is true now". The ranked path cannot satisfy this
+	// test: it is not involved.
+	#[test]
+	fn the_id_path_flags_an_expired_thought_instead_of_hiding_it() {
+		use std::time::{Duration, SystemTime, UNIX_EPOCH};
+		let now = SystemTime::now();
+		let mut g = graph_with(
+			&[
+				("dead", EntityKind::Fact),
+				("live", EntityKind::Fact),
+				("forever", EntityKind::Fact),
+			],
+			&[],
+		);
+		let deadline = now - Duration::from_secs(3600);
+		let k = g.kerns.get_mut("kx").expect("kern present");
+		k.entities.get_mut("dead").unwrap().valid_until = Some(deadline);
+		k.entities.get_mut("live").unwrap().valid_until = Some(now + Duration::from_secs(3600));
+
+		let dead = entity_detail_by_id(&g, "dead").expect(
+			"an expired thought still resolves by id — 'not found' would lie about a \
+			 row GC never collects",
+		);
+		assert_eq!(dead["expired"], serde_json::json!(true));
+		assert_eq!(
+			dead["valid_until"],
+			serde_json::json!(deadline.duration_since(UNIX_EPOCH).unwrap().as_secs()),
+			"the deadline travels with the flag so the caller can judge the staleness"
+		);
+
+		let live = entity_detail_by_id(&g, "live").expect("live resolves");
+		assert_eq!(live["expired"], serde_json::json!(false));
+
+		let no_ttl = entity_detail_by_id(&g, "forever").expect("no-retention thought resolves");
+		assert!(
+			no_ttl.get("expired").is_none() && no_ttl.get("valid_until").is_none(),
+			"no retention means no keys at all, not expired=false: {no_ttl}"
+		);
 	}
 }

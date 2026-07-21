@@ -339,7 +339,7 @@ fn entity_detail(
 			}
 		}
 	}
-	serde_json::json!({
+	let mut v = serde_json::json!({
 		"id": thought.id,
 		"kind": thought.kind as u8,
 		"text": thought.text(),
@@ -349,7 +349,24 @@ fn entity_detail(
 		"access_count": thought.access_count.value_i32(),
 		"kern": kern_id,
 		"edges": edges,
-	})
+	});
+	// Retention on the id surface. The ranked path DROPS an expired thought
+	// (`score::drop_expired`); an explicit id names one row, so answering "thought
+	// not found" for a row that is demonstrably on disk — and that GC never
+	// collects, since a non-superseded Fact is GC-immune — would be a lie the
+	// caller cannot falsify. It is annotated instead, the way a cold hit is:
+	// served, flagged, deadline included, caller decides.
+	if let Some(exp) = thought.valid_until {
+		v["valid_until"] = serde_json::json!(secs_since_epoch(exp));
+		v["expired"] = serde_json::Value::Bool(exp < std::time::SystemTime::now());
+	}
+	v
+}
+
+fn secs_since_epoch(t: std::time::SystemTime) -> u64 {
+	t.duration_since(std::time::UNIX_EPOCH)
+		.map(|d| d.as_secs())
+		.unwrap_or(0)
 }
 
 // kind/scheme/status labels are consumed by `kern_rpc::query` — do not drop them.

@@ -52,6 +52,85 @@ pub struct MergeOutcome {
 	pub same_kind: bool,
 }
 
+/// The `valid_until` ceiling rule. A TTL is a bound on how long a statement may
+/// live, so merging two bounds keeps the LOWER one; `None` means +∞.
+/// `min(∞, t) = t` puts a deadline on a never-expiring entity, and
+/// `min(t, ∞) = t` leaves an expiring one alone when the caller expressed no
+/// opinion — omitting retention is "no opinion", not "make this permanent".
+/// `min` is commutative, associative and idempotent, so the arbitrary replay
+/// order federation produces converges; plain last-writer-wins does not, and
+/// would let a late near-duplicate carrying 30 days void a deliberate 1 hour.
+///
+/// KNOWN COST: ingest can therefore only ever SHORTEN a deadline. Lengthening
+/// one needs an explicit update path, or `forget` + re-ingest.
+pub fn resolve_valid_until(
+	current: Option<std::time::SystemTime>,
+	incoming: Option<std::time::SystemTime>,
+) -> Option<std::time::SystemTime> {
+	match (current, incoming) {
+		(Some(c), Some(i)) => Some(c.min(i)),
+		(Some(c), None) => Some(c),
+		(None, i) => i,
+	}
+}
+
+/// The ONE place a resolved `valid_until` is written. Both dedup gates reach it
+/// through `merge_duplicate`; the fresh-placement path in `ingest::place` calls
+/// it directly, on the id that actually entered the graph.
+///
+/// Stamps a fresh lamport/producer and queues the gossip delta only when the
+/// stored deadline actually moves — or when it was never stamped, which is the
+/// freshly placed entity carrying its own deadline in.
+pub fn merge_valid_until(
+	g: &mut GraphGnn,
+	entity_id: &str,
+	incoming: Option<std::time::SystemTime>,
+) -> bool {
+	// No incoming retention is `min(t, ∞) = t`: nothing to write, nothing to gossip.
+	if incoming.is_none() {
+		return false;
+	}
+	let Some(kern_id) = g.kern_of_entity(entity_id).map(str::to_string) else {
+		return false;
+	};
+	let Some((current, stamped)) = g
+		.get(&kern_id)
+		.and_then(|k| k.entities.get(entity_id))
+		.map(|e| (e.valid_until, e.valid_until_lamport > 0))
+	else {
+		return false;
+	};
+	let resolved = resolve_valid_until(current, incoming);
+	if resolved == current && stamped {
+		return false;
+	}
+
+	let lamport = g.bump_lamport();
+	let producer = g.network_id.clone();
+	let Some(e) = g
+		.get_mut(&kern_id)
+		.and_then(|k| k.entities.get_mut(entity_id))
+	else {
+		return false;
+	};
+	e.valid_until = resolved;
+	e.valid_until_lamport = lamport;
+	e.valid_until_producer = producer.clone();
+
+	let lww_value =
+		bincode::serde::encode_to_vec(resolved, bincode::config::standard()).unwrap_or_default();
+	g.push_delta(crate::base::graph::PendingDelta {
+		object_id: entity_id.to_string(),
+		target: 3,
+		replica: String::new(),
+		value: 0,
+		lamport,
+		producer,
+		lww_value,
+	});
+	true
+}
+
 // INVARIANT: never overwrite statements/vector under the existing id
 // (= content_hash(text)); differing phrasing → Rephrase edge.
 pub fn merge_duplicate(
@@ -60,8 +139,12 @@ pub fn merge_duplicate(
 	new_text: &str,
 	new_score: f64,
 	incoming_kind: EntityKind,
+	incoming_valid_until: Option<std::time::SystemTime>,
 ) -> Option<MergeOutcome> {
 	let kern_id = g.kern_of_entity(entity_id)?.to_string();
+	// A deduped ingest still carries its retention: the survivor inherits the
+	// tighter of the two ceilings. Both dedup gates land here.
+	merge_valid_until(g, entity_id, incoming_valid_until);
 	let kern = g.get_mut(&kern_id)?;
 
 	let (differs, old_kind) = {
@@ -175,7 +258,14 @@ fn commit_entity(
 	// the alternate wording. Returning early stored nothing and merged nothing.
 	if let Some((survivor_id, _)) = dup {
 		let text = thought.text();
-		let outcome = merge_duplicate(g, &survivor_id, &text, thought.conf_mean(), thought.kind);
+		let outcome = merge_duplicate(
+			g,
+			&survivor_id,
+			&text,
+			thought.conf_mean(),
+			thought.kind,
+			thought.valid_until,
+		);
 		let (placed_in, reason_ids) = match outcome {
 			Some(o) => (o.kern_id, o.rephrase_id.into_iter().collect()),
 			None => (kern_id.to_string(), Vec::new()),
@@ -1108,6 +1198,36 @@ mod tests {
 			parse_contradiction("this is an update but they are RELATED"),
 			ContradictionClass::Related,
 			"a RELATED mention wins — conservative"
+		);
+	}
+
+	#[test]
+	fn resolve_valid_until_is_a_min_with_none_as_infinity() {
+		use std::time::{Duration, UNIX_EPOCH};
+		let early = UNIX_EPOCH + Duration::from_secs(100);
+		let late = UNIX_EPOCH + Duration::from_secs(500);
+
+		assert_eq!(resolve_valid_until(Some(late), Some(early)), Some(early));
+		assert_eq!(
+			resolve_valid_until(Some(early), Some(late)),
+			Some(early),
+			"commutative — the shorter deadline wins in either order"
+		);
+		assert_eq!(
+			resolve_valid_until(None, Some(early)),
+			Some(early),
+			"min(∞, t) = t — a never-expiring entity accepts a deadline"
+		);
+		assert_eq!(
+			resolve_valid_until(Some(early), None),
+			Some(early),
+			"min(t, ∞) = t — no opinion never lengthens a deadline"
+		);
+		assert_eq!(resolve_valid_until(None, None), None);
+		assert_eq!(
+			resolve_valid_until(Some(early), Some(early)),
+			Some(early),
+			"idempotent"
 		);
 	}
 

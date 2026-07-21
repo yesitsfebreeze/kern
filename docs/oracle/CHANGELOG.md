@@ -2,6 +2,51 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — three parallel cycles reconciled into one doc set, and item 93's
+  content check earned its keep on the first merge it saw. `cycle/3` (item 19)
+  merged master carrying item 93 and item 91 `[retrieval]`; every source file
+  auto-merged and only `CHANGELOG.md` and `ROADMAP.md` conflicted, both because
+  all three sides had prepended to the same two lists. Nothing was dropped: the
+  changelog keeps all seven conflicting entries newest-first by commit time, and
+  "Closed and verified" keeps item 19, item 91 `[retrieval]` and item 88 in
+  closure order above the items already there. Item 75 took HEAD's rewrite —
+  the half of it verified false — over master's, which had only re-anchored the
+  paragraph HEAD deleted; master's three corrected
+  `diskann-disk-index.md` line numbers were carried across into it, since those
+  were right and HEAD's were stale.
+
+  **The number 91 was allocated twice and the collision became a live wrong
+  pointer.** Item 18's fourth bullet said "item 91 is the same unfiltered path
+  dropping `valid_until`", written about the `[retrieval]` 91 — which has since
+  closed and retired its number, leaving the open `[ingest]` 91 ("the second
+  dedup gate lies about what it did, twice") as the only thing that spelling
+  resolves to. A reader following it landed on an unrelated item. Repointed at
+  the retired item by title, and the bullet now also records what the closure
+  actually did to it: 91 `[retrieval]` shipped a *flag*, not a filter, so it
+  bought this bullet nothing — an ACL denial cannot ride on the row it denies.
+  The other reference, in item 88's closure note, was re-read and does mean the
+  open `[ingest]` one; it is tagged now rather than left to the number.
+
+  **Twenty-two citations were repointed, and twelve of them `docs-check` found
+  by itself** — the first time it has caught anything, because until item 93
+  landed it checked only that the cited line existed, and every one of these
+  did. Five of the twelve were `ROADMAP.md` -> `FEATURES.md` (`trnsprt`
+  pooling, hub↔node version skew, the Ollama retry/backoff gap, `promote`, the
+  WSL2 Ollama URL), all shifted by the +16 lines the two `FEATURES.md` edits
+  added above them. Seven were `src/` citations moved by the *code* merge, and
+  those are the ones no amount of care on either branch could have prevented:
+  `with_graph` 442 -> 453 (twice), `wire_fetch` 1015 -> 1038 (twice),
+  `validate_fact_source` 118 -> 131, `validate_conf` 116 -> 129,
+  `maybe_self_heal_store` 426 -> 424. The other ten came out of reading the same
+  pass by hand and were never nominated — `cmd_hub_merge` 648 -> 746 in two
+  files, the RPC-auth gap, the watcher's off-by-default paragraph, the `move`
+  tool row, the prompts/resources note, the README version pin — which is the
+  measured 33% recall the checker was shipped admitting to.
+
+  Counted rather than eyeballed: nominations went 39 (master) -> 51 (merged) ->
+  36 (repaired), and the set of nominated targets present in neither parent is
+  now empty. The 36 standing are the pre-existing ones, not new damage.
+
 - 2026-07-21 — item 19 closed: deleting a source cascades into the graph.
   `forget_by_source(scheme, object_id, force)` resolves every entity whose
   `Source` matches the pair across all resident kerns and removes it through the
@@ -66,6 +111,249 @@
   guard would have been the symptom fix; the root is that removal immunity is
   enforced where removal happens.
 
+- 2026-07-21 — `docs-check` now reads the line it is pointed at. Item 93's
+  second candidate closure landed: every anchor carrying a line number gets its
+  citing block's content words compared against the cited line's, and an anchor
+  that shares too few is **nominated**, not failed. Tokens lowercase, split on
+  `_` and on the camelCase boundary, keep four characters or more, drop a small
+  stopword set. The bar splits by target kind — two shared words for prose,
+  total silence for code — because prose citing code shares almost nothing by
+  design, and a two-word bar everywhere nominates 117 of 655 anchors, which is
+  the same as nominating nothing. Split, it nominates 38.
+
+  The design constraint was the whole point and it is honored: nominations print
+  under their own heading, say plainly that they are suspicions, and **do not
+  touch the exit code**. `python3 scripts/docs_check.py` exits 0 with all 38
+  standing; only genuinely dead references still exit 1. `--strict-anchors` is
+  the opt-in that makes them fatal, there for a CI that has decided to trust
+  them, which nothing has yet. An adjudicated anchor is silenced in place with a
+  trailing `docs-check: anchor-ok` comment — the historical marker's idiom,
+  counted only outside backticks so a page can still quote it. Item 93's own
+  paragraph is its first user, since its `FEATURES.md:408-409` was never a
+  citation, only an example of one going wrong.
+
+  **The measured false-positive rate is 13 of 39, about 33%**, adjudicated one
+  at a time against the real tree rather than estimated. That is a real number
+  and it is the reason strict is opt-in. The 26 true ones are the predicted
+  damage: `bayesian-belief.md` citing `conf_alpha`/`conf_beta` at a `ChunkPart`
+  struct, `FEATURES.md` citing `classify_prompt` at a `return Vec::new();`,
+  `README.md` citing the cold-tier drop counter at a closing brace — five of six
+  anchors in one `crdts-federation.md` status block are wrong. The thirteen
+  false ones share one cause: the target's distinguishing word is under four
+  characters (`acl`, `rrf`, `run_hub`) or inflected (`fn stem` against
+  "stemmer"). Two are this item's own illustrations and are acquitted in place,
+  leaving 38 standing at 32%.
+
+  One tuning step is recorded as the near-wash it measured as, rather than as
+  the improvement it looked like: splitting the camelCase boundary silenced two
+  false positives **and one true one** — `bayesian-belief.md:16` cites
+  `src/base/types.rs:66-75` for "the seven kinds that exist" when 66-75 is
+  `EntityStatus` and `ReasonKind` starts at 76, and that breakage now hides
+  behind a stray "entity" match. Precision 64% → 67%, recall 27 → 26. Kept on
+  the principle that prose and code should tokenise alike, not on the numbers.
+
+  The selftest carries the proof rather than the claim: a fixture page cites a
+  matching line, a mismatched line, and the mismatched line again with the
+  acquittal marker, and asserts exactly one nomination naming the mismatch. Both
+  directions are asserted, because a checker never observed firing proves
+  nothing — which is how four false-green tests got caught here today.
+
+  Decided by: name-the-tradeoff — the honest 31% is stated in the item, in the
+  output and here, instead of being tuned away into a number that would have
+  made the checker look ready to gate when it is not.
+
+- 2026-07-21 — retention now reaches the id read surface, and it does it by
+  **flagging, not hiding**. Item 91 `[retrieval]` closed.
+
+  The gap was real and every line of the item checked out against source:
+  `drop_expired` had one call site, the ranked path, and `tool_query` returns
+  `entity_detail_by_id` before any `QueryOptions` exists — so a fact ingested
+  with `--retention-secs 60` vanished from `kern query` after the deadline and
+  was still served in full by `kern get` and MCP `query{id}`, forever, because
+  GC never reads `valid_until` and a non-superseded `Fact` is GC-immune.
+
+  The item prescribed a filter on the id path. It did not ship, and the reason
+  is the question the item deferred rather than an easier fix. **An id is a
+  direct question and deserves a direct answer.** `kern query` is asked "what is
+  true now" and is right to drop an expired claim; `kern get <id>` is asked
+  "what is this row", and answering `thought not found` about a row sitting on
+  disk is a false statement with no way for the caller to check it — not a
+  softer failure than serving it, a harder one, because it is unfalsifiable and
+  permanent. So the resolver annotates: `expired` and `valid_until` on the JSON
+  whenever a retention is set, an `Expired:` line on the `kern get` printout.
+  Same shape as the `cold` flag that already rides on that JSON, for the same
+  reason — the caller should not have to infer a fact about a row from its
+  absence.
+
+  **Why not-found lost.** It matches the ranked path's semantics, which is a
+  real argument and the item's own recommendation. It lost because item 9
+  deliberately widened this surface — `query{id}` takes a prefix and falls back
+  to the cold tier precisely so `kern get` loses nothing by routing — and a
+  silent drop narrows it back to an error message indistinguishable from a
+  mistyped id. A caller who wants ranked-path semantics on an id already has
+  them: read the flag and discard. A caller who wants the row has no way to
+  recover it from a not-found. Asymmetric, so the reversible option wins.
+
+  Bi-temporal is untouched and now pinned where it was not before. `as_of` /
+  `valid_at` still skip `drop_expired`, and that escape had unit tests only on
+  the predicate — the same shape of hole that let `valid_until` be honoured by a
+  function nothing called. `retrieve_drops_an_expired_claim_from_the_default_path`
+  now runs the corpus twice and asserts the named-instant query still returns
+  the since-expired claim, so deleting the early return fails at the call site.
+
+  Both new tests were reverted and re-run before either was believed: the id
+  test fails `left: Null, right: Bool(true)`, the bi-temporal half fails with
+  `["live"]`, and the e2e test fails against a real binary printing the expired
+  fact with no marker — which is the defect itself, reproduced. `e2e` floors
+  unmoved at 0.9306 / 0.9722 / 0.9471.
+
+  Not bought: item 18's fourth bullet still needs its own guard. It wants ACL on
+  the id path, and an ACL denial cannot be a flag on the row it denies — the
+  text would ship with it. Item 91's claim that closing it would hand 18 that
+  bullet was wrong.
+
+  Decided by: name-the-tradeoff — the item had already chosen the filter, and
+  the two failure modes were only comparable once "silently reporting not-found
+  for a row that exists" was stated as the cost it is.
+
+- 2026-07-21 — merging `cycle/1` broke **fifteen** line anchors at once, and the
+  count is the point. Both branches had just re-pointed their anchors and both
+  were right in their own tree; combining them shifted `FEATURES.md` again and
+  eleven `ROADMAP.md` -> `FEATURES.md` citations plus four `src/` ones landed on
+  unrelated content — "no batch query" on the `health` tool row, "clustering is
+  vector-only" on kern idle timeout, `get_or_spawn_unnamed_child` on a blank
+  line 90 lines short. `docs-check` was green at every moment, before, during
+  and after, because all fifteen lines existed the whole time.
+
+  This is the fourth occurrence today and the mechanism is no longer in doubt:
+  **a cross-file line anchor cannot survive a merge that appends to the target
+  file, and appending is the only thing that ever happens to `FEATURES.md`.**
+  Re-pointing them by hand each merge is not a fix, it is a tax that will be
+  paid wrong the first time nobody checks. Filed as item 93 — the anchors want
+  to be symbolic (a heading or a stable phrase), or `docs_check.py` needs to
+  verify content rather than existence. Until one of those lands, every merge
+  touching `FEATURES.md` silently rots its citations.
+
+  Found by an overlap audit rather than by reading: comparing the words of each
+  citing sentence against the words of the line it points at flags a wrong
+  anchor in one pass, where `docs-check` cannot flag any of them. Three of the
+  22 the audit scored "weak" were correct — short targets score low — so the
+  tool nominates and a human adjudicates; it is not a gate.
+
+  Decided by: verify-before-claiming — the anchors were re-read against the
+  merged file rather than trusted from either parent, which is the only step
+  that catches this class at all.
+
+- 2026-07-21 — `test_retention`'s intermittent failure is now ROADMAP item 92
+  rather than folklore. Two independent runs saw
+  `test_a_retention_expires_the_fact_out_of_query_results` fail, always with
+  the CPU-heavy `test_recall.py` ahead of it; a third could not reproduce it in
+  six consecutive runs on stashed-clean `src/`. Recorded with that split
+  evidence intact rather than resolved to "flaky" or "fine", because neither is
+  established and the honest state is "real, load-dependent, not reproducible on
+  demand". The reason it is worth an item at all is not the failed run — it is
+  that an unrecorded intermittent failure is indistinguishable from a
+  regression, so the next person to see it red waves through whatever actually
+  broke.
+  Decided by: verify-before-claiming — the implement stage's flake claim was
+  checked rather than accepted, and the check disagreed with it, so both results
+  are in the item.
+
+- 2026-07-21 — `kern graviton add`/`remove` and `kern claim-kind add`/`rm` route
+  through the daemon; item 9's unblocked half closed.
+
+  These four were the last shipped subcommands calling `with_graph` with no
+  routing in front of it. `with_graph` loads, mutates and calls
+  `save_graph_unguarded`, holding no writer lock and doing no epoch check, and
+  it writes the whole kern map — so run beside a daemon, `kern graviton add`
+  did not add a graviton to the live graph, it replaced that graph with a
+  minutes-old copy of itself plus one graviton. The daemon's next persist then
+  dropped the graviton too, because its own graph had never seen it. Both ends
+  of that, from one command.
+
+  No new tool was needed: `graviton` and `claim_kind` already exist on the MCP
+  surface with the same semantics the CLI wants. The shape copied is
+  `cmd_forget`/`cmd_degrade` — route first, `with_graph` only on `NoDaemon`,
+  one printer per outcome so routed and local output cannot drift. The one
+  ordering call worth naming: the graviton add routes *before* it embeds. The
+  daemon embeds with its own client and owns the vector it stores, so embedding
+  first would spend a model call on a vector nobody keeps.
+
+  **The seam that made it testable.** `route()` already delegates to
+  `route_to(&Endpoint::kern(), …)`; `cmd_graviton`/`cmd_claim_kind` now delegate
+  the same way to `graviton_at`/`claim_kind_at`. Without that, a unit test of the
+  routed path would have to reach the process-global `Endpoint::kern()` — cwd
+  plus `XDG_RUNTIME_DIR` — which is neither settable in parallel tests nor
+  distinguishable from a daemon the developer happens to be running.
+
+  **Both new tests were reverted to prove they fail.** The unit tests fail with
+  "the serving daemon's own graph took the write" / "the serving daemon's own
+  graph lost the graviton"; the e2e fails with "the CLI wrote the graviton
+  locally after all", and with the control removed it fails one assertion later
+  with "the daemon's persist dropped the routed graviton" — so both halves carry
+  weight, not just the control. The regression guard was checked the same way by
+  dropping the local persist: "the local add must reach the local store".
+
+- 2026-07-21 — a full semantic sweep of every line anchor in `ROADMAP.md` and
+  `FEATURES.md`, and two claims that did not survive it.
+
+  **Anchors.** Twenty-seven citations pointed at a line that exists and no
+  longer says what it was cited for; `docs-check` was green at 634 references
+  before and after, as it has been every time. Ten were `ROADMAP.md` ->
+  `FEATURES.md` — the predicted rot, and the counts show why: every one of them
+  had drifted *downward* by between 14 and 27 lines, the size of what
+  `FEATURES.md` grew by underneath them. `:390` for the 512-bounded tick queue
+  had landed on a blank line, `:588-589` for "hand-rolled schemas, no batch
+  query" on the `forget`/`degrade` tool-table rows, `:547-549` for the GNN gaps
+  on a *different* GNN paragraph — near enough to read as right, which is the
+  dangerous kind. Re-pointed to `:408-409`, `:607-608`, `:565-566` and the rest.
+
+  The other seventeen were the same failure in `src/` and `docs/kern/`, and they
+  are not merge damage — they are ordinary code motion. `src/tick.rs:195` for
+  `spawn_child_clusters` had slid one line onto a blank; `src/commands.rs:1003`
+  for `wire_fetch` was twelve lines short of the call, `:966-1040` for
+  `start_gossip` thirteen; `src/commands/ingest_cmd.rs:49` for the CLI's
+  `clamp_confidence(1.0, "user")` — the citation that carries the entire
+  "only the CLI reaches `Fact`" argument — was ten lines above it, on a closing
+  brace. `docs/kern/` was worse: the convergence gate `G ≥ 0.6`, the
+  `HeatStats` health export, the DiskANN WAL note and the lower-confidence-bound
+  formula were all cited at lines holding other content.
+
+  **Claim one, retired: "the remaining two unlocked callers."** Item 9 said
+  naming `save_graph_unguarded` had made its two remaining unlocked callers
+  visible. Walking the call sites finds three. The third is `with_graph`
+  (`src/commands.rs:442`), which loads, mutates and writes the whole graph back
+  holding no lock. `cmd_forget` and `cmd_degrade` reach it safely because they
+  route first and land there only on `NoDaemon` — but `kern graviton add`/
+  `remove` and `kern claim-kind add`/`rm` do not route at all. Beside a running
+  daemon they overwrite everything the daemon has committed since they loaded:
+  a full-graph clobber, from four shipped subcommands, in the item whose entire
+  subject is that race. The item's title and its "one half remains" both said
+  `ingest`/`link`; both were undercounting, and both are corrected. This half is
+  **not** blocked on item 24 — `graviton` and `claim_kind` assert no trust, and
+  the tools to route to already exist with matching semantics.
+
+  **Claim two, promoted to item 91: retention is enforced on one read surface of
+  two.** Item 18's "guard the id path" bullet was written as an ACL concern, so
+  it read as a cost of work not yet done. It is not: `drop_expired` has one call
+  site, on the ranked path, and the id path returns `entity_detail_by_id` before
+  any option is built. A thought ingested with `--retention-secs 60` disappears
+  from `kern query` after the deadline and is still served in full by `kern get`.
+  It does not heal — GC never reads `valid_until`, and the CLI mints at
+  confidence 1.0, so the entity is a `Fact` and GC-immune. `e2e/test_retention.py`
+  closed item 22 green because it only ever asked the ranked path. Ranked beside
+  88 and 89 on 88's own reasoning: a correctness gap in a shipped flag, reachable
+  only by opting into retention.
+
+  What both findings have in common is what the pinned pattern predicts one
+  level up. A citation that still resolves is not a citation that is still true,
+  and a *claim* that was true when written is not a claim that is still true
+  either. `docs-check` proves neither; only reading the source does.
+
+  Decided by: verify-before-claiming — every anchor here was opened and read
+  against what the citing sentence asserts, and the two claims that fell were
+  claims nothing in the toolchain was ever going to fail on.
+
 - 2026-07-21 — merging `cycle/2` re-broke four `ROADMAP.md` -> `FEATURES.md`
   anchors that were correct in the branch, and that is a property of the merge
   rather than a mistake by either side. Both branches appended to `FEATURES.md`,
@@ -96,6 +384,76 @@
   Decided by: verify-before-claiming — every re-pointed anchor was read back
   against the merged file rather than trusted from either parent, which is the
   only step that would have caught this.
+
+- 2026-07-21 — item 88 closed: a retention that lands on a duplicate is applied,
+  not dropped. Item 22 shipped `retention_secs` the day before and it reached
+  `valid_until` only where an entity was *created*; a near-duplicate re-ingest
+  reported `deduped` and left an entity that never expires. There were **two**
+  dedup gates swallowing it, not one — `find_duplicate` in `place.rs`, and
+  `accept_with_dedup`'s own wider `find_duplicate_hit`, whose `dup` branch drops
+  the incoming `Entity` whole. Both now carry the deadline through
+  `merge_duplicate` into a single writer, `accept::merge_valid_until`.
+
+  **`min` of the two deadlines, not last-writer-wins, and that was the
+  decision.** LWW is what `valid_until` already uses on the *merge* path
+  (lamport + producer, `base/merge.rs`), so LWW here would have been the
+  consistent-looking choice. It was rejected because a TTL is a **ceiling**, not
+  an opinion about a value. Under LWW a near-duplicate carrying 30 days that
+  happens to arrive after a deliberate 1 hour voids the 1 hour, and federation
+  delivers deltas in arbitrary order, so *which* retention survives would depend
+  on network timing. `min` is commutative, associative and idempotent — every
+  replica converges on the same deadline no matter what order the writes land
+  in. `None` is +∞: `min(∞, t) = t` lets an untimed entity accept a deadline,
+  and `min(t, ∞) = t` means omitting `retention_secs` is *no opinion*, not
+  "make this permanent".
+
+  **Accepted cost, named in the tool schema rather than hidden:** ingest can
+  therefore only ever **shorten** a TTL, never lengthen one. There is no
+  ingest-shaped way to say "actually, keep this longer" — that needs an explicit
+  update path, or `forget` + re-ingest. This is the right trade for a retention
+  feature, where the failure that matters is data outliving its deadline, but it
+  is a real limitation and callers are told about it in the `retention_secs`
+  description.
+
+  **An orphan delta was found and fixed on the way.** `place.rs` stamped the
+  lamport/producer and pushed the `ValidUntil` `PendingDelta` *before* calling
+  `accept_with_dedup` — so on a gate-2 dedup it gossiped a deadline for an id
+  that never entered any kern. The stamp moved *after* accept, onto
+  `result.entity_id`, guarded by `!result.deduped`; the deduped case is handled
+  inside `merge_duplicate` against the survivor. A delta is now queued only when
+  the stored deadline actually moves, or when it was never stamped — which is
+  exactly the freshly placed entity carrying its own deadline in.
+
+  **Decided by:** verify-before-claiming, then fix-the-root. Every claim was
+  tested by breaking it rather than by reading it. Reverting gate 1 alone fails
+  three `place.rs` tests and leaves the gate-2 test **green**; reverting gate 2
+  alone fails **only** the gate-2 test — proof the two tests exercise two paths
+  and neither would pass either way. Deleting the `push_delta` while keeping the
+  stamp initially failed only the two dedup tests, which exposed a real coverage
+  hole: nothing asserted the **non-dedup** delta, the one federation depends on
+  for an ordinary retention-carrying ingest. That assertion was added
+  (`a_configured_retention_stamps_valid_until_on_every_placed_entity` now checks
+  object id, lamport and producer against the entity), and the same mutation now
+  fails all three. Root-cause over patch: the fix is one writer both gates reach,
+  not a second copy of the rule in `update_existing_entity`.
+
+  **The e2e's clock handling is an environment fix, and was confirmed as one
+  independently.** `e2e/test_retention.py` was ~50% flaky before this change.
+  Measured on this box: `CLOCK_REALTIME` is stepped **backwards ~2.80s every
+  ~32s** by WSL2 hv time sync — 60s of monotonic time advanced realtime by only
+  54.4s, and one `sleep(7)` in three advanced it by 4.23s. `valid_until` is an
+  absolute instant compared against `SystemTime::now()`, but `time.sleep` waits
+  on the *monotonic* clock, so a `sleep(RETENTION + 2)` could return with the
+  deadline still in the future. The waits now key on realtime and poll until the
+  fact stops being delivered, bounded by a monotonic cap. This does not soften
+  the test: with `merge_valid_until` neutered,
+  `test_a_deduped_ingest_still_applies_its_retention` fails on the cap with the
+  fact still delivered.
+
+  Left behind as item 91: the second gate still returns `doc_id` rather than the
+  survivor id, so `finalize_doc_identity` reports `committed` on a gate-2 dedup,
+  and both placement paths insert the discarded id into the lexical index. Both
+  predate this work and are on the plain path with no retention involved.
 
 - 2026-07-21 — item 22 closed: per-source TTL has a writer. The reader half
   (`score::drop_expired`) had been enforcing `valid_until` on every retrieve

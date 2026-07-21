@@ -95,6 +95,7 @@ pub(crate) async fn place_document(
 			&job.text,
 			job.confidence,
 			kind,
+			job.config.valid_until,
 			defer_contradiction,
 		);
 		return (Some(existing_id), None);
@@ -119,25 +120,14 @@ pub(crate) async fn place_document(
 
 	let lex = {
 		let mut g = graph.write();
-		let lamport = g.bump_lamport();
-		let producer = g.network_id.clone();
-		if thought.valid_until.is_some() && thought.valid_until_lamport == 0 {
-			thought.valid_until_lamport = lamport;
-			thought.valid_until_producer = producer.clone();
-			let lww_value =
-				bincode::serde::encode_to_vec(thought.valid_until, bincode::config::standard())
-					.unwrap_or_default();
-			g.push_delta(crate::base::graph::PendingDelta {
-				object_id: thought.id.clone(),
-				target: 3,
-				replica: String::new(),
-				value: 0,
-				lamport,
-				producer,
-				lww_value,
-			});
+		// Stamp AFTER accept, against the id that actually entered the graph: the
+		// second dedup gate drops `thought` whole, so a delta minted beforehand
+		// would gossip a ValidUntil for an id no kern holds. That branch tightens
+		// the survivor itself, inside merge_duplicate.
+		let result = accept::accept_with_dedup(&mut g, &root_id, thought.clone(), "", dedup_threshold);
+		if !result.deduped {
+			accept::merge_valid_until(&mut g, &result.entity_id, job.config.valid_until);
 		}
-		accept::accept_with_dedup(&mut g, &root_id, thought.clone(), "", dedup_threshold);
 		g.lexical()
 	};
 	if let Some(lex) = lex {
@@ -180,6 +170,7 @@ pub(crate) fn place_chunks(
 				chunk,
 				job.confidence,
 				job.kind,
+				job.config.valid_until,
 				defer_contradiction,
 			);
 			placed += 1;
@@ -202,25 +193,12 @@ pub(crate) fn place_chunks(
 
 		let (result, lex) = {
 			let mut g = graph.write();
-			let lamport = g.bump_lamport();
-			let producer = g.network_id.clone();
-			if thought.valid_until.is_some() && thought.valid_until_lamport == 0 {
-				thought.valid_until_lamport = lamport;
-				thought.valid_until_producer = producer.clone();
-				let lww_value =
-					bincode::serde::encode_to_vec(thought.valid_until, bincode::config::standard())
-						.unwrap_or_default();
-				g.push_delta(crate::base::graph::PendingDelta {
-					object_id: tid.clone(),
-					target: 3,
-					replica: String::new(),
-					value: 0,
-					lamport,
-					producer,
-					lww_value,
-				});
-			}
+			// Same ordering rule as place_document: the ValidUntil delta names the id
+			// that actually entered the graph, never the discarded incoming one.
 			let r = accept::accept_with_dedup(&mut g, &root_id, thought, doc_id, dedup_threshold);
+			if !r.deduped {
+				accept::merge_valid_until(&mut g, &r.entity_id, job.config.valid_until);
+			}
 			let l = g.lexical();
 			(r, l)
 		};
@@ -463,15 +441,224 @@ mod tests {
 			vec![Some(deadline)],
 			"the ingest-time retention reaches the entity"
 		);
-		let gg = g.read();
-		let stamped = gg
-			.all()
-			.iter()
-			.flat_map(|k| k.entities.values())
-			.all(|e| e.valid_until_lamport > 0 && !e.valid_until_producer.is_empty());
+		let id = util::content_hash("alpha beta");
+		let e = stored(&g, &id);
 		assert!(
-			stamped,
+			e.valid_until_lamport > 0 && !e.valid_until_producer.is_empty(),
 			"the existing LWW stamping fired for the new writer"
+		);
+
+		// The stamp alone is local. A peer only ever learns a deadline from the
+		// delta, so the fresh-placement path must queue one as well — naming the
+		// id that entered the graph and carrying the very lamport/producer written
+		// to the entity. Moving the stamp after accept must not cost this.
+		let deltas: Vec<_> = g
+			.read()
+			.drain_pending_deltas()
+			.into_iter()
+			.filter(|d| d.target == 3)
+			.collect();
+		assert_eq!(
+			deltas.len(),
+			1,
+			"a placed entity gossips exactly one ValidUntil delta"
+		);
+		assert_eq!(deltas[0].object_id, id, "named for the placed entity");
+		assert_eq!(
+			(deltas[0].lamport, deltas[0].producer.as_str()),
+			(e.valid_until_lamport, e.valid_until_producer.as_str()),
+			"the delta carries the stamp that was written, not a second one"
+		);
+	}
+
+	// Same vector for both texts, so the dedup gates fire on content-identity the
+	// way a near-duplicate re-ingest does, without depending on an embedder.
+	const SURVIVOR: &str = "alpha beta gamma";
+	const NEAR_DUP: &str = "alpha beta gamma, restated";
+	const DUP_VEC: [f32; 3] = [1.0, 0.0, 0.0];
+
+	fn ingest_chunk(g: &Arc<RwLock<GraphGnn>>, text: &str, valid_until: Option<SystemTime>) -> usize {
+		let mut j = job("doc", 1.0);
+		j.config.valid_until = valid_until;
+		place_chunks(
+			g,
+			None,
+			None,
+			&j,
+			&[text.to_string()],
+			&[DUP_VEC.to_vec()],
+			"doc1",
+			0.95,
+		)
+	}
+
+	fn stored(g: &Arc<RwLock<GraphGnn>>, id: &str) -> Entity {
+		let gg = g.read();
+		let kid = gg
+			.kern_of_entity(id)
+			.expect("entity is indexed")
+			.to_string();
+		gg.loaded(&kid)
+			.and_then(|k| k.entities.get(id))
+			.expect("entity is stored")
+			.clone()
+	}
+
+	// Drains, so a test can ignore the deltas of its setup and read only its act.
+	fn valid_until_delta_ids(g: &Arc<RwLock<GraphGnn>>) -> Vec<String> {
+		g.read()
+			.drain_pending_deltas()
+			.into_iter()
+			.filter(|d| d.target == 3)
+			.map(|d| d.object_id)
+			.collect()
+	}
+
+	#[test]
+	fn dedup_onto_an_untimed_survivor_adopts_the_incoming_deadline() {
+		let deadline = SystemTime::now() + std::time::Duration::from_secs(3600);
+		let g = empty_graph();
+		ingest_chunk(&g, SURVIVOR, None);
+		let sid = util::content_hash(SURVIVOR);
+		assert_eq!(
+			stored(&g, &sid).valid_until,
+			None,
+			"survivor starts untimed"
+		);
+
+		ingest_chunk(&g, NEAR_DUP, Some(deadline));
+
+		assert_eq!(total_entity_count(&g), 1, "the near-duplicate deduped");
+		let s = stored(&g, &sid);
+		assert_eq!(
+			s.valid_until,
+			Some(deadline),
+			"min(∞, t) = t — a deduped ingest's retention reaches the survivor"
+		);
+		assert!(s.valid_until_lamport > 0, "stamped with a fresh lamport");
+		assert!(
+			!s.valid_until_producer.is_empty(),
+			"stamped with a producer"
+		);
+	}
+
+	#[test]
+	fn dedup_keeps_the_shorter_deadline_whichever_arrives_first() {
+		let hour = SystemTime::now() + std::time::Duration::from_secs(3600);
+		let month = SystemTime::now() + std::time::Duration::from_secs(30 * 86_400);
+		let sid = util::content_hash(SURVIVOR);
+
+		let g = empty_graph();
+		ingest_chunk(&g, SURVIVOR, Some(hour));
+		let before = stored(&g, &sid);
+		ingest_chunk(&g, NEAR_DUP, Some(month));
+		let after = stored(&g, &sid);
+		assert_eq!(
+			after.valid_until,
+			Some(hour),
+			"a longer incoming TTL must not extend the survivor — min, not last-writer"
+		);
+		assert_eq!(
+			after.valid_until_lamport, before.valid_until_lamport,
+			"no re-stamp when the deadline does not move"
+		);
+
+		let g2 = empty_graph();
+		ingest_chunk(&g2, SURVIVOR, Some(month));
+		ingest_chunk(&g2, NEAR_DUP, Some(hour));
+		assert_eq!(
+			stored(&g2, &sid).valid_until,
+			Some(hour),
+			"min is commutative — arrival order cannot change the outcome"
+		);
+	}
+
+	#[test]
+	fn dedup_without_retention_leaves_the_survivor_deadline_alone() {
+		let hour = SystemTime::now() + std::time::Duration::from_secs(3600);
+		let g = empty_graph();
+		ingest_chunk(&g, SURVIVOR, Some(hour));
+		let sid = util::content_hash(SURVIVOR);
+		let before = stored(&g, &sid);
+
+		valid_until_delta_ids(&g);
+		ingest_chunk(&g, NEAR_DUP, None);
+
+		let after = stored(&g, &sid);
+		assert_eq!(
+			after.valid_until,
+			Some(hour),
+			"min(t, ∞) = t — omitting retention is no opinion, not 'make this permanent'"
+		);
+		assert_eq!(after.valid_until_lamport, before.valid_until_lamport);
+		assert_eq!(after.valid_until_producer, before.valid_until_producer);
+		assert!(
+			valid_until_delta_ids(&g).is_empty(),
+			"an unchanged deadline gossips nothing"
+		);
+	}
+
+	#[test]
+	fn a_tightening_dedup_queues_one_delta_against_the_survivor_only() {
+		let deadline = SystemTime::now() + std::time::Duration::from_secs(3600);
+		let g = empty_graph();
+		ingest_chunk(&g, SURVIVOR, None);
+		valid_until_delta_ids(&g);
+
+		ingest_chunk(&g, NEAR_DUP, Some(deadline));
+
+		let ids = valid_until_delta_ids(&g);
+		assert_eq!(
+			ids,
+			vec![util::content_hash(SURVIVOR)],
+			"exactly one ValidUntil delta, named for the survivor"
+		);
+		assert!(
+			!ids.contains(&util::content_hash(NEAR_DUP)),
+			"no orphan delta for the id that never entered the graph"
+		);
+	}
+
+	#[test]
+	fn the_second_dedup_gate_tightens_too_and_orphans_no_delta() {
+		let deadline = SystemTime::now() + std::time::Duration::from_secs(3600);
+		let g = empty_graph();
+		ingest_chunk(&g, SURVIVOR, None);
+		let sid = util::content_hash(SURVIVOR);
+
+		// Hide the survivor from `find_duplicate` (which reads entity_idx alone)
+		// while leaving it visible to accept_with_dedup's wider scan — the exact
+		// shape that walks past gate 1 into commit_entity's dup branch.
+		{
+			let mut gg = g.write();
+			gg.entity_idx.delete(&sid);
+			gg.gnn_entity_idx.insert(sid.clone(), DUP_VEC.to_vec());
+		}
+		valid_until_delta_ids(&g);
+
+		let placed = ingest_chunk(&g, NEAR_DUP, Some(deadline));
+		assert_eq!(placed, 1);
+		assert_eq!(
+			total_entity_count(&g),
+			1,
+			"gate 2 deduped — the incoming entity was dropped"
+		);
+
+		let s = stored(&g, &sid);
+		assert_eq!(
+			s.valid_until,
+			Some(deadline),
+			"the second gate carries the retention as well"
+		);
+		assert!(s.valid_until_lamport > 0, "stamped with a fresh lamport");
+		assert!(
+			!s.valid_until_producer.is_empty(),
+			"stamped with a producer"
+		);
+		assert_eq!(
+			valid_until_delta_ids(&g),
+			vec![sid],
+			"one delta, against the survivor — never the discarded incoming id"
 		);
 	}
 

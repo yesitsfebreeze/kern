@@ -127,11 +127,11 @@ root fan-out is already O(gravitons). The remaining scaling question is the
 per-parent fan-out itself, not an index.
 
 Unnamed children are **not** unbounded on the routing path: `route_entity` goes
-through `get_or_spawn_unnamed_child` (`src/base/accept.rs:539`), which reuses the
+through `get_or_spawn_unnamed_child` (`src/base/accept.rs:629`), which reuses the
 single holding-pen child and auto-loads an evicted one rather than respawning it
-(three tests hold the line, `src/base/accept.rs:839`, `:894`). Growth comes only
+(three tests hold the line, `src/base/accept.rs:919`, `:894`). Growth comes only
 from tick clustering, which deliberately spawns one *distinct* child per
-spawnable cluster (`spawn_child_clusters`, `src/tick.rs:195`) — bounded per pass
+spawnable cluster (`spawn_child_clusters`, `src/tick.rs:196`) — bounded per pass
 by the cluster count, not by anything per parent.
 
 ---
@@ -323,7 +323,7 @@ and cold tier live together. Readers never block, writers serialize.
 
 **Gaps.** Single-writer is enforced, not assumed — `src/base/lock.rs` is an advisory
 lock `reembed`, `gc` and `compact` claim or refuse — but `cmd_hub_merge`
-(`src/commands/admin.rs:648`) and `maybe_self_heal_store` (`src/commands.rs:437`)
+(`src/commands/admin.rs:746`) and `maybe_self_heal_store` (`src/commands.rs:437`)
 still `save_graph_unguarded` holding none. No WAL but LMDB's; compaction is offline.
 
 ---
@@ -385,15 +385,31 @@ Nothing is lost on an LLM outage — the delta stays queued until it succeeds.
   `intake::drain_now` flushed through the same guarded retry as `cmd_ingest`.
   Both share `drain_once` with the daemon loop, and both print the same tail.
 
-**Where.** `src/ingest/*` (3376 LoC, 13 files). Spawned by `spawn_intake`
+**Where.** `src/ingest/*` (3583 LoC, 13 files). Spawned by `spawn_intake`
 (`src/commands.rs`); driven manually by `src/commands/intake_cmd.rs`.
 
+A **deduped** ingest carries its retention too. `accept::merge_valid_until` is
+the one place a `valid_until` decision is written, and all three placement
+outcomes reach it: the `find_duplicate` gate in `place.rs` and `commit_entity`'s
+`dup` branch in `accept.rs` both funnel through `merge_duplicate`, and a fresh
+placement calls it directly *after* accept, on the id that actually entered the
+graph. The rule is `min` with `None` as +∞ (`accept::resolve_valid_until`): a
+TTL bounds a lifetime, so merging two bounds keeps the **lower** one, which is
+commutative and idempotent and therefore converges under any replay order. A
+fresh lamport/producer is stamped and a `ValidUntil` delta queued only when the
+stored deadline actually moves or was never stamped, and always against the
+**survivor's** id — the discarded incoming entity never gossips one. **Known
+cost:** ingest can only ever *shorten* a deadline. There is no way to lengthen
+one through ingest; that needs an explicit update path, or `forget` +
+re-ingest.
+
 **Gaps.** Distill prompt is one-shot; long deltas may truncate. No per-kind
-prompt tuning. Dedup threshold is global, not per-kind. Retention reaches an
-entity only when one is *created*: the `.txt` distillation path and the file
-watcher offer no retention, there is no `kern.toml` default for it, and a
-retention-carrying ingest that lands on `find_duplicate` merges into the
-existing entity without touching its `valid_until` (ROADMAP items 88-90).
+prompt tuning. Dedup threshold is global, not per-kind. Retention still reaches
+only two of four entrances — the `.txt` distillation path and the file watcher
+offer no retention, and there is no `kern.toml` default for it (ROADMAP item
+89) — and `DirectJob` carries `valid_until` but drops `valid_from` (item 90).
+Separately, a dedup caught by the *second* gate is mis-reported as `committed`
+and leaves the discarded id in the lexical index (item 91).
 
 ---
 
@@ -566,7 +582,7 @@ Trained per-kern on the tick.
 Weights are per-kern, not shared across the tree. Link prediction only — no
 node-classification objective. *Corrected 2026-07-21:* a repeatedly failing
 propagation does **not** re-enqueue every tick. `GnnPropagate` is enqueued only
-when `do_cluster` did structural work (`if did_structural_work`, `src/tick.rs:168`),
+when `do_cluster` did structural work (`if did_structural_work`, `src/tick.rs:166`),
 so a quiescent kern retries nothing; the climbing `task_failures` count
 (`src/tick/gnn_propagate.rs:46`) is still the only visibility when it does.
 
@@ -588,7 +604,7 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 | `forget` | `tools_mutate.rs` | Remove a thought + cascade edges (Facts immune). |
 | `forget_by_source` | `tools_mutate.rs` | Remove every thought from one `(scheme, object_id)` — **all sections of it**, since `source_id` hashes the section and keying on one would forget a single chunk of a document. Cascades through the same `forget_entity`; refuses local Facts unless `force`, which is the ONLY bypass of the Fact guard and is never implicit. Returns `removed_entities`/`removed_edges`/`kept_facts` — the last so a refused Fact is reported rather than read as "nothing was there". Exists so `kern forget --source` has somewhere to route. |
 | `degrade` | `tools_mutate.rs` | Down-weight edges along a bad retrieval path (`DEGRADE_*` decay). Returns `decayed_edges` and `removed_edges` — the reap count exists so a CLI `degrade` routed through the daemon can print what the local path prints. |
-| `move` | `tools_mutate.rs:377` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
+| `move` | `tools_mutate.rs:389` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
 | `health` | `tools_admin.rs:83` | Graph stats (gravitons/kerns/entities/reasons/unnamed/claim_kinds) **plus the degradation surface**: `queue_depth`, `tasks_done`, `task_avg_ms`, `task_panics`, `last_task_panic`, `task_failures`, `last_task_failure`, `cold_evicted`, `embed_model`, `embed_dim`, `embed_mismatch` (`Server::health_stats`, `src/mcp.rs`). |
 | `graviton` | `tools_admin.rs` | list/add/remove focus attractors (name + text — phrase or full document — + optional mass). Replaced the single per-kern "purpose". |
 | `claim_kind` | `tools_admin.rs` | register/remove claim kinds; registered kinds extend the built-in distill set. |
@@ -657,9 +673,10 @@ reads as zero.
 ## 14. CLI — `active`
 
 **What.** The `kern` binary. Reads the on-disk graph directly (can race a live
-daemon — prefer MCP for live state). Four commands are the exceptions when a
-daemon serves: `forget` and `degrade` hand it the write, and `get` and `query`
-take their read from it.
+daemon — prefer MCP for live state). Nine commands are the exceptions when a
+daemon serves: `forget`, `degrade`, `intake drain`, `graviton add`,
+`graviton remove`, `claim-kind add` and `claim-kind rm` hand it the write, and
+`get` and `query` take their read from it.
 
 **Subcommands** (`Commands` enum, `src/commands.rs`): `ingest`, `query`,
 `search`, `reembed`, `get`, `list`, `forget [ID | --source <scheme>://<object_id>
@@ -674,11 +691,16 @@ Notable:
 
 - **Daemon-first writes** (`src/commands/route.rs`) — `route(name, args)` probes
   `Endpoint::kern()` once, never spawns, and answers `Done` / `Refused` /
-  `NoDaemon`. `forget` and `degrade` take it: while a daemon serves, the
+  `NoDaemon`. `forget`, `degrade`, `graviton add`/`remove` and `claim-kind
+  add`/`rm` take it (the last four via `graviton_at`/`claim_kind_at`,
+  `src/commands/admin.rs`, which take the endpoint the way `route_to` does so
+  the routed path is reachable from a test): while a daemon serves, the
   mutation lands in its live in-memory graph over `call_tool` instead of in a
   second copy this process opened, and a daemon that refuses is reported rather
   than retried against the store behind it. No daemon -> the pre-existing local
-  path runs, printing through the same printer so the two cannot drift.
+  path runs, printing through the same printer so the two cannot drift. The
+  graviton add routes before it embeds: the daemon embeds with its own client,
+  so a local embed first would spend a model call on a vector nobody keeps.
 
 - **Daemon-first reads** (same route, `query` tool) — `get` (`cmd_get`,
   `graph_ops.rs`) and `query` (`cmd_query`, `query.rs`) route before they touch
@@ -1329,8 +1351,12 @@ Ranked by leverage:
 5. **CLI vs daemon race, serving half** — the destructive half is closed:
    `src/base/lock.rs` is an advisory writer lock and `reembed`/`compact`/`gc`
    refuse while a daemon holds it, with `kern status` reporting the holder. The
-   route decided for the rest exists (`src/commands/route.rs`) and `forget` and
-   `degrade` take it. `kern mcp`'s standalone fallback — the last long-lived
+   route decided for the rest exists (`src/commands/route.rs`) and `forget`,
+   `degrade`, `graviton add`/`remove` and `claim-kind add`/`rm` take it — the
+   last four closed 2026-07-21, and they were the ones that mattered most: with
+   no routing at all they reached `with_graph`, which writes the whole kern map
+   back unguarded over whatever the daemon had committed. `kern mcp`'s
+   standalone fallback — the last long-lived
    second writer, and one no probe can see — now claims the same lock before it
    reads the graph and refuses to boot beside a holder (`claim_standalone`,
    `src/commands/mcp_cmd.rs`). The read side is done: `get` and `query` route
