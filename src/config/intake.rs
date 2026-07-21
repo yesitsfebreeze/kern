@@ -68,5 +68,4 @@ mod tests {
 			"disabled intake ignores its poll interval"
 		);
 	}
-
 }

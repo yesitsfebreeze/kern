@@ -94,7 +94,6 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, StoreError> {
 	Ok(v)
 }
 
-
 // Do NOT persist QuantizedVec directly — its skip_serializing_if desyncs
 // positional bincode. Every field here is always present.
 #[derive(Serialize, Deserialize)]
@@ -239,7 +238,6 @@ impl StoredKern {
 		kern
 	}
 }
-
 
 // Identity of the model that produced the stored vectors. A query embedded by a
 // different model scores as noise against them — cosine truncates to the shorter

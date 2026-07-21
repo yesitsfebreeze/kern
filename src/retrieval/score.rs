@@ -994,6 +994,10 @@ mod query_filter_tests {
 	fn a_never_accessed_thought_is_not_throttled() {
 		let mut e = ent("fresh", EntityKind::Claim, file_src("/a")).entity;
 		assert!(e.accessed_at.is_none(), "precondition");
-		assert!(stamp_access(&mut e, SystemTime::now(), &HeatConfig::default()));
+		assert!(stamp_access(
+			&mut e,
+			SystemTime::now(),
+			&HeatConfig::default()
+		));
 	}
 }

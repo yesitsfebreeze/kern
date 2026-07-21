@@ -31,7 +31,8 @@ pub(super) async fn cmd_query(cfg: &crate::config::Config, params: QueryParams<'
 
 	let mode = crate::retrieval::seed::Mode::parse(mode);
 
-	let result = crate::retrieval::query::query(&g, &cfg.retrieval, &cfg.heat, &vec, text, mode, None);
+	let result =
+		crate::retrieval::query::query(&g, &cfg.retrieval, &cfg.heat, &vec, text, mode, None);
 	// No save: read-only — access/heat bumps land on cloned result entities, and
 	// persisting would risk clobbering a daemon's newer on-disk state.
 

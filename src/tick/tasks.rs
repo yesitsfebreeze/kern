@@ -423,13 +423,10 @@ pub fn do_resolve(
 	let broadcast_data = if bq.is_some() {
 		let graph = g.read();
 		graph.loaded(kern_id).and_then(|kern| {
-			kern.reasons.get(rid).map(|r| {
-				(
-					r.id.clone(),
-					r.vector.clone(),
-					r.text.clone(),
-				)
-			})
+			kern
+				.reasons
+				.get(rid)
+				.map(|r| (r.id.clone(), r.vector.clone(), r.text.clone()))
 		})
 	} else {
 		None
