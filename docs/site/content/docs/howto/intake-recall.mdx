@@ -149,9 +149,25 @@ enabled = true              # set false to opt out of self-learning entirely
 dir = ".kern/intake"       # intake directory, cwd-relative
 poll_secs = 5               # drain cadence
 done_retention_secs = 604800
+retention_secs = 0          # TTL on what this queue ingests; 0 = never expires
 ```
 
 `poll_secs = 0` rejected by the validator (busy-loop).
+
+`retention_secs` is the standing per-source policy behind `kern ingest
+--retention-secs`: "everything dropped in this queue expires in 30 days"
+(`2592000`), said once instead of per call. It becomes a `valid_until` on the
+entity — distinct from `done_retention_secs`, which prunes the archived *files*
+in `done/`. The file watcher has the same key for the same reason:
+
+```toml
+[watcher]
+enabled = true
+retention_secs = 0          # TTL on every watched file this ingests
+```
+
+Both live here rather than in `[ingest]` because that section is preset-owned
+and a user `kern.toml` is refused for setting it.
 
 ---
 

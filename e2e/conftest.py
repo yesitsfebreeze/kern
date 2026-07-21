@@ -55,7 +55,7 @@ class KernProject:
 		}
 		self._children = []
 
-	def write_config(self, data_dir=None, intake_enabled=True):
+	def write_config(self, data_dir=None, intake_enabled=True, intake_retention_secs=0):
 		"""(Re)write the project kern.toml. `data_dir` is cwd-relative.
 
 		Config is read once per process, at startup — so rewriting this while a
@@ -64,13 +64,20 @@ class KernProject:
 
 		`intake_enabled=False` stops the daemon spawning its own intake poll
 		loop; `kern intake drain` ignores the flag, being an explicit request.
+
+		`intake_retention_secs` is the standing per-source TTL for everything
+		that queue ingests. It is omitted when 0 so the default config text —
+		what every other test loads — stays exactly what it was.
 		"""
 		head = f'data_dir = "{data_dir}"\n\n' if data_dir else ""
+		ttl = (
+			f"retention_secs = {intake_retention_secs}\n" if intake_retention_secs else ""
+		)
 		(self.cwd / ".kern" / "kern.toml").write_text(
 			f"{head}"
 			f'[embed]\nurl = "{self.llm_url}"\nmodel = "fake-embed"\n\n'
 			f'[reason]\nurl = "{self.llm_url}"\nmodel = "fake-reason"\n\n'
-			f"[intake]\nenabled = {str(intake_enabled).lower()}\n\n"
+			f"[intake]\nenabled = {str(intake_enabled).lower()}\n{ttl}\n"
 		)
 
 	def run(self, *args, timeout=120):

@@ -187,6 +187,8 @@ async fn drain_entry(
 			section: String::new(),
 			title: format!("session://{}", c.kind),
 		};
+		// The clone carries the queue's standing `valid_until`; only the lower
+		// bound is per-claim, because only that one the distiller can know.
 		let mut claim_cfg = cfg.clone();
 		claim_cfg.valid_from = c.valid_from;
 		let outcome = worker
@@ -249,13 +251,15 @@ pub async fn drain_now(
 	llm: Option<&LlmFunc>,
 	extra_kinds: &[String],
 	dedup_threshold: f64,
+	retention_secs: u64,
 	done_retention: Duration,
 	now: SystemTime,
 ) -> usize {
 	let cfg = crate::ingest::Config {
 		dedup_threshold,
 		..Default::default()
-	};
+	}
+	.with_retention(retention_secs);
 	drain_once(
 		intake_dir,
 		&intake_dir.join("done"),
@@ -300,22 +304,28 @@ async fn drain_once(
 	archived
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
 	intake_dir: PathBuf,
 	worker: Arc<Worker>,
 	llm: Option<LlmFunc>,
 	claim_kinds: Option<ClaimKindsFn>,
 	dedup_threshold: f64,
+	retention_secs: u64,
 	interval: Duration,
 	done_retention: Duration,
 ) {
 	let _ = std::fs::create_dir_all(&intake_dir);
 	let done = intake_dir.join("done");
-	let cfg = crate::ingest::Config {
-		dedup_threshold,
-		..Default::default()
-	};
 	loop {
+		// Per pass, not once above the loop: this daemon outlives its deltas, and
+		// a deadline resolved at startup would give a transcript dropped a month
+		// from now a TTL that already expired.
+		let cfg = crate::ingest::Config {
+			dedup_threshold,
+			..Default::default()
+		}
+		.with_retention(retention_secs);
 		let extra_kinds = claim_kinds.as_ref().map(|f| f()).unwrap_or_default();
 		drain_once(
 			&intake_dir,
@@ -562,6 +572,163 @@ mod tests {
 		let entities: usize = g.all().iter().map(|k| k.entities.len()).sum();
 		assert!(entities > 0, "the document reached the graph");
 
+		server.abort();
+	}
+
+	// The `.txt` distillation path used to build its per-claim config from the
+	// queue's config and then overwrite only `valid_from`, so a queue with a
+	// standing retention policy still produced claims that never expire.
+	#[tokio::test]
+	async fn a_queue_retention_reaches_the_distilled_claim() {
+		use crate::base::graph::GraphGnn;
+		use parking_lot::RwLock;
+
+		let app = axum::Router::new().route(
+			"/api/embed",
+			axum::routing::post(|_b: axum::Json<serde_json::Value>| async move {
+				axum::Json(serde_json::json!({ "embeddings": [[0.1, 0.2, 0.3]] }))
+			}),
+		);
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let addr = listener.local_addr().unwrap();
+		let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+		let embedder = crate::llm::Client::new_embed_only(&format!("http://{addr}"), "m", "");
+		let llm: LlmFunc =
+			Arc::new(|_p: &str| r#"[{"text":"the pager rotation is Ada's","kind":"fact"}]"#.to_string());
+		let graph = Arc::new(RwLock::new(GraphGnn::new()));
+		let worker = Arc::new(Worker::new(graph.clone(), embedder, None, None, None));
+
+		let dir = tempdir().unwrap();
+		let intake = dir.path().to_path_buf();
+		let delta = intake.join("sess-ttl.txt");
+		std::fs::write(&delta, "user: who is oncall\nassistant: Ada").unwrap();
+
+		let deadline = SystemTime::now() + Duration::from_secs(3600);
+		let cfg = crate::ingest::Config {
+			valid_until: Some(deadline),
+			..Default::default()
+		};
+		assert!(
+			drain_entry(
+				&delta,
+				&intake.join("done"),
+				&intake.join("failed"),
+				&worker,
+				Some(&llm),
+				&[],
+				&cfg,
+			)
+			.await,
+			"the transcript committed"
+		);
+
+		let g = graph.read();
+		let deadlines: Vec<Option<SystemTime>> = g
+			.all()
+			.iter()
+			.flat_map(|k| k.entities.values().map(|e| e.valid_until))
+			.collect();
+		assert!(!deadlines.is_empty(), "the claim reached the graph");
+		assert!(
+			deadlines.iter().all(|v| *v == Some(deadline)),
+			"every distilled claim carries the queue's deadline, got {deadlines:?}"
+		);
+
+		server.abort();
+	}
+
+	// Where `with_retention` is called matters more than what it returns, and no
+	// test of the conversion itself can see that. Built once above the loop —
+	// where this config lived until now — a daemon would hand every transcript
+	// it ever sees a deadline measured from boot, so a queue configured for 30
+	// days would expire month-old and minute-old deltas at the same instant.
+	// Two passes a beat apart must therefore stamp two different deadlines.
+	#[tokio::test]
+	async fn the_poll_loop_resolves_its_deadline_per_pass_not_once_at_startup() {
+		use crate::base::graph::GraphGnn;
+		use parking_lot::RwLock;
+
+		// Distinct vectors per text: a constant embedding makes the second claim
+		// a near-duplicate of the first, and it never lands as its own entity.
+		let app = axum::Router::new().route(
+			"/api/embed",
+			axum::routing::post(|b: axum::Json<serde_json::Value>| async move {
+				let v = if b.0.to_string().contains("alpha") {
+					[1.0, 0.0, 0.0]
+				} else {
+					[0.0, 1.0, 0.0]
+				};
+				axum::Json(serde_json::json!({ "embeddings": [v] }))
+			}),
+		);
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let addr = listener.local_addr().unwrap();
+		let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+		let embedder = crate::llm::Client::new_embed_only(&format!("http://{addr}"), "m", "");
+		let llm: LlmFunc = Arc::new(|p: &str| {
+			let which = if p.contains("alpha") { "alpha" } else { "beta" };
+			format!(r#"[{{"text":"the {which} rotation is Ada's","kind":"fact"}}]"#)
+		});
+		let graph = Arc::new(RwLock::new(GraphGnn::new()));
+		let worker = Arc::new(Worker::new(graph.clone(), embedder, None, None, None));
+
+		// Distinct `valid_until`s, polled: the drain is a background loop, so the
+		// commit is observed rather than awaited.
+		async fn deadlines_reaching(g: &Arc<RwLock<GraphGnn>>, n: usize) -> Vec<SystemTime> {
+			let cap = std::time::Instant::now() + Duration::from_secs(10);
+			loop {
+				let mut got: Vec<SystemTime> = g
+					.read()
+					.all()
+					.iter()
+					.flat_map(|k| k.entities.values().filter_map(|e| e.valid_until))
+					.collect();
+				got.sort();
+				got.dedup();
+				if got.len() >= n || std::time::Instant::now() > cap {
+					return got;
+				}
+				tokio::time::sleep(Duration::from_millis(20)).await;
+			}
+		}
+
+		let dir = tempdir().unwrap();
+		let intake = dir.path().to_path_buf();
+		std::fs::write(intake.join("a.txt"), "user: q\nassistant: alpha").unwrap();
+
+		let drain = tokio::spawn(run(
+			intake.clone(),
+			worker.clone(),
+			Some(llm),
+			None,
+			0.9,
+			3600,
+			Duration::from_millis(50),
+			Duration::from_secs(3600),
+		));
+
+		let first = deadlines_reaching(&graph, 1).await;
+		assert_eq!(
+			first.len(),
+			1,
+			"the first transcript's claim reached the graph"
+		);
+
+		tokio::time::sleep(Duration::from_secs(2)).await;
+		std::fs::write(intake.join("b.txt"), "user: q\nassistant: beta").unwrap();
+		let both = deadlines_reaching(&graph, 2).await;
+
+		assert_eq!(both.len(), 2, "two passes, two deadlines — got {both:?}");
+		let gap = both[1].duration_since(both[0]).unwrap();
+		assert!(
+			gap >= Duration::from_secs(1),
+			"a transcript queued two seconds later must expire two seconds later; \
+			 the deadlines are {gap:?} apart, which is a config built once at startup"
+		);
+
+		drain.abort();
 		server.abort();
 	}
 

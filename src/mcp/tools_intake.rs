@@ -30,6 +30,7 @@ impl Server {
 			llm_fn.as_ref(),
 			&extra_kinds,
 			self.cfg.ingest.dedup_threshold,
+			self.cfg.intake.retention_secs,
 			Duration::from_secs(self.cfg.intake.done_retention_secs),
 			SystemTime::now(),
 		));

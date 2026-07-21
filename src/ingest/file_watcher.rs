@@ -27,11 +27,22 @@ fn strip_file_uri(uri: &str) -> String {
 #[derive(Clone)]
 pub struct KernFileWatcherSink {
 	worker: Arc<Worker>,
+	retention_secs: u64,
 }
 
 impl KernFileWatcherSink {
-	pub fn new(worker: Arc<Worker>) -> Self {
-		Self { worker }
+	pub fn new(worker: Arc<Worker>, retention_secs: u64) -> Self {
+		Self {
+			worker,
+			retention_secs,
+		}
+	}
+
+	// Per record, never once at construction: this sink lives as long as the
+	// daemon, and a deadline resolved at startup would give a file edited a
+	// month later a TTL measured from boot.
+	fn ingest_config(&self) -> IngestRunConfig {
+		IngestRunConfig::default().with_retention(self.retention_secs)
 	}
 }
 
@@ -67,7 +78,7 @@ impl IngestSink for KernFileWatcherSink {
 			EntityKind::Document,
 			hint,
 			1.0,
-			IngestRunConfig::default(),
+			self.ingest_config(),
 		);
 	}
 }
@@ -265,6 +276,77 @@ mod tests {
 				.any(|p| target_str.ends_with(p) || p.ends_with("note.md")),
 			"expected stored path to reference note.md; got {paths:?}"
 		);
+	}
+
+	// The sink used to hand the worker `IngestRunConfig::default()` outright, so
+	// a `[watcher] retention_secs` had nowhere to land and every watched file
+	// became a document that never expires.
+	#[tokio::test]
+	async fn the_sink_stamps_the_configured_retention_on_what_it_ingests() {
+		let app = axum::Router::new().route(
+			"/api/embed",
+			axum::routing::post(|_b: axum::Json<serde_json::Value>| async move {
+				axum::Json(serde_json::json!({ "embeddings": [[0.1, 0.2, 0.3]] }))
+			}),
+		);
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let addr = listener.local_addr().unwrap();
+		let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+		let g = Arc::new(RwLock::new(GraphGnn::new()));
+		let embedder = crate::llm::Client::new_embed_only(&format!("http://{addr}"), "m", "");
+		let worker = Arc::new(crate::ingest::Worker::new(
+			g.clone(),
+			embedder,
+			None,
+			None,
+			None,
+		));
+		let sink = KernFileWatcherSink::new(worker.clone(), 3600);
+
+		let before = SystemTime::now();
+		sink
+			.ingest(IngestRecord {
+				source_uri: "file:///tmp/ttl.rs".to_string(),
+				content: "fn expires() {}".to_string(),
+				language_hint: Some("rust".to_string()),
+			})
+			.await;
+
+		// `enqueue` is fire-and-forget by design, so the commit is observed, not awaited.
+		let mut deadlines = Vec::new();
+		let cap = std::time::Instant::now() + Duration::from_secs(5);
+		while std::time::Instant::now() < cap {
+			deadlines = g
+				.read()
+				.kerns
+				.values()
+				.flat_map(|k| k.entities.values().map(|e| e.valid_until))
+				.collect();
+			if !deadlines.is_empty() {
+				break;
+			}
+			sleep(Duration::from_millis(25)).await;
+		}
+
+		assert!(!deadlines.is_empty(), "the watched file reached the graph");
+		for got in &deadlines {
+			let got = got.expect("a configured retention is a deadline, not None");
+			assert!(
+				got >= before + Duration::from_secs(3600),
+				"the deadline is resolved per record, not hardcoded to None"
+			);
+		}
+
+		assert_eq!(
+			KernFileWatcherSink::new(worker, 0)
+				.ingest_config()
+				.valid_until,
+			None,
+			"…while an unconfigured watcher still ingests with no TTL",
+		);
+
+		server.abort();
 	}
 
 	#[tokio::test]
