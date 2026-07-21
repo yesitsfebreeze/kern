@@ -147,6 +147,9 @@ pub fn start_announce(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 	});
 }
 
+const QUESTION_RATE_WARN_SECS: u64 = 300;
+static QUESTION_RATE_WARN: LogThrottle = LogThrottle::new(QUESTION_RATE_WARN_SECS);
+
 // Rows per heartbeat. Hard-coded rather than tuned: with no divergence estimate
 // there is nothing to tune it against, and batch size is part of the anti-entropy
 // question in `ROADMAP.md`, not a knob to guess at here.
@@ -305,6 +308,23 @@ fn handle_question(d: &Deps, msg: GossipMessage) {
 	};
 
 	if question.reason_vec.is_empty() {
+		return;
+	}
+
+	// SECURITY: answering tells the peer we hold something above the resolve
+	// threshold for a vector THEY chose. That is a membership oracle, and the
+	// content never has to be sent for it to leak. A budget makes bulk extraction
+	// expensive; only an authenticated identity (item 33) can refuse outright.
+	if !d.node.question_rate.allow(&msg.origin) {
+		if QUESTION_RATE_WARN.allow() {
+			tracing::warn!(
+				target: "kern.gossip",
+				origin = %msg.origin,
+				total_refused = d.node.question_rate.refused(),
+				"peer exceeded its question budget; probes refused \
+				 (further refusals counted, not logged)"
+			);
+		}
 		return;
 	}
 
@@ -1120,6 +1140,48 @@ mod tests {
 		assert!(
 			hottest_local(&g, 0).is_empty(),
 			"a zero batch must return nothing, not underflow select_nth"
+		);
+	}
+	#[test]
+	fn a_flood_of_questions_from_one_peer_is_refused() {
+		use crate::base::types::Entity;
+		use crate::gossip::rate::GOSSIP_QUESTION_PER_MIN;
+		let mut graph = GraphGnn::new();
+		let root = graph.root.id.clone();
+		{
+			let k = graph.kerns.get_mut(&root).expect("root");
+			let mut e = Entity {
+				id: "held".into(),
+				vector: vec![1.0, 0.0],
+				..Default::default()
+			};
+			e.gnn_vector = e.vector.clone();
+			k.entities.insert("held".into(), e);
+		}
+		graph.index_entity("held", &root);
+		graph.rebuild_index();
+		let g = Arc::new(RwLock::new(graph));
+		let d = mk_deps(g.clone());
+
+		let probe = |i: usize| GossipMessage {
+			kind: GossipKind::Question,
+			id: format!("q{i}"),
+			origin: "prober:1".into(),
+			payload: GossipPayload::Question(QuestionPayload {
+				reason_id: format!("r{i}"),
+				from_id: String::new(),
+				reason_vec: vec![1.0, 0.0],
+				question_text: String::new(),
+			}),
+		};
+
+		let before = d.node.question_rate.refused();
+		for i in 0..(GOSSIP_QUESTION_PER_MIN as usize + 20) {
+			handle_question(&d, probe(i));
+		}
+		assert!(
+			d.node.question_rate.refused() > before,
+			"an unbounded membership oracle is extractable in bulk"
 		);
 	}
 }

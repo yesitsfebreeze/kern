@@ -10,6 +10,7 @@ use tokio::sync::watch;
 use crate::base::constants::*;
 
 use super::ledger::Ledger;
+use super::rate::{RateLimiter, GOSSIP_QUESTION_PER_MIN, GOSSIP_RATE_MAX_ORIGINS};
 use super::seen::SeenSet;
 use super::transport::{decode_msg, encode_msg, send_and_receive, send_msg};
 use super::types::*;
@@ -23,6 +24,8 @@ pub struct Node {
 	pub network_id: String,
 	peers: RwLock<Vec<String>>,
 	seen: SeenSet,
+	// Unauthenticated peers, so the only lever on the Question oracle is cost.
+	pub question_rate: RateLimiter,
 	pub ledger: Ledger,
 	lamport: AtomicU64,
 	handler: RwLock<Option<Handler>>,
@@ -41,6 +44,11 @@ impl Node {
 			network_id: network_id.to_string(),
 			peers: RwLock::new(peers),
 			seen: SeenSet::new(),
+			question_rate: RateLimiter::new(
+				GOSSIP_QUESTION_PER_MIN,
+				std::time::Duration::from_secs(60),
+				GOSSIP_RATE_MAX_ORIGINS,
+			),
 			ledger: Ledger::new(),
 			lamport: AtomicU64::new(0),
 			handler: RwLock::new(None),
