@@ -22,6 +22,11 @@ pub struct HealthStats {
 	// Entities GC could not age because their timestamp is in the future.
 	// Nonzero means compaction is stalled on a clock problem, not on policy.
 	pub clock_skew_skips: u64,
+	// Chunks dropped because embedding them failed — an empty graph caused by a
+	// dead endpoint rather than by an empty corpus.
+	pub ingest_dropped_chunks: u64,
+	// New remote ids refused because their phantom kern is at the entity cap.
+	pub remote_cap_dropped: u64,
 }
 
 pub fn graph_health_stats(g: &GraphGnn) -> HealthStats {
@@ -63,6 +68,8 @@ pub fn graph_health_stats(g: &GraphGnn) -> HealthStats {
 		query_dim_rejected: crate::base::search::query_dim_rejected(),
 		below_floor_deliveries: crate::retrieval::score::below_floor_deliveries(),
 		clock_skew_skips: crate::tick::stigmergy::clock_skew_skips(),
+		ingest_dropped_chunks: crate::ingest::worker::ingest_dropped_chunks(),
+		remote_cap_dropped: crate::base::merge::remote_cap_dropped(),
 	}
 }
 

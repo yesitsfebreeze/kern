@@ -62,10 +62,19 @@ pub(super) async fn cmd_health(cfg: &crate::config::Config) {
 	// Fail-open is the policy; invisible fail-open is the defect (ROADMAP item 7).
 	// Print the line only when something actually degraded, so a healthy kern stays
 	// quiet and a nonzero count is impossible to scroll past.
-	if h.query_dim_rejected > 0 || h.below_floor_deliveries > 0 || h.clock_skew_skips > 0 {
+	let degraded = h.query_dim_rejected
+		+ h.below_floor_deliveries
+		+ h.clock_skew_skips
+		+ h.ingest_dropped_chunks
+		+ h.remote_cap_dropped;
+	if degraded > 0 {
 		println!(
-			"degraded:    {} off-model queries dropped, {} below-floor deliveries, {} clock-skewed entities GC could not age",
-			h.query_dim_rejected, h.below_floor_deliveries, h.clock_skew_skips
+			"degraded:    {} off-model queries dropped, {} below-floor deliveries, {} clock-skewed entities GC could not age, {} chunks lost to embedding, {} remote ids refused at the cap",
+			h.query_dim_rejected,
+			h.below_floor_deliveries,
+			h.clock_skew_skips,
+			h.ingest_dropped_chunks,
+			h.remote_cap_dropped
 		);
 	}
 	for line in tick_health_lines(daemon_health().await.as_ref()) {

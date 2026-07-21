@@ -140,6 +140,8 @@ impl Server {
 			"query_dim_rejected": h.query_dim_rejected,
 			"below_floor_deliveries": h.below_floor_deliveries,
 			"clock_skew_skips": h.clock_skew_skips,
+			"ingest_dropped_chunks": h.ingest_dropped_chunks,
+			"remote_cap_dropped": h.remote_cap_dropped,
 		})
 	}
 }
@@ -376,6 +378,8 @@ mod tests {
 			"query_dim_rejected",
 			"below_floor_deliveries",
 			"clock_skew_skips",
+			"ingest_dropped_chunks",
+			"remote_cap_dropped",
 		] {
 			assert!(!h[key].is_null(), "{key} must reach the MCP surface");
 		}

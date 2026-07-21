@@ -91,6 +91,8 @@ impl KernRpc for KernRpcHandler {
 				query_dim_rejected: u64_at("query_dim_rejected"),
 				below_floor_deliveries: u64_at("below_floor_deliveries"),
 				clock_skew_skips: u64_at("clock_skew_skips"),
+				ingest_dropped_chunks: u64_at("ingest_dropped_chunks"),
+				remote_cap_dropped: u64_at("remote_cap_dropped"),
 				embed_model: str_at("embed_model"),
 				embed_dim: u64_at("embed_dim"),
 				embed_mismatch: payload

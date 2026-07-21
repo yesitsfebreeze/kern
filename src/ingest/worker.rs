@@ -7,6 +7,7 @@ use crate::ingest::outcome::{FailureReport, Outcome, OutcomeStatus};
 use crate::ingest::place::{place_chunks, place_document};
 use crate::ingest::split;
 use crate::llm::Client as LlmClient;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -147,7 +148,20 @@ fn outcome_log_severity(o: &Outcome) -> &'static str {
 	}
 }
 
+// Chunks a dead or failing embed endpoint cost us. A `Failed` job is logged at
+// error level, but a log is not a signal an operator can poll — and until now
+// nothing distinguished "the graph is empty because nothing was written" from
+// "the graph is empty because every write was dropped" (ROADMAP item 7).
+static INGEST_DROPPED: AtomicU64 = AtomicU64::new(0);
+
+pub fn ingest_dropped_chunks() -> u64 {
+	INGEST_DROPPED.load(Ordering::Relaxed)
+}
+
 fn log_outcome(o: &Outcome) {
+	if o.failed_chunks > 0 {
+		INGEST_DROPPED.fetch_add(o.failed_chunks as u64, Ordering::Relaxed);
+	}
 	let first_failure = o
 		.failures
 		.first()

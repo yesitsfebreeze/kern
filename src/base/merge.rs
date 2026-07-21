@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::base::log_throttle::LogThrottle;
 use std::time::SystemTime;
 
 use crate::base::constants;
@@ -133,6 +136,16 @@ pub fn merge_reason(local: &mut Reason, remote: &Reason) -> bool {
 	changed
 }
 
+const REMOTE_CAP_WARN_SECS: u64 = 300;
+static REMOTE_CAP_DROPPED: AtomicU64 = AtomicU64::new(0);
+static REMOTE_CAP_WARN: LogThrottle = LogThrottle::new(REMOTE_CAP_WARN_SECS);
+
+// New remote ids refused because their phantom kern is at the entity cap. Known
+// ids still merge, so nothing else distinguishes a capped peer from a quiet one.
+pub fn remote_cap_dropped() -> u64 {
+	REMOTE_CAP_DROPPED.load(Ordering::Relaxed)
+}
+
 // SECURITY: id owned by a DIFFERENT kern → reject (hijack); owned by none →
 // insert under a per-kern cap; already in target → CRDT-merge.
 pub fn merge_remote_entity(g: &mut GraphGnn, target_kern_id: &str, mut remote: Entity) -> bool {
@@ -180,12 +193,21 @@ pub fn merge_remote_entity(g: &mut GraphGnn, target_kern_id: &str, mut remote: E
 				return false;
 			};
 			if kern.entities.len() >= constants::GOSSIP_REMOTE_KERN_ENTITY_CAP {
-				tracing::warn!(
-					target: "kern.merge",
-					kern = %target_kern_id,
-					cap = constants::GOSSIP_REMOTE_KERN_ENTITY_CAP,
-					"remote kern at entity cap; dropping new remote entity"
-				);
+				// Known ids keep merging above the cap; only NEW ones are refused, so a
+				// peer at the ceiling looks healthy while its fresh knowledge silently
+				// never arrives. Unthrottled this warned once per dropped entity — a
+				// gossiping peer would flood the log it is supposed to be visible in.
+				let total = REMOTE_CAP_DROPPED.fetch_add(1, Ordering::Relaxed) + 1;
+				if REMOTE_CAP_WARN.allow() {
+					tracing::warn!(
+						target: "kern.merge",
+						kern = %target_kern_id,
+						cap = constants::GOSSIP_REMOTE_KERN_ENTITY_CAP,
+						total_dropped = total,
+						"remote kern at entity cap; dropping new remote entity \
+						 (further drops counted, not logged)"
+					);
+				}
 				return false;
 			}
 			let id = remote.id.clone();
@@ -871,6 +893,39 @@ mod tests {
 		assert_eq!(
 			local.valid_until,
 			Some(UNIX_EPOCH + Duration::from_secs(100))
+		);
+	}
+	#[test]
+	fn a_remote_id_refused_at_the_cap_is_counted() {
+		let mut g = GraphGnn::new();
+		let phantom = "remote-netC-cap";
+		g.register(Kern::new(phantom, &g.root.id));
+		{
+			let k = g.kerns.get_mut(phantom).expect("phantom kern");
+			for i in 0..constants::GOSSIP_REMOTE_KERN_ENTITY_CAP {
+				let id = format!("filler{i}");
+				k.entities.insert(
+					id.clone(),
+					Entity {
+						id,
+						..Default::default()
+					},
+				);
+			}
+		}
+
+		let before = remote_cap_dropped();
+		let fresh = Entity {
+			id: "brand-new".into(),
+			..Default::default()
+		};
+		let merged = merge_remote_entity(&mut g, phantom, fresh);
+
+		assert!(!merged, "a new id above the cap is refused");
+		assert_eq!(
+			remote_cap_dropped(),
+			before + 1,
+			"and the refusal is counted — a capped peer otherwise looks quiet"
 		);
 	}
 }
