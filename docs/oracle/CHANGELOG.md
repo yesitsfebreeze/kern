@@ -2,6 +2,43 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — the same sweep run against `FEATURES.md`, which the previous pass
+  did not walk. The last audit re-pointed the roadmap's anchors into
+  `FEATURES.md`; it never checked `FEATURES.md`'s own anchors into `src/`. They
+  had drifted hardest of anywhere in the repo, because `efd34aa` deleted the
+  store's compatibility path and every `src/base/store.rs` citation past that
+  point slid by 30-60 lines while still resolving: `Store::open` cited `:351`
+  landed on a blank line (really `:283`), `cold_search` cited `:685` landed on a
+  closing brace (`:629`), `cold_cap` `:712` (`:678`), `compact_dir` `:790`
+  (`:756`), `cold_evicted` `:752` (`:718`), `check_embed_stamp` `:473` (`:417`),
+  `flush_guarded` `:594` (`:538`). Thirty-six anchors corrected in `FEATURES.md`
+  and fifteen in `ROADMAP.md`, including the whole "Closed and
+  verified" block, whose proof-of-closure citations were the ones least likely to
+  be re-read and so the ones that had rotted furthest — `start_gossip` cited
+  `src/commands.rs:900-930` is at `:966-1040`, `do_resolve` cited `src/tick.rs:64`
+  lives in `src/tick/tasks.rs:372`, `MAX_AI_CONFIDENCE` cited `:62` is `:69`. A
+  closure whose evidence points at the wrong line is a closure nobody can check.
+
+  Two claims were false, not merely mis-pointed. **Item 37** opened with "no
+  per-peer rate limit anywhere"; `53af8ac` shipped one — a per-origin `Question`
+  budget (`src/gossip/rate.rs`, 30/min, checked at
+  `src/gossip/handler.rs:318`) — and item 34 already said so ten items above.
+  The item is narrowed to the true statement: the `Delta` path, which is the one
+  that takes the write lock, still has no budget. Its four full-corpus loops were
+  cited at `:378, 394, 407, 428`, none of which is a loop; they are `:432`,
+  `:448`, `:461` and `:482`, and two of the four go through `remote_kern_ids`
+  rather than `g.all_ids()` directly — the shape the item describes is right,
+  the evidence was pointing at a `pulse` call. **Item 27**'s heading still said
+  "three separate places" over a body that enumerates four costs with two closed.
+
+  The generalisation, recorded because it will recur: a docs anchor into a file
+  that shrank is more dangerous than one into a file that grew, since deletion
+  moves every following line at once and `docs_check.py` stays green throughout.
+  The check that catches it is not "does the line exist" but "does the line
+  contain the identifier the sentence names", and that is cheap to run.
+
+  Decided by: verify-before-claiming
+
 - 2026-07-21 — every citation in `ROADMAP.md` re-pointed at what it was cited
   for. `docs_check.py` proves a cited line **exists**; it cannot prove the line
   still **says** the thing. That gap had gone systemic: of the 23 distinct
