@@ -1,5 +1,6 @@
 use crate::base::graph::GraphGnn;
 use crate::base::log_throttle::LogThrottle;
+use crate::base::math::clamp_confidence;
 use crate::base::types::*;
 use crate::base::util;
 use crate::ingest::config::Config;
@@ -28,6 +29,11 @@ pub(crate) struct Job {
 	pub(crate) result_tx: Option<oneshot::Sender<Outcome>>,
 }
 
+// The ONLY place a Job is built, so `source_tag` is the one gate every producer
+// passes. The clamp lives here rather than at each producer because a producer
+// that forgot it is exactly the defect this closes (ROADMAP item 95): the file
+// watcher minted `1.0`, a posterior of 0.6667 — a human's, and above the 0.6500
+// a deliberate agent assertion gets.
 #[allow(clippy::too_many_arguments)]
 fn job(
 	text: String,
@@ -35,9 +41,14 @@ fn job(
 	kind: EntityKind,
 	hint: String,
 	confidence: f64,
+	source_tag: &str,
 	config: Config,
 	acl: Acl,
+	result_tx: Option<oneshot::Sender<Outcome>>,
 ) -> Job {
+	// The confidence only. `kind` stays the producer's: a watched file is a
+	// Document at 0.95, not the Claim the clamp's own classification would name.
+	let (confidence, _) = clamp_confidence(confidence, source_tag);
 	Job {
 		text,
 		source,
@@ -46,7 +57,7 @@ fn job(
 		confidence,
 		config,
 		acl,
-		result_tx: None,
+		result_tx,
 	}
 }
 
@@ -96,6 +107,7 @@ impl Worker {
 	// `None` = refused, queue full. A synchronous producer cannot wait on the LLM
 	// leg without becoming as slow as it, and there is no oldest job worth
 	// discarding for a newer one, so the newest is refused and the caller decides.
+	#[allow(clippy::too_many_arguments)]
 	pub fn enqueue(
 		&self,
 		text: String,
@@ -103,9 +115,19 @@ impl Worker {
 		kind: EntityKind,
 		hint: String,
 		confidence: f64,
+		source_tag: &str,
 		config: Config,
 	) -> Option<String> {
-		self.enqueue_with_acl(text, source, kind, hint, confidence, config, Acl::default())
+		self.enqueue_with_acl(
+			text,
+			source,
+			kind,
+			hint,
+			confidence,
+			source_tag,
+			config,
+			Acl::default(),
+		)
 	}
 
 	// `enqueue` plus the requesting principal's ACL. The plain form is this with
@@ -119,13 +141,16 @@ impl Worker {
 		kind: EntityKind,
 		hint: String,
 		confidence: f64,
+		source_tag: &str,
 		config: Config,
 		acl: Acl,
 	) -> Option<String> {
 		let doc_id = util::content_hash(&text);
 		if self
 			.tx
-			.try_send(job(text, source, kind, hint, confidence, config, acl))
+			.try_send(job(
+				text, source, kind, hint, confidence, source_tag, config, acl, None,
+			))
 			.is_err()
 		{
 			let total = QUEUE_REFUSED.fetch_add(1, Ordering::Relaxed) + 1;
@@ -146,6 +171,7 @@ impl Worker {
 	// refused. The file watcher is one: nothing is waiting on it, and its backlog
 	// is coalesced paths rather than job bodies, so stalling it is cheaper than
 	// losing a file that nothing will re-offer.
+	#[allow(clippy::too_many_arguments)]
 	pub async fn submit(
 		&self,
 		text: String,
@@ -153,13 +179,25 @@ impl Worker {
 		kind: EntityKind,
 		hint: String,
 		confidence: f64,
+		source_tag: &str,
 		config: Config,
 	) -> Option<String> {
 		let doc_id = util::content_hash(&text);
-		let job = job(text, source, kind, hint, confidence, config, Acl::default());
+		let job = job(
+			text,
+			source,
+			kind,
+			hint,
+			confidence,
+			source_tag,
+			config,
+			Acl::default(),
+			None,
+		);
 		self.tx.send(job).await.ok().map(|()| doc_id)
 	}
 
+	#[allow(clippy::too_many_arguments)]
 	pub async fn run(
 		&self,
 		text: String,
@@ -167,10 +205,20 @@ impl Worker {
 		kind: EntityKind,
 		hint: String,
 		confidence: f64,
+		source_tag: &str,
 		config: Config,
 	) -> Outcome {
 		self
-			.run_with_acl(text, source, kind, hint, confidence, config, Acl::default())
+			.run_with_acl(
+				text,
+				source,
+				kind,
+				hint,
+				confidence,
+				source_tag,
+				config,
+				Acl::default(),
+			)
 			.await
 	}
 
@@ -183,20 +231,22 @@ impl Worker {
 		kind: EntityKind,
 		hint: String,
 		confidence: f64,
+		source_tag: &str,
 		config: Config,
 		acl: Acl,
 	) -> Outcome {
 		let (result_tx, result_rx) = oneshot::channel();
-		let job = Job {
+		let job = job(
 			text,
 			source,
 			kind,
 			hint,
 			confidence,
+			source_tag,
 			config,
 			acl,
-			result_tx: Some(result_tx),
-		};
+			Some(result_tx),
+		);
 		if let Err(e) = self.tx.send(job).await {
 			return Outcome::failed(
 				"failed to enqueue",
@@ -437,6 +487,7 @@ mod tests {
 			EntityKind::Claim,
 			String::new(),
 			1.0,
+			"session",
 			Config::default(),
 		);
 		assert_eq!(doc_id, Some(util::content_hash(&text)));
@@ -469,6 +520,7 @@ mod tests {
 				EntityKind::Claim,
 				String::new(),
 				1.0,
+				"session",
 				Config::default(),
 			);
 			if got.is_some() {
@@ -540,24 +592,6 @@ mod tests {
 
 	const STUB_VEC: [f32; 3] = [0.1, 0.2, 0.3];
 
-	// Every text embeds to the same vector, so both dedup gates fire on content
-	// identity without depending on a live model.
-	fn fixed_vec_app() -> axum::Router {
-		axum::Router::new().route(
-			"/api/embed",
-			axum::routing::post(|body: axum::Json<serde_json::Value>| async move {
-				let n = body
-					.0
-					.get("input")
-					.and_then(|v| v.as_array())
-					.map(|a| a.len())
-					.unwrap_or(1);
-				let embs: Vec<Vec<f32>> = (0..n).map(|_| STUB_VEC.to_vec()).collect();
-				axum::Json(serde_json::json!({ "embeddings": embs }))
-			}),
-		)
-	}
-
 	fn job_for(text: &str) -> Job {
 		Job {
 			text: text.into(),
@@ -574,7 +608,8 @@ mod tests {
 	#[tokio::test]
 	async fn a_second_gate_dedup_reports_deduped_and_the_surviving_id() {
 		let graph = Arc::new(RwLock::new(GraphGnn::new()));
-		let (url, _server) = crate::test_support::spawn_http(fixed_vec_app()).await;
+		let (url, _server) =
+			crate::test_support::spawn_http(crate::test_support::fixed_vec_embed_app()).await;
 		let embedder = LlmClient::new_embed_only(&url, "m", "");
 
 		let first = job_for("alpha beta gamma");
@@ -619,6 +654,163 @@ mod tests {
 		);
 	}
 
+	// ROADMAP item 95. The clamp used to live at each producer, so a producer that
+	// forgot it minted an unclamped confidence — which is how the file watcher
+	// shipped a raw 1.0. The guard is now `job()`, and this enumerates EVERY
+	// public entry point rather than the one that was caught: a new method that
+	// builds a Job by hand is the same defect again, and this test is what a
+	// reviewer runs to see it.
+	#[test]
+	fn no_entry_point_can_mint_an_unclamped_confidence() {
+		let file = || Source::File {
+			path: "p".into(),
+			section: String::new(),
+			title: String::new(),
+			author: String::new(),
+			url: String::new(),
+		};
+		let build = |conf: f64, tag: &str| {
+			job(
+				"t".into(),
+				file(),
+				EntityKind::Document,
+				String::new(),
+				conf,
+				tag,
+				Config::default(),
+				Acl::default(),
+				None,
+			)
+		};
+
+		assert_eq!(
+			build(1.0, "file").confidence,
+			crate::base::constants::MAX_AI_CONFIDENCE,
+			"a non-user channel is capped, whatever it asked for"
+		);
+		assert_eq!(
+			build(1.0, crate::base::constants::AGENT_SOURCE).confidence,
+			crate::base::constants::MAX_AI_CONFIDENCE,
+		);
+		assert_eq!(
+			build(1.0, crate::base::constants::USER_SOURCE).confidence,
+			1.0,
+			"the one path with a human behind it keeps its 1.0"
+		);
+		assert_eq!(
+			build(crate::base::constants::MAX_AI_CONFIDENCE, "file").confidence,
+			crate::base::constants::MAX_AI_CONFIDENCE,
+			"idempotent: a producer that already clamped is not clamped twice"
+		);
+		assert_eq!(
+			build(1.0, "file").kind,
+			EntityKind::Document,
+			"the clamp takes the confidence only — a watched file stays a Document, \
+			 not the Claim clamp_confidence's own classification would name"
+		);
+	}
+
+	// The guard above is only a guard if every entrance walks through it. This
+	// drives the real methods against a real graph, so a future entrance that
+	// builds a `Job` by hand fails here rather than shipping a 1.0 the way the
+	// file watcher did.
+	#[tokio::test]
+	async fn every_public_entry_point_walks_through_the_clamp() {
+		let graph = Arc::new(RwLock::new(GraphGnn::new()));
+		let (url, _server) =
+			crate::test_support::spawn_http(crate::test_support::fixed_vec_embed_app()).await;
+		let worker = Worker::new(
+			graph.clone(),
+			LlmClient::new_embed_only(&url, "m", ""),
+			None,
+			None,
+			None,
+		);
+
+		// Every text embeds to the same stub vector, so the default threshold would
+		// merge the three entrances into one entity and hide two of them.
+		let no_dedup = Config {
+			dedup_threshold: 2.0,
+			..Config::default()
+		};
+		let file = || Source::File {
+			path: "p".into(),
+			section: String::new(),
+			title: String::new(),
+			author: String::new(),
+			url: String::new(),
+		};
+
+		worker
+			.run(
+				"entered through run".into(),
+				file(),
+				EntityKind::Document,
+				String::new(),
+				1.0,
+				"file",
+				no_dedup.clone(),
+			)
+			.await;
+		worker
+			.submit(
+				"entered through submit".into(),
+				file(),
+				EntityKind::Document,
+				String::new(),
+				1.0,
+				"file",
+				no_dedup.clone(),
+			)
+			.await;
+		worker.enqueue(
+			"entered through enqueue".into(),
+			file(),
+			EntityKind::Document,
+			String::new(),
+			1.0,
+			"file",
+			no_dedup,
+		);
+
+		let want = crate::base::constants::MAX_AI_CONFIDENCE;
+		let mut seen: Vec<(String, f64)> = Vec::new();
+		let cap = std::time::Instant::now() + std::time::Duration::from_secs(5);
+		while std::time::Instant::now() < cap {
+			seen = graph
+				.read()
+				.kerns
+				.values()
+				.flat_map(|k| {
+					k.entities
+						.values()
+						.map(|e| (e.statements.join(" "), e.conf_mean()))
+				})
+				.collect();
+			if seen.len() >= 3 {
+				break;
+			}
+			tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+		}
+
+		assert!(
+			seen.len() >= 3,
+			"all three entrances reached the graph, got {seen:?}"
+		);
+		for entrance in ["run", "submit", "enqueue"] {
+			let hit = seen
+				.iter()
+				.find(|(text, _)| text.contains(entrance))
+				.unwrap_or_else(|| panic!("{entrance} placed nothing; got {seen:?}"));
+			assert!(
+				(hit.1 - (1.0 + want) / 3.0).abs() < 1e-6,
+				"{entrance} minted an unclamped confidence: posterior {:.4}, want {:.4}",
+				hit.1,
+				(1.0 + want) / 3.0
+			);
+		}
+	}
+
 	#[tokio::test]
 	async fn run_assembles_a_failed_outcome_when_document_embedding_fails() {
 		let graph = Arc::new(RwLock::new(GraphGnn::new()));
@@ -631,6 +823,7 @@ mod tests {
 				EntityKind::Claim,
 				String::new(),
 				1.0,
+				"session",
 				Config::default(),
 			)
 			.await;

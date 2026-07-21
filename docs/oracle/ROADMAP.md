@@ -288,7 +288,7 @@ larger than the feature. The behaviour is pinned by
 **Still open, deliberately deferred:** does the file watcher give `Document`
 entities a tenant-default ACL, or leave them public? Recommend configurable,
 default public-within-tenant, since the tenant boundary is the process.
-`src/ingest/file_watcher.rs:150` hardcodes `Acl::default()` — which is that
+`src/ingest/file_watcher.rs:158` hardcodes `Acl::default()` — which is that
 recommended default — and `Worker::enqueue`'s public delegation keeps it there
 until the decision is made.
 
@@ -413,12 +413,13 @@ distinction nothing records.
 Nor does confidence stand in for it. `clamp_confidence`
 (`src/base/math.rs:201`) caps a non-`USER_SOURCE` write at `MAX_AI_CONFIDENCE`,
 which after `beta_params_from_confidence` (`src/ingest/place.rs:16`) is a 0.667
-against 0.650 posterior — a 2.6% edge over an MCP agent, and none at all over
-the file watcher, which submits `1.0` (`src/ingest/file_watcher.rs:77-83`)
-without passing through the clamp. The item's own headline — a user-authored
-claim outranking an auto-ingested one at equal heat — is therefore still false
-by default; `source_trust = { file = 0.8 }` is now the way to make it true, and
-it is the channel it penalises, not the author.
+against 0.650 posterior — a 2.6% edge over an MCP agent, and since item 95 the
+same 2.6% over the file watcher, whose `tag` is now its `source` `scheme`
+(`src/ingest/file_watcher.rs:80`) instead of a raw `1.0`. So the item's
+own headline — a user-authored claim outranking an auto-ingested one at equal
+heat — is true by default at last, but only by 2.6%, which is a rounding error
+rather than a trust model. `source_trust = { file = 0.8 }` is how to make it
+mean something, and it is the channel it penalises, not the author.
 
 The blocker is an author principal on `Entity`, stamped at each write path — a
 new field, so a store format bump, and it belongs with whoever holds
@@ -820,30 +821,48 @@ double-storage in finding 3 is the actual O(N) term.
 
 ### 95. The file watcher bypasses `clamp_confidence` entirely `[ingest]`
 
-`file_watcher.rs` calls `worker.submit(..., 1.0, ...)` and neither
-`Worker::submit` nor `run` nor `enqueue` contains a `clamp_confidence` call —
-verified by grep, not inferred. Every other minting path routes through it:
-`cmd_ingest` uses `clamp_confidence(1.0, "user")`, the MCP tool uses
-`clamp_confidence(p.conf, AGENT_SOURCE)` which caps at `MAX_AI_CONFIDENCE`.
+~~**A raw 1.0 from the watcher.**~~ **Done 2026-07-22.** Confirmed before fixing:
+the sink submitted `1.0`, reaching `beta_params_from_confidence` unclamped and
+landing on Beta(2,1) = 0.6667 — exactly a human CLI claim's posterior, and above
+the 0.6500 (Beta(1.95,1.05)) a deliberate MCP agent assertion gets. A file
+appearing on disk outranked an agent that asserted something on purpose.
 
-So an auto-ingested `Document` reaches `beta_params_from_confidence` with a raw
-1.0 and lands on Beta(2,1) = 0.6667 — **exactly the posterior of a human's CLI
-claim**, and above the 0.6500 an MCP agent gets after clamping. A file appearing
-on disk is trusted more than an agent that asserted something deliberately.
+**The bypass was wider than the title.** `intake.rs`'s `drain_document` minted a
+raw `1.0` for a `Source::File` `Document` too, through `run` rather than
+`submit`. Clamping inside `Worker::submit` alone — the shape this item proposed —
+would have closed one of two live holes and left the other, which is the same
+"a convention each caller remembers" failure one method further down.
 
-Found while establishing whether confidence already encodes source trust for
-item 20. It does not, and this is why: item 20's headline — "a user-authored
-claim should outrank an auto-ingested one at equal heat" — is false today, and
-the clamp is the mechanism that was supposed to make it true.
+So the guard went one level lower: `Worker`'s private `job()`
+(`src/ingest/worker.rs:38`) is now the ONLY place a `Job` is built — `run_with_acl`
+no longer assembles one by hand — and it clamps. Every entrance
+(`enqueue`, `enqueue_with_acl`, `submit`, `run`, `run_with_acl`) takes a
+`source_tag` it cannot omit, so a future producer is asked "who is asserting
+this?" by the compiler rather than by a convention. The clamp takes the
+confidence only; `kind` stays the producer's, or a watched file would be
+reclassified from `Document` to `Claim`.
 
-Not fixed alongside item 20 because it **moves ranking**. Clamping the watcher
-changes the posterior of every `Document` in a corpus that has one, so it needs
-its own recall gate and its own before/after, which item 20's bit-identity bar
-explicitly forbade. Two candidate closures: route the watcher through
-`clamp_confidence` with a watcher-specific source tag, or move the clamp inside
-`Worker::submit` so no caller can skip it. The second is the fix-the-root shape
-— a guard every path must pass rather than one each caller must remember — and
-it is the reason this defect existed at all.
+**The `tag` is the channel, `source.scheme()`** — `"file"` for the watcher
+(`src/ingest/file_watcher.rs:80`) and for the intake drain. Not `USER_SOURCE`:
+no human asserted it. Not `AGENT_SOURCE`: an agent's ceiling belongs to a
+deliberate assertion by a non-human principal, and a file changing on disk is
+not an assertion at all. No new `"watcher"` constant either — `clamp_confidence`
+only separates `USER_SOURCE` from everything else, so a new tag would be a
+second name for the same 0.95 ceiling, exactly the label-that-weights-nothing
+item 20 refused. `scheme()` is already what `RetrievalConfig::source_trust`
+keys on, so `source_trust = { file = ... }` is the lever that actually separates
+watcher from agent. The two paths that DO know their principal name it
+explicitly, because `Source` cannot record an author (item 20's open blocker):
+the CLI passes `USER_SOURCE`, MCP and the direct-intake replay pass
+`AGENT_SOURCE`.
+
+**Ranking moved for `Document`s, and not at all for the recall corpus.** A
+watcher or intake `Document` drops 0.6667 → 0.6500; `e2e` recall is unchanged at
+0.9306 / 0.9722 / 0.9471, bit-identical including the worst-probe list, because
+that corpus is ingested through `kern ingest` — the one path that still mints
+1.0. The recorded baseline therefore stands as measured; nothing to update.
+
+Deciding behavior: fix-the-root.
 
 ### 30. Ingest queue `enqueue` detaches with no backpressure `[ingest]`
 
@@ -854,13 +873,13 @@ changed: not a silent drop but unbounded growth. `tokio`'s `send` only errors on
 a closed channel, so every detached task *parked* on a full queue holding its
 whole text — 500 offered to a stalled worker, 500 accepted, nothing refused, and
 that is the failure the new test reproduces when the bound is removed. Now
-`QUEUE_CAP` is the whole bound (`src/ingest/worker.rs:61`): `try_send` refuses
+`QUEUE_CAP` is the whole bound (`src/ingest/worker.rs:72`): `try_send` refuses
 the newest job rather than detaching (`:128`), the refusal is counted
 (`:131`) and reaches every health surface as `ingest_queue_refused`
 (`src/base/health.rs:81`, `src/mcp.rs:145`, `src/commands/admin.rs:85`). The
 one producer that must not be refused waits instead — `submit` awaits capacity
-(`src/ingest/worker.rs:149`) and the file-watcher sink calls it
-(`src/ingest/file_watcher.rs:77`), because a watcher record has no durable
+(`src/ingest/worker.rs:175`) and the file-watcher sink calls it
+(`src/ingest/file_watcher.rs:84`), because a watcher record has no durable
 backstop; the MCP RAM-queue fallback gets a `tool_error`
 (`src/mcp/tools_mutate.rs:331`). Still distinct from the *tick* queue, which is
 bounded at 512 (`FEATURES.md:434-435`).
@@ -1667,8 +1686,8 @@ itself is pinned — `content_hash` (`src/base/util.rs:3`) is sha256-to-lowercas
 and `util.rs:155` asserts length, alphabet and determinism. What is unpinned is
 every *composition* feeding it, and each one is a different format string: entity
 ids are `content_hash(text)` bare (`src/ingest/place.rs`,
-`src/ingest/file_watcher.rs:129`, `src/ingest/direct.rs:31`,
-`src/ingest/worker.rs:125`), `Source::source_id` is
+`src/ingest/file_watcher.rs:137`, `src/ingest/direct.rs:32`,
+`src/ingest/worker.rs:148`), `Source::source_id` is
 `scheme \x00 object \x00 section` (`src/base/types.rs:257-269`), child and named
 ids are `parent_id + nonce` and `parent_id + name + nonce`
 (`types.rs:502`, `:507`), and the HNSW canon has its own (`src/base/hnsw.rs:525`).
@@ -1763,7 +1782,7 @@ is a real reason nothing is set — eviction drops unpersisted `children` pushes
   renamed file lands as a new `Document` and the old one is neither moved nor
   removed. It duplicates only when the rename *also* edits the file — ids are
   `content_hash(text)`, so an untouched move re-resolves to the same id, while
-  `external_id` is the path (`src/ingest/file_watcher.rs:133`), so a
+  `external_id` is the path (`src/ingest/file_watcher.rs:141`), so a
   move-plus-edit gets a new id under a new external id and supersede never
   fires. It sits in this tier and not in tier 1 because the watcher is **off by
   default** — `WatcherConfig::enabled` is `false` unless a `kern.toml` sets it

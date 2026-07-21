@@ -101,6 +101,25 @@ pub(crate) fn hanging_embed_app() -> axum::Router {
 	)
 }
 
+// Every text embeds to the same vector, so a test can drive the whole ingest
+// path — document plus chunks — without a live model. Answers one embedding per
+// `input` entry; a fixed-length reply starves `embed_chunks`.
+pub(crate) fn fixed_vec_embed_app() -> axum::Router {
+	axum::Router::new().route(
+		"/api/embed",
+		axum::routing::post(|body: axum::Json<serde_json::Value>| async move {
+			let n = body
+				.0
+				.get("input")
+				.and_then(|v| v.as_array())
+				.map(|a| a.len())
+				.unwrap_or(1);
+			let embs: Vec<Vec<f32>> = (0..n).map(|_| vec![0.1, 0.2, 0.3]).collect();
+			axum::Json(serde_json::json!({ "embeddings": embs }))
+		}),
+	)
+}
+
 pub(crate) async fn spawn_http(app: axum::Router) -> (String, JoinHandle<()>) {
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let addr = listener.local_addr().unwrap();

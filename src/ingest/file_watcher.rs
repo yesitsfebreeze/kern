@@ -72,6 +72,13 @@ impl IngestSink for KernFileWatcherSink {
 
 		let hint = language_hint.unwrap_or_default();
 
+		// The channel, not a principal: nobody asserted this, a file changed on
+		// disk. `scheme()` is also what `RetrievalConfig::source_trust` weights on,
+		// so `source_trust = { file = ... }` is the lever that separates the
+		// watcher from an agent — a `"watcher"` constant would only relabel the
+		// same 0.95 ceiling.
+		let tag = source.scheme();
+
 		self
 			.worker
 			.submit(
@@ -80,6 +87,7 @@ impl IngestSink for KernFileWatcherSink {
 				EntityKind::Document,
 				hint,
 				1.0,
+				tag,
 				self.ingest_config(),
 			)
 			.await;
@@ -379,6 +387,7 @@ mod tests {
 				EntityKind::Document,
 				String::new(),
 				1.0,
+				"inline",
 				IngestRunConfig::default(),
 			)
 			.is_some()
@@ -409,6 +418,66 @@ mod tests {
 			refused_before,
 			"waiting for capacity is not a refusal, and must not be counted as one"
 		);
+	}
+
+	// ROADMAP item 95. The sink submitted a raw 1.0, which is Beta(2,1) = 0.6667 —
+	// a human CLI claim's posterior, and above the 0.6500 a deliberate agent
+	// assertion gets. A file appearing on disk is not an assertion at all.
+	#[tokio::test]
+	async fn a_watched_file_is_capped_below_a_deliberate_agent_assertion() {
+		let (url, _server) =
+			crate::test_support::spawn_http(crate::test_support::fixed_vec_embed_app()).await;
+		let g = Arc::new(RwLock::new(GraphGnn::new()));
+		let embedder = crate::llm::Client::new_embed_only(&url, "m", "");
+		let worker = Arc::new(crate::ingest::Worker::new(
+			g.clone(),
+			embedder,
+			None,
+			None,
+			None,
+		));
+
+		KernFileWatcherSink::new(worker, 0)
+			.ingest(IngestRecord {
+				source_uri: "file:///tmp/trusted.rs".to_string(),
+				content: "fn appears_on_disk() {}".to_string(),
+				language_hint: Some("rust".to_string()),
+			})
+			.await;
+
+		// `conf_beta`, not `conf_mean`: this document's single chunk re-derives the
+		// same stub vector, so the second dedup gate calls `observe_support` and
+		// moves `conf_alpha` after the mint. Only alpha accrues evidence, so beta
+		// is the one field that still reports what was MINTED —
+		// beta_params_from_confidence(c) gives beta = 2 - c, so 1.05 <=> 0.95 and
+		// 1.00 <=> the raw 1.0 this path used to submit.
+		let mut betas: Vec<f32> = Vec::new();
+		let cap = std::time::Instant::now() + Duration::from_secs(5);
+		while std::time::Instant::now() < cap {
+			betas = g
+				.read()
+				.kerns
+				.values()
+				.flat_map(|k| k.entities.values().map(|e| e.conf_beta))
+				.collect();
+			if !betas.is_empty() {
+				break;
+			}
+			sleep(Duration::from_millis(25)).await;
+		}
+		assert!(!betas.is_empty(), "the watched file reached the graph");
+
+		let agent = 2.0 - crate::base::constants::MAX_AI_CONFIDENCE as f32;
+		for got in &betas {
+			assert!(
+				(got - agent).abs() < 1e-6,
+				"a watched file lands on the non-user ceiling: conf_beta want {agent:.4}, got {got:.4}"
+			);
+			assert!(
+				*got > 1.0,
+				"a file on disk must not mint a human's 1.0 (conf_beta 1.0); got {got:.4}"
+			);
+		}
 	}
 
 	#[tokio::test]

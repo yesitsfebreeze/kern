@@ -132,6 +132,9 @@ async fn run_once(
 			kind,
 			String::new(),
 			conf,
+			// The CLI is the one path with a human behind it, and `Source::Inline`
+			// cannot record that (ROADMAP item 20), so it names the principal here.
+			crate::base::constants::USER_SOURCE,
 			ingest_config(cfg, valid_until),
 		)
 		.await
