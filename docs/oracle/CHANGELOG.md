@@ -2,6 +2,37 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 26's full-reach regression closed: the power iteration runs
+  full-width loops once the reached set is closed and covers 90% or more of the
+  graph, which is past where the confined walk stops paying for itself.
+
+  Reproduced before it was fixed, and the item's own number did not survive that.
+  Its instrument charged the full-width reference a 100k-row sort the confined
+  path never pays, so "1.4× slower at full reach" was two costs added together;
+  the same instrument on this box read 1.19× today. A fair A/B — one function
+  against itself, same top-k tail, only the loop body differing, over graphs whose
+  edges stay inside a block of known size so reach moves while edge count does not
+  — puts the real penalty at 1.06–1.29× from 88% reach upward and confirms the
+  regression is genuine. The crossover is ~80% reach and holds at out-degree 4, 8
+  and 16 alike; at out-degree 1 the reached set does not close inside 25 iterations,
+  so the switch cannot fire and does not need to.
+
+  The tradeoff taken: a second copy of the loop body, which must stay bit-identical
+  to the first forever, bought for that 1.06–1.29× wherever the seeds saturate. It
+  is paid for rather than hoped for — the existing bit-identity test now runs its
+  whole matrix through both bodies and across two graphs placed either side of the
+  threshold, and fails if only one body was ever walked. The threshold is 90 and
+  not the measured 80 because the two errors are not symmetric: switching late
+  gives back a 1.3× band, switching early costs up to 1.22× on graphs the confined
+  walk still wins.
+
+  What is left of item 26, and its whole title now, is the four N-sized buffers
+  allocated per call. Removing them means a sparse rank vector, and that has to be
+  argued against bit-identity first — a hash map does not iterate in the ascending
+  index order the `+0.0` argument depends on.
+
+  Decided by: name-the-tradeoff.
+
 - 2026-07-22 — three ROADMAP headings still named defects that had been closed,
   and the heading is the index. Items 28, 29 and 95 all carried struck-through
   bodies marked closed while their titles read "GNN training runs synchronously

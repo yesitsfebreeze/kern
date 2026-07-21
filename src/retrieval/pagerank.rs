@@ -57,6 +57,58 @@ fn merge_ascending(a: &[usize], b: &[usize], merged: &mut Vec<usize>) {
 	merged.extend_from_slice(&b[j..]);
 }
 
+// One power iteration over every node, for use when the reached set is closed and
+// covers nearly all of them. Identical to the confined body below term for term:
+// the nodes it adds are exactly those holding 0.0 in both vectors, so each extra
+// term is a literal +0.0 and the surviving ones keep their ascending order.
+fn full_width_step(
+	out: &[Vec<usize>],
+	tele: &[f64],
+	rank: &[f64],
+	next: &mut [f64],
+	d: f64,
+) -> f64 {
+	let mut dangling = 0.0;
+	for (j, outs) in out.iter().enumerate() {
+		if outs.is_empty() {
+			dangling += rank[j];
+		}
+	}
+	let dangling_mass = d * dangling;
+	let base = 1.0 - d + dangling_mass;
+	for (slot, &t) in next.iter_mut().zip(tele.iter()) {
+		*slot = base * t;
+	}
+	for (j, outs) in out.iter().enumerate() {
+		if outs.is_empty() {
+			continue;
+		}
+		let share = d * rank[j] / (outs.len() as f64);
+		for &ti in outs {
+			next[ti] += share;
+		}
+	}
+	next
+		.iter()
+		.zip(rank.iter())
+		.map(|(a, b)| (a - b).abs())
+		.sum()
+}
+
+// Which loop body each iteration ran. Carried out of `pagerank_at` so a test can
+// fail on the switch never firing as well as on it always firing — a two-path
+// optimisation whose corpus only exercises one path tests nothing about the other.
+#[derive(Debug, Default)]
+struct Steps {
+	confined: usize,
+	full_width: usize,
+}
+
+// The reach share at which the confined walk's indirection costs more than the
+// zeros the full-width loops re-add. Measured, not guessed: see
+// `cost_against_full_width_by_reach`.
+const FULL_WIDTH_REACH_PCT: usize = 90;
+
 pub fn pagerank(
 	g: &GraphGnn,
 	seeds: &[EntityHit],
@@ -64,11 +116,22 @@ pub fn pagerank(
 	iters: usize,
 	top_k: usize,
 ) -> Vec<EntityHit> {
+	pagerank_at(g, seeds, damping, iters, top_k, FULL_WIDTH_REACH_PCT).0
+}
+
+fn pagerank_at(
+	g: &GraphGnn,
+	seeds: &[EntityHit],
+	damping: f64,
+	iters: usize,
+	top_k: usize,
+	full_width_reach_pct: usize,
+) -> (Vec<EntityHit>, Steps) {
 	let adj = g.entity_adjacency();
 	let ids = &adj.ids;
 	let n = ids.len();
 	if n == 0 {
-		return Vec::new();
+		return (Vec::new(), Steps::default());
 	}
 	let out = &adj.out;
 	let d = damping.clamp(0.0, 1.0);
@@ -92,12 +155,23 @@ pub fn pagerank(
 	}
 	let mut fresh: Vec<usize> = Vec::new();
 	let mut merged: Vec<usize> = Vec::new();
-	let mut closed = false;
+	let mut closed = reached.len() == n;
+	let mut steps = Steps::default();
 
 	// Stop early once the rank vector stops moving — `iters` is just an upper bound.
 	const CONVERGENCE_EPS: f64 = 1e-9;
 
 	for _ in 0..iters.max(1) {
+		if closed && reached.len() * 100 >= n * full_width_reach_pct {
+			steps.full_width += 1;
+			let delta = full_width_step(out, &tele, &rank, &mut next, d);
+			std::mem::swap(&mut rank, &mut next);
+			if delta < CONVERGENCE_EPS {
+				break;
+			}
+			continue;
+		}
+		steps.confined += 1;
 		let mut dangling = 0.0;
 		for &j in &reached {
 			if out[j].is_empty() {
@@ -147,7 +221,7 @@ pub fn pagerank(
 
 	let take = top_k.min(n);
 	if take == 0 {
-		return Vec::new();
+		return (Vec::new(), steps);
 	}
 	// Unique ids make this a STRICT total order, so the top-k partition + sorting only the survivors equals a full sort + take.
 	let cmp = |a: &(usize, f64), b: &(usize, f64)| {
@@ -176,7 +250,7 @@ pub fn pagerank(
 			score,
 		});
 	}
-	out_list
+	(out_list, steps)
 }
 
 #[cfg(test)]
@@ -306,6 +380,103 @@ mod tests {
 		g
 	}
 
+	// Same generator, except every edge stays inside a contiguous block of `block`
+	// nodes. The seeds sit in block 0, so their reach is one block while the graph's
+	// total edge count and per-node out-degree do not move with it — which is what
+	// makes a sweep over `block` a sweep over reach alone.
+	fn synth_blocks(n: usize, fanout: usize, dangling_every: usize, block: usize) -> GraphGnn {
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("k", "");
+		for i in 0..n {
+			k.entities
+				.insert(format!("e{i:05}"), ent(&format!("e{i:05}")));
+		}
+		let mut h: u64 = 0x2545F491_4F6CDD1D;
+		for i in 0..n {
+			if i % dangling_every == 0 {
+				continue;
+			}
+			let lo = (i / block) * block;
+			let span = (lo + block).min(n) - lo;
+			for f in 0..fanout {
+				h ^= h << 13;
+				h ^= h >> 7;
+				h ^= h << 17;
+				let to = lo + (h as usize) % span;
+				let e = edge(&format!("e{i:05}"), &format!("e{to:05}"));
+				k.reasons.insert(format!("r{i}_{f}"), e);
+			}
+		}
+		g.register(k);
+		g
+	}
+
+	fn reach_of(g: &GraphGnn, seeds: &[EntityHit]) -> usize {
+		let adj = g.entity_adjacency();
+		let mut seen = vec![false; adj.ids.len()];
+		let mut stack: Vec<usize> = Vec::new();
+		for s in seeds {
+			if let Some(&i) = adj.id_to_idx.get(&s.entity_id) {
+				if !seen[i] {
+					seen[i] = true;
+					stack.push(i);
+				}
+			}
+		}
+		while let Some(j) = stack.pop() {
+			for &t in &adj.out[j] {
+				if !seen[t] {
+					seen[t] = true;
+					stack.push(t);
+				}
+			}
+		}
+		seen.iter().filter(|s| **s).count()
+	}
+
+	#[test]
+	#[ignore = "measurement, not an assertion; run explicitly in release"]
+	fn cost_against_full_width_by_reach() {
+		use std::time::Instant;
+		const N: usize = 100_000;
+		const REPS: usize = 7;
+		for fanout in [1usize, 2, 4, 8, 16] {
+			for pct in [60usize, 80, 90, 95, 100] {
+				let block = N * pct / 100;
+				let g = synth_blocks(N, fanout, 16, block);
+				// `| 1` keeps every seed off the dangling stride, so the reach the row
+				// reports is the block and not the seed set.
+				let seeds: Vec<EntityHit> = (0..75)
+					.map(|i| hit(&format!("e{:05}", (i * (block / 75)) | 1), 1.0))
+					.collect();
+				let reached = reach_of(&g, &seeds);
+				let _ = g.entity_adjacency();
+				let mut confined = f64::MAX;
+				let mut shipped = f64::MAX;
+				let mut steps = Steps::default();
+				for _ in 0..REPS {
+					// Both sides are the same function with the same top-k tail; only the
+					// loop body differs, which is the only thing this row is deciding. 101
+					// is the confined-only walk this switch was measured against.
+					let t = Instant::now();
+					let a = pagerank_at(&g, &seeds, 0.85, 25, 100, 101);
+					confined = confined.min(t.elapsed().as_secs_f64() * 1000.0);
+					let t = Instant::now();
+					let b = pagerank_at(&g, &seeds, 0.85, 25, 100, FULL_WIDTH_REACH_PCT);
+					shipped = shipped.min(t.elapsed().as_secs_f64() * 1000.0);
+					assert_eq!(a.0.len(), b.0.len());
+					assert_eq!(a.1.full_width, 0);
+					steps = b.1;
+				}
+				println!(
+					"N={N} fanout={fanout:<3} block={pct:>3}% reached={reached:<7} ({:5.1}%) confined_only={confined:7.3}ms shipped={shipped:7.3}ms ratio={:5.2} steps={steps:?}",
+					100.0 * reached as f64 / N as f64,
+					shipped / confined
+				);
+			}
+		}
+	}
+
 	// The confined iteration's win is bounded by how far the seeds reach, so the
 	// number it earns is a property of the graph, not of the code. Kept as the
 	// instrument for that claim.
@@ -325,21 +496,44 @@ mod tests {
 			// ran first would otherwise be charged the whole build.
 			let _ = g.entity_adjacency();
 			let t = Instant::now();
-			let a = pagerank(&g, &seeds, 0.85, 25, 100);
-			let confined = t.elapsed().as_secs_f64() * 1000.0;
+			let a = pagerank_at(&g, &seeds, 0.85, 25, 100, FULL_WIDTH_REACH_PCT);
+			let shipped = t.elapsed().as_secs_f64() * 1000.0;
 			let t = Instant::now();
 			let b = pagerank_full_width(&g, &seeds, 0.85, 25, 100);
 			let full = t.elapsed().as_secs_f64() * 1000.0;
-			assert_eq!(a.len(), b.len());
-			println!("N={N} fanout={fanout:<3} confined={confined:7.3}ms full_width={full:7.3}ms");
+			assert_eq!(a.0.len(), b.len());
+			println!(
+				"N={N} fanout={fanout:<3} shipped={shipped:7.3}ms full_width={full:7.3}ms steps={:?}",
+				a.1
+			);
 		}
 	}
 
 	#[test]
 	fn confined_iteration_equals_the_full_width_one_bit_for_bit() {
 		let mut cases = 0;
-		for (n, fanout, dangling_every) in [(400usize, 1usize, 3usize), (400, 8, 7), (60, 3, 2)] {
-			let g = synth(n, fanout, dangling_every);
+		let mut ran = Steps::default();
+		// The last two straddle the near-N switch: at n=600, fanout 6, edges confined
+		// to a block, the reach is a known fraction either side of FULL_WIDTH_REACH_PCT.
+		let graphs = [
+			synth(400, 1, 3),
+			synth(400, 8, 7),
+			synth(60, 3, 2),
+			synth_blocks(600, 6, 9, 600 * 88 / 100),
+			synth_blocks(600, 6, 9, 600 * 92 / 100),
+		];
+		let straddle = hit("e00003", 1.0);
+		for (gi, want_below) in [(3usize, true), (4, false)] {
+			let n = graphs[gi].entity_adjacency().ids.len();
+			let r = reach_of(&graphs[gi], std::slice::from_ref(&straddle));
+			assert_eq!(
+				r * 100 < n * FULL_WIDTH_REACH_PCT,
+				want_below,
+				"graph {gi} must sit on its side of the switch, reached {r} of {n}"
+			);
+		}
+		for (gi, g) in graphs.iter().enumerate() {
+			let n = g.entity_adjacency().ids.len();
 			for seed_ids in [
 				vec![],
 				vec![("e00007", 1.0)],
@@ -350,33 +544,81 @@ mod tests {
 				let seeds: Vec<EntityHit> = seed_ids.iter().map(|(i, s)| hit(i, *s)).collect();
 				for top_k in [3usize, 100, n * 2] {
 					for iters in [1usize, 4, 25] {
-						let got = pagerank(&g, &seeds, 0.85, iters, top_k);
-						let want = pagerank_full_width(&g, &seeds, 0.85, iters, top_k);
-						assert_eq!(
-							got.len(),
-							want.len(),
-							"n={n} fanout={fanout} top_k={top_k} iters={iters} length"
-						);
-						for (a, b) in got.iter().zip(want.iter()) {
+						// 101 never switches, 0 switches the moment the set closes, and
+						// FULL_WIDTH_REACH_PCT is what ships. All three answer to full width.
+						for pct in [101usize, FULL_WIDTH_REACH_PCT, 0] {
+							let (got, steps) = pagerank_at(g, &seeds, 0.85, iters, top_k, pct);
+							ran.confined += steps.confined;
+							ran.full_width += steps.full_width;
+							let want = pagerank_full_width(g, &seeds, 0.85, iters, top_k);
 							assert_eq!(
-								a.entity_id, b.entity_id,
-								"n={n} fanout={fanout} top_k={top_k} iters={iters} order"
+								got.len(),
+								want.len(),
+								"g={gi} pct={pct} top_k={top_k} iters={iters} length"
 							);
-							assert_eq!(
-								a.score.to_bits(),
-								b.score.to_bits(),
-								"n={n} fanout={fanout} top_k={top_k} iters={iters} score for {}: {} vs {}",
-								a.entity_id,
-								a.score,
-								b.score
-							);
+							for (a, b) in got.iter().zip(want.iter()) {
+								assert_eq!(
+									a.entity_id, b.entity_id,
+									"g={gi} pct={pct} top_k={top_k} iters={iters} order"
+								);
+								assert_eq!(
+									a.score.to_bits(),
+									b.score.to_bits(),
+									"g={gi} pct={pct} top_k={top_k} iters={iters} score for {}: {} vs {}",
+									a.entity_id,
+									a.score,
+									b.score
+								);
+							}
+							cases += 1;
 						}
-						cases += 1;
 					}
 				}
 			}
 		}
-		assert_eq!(cases, 108, "every configuration was actually compared");
+		assert_eq!(cases, 540, "every configuration was actually compared");
+		// A matrix that only ever walked one of the two bodies would prove nothing
+		// about the other, and would still pass every assertion above.
+		assert!(
+			ran.confined > 0 && ran.full_width > 0,
+			"both bodies ran: {ran:?}"
+		);
+	}
+
+	// The switch is only worth its second loop body if it fires where the measurement
+	// says it should and nowhere else, so both directions are asserted: a graph the
+	// seeds saturate must take it, and one they barely touch must not.
+	#[test]
+	fn the_near_n_body_runs_on_saturating_reach_and_not_on_narrow_reach() {
+		const N: usize = 4_000;
+		let seeds: Vec<EntityHit> = (0..20)
+			.map(|i| hit(&format!("e{:05}", (i * 13) | 1), 1.0))
+			.collect();
+
+		let wide = synth_blocks(N, 8, 16, N);
+		let wide_reach = reach_of(&wide, &seeds);
+		assert!(
+			wide_reach * 100 >= N * FULL_WIDTH_REACH_PCT,
+			"the saturating graph must actually saturate, reached {wide_reach} of {N}"
+		);
+		let (_, wide_steps) = pagerank_at(&wide, &seeds, 0.85, 25, 100, FULL_WIDTH_REACH_PCT);
+		assert!(
+			wide_steps.full_width > 0,
+			"a reach of {wide_reach}/{N} must run the near-N body: {wide_steps:?}"
+		);
+
+		let narrow = synth_blocks(N, 8, 16, N / 10);
+		let narrow_reach = reach_of(&narrow, &seeds);
+		assert!(
+			narrow_reach * 100 < N * FULL_WIDTH_REACH_PCT,
+			"the narrow graph must stay narrow, reached {narrow_reach} of {N}"
+		);
+		let (_, narrow_steps) = pagerank_at(&narrow, &seeds, 0.85, 25, 100, FULL_WIDTH_REACH_PCT);
+		assert_eq!(
+			narrow_steps.full_width, 0,
+			"a reach of {narrow_reach}/{N} must never run the near-N body: {narrow_steps:?}"
+		);
+		assert!(narrow_steps.confined > 0, "{narrow_steps:?}");
 	}
 
 	#[test]
