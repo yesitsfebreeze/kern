@@ -2,6 +2,28 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — item 94's fix simplifies to "delete the file". Cargo's default
+  `target-dir` is `<workspace-root>/target`, which inside a git worktree is that
+  worktree's own directory, so isolation is what you get by doing nothing.
+  Confirmed rather than assumed: `cycle/2` has no `.cargo/` at all and resolves
+  to `kern-cycles/2/target` unprompted.
+
+  Which means the entire contamination defect was self-inflicted — introduced by
+  a launch step that wrote a `.cargo/config.toml` pointing every worktree at the
+  main checkout's cache, to buy a warm build. Pointing that file at a per-tree
+  path also works, and is what three live trees currently do, but it is a second
+  thing to keep correct forever. Not writing the file has no failure mode.
+
+  Worth recording as its own entry because the first correction to item 94 fixed
+  the diagnosis and left the remedy one step short: it said "give each worktree
+  its own target-dir", which is true but reads as "configure something", when
+  the actual instruction is "stop configuring something". A fix that requires
+  ongoing correctness is worse than one that requires nothing, and the launch
+  step that caused this is exactly the kind that gets copied forward unexamined.
+
+  Decided by: fix-the-root — the root was the config file's existence, not its
+  contents.
+
 - 2026-07-21 — `3529fce`'s subject says "item 25, the importance scan indexed"
   and **no index was built**. The merge subject was generated from the slice
   title — the work that was *asked for* — rather than from the diff, which

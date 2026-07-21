@@ -1312,6 +1312,17 @@ alternative (a `just` recipe failing when the binary is older than the newest
 source) is now moot for the same reason: it would have caught mode 1 and been
 blind to mode 2.
 
+**The correct action is to delete the file, not to maintain a path.** Cargo's
+default `target-dir` is already `<workspace-root>/target`, which in a worktree
+is that worktree's own directory — isolation is what you get by doing nothing.
+Confirmed on a tree with no `.cargo/` at all: it resolves to
+`kern-cycles/2/target` unprompted. So the whole defect was introduced by adding
+a `.cargo/config.toml` pointing at the main checkout, and the fix is to stop
+writing that file when a worktree is created rather than to write it with a
+different path. A per-tree path works but is a second thing to keep correct, and
+the launch step that wrote the shared one is exactly the kind of step that gets
+copied forward unexamined.
+
 What survives: the by-name discipline. It is cheap, it catches mode 1
 independently of the build layout, and it is what confirmed both cycles that
 found this.
