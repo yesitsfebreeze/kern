@@ -2,6 +2,66 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — the pre-commit hook refused this merge twice, and the second
+  refusal caught a real loss. Merging `cycle/2` carried its `ROADMAP.md` edits
+  into master while adding no new `CHANGELOG.md` entry: the resolution kept both
+  parents' entries, which reads as recording but is not, since both were already
+  written elsewhere. Ruling 1 counts entries before against after and does not
+  care that the words are new to *this* branch.
+
+  Then the second attempt failed with **161 before, 159 after** — and that was
+  not the rule being pedantic, it was arithmetic catching a bug in my
+  resolution. Splicing the conflict hunk by hand had silently dropped four
+  entries that lived outside the hunk I was looking at. Rebuilt as a true union
+  instead: take HEAD's file whole, prepend only the entries `cycle/2` has that
+  the merge base does not. 161 + 1 + this one = 163.
+
+  Worth stating because merges are where this rule is easiest to rationalise
+  away — the work was recorded, on the branch, by the commit that did it, so the
+  merge feels like transport rather than decision. It is not. Resolving a
+  conflict chooses which version of the repo's own answers survives, and a
+  hand-spliced hunk is exactly how four of them stopped surviving without anyone
+  noticing. The counting rule found it; reading the diff had not.
+
+  What landed: item 25 measured rather than implemented, its "top structural
+  debt" claim withdrawn, item 26 carrying the flat-20ms PageRank figure, and
+  `tests/seed_scale.rs` kept as the `#[ignore]`d instrument behind both.
+  `docs-check` green at 675 references, no anchors nominated — the first merge
+  today that broke no citations at all.
+
+  Decided by: the oracle — the machinery refused a commit, the refusal was
+  right twice over, and the fix is a record plus a corrected merge, not a
+  bypass.
+
+- 2026-07-21 — item 25 was measured before being implemented, and the
+  measurement said to do item 26 instead. `seed_important`'s O(N) scan is real
+  — 34 ms and 55% of retrieve at N=100k with the whole corpus eligible — but it
+  is O(N x eligible), so it shrinks exactly when a query filters. Item 26's
+  PageRank does not: it is a flat ~20 ms per query at N=100k whether 1% or 100%
+  of the corpus survives the filter, because the power iteration walks the whole
+  adjacency regardless. On an ordinary filtered query that is 6.7x the scan.
+
+  So item 25's standing claim to be "top structural debt in the repo" is
+  withdrawn as unmeasured, and both items now carry the table. **No index was
+  written.** Building one would have been a real speedup for the one workload
+  where an index cannot help — a corpus where everything is eligible — and no
+  help for the common one.
+
+  The instrument is kept as `tests/seed_scale.rs`, `#[ignore]`d because it is
+  ~11 minutes in release. It is kept rather than deleted for the reason it
+  existed: both items are perf claims, and a perf claim whose instrument was
+  thrown away cannot be rechecked when the numbers move. It is also why the
+  first attempt at this slice died — run under a plain `cargo test`, in debug,
+  a 100k-entity build never finished and the agent was killed as stalled. The
+  harness now says so at the top.
+
+  Ranking is deliberately NOT reordered here. Position is rank in this file, so
+  moving 26 above 25 is a decision of its own; this entry is the evidence for
+  it, not the act.
+
+  Decided by: verify-before-claiming — the item asserted a cliff and a priority,
+  and only one of the two survived contact with a measurement.
+
 - 2026-07-21 — item 91 `[ingest]` closed: the second dedup gate stopped lying,
   on both counts. What it was lying about was an **id**. `place_document`
   returned an unconditional `Some(doc_id)` — the content hash of the text the
@@ -47,6 +107,7 @@
   survivor" are not the same fix, and closing the item on the first without
   filing the second would have banked a silent recall gap as done work.
 ||||||| 21e5b35
+
 - 2026-07-21 — the acquittal marker silenced a real breakage on its first
   contested use, and the merge caught it. `cycle/1` adjudicated
   `FEATURES.md:608` as a false positive and stamped it
@@ -1260,6 +1321,7 @@
   Decided by: fix-the-root — the "daemon must be stopped" comment on `reembed`
   was an unenforceable precondition, and a comment is not a guard — and
   name-the-tradeoff for the MSRV bump and for the one-shots left reconciling.
+
 - 2026-07-21 — The intake has a surface, and the retry-forever tradeoff is
   finally visible: `kern intake` / `kern intake status` prints pending (age,
   last error), quarantined and done; `kern intake drain` runs one pass
@@ -1276,6 +1338,7 @@
   Decided by: fix-the-root — the missing CLI was the reported symptom, the
   unrecorded failures were the reason the intake was invisible in the first
   place.
+
 - 2026-07-21 — The walk pays: ROADMAP item 86 closed with bounded
   source-weighted traversal credit in `expand` — each examined edge credits its
   far endpoint `source_score × edge_evidence` (once per edge-endpoint, summed,
@@ -1295,6 +1358,7 @@
   Decided by: fix-the-root (the link-score semantics, not another weight on a
   starved signal) and verify-before-claiming (every variant swept and measured;
   the stale baseline caught by re-running master before judging).
+
 - 2026-07-21 — Access stamping obeys `[heat]` config: `commit_access` /
   `commit_access_ids` read `HeatConfig::default()` for half-life AND
   deposit_access, so a configured `[heat]` section (or preset) was silently
@@ -1302,6 +1366,7 @@
   through `query`/`query_profiled`/`query_locked` and the CommitAccess tick
   task (`ctx.heat_cfg` already existed). Behavior-neutral for the running eval
   campaign — live config and e2e both run defaults. Decided by: fix-the-root.
+
 - 2026-07-21 — MCP ingest `kind` arg dropped, not honored: it was validated
   but never stored (kind always derived from clamped confidence), absent from
   the advertised tool schema, and its only passable value (`claim`) is the
@@ -1311,6 +1376,7 @@
   kind stays derived-only at the agent boundary.
   Decided by: avoided-question-first — the arg promised a choice the
   boundary never grants.
+
 - 2026-07-21 — Alpha means no compatibility: recorded in `AGENTS.md` and every
   backward-compat implementation removed in one sweep. Gone: `kern migrate` and
   `src/base/migrate.rs` (legacy shard → LMDB import), the `.kern` file-shard
@@ -1693,6 +1759,7 @@
   pending direct-intake JSON decodes via the same alias, but external agent
   configs calling the old tool name must update. Kern shard bincode is
   positional, so the `Kern.claim_kinds` field rename is wire-compatible.
+
 - 2026-07-21 — **V1 carries no answer compatibility.** The two shims kept
   during the answer-leg removal earlier today are deleted: the `[answer]`
   config tombstone (an unknown section is now just unknown — pre-1.0, nobody
@@ -3963,5 +4030,7 @@
 - 2026-07-16 — Added `just insight` (`scripts/insight.py`): a measured repository snapshot (build, test count, code shape, oracle state, baseline presence) so project status is a run, not a recollection. Composes existing tools (cargo, nextest, tokei, git) rather than building analysis machinery. Decided by: verify-before-claiming, builtin-before-built. Supersedes: nothing.
 
 - 2026-07-16 — Initialized the content files from the source tree: `VISION.md` (failable criteria distilled from `docs/vision.md` and `docs/aspiration.md`), `FEATURES.md` (present state, federation and the eval harness marked `building`), `ROADMAP.md` (seven open questions, eval baseline first), `SPECIALISTS.md` (seven delegation briefs by subsystem). Decided by: record-the-decision. Supersedes: nothing — first content.
+
 - 2026-07-16 — Pinned the initial behavior set, ten from upstream `v1`, `verify-before-claiming` heaviest — measure-don't-assume is already this repo's loudest law (`docs/aspiration.md` claim standard). Decided by: the oracle. Supersedes: the empty pin list from install.
+
 - 2026-07-16 — Installed the oracle: `ORACLE.md` is this repository's process machinery from here on. Decided by: the oracle. Supersedes: nothing.

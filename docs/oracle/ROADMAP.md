@@ -312,13 +312,62 @@ half the harness can already claim.
 `seed_important` iterates `g.all()` × `kern.entities.values()`
 (`src/retrieval/seed.rs:127-174`), called unconditionally once per retrieve
 (`src/retrieval/query.rs`, in `retrieve_profiled`). Rayon-parallel, but still full-corpus per
-query. Top structural debt in the repo.
+query.
+
+**Measured 2026-07-21 before touching it** (`tests/seed_scale.rs`, release,
+20 reps per configuration). The cliff is real and it is O(N × eligible):
+
+| N | eligible | `seed_important` | share of retrieve |
+|---|---|---|---|
+| 10k | 1% | 0.14 ms | 10.7% |
+| 10k | 100% | 2.61 ms | 53.1% |
+| 100k | 1% | 2.98 ms | 12.3% |
+| 100k | 100% | 34.42 ms | 54.6% |
+
+So the item is justified at scale — but **it is not the top structural debt it
+claimed to be, and the same run says why.** Item 26's PageRank is a *flat* ~20 ms
+per query at N=100k, independent of eligibility (measured as default minus
+`pagerank_enabled: false`: 20.0 / 21.0 / 19.6 / 18.1 ms across 1/10/50/100%).
+The scan only overtakes it once more than half the corpus is eligible:
+
+| N=100k | scan | PageRank | PageRank ÷ scan |
+|---|---|---|---|
+| 1% eligible | 2.98 ms | 20.03 ms | 6.7× |
+| 10% eligible | 8.61 ms | 21.02 ms | 2.4× |
+| 50% eligible | 18.40 ms | 19.56 ms | 1.1× |
+| 100% eligible | 34.41 ms | 18.11 ms | 0.5× |
+
+A filtered query — the ordinary case — is dominated by PageRank, not by this
+scan. **Item 26 should be done first**, and this item's "top structural debt in
+the repo" claim is withdrawn: it was asserted, never measured. Ranking is not
+changed here because position is rank and reordering wants its own decision;
+this note is the evidence for that decision when it is taken.
+
+Indexing this is still worth doing after 26. The shape wanted is an index over
+the importance predicate so the scan visits eligible entities rather than all of
+them — which is precisely why the win tracks eligibility, and why a corpus where
+everything is eligible cannot be helped by an index at all.
 
 ### 26. PageRank runs a full power iteration per query, persisted nowhere `[retrieval]`
 
 Up to 25 iterations over the whole entity adjacency on every retrieve, with
 nothing cached between queries (`decisions/pagerank-authority.mdx:102-105`). The
 second query-time cliff, and it was recorded on the site but in no plan.
+
+**Measured 2026-07-21 and it is the FIRST cliff, not the second**
+(`tests/seed_scale.rs`, release, default minus `pagerank_enabled: false`). At
+N=100k it costs a flat **~20 ms per query** — 20.0 / 21.0 / 19.6 / 18.1 ms at
+1 / 10 / 50 / 100% eligibility. Flat is the finding: unlike item 25's scan, the
+cost does not shrink when the query filters hard, because the power iteration
+walks the whole adjacency regardless of how few entities survive the filter. On
+an ordinary filtered query at 1% eligibility it is **6.7× item 25's scan**, and
+`fuse_hybrid` goes from 0.05 ms to 17.68 ms with it on.
+
+That makes this the highest-value unblocked retrieval work, ahead of item 25,
+which is where the ranking implies it sits and where the numbers now agree.
+Nothing here is cached, so the first cheap closure to weigh is persisting the
+vector and recomputing on a tick rather than per query — the scores change with
+the graph, not with the query, so per-query recomputation is pure waste.
 
 ### 27. The GC sweep is superlinear in two remaining places `[lifecycle]`
 
