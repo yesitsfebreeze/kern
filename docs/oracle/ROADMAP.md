@@ -198,7 +198,7 @@ exact race the writer lock and the route exist to close. Unlike `ingest` and
 widens item 24's hole no more than `intake drain` did, and the tools they would
 route to already exist and already have matching semantics — `graviton`
 (`src/mcp/tools_admin.rs:87`, schema `:39`) and `claim_kind` (`:161`, schema
-`:52`), both dispatched at `src/mcp.rs:181-182`.
+`:52`), both dispatched at `src/mcp.rs:182-183`.
 
 So the item's remainder is two halves, not one: `graviton`/`claim_kind`,
 unblocked and mechanical, and `ingest`/`link`, blocked on item 24. The item does
@@ -236,17 +236,21 @@ populate it. Four parts:
   (`QueryArgs`, `src/mcp/tools_query.rs:76-107`).
 - Enforce in `matches_filter` (`src/retrieval/score.rs:205-243`), which has no
   ACL predicate.
-- **Guard the id path.** `src/mcp/tools_query.rs:129-137` returns
-  `entity_detail_by_id(&g, &p.id)` directly, before `build_query_options`
-  (`:157`) is ever called — no filter of any kind runs. Without this guard ACL is
-  decorative, and the read-side route of item 9 put `kern get` behind this same
-  unfiltered path. **This has already cost a shipped feature, not only a
-  planned one: "Retention reaches the id read surface" — the retired item 91
-  `[retrieval]`, closed 2026-07-21, not the item 91 `[ingest]` — was this
-  same unfiltered path dropping `valid_until`.** It closed by *flagging* the row
-  rather than filtering it, so it hands this bullet nothing: an ACL denial
-  cannot ride as a flag on the row it denies, and this guard still has to be
-  built.
+- ~~**Guard the id path.**~~ **Done 2026-07-21.** `src/mcp/tools_query.rs:129-149`
+  now builds `QueryOptions` first and runs the resolved row through
+  `retrieval::score::matches_filter` (`src/retrieval/score.rs:205`) before it
+  renders, so the id read honours every filter the ranked read honours —
+  `query {id, kind: "claim"}` on a `Fact` answers `thought not found`
+  (`id_filter_tests`, same file). Previously it returned `entity_detail_by_id`
+  directly and no filter of any kind ran, which made ACL decorative and put
+  `kern get` — routed here by item 9 — behind the same unfiltered path.
+  A bare `query {id}` still filters nothing, because `QueryOptions::default()`
+  leaves `valid_at`/`as_of` unset; that is what preserves the retired item 91
+  `[retrieval]` decision (closed 2026-07-21, not the open item 91 `[ingest]`) to
+  *flag* an expired row rather than hide it. **This bullet no longer blocks the
+  three above, but it does not deliver them:** `matches_filter` still has no ACL
+  predicate, so the routing exists and the rule does not — and the rule is still
+  decided alongside item 24, whose missing socket auth is the same boundary.
 
 Decide alongside: does the file watcher give `Document` entities a tenant-default
 ACL, or leave them public? Recommend configurable, default public-within-tenant,
@@ -299,13 +303,62 @@ half the harness can already claim.
 `seed_important` iterates `g.all()` × `kern.entities.values()`
 (`src/retrieval/seed.rs:127-174`), called unconditionally once per retrieve
 (`src/retrieval/query.rs`, in `retrieve_profiled`). Rayon-parallel, but still full-corpus per
-query. Top structural debt in the repo.
+query.
+
+**Measured 2026-07-21 before touching it** (`tests/seed_scale.rs`, release,
+20 reps per configuration). The cliff is real and it is O(N × eligible):
+
+| N | eligible | `seed_important` | share of retrieve |
+|---|---|---|---|
+| 10k | 1% | 0.14 ms | 10.7% |
+| 10k | 100% | 2.61 ms | 53.1% |
+| 100k | 1% | 2.98 ms | 12.3% |
+| 100k | 100% | 34.42 ms | 54.6% |
+
+So the item is justified at scale — but **it is not the top structural debt it
+claimed to be, and the same run says why.** Item 26's PageRank is a *flat* ~20 ms
+per query at N=100k, independent of eligibility (measured as default minus
+`pagerank_enabled: false`: 20.0 / 21.0 / 19.6 / 18.1 ms across 1/10/50/100%).
+The scan only overtakes it once more than half the corpus is eligible:
+
+| N=100k | scan | PageRank | PageRank ÷ scan |
+|---|---|---|---|
+| 1% eligible | 2.98 ms | 20.03 ms | 6.7× |
+| 10% eligible | 8.61 ms | 21.02 ms | 2.4× |
+| 50% eligible | 18.40 ms | 19.56 ms | 1.1× |
+| 100% eligible | 34.41 ms | 18.11 ms | 0.5× |
+
+A filtered query — the ordinary case — is dominated by PageRank, not by this
+scan. **Item 26 should be done first**, and this item's "top structural debt in
+the repo" claim is withdrawn: it was asserted, never measured. Ranking is not
+changed here because position is rank and reordering wants its own decision;
+this note is the evidence for that decision when it is taken.
+
+Indexing this is still worth doing after 26. The shape wanted is an index over
+the importance predicate so the scan visits eligible entities rather than all of
+them — which is precisely why the win tracks eligibility, and why a corpus where
+everything is eligible cannot be helped by an index at all.
 
 ### 26. PageRank runs a full power iteration per query, persisted nowhere `[retrieval]`
 
 Up to 25 iterations over the whole entity adjacency on every retrieve, with
 nothing cached between queries (`decisions/pagerank-authority.mdx:102-105`). The
 second query-time cliff, and it was recorded on the site but in no plan.
+
+**Measured 2026-07-21 and it is the FIRST cliff, not the second**
+(`tests/seed_scale.rs`, release, default minus `pagerank_enabled: false`). At
+N=100k it costs a flat **~20 ms per query** — 20.0 / 21.0 / 19.6 / 18.1 ms at
+1 / 10 / 50 / 100% eligibility. Flat is the finding: unlike item 25's scan, the
+cost does not shrink when the query filters hard, because the power iteration
+walks the whole adjacency regardless of how few entities survive the filter. On
+an ordinary filtered query at 1% eligibility it is **6.7× item 25's scan**, and
+`fuse_hybrid` goes from 0.05 ms to 17.68 ms with it on.
+
+That makes this the highest-value unblocked retrieval work, ahead of item 25,
+which is where the ranking implies it sits and where the numbers now agree.
+Nothing here is cached, so the first cheap closure to weigh is persisting the
+vector and recomputing on a tick rather than per query — the scores change with
+the graph, not with the query, so per-query recomputation is pure waste.
 
 ### 27. The GC sweep is superlinear in two remaining places `[lifecycle]`
 
@@ -1105,7 +1158,7 @@ single local daemon and needs only sign-off.
 (`src/commands/mcp_cmd.rs:290`, `:306`, `:343`) with no `handle_method` override,
 so the trait default returns `None` (`src/trnsprt/src/server.rs:21`). Meanwhile
 `extra_capabilities` advertises `{"resources": {}, "prompts": {}}` (`:346`) to
-match standalone, which *does* serve them (`src/mcp.rs:208-211`, advertised `:157`). Advertised on
+match standalone, which *does* serve them (`src/mcp.rs:211-218`, advertised `:157`). Advertised on
 the normal path, non-functional there. Either forward them or stop advertising.
 
 ### 82. Standalone `kern mcp` runs no gossip `[surface]`
@@ -1415,7 +1468,7 @@ an overall eval score that makes specialization worth funding.
   since a non-superseded `Fact` is immune (`is_cold_victim`,
   `src/tick/stigmergy.rs:35-46`) — is a false statement the caller has no way to
   falsify. So the id path **serves and flags**: `entity_detail`
-  (`src/mcp/tools_query.rs:321`) emits `expired` and `valid_until` whenever a
+  (`src/mcp/tools_query.rs:363`) emits `expired` and `valid_until` whenever a
   retention is set, and `kern get` prints an `Expired:` line
   (`src/commands/graph_ops.rs:67`). Filtering lost because the surface item 9
   deliberately widened — prefix plus cold-tier fallback — would have been
