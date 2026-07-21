@@ -31,6 +31,8 @@ pub struct HnswIndex {
 	id_of: Vec<String>,
 	slot_of: HashMap<String, u32>,
 	free: Vec<u32>,
+	// Deleted, not yet scrubbed of inbound edges, and therefore not yet reusable.
+	pending_scrub: Vec<u32>,
 	ep: Option<u32>,
 	max_layer: usize,
 	quant_mode: QuantizationMode,
@@ -74,14 +76,18 @@ impl HnswIndex {
 			id_of: Vec::new(),
 			slot_of: HashMap::new(),
 			free: Vec::new(),
+			pending_scrub: Vec::new(),
 			ep: None,
 			max_layer: 0,
 			quant_mode,
 		}
 	}
 
+	// A deleted slot is live in neither list: `free` holds only scrubbed slots, and
+	// `pending_scrub` holds deleted ones awaiting their pass. Counting `free` alone
+	// would report a deleted node as present until the next insert.
 	pub fn len(&self) -> usize {
-		self.nodes.len() - self.free.len()
+		self.nodes.len() - self.free.len() - self.pending_scrub.len()
 	}
 
 	pub fn is_empty(&self) -> bool {
@@ -101,6 +107,9 @@ impl HnswIndex {
 	}
 
 	fn alloc_slot(&mut self, id: String, node: HnswNode) -> u32 {
+		// A slot may only be reused once its inbound edges are gone, or a lingering
+		// edge silently points at whatever lands in it next.
+		self.scrub_pending();
 		if let Some(slot) = self.free.pop() {
 			self.nodes[slot as usize] = Some(node);
 			self.id_of[slot as usize] = id.clone();
@@ -115,19 +124,21 @@ impl HnswIndex {
 		}
 	}
 
+	// Scrubbing inbound edges costs a pass over every node and every layer, and a
+	// GC sweep deletes many entities at once — doing it per delete made a sweep
+	// O(victims x nodes x edges). Deletion is therefore two steps: mark the node
+	// dead now (searches skip a `None` node, so it is immediately invisible), and
+	// scrub every pending slot in ONE pass before any of them can be reused.
+	//
+	// Symmetry is not enough to do better: insert links both ways, but pruning a
+	// neighbour's over-cap list drops its back-edge while the forward edge remains,
+	// so a node's own layers are not a complete list of who points at it.
 	pub fn delete(&mut self, id: &str) {
 		let Some(slot) = self.slot_of.remove(id) else {
 			return;
 		};
-		// Scrub every inbound edge before freeing the slot: once it is recycled for
-		// a different id, a lingering edge would silently point at the new node.
-		for n in self.nodes.iter_mut().flatten() {
-			for layer in n.layers.iter_mut() {
-				layer.retain(|&s| s != slot);
-			}
-		}
 		self.nodes[slot as usize] = None;
-		self.free.push(slot);
+		self.pending_scrub.push(slot);
 		if self.ep == Some(slot) {
 			self.ep = self
 				.nodes
@@ -135,6 +146,21 @@ impl HnswIndex {
 				.position(|n| n.is_some())
 				.map(|i| i as u32);
 		}
+	}
+
+	// One pass for every slot deleted since the last one. Only after this may a
+	// slot enter `free` — until then nothing can alias it.
+	fn scrub_pending(&mut self) {
+		if self.pending_scrub.is_empty() {
+			return;
+		}
+		let dead: std::collections::HashSet<u32> = self.pending_scrub.iter().copied().collect();
+		for n in self.nodes.iter_mut().flatten() {
+			for layer in n.layers.iter_mut() {
+				layer.retain(|s| !dead.contains(s));
+			}
+		}
+		self.free.append(&mut self.pending_scrub);
 	}
 
 	pub fn insert(&mut self, id: String, vec: Vec<f32>) {
@@ -940,5 +966,77 @@ mod tests {
 			agreement >= 0.30,
 			"binary vs f64 top-{k} agreement below floor: {agreement:.3}"
 		);
+	}
+	#[test]
+	fn a_deleted_slot_is_not_reusable_until_its_inbound_edges_are_scrubbed() {
+		// The whole safety argument for deferring the scrub: a slot may sit dead
+		// with edges still pointing at it, but it must not be handed to a new id
+		// while they do — that is how a stale edge starts aliasing a live node.
+		let mut ix = HnswIndex::new(8, 100);
+		for i in 0..12 {
+			ix.insert(
+				format!("e{i}"),
+				rand_vec(&mut rand::SeedableRng::seed_from_u64(i), 8),
+			);
+		}
+		let before = ix.len();
+
+		ix.delete("e5");
+		assert_eq!(ix.len(), before - 1, "a deleted node is immediately gone");
+		assert!(
+			ix.free.is_empty(),
+			"the slot must NOT be free while inbound edges may still name it"
+		);
+		assert_eq!(ix.pending_scrub.len(), 1, "it is queued for the next pass");
+
+		// The next insert drains the queue before it can take the slot.
+		ix.insert(
+			"fresh".into(),
+			rand_vec(&mut rand::SeedableRng::seed_from_u64(99), 8),
+		);
+		assert!(
+			ix.pending_scrub.is_empty(),
+			"allocating a slot must scrub first"
+		);
+		let dead = ix.nodes.iter().flatten().any(|n| {
+			n.layers
+				.iter()
+				.any(|l| l.iter().any(|&s| ix.id_of.get(s as usize).is_none()))
+		});
+		assert!(!dead, "no edge points outside the arena");
+	}
+
+	#[test]
+	fn one_scrub_pass_clears_every_slot_deleted_since_the_last_one() {
+		// The cost this closes: scrubbing per delete made a GC sweep pay
+		// O(victims x nodes x edges). A sweep now pays one pass total.
+		let mut ix = HnswIndex::new(8, 100);
+		for i in 0..12 {
+			ix.insert(
+				format!("e{i}"),
+				rand_vec(&mut rand::SeedableRng::seed_from_u64(i), 8),
+			);
+		}
+		for i in [2u64, 4, 6, 8] {
+			ix.delete(&format!("e{i}"));
+		}
+		assert_eq!(ix.pending_scrub.len(), 4, "all four wait for one pass");
+
+		ix.insert(
+			"fresh".into(),
+			rand_vec(&mut rand::SeedableRng::seed_from_u64(77), 8),
+		);
+
+		assert!(ix.pending_scrub.is_empty(), "one pass drained all four");
+		let live: std::collections::HashSet<u32> = (0..ix.nodes.len() as u32)
+			.filter(|&s| ix.nodes[s as usize].is_some())
+			.collect();
+		for n in ix.nodes.iter().flatten() {
+			for l in &n.layers {
+				for s in l {
+					assert!(live.contains(s), "edge to slot {s} survived the scrub");
+				}
+			}
+		}
 	}
 }

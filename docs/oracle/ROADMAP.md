@@ -238,7 +238,8 @@ second query-time cliff, and it was recorded on the site but in no plan.
 
 ### 27. The GC sweep is superlinear in three separate places `[lifecycle]`
 
-One item because one sweep pays all four costs:
+One item because one sweep pays all four costs. **Two are closed**; the two that
+remain are the scans, not the accumulation:
 
 - Victim selection is O(entities) per kern per sweep (`src/tick/stigmergy.rs:51-56`).
 - The cold tier is a brute-force cosine scan with no index — `cold_search` decodes
@@ -249,9 +250,14 @@ One item because one sweep pays all four costs:
   to it — one full-table pass per 1024 spills instead of one per spill. The tier
   may sit up to 2% over its cap between passes; the cap is a disk bound, not a
   correctness boundary. Direct `cold_cap` callers still get the exact trim.
-- `HnswIndex::delete` is O(nodes × edges) — it scans every node and every layer
-  to scrub inbound edges (`src/base/hnsw.rs:124-128`), once per victim, so a
-  sweep is O(V · N · E).
+- ~~`HnswIndex::delete` is O(nodes × edges), once per victim~~ **Closed
+  2026-07-21.** Deletion marks the node dead (searches skip a `None` node, so it
+  is immediately invisible) and queues the slot; one scrub pass clears every slot
+  deleted since the last one, and a slot only enters the free list after it. A
+  sweep pays one pass instead of V. Symmetry could not be used to do better:
+  insert links both ways, but pruning an over-cap neighbour drops its back-edge
+  while the forward edge remains, so a node's own layers are not a complete list
+  of who points at it.
 
 The previous version of this file listed "HNSW tombstone compaction — dead nodes
 accumulate" here. **That was wrong.** There are no tombstones: `delete` scrubs

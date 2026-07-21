@@ -22,6 +22,31 @@
   acceptable, off-topic-in-generic is preserved, and the retrieval eval
   remains the instrument that will judge whether routing quality matters.
 
+- 2026-07-21 — Roadmap item 27, second of its four costs: `HnswIndex::delete`
+  stops scanning the whole arena per victim. It scrubbed inbound edges by walking
+  every node and every layer, once per delete, so a GC sweep was
+  O(victims x nodes x edges).
+
+  Deletion is now two steps: mark the node dead — searches skip a `None` node, so
+  it is invisible immediately — and queue the slot; one scrub pass then clears
+  every slot deleted since the last one. A sweep pays one pass instead of V.
+
+  The safety argument is the reason it is staged rather than made cheaper in
+  place. A slot enters the free list only *after* its pass, so nothing can be
+  handed a slot while edges still name it — the aliasing the old comment warned
+  about. Using symmetry instead would have been wrong: insert links both ways, but
+  pruning an over-cap neighbour drops its back-edge while the forward edge
+  remains, so a node's own layers are not a complete list of who points at it. A
+  scrub driven from them would have missed exactly those edges, silently.
+
+  `len()` had to change with it — it derived liveness from the free list, which a
+  pending slot has not joined, so a deleted node would have counted as present
+  until the next insert. An existing cascade test caught that.
+
+  **Decided by:** verify-before-claiming. Both tests were confirmed to fail against
+  a neutered scrub, and `recall@1`/`recall@5`/`MRR` are unchanged — an ANN index
+  change that moved recall would be the failure worth catching here.
+
 - 2026-07-21 — Roadmap item 27, one of its four costs: the cold tier stops paying
   a full-table decode per eviction. `cold_cap` sorts by age, which means decoding
   every row, and `cold_spill` called it after every single put — so at the steady
