@@ -82,7 +82,7 @@ an unauthenticated socket is armed the same either way.
 
 **Closed 2026-07-21: `graviton add`/`remove` and `claim-kind add`/`rm`.** These
 were the four shipped subcommands that reached `with_graph`
-(`src/commands.rs:442` — load, mutate, `save_graph_unguarded`) with no routing at
+(`src/commands.rs:453` — load, mutate, `save_graph_unguarded`) with no routing at
 all, so beside a running daemon each one wrote the WHOLE kern map back over
 everything that daemon had committed since the CLI loaded. They needed no new
 tool: the daemon already exposes `graviton` and `claim_kind`
@@ -177,15 +177,15 @@ underneath any of them gets a refused flush and a reload rather than a clobber.
 two unlocked callers".** The unguarded entry point is named
 `save_graph_unguarded` and carries its precondition, and walking its call sites
 turns up **three** classes, not two. The two this item already named stand and
-still do not belong to it: `cmd_hub_merge` (`src/commands/admin.rs:648`) writes
+still do not belong to it: `cmd_hub_merge` (`src/commands/admin.rs:746`) writes
 a destination graph it holds no lock on, and `maybe_self_heal_store`
-(`src/commands.rs:426`) rewrites the store during boot recovery — hub merge
+(`src/commands.rs:424`) rewrites the store during boot recovery — hub merge
 stops both daemons first, self-heal runs before the daemon serves, and neither
 has been proven safe.
 
 The third class *is* this item, and it is the half that is **not** blocked on
-item 24. `with_graph` (`src/commands.rs:442`) loads the graph, mutates it and
-calls `save_graph_unguarded` (`:445`) holding no lock at all. `cmd_forget` and
+item 24. `with_graph` (`src/commands.rs:453`) loads the graph, mutates it and
+calls `save_graph_unguarded` (`:456`) holding no lock at all. `cmd_forget` and
 `cmd_degrade` reach it safely, because they `route` first and only fall into it
 on `NoDaemon` (`src/commands/graph_ops.rs:120`, `:285`). **`kern graviton
 add`/`remove` (`src/commands/admin.rs:241`, `:257`) and `kern claim-kind
@@ -277,8 +277,13 @@ populate it. Four parts:
   `entity_detail_by_id(&g, &p.id)` directly, before `build_query_options`
   (`:157`) is ever called — no filter of any kind runs. Without this guard ACL is
   decorative, and the read-side route of item 9 put `kern get` behind this same
-  unfiltered path. **This is already costing a shipped feature, not only a
-  planned one: item 91 is the same unfiltered path dropping `valid_until`.**
+  unfiltered path. **This has already cost a shipped feature, not only a
+  planned one: "Retention reaches the id read surface" — the retired item 91
+  `[retrieval]`, closed 2026-07-21, not the open item 91 `[ingest]` — was this
+  same unfiltered path dropping `valid_until`.** It closed by *flagging* the row
+  rather than filtering it, so it hands this bullet nothing: an ACL denial
+  cannot ride as a flag on the row it denies, and this guard still has to be
+  built.
 
 Decide alongside: does the file watcher give `Document` entities a tenant-default
 ACL, or leave them public? Recommend configurable, default public-within-tenant,
@@ -319,7 +324,7 @@ be remembered by every caller.
 
 ### 24. RPC socket has no auth `[surface]`
 
-`FEATURES.md:645-646`. The missing auth is the same boundary as 18's
+`FEATURES.md:665-666`. The missing auth is the same boundary as 18's
 caller-asserted principals — decide them together or the principal stops at the
 MCP surface only. The item's second half is **retired 2026-07-21 — verified
 false**: `KernRpc` does not mirror MCP 1:1 and never did. The contract is four
@@ -503,7 +508,7 @@ sorts by heat and truncates to `ENTITY_SYNC_BATCH = 32` per heartbeat
 (`src/gossip/handler.rs:156`, sorted `:181`),
 so cold entities may never propagate and a partitioned node that rejoins never
 catches up. (`Fetch` is live — `wire_fetch` installs the handler at
-`src/commands.rs:1015` and the question path issues it — but it is single-id, not a
+`src/commands.rs:1038` and the question path issues it — but it is single-id, not a
 catch-up mechanism.) Two pieces adopted on paper and unscheduled: **back-off
 pacing** with exponential jitter keyed to a divergence estimate
 (`docs/kern/fl-vs-knids-federation.md:163-168`), and **batch-size / push-vs-pull
@@ -617,7 +622,7 @@ fallback and no way to distinguish discovery-failed from no-peers-present
 
 `TcpStream::connect` per call at `src/gossip/transport.rs:37` (`send_msg`) and
 `:45` (`send_and_receive`). No pooling. Separately, the `trnsprt` client has no
-pooling either (`FEATURES.md:936-937`) — that one is not gossip and is not gated
+pooling either (`FEATURES.md:952-953`) — that one is not gossip and is not gated
 on 33.
 
 ### 47. Hub phase 3: gossip moves hub-side `[hub]`
@@ -633,7 +638,7 @@ port-clash validation in `src/config/serve.rs` to collapse. (Corrected again
 item 84 owns.)
 
 Beside it: **hub↔node version skew is unmanaged** beyond same-binary spawning
-(`FEATURES.md:1042-1043`).
+(`FEATURES.md:1058-1059`).
 
 ### Decisions owed before the federation build
 
@@ -1075,7 +1080,7 @@ unremarked.
 
 Called **once** (corrected 2026-07-21 — it was twice; the second site left with
 the ingest `kind` arg in `216730d`), with the literal `AGENT_SOURCE`
-(`src/mcp/tools_mutate.rs:118`), and it accepts `USER_SOURCE` / `AGENT_SOURCE`
+(`src/mcp/tools_mutate.rs:131`), and it accepts `USER_SOURCE` / `AGENT_SOURCE`
 (`src/base/validate.rs:22`), so it can never fail. Decision:
 thread a real auth identity (item 18/24), or delete. Delete is correct for a
 single local daemon and needs only sign-off.
@@ -1128,9 +1133,9 @@ is a real reason nothing is set — eviction drops unpersisted `children` pushes
   requires either promoting them to real per-endpoint config or exposing that
   predicate. Was listed under item 11; it is a different job.
 - Hand-rolled tool schemas; no batch query
-  (`FEATURES.md:624`).
+  (`FEATURES.md:624-625`).
 - The LLM client is Ollama-centric with no retry/backoff policy object
-  (`FEATURES.md:882-883`).
+  (`FEATURES.md:898-899`).
 - ~~Watcher `.gitignore` parsing is approximate; no rename tracking~~ **(retired
   2026-07-21 — verified false on both counts).** `IgnoreRules` builds a real
   `Gitignore` through ripgrep's `ignore` crate
@@ -1147,12 +1152,12 @@ is a real reason nothing is set — eviction drops unpersisted `children` pushes
   fires. It sits in this tier and not in tier 1 because the watcher is **off by
   default** — `WatcherConfig::enabled` is `false` unless a `kern.toml` sets it
   (`src/config/watcher.rs:14-16`) — so it is not a default-path defect
-  (`FEATURES.md:1025-1033`).
-- `unnamed` lists only; there is no `promote` (`FEATURES.md:781`).
+  (`FEATURES.md:1066-1069`).
+- `unnamed` lists only; there is no `promote` (`FEATURES.md:797`).
 - GNN has no GPU path, weights are per-kern rather than shared, and the objective
   is link-prediction only (`FEATURES.md:581`).
 - Under WSL2 NAT a loopback Ollama URL must be hand-pinned; kern neither rewrites
-  nor warns (`FEATURES.md:1090`).
+  nor warns (`FEATURES.md:1106-1108`).
 - RPC socket bind→chmod race — sub-millisecond, umask default — recorded as an
   accepted risk (`concepts/security.mdx:40-43`); revisit only if the umask
   alternative stops being worse.
@@ -1182,7 +1187,7 @@ and item 1's instrument staying the scorer.
   `howto/mcp.mdx:50`, which says only "Needs `text` or `id`" and then lists the
   filters as if they applied to both.
 - (retired 2026-07-21 — the tables were filled in) the `move` MCP tool is listed
-  in `README.md:352` and `FEATURES.md:606`, and the site's count is now thirteen
+  in `README.md:352` and `FEATURES.md:607`, and the site's count is now thirteen
   (`howto/mcp.mdx:5, :75`), so the "Eleven tools" note is retired with it.
 - `docs/kern/README.md:60` declares the directory holds "never plans"; five of
   its notes contain execution plans, migration stages and phase orderings
@@ -1210,12 +1215,12 @@ and item 1's instrument staying the scorer.
 - (retired 2026-07-21 — `README.md` and `VISION.md` were corrected) neither
   opens on "takes in durable facts from your sessions" or "learns on its own"
   any more; `VISION.md:52` now *states* there is no recorded baseline instead of
-  gating claims on one; `README.md:393` says the Question and Pulse senders and
-  the fetch RPC are live, and `:398` pins the version at `1.1.0`, matching
+  gating claims on one; `README.md:393-394` says the Question and Pulse senders and
+  the fetch RPC are live, and `:399` pins the version at `1.1.0`, matching
   `FEATURES.md`.
 - (retired 2026-07-21 — all three fixed) `FEATURES.md:54` now lists `Entity`'s
   `acl`; the retired query-cache finding is gone from the file entirely; and
-  `:608` marks prompts and resources "served on the standalone path only",
+  `:625-626` marks prompts and resources "served on the standalone path only",
   which is item 81's note.
 
 Deferred design calls, still owed, no blocker and no urgency: quarantine
@@ -1338,6 +1343,30 @@ an overall eval score that makes specialization worth funding.
 
 ## Closed and verified — do not re-open
 
+- **Deleting a source cascades into the graph** — was item 19, closed
+  2026-07-21. `forget_by_source(scheme, object_id, force)`
+  (`src/commands/graph_ops.rs`) resolves every entity whose `Source` matches the
+  pair across all resident kerns and cascades through the existing
+  `forget_entity`, so edge removal has one implementation. The key is
+  deliberately `(scheme, object_id)` and **not** `source_id`, which hashes the
+  section too — keying on that would forget one chunk of a document and leave
+  the rest. Reachable as the MCP tool `forget_by_source` and as
+  `kern forget --source <scheme>://<object_id> [--force]`, which routes through
+  the daemon with the local path as the `NoDaemon` fallback (item 9's contract);
+  `a_routed_forget_by_source_mutates_the_serving_daemons_graph` and an e2e that
+  blinds the CLI's `data_dir` prove the write lands in the daemon's live graph
+  and not in a stale on-disk copy.
+  **The guard was in two places, not one.** `remove_entity`
+  (`src/base/reason.rs`) carries its own local-Fact immunity check, so a `force`
+  that lifted only `forget_entity`'s outer guard would have counted and reported
+  `removed_entities: 1` while removing nothing — success printed over a silent
+  refusal. Both take `force`; every other caller, GC included
+  (`src/tick/stigmergy.rs`), passes `false`, and that is the only bypass of the
+  Fact guard in the tree. The response carries a third field, `kept_facts`,
+  beyond the two the item asked for: without it a source made only of local
+  Facts answers `removed_entities: 0`, which is indistinguishable from "that
+  source was never ingested" — the refusal has to be observable or `--force` is
+  undiscoverable and an incomplete deletion reads as a complete one.
 - **Retention reaches the id read surface** — was item 91 `[retrieval]` (the
   second item to carry that number; the `[ingest]` one is still open), closed
   2026-07-21. Every claim in the item was re-verified against source first and
@@ -1384,33 +1413,10 @@ an overall eval score that makes specialization worth funding.
   green, neutering gate 2 fails only the gate-2 test, and removing the
   `push_delta` fails all three delta assertions including the fresh-placement
   one. `e2e/test_retention.py::test_a_deduped_ingest_still_applies_its_retention`
-  fails loudly with the merge neutered. What this did *not* buy is item 91: the
+  fails loudly with the merge neutered. What this did *not* buy is item 91
+  `[ingest]` — the open one, not the retired `[retrieval]` 91 listed above: the
   same gate still reports `committed` on a dedup and still leaves the discarded
   id in the lexical index.
-- **Deleting a source cascades into the graph** — was item 19, closed
-  2026-07-21. `forget_by_source(scheme, object_id, force)`
-  (`src/commands/graph_ops.rs`) resolves every entity whose `Source` matches the
-  pair across all resident kerns and cascades through the existing
-  `forget_entity`, so edge removal has one implementation. The key is
-  deliberately `(scheme, object_id)` and **not** `source_id`, which hashes the
-  section too — keying on that would forget one chunk of a document and leave
-  the rest. Reachable as the MCP tool `forget_by_source` and as
-  `kern forget --source <scheme>://<object_id> [--force]`, which routes through
-  the daemon with the local path as the `NoDaemon` fallback (item 9's contract);
-  `a_routed_forget_by_source_mutates_the_serving_daemons_graph` and an e2e that
-  blinds the CLI's `data_dir` prove the write lands in the daemon's live graph
-  and not in a stale on-disk copy.
-  **The guard was in two places, not one.** `remove_entity`
-  (`src/base/reason.rs`) carries its own local-Fact immunity check, so a `force`
-  that lifted only `forget_entity`'s outer guard would have counted and reported
-  `removed_entities: 1` while removing nothing — success printed over a silent
-  refusal. Both take `force`; every other caller, GC included
-  (`src/tick/stigmergy.rs`), passes `false`, and that is the only bypass of the
-  Fact guard in the tree. The response carries a third field, `kept_facts`,
-  beyond the two the item asked for: without it a source made only of local
-  Facts answers `removed_entities: 0`, which is indistinguishable from "that
-  source was never ingested" — the refusal has to be observable or `--force` is
-  undiscoverable and an incomplete deletion reads as a complete one.
 - **Per-source TTL has a writer** — was item 22, closed 2026-07-21. The reader
   (`score::drop_expired`) had been waiting for one; `valid_until` is now set at
   ingest from a `retention_secs` on the MCP `ingest` schema and a
@@ -1552,7 +1558,7 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   `broadcast_q` invoked by `do_resolve` (`src/tick/tasks.rs:372`), `handle_question`
   live-dispatched (`src/gossip/handler.rs:44`).
 - **`Fetch` is wired** — `wire_fetch` installs the handler at
-  `src/commands.rs:1015`. Single-id, so it is not anti-entropy (item 36), but it
+  `src/commands.rs:1038`. Single-id, so it is not anti-entropy (item 36), but it
   is not dead.
 - **`union_statements` never existed**; remote heat is no longer pinnable
   (`src/base/merge.rs:20`, applied `:153`).
@@ -1573,7 +1579,7 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   `src/base/constants.rs:69`). Only the CLI reaches `Fact`, via
   `clamp_confidence(1.0, "user")` (`src/commands/ingest_cmd.rs:59`).
 - **`conf` is clamped to [0,1]** — `validate_conf` (`src/base/validate.rs:14`)
-  called at `src/mcp/tools_mutate.rs:116`.
+  called at `src/mcp/tools_mutate.rs:129`.
 - **A prose-answering reason model no longer archives deltas having stored
   nothing.** `parse_claims` returns `Option`; a reply with no parseable JSON array
   leaves the delta queued for retry, a well-formed empty array still archives

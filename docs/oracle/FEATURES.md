@@ -323,7 +323,7 @@ and cold tier live together. Readers never block, writers serialize.
 
 **Gaps.** Single-writer is enforced, not assumed — `src/base/lock.rs` is an advisory
 lock `reembed`, `gc` and `compact` claim or refuse — but `cmd_hub_merge`
-(`src/commands/admin.rs:648`) and `maybe_self_heal_store` (`src/commands.rs:437`)
+(`src/commands/admin.rs:746`) and `maybe_self_heal_store` (`src/commands.rs:437`)
 still `save_graph_unguarded` holding none. No WAL but LMDB's; compaction is offline.
 
 ---

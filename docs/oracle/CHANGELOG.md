@@ -2,6 +2,124 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — three parallel cycles reconciled into one doc set, and item 93's
+  content check earned its keep on the first merge it saw. `cycle/3` (item 19)
+  merged master carrying item 93 and item 91 `[retrieval]`; every source file
+  auto-merged and only `CHANGELOG.md` and `ROADMAP.md` conflicted, both because
+  all three sides had prepended to the same two lists. Nothing was dropped: the
+  changelog keeps all seven conflicting entries newest-first by commit time, and
+  "Closed and verified" keeps item 19, item 91 `[retrieval]` and item 88 in
+  closure order above the items already there. Item 75 took HEAD's rewrite —
+  the half of it verified false — over master's, which had only re-anchored the
+  paragraph HEAD deleted; master's three corrected
+  `diskann-disk-index.md` line numbers were carried across into it, since those
+  were right and HEAD's were stale.
+
+  **The number 91 was allocated twice and the collision became a live wrong
+  pointer.** Item 18's fourth bullet said "item 91 is the same unfiltered path
+  dropping `valid_until`", written about the `[retrieval]` 91 — which has since
+  closed and retired its number, leaving the open `[ingest]` 91 ("the second
+  dedup gate lies about what it did, twice") as the only thing that spelling
+  resolves to. A reader following it landed on an unrelated item. Repointed at
+  the retired item by title, and the bullet now also records what the closure
+  actually did to it: 91 `[retrieval]` shipped a *flag*, not a filter, so it
+  bought this bullet nothing — an ACL denial cannot ride on the row it denies.
+  The other reference, in item 88's closure note, was re-read and does mean the
+  open `[ingest]` one; it is tagged now rather than left to the number.
+
+  **Twenty-two citations were repointed, and twelve of them `docs-check` found
+  by itself** — the first time it has caught anything, because until item 93
+  landed it checked only that the cited line existed, and every one of these
+  did. Five of the twelve were `ROADMAP.md` -> `FEATURES.md` (`trnsprt`
+  pooling, hub↔node version skew, the Ollama retry/backoff gap, `promote`, the
+  WSL2 Ollama URL), all shifted by the +16 lines the two `FEATURES.md` edits
+  added above them. Seven were `src/` citations moved by the *code* merge, and
+  those are the ones no amount of care on either branch could have prevented:
+  `with_graph` 442 -> 453 (twice), `wire_fetch` 1015 -> 1038 (twice),
+  `validate_fact_source` 118 -> 131, `validate_conf` 116 -> 129,
+  `maybe_self_heal_store` 426 -> 424. The other ten came out of reading the same
+  pass by hand and were never nominated — `cmd_hub_merge` 648 -> 746 in two
+  files, the RPC-auth gap, the watcher's off-by-default paragraph, the `move`
+  tool row, the prompts/resources note, the README version pin — which is the
+  measured 33% recall the checker was shipped admitting to.
+
+  Master had already resolved item 19's merge independently as `88f1201`, so
+  the same two-parent docs conflict got resolved twice, in two trees, by two
+  agents who could not see each other. Both are sound; this one is kept because
+  only it carries the item 91 repoint above. Taking it wholesale was checked
+  rather than assumed — 162 changelog bullets against master's 161, the extra
+  being this entry, item 19's entry reordered to the top, nothing dropped.
+  Decided by: verify-before-claiming — two resolutions of one conflict is not a
+  thing to average, it is a thing to diff and choose between on evidence.
+
+  Counted rather than eyeballed: nominations went 39 (master) -> 51 (merged) ->
+  36 (repaired), and the set of nominated targets present in neither parent is
+  now empty. The 36 standing are the pre-existing ones, not new damage.
+
+- 2026-07-21 — item 19 closed: deleting a source cascades into the graph.
+  `forget_by_source(scheme, object_id, force)` resolves every entity whose
+  `Source` matches the pair across all resident kerns and removes it through the
+  existing `forget_entity`, reachable as the MCP tool `forget_by_source` and as
+  `kern forget --source <scheme>://<object_id> [--force]`.
+
+  **The Fact guard was in two places, and only one of them was obvious.**
+  `forget_entity` refuses a local Fact and returns `Err("cannot forget a fact")`
+  — that is the guard the item describes and the one a reader finds first. But
+  `remove_entity` (`src/base/reason.rs`) carries a *second*, silent one: it
+  returns early on an active local Fact with no error and no signal. A `force`
+  that lifted only the outer guard would therefore have passed the inner one's
+  early return, counted the entity as removed, and reported
+  `removed_entities: 1` while the entity was still in the kern — success
+  printed over a silent refusal, which is a worse failure than the refusal it
+  replaced. Both take `force` now. This was verified by neutering it rather
+  than by reading it: making `force` inert inside `remove_entity` fails three
+  tests at three levels (`base::reason`, `commands::graph_ops`,
+  `mcp::tools_mutate`) plus the e2e, and the graph_ops failure is precisely
+  the described defect — the `removed_entities == 2` assertion passes and only
+  the "the Fact is actually gone" assertion fails. GC is the call site that
+  must never gain this: `src/tick/stigmergy.rs` passes `false`, and no call
+  site in the tree passes `true` outside the tests that prove the bypass.
+
+  **The selector is `<scheme>://<object_id>`, and the key is not `source_id`.**
+  `source_id()` hashes scheme + object + *section*, so keying the sweep on it
+  would forget a single chunk of a document and silently leave the rest —
+  exactly the half-deletion the item exists to prevent. The pair
+  `(Source::scheme(), Source::object_id())` is what the graph actually stores,
+  so that is the key. On the CLI the `://` spelling is the URI shape `Source`'s
+  own doc comment uses; everything after the separator is the raw `object_id`,
+  **not** a parsed URI path, because re-deriving it from a
+  `ticket://<system>/<id>` spelling would guess at which half is which. A
+  scheme outside the known set is a caller error; an unknown *object* is a
+  legal no-op that removes 0 without erroring, since the host deletes what it
+  has and kern reports what it had.
+
+  **A third response field beyond the two specified.** `kept_facts` was judged
+  and kept, not accepted. Without it a source composed only of local Facts
+  answers `removed_entities: 0`, which is byte-identical to the answer for a
+  source that was never ingested — so an *incomplete* deletion reads as a
+  complete one and `--force` is undiscoverable. For a host-deletion cascade,
+  silently leaving rows behind after "delete this source" is the one outcome
+  that must be impossible to mistake for success.
+
+  Also fixed while proving the flag: `#[arg(long, requires = "source")]` does
+  **not** fire for a `SetTrue` flag in clap 4.6, so `kern forget --force <id>`
+  was parsed, accepted and the flag ignored. Confirmed by re-adding `requires`
+  and observing clap let the invocation through anyway; the pairing is enforced
+  in `dispatch` instead, and `kern forget --force deadbeef` now prints
+  `--force applies to --source <scheme>://<object_id>, not a single thought ID`.
+  `FEATURES.md` had been written claiming the clap-level `requires` was what
+  enforced it, which was the very thing measured false — corrected.
+
+  **Decided by:** verify-before-claiming, and fix-the-root. Every load-bearing
+  claim in the implementation report was checked by breaking it: the second
+  guard by making `force` inert, the daemon-routing proof by deleting the
+  `data_dir` repoint and confirming the control assertion then fails (without
+  the blinding `kern list` does see the entities on the CLI's disk, so the
+  blinded run is what makes "the forget landed in the daemon" the only
+  reading), and the clap finding by restoring `requires`. Fixing only the outer
+  guard would have been the symptom fix; the root is that removal immunity is
+  enforced where removal happens.
+
 - 2026-07-21 — `docs-check` now reads the line it is pointed at. Item 93's
   second candidate closure landed: every anchor carrying a line number gets its
   citing block's content words compared against the cited line's, and an anchor
@@ -244,70 +362,6 @@
   Decided by: verify-before-claiming — every anchor here was opened and read
   against what the citing sentence asserts, and the two claims that fell were
   claims nothing in the toolchain was ever going to fail on.
-
-- 2026-07-21 — item 19 closed: deleting a source cascades into the graph.
-  `forget_by_source(scheme, object_id, force)` resolves every entity whose
-  `Source` matches the pair across all resident kerns and removes it through the
-  existing `forget_entity`, reachable as the MCP tool `forget_by_source` and as
-  `kern forget --source <scheme>://<object_id> [--force]`.
-
-  **The Fact guard was in two places, and only one of them was obvious.**
-  `forget_entity` refuses a local Fact and returns `Err("cannot forget a fact")`
-  — that is the guard the item describes and the one a reader finds first. But
-  `remove_entity` (`src/base/reason.rs`) carries a *second*, silent one: it
-  returns early on an active local Fact with no error and no signal. A `force`
-  that lifted only the outer guard would therefore have passed the inner one's
-  early return, counted the entity as removed, and reported
-  `removed_entities: 1` while the entity was still in the kern — success
-  printed over a silent refusal, which is a worse failure than the refusal it
-  replaced. Both take `force` now. This was verified by neutering it rather
-  than by reading it: making `force` inert inside `remove_entity` fails three
-  tests at three levels (`base::reason`, `commands::graph_ops`,
-  `mcp::tools_mutate`) plus the e2e, and the graph_ops failure is precisely
-  the described defect — the `removed_entities == 2` assertion passes and only
-  the "the Fact is actually gone" assertion fails. GC is the call site that
-  must never gain this: `src/tick/stigmergy.rs` passes `false`, and no call
-  site in the tree passes `true` outside the tests that prove the bypass.
-
-  **The selector is `<scheme>://<object_id>`, and the key is not `source_id`.**
-  `source_id()` hashes scheme + object + *section*, so keying the sweep on it
-  would forget a single chunk of a document and silently leave the rest —
-  exactly the half-deletion the item exists to prevent. The pair
-  `(Source::scheme(), Source::object_id())` is what the graph actually stores,
-  so that is the key. On the CLI the `://` spelling is the URI shape `Source`'s
-  own doc comment uses; everything after the separator is the raw `object_id`,
-  **not** a parsed URI path, because re-deriving it from a
-  `ticket://<system>/<id>` spelling would guess at which half is which. A
-  scheme outside the known set is a caller error; an unknown *object* is a
-  legal no-op that removes 0 without erroring, since the host deletes what it
-  has and kern reports what it had.
-
-  **A third response field beyond the two specified.** `kept_facts` was judged
-  and kept, not accepted. Without it a source composed only of local Facts
-  answers `removed_entities: 0`, which is byte-identical to the answer for a
-  source that was never ingested — so an *incomplete* deletion reads as a
-  complete one and `--force` is undiscoverable. For a host-deletion cascade,
-  silently leaving rows behind after "delete this source" is the one outcome
-  that must be impossible to mistake for success.
-
-  Also fixed while proving the flag: `#[arg(long, requires = "source")]` does
-  **not** fire for a `SetTrue` flag in clap 4.6, so `kern forget --force <id>`
-  was parsed, accepted and the flag ignored. Confirmed by re-adding `requires`
-  and observing clap let the invocation through anyway; the pairing is enforced
-  in `dispatch` instead, and `kern forget --force deadbeef` now prints
-  `--force applies to --source <scheme>://<object_id>, not a single thought ID`.
-  `FEATURES.md` had been written claiming the clap-level `requires` was what
-  enforced it, which was the very thing measured false — corrected.
-
-  **Decided by:** verify-before-claiming, and fix-the-root. Every load-bearing
-  claim in the implementation report was checked by breaking it: the second
-  guard by making `force` inert, the daemon-routing proof by deleting the
-  `data_dir` repoint and confirming the control assertion then fails (without
-  the blinding `kern list` does see the entities on the CLI's disk, so the
-  blinded run is what makes "the forget landed in the daemon" the only
-  reading), and the clap finding by restoring `requires`. Fixing only the outer
-  guard would have been the symptom fix; the root is that removal immunity is
-  enforced where removal happens.
 
 - 2026-07-21 — merging `cycle/2` re-broke four `ROADMAP.md` -> `FEATURES.md`
   anchors that were correct in the branch, and that is a property of the merge
