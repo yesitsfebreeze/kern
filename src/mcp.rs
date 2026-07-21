@@ -175,6 +175,7 @@ impl trnsprt::McpServer for Server {
 			"ingest" => self.tool_ingest(args),
 			"link" => self.tool_link(args),
 			"forget" => self.tool_forget(args),
+			"forget_by_source" => self.tool_forget_by_source(args),
 			"degrade" => self.tool_degrade(args),
 			"move" => self.tool_move(args),
 			"health" => self.tool_health(),

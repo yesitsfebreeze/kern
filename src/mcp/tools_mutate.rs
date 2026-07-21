@@ -57,6 +57,19 @@ pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 			},
 		}),
 		serde_json::json!({
+			"name": "forget_by_source",
+			"description": "Remove every thought ingested from one source — all of its sections — and cascade-delete their edges. Local Facts are refused unless `force` is set; a remote Fact is a peer's assertion, not durable local knowledge, and goes either way.",
+			"inputSchema": {
+				"type": "object",
+				"required": ["scheme", "object_id"],
+				"properties": {
+					"scheme":    {"type": "string", "description": "source scheme: file, ticket, session, agent or inline"},
+					"object_id": {"type": "string", "description": "the source's object id — file path, ticket id, session id, agent object or inline hash"},
+					"force":     {"type": "boolean", "description": "also remove local Facts (default false) — the only bypass of the Fact guard"},
+				},
+			},
+		}),
+		serde_json::json!({
 			"name": "degrade",
 			"description": "Decrease edge scores along the retrieval path for a query.",
 			"inputSchema": {
@@ -131,6 +144,14 @@ struct LinkArgs {
 #[derive(Deserialize)]
 struct ForgetArgs {
 	id: String,
+}
+
+#[derive(Deserialize)]
+struct ForgetBySourceArgs {
+	scheme: String,
+	object_id: String,
+	#[serde(default)]
+	force: bool,
 }
 
 #[derive(Deserialize)]
@@ -350,7 +371,7 @@ impl Server {
 		};
 
 		let mut g = self.graph.write();
-		let res = crate::commands::graph_ops::forget_entity(&mut g, &p.id);
+		let res = crate::commands::graph_ops::forget_entity(&mut g, &p.id, false);
 		drop(g);
 
 		match res {
@@ -361,6 +382,36 @@ impl Server {
 			Err("thought not found") => tool_error(&format!("thought not found: {}", p.id)),
 			Err(e) => tool_error(e),
 		}
+	}
+
+	// The routed half of `kern forget --source` (ROADMAP item 19). Exists so the
+	// command has somewhere to route: item 9 put `forget` through the daemon, and
+	// a per-source forget with no tool behind it would delete from the store
+	// behind a serving daemon's back.
+	pub(crate) fn tool_forget_by_source(&self, args: &serde_json::Value) -> serde_json::Value {
+		let p: ForgetBySourceArgs = match serde_json::from_value(args.clone()) {
+			Ok(v) => v,
+			Err(e) => return tool_error(&format!("invalid arguments: {e}")),
+		};
+		let Some(scheme) = Source::parse_scheme(&p.scheme) else {
+			return tool_error(&format!("unknown source scheme: {}", p.scheme));
+		};
+		if p.object_id.is_empty() {
+			return tool_error("object_id is required");
+		}
+
+		let mut g = self.graph.write();
+		let out = crate::commands::graph_ops::forget_by_source(&mut g, scheme, &p.object_id, p.force);
+		drop(g);
+
+		if out.removed_entities > 0 {
+			(self.save_fn)();
+		}
+		tool_result_json(&serde_json::json!({
+			"removed_entities": out.removed_entities,
+			"removed_edges": out.removed_edges,
+			"kept_facts": out.kept_facts,
+		}))
 	}
 
 	pub(crate) fn tool_degrade(&self, args: &serde_json::Value) -> serde_json::Value {
@@ -496,6 +547,121 @@ mod tests {
 		let out = srv.tool_forget(&serde_json::json!({ "id": "f" }));
 		assert!(is_error(&out));
 		assert!(text(&out).contains("cannot forget a fact"));
+	}
+
+	fn sourced(id: &str, kind: EntityKind, path: &str, section: &str) -> Entity {
+		Entity {
+			id: id.into(),
+			kind,
+			source: crate::base::types::Source::File {
+				path: path.into(),
+				section: section.into(),
+				title: String::new(),
+				author: String::new(),
+				url: String::new(),
+			},
+			..Default::default()
+		}
+	}
+
+	fn source_server() -> Server {
+		let srv = make_server();
+		let mut k = Kern::new("kx", "");
+		for e in [
+			sourced("intro", EntityKind::Claim, "notes.md", "intro"),
+			sourced("body", EntityKind::Claim, "notes.md", "body"),
+			sourced("pinned", EntityKind::Fact, "notes.md", "pinned"),
+			sourced("other", EntityKind::Claim, "elsewhere.md", ""),
+		] {
+			k.entities.insert(e.id.clone(), e);
+		}
+		add_reason(
+			&mut k,
+			Reason {
+				id: "intro->body".into(),
+				from: "intro".into(),
+				to: "body".into(),
+				..Default::default()
+			},
+		);
+		insert_kern(&srv, k);
+		srv
+	}
+
+	// Repo law 3: one dispatcher. `kern forget --source` routes by tool NAME over
+	// the socket, so a handler that exists but is not reachable through
+	// `call_tool` answers "unknown tool" and sends the CLI back to writing the
+	// store behind the daemon — exactly what item 19 must not do.
+	#[tokio::test]
+	async fn forget_by_source_dispatches_through_call_tool() {
+		use trnsprt::McpServer;
+
+		let srv = source_server();
+		let res = McpServer::call_tool(
+			&srv,
+			"forget_by_source",
+			&serde_json::json!({"scheme": "file", "object_id": "notes.md"}),
+		)
+		.expect("the dispatcher answers");
+		assert!(!res.is_error, "{:?}", res.content);
+
+		let body: serde_json::Value =
+			serde_json::from_str(res.content[0]["text"].as_str().expect("text content"))
+				.expect("the result body is json");
+		assert_eq!(body["removed_entities"], 2, "both Claim sections went");
+		assert_eq!(body["removed_edges"], 1, "the edge between them cascaded");
+		assert_eq!(body["kept_facts"], 1, "the Fact was refused, and said so");
+
+		let g = srv.graph.read();
+		let kern = g.kerns.get("kx").unwrap();
+		assert!(!kern.entities.contains_key("intro"));
+		assert!(kern.entities.contains_key("pinned"), "Fact untouched");
+		assert!(
+			kern.entities.contains_key("other"),
+			"other source untouched"
+		);
+	}
+
+	#[tokio::test]
+	async fn tool_forget_by_source_force_takes_the_local_fact() {
+		let srv = source_server();
+		let out = srv.tool_forget_by_source(
+			&serde_json::json!({"scheme": "file", "object_id": "notes.md", "force": true}),
+		);
+		assert!(!is_error(&out), "{}", text(&out));
+		assert_eq!(body(&out)["removed_entities"], 3);
+		assert_eq!(body(&out)["kept_facts"], 0);
+		assert!(
+			!srv
+				.graph
+				.read()
+				.kerns
+				.get("kx")
+				.unwrap()
+				.entities
+				.contains_key("pinned"),
+			"force is the one bypass and it has to actually bite"
+		);
+	}
+
+	#[tokio::test]
+	async fn tool_forget_by_source_rejects_an_unknown_scheme() {
+		let srv = source_server();
+		let out =
+			srv.tool_forget_by_source(&serde_json::json!({"scheme": "ftp", "object_id": "notes.md"}));
+		assert!(is_error(&out));
+		assert!(
+			text(&out).contains("unknown source scheme"),
+			"{}",
+			text(&out)
+		);
+
+		// An unknown *object* is a legal no-op — only the scheme is a caller error.
+		let out = srv.tool_forget_by_source(
+			&serde_json::json!({"scheme": "file", "object_id": "never-ingested.md"}),
+		);
+		assert!(!is_error(&out), "{}", text(&out));
+		assert_eq!(body(&out)["removed_entities"], 0);
 	}
 
 	#[tokio::test]

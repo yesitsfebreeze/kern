@@ -157,6 +157,56 @@ mod tests {
 		);
 	}
 
+	// Same contract for the per-source forget (ROADMAP item 19): a host that
+	// deleted a document hands the whole source over, and the cascade has to land
+	// in the graph the daemon is serving rather than in the copy this process
+	// would have opened beside it.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_routed_forget_by_source_mutates_the_serving_daemons_graph() {
+		use crate::base::types::Source;
+
+		let ep = scratch_endpoint("forget-source");
+		let srv = kern_with_edge();
+		for (id, section) in [("a", "intro"), ("b", "body")] {
+			srv
+				.graph
+				.write()
+				.kerns
+				.get_mut("kx")
+				.expect("kern")
+				.entities
+				.get_mut(id)
+				.expect("entity")
+				.source = Source::File {
+				path: "notes.md".into(),
+				section: section.into(),
+				title: String::new(),
+				author: String::new(),
+				url: String::new(),
+			};
+		}
+		let graph = srv.graph.clone();
+		serving(srv, &ep).await;
+
+		let args = serde_json::json!({"scheme": "file", "object_id": "notes.md"});
+		let Routed::Done(v) = route_to(&ep, "forget_by_source", args).await else {
+			panic!("a serving daemon must answer the per-source forget");
+		};
+		assert_eq!(
+			u64_field(&v, "removed_entities"),
+			2,
+			"both sections of the source went"
+		);
+		assert_eq!(u64_field(&v, "removed_edges"), 2, "their edges cascaded");
+
+		let g = graph.read();
+		let kern = g.kerns.get("kx").expect("kern");
+		assert!(
+			kern.entities.is_empty(),
+			"the daemon's own graph lost the source's entities"
+		);
+	}
+
 	#[tokio::test(flavor = "multi_thread")]
 	async fn a_routed_degrade_reports_both_counts_from_the_daemon() {
 		let ep = scratch_endpoint("degrade");

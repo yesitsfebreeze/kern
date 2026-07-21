@@ -209,14 +209,6 @@ ACL, or leave them public? Recommend configurable, default public-within-tenant,
 since the tenant boundary is the process. `src/ingest/file_watcher.rs:136`
 hardcodes `Acl::default()` today.
 
-### 19. `forget_by_source(scheme, object_id)` with an explicit `force` `[store]`
-
-Deleting a source in the host must cascade into the graph. `forget` exists but is
-per-entity and Facts are immune; neither symbol exists in `src/`. Needs a `force`
-param that punches through the Fact guard — a legal deletion outranks
-GC-immunity. **This is the only place that guard may be bypassed, and it must be
-explicit, never default.**
-
 ### 20. Source-trust weighting `[retrieval]`
 
 User-authored claims should outrank auto-ingested claims of equal heat.
@@ -846,29 +838,79 @@ does not exist. Wanted: track it under `scripts/` and install it via
 
 ### 75. Crash consistency on the DiskANN path `[store]`
 
-The disk graph, the vectors and the bincode metadata can diverge on a mid-write
-crash; there is no WAL and no atomic-rename-per-segment
-(`docs/kern/diskann-disk-index.md:117-118`). Adopted as a known risk, scheduled
-nowhere. Beside it: mmap file-locking and flush semantics differ on Windows
-(`:112-113`), and PQ codebook training/drift has no retrain trigger — "a bad
-codebook silently degrades recall" (`:110-113`) — which lands in item 1's lap
-the moment PQ is promoted out of the non-goals.
+**Half of this was verified false 2026-07-21 and the residual risk is narrower
+than stated.** The item was written off `docs/kern/diskann-disk-index.md:117-118`
+("no WAL and no atomic-rename-per-segment") and never checked against the build.
+Per-segment atomic rename *does* exist: `atomic_write`
+(`src/base/diskann.rs:285-289`) writes `<path>.tmp` then `std::fs::rename`, and
+`build_and_save` uses it for all three segments — meta (`:264`), vectors
+(`:272`), graph (`:281`). `DiskIndex::open` (`:302-347`) then rejects a divergent
+set rather than reading it: ids-length vs count, entry point in range, both mmap
+lengths against the meta's `count × dim × 4` / `count × r × 4`, and every
+adjacency slot either `SENTINEL` or a valid node id — the last one specifically
+so a beam walk cannot slice the vector mmap out of bounds.
+
+What is actually left is **cross-segment** atomicity, and it is a real hole: three
+independent renames mean a crash between them leaves meta from build N+1 beside
+vectors from build N. That survives the length checks whenever the two builds
+have the same `count`, `dim` and `r` — the common case, since a rebuild usually
+changes vectors and not shape. There is also no `sync_all` before the rename, so
+rename ordering is atomic while the *data* behind it need not be durable. A
+corrupt index is not fatal — `build_entity_disk_snapshot`
+(`src/base/graph.rs:351-366`) logs and falls back to the in-RAM index — so this
+is silent staleness, not a crash. Wanted: one rename that publishes all three
+(a versioned directory, or a manifest naming the build the three files belong
+to), and an fsync before it.
+
+Beside it, both unverified against source and still doc-only: mmap file-locking
+and flush semantics differ on Windows (`:112-113`), and PQ codebook
+training/drift has no retrain trigger — "a bad codebook silently degrades recall"
+(`:110-113`) — which lands in item 1's lap the moment PQ is promoted out of the
+non-goals.
 
 ### 76. The watchdog force-exit skips the final guarded flush `[store]`
 
-It force-exits with 101 on a 30s async stall
-(`concepts/architecture.mdx:300-301`), and that path skips the flush
-`howto/install-run.mdx:187-190` says is required to avoid losing RAM-only state.
-Combined with item 10, the default posture can lose up to a tick interval of
-writes with no log.
+Confirmed against source 2026-07-21, and it is not a doc claim: `spawn_watchdog`
+(`src/commands.rs:870-909`) beats a counter once a second from the async runtime
+and force-exits `std::process::exit(101)` (`:900`) after `STALL_LIMIT * CHECK_SECS`
+= 30s of no progress. `process::exit` runs no destructor and no `Drop`, so it
+skips the guarded shutdown flush the ordinary path takes — the `shutdown` notify
+at `src/commands.rs:832` unwinds into the guarded persist closure at `:592`,
+which is the thing that "never overwrites a grown disk". Nothing on the watchdog
+path writes anything, and the exit line does not say so.
+
+The stall it fires on is named as "graph deadlock or worker starvation", which is
+precisely the state where the in-memory graph is ahead of disk and unreachable.
+Combined with item 10 the default posture can lose up to a tick interval of
+writes with no log. The awkward part is that a stalled runtime is exactly when a
+flush may itself block, so "flush before exiting" is not free — wanted is a
+bounded attempt (flush on the watchdog's own thread with a hard deadline, exit
+either way) plus a line saying which of the two happened.
 
 ### 77. Hash composition is an unguarded breaking change `[store]`
 
 "Changing how a hash input is composed is a breaking change to every existing
-graph" (`concepts/graph.mdx:86-88`). Repo law 1 guards bincode schema round
-trips; nothing guards or versions hash composition, and there is no migration
-path. Wanted: a round-trip test over `content_hash` inputs, same shape as the
-bincode guard.
+graph" (`concepts/graph.mdx:86-88`), and source confirms the exposure. The hash
+itself is pinned — `content_hash` (`src/base/util.rs:3`) is sha256-to-lowercase-hex
+and `util.rs:155` asserts length, alphabet and determinism. What is unpinned is
+every *composition* feeding it, and each one is a different format string: entity
+ids are `content_hash(text)` bare (`src/ingest/place.rs`,
+`src/ingest/file_watcher.rs:115`, `src/ingest/direct.rs:26`,
+`src/ingest/worker.rs:65`), `Source::source_id` is
+`scheme \x00 object \x00 section` (`src/base/types.rs:248-260`), child and named
+ids are `parent_id + nonce` and `parent_id + name + nonce`
+(`types.rs:493`, `:498`), and the HNSW canon has its own (`src/base/hnsw.rs:525`).
+
+The bare-text composition is load-bearing beyond identity: the gossip import
+guard re-derives `content_hash(&e.text()) == e.id` to refuse a forged remote
+statement (`src/gossip/handler.rs:536`, and the note at `:521` names every minting
+site it depends on). So changing that composition does not merely orphan old ids —
+it makes every existing remote statement fail its receipt.
+
+Repo law 1 guards bincode schema round trips; nothing guards or versions any of
+these, and there is no migration path. Wanted: golden-vector tests pinning each
+composed input string — not the digest of a value, the *shape* of what is hashed —
+same standing as the bincode guard.
 
 ### 78. A non-local LLM URL egresses everything, silently `[surface]`
 
@@ -1145,6 +1187,30 @@ an overall eval score that makes specialization worth funding.
 
 ## Closed and verified — do not re-open
 
+- **Deleting a source cascades into the graph** — was item 19, closed
+  2026-07-21. `forget_by_source(scheme, object_id, force)`
+  (`src/commands/graph_ops.rs`) resolves every entity whose `Source` matches the
+  pair across all resident kerns and cascades through the existing
+  `forget_entity`, so edge removal has one implementation. The key is
+  deliberately `(scheme, object_id)` and **not** `source_id`, which hashes the
+  section too — keying on that would forget one chunk of a document and leave
+  the rest. Reachable as the MCP tool `forget_by_source` and as
+  `kern forget --source <scheme>://<object_id> [--force]`, which routes through
+  the daemon with the local path as the `NoDaemon` fallback (item 9's contract);
+  `a_routed_forget_by_source_mutates_the_serving_daemons_graph` and an e2e that
+  blinds the CLI's `data_dir` prove the write lands in the daemon's live graph
+  and not in a stale on-disk copy.
+  **The guard was in two places, not one.** `remove_entity`
+  (`src/base/reason.rs`) carries its own local-Fact immunity check, so a `force`
+  that lifted only `forget_entity`'s outer guard would have counted and reported
+  `removed_entities: 1` while removing nothing — success printed over a silent
+  refusal. Both take `force`; every other caller, GC included
+  (`src/tick/stigmergy.rs`), passes `false`, and that is the only bypass of the
+  Fact guard in the tree. The response carries a third field, `kept_facts`,
+  beyond the two the item asked for: without it a source made only of local
+  Facts answers `removed_entities: 0`, which is indistinguishable from "that
+  source was never ingested" — the refusal has to be observable or `--force` is
+  undiscoverable and an incomplete deletion reads as a complete one.
 - **Per-source TTL has a writer** — was item 22, closed 2026-07-21. The reader
   (`score::drop_expired`) had been waiting for one; `valid_until` is now set at
   ingest from a `retention_secs` on the MCP `ingest` schema and a
