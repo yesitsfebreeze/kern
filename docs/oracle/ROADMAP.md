@@ -553,11 +553,12 @@ freshness signal is lost. An index that slows ingest to speed up query is the
 trade, and it only pays where eligibility is low — a corpus where everything is
 eligible cannot be helped by an index at all.
 
-### 26. PageRank costs whatever the seeds reach, and there is no cheap answer when they reach everything `[retrieval]`
+### 26. PageRank allocates four N-sized buffers on every query `[retrieval]`
 
-**Narrowed 2026-07-21.** The flat per-query cost is gone; what is left is a
-smaller cost with a different shape, stated below so the closed part is not
-re-opened and the open part is not mistaken for the old one.
+**Narrowed 2026-07-21, narrowed again 2026-07-22.** The flat per-query cost is
+gone and so is the full-reach regression that replaced it; what is left is the
+per-call allocation, stated below so the closed parts are not re-opened and the
+open one is not mistaken for either of them.
 
 **Measured before, `tests/seed_scale.rs` in release, default minus
 `pagerank_enabled: false`.** At N=100k it cost a flat **~18 ms per query** —
@@ -592,29 +593,62 @@ exact cache is one basis vector per seed node, which is O(N) memory apiece and
 large win on any harness that repeats a query — which is the only kind of harness
 we have — while doing nothing for real traffic.
 
-**What remains, with its number.** The cost now tracks reach, so a query whose
-seeds reach the whole graph pays the whole graph. The instrument for that is
-`cost_against_full_width_by_fanout` in `src/retrieval/pagerank.rs`, ignored by
-default, at N=100k with 75 seeds:
+**The full-reach regression is closed 2026-07-22, and it did reproduce.** The
+cost tracked reach, so a query whose seeds reached the whole graph paid the whole
+graph — and paid it through a list where the loops it replaced vectorised over a
+slice. Rechecking the old instrument (`cost_against_full_width_by_fanout`) on
+this box put out-degree 16 at 31.8 ms against 26.7 ms rather than the 37.7 / 26.3
+recorded above; the direction held, the exact 1.4× did not, and that instrument
+was never a fair one — it charged its full-width reference a 100k-row sort the
+confined path does not pay.
 
-| out-degree | reached | confined | full-width |
+The fair instrument is new: `cost_against_full_width_by_reach` in
+`src/retrieval/pagerank.rs`, ignored by default. It confines every edge to a
+contiguous block of known size, so the seeds' reach is the block while the graph's
+edge count and per-node out-degree do not move with it, and it A/Bs the same
+function against itself — same top-k tail, only the loop body differs. N=100k,
+75 seeds, 25 iterations, min of 7, the quietest of three runs (a loaded box gives
+this a ±20% floor, which is wide enough to hide the whole effect on any single
+row — the shape across rows is the finding, not any one of them):
+
+| reached | out-degree 4 | out-degree 8 | out-degree 16 |
 |---|---|---|---|
-| 1 | 146 | 0.75 ms | 33.5 ms |
-| 4 | 79,659 | 21.9 ms | 24.6 ms |
-| 16 | 99,968 | 37.7 ms | 26.3 ms |
+| ~58–60% | 0.90 | 0.82 | 0.88 |
+| ~78–80% | 1.08 | 1.03 | 0.92 |
+| ~88–90% | 1.13 | 1.06 | 1.06 |
+| ~93–95% | 1.17 | 1.17 | 1.11 |
+| ~97–100% | 1.22 | 1.16 | 1.29 |
 
-So at full reach it is **1.4× slower** than what it replaced: the confined loops
-index through a list and the full-width ones vectorise over a slice. Dropping
-the per-edge membership probe once the reached set closes (it cannot grow again)
-recovered ~2 ms of that, so the rest is the indirection itself. The fix, if this
-regime ever shows up on a real corpus, is to run the full-width loops once the
-reached set is both closed and near-N — exact for the same `+0.0` reason, at the
-price of a second copy of the loop body that has to stay bit-identical. Not
-taken now: 11 ms on a random 16-regular expander, which is the shape a reason
-graph is least like, does not buy that duplication.
+Each cell is confined-only ÷ full-width-once-closed: above 1.00 the confined walk
+is the slower of the two.
 
-Also unaddressed: three N-sized buffers are still allocated per call, which is
-what the residual ~2 ms at low eligibility is — flat in N, unrelated to reach.
+**The crossover sits at ~80% reach, and reach alone does not decide it.** Below
+it the confined walk wins by 0.82–0.92×; from 88% up the full-width loops win by
+1.06–1.29×, monotonically in reach, at out-degree 4, 8 and 16 alike. Out-degree
+2 never gets past 76% reach on this generator and never crosses; out-degree 1
+does not close inside 25 iterations at all, so no switch can fire there and none
+needs to.
+
+What ships is `closed && reached * 100 >= n * 90`. 90 rather than 80 because the
+two errors are not symmetric — switching too late gives back the 1.1–1.3× band,
+switching too early costs up to 1.22× on graphs the confined walk still owns. It
+is exact for the same reason the confinement is: every node outside the reached
+set holds a literal zero in both vectors, and `x + 0.0 == x` for every
+non-negative finite `x`, which is all rank and teleport mass ever are.
+`confined_iteration_equals_the_full_width_one_bit_for_bit` now runs its whole
+matrix three times — never switch, switch at 90, switch the moment the set closes
+— against the one full-width reference, over two graphs placed at 88% and 92%
+reach so the threshold is crossed inside the comparison, and it fails if the
+matrix walked only one of the two bodies.
+
+**What is left is the allocation, not the walk.** Four N-sized buffers are still
+built per call — `tele`, `rank` and `next` at 8 bytes a node, `in_reached` at one
+— which is the residual ~2 ms that is flat in N and indifferent to reach. It is
+2.5 MB at N=100k and it is `calloc`, so the floor measured here is 0.18 ms at
+1.1% reach where nothing else runs. Removing it means a sparse rank
+representation, which is a different change from this one and would have to be
+re-argued against bit-identity: a hash map's iteration order is not the ascending
+index order that makes the `+0.0` argument work.
 
 Item 25's "PageRank ÷ scan" table above is now stale in one direction only: it
 is a correct record of what was measured before this change, and the ratios in
