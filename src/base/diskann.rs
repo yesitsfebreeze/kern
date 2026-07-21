@@ -1,6 +1,6 @@
 // Not yet wired into the live search path.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -79,6 +79,8 @@ fn greedy(
 ) -> (Vec<(f32, u32)>, Vec<u32>) {
 	let mut beam: Vec<(f32, u32)> = vec![(dist(entry), entry)];
 	let mut in_beam: HashSet<u32> = HashSet::from([entry]);
+	// Hash order is safe HERE and only here: this list is `robust_prune`'s
+	// candidate slice, and that dedupes through a BTreeSet before ranking.
 	let mut visited: HashSet<u32> = HashSet::new();
 
 	loop {
@@ -116,7 +118,9 @@ fn robust_prune(
 		.iter()
 		.copied()
 		.filter(|&c| c != p)
-		.collect::<HashSet<u32>>()
+		// BTreeSet, not HashSet: `sort_by` below is STABLE, so every TIED distance
+		// keeps this order, and std's hasher is keyed per instance.
+		.collect::<BTreeSet<u32>>()
 		.into_iter()
 		.map(|c| (cos_dist(&pv, &vec_at(c)), c))
 		.collect();
@@ -147,7 +151,9 @@ fn robust_prune(
 	result
 }
 
-// Deterministic (fixed RNG seed) for reproducible indexes.
+// Reproducible: the RNG is seeded AND every ordered container feeding the
+// adjacency is ordered by construction (see `robust_prune`). The seed alone was
+// not enough, and for a long time this comment claimed it was.
 pub fn build_and_save(
 	dir: &Path,
 	items: &[(String, Vec<f32>)],
@@ -169,7 +175,9 @@ pub fn build_and_save(
 		let mut rng = rand::rngs::StdRng::seed_from_u64(42);
 
 		for (i, slot) in adj.iter_mut().enumerate().take(count) {
-			let mut nbrs = HashSet::new();
+			// BTreeSet, not HashSet: this seeds the traversal every later decision is
+			// taken from, so hash order here reaches the built graph.
+			let mut nbrs = BTreeSet::new();
 			while nbrs.len() < params.r.min(count - 1) {
 				let j = rng.random_range(0..count) as u32;
 				if j as usize != i {
@@ -472,6 +480,54 @@ mod tests {
 		}
 		let recall = hit as f64 / total as f64;
 		assert!(recall >= 0.90, "recall@10 too low: {recall:.3}");
+	}
+
+	// Sparse feature-hashed vectors, the shape `e2e/test_recall.py` and the scaling
+	// instruments use — and the shape that produces EXACTLY TIED cosine distances
+	// in bulk. Dense random floats never tie, which is why they cannot detect a
+	// tie-breaking bug.
+	fn tied_items(n: usize, dim: usize) -> Vec<(String, Vec<f32>)> {
+		(0..n)
+			.map(|i| {
+				let mut v = vec![0.0f32; dim];
+				for j in 0..7 {
+					let mut h: u64 = 1469598103934665603;
+					for b in format!("w{}", i.wrapping_mul(2654435761).wrapping_add(j)).as_bytes() {
+						h ^= *b as u64;
+						h = h.wrapping_mul(1099511628211);
+					}
+					v[(h % dim as u64) as usize] += if h & 0x100 != 0 { 1.0 } else { -1.0 };
+				}
+				(format!("e{i:05}"), v)
+			})
+			.collect()
+	}
+
+	// A seeded RNG is not a reproducible build. Two of the three hashed containers
+	// in `build_and_save` reach disk, and each was checked alone: reverting
+	// `robust_prune`'s dedupe differs by 22740/76800 adjacency bytes, reverting the
+	// neighbour init by 446/76800, reverting `greedy`'s visited list by none.
+	// graph.bin is the whole adjacency, so comparing bytes compares the index.
+	#[test]
+	fn the_same_corpus_builds_a_byte_identical_index() {
+		let items = tied_items(600, 64);
+		let mut graphs = Vec::new();
+		for _ in 0..2 {
+			let dir = tempfile::tempdir().unwrap();
+			build_and_save(dir.path(), &items, Params::default()).unwrap();
+			graphs.push(std::fs::read(graph_path(dir.path())).unwrap());
+		}
+		let differing = graphs[0]
+			.iter()
+			.zip(&graphs[1])
+			.filter(|(a, b)| a != b)
+			.count();
+		assert_eq!(
+			differing,
+			0,
+			"two builds of one corpus produced different adjacency ({differing} of {} bytes differ)",
+			graphs[0].len()
+		);
 	}
 
 	#[test]

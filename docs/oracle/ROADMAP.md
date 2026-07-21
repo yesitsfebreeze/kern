@@ -434,44 +434,98 @@ half the harness can already claim.
 
 ### 25. O(N) importance scan per retrieve `[retrieval]`
 
-`seed_important` iterates `g.all()` × `kern.entities.values()`
-(`src/retrieval/seed.rs:127-174`), called unconditionally once per retrieve
-(`src/retrieval/query.rs`, in `retrieve_profiled`). Rayon-parallel, but still full-corpus per
-query.
+`seed_important` (`src/retrieval/seed.rs:127`) iterates `g.all()` ×
+`kern.entities`, called unconditionally once per retrieve
+(`src/retrieval/query.rs`, in `retrieve_profiled`).
 
-**Measured 2026-07-21 before touching it** (`tests/seed_scale.rs`, release,
-20 reps per configuration). The cliff is real and it is O(N × eligible):
+**Narrowed 2026-07-21, after item 26 landed.** The scan is 1.9–3.9× faster and
+its share of retrieve is roughly halved, but it is still O(N): what this pass
+removed was a parallelism bug, not the linear walk. The index the item asks for
+turned out to be blocked, and the blocker is named below so the next attempt
+does not rediscover it.
 
-| N | eligible | `seed_important` | share of retrieve |
+**The old tables are replaced, not amended — both were measured before item 26.**
+Re-measured with the same instrument (`tests/seed_scale.rs`, release, 20 reps per
+configuration), the PageRank comparison inverts. PageRank is now ~2–3 ms rather
+than a flat ~20 ms, so the scan is the larger cost everywhere above 1%
+eligibility:
+
+| N=100k | scan | PageRank | scan ÷ PageRank | scan as share of retrieve |
+|---|---|---|---|---|
+| 1% eligible | 2.37 ms | 2.46 ms | 1.0× | 39.7% |
+| 10% eligible | 6.74 ms | 2.93 ms | 2.3× | 60.1% |
+| 50% eligible | 18.82 ms | 2.08 ms | 9.0× | 72.1% |
+| 100% eligible | 35.69 ms | 2.54 ms | 14.1× | 71.2% |
+
+The superseded row "100k, 1%, 12.3% of retrieve" is not a contradiction: the
+scan cost the same, but retrieve no longer carries PageRank's 20 ms, so the same
+absolute cost is a far larger share. The old item said the numbers would decide
+the ordering; they have.
+
+**Fixed here: the scan was never actually parallel on the ordinary corpus.**
+`kerns.par_iter().flat_map_iter(...)` parallelised over *kerns* and walked each
+kern's entities on a single thread, so a one-kern graph — what `e2e/` builds and
+what a fresh install is — scanned the whole corpus serially however many cores
+were free. This item's own "Rayon-parallel" claim was wrong in exactly the case
+that matters. The inner walk now splits too
+(`src/retrieval/seed.rs:149`), on 8 cores:
+
+| N=100k | before | after | |
 |---|---|---|---|
-| 10k | 1% | 0.14 ms | 10.7% |
-| 10k | 100% | 2.61 ms | 53.1% |
-| 100k | 1% | 2.98 ms | 12.3% |
-| 100k | 100% | 34.42 ms | 54.6% |
+| 1% eligible | 2.37 ms | 1.24 ms | 1.9× |
+| 10% eligible | 6.74 ms | 1.73 ms | 3.9× |
+| 50% eligible | 18.82 ms | 8.19 ms | 2.3× |
+| 100% eligible | 35.69 ms | 12.04 ms | 3.0× |
 
-So the item is justified at scale — but **it is not the top structural debt it
-claimed to be, and the same run says why.** Item 26's PageRank is a *flat* ~20 ms
-per query at N=100k, independent of eligibility (measured as default minus
-`pagerank_enabled: false`: 20.0 / 21.0 / 19.6 / 18.1 ms across 1/10/50/100%).
-The scan only overtakes it once more than half the corpus is eligible:
+Recall is exactly unchanged (0.9306 / 0.9722 / 0.9471). The selection is
+bit-identical rather than merely equivalent —
+`parallel_importance_scan_equals_the_sequential_scan_it_replaces` compares ids,
+rank positions and score *bit patterns* against an independently written
+sequential gate over a generated three-kern graph. At N=10k the change is inside
+the noise floor of a box running three worktrees, and it buys nothing there;
+the win is a large-corpus win.
 
-| N=100k | scan | PageRank | PageRank ÷ scan |
-|---|---|---|---|
-| 1% eligible | 2.98 ms | 20.03 ms | 6.7× |
-| 10% eligible | 8.61 ms | 21.02 ms | 2.4× |
-| 50% eligible | 18.40 ms | 19.56 ms | 1.1× |
-| 100% eligible | 34.41 ms | 18.11 ms | 0.5× |
+**The index is blocked on the absence of an entity-mutation chokepoint, and
+`mutation_epoch` is not one.** `bump_mutation_epoch`
+(`src/base/graph.rs:439`) has exactly three callers, all inside `graph.rs`:
+`get_mut`, `register`, `deregister`. But `GraphGnn::kerns` and `Kern::entities`
+are public fields, and ~20 non-test sites mutate them directly without passing
+through any of the three — `merge_remote_entity` (`src/base/merge.rs`) inserts a
+fresh Fact, `reembed` replaces every vector through `values_mut`, gossip writes
+phantom-kern entities, clustering moves entities between kerns. Each of those
+changes an input to the importance gate (`has_vector`, kind, `access_count`)
+while leaving the epoch untouched.
 
-A filtered query — the ordinary case — is dominated by PageRank, not by this
-scan. **Item 26 should be done first**, and this item's "top structural debt in
-the repo" claim is withdrawn: it was asserted, never measured. Ranking is not
-changed here because position is rank and reordering wants its own decision;
-this note is the evidence for that decision when it is taken.
+Worse, the one mutation that *creates* importance is epoch-silent on purpose:
+`commit_access_ids` (`src/retrieval/score.rs:341`) stamps access on every
+delivered result and deliberately bypasses `get_mut` so it will not invalidate
+the semantic query cache (`src/retrieval/score.rs:340`). An eligible-set index
+keyed on the epoch would never see a Claim cross
+`important_access_threshold` — stale forever, in the direction that silently
+drops seeds and moves recall with no error anywhere.
 
-Indexing this is still worth doing after 26. The shape wanted is an index over
-the importance predicate so the scan visits eligible entities rather than all of
-them — which is precisely why the win tracks eligibility, and why a corpus where
-everything is eligible cannot be helped by an index at all.
+That is verified rather than argued: installing a `mutation_epoch`-keyed memo
+over `seed_important` makes
+`an_eligibility_change_is_reflected_with_no_epoch_bump` fail on "crossing the
+access threshold makes an entity important on the very next retrieve". The test
+is left behind as the guard, so the next attempt at an index fails loudly
+instead of shipping the regression quietly.
+
+**What is left is therefore a different question: what makes entity mutation
+observable?** Two candidates, neither cheap. Make `Kern::entities` private behind
+an accessor that versions its kern — correct by construction, but mechanical
+across ~40 call sites in `ingest/`, `tick/`, `gossip/` and `commands/`. Or
+hand-maintain the eligible set at each mutation site the way `entity_idx`
+already is — the convention the codebase actually uses, and the reason
+`merged_remote_entity_is_vector_searchable_without_rebuild` exists — at the price
+of a fifth thing every mutation site must remember. Not decided here.
+
+The costs to weigh when it is: an eligible-id set is ~80 B per eligible entity
+(a `String` plus its set slot), so ~8 MB at N=100k fully eligible, and it puts
+O(1) index maintenance on every write plus a full O(N) rebuild whenever the
+freshness signal is lost. An index that slows ingest to speed up query is the
+trade, and it only pays where eligibility is low — a corpus where everything is
+eligible cannot be helped by an index at all.
 
 ### 26. PageRank costs whatever the seeds reach, and there is no cheap answer when they reach everything `[retrieval]`
 
@@ -616,21 +670,128 @@ scan, not the accumulation.
 
 ### 28. GNN training runs synchronously on the tick `[lifecycle]`
 
-`TaskKind::GnnPropagate => do_gnn_propagate(...)` runs inline in `process_task`
-on the single tick loop (`process_task`, `src/tick.rs:85`; the arm at `:97`),
-stalling large kerns — and, per item
-2, taking every other maintenance task down with it if it panics.
+~~`TaskKind::GnnPropagate => do_gnn_propagate(...)` runs inline in `process_task`
+on the single tick loop, stalling large kerns.~~ **(closed 2026-07-21.)** The
+stall was measured before it was changed, by a new instrument in the shape of
+`tests/gc_scale.rs` — `tests/gnn_scale.rs`, `#[ignore]`d, release-only. At the
+shipped defaults — `min_thoughts` 128 and `train_epochs` 24
+(`src/gnn/propagate.rs:16-17`) — over 384-dim vectors, one propagation cost
+0.64s at 128 entities, 6.4s
+at 1024, 21.6s at 2048 and 79.7s at 4096. Every other tick task at the same
+sizes was sub-millisecond: `stigmergy_gc` 0.151ms, `commit_access` 0.002ms,
+`idle_sweep` 0.000ms at N=4096. On the real loop (`tick::start`) the recall
+path's own heat write-back — `CommitAccess`, enqueued at
+`src/mcp/tools_query.rs:196` — landed in 2.2ms with nothing ahead of it and in
+**56,787ms** with one propagation ahead of it at N=2048. The premise held.
+
+Training now runs on a dedicated thread (`src/tick/trainer.rs`), and the tick
+arm only hands it the kern id (`src/tick.rs:116-121`). Same measurement after:
+1.2ms at N=2048, down from 56,787ms. Decisions, all three deliberate:
+
+- **Where.** One `std::thread`, not `spawn_blocking`: that pool is 512 wide, so
+  every kern would train at once and each training allocates a dense
+  `num_entities^2` adjacency — 134MB at N=4096 alone.
+- **Overlap.** The waiting set is keyed by kern id, so a second request for a
+  kern already waiting is *coalesced*, not queued (`Submit::Coalesced`,
+  `src/tick/trainer.rs:82`) — the waiting job snapshots the graph when it runs,
+  so it already covers what the newer request would have seen. Past
+  `TRAIN_QUEUE_CAP` distinct kerns (`:16`) the newest is refused and counted
+  (`:87`, `:97`), the shape item 30 settled on, and the count reaches MCP health
+  as `gnn_train_refused` (`src/mcp.rs:146`).
+- **Panic.** Item 2 is closed, so the inline arm was already contained by
+  `run_guarded` — moving the work does not improve that, it *relocates* it, and
+  a bare thread would have been strictly worse: the first panicking propagation
+  would kill the trainer and every later one would silently never run. The
+  trainer therefore catches per job (`src/tick/trainer.rs:61`) and records
+  through the same `Queue::record_task_panic` the health surfaces already read,
+  so `GnnPropagate` keeps being the one task that reports a contained failure.
+
+Moving training off the loop also opened a write-back race the inline version
+could not have: an entity superseded *during* training would have been
+re-inserted into `gnn_entity_idx` by the apply step, undoing the supersede
+removal. `apply_gnn_updates` now re-checks status at write time
+(`src/tick/gnn_propagate.rs:155`).
+
+Remaining, and the reason this item is closed rather than deleted: **the cost
+itself is untouched.** A propagation still takes 79.7s at N=4096; it just no
+longer takes maintenance with it. The cost is quadratic in entities because
+`normalized_adjacency` materialises a dense N x N `Tensor`
+(`src/gnn/graph.rs:133-167`) which every `try_forward_graph` then multiplies
+(`src/gnn/gcn.rs:44-45`) — while the real graph is sparse, since ingest gives
+each entity at most one similarity edge (`add_similarity_reason`,
+`src/base/accept.rs:378`). A sparse adjacency would make training linear in
+edges instead of quadratic in nodes, but it changes the numerics the ranking
+reads, so it is its own item with its own recall gate, not a rider on this one.
+Also unaddressed: `gnn_train_refused` reaches MCP health only — `kern status`
+and the RPC `HealthRes` do not carry it.
 
 ### 29. A spilled kern still carries two resident indexes `[retrieval]`
 
-DiskANN spill is entity-index-only: `rebuild_index` (`src/base/graph.rs:286`) hardcodes
-`gnn_entity_idx` and `reason_idx` to `VectorBackend::resident(...)` (`:289-290`)
-while only `entity_idx` takes the spill branch (`:296-300`). The memory ceiling
-is pushed back, not removed. Compounded: `disk_threshold` defaults to
-`KERN_CAP_DISABLED` and nothing auto-tunes it
-(`decisions/diskann-spill.mdx:131-134`, `src/config/graph.rs:20`), so the
-ceiling DiskANN exists to remove is undefended in every default deployment, with
-no signal on approach.
+~~DiskANN spill is entity-index-only, so the memory ceiling is pushed back, not
+removed.~~ **The premise is true and the remedy is refused, measured 2026-07-21.**
+The two indexes are exactly where the item said: `rebuild_index` hardcodes
+`gnn_entity_idx` and `reason_idx` to `VectorBackend::resident(...)`
+(`src/base/graph.rs:289-290`) while only `entity_idx` takes the spill branch
+(`:296-297`). What was never checked is whether spilling them would help. It
+would not; it costs 122 MB.
+
+The instrument is `tests/spill_memory.rs` — one process per configuration
+(glibc does not return HNSW's many ~1.5 KB vector allocations, so a
+free-direction reading inside one process is a lie), RSS from
+`/proc/self/statm`, and **two readings: cold, and hot after 200 searches.** The
+hot one is the honest one, because mmap pages are only resident once touched.
+50k entities at dim 384, each with `vector` AND `gnn_vector`
+(`src/base/types.rs:280-281`), plus 25k reasons with vectors (`:427`):
+
+| configuration | cold MB | **hot MB** |
+| --- | --- | --- |
+| kern map alone, no indexes | 260.7 | 260.7 |
+| + entity index (resident) | 358.1 | 358.1 |
+| + GNN index (resident) | 358.5 | 358.5 |
+| + reason index (resident) | 309.6 | 309.6 |
+| all three resident — today's default | 510.3 | 510.3 |
+| entity spilled — today's `disk_threshold` path | 438.9 | **512.1** |
+| all three spilled — what this item asked for | 449.2 | **632.3** |
+
+Three findings, in the order they overturn the item:
+
+1. **Spilling frees nothing under load.** It looks like 71.4 MB (510.3 → 438.9)
+   until a query touches the snapshot; then it is 512.1, *above* never spilling.
+   The vectors mmap is faulted straight back in, and `DiskIndex` additionally
+   keeps `ids: Vec<String>` resident (`src/base/diskann.rs:304`). What spill
+   actually changes is the *kind* of memory: ~97 MB of unreclaimable heap becomes
+   clean, file-backed, reclaimable page cache. That is worth having under memory
+   pressure. It is not a ceiling moving, and `decisions/diskann-spill.mdx:48`
+   claiming heap drops "by the full vector set" was corrected in the same change.
+2. **Doing what this item asked makes it worse by 122 MB** (632.3 vs 510.3 hot).
+   Three `ids` vectors instead of one, three adjacency mmaps walked at open, three
+   builds' arenas retained. Priced by the `spilled_all` mode without shipping it.
+3. **The largest resident holder is not an index and never was.** The kern map is
+   260.7 MB of the 512.1 — 51% — because every vector is stored *twice*: once in
+   `Kern::entities`/`reasons`, once in the index that points at it
+   (`HnswNode::vec`, `src/base/hnsw.rs:14`). Spill relocates one of the two
+   copies. Nothing removes either. Halving that needs shared ownership of the
+   vector between the kern map and the index, which is a type change across
+   ~20 write sites, not an index-backend swap.
+
+**Closed as written.** No index-spilling code shipped. What the pass did ship is
+the defect it found on the way: `build_and_save` was **not reproducible** despite
+a seeded RNG and a comment claiming it was — two hashed containers reached the
+adjacency, and the `sort_by` that ranks candidates is stable, so every tied
+cosine distance broke in per-process hash order. Same corpus, different index,
+every process. Both now `collect` into a `BTreeSet` (`src/base/diskann.rs:123`,
+`:180`); guarded by
+`the_same_corpus_builds_a_byte_identical_index` (22740/76800 adjacency bytes
+differ when the first is reverted, 446/76800 when the second is) and by
+`tests/spill_transparency.rs`, which also records what spilling costs in recall:
+resident 1.0000 vs spilled 0.9940 against brute force, overlap 0.9940. Spill is
+therefore **not** answer-preserving — it swaps one approximation for another, and
+identical answers were never on offer.
+
+Still open, and belonging to item 83 rather than here: nothing bounds the
+resident set, `disk_threshold` defaults to `KERN_CAP_DISABLED`
+(`src/config/graph.rs:20`) with no auto-tuning and no signal on approach, and the
+double-storage in finding 3 is the actual O(N) term.
 
 ### 30. Ingest queue `enqueue` detaches with no backpressure `[ingest]`
 
@@ -1027,7 +1188,7 @@ incomplete — no item below produces a wrong answer today.
 There is no `Contradicts` reason kind (`src/base/types.rs:77-86`) and no `stance`
 parameter on the ingest schema (`src/mcp/tools_mutate.rs:19-33`);
 `observe_contradict` (`src/base/types.rs:420`) has exactly one caller, GNN
-alignment (`src/tick/gnn_propagate.rs:157`). Observer-reputation weighting is
+alignment (`src/tick/gnn_propagate.rs:163`). Observer-reputation weighting is
 also unbuilt.
 
 ### 57. No evidence decay `[lifecycle]`
@@ -1321,6 +1482,17 @@ alternative (a `just` recipe failing when the binary is older than the newest
 source) is now moot for the same reason: it would have caught mode 1 and been
 blind to mode 2.
 
+**The correct action is to delete the file, not to maintain a path.** Cargo's
+default `target-dir` is already `<workspace-root>/target`, which in a worktree
+is that worktree's own directory — isolation is what you get by doing nothing.
+Confirmed on a tree with no `.cargo/` at all: it resolves to
+`kern-cycles/2/target` unprompted. So the whole defect was introduced by adding
+a `.cargo/config.toml` pointing at the main checkout, and the fix is to stop
+writing that file when a worktree is created rather than to write it with a
+different path. A per-tree path works but is a second thing to keep correct, and
+the launch step that wrote the shared one is exactly the kind of step that gets
+copied forward unexamined.
+
 What survives: the by-name discipline. It is cheap, it catches mode 1
 independently of the build layout, and it is what confirmed both cycles that
 found this.
@@ -1364,9 +1536,9 @@ does not exist. Wanted: track it under `scripts/` and install it via
 than stated.** The item was written off `docs/kern/diskann-disk-index.md:142-143`
 ("no WAL and no atomic-rename-per-segment") and never checked against the build.
 Per-segment atomic rename *does* exist: `atomic_write`
-(`src/base/diskann.rs:285-289`) writes `<path>.tmp` then `std::fs::rename`, and
-`build_and_save` uses it for all three segments — meta (`:264`), vectors
-(`:272`), graph (`:281`). `DiskIndex::open` (`:302-347`) then rejects a divergent
+(`src/base/diskann.rs:293-297`) writes `<path>.tmp` then `std::fs::rename`, and
+`build_and_save` uses it for all three segments — meta (`:272`), vectors
+(`:280`), graph (`:289`). `DiskIndex::open` (`:310-355`) then rejects a divergent
 set rather than reading it: ids-length vs count, entry point in range, both mmap
 lengths against the meta's `count × dim × 4` / `count × r × 4`, and every
 adjacency slot either `SENTINEL` or a valid node id — the last one specifically

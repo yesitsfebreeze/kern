@@ -65,6 +65,229 @@
   Seven unit tests, one per guard: each guard mutated away fails exactly its own
   test and no other. The four pre-existing resources tests are byte-identical.
   Baseline 891 → 898.
+- 2026-07-21 — merged item 29, which closed unbuilt and shipped a different fix.
+  176 + 1 + this one = 178, by the union rebuild rather than a hand-spliced
+  conflict hunk.
+
+  The pattern across today is now clear enough to state as a finding rather than
+  an anecdote. **Nine slices ran; six ended somewhere other than their title
+  pointed.** Item 25 asked for an index twice and got neither — first because the
+  scan did not dominate, then because it had no sound freshness signal and the
+  real defect was that it was never parallel within a kern. Item 26's premise was
+  false: PageRank is query-personalised, so the caching it prescribed was the
+  rejected design. Item 27's first bullet was 0.06% of the sweep and its second
+  was real for a different reason (bincode decode, not cosine). Item 28's panic
+  clause cited an item that had already closed. Item 29's premise held but its
+  remedy made memory *worse* by 122 MB, and chasing the variance found a build
+  that was not reproducible.
+
+  What made the difference every time was the same rule: measure before
+  implementing, and treat the item as a hypothesis. The two items that shipped
+  what they asked for — 28 and 30 — are the two whose measurements confirmed
+  them. That is the loop working, not failing: an item is a hypothesis written
+  down by someone who could not run the experiment yet.
+
+  The corollary is uncomfortable and worth keeping: **a slice title is the least
+  reliable sentence in the file**, and any automation that names a merge after
+  the slice rather than the diff — as `3529fce` did — will be wrong precisely on
+  the passes where the work was most useful.
+
+  Decided by: verify-before-claiming — six of nine.
+
+- 2026-07-21 — item 29 closed with no index-spilling code, and the DiskANN build
+  made reproducible instead. The item said a spilled kern still carries two
+  resident indexes. It does — `rebuild_index` hardcodes `gnn_entity_idx` and
+  `reason_idx` resident (`src/base/graph.rs:289-290`) — so for once the premise
+  held. What had never been checked is whether spilling them would help.
+
+  Measured with `tests/spill_memory.rs`, one process per configuration because
+  glibc does not return HNSW's many ~1.5 KB vector allocations, and RSS read
+  twice — cold, and hot after 200 searches, since mmap pages are only resident
+  once touched. At 50k entities, dim 384: all-resident 510.3 MB hot; entity
+  spilled 512.1 MB hot; **all three spilled 632.3 MB hot.** Doing what the item
+  asked costs 122 MB. Spilling the entity index alone looks like it saves 71.4 MB
+  and gives every byte back the moment a query touches the snapshot.
+
+  So the trade that spill actually makes is not the one its decision doc claimed
+  ("drops heap by the full vector set"): it converts ~97 MB of unreclaimable
+  anonymous heap into clean file-backed page cache. Worth having under memory
+  pressure, and not a ceiling moving. `diskann-spill.mdx` and
+  `docs/kern/diskann-disk-index.md` were corrected in the same change.
+
+  The largest resident holder turned out to be no index at all — the kern map is
+  260.7 MB of the 512.1, because every vector is stored twice, once in
+  `Kern::entities` and once in the index pointing at it. Spill relocates one
+  copy. Removing one needs shared ownership across ~20 write sites, so it is
+  named in item 83 rather than attempted here.
+
+  **What did ship** is the defect the measurement exposed: `build_and_save` was
+  not reproducible, despite a seeded RNG and a comment asserting it was. Two
+  hashed containers reach the adjacency and the `sort_by` ranking candidates is
+  stable, so every tied cosine distance broke in per-process hash order — the
+  same corpus built a different index in every process. Only a corpus with tied
+  distances can detect this, which is why the first version of the guard passed
+  against dense random floats and proved nothing. Two `BTreeSet`s
+  (`src/base/diskann.rs:123`, `:180`); reverting the first differs by
+  22740/76800 adjacency bytes, the second by 446/76800, and reverting
+  `greedy`'s visited list by none — so that one was not changed.
+
+  **The tradeoff, named:** reproducibility here costs a `BTreeSet` insert where a
+  `HashSet` insert was, on sets of ≤ 64 ids, against a per-candidate cosine over
+  384 dimensions — unmeasurable, and not measured. The real cost is that
+  `tests/spill_transparency.rs` now records what spill costs in recall and it is
+  not zero: 1.0000 resident vs 0.9940 spilled against brute force, 0.9940
+  overlap. Spill is **not** answer-preserving. It cannot be — it swaps HNSW for
+  Vamana — so the round-trip test asserts recorded floors, not equality, and
+  saying otherwise anywhere in the docs would have been the easier lie.
+  `e2e` recall unchanged at 0.9306 / 0.9722 / 0.9471; the default path never
+  spills, so nothing here reaches it.
+
+  Decided by: verify-before-claiming — the item was tested as a hypothesis, and
+  the remedy it prescribed was priced before being refused.
+
+- 2026-07-21 — item 28 `[lifecycle]` closed: GNN training runs on its own thread,
+  not on the tick loop. Unlike the last three perf items, this premise survived
+  measurement. A new release-only instrument (`tests/gnn_scale.rs`, in the shape
+  of `tests/gc_scale.rs`) put one propagation at 0.64s at 128 entities — the
+  smallest kern that trains at all, `min_thoughts` — 6.4s at 1024, 21.6s at 2048
+  and 79.7s at 4096, against `stigmergy_gc` at 0.151ms, `commit_access` at
+  0.002ms and `idle_sweep` at 0.000ms on the same graphs. The stall was then
+  measured on the real loop rather than argued from the source: the recall path's
+  own heat write-back, the `CommitAccess` task an MCP query enqueues, landed in
+  2.2ms with nothing ahead of it and in **56 787 ms** with one propagation ahead
+  of it at 2048 entities. After the change, 1.2ms.
+
+  **The overlap policy is coalesce-then-refuse, and the coalescing is the
+  interesting half.** A second propagation request for a kern already waiting is
+  folded into the waiting one rather than queued, because the propagation
+  snapshots the graph when it *runs*, not when it is enqueued — so the job
+  already in line will train on everything the newer request would have seen.
+  Only genuinely different kerns can queue, eight of them, and past that the
+  newest is refused and counted, which is the shape item 30 settled on for the
+  ingest queue. Rejected: `spawn_blocking`, whose 512-wide pool would train every
+  kern at once while each training allocates a dense N×N adjacency — 134 MB at
+  4096 entities alone; and an unbounded queue, which is precisely the growth
+  defect item 30 had just closed elsewhere.
+
+  **The panic story is relocation, not improvement, and saying otherwise would
+  have been the easy lie.** Item 2 is closed, so the inline arm was already
+  contained by `run_guarded`; moving the work moves that containment rather than
+  adding it. A bare thread would have been strictly *worse* — the first panicking
+  propagation kills the trainer and every later one silently never runs. The
+  revert test proves exactly that: with the trainer's `catch_unwind` removed the
+  `kern-gnn` thread dies and the panic count stays 0. It is kept, and it records
+  through the same `Queue::record_task_panic` the health surfaces already read,
+  so `GnnPropagate` remains the one task that reports a contained failure.
+
+  Moving training off the loop opened one race the inline version could not have,
+  and it is fixed in the same change: an entity superseded *during* training
+  would have been re-inserted into `gnn_entity_idx` by the apply step, undoing
+  the supersede removal, so `apply_gnn_updates` now re-checks status at write
+  time as well as at snapshot time.
+
+  `pytest -q -s e2e` returns 0.9306 / 0.9722 / 0.9471, unchanged — which is what
+  says the propagation still produces what ranking reads. What is left, and the
+  reason the item is closed rather than deleted, is the cost itself: 79.7s at
+  4096 is untouched, because `normalized_adjacency` materialises a dense N×N
+  matrix over a graph ingest keeps sparse at roughly one similarity edge per
+  entity. A sparse adjacency would make training linear in edges instead of
+  quadratic in nodes, but it changes the numerics ranking reads and so needs its
+  own recall gate rather than a ride on this one. Also left: `gnn_train_refused`
+  reaches MCP health only, not `kern status` or the RPC `HealthRes`.
+
+  Decided by: verify-before-claiming
+
+- 2026-07-21 — item 94's fix simplifies to "delete the file". Cargo's default
+  `target-dir` is `<workspace-root>/target`, which inside a git worktree is that
+  worktree's own directory, so isolation is what you get by doing nothing.
+  Confirmed rather than assumed: `cycle/2` has no `.cargo/` at all and resolves
+  to `kern-cycles/2/target` unprompted.
+
+  Which means the entire contamination defect was self-inflicted — introduced by
+  a launch step that wrote a `.cargo/config.toml` pointing every worktree at the
+  main checkout's cache, to buy a warm build. Pointing that file at a per-tree
+  path also works, and is what three live trees currently do, but it is a second
+  thing to keep correct forever. Not writing the file has no failure mode.
+
+  Worth recording as its own entry because the first correction to item 94 fixed
+  the diagnosis and left the remedy one step short: it said "give each worktree
+  its own target-dir", which is true but reads as "configure something", when
+  the actual instruction is "stop configuring something". A fix that requires
+  ongoing correctness is worse than one that requires nothing, and the launch
+  step that caused this is exactly the kind that gets copied forward unexamined.
+
+  Decided by: fix-the-root — the root was the config file's existence, not its
+  contents.
+
+- 2026-07-21 — `3529fce`'s subject says "item 25, the importance scan indexed"
+  and **no index was built**. The merge subject was generated from the slice
+  title — the work that was *asked for* — rather than from the diff, which
+  refused the index on evidence and parallelised the inner loop instead. Checked
+  before writing this: no `importance_index` symbol exists anywhere in `src/`,
+  and `an_eligibility_change_is_reflected_with_no_epoch_bump` — the test that
+  exists specifically to fail if someone memoises this scan — is present and
+  green.
+
+  Recorded because `git log` is the first place anyone looks and that subject is
+  a lie about the tree. `ROADMAP.md` item 25 and the entry below it are both
+  accurate; only the commit subject is wrong, and a commit subject cannot be
+  corrected in place once it is pushed. So the correction lives here, where the
+  next reader of the history will also be looking.
+
+  The general shape is worth naming: **a slice title is a hypothesis, and this
+  loop keeps disproving them.** Four perf items today ended somewhere other than
+  where their title pointed — 25 twice, 26's premise, 27's first bullet. Any
+  automation that names a merge after the slice rather than the diff will
+  therefore be wrong precisely on the passes where the work was most useful.
+
+  Decided by: verify-before-claiming — the subject asserted an index, the tree
+  was checked for one, and it is not there.
+
+- 2026-07-21 — item 25 narrowed, and the index it asked for deliberately not
+  built. Re-measuring after item 26 confirmed the scan now dominates every
+  eligibility level — 39.7 / 60.1 / 72.1 / 71.2% of retrieve at N=100k, against
+  a PageRank that item 26 cut from a flat ~20 ms to ~2–3 ms — so the item was
+  live and the old "PageRank first" table it carried is replaced.
+
+  Then the index turned out to have no sound freshness signal.
+  `bump_mutation_epoch` has three callers, all inside `graph.rs`, while
+  `GraphGnn::kerns` and `Kern::entities` are public and ~20 non-test sites write
+  through them directly. The decisive one is `commit_access_ids`, which stamps
+  access on every delivered result and bypasses `get_mut` *on purpose* so it will
+  not invalidate the semantic query cache — so the single mutation that creates
+  importance is exactly the one an epoch-keyed index can never see. Proven, not
+  argued: a `mutation_epoch`-keyed memo over `seed_important` makes the new
+  `an_eligibility_change_is_reflected_with_no_epoch_bump` fail on the access
+  crossing. That test ships as the guard against the next attempt.
+
+  What did ship is the root the measurement exposed: the scan was never parallel
+  on the corpus everyone actually has. `par_iter().flat_map_iter(...)` split over
+  *kerns* and walked each kern's entities on one thread, so a single-kern graph
+  scanned serially on 8 idle cores — and this item had described itself as
+  "rayon-parallel" throughout. Splitting the inner walk gives 1.9–3.9× at N=100k
+  (35.7 -> 12.0 ms at full eligibility) with recall bit-for-bit unchanged at
+  0.9306 / 0.9722 / 0.9471, and the selection proven bit-identical against an
+  independently written sequential gate rather than merely equivalent.
+
+  **The tradeoff, named:** this buys nothing at N=10k, where the numbers sit
+  inside the noise of a box running three worktrees. It is a large-corpus fix
+  that leaves the O(N) walk intact — the cliff is postponed, not removed, and
+  anyone reading "faster" here should read "still linear".
+
+  Also found, and worth someone's attention: the shared `target-dir` **does**
+  serve artifacts across worktrees, which item 94 explicitly ruled out. A clean
+  tree at 5d0a2bc failed to compile against a `HealthRes` field that does not
+  exist in its own source — slot 2's in-flight `ingest_queue_refused` — because
+  `libtrnsprt-*.rmeta` is last-writer-wins between trees. `touch`ing the local
+  `dto.rs` fixes it; a sibling rebuild brings it back. Every build in this pass
+  needed that touch first. Not filed here, because this pass owns one item.
+
+  174 entries.
+
+  Decided by: fix-the-root — the item asked for an index, but the root was that
+  entity mutation is unobservable and that the scan was not parallel at all;
+  building the index on an epoch that cannot see the mutation would have shipped
+  a silent recall bug instead of fixing either.
 
 - 2026-07-21 — item 27 `[lifecycle]` narrowed to one bullet it never contained.
   Both remaining claims were measured first (`tests/gc_scale.rs`, release, new
@@ -117,6 +340,7 @@
   decision rather than a performance one.
 
   Decided by: verify-before-claiming
+
 - 2026-07-21 — item 94 corrected: the shared `target-dir` **does** leak between
   worktrees, and the earlier entry saying it does not was wrong. That entry
   checked the wrong artifact class. Lib-test binaries really do get one hash per
