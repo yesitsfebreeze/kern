@@ -144,8 +144,8 @@ Two constraints hold across all of it. **ACL is caller-asserted** — the daemon
 cannot verify a caller's principals, exactly like the existing
 `validate_fact_source` boundary, so trust ends at the process edge. And **Facts
 are GC-immune, not ACL-immune** — a Fact the requester cannot see must still not
-be returned. Backward compatibility: empty `principals` means *no filter*, not
-*public only*, or every existing single-agent caller goes blind.
+be returned. Default semantics: empty `principals` means *no filter*, not
+*public only*, or every single-agent caller goes blind.
 
 ### 18. ACL + request principal — gates everything else in this tier `[surface]`
 
@@ -189,8 +189,9 @@ parallel after 18.
 
 ### 21. Review / draft lifecycle `[surface]`
 
-`ReviewState` on `Entity` (`#[serde(default)]` → old rows decode as
-`PendingReview`, fail-safe) + source-level review policy in config + an
+`ReviewState` on `Entity` (added with a store format-version bump — alpha
+rejects old stores rather than defaulting them) + source-level review policy in
+config + an
 `exclude_pending` query filter and a `promote` tool. Lets a host hold
 auto-distilled claims out of retrieval until a human curates them. No
 `ReviewState`, `exclude_pending` or `promote` exists in `src/`. Requires 18's
@@ -348,9 +349,14 @@ item 13.
 ### 34. The `Question` path is an unauthenticated membership oracle `[federation]`
 
 A peer sends `Question` messages carrying arbitrary embedding vectors and gets a
-yes/no on whether you hold a fact above cosine 0.80, with no rate limit
-(`concepts/security.mdx:212-215`). Documented on the site, in no plan. Content
-existence is extractable one probe at a time without ever receiving the content.
+yes/no on whether you hold a fact above cosine 0.80. Content existence is
+extractable one probe at a time without ever receiving the content.
+
+**Mitigated 2026-07-21, not closed.** A per-origin budget (`src/gossip/rate.rs`,
+30/minute) makes bulk extraction expensive; the oracle is still there for a
+patient prober, and `origin` is an unauthenticated self-declared string, so the
+budget is evadable by rotating it. Closing this needs an identity to refuse on —
+**gated on item 33**, and the same rotation problem is item 35.
 
 ### 35. Namespace rotation is unbounded storage `[federation]`
 
@@ -441,7 +447,7 @@ pulses and counters** (`docs/kern/fl-vs-knids-federation.md:131-136`).
 The `anchor_*` → `graviton_*` rename "breaks federation peers that predate the
 change" (`concepts/stigmergy.mdx:173-175`) and nothing on the wire negotiates a
 version. Known impact of planned changes: `GossipMessage.signature` is breaking
-(mitigate with `serde(default)`); `AntiEntropy` is additive. Confidence isolation
+(alpha: peers upgrade together, no wire mitigation); `AntiEntropy` is additive. Confidence isolation
 (`conf_alpha` / `conf_beta` / `unlinked_count` never imported from remote) must
 survive every change — and note that `decisions/crdts-over-consensus.mdx:116-117`
 frames the same `unlinked_count` behavior as a **PN-Counter that was never
@@ -1031,12 +1037,12 @@ number ("blocked on item 13") and renumbering would silently repoint them.
 - **The embedding-model swap is caught** — was item 3. Model and dimension stamped
   on flush, checked at open, guarded fail-open on the query path.
 - **`as_of` no longer lies over the cold tier** — was item 4. The temporal triple
-  round-trips through `cold_spill`; legacy rows still decode.
+  round-trips through `cold_spill`.
 - **Cold evictions are counted and surfaced** — was item 6. The 50k FIFO bound
   stays; it is no longer invisible.
 - **The detached daemon logs** — was item 10. Per-arg, owner-only, append-only
   `<data_dir>/logs/{hub,daemon}.log` via `src/config/detached_log.rs`, on both the
-  hub-first path (`src/hub/node.rs`) and the legacy `spawn_daemon` fallback
+  hub-first path (`src/hub/node.rs`) and the direct `spawn_daemon` fallback
   (CHANGELOG 2026-07-21).
 - **An invalid config stops startup** — was item 11. Exit 78 (`EX_CONFIG`) for
   both an unparseable file and a failed `validate()`; an absent config still

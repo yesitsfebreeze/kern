@@ -22,7 +22,7 @@ session delta (.txt) ──► intake ──► distill (LLM) ──► typed cl
    ┌───────── MCP (stdio+SSE) ────┼─── RPC (typed local socket) ───┐
    │            ▲                  │                 ▲              │
    │        query pipeline ◄───────┴──────────►  recall            │
-   │  (HNSW+BM25 seed → expand → RRF+PageRank → MMR → answer)      │
+   │  (HNSW+BM25 seed → expand → RRF+PageRank → MMR → passages)    │
    │                                                                │
    │   tick queue ──► cluster / name / enrich / gc / gnn / persist  │
    │                                                                │
@@ -43,7 +43,7 @@ everywhere, which is what makes conflict-free cross-node merge work.
 **How.**
 
 - `Entity` (`src/base/types.rs:246`) — typed (`Fact`/`Claim`/`Document`/
-  `Question`/`Answer`/`Conclusion`, `src/base/types.rs:19`), weighted by
+  `Question`/`Conclusion`, `src/base/types.rs:19`), weighted by
   confidence (a beta distribution stored as `conf_alpha`/`conf_beta`, read via
   the `conf_mean`/`conf_variance` methods, updated via
   `observe_support`/`observe_contradict`)
@@ -146,10 +146,9 @@ stays as history with a stamped `valid_to`; `query` can recover the past via
   point-in-time membership; the query layer's `include_history` walks the
   `superseded_by` chain.
 - The three stamps survive the **cold tier**. A spilled row is a `ColdRow`
-  (`src/base/store.rs:170`) = `Entity` ++ `StoredTemporal`
-  (`src/base/store.rs:141`), written under `FORMAT_V4` and decoded by version,
-  never by parse-sniffing (`decode_cold`, `src/base/store.rs:197`) — a truncated
-  V4 value errors instead of silently degrading to a stampless `Entity`. So a
+  (`src/base/store.rs`) = `Entity` ++ `StoredTemporal`, written under
+  `FORMAT_V5` and decoded strictly, never by parse-sniffing (`decode_cold`) — a
+  truncated value errors instead of silently degrading to a stampless `Entity`. So a
   cold-recovered revision keeps `valid_from`/`valid_to`/`invalidated_at` and
   `is_valid_at` answers over the cold tail exactly as it does over the hot graph.
 
@@ -168,7 +167,7 @@ the history chain directly beyond `include_history`.
 **What.** The hybrid query engine. Hand-rolled end to end (no external ANN or
 rerank lib). This is the product's core IP.
 
-**Stages** (`retrieve_profiled`, `src/retrieval/answer.rs`, each checkpoint
+**Stages** (`retrieve_profiled`, `src/retrieval/query.rs`, each checkpoint
 profiled via `src/profile.rs`):
 
 | # | Stage | File | What happens |
@@ -177,17 +176,16 @@ profiled via `src/profile.rs`):
 | 2 | **Seed lexical** | `retrieval/seed.rs:86` | BM25 (`LexicalIndex`) candidate list, fused via RRF when `mode==Hybrid`. |
 | 3 | **Fuse (RRF)** | `retrieval/fuse.rs` | Reciprocal-rank fusion of dense + lexical + important lists with mode weights. |
 | 4 | **PageRank** | `retrieval/pagerank.rs` | Centrality weighting of the fused seeds over the reason graph. |
-| 5 | **Expand** | `retrieval/expand.rs:178` | Walk reason edges out from seeds (`PathChain` recording the *why*), scoring neighbors (`score_neighbor`). Optional **HyDE** (`retrieval/hyde.rs`) generates a hypothetical answer to broaden recall. |
+| 5 | **Expand** | `retrieval/expand.rs:178` | Walk reason edges out from seeds (`PathChain` recording the *why*), scoring neighbors (`score_neighbor`). |
 | 6 | **Merge** | `retrieval/merge.rs` | Combine seeds + expanded neighbors into `ScoredEntity` list. |
 | 7 | **Boosts** | `retrieval/score.rs` | `apply_boosts`: confidence × score + **QBST** access/recency boost (`qbst`, capped at 0.1, 24h half-life) + `fact_score_boost` (0.3) for Facts. |
 | 7b | **Gravity** | `retrieval/gravity.rs` | Query-time graviton pull: `score += gravity_weight (0.15) * max_over_gravitons(mass * max(0, cos(entity, graviton_vec)))`. Max, not sum — overlapping gravitons never double-count. `gravity_weight=0` disables (early return, zero cost); no gravitons → no-op. Latency only, from the bench deleted in `8d8b19e` and not reproducible: ~+7% p50 with 5 gravitons. No quality claim accompanies it — the retrieval-quality half of that bench is withdrawn under the claim standard (`ROADMAP.md` — "What measures retrieval quality with no LLM in the scoring loop?"). |
 | 8 | **Filter** | `retrieval/score.rs` | `filter_delivery`: drop superseded; floor at `retrieval.min_deliver_score` (default `0.0` — off); cap at `retrieval.max_deliver_results` (default `25`; MMR keeps a `mmr_pool_size=50` pool when on). Both are config fields (`src/config/retrieval.rs:44-45`), not constants. Query options (source/kind/scheme/time/min_conf) go through `matches_filter` (`retrieval/score.rs`), the single predicate shared with pre-filtered ANN search. |
 | 9 | **Dedup by section** | `retrieval/diversify.rs:6` | Collapse near-duplicate sections. |
 | 10 | **MMR** | `retrieval/diversify.rs:46` | Maximal-marginal-relevance diversification so the `k` results actually differ. |
-| 11 | **Rerank** (opt) | `retrieval/rerank.rs` | LLM reranker reorders the head; `parse_ranking` recovers a permutation. |
-| 12 | **Answer** (opt) | `retrieval/answer.rs` | `synthesize` glues top chains + thoughts into an LLM answer prompt (`ANSWER_MAX_CHAINS=5`, `ANSWER_MAX_THOUGHTS=5`). Prompt instructs declining with the exact `NO_ANSWER` string when context lacks the answer; empty context short-circuits to that string with no LLM call. `QueryOptions::answer_style` appends a caller-supplied style hint (eval uses it for short-fact answers; product default none). |
+| 11 | **Deliver** | `retrieval/query.rs` | Passages + enriched edges + `format_chains` chain text (`QUERY_MAX_CHAINS=5`), remote entities tagged UNTRUSTED for the synthesizing caller. The whole read path is LLM-free by design (2026-07-21): the calling agent synthesizes; an in-kern small-model answerer set the quality ceiling and made retrieval untunable. |
 | 13 | **Cold backfill** | `src/mcp/tools_query.rs:242` | If hot returns `< k`, cold-tier hits (brute-force `Store::cold_search`, `src/base/store.rs:685`) fill remaining slots, flagged `cold:true`. Skipped on the exact-text fast path, which never embedded a query vector. |
-| 14 | **Query cache** | `retrieval/cache.rs` | LRU keyed on query-vector hash + tag (256 cap, θ=0.97 similarity). `lookup`/`lookup_text`/`insert`. Heat is deposited separately: `score::commit_access` (`retrieval/score.rs`) stamps the delivered hits, and the tick's `CommitAccess` task calls `score::commit_access_ids`. |
+| 14 | **Access stamping** | `retrieval/score.rs` | Heat deposits off the hot path: `score::commit_access` stamps delivered hits; the tick's `CommitAccess` task calls `score::commit_access_ids`. |
 
 **Where.** `src/retrieval/*` (4374 LoC, 12 files). Entry: `retrieval::query`
 (one-shot CLI) and `retrieval::query_locked` (daemon, holds read lock only for
@@ -205,7 +203,6 @@ the graph phase; every LLM call runs unlocked).
   improves recall is false until that closes.
 - The O(N) importance scan runs every retrieve; at scale it should be indexed.
 - RRF weights and mode blends are config but not auto-tuned.
-- No learned rerank model — the LLM rerank is a cold call per query.
 
 ---
 
@@ -269,9 +266,9 @@ and cold tier live together. Readers never block, writers serialize.
 - `Store::open` (`src/base/store.rs:351`) opens the env (`heed` 0.20);
   `StoredKern`/`StoredVec`/`StoredTemporal`/`ColdRow` are the on-disk bincode
   shapes, each value a version byte followed by a `zstd` frame
-  (`encode_at`/`strip_version`, `src/base/store.rs:70`/`:83`), vectors int8.
-  Formats `V1..=V4`; a value carrying a newer byte is rejected, never
-  mis-decoded.
+  (`encode_at`/`strip_version`, `src/base/store.rs`), vectors int8. Exactly one
+  live format, `FORMAT_V5`; any other version byte is rejected, never
+  mis-decoded and never migrated.
 - **Guarded flush** (`Store::flush_guarded` `src/base/store.rs:594`,
   `persist::flush_guarded` `src/base/persist.rs:331`) — a snapshot carries an
   expected `mutation_epoch`; if disk advanced under us (another writer /
@@ -309,15 +306,12 @@ and cold tier live together. Readers never block, writers serialize.
 - **Compaction** (`compact_dir`, `src/base/store.rs:790`) — the only way to
   shrink LMDB's high-water mark; writes a fresh env to a tmp file then
   `swap_compacted` renames with retry. Requires exclusive access (run offline).
-- **Migration** (`src/base/migrate.rs`) — `migrate_dir` is a one-shot idempotent
-  import of legacy per-kern bincode shards (`load_legacy_dir` → `save_graph_into`),
-  exposed as `kern migrate`. Source shards left in place.
 - **Snapshots** — `snapshot_for_flush` (`src/base/persist.rs:356`) /
   `FlushSnapshot` capture a consistent point-in-time; the maintenance tick runs
   a mutation-epoch-gated snapshot so crash loss is bounded to one tick interval.
 
 **Where.** `src/base/store.rs` (1611 LoC), `src/base/persist.rs` (565 LoC),
-`src/base/migrate.rs`, `src/base/search.rs` (dimension guard), `src/store.rs`
+`src/base/search.rs` (dimension guard), `src/store.rs`
 (per-cwd `Registry` of open stores).
 
 **Gaps.** Single-writer means CLI commands reading the on-disk graph can race a
@@ -545,7 +539,7 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 
 | Tool | File | Purpose |
 | ------ | ------ | --------- |
-| `query` | `tools_query.rs` | Hybrid search + optional LLM answer. Filters: `mode`/`kind`/`source`/time range/`min_conf`/`as_of`; `include_history` for supersede chain. |
+| `query` | `tools_query.rs` | Hybrid search, LLM-free; the caller synthesizes. Filters: `mode`/`kind`/`source`/time range/`min_conf`/`as_of`; `include_history` for supersede chain. |
 | `ingest` | `tools_mutate.rs` | Add text. `object_id` update semantics, free-text `hint` chunking context (`descriptor` accepted as serde alias). |
 | `link` | `tools_mutate.rs` | Create a reason edge (LLM writes the reason if blank). |
 | `forget` | `tools_mutate.rs` | Remove a thought + cascade edges (Facts immune). |
@@ -561,12 +555,12 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 Plus MCP **prompts** (`src/mcp/prompt.rs`) and **resources** (`src/mcp/resources.rs`).
 
 **Server** (`src/mcp.rs`) — `Server` holds the shared `graph`/`worker`/`llm`/
-`cache`/`task_q`/`cfg`; implements `trnsprt::McpServer`. `run`/`run_stdio` use
+`task_q`/`cfg`; implements `trnsprt::McpServer`. `run`/`run_stdio` use
 the trnsprt framing. `run_sse` (`src/mcp/sse.rs`) serves HTTP/SSE.
 
 **Where.** `src/mcp/*` (2484 LoC, 8 files).
 
-**Gaps.** No streaming `answer` over stdio (SSE only). Tool schemas are hand-
+**Gaps.** Tool schemas are hand-
 rolled JSON, not derived. No batch query. **Prompts and resources are served on
 the standalone path only.** `ProxyServer` — the path taken whenever a daemon is
 running, i.e. the normal one — implements `tools_list`/`call_tool`/
@@ -623,7 +617,7 @@ daemon — prefer MCP for live state).
 **Subcommands** (`Commands` enum, `src/commands.rs`): `ingest`, `query`,
 `search`, `reembed`, `get`, `list`, `forget`, `link`, `health`, `profile`,
 `gc`, `compact`, `graviton {add|list|remove}`, `degrade`, `claim-kind {add|rm}`,
-`peers`, `register`, `unnamed {list}`, `mcp`, `compress`, `migrate`, `daemon`,
+`peers`, `register`, `unnamed {list}`, `mcp`, `compress`, `daemon`,
 `hub {status|resolve|unload|merge|stop}`.
 
 **How.** `dispatch` (`src/commands.rs`) routes; per-subcommand handlers in
@@ -642,7 +636,6 @@ Notable:
   only when nonzero.
 - `profile` (`profile_cmd.rs`) — runs a query with a `Profiler` timeline.
 - `compress` (`admin.rs`) — compresses vectors with a chosen `QuantizationMode`.
-- `migrate` — legacy shard → LMDB.
 - `daemon` / `run_server` (`src/commands.rs`) — boots the full runtime: loads
   graph, binds the embedding model and checks the store's stamp, spawns
   watchdog, LLM keepalive, file watcher, the intake, gossip, maintenance tick,
@@ -733,12 +726,11 @@ id (`src/gossip/handler.rs:463`).
 
 ## 16. LLM client — `active`
 
-**What.** One client wrapping three endpoints (reason / answer / embed) against
+**What.** One client wrapping two endpoints (reason / embed) against
 Ollama by default; fail-open everywhere.
 
 **How.** `Client` (`src/llm.rs:64`) — `embed` (`:179`) / `embed_batch` (`:223`)
 against the embedding endpoint, `complete` (`:279`, reason / distillation),
-`answer` (`:335`, streamed answer via Ollama native `/api/chat`),
 `complete_func` (`:415`, sync closure for the tick/ingest blocking bridges).
 `is_transient` (`:20`) classifies retryable errors. `Endpoint` (`:47`) holds
 url/model/key; `new_embed_only` (`:171`) builds a client for `reembed`.
@@ -888,7 +880,7 @@ client→node — the hub is connect-time only, never a proxy hop.
 - **Hub-first proxy + auto-start** (`src/commands/mcp_cmd.rs`) — `kern mcp` asks
   the hub first, auto-starting a detached hub when none answers
   (`[hub] auto_start = false` opts out); any failure falls through to the
-  legacy direct-connect/auto-spawn path. `kern hub stop` ends the hub over
+  direct-connect/auto-spawn fallback. `kern hub stop` ends the hub over
   RPC; nodes stay up.
 - **Detached children are logged.** Both spawners — the hub
   (`spawn_hub`/`spawn_daemon`, `src/commands/mcp_cmd.rs`) and the hub's per-root
@@ -936,7 +928,7 @@ Ollama). The whole memory-tuning surface is one key: `preset = "relaxed" |
 "medium" | "tight"`.
 
 **How.** `Config` (`src/config/mod.rs`) aggregates sub-configs — `Embed`,
-`Reason`, `Answer`, `Serve`, `Retrieval`, `Ingest`, `Gossip`, `Tick`, `Heat`,
+`Reason`, `Serve`, `Retrieval`, `Ingest`, `Gossip`, `Tick`, `Heat`,
 `Gnn`, `Watcher`, `Intake`, `Graph`, `Hub` — plus `data_dir`, `preset`, and a
 derived `log_dir()` = `<data_dir>/logs`. Resolved project-scope
 (`<cwd>/.kern/kern.toml`) over user-scope (`<XDG_CONFIG>/kern/kern.toml`).
@@ -946,13 +938,13 @@ a loopback Ollama URL must be pinned to the Windows host gateway in `kern.toml`
 
 **Presets own the tuning knobs.** `Preset::apply` (`src/config/preset.rs`) is
 the only writer of heat half-life, ingest dedup threshold, and retrieval
-breadth (`seed_k`, `max_expansions`, `max_deliver_results`,
-`answer_max_facts`). Default is `relaxed`: 30d half-life, 0.98 dedup, seed_k
-25 / 800 expansions / 40 results / 8 answer facts. `medium` = the neutral
-sub-config struct defaults (7d, 0.95, 15/500/25/5, pinned together by test);
-`tight` = 3d, 0.90, 10/250/12/4. The `[heat]`, `[ingest]`, and `[retrieval]`
-sections are **refused** at load with a pointer to `preset` — no silently
-ignored keys. Project-scope preset beats user-scope preset like any other key.
+breadth (`seed_k`, `max_expansions`, `max_deliver_results`). Default is
+`relaxed`: 30d half-life, 0.98 dedup, seed_k 25 / 800 expansions / 40 results.
+`medium` = the neutral sub-config struct defaults (7d, 0.95, 15/500/25, pinned
+together by test); `tight` = 3d, 0.90, 10/250/12. The `[heat]`, `[ingest]`,
+and `[retrieval]` sections are **refused** at load with a pointer to `preset`,
+and `[answer]` is refused with a removal notice (2026-07-21: kern does no
+synthesis; the calling agent does) — no silently ignored keys. Project-scope preset beats user-scope preset like any other key.
 
 **Scopes deep-merge, per key.** `merged_value` → `merge_deep`
 (`src/config/io.rs`) recurses wherever both scopes hold a table, so a
@@ -966,7 +958,7 @@ misreads a leading `[section]` header as an array.
 `secrets::seal_redirected` (`src/config/secrets.rs:15`) strips `key` from any
 section where the project scope set `url` and did *not* set `key`. Without it a
 cloned repo committing `[embed] url = "http://attacker.example/v1"` would harvest
-the user's live key on the first embed call — and `reason_key`/`answer_key` fall
+the user's live key on the first embed call — and `reason_key` falls
 back to `embed.key`, so redirecting any one endpoint reaches it. A project that
 leaves `url` alone keeps inheriting the key, which is the whole point of
 layering.
@@ -1011,13 +1003,13 @@ a test that ingests the facts already knows which id is correct.
 
 **What.** `just e2e` (pytest) drives the real `kern` binary end to end, and is
 **the instrument retrieval quality is measured with** (`ROADMAP.md` item 1):
-answer retrieval, the hub supervisor lifecycle, VISION-criterion invariants, and
+retrieval ranking, the hub supervisor lifecycle, VISION-criterion invariants, and
 a scored recall metric.
 
 **How.** `fake_llm.py` serves the native Ollama API deterministically —
 `/api/embed` returns feature-hashed bag-of-words vectors (token overlap gives
 real cosine ranking, no GPU or model), `/api/chat` echoes the last user
-message so the answer test can assert the retrieved context reached the
+message so a test can assert what reached any chat-completion prompt in the
 prompt. `conftest.py` isolates each test in a private project (own
 `XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME`, `.kern/kern.toml` pinned to the fake).
 `test_hub.py` is the ported Rust hub supervisor suite.
@@ -1186,7 +1178,7 @@ Ranked by leverage:
 8. **`HnswIndex::delete` is O(nodes × edges)** — it scans every node and every
    layer to scrub inbound edges (`src/base/hnsw.rs:118`), once per GC victim.
    (There is nothing to compact: the slot goes on a `free` list and is reused.)
-9. **No learned rerank model** — every rerank is a cold LLM call; a small
+9. (retired 2026-07-21 — the LLM rerank left with the answer leg) a small
    cross-encoder trained on `degrade` feedback could replace it.
 10. **Only `GnnPropagate` reports a contained failure** — the panic guard covers
     every task, but a task that returns early instead of dying is still

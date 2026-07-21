@@ -30,8 +30,9 @@ A change fails the vision if it breaks any of these:
 - **Superseded, never deleted.** An updated or contradicted claim becomes
   bi-temporal history queryable `as_of` a past instant; the
   update-vs-contradiction call runs off the recall path.
-- **Default recall touches no LLM.** `answer:false` stays on the sub-ms graph
-  path, offline-capable against local models only.
+- **Recall touches no LLM, ever.** The read path is graph + embeddings only —
+  kern does no synthesis; the calling agent does. Offline-capable against a
+  local embedder alone.
 - **The hot graph stays bounded.** Decay + GC compact without intervention;
   Facts are never auto-forgotten; evictions spill to the cold tier before they
   drop.

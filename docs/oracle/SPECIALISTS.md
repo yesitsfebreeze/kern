@@ -20,9 +20,9 @@ sets; parallelize only what does not overlap.
 
 - **Scope:** `src/retrieval/`, `src/gnn/`, `src/quant.rs`.
 - **Knows:** the hybrid pipeline (HNSW/DiskANN + BM25 + GNN-blended seeds,
-  edge expansion, HyDE, RRF + PageRank fusion, rerank, MMR diversify), int8
-  quantization recall parity, the semantic query cache
-  (cosine ≥ 0.97 + version stamps), filtered ANN on `is_active`.
+  edge expansion, RRF + PageRank fusion, MMR diversify — LLM-free end to end
+  since 2026-07-21), int8 quantization recall parity, filtered ANN on
+  `is_active`.
 - **Delegate when:** recall quality, ranking, ANN structure, or any change
   that could move recall@k or query latency.
 
@@ -30,9 +30,10 @@ sets; parallelize only what does not overlap.
 
 - **Scope:** `src/store.rs`, persistence, cold tier, `src/crdt.rs`.
 - **Knows:** the single LMDB env (heed) per data dir, single-writer +
-  guarded-flush protocol, `zstd(bincode)` values, the append-only-bincode law
-  (persisted enums/structs grow by appending only — guard schema touches with
-  a round-trip test), content-hash ids as the merge foundation, `kern migrate`.
+  guarded-flush protocol, `zstd(bincode)` values, the single-version law
+  (exactly one decodable format, `FORMAT_V5`; any persisted-schema change bumps
+  it and old stores are rejected, never appended-for or migrated — guard schema
+  touches with a round-trip test), content-hash ids as the merge foundation.
 - **Delegate when:** persistence, schema, durability (snapshots/WAL), or
   anything holding a write guard.
 
@@ -51,7 +52,8 @@ sets; parallelize only what does not overlap.
 - **Scope:** `src/ingest/`, `src/llm.rs`, `src/watcher/`.
 - **Knows:** the intake and its outage-safe queueing, the one-pass
   distillation into typed claims, claim kinds and gravitons, Ollama endpoints
-  (reason/embed/answer split), streaming, `num_ctx` caps, warm-keeping.
+  (reason/embed split — reason is write-path only), `num_ctx` caps,
+  embed warm-keeping.
 - **Delegate when:** distillation quality, claim typing, LLM latency, or
   model/endpoint wiring.
 

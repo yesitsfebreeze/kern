@@ -2,6 +2,74 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — Access stamping obeys `[heat]` config: `commit_access` /
+  `commit_access_ids` read `HeatConfig::default()` for half-life AND
+  deposit_access, so a configured `[heat]` section (or preset) was silently
+  ignored exactly where retrieval deposits heat. `HeatConfig` is now threaded
+  through `query`/`query_profiled`/`query_locked` and the CommitAccess tick
+  task (`ctx.heat_cfg` already existed). Behavior-neutral for the running eval
+  campaign — live config and e2e both run defaults. Decided by: fix-the-root.
+- 2026-07-21 — MCP ingest `kind` arg dropped, not honored: it was validated
+  but never stored (kind always derived from clamped confidence), absent from
+  the advertised tool schema, and its only passable value (`claim`) is the
+  default — Fact is unreachable for agents (conf clamped to 0.95 <
+  FACT_CONFIDENCE) and Document/Question/Conclusion are internal-only. The
+  field, its dead validation path (`validate_kind`, `InternalKind`) removed;
+  kind stays derived-only at the agent boundary.
+  Decided by: avoided-question-first — the arg promised a choice the
+  boundary never grants.
+- 2026-07-21 — Alpha means no compatibility: recorded in `AGENTS.md` and every
+  backward-compat implementation removed in one sweep. Gone: `kern migrate` and
+  `src/base/migrate.rs` (legacy shard → LMDB import), the `.kern` file-shard
+  loader (`load_legacy_dir`/`load_kern`/`save_kern`, quant sidecar,
+  `sweep_stale_tmp`, base `PersistError`), `KernPreMass` and the
+  `StoredKernV1`/`V2` mirrors, the pre-V4 bare-entity cold-row decode,
+  `migrate_root_id` and `backfill_created_at` load-time backfills, the
+  `vec_f64_compat` serde shim (vectors now serialize as native f32 on disk and
+  gossip wire), and the `descriptor` serde alias on `DirectJob.hint`. The store
+  now writes and decodes exactly one version, `FORMAT_V5` — any other version
+  byte is a clean `BadVersion` rejection, so pre-V5 stores (and every V1-V4
+  store) must be wiped and reingested; gossip peers must run the same build.
+  A third scrape (agent-verified) caught the structural stragglers:
+  `EntityKind` reclaims discriminant 4 (the "4 was Answer" gap held open for
+  numeric-kind stability), the gossip enum comment now states the real wire law
+  (serde encodes declaration order, not repr values), `QuestionPayload.from_id`
+  dropped (written, never read — its consumer was removed) shrinking
+  `BroadcastQuestionFunc` to three args, `retrieval.heat_half_life_secs`
+  dropped (write-only duplicate of `heat.half_life_secs`), the bare
+  `"initialized"` pre-spec MCP spelling dropped, the MCP query `kind` filter
+  fixed to accept the stable lowercase labels (the schema advertised `"normal"`
+  — a pre-rename label no parser accepted — and the serde derive wanted Rust
+  variant names; both were wrong), `valid_at`/`scheme` added to the advertised
+  query schema, and the graviton `rm` alias documented in its schema enum.
+  Stale docs corrected: README's pre-V4 stampless-cold-row "gap" paragraph
+  (that tolerance is gone), FEATURES' `V1..=V4` format claims, and two ROADMAP
+  proposals that prescribed the removed `serde(default)` evolution mechanism.
+  Also kept after verification: `CrdtTarget::Statements` no-op arm (in-code
+  security decision: statement text only via content-addressed EntitySync),
+  `traversal_count` + `CrdtTarget::ReasonTraversalCount` (tied to the OPEN
+  traversal-credit roadmap item, not compat), the `-d/--daemon` flag
+  (load-bearing: `spawn_daemon` launches `kern --daemon`), and the
+  restart-verdict Hold for daemons predating the identity handshake (the
+  documented live-handshake exception).
+  A second scrape removed the residue: every `#[serde(default)]` on
+  `Entity`/`Reason`/`Kern`/`CrdtDeltaPayload` (appended-field compat markers,
+  inert under positional bincode — these types are never JSON-decoded), the
+  `stale_digest_keys_are_ignored_not_fatal` config test (pinned tolerance for
+  removed `kern.toml` keys), and the append-only-bincode law in SPECIALISTS.md,
+  superseded by the single-version law: one decodable format, schema changes
+  bump it. The kept hub fallback is renamed "direct path" in code, logs, and
+  docs so it stops reading as compat debt.
+  Kept deliberately: that direct-connect fallback in `mcp_cmd.rs` (resilience
+  when the hub cannot start, not format compat) and the tolerant `HealthRes`
+  decode in `trnsprt` dto plus the hub's `idle_ms == 0` distrust (both serve
+  the live attach → stale-detect → auto-restart handshake against a
+  still-running older daemon).
+  Decided by: name-the-tradeoff (compat code and its test surface traded away
+  against losing every pre-V5 store; alpha has no users to strand, so the
+  simpler single-format codebase wins). Supersedes the shard-migration decision
+  that introduced `kern migrate`.
+
 - 2026-07-21 — Graviton routing measured dead and recalibrated. A 40-claim
   labelled corpus against qwen3-embedding:0.6b showed intended
   claim-to-graviton cosine distances of 0.29-0.69 while the acceptance
@@ -21,6 +89,26 @@
   categories (decisions vs architecture); a sibling-bucket landing is
   acceptable, off-topic-in-generic is preserved, and the retrieval eval
   remains the instrument that will judge whether routing quality matters.
+
+- 2026-07-21 — Roadmap item 34, mitigated rather than closed: the `Question` path
+  gets a per-origin budget. Answering tells a peer we hold something above the
+  resolve threshold for a vector THEY chose — a membership oracle that leaks
+  without the content ever being sent, and it had no limit of any kind.
+
+  `src/gossip/rate.rs` gives each origin 30 questions a minute, refusals counted
+  and throttle-logged. The table is bounded and reclaims expired buckets before
+  evicting live ones, because `origin` is an attacker-chosen string and the table
+  is therefore itself a memory target — the same class as item 35.
+
+  **Said plainly because the difference matters:** this makes bulk extraction
+  expensive, it does not close the oracle. A patient prober still learns what we
+  hold, and a peer that rotates its self-declared `origin` gets a fresh budget
+  each time. Refusing outright needs an authenticated identity, which is item 33.
+  Eviction prefers the oldest bucket over refusing new origins, so a spoofing peer
+  cannot lock every real one out — trading a weaker bound for availability, both
+  of which are inherent until identities exist.
+
+  **Decided by:** name-the-tradeoff.
 
 - 2026-07-21 — Roadmap item 37, its cheapest half: the gossip heartbeat stops
   deep-cloning the whole corpus to send 32 rows. `start_entity_sync` cloned every
@@ -312,6 +400,19 @@
   pending direct-intake JSON decodes via the same alias, but external agent
   configs calling the old tool name must update. Kern shard bincode is
   positional, so the `Kern.claim_kinds` field rename is wire-compatible.
+- 2026-07-21 — **V1 carries no answer compatibility.** The two shims kept
+  during the answer-leg removal earlier today are deleted: the `[answer]`
+  config tombstone (an unknown section is now just unknown — pre-1.0, nobody
+  has that config), and the dead `EntityKind::Answer` variant. Verified safe
+  against live stores before removal: no code path ever constructed an
+  `Answer` entity — nor, it turns out, a `Question`/`Conclusion` entity; only
+  Fact/Claim/Document rows exist on disk, all below the removed serde index,
+  so decoding is unaffected and the append-only bincode law is not violated,
+  merely unexercised. Discriminant 4 is annotated retired in the enum so it
+  is not blindly reused. **Decided by:** the oracle, on the user's ruling —
+  this is a v1 implementation; compatibility surface starts at v1.0,
+  not before.
+
 - 2026-07-21 — **The answer leg is deleted; retrieval is the only read
   path.** `query` returns scored passages, enriched edges, and path chains —
   no synthesis, ever. The calling agent synthesizes, which is what agents are
