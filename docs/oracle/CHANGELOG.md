@@ -2,6 +2,42 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — an `id` read now runs the same filters a ranked read runs, and the
+  one filter it must never run stays off. `tool_query` returned
+  `entity_detail_by_id` and returned *before* `build_query_options` was ever
+  called (`src/mcp/tools_query.rs:129`), so `kind`, `source`, `scheme`,
+  `min_conf`, `since`, `before`, `valid_at` and `as_of` were accepted by the
+  schema, parsed by nobody, and silently dropped — `query {id, kind: "claim"}`
+  answered with a `Fact`. A filter meant one thing on `text` and nothing on
+  `id`. The branch now builds `QueryOptions` first and puts the resolved row
+  through `retrieval::score::matches_filter` (`src/retrieval/score.rs:205`) —
+  the same predicate the ranked read uses, not a second copy — and a malformed
+  `since` is an error on the id path instead of a shrug. Resolution stayed
+  single: `entity_detail_by_id` and the tool both go through one new
+  `resolve_by_id`, so prefix and cold tier still resolve exactly one way.
+
+  **A bare `query {id}` still filters nothing**, and that is load-bearing rather
+  than incidental: `QueryOptions::default()` leaves `valid_at`/`as_of` unset, so
+  an expired row keeps arriving *served and flagged* (`expired`/`valid_until`),
+  which is the retired item 91 `[retrieval]` decision. Reverting the `.filter`
+  fails `id_read_drops_a_row_the_kind_filter_excludes` *and* the explicit
+  `valid_at` complement inside `bare_id_read_still_serves_an_expired_row_flagged`
+  — neither direction is decorative, and the three `graph_ops.rs` retention tests
+  needed no edit because they call the resolver, which never filtered.
+
+  **This does not deliver ACL.** It is item 18's id-path bullet and nothing else:
+  `matches_filter` still has no ACL predicate and `QueryArgs` has no
+  `principals`, so what shipped is the *route* an ACL rule would travel, not the
+  rule. What it does buy is that the rule can no longer be walked around —
+  before this, an ACL check added to `matches_filter` would have been decorative,
+  because `kern get`, routed to this tool by item 9, bypassed the filter
+  entirely. Item 18 stays open with three bullets left, still decided alongside
+  item 24.
+
+  Decided by: fix-the-root — the early return was the root, not the missing
+  `kind` check. Special-casing one filter at the branch would have left the next
+  one to be dropped the same silent way.
+
 - 2026-07-21 — the acquittal marker silenced a real breakage on its first
   contested use, and the merge caught it. `cycle/1` adjudicated
   `FEATURES.md:608` as a false positive and stamped it
