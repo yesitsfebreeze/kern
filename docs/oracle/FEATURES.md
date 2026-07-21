@@ -42,7 +42,7 @@ everywhere, which is what makes conflict-free cross-node merge work.
 
 **How.**
 
-- `Entity` (`src/base/types.rs:271`) — typed (`Fact`/`Claim`/`Document`/
+- `Entity` (`src/base/types.rs:280`) — typed (`Fact`/`Claim`/`Document`/
   `Question`/`Conclusion`, `src/base/types.rs:19`), weighted by
   confidence (a beta distribution stored as `conf_alpha`/`conf_beta`, read via
   the `conf_mean`/`conf_variance` methods, updated via
@@ -52,7 +52,7 @@ everywhere, which is what makes conflict-free cross-node merge work.
   (OR-Set of text lines), two vectors (`vector` content, `gnn_vector` structure),
   and provenance (`Source` with `system`/`object_id`/`section`/`title`/`author`/
   `url`). `kind`/`source` parsed off the source string. Also carries an `acl`
-  (`src/base/types.rs:287`; `Acl { scope, users, groups }` at `:120-124`) — as of
+  (`src/base/types.rs:296`; `Acl { scope, users, groups }` at `:120-124`) — as of
   2026-07-21 it is **written and read**. The MCP `ingest` tool's `scope` /
   `principals` build it (`acl_from_args`, `src/mcp/tools_mutate.rs`) and it rides
   `ingest::Job::acl` into `new_statement_entity` (`src/ingest/place.rs:57`);
@@ -62,14 +62,14 @@ everywhere, which is what makes conflict-free cross-node merge work.
   filter*, not public-only. A dedup keeps the survivor's ACL and drops the
   `Rephrase` edge across a boundary — a `Reason` has no ACL. The file watcher
   still writes `Acl::default()`; `ROADMAP.md` item 18 lists what is still ungated.
-- `Reason` (`src/base/types.rs:419`) — an edge `from`→`to` with a `kind`
+- `Reason` (`src/base/types.rs:428`) — an edge `from`→`to` with a `kind`
   (`Similarity`/`Provenance`/`Question`/`Spawn`/`Supersedes`/`Ratification`/
   `Rephrase`, `src/base/types.rs:77-86`), its own vector (mean of endpoints), a
-  `traversal_count` GCounter (`src/base/types.rs:431`), and a CRDT `score`.
+  `traversal_count` GCounter (`src/base/types.rs:440`), and a CRDT `score`.
   `is_enriched`/`is_remote` flags. There is no `Contradiction` edge kind —
   `Related` is a `ContradictionClass` verdict, not an edge, and a deferred
   contradiction candidate is carried by a `Rephrase` edge.
-- `Kern` (`src/base/types.rs:462`) — a container node in the kern tree:
+- `Kern` (`src/base/types.rs:471`) — a container node in the kern tree:
   `entities` + `reasons` maps, `children` ids, a `graviton_vec`/`graviton_text` + `mass` (default 1.0),
   radii (`inner_radius`/`outer_radius`) for acceptance gating, and an
   `access_count`. Root, named children, and unnamed (spill) children are all
@@ -197,7 +197,7 @@ profiled via `src/profile.rs`):
 | 4 | **PageRank** | `retrieval/pagerank.rs` | Centrality weighting of the fused seeds over the reason graph. |
 | 5 | **Expand** | `retrieval/expand.rs:178` | Walk reason edges out from seeds (`PathChain` recording the *why*), scoring neighbors (`score_neighbor`) — plus bounded traversal credit: each examined edge pays its far endpoint `source_score × edge_evidence` (×`traversal_credit_weight`, capped at `traversal_credit_cap`, clamped below the strongest voucher's walk score), which is how a linked neighbour sharing no words with the query reaches the top ranks without ever outranking a direct match. |
 | 6 | **Merge** | `retrieval/merge.rs` | Combine seeds + expanded neighbors into `ScoredEntity` list. |
-| 7 | **Boosts** | `retrieval/score.rs` | `apply_boosts`: confidence × score + **QBST** access/recency boost (`qbst`, capped at 0.1, 24h half-life) + `fact_score_boost` (0.3) for Facts. |
+| 7 | **Boosts** | `retrieval/score.rs` | `apply_boosts`: (confidence × score + **QBST** access/recency boost (`qbst`, capped at 0.1, 24h half-life) + `fact_score_boost` (0.3) for Facts) × `source_trust`. `source_trust` is a `RetrievalConfig` map keyed on `Source::scheme()` — `file`, `ticket`, `session`, `agent`, `inline` — empty by default, absent key exactly `1.0`, so an unconfigured kern scores bit-identically. It weights the CHANNEL, never the author: `kern ingest` and an MCP agent's default ingest both write `inline` (`ROADMAP.md` item 20). An unknown key is a `validate` error, not a silent no-op. |
 | 7b | **Gravity** | `retrieval/gravity.rs` | Query-time graviton pull: `score += gravity_weight (0.15) * max_over_gravitons(mass * max(0, cos(entity, graviton_vec)))`. Max, not sum — overlapping gravitons never double-count. `gravity_weight=0` disables (early return, zero cost); no gravitons → no-op. Latency only, from the bench deleted in `8d8b19e` and not reproducible: ~+7% p50 with 5 gravitons. No quality claim accompanies it — the retrieval-quality half of that bench is withdrawn under the claim standard (`ROADMAP.md` — "no quality claim of any kind"). |
 | 8 | **Filter** | `retrieval/score.rs` | `filter_delivery`: drop superseded; floor at `retrieval.min_deliver_score` (default `0.0` — off); cap at `delivery_cap` = `retrieval.max_deliver_results` (default `25`), or `mmr_pool_size=50` when MMR is on. Both are config fields (`src/config/retrieval.rs:48-49`), not constants. `delivery_cap` is a named function because the CLI reads it too — `cmd_query` sends it as `k` when it routes to a daemon, so the routed and local reads deliver the same number of hits. Query options (source/kind/scheme/time/min_conf/`principals`) go through `matches_filter` (`retrieval/score.rs`), the single predicate shared with pre-filtered ANN search. The ACL predicate runs first (`acl_admits`, same file): an entity whose `Acl` names no scope, user or group is public, otherwise the caller's `principals` must name one of them. An empty `principals` is **no filter, not public-only** — that is what keeps every principal-less read working — and a Fact is GC-immune, never ACL-immune, so a scoped Fact is withheld from a non-member like anything else. |
 | 9 | **Dedup by section** | `retrieval/diversify.rs:6` | Collapse near-duplicate sections. |
@@ -452,13 +452,13 @@ maintains itself.
   synchronous one-shot variant; `enqueue_all` (`:323`) fans a Cluster task out
   to every non-empty kern.
 - **Maintenance tick** (`spawn_maintenance_tick`, `src/commands.rs`) — periodic
-  driver at `TICK_INTERVAL_SECS=60` (0 = event-driven only): pulses heat, gates
-  GC and disk consolidation on clock validity + elapsed interval
-  (`pulse::should_run_gc`, `src/tick/pulse.rs:63`), enqueues persist.
-- **Pulse** (`src/tick/pulse.rs`) — `pulse_with_heat` (`src/tick/pulse.rs:20`) re-deposits heat
-  on entities reachable from the root, decaying strength by `PULSE_DECAY=0.5`
-  per level; below `PULSE_THRESHOLD=0.05` it stops. Heat itself decays lazily
-  by age (`heat::decayed`, half-life based), *not* per tick.
+  driver at `TICK_INTERVAL_SECS=60` (0 = event-driven only): pulses the root,
+  gates GC and disk consolidation on clock validity + elapsed interval
+  (`pulse::should_run_gc`, `src/tick/pulse.rs:52`), enqueues persist.
+- **Pulse** (`src/tick/pulse.rs`) — `pulse` (`src/tick/pulse.rs:15`) fans Cluster tasks out from the root,
+  decaying strength by `PULSE_DECAY=0.5` per level; below `PULSE_THRESHOLD=0.05` it
+  stops, covering 5 levels. Deposits **no** heat, takes the graph by shared reference.
+  Heat decays lazily by age (`heat::decayed`, half-life based), *not* per tick.
 - **Cluster** (`src/tick/cluster.rs` + `tick::do_cluster`) — `vector_cluster`
   (`src/tick/cluster.rs:13`) samples up to `TICK_MAX_CLUSTER_SAMPLE=200`
   entities and groups them; a cluster
@@ -607,13 +607,13 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 
 | Tool | File | Purpose |
 | ------ | ------ | --------- |
-| `query` | `tools_query.rs` | Hybrid search, LLM-free; the caller synthesizes. Filters: `mode`/`kind`/`source`/`scheme`/time range/`min_conf`/`valid_at`/`as_of`; `include_history` for supersede chain. Returns edges **and path chains**, and `id` resolves a prefix and the cold tier (`entity_detail_by_id`) — both widenings exist so a CLI `query`/`get` routed through the daemon answers with what the local path answers. An `id` read runs the **same** filters: `src/mcp/tools_query.rs:133-153` builds `QueryOptions` first and puts the resolved row through `retrieval::score::matches_filter`, so `query {id, kind: "claim"}` on a `Fact` answers `thought not found`. A bare `query {id}` filters nothing — `QueryOptions::default()` leaves `valid_at`/`as_of` unset — which is what keeps an expired row served-and-flagged (`expired`/`valid_until`, `entity_detail`, `src/mcp/tools_query.rs:367`) rather than hidden. `principals` (string array) is the caller's asserted identity and rides the same predicate, so `query {id, principals: ["bob"]}` on an alice-scoped row answers `thought not found` while a bare `query {id}` still serves it. A blank entry is a hard error (`parse_principals`, `src/mcp.rs`), never a silent skip — it would otherwise match the empty scope of every public entity. **MCP-only: there is no CLI flag, so `e2e/` cannot reach it** (`e2e/conftest.py` drives the binary over subprocess and has no JSON-RPC client); the coverage is unit tests. |
+| `query` | `tools_query.rs` | Hybrid search, LLM-free; the caller synthesizes. Filters: `mode`/`kind`/`source`/`scheme`/time range/`min_conf`/`valid_at`/`as_of`; `include_history` for supersede chain. Returns edges **and path chains**, and `id` resolves a prefix and the cold tier (`entity_detail_by_id`) — both widenings exist so a CLI `query`/`get` routed through the daemon answers with what the local path answers. An `id` read runs the **same** filters: `src/mcp/tools_query.rs:133-153` builds `QueryOptions` first and puts the resolved row through `retrieval::score::matches_filter`, so `query {id, kind: "claim"}` on a `Fact` answers `thought not found`. A bare `query {id}` filters nothing — `QueryOptions::default()` leaves `valid_at`/`as_of` unset — which is what keeps an expired row served-and-flagged (`expired`/`valid_until`, `entity_detail` `src/mcp/tools_query.rs:375`, stamped `:413-415`) rather than hidden. `principals` (string array) is the caller's asserted identity and rides the same predicate, so `query {id, principals: ["bob"]}` on an alice-scoped row answers `thought not found` while a bare `query {id}` still serves it. A blank entry is a hard error (`parse_principals`, `src/mcp.rs`), never a silent skip — it would otherwise match the empty scope of every public entity. **MCP-only: there is no CLI flag, so `e2e/` cannot reach it** (`e2e/conftest.py` drives the binary over subprocess and has no JSON-RPC client); the coverage is unit tests. |
 | `ingest` | `tools_mutate.rs` | Add text. `object_id` update semantics, free-text `hint` chunking context (`hint` is the only spelling — the `descriptor` alias retired in `7de23c0`), optional `retention_secs` TTL (integer seconds; `0`/absent = never) resolved to an absolute `valid_until` once, before the sync / durable-direct / RAM-queue branch, so all three carry the same deadline. Optional `scope` (string) + `principals` (string array) build the `Acl` stamped on every entity the job places (`acl_from_args` → `ingest::Job::acl` → `new_statement_entity`); naming neither leaves the thought public. Resolved on the same pre-branch line as `valid_until` and carried across the durable hop by `DirectJob::acl`, so the async path cannot silently republish a scoped ingest as public. |
 | `link` | `tools_mutate.rs` | Create a reason edge (LLM writes the reason if blank). Edge score is the asserted confidence (agent 0.95; CLI user 1.0), NOT `cosine(from,to)` — a deliberate link connects what similarity cannot, so similarity must not be its strength. |
 | `forget` | `tools_mutate.rs` | Remove a thought + cascade edges (Facts immune). |
 | `forget_by_source` | `tools_mutate.rs` | Remove every thought from one `(scheme, object_id)` — **all sections of it**, since `source_id` hashes the section and keying on one would forget a single chunk of a document. Cascades through the same `forget_entity`; refuses local Facts unless `force`, which is the ONLY bypass of the Fact guard and is never implicit. Returns `removed_entities`/`removed_edges`/`kept_facts` — the last so a refused Fact is reported rather than read as "nothing was there". Exists so `kern forget --source` has somewhere to route. |
 | `degrade` | `tools_mutate.rs` | Down-weight edges along a bad retrieval path (`DEGRADE_*` decay). Returns `decayed_edges` and `removed_edges` — the reap count exists so a CLI `degrade` routed through the daemon can print what the local path prints. |
-| `move` | `tools_mutate.rs:444` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
+| `move` | `tools_mutate.rs:471` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
 | `health` | `tools_admin.rs:83` | Graph stats (gravitons/kerns/entities/reasons/unnamed/claim_kinds) **plus the degradation surface**: `queue_depth`, `tasks_done`, `task_avg_ms`, `task_panics`, `last_task_panic`, `task_failures`, `last_task_failure`, `cold_evicted`, `embed_model`, `embed_dim`, `embed_mismatch`, and the seven fail-open counters — `query_dim_rejected`, `below_floor_deliveries`, `clock_skew_skips`, `ingest_dropped_chunks`, `remote_cap_dropped`, `unspilled_drops`, `ingest_queue_refused` — each a path that returns something rather than erroring, so the count is the only way to tell a degraded result from a good one (`Server::health_stats`, `src/mcp.rs:116`). |
 | `graviton` | `tools_admin.rs` | list/add/remove focus attractors (name + text — phrase or full document — + optional mass). Replaced the single per-kern "purpose". |
 | `claim_kind` | `tools_admin.rs` | register/remove claim kinds; registered kinds extend the built-in distill set. |
@@ -622,7 +622,7 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 | `intake_drain` | `tools_intake.rs` | One immediate pass of the daemon's own intake drain (`ingest::intake::drain_now`), returning `archived`. Exists so `kern intake drain` has somewhere to route: the CLI's in-process pass reads the same queue directory and archives the same entries as the daemon's poll loop, so both distill the file and both race the archive move. |
 | `setup` | `tools_setup.rs` | Agent-facing installer: returns idempotent wiring instructions (seed gravitons, install the capture rule/hook in the host, verify) plus this project's current [done]/[todo] state. kern never writes host config; the calling agent does the wiring. |
 
-Plus MCP **prompts** (`src/mcp/prompt.rs`) and **resources** (`src/mcp/resources.rs`).
+Plus MCP **prompts** (`src/mcp/prompt.rs`) and **resources** (`src/mcp/resources.rs`) — four static URIs (`kern://local/health`, `kern://local/thoughts`, `kern://local/kerns`, `kern://local/claim-kinds`, `resource_definitions`) plus two dynamic prefixes resolved in `handle_resource_read`, `thought://{id}` (full text and every incident edge's text) and `reason://{id}` (an edge's text). Anything else is `unknown resource`. **This surface takes no `principals`, so it is default-deny**: it serves only rows whose `Acl` is empty (`Acl::is_public()`, the same emptiness test `acl_admits` runs), never a scoped one. A scoped `thought://{id}` reads back through the same `None` arm a missing one takes — byte-identical, and nothing in the file logs. An edge is gated on **both** ends, because `explain_relationship_prompt` writes its text from both endpoint texts, and the endpoint verdict has three outcomes (`Endpoint`) rather than two: `find_entity` walks only the *resident* kern map, so an id that does not resolve may be a cold-spilled or unloaded scoped row still alive in the store — Scoped drops the edge, Unresolved serves it with `text` withheld, Public serves it whole; `resource_reason`'s `from` fails closed on Unresolved too. The two `kern://local` counting URIs still count scoped rows — a cardinality oracle, no ids and no text, tracked in item 18. Narrower than any principal scheme item 24 lands, which can only widen it (`ROADMAP.md` item 18). **MCP-only: `e2e/` drives the binary over subprocess with no JSON-RPC client, so `resources/read` is unreachable from there**; the coverage is seven unit tests in `src/mcp/resources.rs`, one per guard.
 
 **Server** (`src/mcp.rs`) — `Server` holds the shared `graph`/`worker`/`llm`/
 `task_q`/`cfg`; implements `trnsprt::McpServer`. `run`/`run_stdio` use the

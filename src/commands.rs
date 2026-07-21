@@ -1111,8 +1111,8 @@ fn spawn_maintenance_tick(
 				g.root.id.clone()
 			};
 			{
-				let mut g = g_tick.write();
-				crate::tick::pulse::pulse_with_heat(&q_tick, &mut g, &root_id, 1.0, &cfg_tick.heat);
+				let g = g_tick.read();
+				crate::tick::pulse::pulse(&q_tick, &g, &root_id, 1.0);
 			}
 			if let Some(broadcast) = &broadcast_pulse {
 				broadcast(&root_id, 1.0);

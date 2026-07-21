@@ -47,6 +47,256 @@
 
   Decided by: name-the-tradeoff — the memory win does not get to be reported
   without the latency it cost.
+- 2026-07-21 — `4e836bb`'s subject is wrong in the same way `3529fce`'s was, and
+  twice makes it a pattern with a clean cause. It reads "source-trust weighting —
+  a user-authored claim should outrank an auto-ingested one at equal heat,
+  defaulting to 1.0", and every clause of that is what the slice **disproved**:
+  user and agent are indistinguishable at scoring time (both mint
+  `Source::Inline`), so no `source_trust_user` key was built — grep finds none —
+  and what shipped is a scheme-keyed `BTreeMap` that is **empty** by default, not
+  1.0.
+
+  The cause is now isolatable. Eight merges reached master today. The two written
+  by automation — `3529fce`, `4e836bb` — copy the slice title verbatim and are
+  both false. The six written by hand after reading the diff are accurate. The
+  difference is not care; it is *input*: a slice title is written before the work
+  and describes a hypothesis, and this loop disproves six hypotheses in ten.
+
+  So the fix is not "write better subjects", it is **never derive a merge subject
+  from the slice**. Anything that must be generated should come from the branch's
+  own commit subjects, which are written after the diff exists. Recorded here
+  because a pushed subject cannot be corrected in place, and `git log` is the
+  first place anyone looks — someone reading these two lines would conclude kern
+  has an importance index and a user-trust knob. It has neither.
+
+  Decided by: verify-before-claiming — both subjects were checked against the
+  tree rather than trusted, and both failed.
+
+- 2026-07-21 — filed item 95 while verifying item 20: the file watcher bypasses
+  `clamp_confidence` entirely, so an auto-ingested `Document` lands on Beta(2,1)
+  = 0.6667, exactly a human CLI claim's posterior and above the 0.6500 an MCP
+  agent gets after clamping. A file appearing on disk is trusted more than an
+  agent that asserted something on purpose.
+
+  It was found and described by the item-20 slice but left unfiled, inside that
+  item's prose. Filing it is the point: item 20's headline is "a user-authored
+  claim should outrank an auto-ingested one at equal heat", and this is the
+  mechanism that was supposed to make that true. A defect that lives only as a
+  sentence inside a neighbouring item is one nobody will ever schedule.
+
+  Deliberately not fixed alongside item 20, because clamping the watcher moves
+  the posterior of every `Document` and therefore moves ranking — which item
+  20's bit-identity bar forbade. The root-shaped closure is to move the clamp
+  inside `Worker::submit` so no caller can skip it, rather than adding a third
+  call site each future caller must remember; the guard-every-path-must-pass
+  version is exactly what its absence cost here.
+
+  Decided by: fix-the-root — the defect is that the clamp is a convention
+  callers follow rather than a gate they cannot avoid.
+
+- 2026-07-21 — source-trust weighting ships as a per-scheme multiplier in
+  `apply_boosts`, and the `_user` / `_agent` knobs ROADMAP item 20 asked for do
+  not ship at all, because nothing in the tree records who authored a claim.
+  `Entity.source` is a `Source` — `{File, Ticket, Session, Agent, Inline}` — a
+  URI scheme describing the channel. `kern ingest`, the human path, writes
+  `Source::Inline`; the MCP `ingest` tool's default writes `Source::Inline`.
+  One tag, two trust principals. A knob named `source_trust_user` could only
+  have been keyed on that tag, so it would have read as working and weighted an
+  agent identically to a person.
+
+  Confidence does not cover for it either, which was the other way the item
+  could have been closed. `clamp_confidence` caps a non-`USER_SOURCE` write at
+  `MAX_AI_CONFIDENCE`, worth a 0.667-against-0.650 posterior — a 2.6% edge over
+  an MCP agent, and none whatever over the file watcher, which submits `1.0` and
+  never passes through the clamp. So the item's headline claim, a user-authored
+  claim outranking an auto-ingested one at equal heat, was false in both
+  directions it could have been true.
+
+  What shipped is the honest half: `RetrievalConfig::source_trust`, a map keyed
+  on `Source::scheme()`, multiplied into the composite post-fusion. Empty by
+  default and an absent key is exactly `1.0`, so recall is unmoved — 0.9306 /
+  0.9722 / 0.9471, and a bit-identity test on the score words rather than a
+  tolerance. `source_trust = { file = 0.8 }` now buys the ranking the item
+  wanted, while naming the thing it actually penalises. Unknown keys fail
+  `validate` rather than weighting nothing quietly.
+
+  Item 20 stays open on the one thing left: an author principal on `Entity`,
+  which is a new field and a store format bump, and belongs with whoever holds
+  `src/base/types.rs`.
+
+  Decided by: fix-the-root — a knob keyed on a signal the tree does not record
+  is not a smaller version of the feature, it is a label for a distinction
+  nothing makes.
+
+- 2026-07-21 — the one cross-slice interaction anyone raised today was checked
+  and is a non-issue, and checking it is the point. Item 28's author flagged that
+  item 32 rewrote `src/tick/pulse.rs`, where `deposit_pulse` was the path
+  enqueueing `TaskKind::Cluster` — one of the three sites that lead to
+  `GnnPropagate`. If item 32 changed how often kerns are enqueued for clustering,
+  the practical frequency of GNN training changed with it, and neither slice's
+  measurements would account for that.
+
+  It did not. `fan_out_cluster` keeps the identical traversal: the same
+  `strength < PULSE_THRESHOLD` early return, the same
+  `if !k.entities.is_empty()` enqueue, the same `strength * PULSE_DECAY`
+  recursion into children. The diff removes only the heat-deposit lines and
+  relaxes the graph lock from `&mut` to `&`. Clustering cadence, and therefore
+  GNN training cadence, is unchanged.
+
+  Worth recording as its own entry rather than folded into the merge note,
+  because it is the first time the parallel structure produced a specific,
+  falsifiable question about how two slices compose — the previous entry admits
+  the suite is what says they compose and nobody reasons about it. Here someone
+  did, named the mechanism, and it took one grep to settle. An agent flagging
+  "this lands next to my work and neither of us measured it" is the cheapest
+  review this loop has, and it only happened because the author kept looking
+  after its own work was committed.
+
+  Decided by: verify-before-claiming — a plausible interaction is not an
+  interaction, and the difference is one command.
+
+- 2026-07-21 — merged item 32, the pulse heat deposit removal. 179 + 1 + this
+  one = 181, by union rebuild.
+
+  Flagging the merge itself because of what it combines. `cycle/2` closed MCP
+  resources against non-public rows and two fail-open holes; `cycle/3` changed
+  what the graph forgets. Both are green apart and green together — 902 tests,
+  recall exactly 0.9306 / 0.9722 / 0.9471, docs-check clean — but they were
+  developed against different masters and neither author saw the other's diff.
+  The suite is what says they compose; nobody reasoned about it.
+
+  That is worth stating once, plainly: parallel cycles are verified
+  independently and integrated by test, not by design review. It has held all
+  day across nine merges, and the anchor checker plus the entry count have each
+  caught a class of damage that reading the diff did not. But "the tests pass on
+  the union" is a weaker claim than "someone understood the union", and the gap
+  is where a subtle interaction would live. Item 32 in particular is a live
+  change to retention semantics, not an optimisation: entities in the top five
+  levels unread for ~199 days are now collectable where they previously were
+  not.
+
+  Decided by: name-the-tradeoff — parallelism bought nine slices in a day and
+  costs design-level review of how they compose.
+
+- 2026-07-21 — item 32 `[lifecycle]` closed: the tick pulse deposits no heat.
+  Access is now the only deposit, so retention is a function of use and of
+  nothing else.
+
+  **The item was right that survival tracked tree position and wrong about which
+  way.** Measured first, in `tests/depth_bias.rs` — a chain deeper than the pulse
+  can reach, two cohorts at every depth with identical usage, the real `pulse` →
+  `commit_access_ids` → `run_gc` lifecycle driven over simulated months by
+  rewinding entity stamps rather than sleeping. The reach is **5 levels, not the
+  "~4" the item cited from a doc**: 1.0 halved per level stays above the 0.05
+  floor through depth 4. Under `relaxed`, an entity read once and never again was
+  evicted on day 199.3 at depths 5–7 and **ALIVE at depths 0–4**, carrying heat
+  from 1939 (depth 4) to 31 031 (depth 0) against a cold gate of 0.01. Same shape
+  on `medium` (day 46.5) and `tight` (day 20.0). So the defect was not that deep
+  branches decayed; it was that nothing within four levels of the root could ever
+  be collected, used or not — the vision's "the hot graph stays bounded" failing
+  outright, on graphs whose whole tree usually fits inside that reach.
+
+  **No deposit size could have been kept.** The deposit recurs every 60s against
+  a half-life measured in weeks, so equilibrium is deposit/(1−decay-per-tick): any
+  amount above ~1.6e-7 settles above the 0.01 gate and grants the same permanent
+  exemption. That rules out tuning it, and it rules out the fix the item's title
+  implies — propagating *deeper* would have extended the exemption to every entity
+  in the graph and disarmed cold GC completely. Removing the deposit was the only
+  option that leaves heat meaning what `VISION.md` says it means.
+
+  **Stated cost.** Eviction changes: entities in the top five levels that go
+  unread past 6.64 half-lives (~199 days on the default `relaxed`, ~46 on
+  `medium`, ~20 on `tight`) are now collected where before they never could be.
+  They spill to the cold tier first and recall backfills from it, active Facts and
+  Documents keep their immunity, so nothing durable is lost — but a long-idle
+  graph will shed hot rows it used to keep, and that is the point. Gossip's
+  `hottest_local` batch changes with it, from "whatever sits near the root" to
+  what has actually been read. Recall does not move: heat feeds GC and gossip
+  selection, never ranking, and `e2e` re-measured at exactly 0.9306 / 0.9722 /
+  0.9471. The tick got cheaper rather than dearer — the deposit was O(entities in
+  reach) heat writes plus a `Vec<String>` of every entity id per kern, under the
+  graph **write** lock; over 342 kerns / 102 300 entities the same pulse fell from
+  **17 586µs to 341µs**, and now takes a read lock.
+
+  Proven by revert: restoring the deposit inside the walk fails
+  `tick::pulse::tests::at_equal_usage_survival_does_not_depend_on_depth` with
+  "depth 0: a thought untouched for 9 days survived while the identical thought at
+  depth 7 was collected — survival is tracking tree position, not usage". The test
+  is 8 kerns deep and 9 simulated days long on purpose: a tree inside the reach,
+  or a horizon under `COLD_GC_AGE`, passes whether the bias exists or not.
+  `HeatConfig::deposit_traversal` is deleted rather than left at 0.0, and
+  `pulse_with_heat` collapses back into `pulse`, since a heat argument that
+  deposits nothing is a lie the next reader has to disprove. Docs corrected in the
+  same change: `stigmergy.mdx` called the deposit "load-bearing" and claimed a
+  subtree near the root "survives GC more readily" — it survived absolutely —
+  and `stigmergy-over-gardening.mdx` had already written down "pulse-reachable
+  never qualifies" without anyone reading it as the defect it was.
+
+  Decided by: fix-the-root
+
+- 2026-07-21 — item 18 `[surface]`, the separable half: the MCP **resources**
+  surface is default-deny. `resource_thoughts`, `resource_thought` and
+  `resource_reason` returned entity text to any client that could open the
+  transport with no ACL consulted; `resource_reason` checked nothing at all,
+  which made it a read of scoped entity text through an id that is not the
+  entity's, since `link`'s `explain_relationship_prompt` writes edge text from
+  both endpoint texts. `Acl::is_public()` now lives on `Acl` and `acl_admits`
+  calls it, so "public" has one definition shared with `matches_filter` instead
+  of two copies that could drift.
+
+  **Why this is separable from item 24.** Item 24 is the missing-auth boundary —
+  how a principal *arrives*, per-read or per-session. That question is untouched
+  here and stays open. The separable question is what a surface that can name no
+  principal may return *at all*, and it has an answer that does not depend on the
+  other: only rows carrying no ACL. Default-deny is the floor any principal
+  scheme can only widen, never contradict, so landing it early cannot constrain
+  item 24's design.
+
+  **Decided by: an edge endpoint that does not resolve gets its own verdict —
+  the edge is served, its text is not.** This was the load-bearing call and the
+  first cut got it wrong twice. `find_entity` (`src/base/search.rs:148`) walks
+  only the *resident* kern map: `loaded` is `kerns.get`, `all()` is
+  `kerns.values()`, and neither sees `unloaded` or the cold tier. So "did not
+  resolve" is **not** "does not exist" — a GC cold-spill
+  (`src/tick/stigmergy.rs`) or a kern-cap unload (`GraphGnn::unload`) leaves a
+  scoped row alive in the store with its ACL intact and invisible to this
+  surface, while the edge quoting it survives untouched, because a kern hosts a
+  reason iff it hosts its `from` (`src/base/reason.rs:78`): `move_entity` leaves
+  an incoming edge in the *source* kern and `remove_entity` cascades only within
+  one kern. Reading unresolved as "allowed" would therefore let a scoped row
+  become readable **by disappearing**, with no race in it — that is the stable
+  committed post-GC state, not a window a wider lock would close.
+
+  Failing closed on it was not available: a dangling endpoint is ordinary here
+  (`Reason::to` is optional in `add_reason`), and dropping every edge with one
+  hides a public entity's own structure — default-deny becoming deny-all, which
+  is the failure the four pre-existing tests exist to catch and which they do
+  catch. So the verdict is three-valued (`Endpoint`): **Scoped** drops the edge,
+  **Public** serves it whole, **Unresolved** serves the edge with its `text`
+  withheld. The text is what carries the disclosure — up to 500 chars of both
+  endpoints via `explain_relationship_prompt` — and the ids that remain are
+  `content_hash(text)`, which at worst confirms a guessed text. `resource_reason`
+  runs the same rule with one asymmetry: `from` fails closed on Unresolved too,
+  because it is the entity the edge hangs off and one that did not resolve is not
+  one that said the read was allowed.
+
+  Also decided: **both** ends of an edge are gated, not just `from`. Gating
+  `from` alone still served `reason://{id}` for an edge whose `to` was scoped,
+  naming the scoped id outright beside text written from it.
+
+  Not closed, and named rather than waved off: `kern://local/health` and
+  `kern://local/kerns` count every entity and reason, scoped included
+  (`graph_health_stats`, `src/base/health.rs:44-50`), so a scoped ingest moves a
+  number. No ids, no text, and the same count the operational `health` tool
+  reports — narrowing it is the separate question of what an unauthenticated
+  operational surface may say. Gossip egress still replicates scoped entities
+  ungated, and `Reason` still carries no ACL of its own, so every reader
+  re-derives the verdict from the endpoints; storing it at write time is the real
+  fix. Item 18 stays open on those and on principal arrival.
+
+  Seven unit tests, one per guard: each guard mutated away fails exactly its own
+  test and no other. The four pre-existing resources tests are byte-identical.
+  Baseline 891 → 898.
 
 - 2026-07-21 — merged item 29, which closed unbuilt and shipped a different fix.
   176 + 1 + this one = 178, by the union rebuild rather than a hand-spliced

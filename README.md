@@ -30,9 +30,9 @@ MCP ingest ─────────────────────► ty
 - **Recalls into context.** Recall is the `query` MCP tool: relevance-targeted
   against the live graph, with provenance on every result.
 
-- **Compacts itself.** Every access deposits a **heat** trace, and the tick's
-  pulse re-deposits heat on entities still reachable from the roots; heat then
-  decays lazily with age (half-life based), not per tick. A stigmergy GC evicts
+- **Compacts itself.** Every access deposits a **heat** trace, and nothing else
+  does — the tick's pulse schedules maintenance without depositing, so retention
+  never tracks tree position; heat decays lazily with age, not per tick. A stigmergy GC evicts
   cold, stale, non-durable thoughts (Facts are immune) and spills them to a
   capped cold tier before dropping them — a latest-wins keyed table holding the
   newest 50k entries, so recent evictions stay recoverable while the very oldest

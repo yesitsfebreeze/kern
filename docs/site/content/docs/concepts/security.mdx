@@ -66,7 +66,7 @@ Structural bounds, one principle: your local graph records what *you* learned; n
 | Probe whether you hold a fact near a given vector | 0.80 similarity threshold |
 | Inflate access/traversal counters on local rows | clamped per message; replica names attacker-chosen |
 | Set reason scores and `valid_until` on local rows | LWW; a poisoned `valid_until` bites only callers passing `valid_at` — today |
-| Deposit heat into local kerns via `Pulse` | strength unclamped; an unknown kern id falls back to your **root** kern |
+| Drive maintenance work with `Pulse` | id must name a `remote-*` kern you already hold, strength clamped; deposits no heat |
 | Impersonate any `network_id` | by design — not a credential |
 
 | A peer **cannot** | Why |

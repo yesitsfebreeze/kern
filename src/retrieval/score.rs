@@ -97,7 +97,12 @@ pub fn apply_boosts<T: Scored>(g: &GraphGnn, cfg: &RetrievalConfig, results: &mu
 		} else {
 			0.0
 		};
-		r.set_score(r.score() * confidence + boost + fact_bonus);
+		let trust = cfg
+			.source_trust
+			.get(e.source.scheme())
+			.copied()
+			.unwrap_or(1.0);
+		r.set_score((r.score() * confidence + boost + fact_bonus) * trust);
 	}
 }
 
@@ -214,7 +219,7 @@ pub fn delivery_cap(cfg: &RetrievalConfig) -> usize {
 // is to GC alone — a scoped Fact is withheld from a non-member exactly like a
 // scoped Claim.
 fn acl_admits(acl: &Acl, principals: &[String]) -> bool {
-	if acl.scope.is_empty() && acl.users.is_empty() && acl.groups.is_empty() {
+	if acl.is_public() {
 		return true;
 	}
 	principals
@@ -375,6 +380,7 @@ pub fn commit_access_ids(g: &mut GraphGnn, ids: &[String], heat_cfg: &HeatConfig
 mod query_filter_tests {
 	use super::*;
 	use crate::base::types::{Entity, Source};
+	use std::collections::BTreeMap;
 
 	fn ent(id: &str, kind: EntityKind, src: Source) -> ScoredEntity {
 		ScoredEntity {
@@ -965,6 +971,76 @@ mod query_filter_tests {
 			(results[1].score - 1.0).abs() < 1e-9,
 			"claim got {}",
 			results[1].score
+		);
+	}
+
+	// Bits, not a tolerance: the whole safety claim for source trust is that an
+	// unconfigured kern ranks EXACTLY as it did before the knob existed.
+	#[test]
+	fn shipped_source_trust_default_leaves_boosted_scores_bit_identical() {
+		let cfg = RetrievalConfig::default();
+		assert!(
+			cfg.source_trust.is_empty(),
+			"the shipped default must weight no scheme, got {:?}",
+			cfg.source_trust
+		);
+		let mut results = vec![
+			ent("a", EntityKind::Fact, file_src("/a")),
+			ent("b", EntityKind::Claim, ticket_src("42")),
+			ent("c", EntityKind::Document, Source::default()),
+		];
+		for (i, r) in results.iter_mut().enumerate() {
+			r.score = 0.25 * (i as f64 + 1.0);
+			r.entity.score = 0.1 * (i as f64 + 3.0);
+		}
+		let expected: Vec<u64> = results
+			.iter()
+			.map(|r| {
+				let fact_bonus = if r.entity.kind == EntityKind::Fact {
+					cfg.fact_score_boost
+				} else {
+					0.0
+				};
+				(r.score * r.entity.score + fact_bonus).to_bits()
+			})
+			.collect();
+
+		apply_boosts(&GraphGnn::new(), &cfg, &mut results);
+
+		let got: Vec<u64> = results.iter().map(|r| r.score.to_bits()).collect();
+		assert_eq!(got, expected, "an unconfigured source_trust moved a score");
+	}
+
+	// The other half: a knob that only ever proves it does nothing is satisfied by
+	// code that does nothing.
+	#[test]
+	fn a_configured_source_trust_reorders_two_otherwise_equal_entities() {
+		let watched = ent("watched", EntityKind::Claim, file_src("/notes.md"));
+		let typed = ent("typed", EntityKind::Claim, Source::default());
+
+		let mut tied = vec![watched.clone(), typed.clone()];
+		apply_boosts(&GraphGnn::new(), &RetrievalConfig::default(), &mut tied);
+		assert_eq!(
+			tied[0].score, tied[1].score,
+			"the two differ only by source scheme, so unconfigured they must tie"
+		);
+
+		let cfg = RetrievalConfig {
+			source_trust: BTreeMap::from([("file".to_string(), 0.5)]),
+			..Default::default()
+		};
+		let mut results = vec![watched, typed];
+		apply_boosts(&GraphGnn::new(), &cfg, &mut results);
+		assert!(
+			results[1].score > results[0].score,
+			"the file-scheme entity must fall below the inline one: {} vs {}",
+			results[0].score,
+			results[1].score
+		);
+		assert_eq!(
+			results[0].score.to_bits(),
+			(tied[0].score * 0.5).to_bits(),
+			"the weighted score is the composite scaled by the configured trust"
 		);
 	}
 	// The cap the CLI hands a serving daemon has to be the cap the local read

@@ -279,9 +279,9 @@ fn handle_sphere(d: &Deps, msg: GossipMessage) {
 	}
 
 	if let Some(q) = &d.queue {
-		let mut g = d.graph.write();
+		let g = d.graph.read();
 		let root_id = g.root.id.clone();
-		tick::pulse::pulse(q, &mut g, &root_id, PULSE_THRESHOLD * 2.0);
+		tick::pulse::pulse(q, &g, &root_id, PULSE_THRESHOLD * 2.0);
 	}
 }
 
@@ -295,9 +295,9 @@ fn handle_answer(d: &Arc<Deps>, msg: GossipMessage) {
 	resolve_question_from_peer(d, reason_id, sphere, &msg.origin);
 
 	if let Some(q) = &d.queue {
-		let mut g = d.graph.write();
+		let g = d.graph.read();
 		let root_id = g.root.id.clone();
-		tick::pulse::pulse(q, &mut g, &root_id, PULSE_THRESHOLD * 2.0);
+		tick::pulse::pulse(q, &g, &root_id, PULSE_THRESHOLD * 2.0);
 	}
 }
 
@@ -363,11 +363,11 @@ fn handle_pulse(d: &Deps, msg: GossipMessage) {
 		None => return,
 	};
 
-	let mut g = d.graph.write();
+	let g = d.graph.read();
 	// SECURITY: an unknown kern id used to fall back to the LOCAL ROOT, so a peer
-	// sending a garbage id deposited heat straight into it. No design intent
-	// justified that. Reject the id, confine deposits to `remote-*`, and clamp the
-	// strength — the wire carries an arbitrary f64 and nothing else bounded it.
+	// sending a garbage id drove maintenance straight into it. No design intent
+	// justified that. Reject the id, confine the fan-out to `remote-*`, and clamp
+	// the strength — the wire carries an arbitrary f64 and nothing else bounded it.
 	if !crate::base::merge::is_remote_kern_id(&pulse.kern_id) {
 		return;
 	}
@@ -375,7 +375,7 @@ fn handle_pulse(d: &Deps, msg: GossipMessage) {
 		return;
 	}
 	let strength = pulse.strength.clamp(0.0, MAX_REMOTE_PULSE);
-	tick::pulse::pulse(q, &mut g, &pulse.kern_id, strength);
+	tick::pulse::pulse(q, &g, &pulse.kern_id, strength);
 }
 
 fn handle_peer_exchange(d: &Deps, msg: GossipMessage) {

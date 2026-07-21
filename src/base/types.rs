@@ -123,6 +123,15 @@ pub struct Acl {
 	pub groups: Vec<String>,
 }
 
+impl Acl {
+	/// An ACL that names nothing is public: every caller reads it. The single
+	/// definition of "public" in the tree — `acl_admits` and the MCP resource
+	/// surface both ask here rather than each spelling out the emptiness test.
+	pub fn is_public(&self) -> bool {
+		self.scope.is_empty() && self.users.is_empty() && self.groups.is_empty()
+	}
+}
+
 // URI schemes: file://<path>, ticket://<system>/<id>[#section],
 // session://<id>[#slice], agent://<name>, inline://<hash>.
 #[derive(Debug, Clone, Serialize, Deserialize)]
