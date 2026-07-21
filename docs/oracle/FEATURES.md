@@ -3,7 +3,7 @@
 A full technical scrape of everything that actually exists in the kern source
 today. Organized by subsystem. For each: **what** it does, **how** it works,
 **where** it lives in the code, and **gaps** (known limitations / improvement
-opportunities). Version: `1.1.0`. LoC ~41.7k across 152 tracked `.rs` files.
+opportunities). Version: `1.1.0`. LoC ~42.0k across 155 tracked `.rs` files.
 
 State legend: `active` (runs today), `building` (wired but partial/unverified),
 `off` (present but disabled by default).
@@ -223,8 +223,10 @@ cold backfill.
 
 **Where.** `src/base/{hnsw,diskann,lexical,vector_backend,search}.rs`.
 
-**Gaps.** HNSW delete is logical (tombstone) — no compaction of dead nodes
-in-graph. DiskANN is build-once; incremental updates funnel through
+**Gaps.** HNSW delete is not a tombstone — it scrubs inbound edges, nulls the
+node and queues the slot; one `scrub_pending` pass per sweep recycles every slot
+deleted since the last one, so the cost is the scan, not accumulation.
+DiskANN is build-once; incremental updates funnel through
 `consolidate_disk_index` on the tick. Lexical index is RAM-only.
 
 ---
@@ -735,12 +737,13 @@ page on the docs site (`docs/site/content/docs/concepts/security.mdx`).
 
 **Gaps.** No auth/crypto. No anti-entropy merkle/snapshot exchange — EntitySync
 ships the hottest 32 by heat per heartbeat, so cold entities may never
-propagate. No backpressure on remote-id cap (drops new, keeps known). CRDT
-deltas and pulses reach *local* rows, not just `remote-*` (`ROADMAP.md` —
-"Confine LWW deltas to `remote-*` rows", "`handle_pulse` falls back to the local
-root kern") —
-entity bodies are also accepted without checking content against the claimed
-id (`src/gossip/handler.rs:463`).
+propagate. No backpressure on remote-id cap (drops new, keeps known). No
+per-peer rate limit and no divergence signal (`ROADMAP.md` — "Backpressure,
+divergence metric, and delta write-lock starvation"). The unauthenticated
+local-row reach is closed: LWW deltas only touch `remote-*` kerns
+(`remote_kern_ids`), `handle_pulse` rejects an unknown kern id and clamps the
+deposit, and a body whose text does not hash to its claimed id is dropped on
+receipt (`id_matches_body`, `src/gossip/handler.rs`).
 
 ---
 
@@ -1057,11 +1060,10 @@ missing surface: `supersede` and `as_of` are unreachable from the CLI (MCP
 only), path-scoped `degrade` is inexpressible (`kern degrade` takes one entity
 and decays every edge incident on it), and "an ordinary thought is evictable"
 has no CLI construction because everything the CLI ingests comes back
-`Kind: Fact`. One invariant is a recorded `xfail(strict=True)`: a reason edge
-changes no ranking (`ROADMAP.md` item 86). Windows: hub tests skip (unix
-sockets); retrieval tests unverified there. (The former
-query-ranking xfail is fixed — hybrid fusion rescores seeds by query cosine;
-see CHANGELOG 2026-07-20 — and is now a hard regression test.)
+`Kind: Fact`. No `xfail` remains: the reason-edge invariant is a hard regression
+test since item 86 closed, as is the former query-ranking one (hybrid fusion
+rescores seeds by query cosine; see CHANGELOG 2026-07-20). Windows: hub tests
+skip (unix sockets); retrieval tests unverified there.
 
 
 ## 21b. Docs site (`docs/site/`, fumadocs) — `active`
@@ -1132,9 +1134,12 @@ only by audit.
   **even when it matched**, so with a gitignored path in the list the step could
   never fail. It tests the captured output instead.
 
-Two more workflows: `.github/workflows/docs-check.yml` (runs `docs_check.py` on
-every push and PR, deliberately unfiltered by path) and
-`.github/workflows/docs.yml` (builds and publishes the site).
+Three more workflows: `.github/workflows/docs-check.yml` (runs `docs_check.py`
+on every push and PR, deliberately unfiltered by path),
+`.github/workflows/docs.yml` (builds and publishes the site), and
+`.github/workflows/release.yml` (on a `v*` tag or manual dispatch: the same 15
+targets, built `--release --locked`, packaged per-target and attached to the
+GitHub Release the install scripts fetch from).
 
 **Bootstrap** — `.pi/update.sh` is **tracked**. It was previously matched by the
 default-deny `.gitignore`, so the file existed locally and in no clone: the
@@ -1183,11 +1188,10 @@ Ranked by leverage:
 2. **O(N) importance scan per retrieve** (`src/retrieval/seed.rs:127`) —
    `seed_important` walks every entity each query (`par_iter`, `:139`); index
    it, it's the scaling cliff at query time. Open as `ROADMAP.md` item 25.
-3. **Federation security** — add auth + encryption before any real deployment;
-   before that, close the local-row reach of CRDT deltas and pulses and verify
-   entity content against claimed ids, neither of which needs auth (`ROADMAP.md`
-   — "Transport security", "Confine LWW deltas to `remote-*` rows", "Verify
-   entity bodies against their claimed ids").
+3. **Federation security** — add auth + encryption before any real deployment
+   (`ROADMAP.md` — "Transport security"). The three fixes that needed no auth
+   are done: LWW deltas confined to `remote-*`, pulses id-checked and clamped,
+   remote bodies hash-verified against their claimed ids.
    Trust model: `docs/site/content/docs/concepts/security.mdx`.
 4. **Per-kern entity cap** — `KERN_CAP_DISABLED` today; a safe cap + escalation
    policy would bound memory deterministically.

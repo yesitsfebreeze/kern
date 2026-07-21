@@ -2,6 +2,56 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — every citation in `ROADMAP.md` re-pointed at what it was cited
+  for. `docs_check.py` proves a cited line **exists**; it cannot prove the line
+  still **says** the thing. That gap had gone systemic: of the 23 distinct
+  `FEATURES.md` line anchors the roadmap cites, 22 landed on unrelated prose —
+  item 24's "RPC socket has no auth" pointed at "Trained per-kern on the tick",
+  item 67's int4 gap pointed at a blank line, item 85 cited `:166` for a
+  recall/NDCG claim that had been withdrawn out of the file. `FEATURES.md` grew
+  and every anchor into it slid; nothing could see it, because all 563
+  references existed. Source anchors had drifted the same way — item 28's
+  `src/tick.rs:66` pointed into the panic guard `3a3afa1` added rather than at
+  the `GnnPropagate` arm, now `:97`.
+
+  Four claims were not merely mis-pointed, they were false, and each is retired
+  in place with the date and the reason. **Item 52** said chunk + mean-pool was
+  the unbuilt upgrade path for graviton seeds; `08c9971` shipped it —
+  `seed_examples` splits on newlines and `mean_pool` averages, and the source
+  comment the item cited as its evidence was deleted in the same commit. The
+  item is narrowed to what `seed_examples` deliberately does not split: a
+  single-line seed, which still embeds whole. **Item 79** said
+  `validate_fact_source` is "called twice"; `216730d` took one site with the
+  ingest `kind` arg, so it is called once — the dead-code conclusion gets
+  stronger, not weaker. **Item 85** lost five of its nine documentation debts:
+  the `move` tool reached both tables, `Entity.acl` reached the field list, the
+  four stale `docs/kern/` research claims were corrected at the source, the
+  forbidden quality claims were withdrawn in place, and `README.md`/`VISION.md`
+  stopped promising a baseline that does not exist. **Item 47** claimed
+  `src/config/serve.rs` is "`mcp_token` handling only" while item 84, in the
+  same file, cited `serve.mcp_addr` as a reader-less field living there — the
+  two contradicted each other and the file settles it.
+
+  Item 30's queue-depth clause is narrowed rather than retired: closing item 8
+  gave `kern intake` a `pending=/stuck=/failed=/done=` readout, so the
+  file-backed queue reports depth; the in-process `Worker` channel still does
+  not, and the distill leg still has no timeout budget.
+
+  The tradeoff in re-pointing rather than removing line numbers: they will drift
+  again on the next edit to either file, and `docs_check.py` will stay silent
+  about it, because the check that would catch it — does this line still say
+  this? — is a reading, not a script. Anchors are worth keeping anyway: a wrong
+  line number costs one grep, while no citation at all costs the whole audit.
+  What follows from that is a cadence, not a tool: this pass has to be re-walked
+  whenever `FEATURES.md` changes length, and the roadmap should prefer symbol
+  names over line numbers wherever a symbol is unique.
+
+  docs-check green at 570 references — the same existence proof as before, which
+  is exactly why it was green at 563 while 22 of 23 anchors pointed at the wrong
+  paragraph.
+
+  Decided by: verify-before-claiming
+
 - 2026-07-21 — `FEATURES.md` §23 and the `ROADMAP.md` preamble reconciled
   against the tree, not against each other. Three of the ten ranked improvement
   opportunities described a repo that no longer exists: "a reason edge changes

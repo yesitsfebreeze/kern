@@ -89,8 +89,8 @@ be returned. Default semantics: empty `principals` means *no filter*, not
 
 ### 18. ACL + request principal — gates everything else in this tier `[surface]`
 
-`Entity` already carries `Acl` (`src/base/types.rs:268`; struct `{scope, users,
-groups}` at `:94-99`), and it is only ever written as `Acl::default()`
+`Entity` already carries `Acl` (`src/base/types.rs:259`; struct `{scope, users,
+groups}` at `:92-96`), and it is only ever written as `Acl::default()`
 (`src/ingest/place.rs:56`, `src/ingest/file_watcher.rs:136`), so nothing can
 populate it. Four parts:
 
@@ -99,11 +99,11 @@ populate it. Four parts:
   `place.rs`.
 - Accept `principals` on `query` — no identity param exists
   (`QueryArgs`, `src/mcp/tools_query.rs:95-108`).
-- Enforce in `matches_filter` (`src/retrieval/score.rs:130-179`), which has no
+- Enforce in `matches_filter` (`src/retrieval/score.rs:194-232`), which has no
   ACL predicate.
-- **Guard the id path.** `src/mcp/tools_query.rs:119-127` returns
-  `find_entity(&g, &p.id)` directly, before `build_query_options` is ever
-  called — no filter of any kind runs. Without this guard ACL is decorative.
+- **Guard the id path.** `src/mcp/tools_query.rs:129-138` returns
+  `find_entity(&g, &p.id)` directly, before `build_query_options` (`:158`) is
+  ever called — no filter of any kind runs. Without this guard ACL is decorative.
 
 Decide alongside: does the file watcher give `Document` entities a tenant-default
 ACL, or leave them public? Recommend configurable, default public-within-tenant,
@@ -144,25 +144,27 @@ param plus one timestamp — and the bi-temporal expiry path now enforces it on
 every retrieve, so the setting has a reader the moment it has a writer
 (unblocked 2026-07-21; `drop_expired`, `src/retrieval/score.rs`).
 
-### 23. Surface `(belief, uncertainty)` on `query` `[surface]`
+### 24. RPC socket has no auth `[surface]`
 
-`conf_variance` is computed (`FEATURES.md:47-49`) and surfaced nowhere. A host
-mounting kern as a reasoning store cannot tell a well-evidenced claim from a
-single-observation one. Adopted on paper at `docs/kern/bayesian-belief.md:149-151`.
-
-### 24. RPC socket has no auth, and `KernRpc` mirrors MCP 1:1 `[surface]`
-
-`FEATURES.md:477-478`. The mirroring is a drift risk against repo law 3, and the
-missing auth is the same boundary as 18's caller-asserted principals — decide
-them together or the principal stops at the MCP surface only.
+`FEATURES.md:607-608`. The missing auth is the same boundary as 18's
+caller-asserted principals — decide them together or the principal stops at the
+MCP surface only. The item's second half is **retired 2026-07-21 — verified
+false**: `KernRpc` does not mirror MCP 1:1 and never did. The contract is four
+methods (`health`/`shutdown`/`call_tool`/`list_tools`,
+`src/trnsprt/src/kern_rpc/svc.rs`) and every tool reaches the daemon through the
+one `call_tool` passthrough, so there is no second dispatch copy to drift
+against repo law 3 — as the closed list already recorded while this item claimed
+the opposite.
 
 ---
 
 # Tier 4 — scaling cliffs
 
 None of these is wrong today. Each converts "works on my corpus" into "does not
-work at 10×", and none is measurable-as-fixed until item 1 exists (except by
-latency, which the e2e harness can still claim).
+work at 10×". Item 1's instrument now exists, so a fix here is judgeable the way
+tier 8 is — but only at the corpus size `e2e/` builds, which is small: the cliff
+itself stays unmeasured until something generates a large one. Latency is the
+half the harness can already claim.
 
 ### 25. O(N) importance scan per retrieve `[retrieval]`
 
@@ -182,9 +184,9 @@ second query-time cliff, and it was recorded on the site but in no plan.
 One item because one sweep pays all four costs. **Two are closed**; the two that
 remain are the scans, not the accumulation:
 
-- Victim selection is O(entities) per kern per sweep (`src/tick/stigmergy.rs:51-56`).
+- Victim selection is O(entities) per kern per sweep (`src/tick/stigmergy.rs:87-92`).
 - The cold tier is a brute-force cosine scan with no index — `cold_search` decodes
-  and scores every row (`src/base/store.rs:515-529`).
+  and scores every row (`src/base/store.rs:629-648`).
 - ~~`cold_cap` decodes the entire 50k-row cold table on every individual spill~~
   **Closed 2026-07-21.** `cold_spill` now calls `cold_cap_amortized`, which trims
   only once the tier is a slack margin (1024 rows) past the cap and then cuts back
@@ -203,21 +205,22 @@ remain are the scans, not the accumulation:
 The previous version of this file listed "HNSW tombstone compaction — dead nodes
 accumulate" here. **That was wrong.** There are no tombstones: `delete` scrubs
 inbound edges, sets the node to `None`, and pushes the slot onto a `free` list
-for reuse (`src/base/hnsw.rs:118-138`, alloc reuse `:103-116`), guarded by the
-test "deleted slots were recycled, arena did not grow" (`:729`). The cost is the
+for reuse (`src/base/hnsw.rs:136-149`, scrub `:153`, alloc reuse `:109-125`),
+guarded by the test "deleted slots were recycled, arena did not grow" (`:755`). The cost is the
 scan, not the accumulation.
 
 ### 28. GNN training runs synchronously on the tick `[lifecycle]`
 
 `TaskKind::GnnPropagate => do_gnn_propagate(...)` runs inline in `process_task`
-on the single tick loop (`src/tick.rs:66`), stalling large kerns — and, per item
+on the single tick loop (`process_task`, `src/tick.rs:85`; the arm at `:97`),
+stalling large kerns — and, per item
 2, taking every other maintenance task down with it if it panics.
 
 ### 29. A spilled kern still carries two resident indexes `[retrieval]`
 
-DiskANN spill is entity-index-only: `rebuild_index` hardcodes `gnn_entity_idx`
-and `reason_idx` to `VectorBackend::resident(...)` (`src/base/graph.rs:227-228`)
-while only `entity_idx` takes the spill branch (`:234-235`). The memory ceiling
+DiskANN spill is entity-index-only: `rebuild_index` (`src/base/graph.rs:286`) hardcodes
+`gnn_entity_idx` and `reason_idx` to `VectorBackend::resident(...)` (`:289-290`)
+while only `entity_idx` takes the spill branch (`:296-300`). The memory ceiling
 is pushed back, not removed. Compounded: `disk_threshold` defaults to
 `KERN_CAP_DISABLED` and nothing auto-tunes it
 (`decisions/diskann-spill.mdx:131-134`, `src/config/graph.rs:20`), so the
@@ -227,13 +230,17 @@ no signal on approach.
 ### 30. Ingest queue `enqueue` detaches with no backpressure `[ingest]`
 
 `Worker::enqueue` fires `tokio::spawn(async move { tx.send(job).await })` and
-returns immediately (`src/ingest/worker.rs:74-77`). The channel bound is 64
-(`:43`); the spawn set is unbounded. Distinct from the *tick* queue, which is
-bounded at 512 with real backpressure (`FEATURES.md:318-320`) — the two read as
+returns immediately (`src/ingest/worker.rs:76-78`). The channel bound is 64
+(`:44`); the spawn set is unbounded. Distinct from the *tick* queue, which is
+bounded at 512 with real backpressure (`FEATURES.md:377`) — the two read as
 one and are not.
 
-Beside it, and equally unbounded: **the distill leg has no timeout budget and no
-queue-depth metric.** "The LLM call is the only unbounded step on the path"
+Beside it: **the distill leg has no timeout budget** (no `timeout` in
+`src/ingest/distill.rs` or `src/ingest/worker.rs`). The queue-depth half is
+**narrowed 2026-07-21** — closing item 8 gave `kern intake` a
+`pending=/stuck=/failed=/done=` readout (`src/commands/intake_cmd.rs:43-45`),
+so the file-backed queue reports its depth; the in-process `Worker` channel
+still does not. "The LLM call is the only unbounded step on the path"
 (`concepts/acceptance.mdx:189-192`), and with the answer leg removed (2026-07-21)
 the distill leg is now the only LLM on any path — no latency work has landed on it.
 
@@ -242,13 +249,13 @@ the distill leg is now the only LLM on any path — no latency work has landed o
 Recorded in `FEATURES.md` gap blocks, planned nowhere:
 
 - Routing does a vector lookup per level, O(depth·log n), and unnamed children
-  are unbounded per parent (`FEATURES.md:111-113`).
+  are unbounded per parent (`FEATURES.md:120-121`).
 - `Entity` is a ~30-field flat struct (serialization cost on every store round
   trip) and `Kern` carries no per-kern stats — mean heat, fill ratio — that
-  clustering could reuse (`FEATURES.md:77-79`).
-- DiskANN is build-once; the lexical index is RAM-only (`FEATURES.md:210-211`).
+  clustering could reuse (`FEATURES.md:84-86`).
+- DiskANN is build-once; the lexical index is RAM-only (`FEATURES.md:229-230`).
 - LMDB compaction is manual and offline-only, and is the only way to shrink the
-  high-water mark (`FEATURES.md:265-266`).
+  high-water mark (`FEATURES.md:300-302`).
 
 ### 32. Tree depth is an unlisted eviction bias `[lifecycle]`
 
@@ -280,7 +287,7 @@ variant so an older peer cannot inject text under a content-addressed id.
 
 Raw TCP, no TLS. `network_id` broadcast cleartext over UDP multicast. No
 signature on `GossipMessage` — it carries `kind` / `id` / `origin` / `payload`
-only (`src/gossip/types.rs:17-21`) — and `handle_conn` accepts any stream while
+only (`src/gossip/types.rs:18-23`) — and `handle_conn` accepts any stream while
 `handle_peer_exchange` trusts any `msg.origin`. Needs `tokio-rustls` + `rcgen` as
 direct deps; neither is in `Cargo.toml`. **This one gates any deployment off a
 trusted LAN / WireGuard mesh**, and it gates the counter-slot identity half of
@@ -308,11 +315,12 @@ Sybil work covers ranking; this is disk.
 
 ### 36. Anti-entropy `[federation]`
 
-No `AntiEntropy` variant in `GossipKind` (`src/gossip/types.rs:6-14`). The sender
-sorts by heat and truncates to 32 per heartbeat (`src/gossip/handler.rs:167-169`),
+No `AntiEntropy` variant in `GossipKind` (`src/gossip/types.rs:7-15`). The sender
+sorts by heat and truncates to `ENTITY_SYNC_BATCH = 32` per heartbeat
+(`src/gossip/handler.rs:156`, sorted `:181`),
 so cold entities may never propagate and a partitioned node that rejoins never
 catches up. (`Fetch` is live — `wire_fetch` installs the handler at
-`src/commands.rs:894` and the question path issues it — but it is single-id, not a
+`src/commands.rs:1002` and the question path issues it — but it is single-id, not a
 catch-up mechanism.) Two pieces adopted on paper and unscheduled: **back-off
 pacing** with exponential jitter keyed to a divergence estimate
 (`docs/kern/fl-vs-knids-federation.md:163-168`), and **batch-size / push-vs-pull
@@ -322,7 +330,7 @@ the push-only choice was never revisited.
 ### 37. Backpressure, divergence metric, and delta write-lock starvation `[federation]`
 
 No per-peer rate limit anywhere; `HealthStats` has no divergence field
-(`src/base/health.rs:4-10`). Sharper than previously recorded: the four
+(`src/base/health.rs:4-34`). Sharper than previously recorded: the four
 `for kern_id in g.all_ids()` loops in `handle_crdt_delta`
 (`src/gossip/handler.rs:378, 394, 407, 428`) run under the graph **write** lock,
 once per inbound delta, unlimited — a cheap remote write-lock-starvation vector
@@ -408,7 +416,7 @@ Two leads from `docs/kern/crdts-federation.md`, adopted and never scheduled:
 ### 44. Bi-temporal stamps are never federated `[federation]`
 
 `valid_from` / `valid_to` / `invalidated_at` are `#[serde(skip)]`
-(`src/base/types.rs:291-296`), so each node re-derives its own `as_of` view and
+(`src/base/types.rs:274-279`), so each node re-derives its own `as_of` view and
 two *converged* nodes can answer the same point-in-time query differently
 (`docs/kern/crdts-federation.md:54-62`). The federated twin of item 4.
 
@@ -422,7 +430,7 @@ fallback and no way to distinguish discovery-failed from no-peers-present
 
 `TcpStream::connect` per call at `src/gossip/transport.rs:37` (`send_msg`) and
 `:45` (`send_and_receive`). No pooling. Separately, the `trnsprt` client has no
-pooling either (`FEATURES.md:637-638`) — that one is not gossip and is not gated
+pooling either (`FEATURES.md:818-819`) — that one is not gossip and is not gated
 on 33.
 
 ### 47. Hub phase 3: gossip moves hub-side `[hub]`
@@ -432,11 +440,13 @@ network entirely (`src/config/gossip.rs:7-16` today). **Ordering decided
 2026-07-20:** the senders and semantics build per-node first; this transport move
 ships together with item 33 — same wire layer, migrate once. Not blocked,
 sequenced. One clause of the previous version was wrong: there is **no** per-project
-port-clash validation in `src/config/serve.rs` to collapse — that file is
-`mcp_token` handling only (`:1-78`).
+port-clash validation in `src/config/serve.rs` to collapse. (Corrected again
+2026-07-21: that file is not `mcp_token` handling only — `ServeConfig` is
+`{mcp_token, mcp_addr}` at `:6-11`, and `mcp_addr` is the reader-less field
+item 84 owns.)
 
 Beside it: **hub↔node version skew is unmanaged** beyond same-binary spawning
-(`FEATURES.md:677-678`).
+(`FEATURES.md:924-925`).
 
 ### Decisions owed before the federation build
 
@@ -473,7 +483,7 @@ retired:** `CHANGELOG.md` 2026-07-20 shipped chunk external ids keyed on the ful
 source identity (`source_id()` + chunk index, not the bare section), and CLI
 `kern ingest` deriving its inline source hash from the text. What remains is the
 *dedup* key, not the external id. Beside it: the dedup threshold is global, not
-per-kind (`FEATURES.md:305-306`).
+per-kind (`FEATURES.md:365`).
 
 ### 49. The distill prompt is one-shot and global `[ingest]`
 
@@ -498,15 +508,26 @@ exists nowhere.
 with `fallback_label()` text (`src/base/types.rs:80`), never a caller-supplied
 rationale. The *why* is the thing the graph exists to hold.
 
-### 52. Document gravitons truncate at the embed context window `[ingest]`
+### 52. A single-line graviton seed still truncates at the embed context window `[ingest]`
 
-Acknowledged in source at `src/mcp/tools_admin.rs:116`. Chunk + mean-pool is the
-upgrade path, blocked on a real document long enough to truncate. The guidance
-half is being fixed on the docs side now; the truncation stays open.
+**Narrowed 2026-07-21 — the old wording is retired.** It said "acknowledged in
+source at `src/mcp/tools_admin.rs:116`" with "chunk + mean-pool" as the unbuilt
+upgrade path. Both halves moved in `08c9971`: the acknowledgement comment was
+deleted, and chunk + mean-pool **shipped** for the multi-line case —
+`seed_examples` (`src/base/accept.rs:612-624`) splits a seed on newlines and
+`mean_pool` (`:626`) averages the per-line embeddings, wired at
+`src/mcp/tools_admin.rs:119-136`. Line 116 now carries the mean-pool rationale,
+i.e. the opposite of what it was cited for.
+
+What is left is the case `seed_examples` deliberately does not split: a seed
+with fewer than two non-empty lines is embedded whole (`:619-621`), so one long
+paragraph still goes to the model as a single call and truncates past its
+context window with no signal. Chunking *that* wants a length-based split, not a
+newline one, and is still blocked on a real document long enough to truncate.
 
 ### 53. Clustering is vector-only `[lifecycle]`
 
-No semantic or structural features (`FEATURES.md:358-360`), and naming plus
+No semantic or structural features (`FEATURES.md:437`), and naming plus
 enrich are a cold LLM call per kern. The adopted-but-unbuilt upgrade is
 thought-level PageRank feeding the split heuristic — high-rank nodes become
 gravitons, bridge nodes become sub-kerns
@@ -542,10 +563,10 @@ incomplete — no item below produces a wrong answer today.
 
 ### 56. An agent cannot register disagreement at all `[ingest]`
 
-There is no `Contradicts` reason kind (`src/base/types.rs:66-75`) and no `stance`
+There is no `Contradicts` reason kind (`src/base/types.rs:63-72`) and no `stance`
 parameter on the ingest schema (`src/mcp/tools_mutate.rs:19-31`);
-`observe_contradict` (`src/base/types.rs:400`) has exactly one caller, GNN
-alignment (`src/tick/gnn_propagate.rs:144`). Observer-reputation weighting is
+`observe_contradict` (`src/base/types.rs:383`) has exactly one caller, GNN
+alignment (`src/tick/gnn_propagate.rs:157`). Observer-reputation weighting is
 also unbuilt.
 
 ### 57. No evidence decay `[lifecycle]`
@@ -557,7 +578,7 @@ observations to unseat. Tick-based γ damping is an open design
 
 ### 58. Supersede chains are unbounded while contested `[lifecycle]`
 
-No `ReasonKind::Edit` rationale edge (`src/base/types.rs:66-75`) and no producer
+No `ReasonKind::Edit` rationale edge (`src/base/types.rs:63-72`) and no producer
 rate-limit, so an A/B ping-pong on one `external_id` grows without bound
 (`decisions/edit-convergence.mdx:107`). Compounding it: the three trigger
 conditions that would flip kern to full versioning have **no instrumentation**
@@ -573,7 +594,7 @@ permanently erasing a correct path, and nothing records that they happened.
 ### 60. No re-classification when a contradiction pair changes `[lifecycle]`
 
 Either side of a classified pair can move and nothing re-runs the call, and no
-tool exposes the supersede chain beyond `include_history` (`FEATURES.md:143-145`).
+tool exposes the supersede chain beyond `include_history` (`FEATURES.md:160-161`).
 Two open questions beside it, from `docs/kern/bayesian-belief.md:145-148`: should
 `Reason` edges carry belief symmetrically, and does superseding reset or inherit
 belief?
@@ -594,7 +615,7 @@ neutral here. Item 64's stemmer swap is the clearest case.
 
 ### 61. Move `merge_hits` onto RRF `[retrieval]`
 
-The raw `0.4·content + 0.6·GNN` blend (`src/base/search.rs:25-26`, applied `:39`)
+The raw `0.4·content + 0.6·GNN` blend (`src/base/search.rs:60-61`, applied `:74`)
 is fragile across scales; `fuse::rrf` (`src/retrieval/fuse.rs:4`) already fuses
 the seed layer (`src/retrieval/query.rs`, `fuse_hybrid_seeds`) and never reaches `merge_hits`.
 **Record the cost:** RRF keeps rank information only, so a dense hit that is
@@ -631,13 +652,13 @@ well-evidenced one at equal mean.
 
 Was two ceilings; the rerank half left with the rerank stage itself
 (2026-07-21). What remains: RRF weights plus mode blends are configurable but
-never auto-tuned (`FEATURES.md:180`).
+never auto-tuned (`FEATURES.md:197`).
 
 ### 67. Binary quantization stays non-user-selectable `[retrieval]`
 
 Its recall floor is too low without a rescoring pass; deliberately excluded from
 `parse` (`src/quant.rs:20-21`). Beside it: no int4 path and the quantization
-scale is fixed at encode time (`FEATURES.md:229`).
+scale is fixed at encode time (`FEATURES.md:249`).
 
 ### 69. Speculative decode for the distill leg `[ingest]`
 
@@ -699,26 +720,27 @@ unremarked.
 
 ### 79. `validate_fact_source` is dead code `[surface]`
 
-Called twice, both with the literal `AGENT_SOURCE`
-(`src/mcp/tools_mutate.rs:119`, `:123`), and it accepts `USER_SOURCE` /
-`AGENT_SOURCE` (`src/base/validate.rs:33-34`), so it can never fail. Decision:
+Called **once** (corrected 2026-07-21 — it was twice; the second site left with
+the ingest `kind` arg in `216730d`), with the literal `AGENT_SOURCE`
+(`src/mcp/tools_mutate.rs:115`), and it accepts `USER_SOURCE` / `AGENT_SOURCE`
+(`src/base/validate.rs:22`), so it can never fail. Decision:
 thread a real auth identity (item 18/24), or delete. Delete is correct for a
 single local daemon and needs only sign-off.
 
 ### 81. `resources/list` and `prompts/list` return `-32601` on the proxy path `[surface]`
 
 `ProxyServer` implements `tools_list` / `call_tool` / `extra_capabilities` only
-(`src/commands/mcp_cmd.rs:194-239`) with no `handle_method` override, so the trait
-default returns `None` (`src/trnsprt/src/server.rs:21`). Meanwhile
-`extra_capabilities` advertises `{"resources": {}, "prompts": {}}` (`:238`) to
-match standalone, which *does* serve them (`src/mcp.rs:176-186`). Advertised on
+(`src/commands/mcp_cmd.rs:290`, `:306`, `:343`) with no `handle_method` override,
+so the trait default returns `None` (`src/trnsprt/src/server.rs:21`). Meanwhile
+`extra_capabilities` advertises `{"resources": {}, "prompts": {}}` (`:343-345`) to
+match standalone, which *does* serve them (`src/mcp.rs:208-211`, advertised `:157`). Advertised on
 the normal path, non-functional there. Either forward them or stop advertising.
 
 ### 82. Standalone `kern mcp` runs no gossip `[surface]`
 
 **Corrected:** the previous version said "no maintenance tick and no gossip". The
-tick *is* started (`src/commands/mcp_cmd.rs:293-304`); only gossip is absent
-(`broadcast_q: None` at `:298`, `broadcast_pulse: None` at `:319`). A graph
+tick *is* started (`src/commands/mcp_cmd.rs:404-412`); only gossip is absent
+(`broadcast_q: None` at `:410`, `broadcast_pulse: None` at `:424`). A graph
 served that way decays, clusters and GCs normally, and simply does not federate.
 
 ### 83. Per-kern entity cap is `KERN_CAP_DISABLED` and marked unsafe to enable `[lifecycle]`
@@ -744,16 +766,16 @@ served that way decays, clusters and GCs normally, and simply does not federate.
   requires either promoting them to real per-endpoint config or exposing that
   predicate. Was listed under item 11; it is a different job.
 - Hand-rolled tool schemas; no batch query
-  (`FEATURES.md:460-462`).
+  (`FEATURES.md:566-567`).
 - The LLM client is Ollama-centric with no retry/backoff policy object
-  (`FEATURES.md:598-600`).
+  (`FEATURES.md:764-765`).
 - Watcher `.gitignore` parsing is approximate; no rename tracking
-  (`FEATURES.md:695-696`).
-- `unnamed promote` is manual (`FEATURES.md:510`).
+  (`FEATURES.md:942-943`).
+- `unnamed` lists only; there is no `promote` (`FEATURES.md:668-669`).
 - GNN has no GPU path, weights are per-kern rather than shared, and the objective
-  is link-prediction only (`FEATURES.md:425-427`).
+  is link-prediction only (`FEATURES.md:528`).
 - Under WSL2 NAT a loopback Ollama URL must be hand-pinned; kern neither rewrites
-  nor warns (`FEATURES.md:710-712`).
+  nor warns (`FEATURES.md:958`).
 - RPC socket bind→chmod race — sub-millisecond, umask default — recorded as an
   accepted risk (`concepts/security.mdx:40-43`); revisit only if the umask
   alternative stops being worse.
@@ -780,36 +802,38 @@ and item 1's instrument staying the scorer.
   a user whose daemon vanishes has nothing to read. Verified absent: `grep -rl
   "kern hub" docs/site/content/docs/` returns nothing.
 - The `id` path in `query` bypasses every filter (item 18) — undocumented at
-  `howto/mcp.mdx:73`.
-- The `move` MCP tool exists in source (`src/mcp/tools_mutate.rs:70`) and appears
-  in neither `README.md`'s tool table nor `FEATURES.md:436`. The site is correct
-  ("Eleven tools", `howto/mcp.mdx:65`).
-- `docs/kern/README.md:47-48` declares the directory holds "never plans"; five of
+  `howto/mcp.mdx:50`, which says only "Needs `text` or `id`" and then lists the
+  filters as if they applied to both.
+- (retired 2026-07-21 — the tables were filled in) the `move` MCP tool is listed
+  in `README.md:352` and `FEATURES.md:550`, and the site's count is now twelve
+  (`howto/mcp.mdx:5, :75`), so the "Eleven tools" note is retired with it.
+- `docs/kern/README.md:60` declares the directory holds "never plans"; five of
   its notes contain execution plans, migration stages and phase orderings
   (`diskann-disk-index.md:30, :86-105`, `crdts-federation.md:215-255`,
   `fl-vs-knids-federation.md:248-254`, `stigmergy-self-improving.md:298-301`,
   `pagerank-authority.md:279-280`). Either the notes lose their plans to this
   file, or the declaration is false. Repo law 4 says the former.
-- `docs/kern/` research notes carry four stale claims against current source:
-  `crdts-federation.md:6-7` (GCounter/PnCounter — no `PnCounter` exists),
-  `:11-13` (Delta has no live sender — it does), `:13-14, :276-281` (OR-Set for
-  statements is "not built" — it was *reversed*), and
-  `diskann-disk-index.md:28-29` (PQ is "the next step" — it is a non-goal below).
-- Surviving quality claims that item 1's standard forbids: `FEATURES.md:166`
-  ("recall/NDCG unchanged", from the deleted bench — the `+7% p50` half is
-  latency and stays), `docs/kern/diskann-disk-index.md:25` ("recall@10 ≥ 0.90 vs
-  brute force"), and this file's own former citation of a "recall@10 A/B" as
-  evidence, now struck.
-- `README.md` and `VISION.md` still open by saying kern "takes in durable facts
-  from your sessions" and "learns on its own", contradicting the recorded
-  non-goal that kern captures nothing on its own. `VISION.md:13, :47-48` still
-  gate claims on "the recorded baseline", which item 1 says does not exist.
-  `README.md:344-346` still says the Delta/Question/Pulse senders are dead (they
-  are live) and pins the version at 1.0.0 against `FEATURES.md`'s 1.1.0.
-- `FEATURES.md` omits `Entity.acl` from its field list while claiming to scrape
-  "everything that actually exists", still carries the retired query-cache
-  finding as a live opportunity (`:843-844`), and marks MCP prompts/resources
-  `active` with no note of item 81.
+- (retired 2026-07-21 — corrected at the source) the four stale `docs/kern/`
+  research-note claims are gone: `crdts-federation.md:6-14` now states outright
+  that no `PnCounter` was ever built, that `Delta` has a live sender, and that
+  OR-Set for `statements` was *reversed, not deferred*;
+  `diskann-disk-index.md:28-29` marks the PQ recall claim **withdrawn**.
+- (retired 2026-07-21 — withdrawn in place) the quality claims item 1's standard
+  forbids no longer survive. `FEATURES.md:182` keeps only the `+7% p50` latency
+  half and says the retrieval-quality half is withdrawn;
+  `docs/kern/diskann-disk-index.md:26` says the note "previously published" the
+  `recall@10 ≥ 0.90` figure; this file's own "recall@10 A/B" citation was struck
+  earlier.
+- (retired 2026-07-21 — `README.md` and `VISION.md` were corrected) neither
+  opens on "takes in durable facts from your sessions" or "learns on its own"
+  any more; `VISION.md:51` now *states* there is no recorded baseline instead of
+  gating claims on one; `README.md:393` says the Question and Pulse senders and
+  the fetch RPC are live, and `:398` pins the version at `1.1.0`, matching
+  `FEATURES.md`.
+- (retired 2026-07-21 — all three fixed) `FEATURES.md:54` now lists `Entity`'s
+  `acl`; the retired query-cache finding is gone from the file entirely; and
+  `:565` marks prompts and resources "served on the standalone path only",
+  which is item 81's note.
 
 Deferred design calls, still owed, no blocker and no urgency: quarantine
 representation (bool vs `EntityStatus::Quarantined` vs `Source` trust band);
@@ -845,30 +869,38 @@ the harness.
 The previously published figures (overall 0.137 ± 0.018, "gap 0.46") are
 therefore **withdrawn, not superseded** — no current number replaces them.
 
-Claim standard, until a replacement exists: **no quality claim of any kind.** Not
-SOTA, not parity, not regression, not improvement. Latency claims remain
-permitted from the e2e harness. Item 1 is the open question; nothing below it can
-be scheduled honestly until it is decided.
+Claim standard, unchanged by item 1's closure: **no quality claim of any kind.**
+Not SOTA, not parity, not regression, not improvement. Latency claims remain
+permitted from the e2e harness. What item 1 delivered is a *scorer*
+(`e2e/test_recall.py`) — it steers work and catches regressions against a
+bag-of-words embedder, and it certifies nothing. The standard stands until
+something can.
 
 ## How we supersede Zep / Mem0 / Letta / Qdrant
 
 Not by matching feature lists. By owning a combination none of them hold, then
-proving it — on a measurement that does not yet exist (item 1).
+proving it — on a *comparable* measurement, which still does not exist. Item 1
+shipped a scorer that measures kern against its own past, not against them.
 
 | property | kern | Zep/Graphiti | Mem0 | Letta | Qdrant |
 |---|---|---|---|---|---|
 | Per-project self-maintaining graph (per-cwd) | ✅ | ❌ hosted | ❌ | ❌ | ❌ |
 | Default recall touches no LLM (sub-ms) | ✅ | ❌ | ❌ | ❌ | n/a |
 | Local-first, single binary, no network hop | ✅ | ❌ | ❌ | partial | ❌ |
-| Self-forgetting (decay / stigmergy GC / cold spill) | 🟡 items 2, 5, 6 | ❌ | partial | ❌ | ❌ |
+| Self-forgetting (decay / stigmergy GC / cold spill) | 🟡 items 32, 54 | ❌ | partial | ❌ | ❌ |
 | Graph + dense ANN + BM25 + GNN in one process | ✅ | partial | ❌ | ❌ | ❌ |
-| Bi-temporal supersede off the recall path | 🟡 items 4, 17 | ✅ | ❌ | ❌ | ❌ |
+| Bi-temporal supersede off the recall path | ✅ local / 🟡 item 44 federated | ✅ | ❌ | ❌ | ❌ |
 | Coordinator-free CRDT federation | 🟡 building | ❌ | ❌ | ❌ | ❌ |
 | Published eval numbers | ❌ withdrawn | ✅ | ✅ | ✅ | n/a |
 
-Two rows carried an unqualified ✅ in the previous version while this same file
+Two rows carried an unqualified ✅ in an earlier version while this same file
 funded the defects that break them. They are 🟡 with the items named — a
-scoreboard that disagrees with its own plan is not a scoreboard.
+scoreboard that disagrees with its own plan is not a scoreboard. Re-pointed
+2026-07-21: the items they originally named (2, 5, 6 and 4, 17) have all closed,
+and a qualifier citing a retired number reads as an open defect that no longer
+exists. Self-forgetting is qualified by what is still open — tree-depth
+eviction bias and the missing GC convergence gate — and supersede is ✅ locally,
+qualified only where the stamps stop, at the wire.
 
 **The three moves, in order:**
 
@@ -970,6 +1002,14 @@ Numbers are stable identifiers, retired on close — a closed item leaves its
 number behind rather than compacting the list, because items cite each other by
 number ("blocked on item 13") and renumbering would silently repoint them.
 
+- **`(belief, uncertainty)` is already on `query`** — was item 23, closed on
+  inspection 2026-07-21 rather than by building anything. The item said
+  `conf_variance` is "surfaced nowhere"; every result payload carries both terms
+  — `conf` (the beta mean) and `conf_uncertainty` (the variance) — in
+  `base_entity_json` for the ranked list and in `entity_detail` for the id path
+  (`src/mcp/tools_query.rs`), and has since the initial commit. Nothing was
+  scheduled against a gap that never existed; what remains is item 65, which is
+  about *ranking* on the lower bound, not surfacing it.
 - **In-memory drops are documented and counted** — was item 5. Spill-before-drop
   is a guarantee of a persisted kern; with no store bound there is nowhere to spill
   to, so the victim is dropped outright. Intended, now stated in `README.md` and
@@ -1040,7 +1080,7 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   `broadcast_q` invoked by `do_resolve` (`src/tick.rs:64`), `handle_question`
   live-dispatched (`src/gossip/handler.rs:41`).
 - **`Fetch` is wired** — `wire_fetch` installs the handler at
-  `src/commands.rs:894`. Single-id, so it is not anti-entropy (item 36), but it
+  `src/commands.rs:1002`. Single-id, so it is not anti-entropy (item 36), but it
   is not dead.
 - **`union_statements` never existed**; remote heat is no longer pinnable
   (`src/base/merge.rs:20`, applied `:139`).
@@ -1049,9 +1089,10 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   pre-embed fast path, not the only key. Historical: the cache itself was
   deleted with the answer leg (2026-07-21).
 - **There are no HNSW tombstones.** See item 27.
-- **`Kind` is validated at the wire boundary**, and the premise that it was not
-  was wrong on all three counts: `validate_kind` is called
-  (`src/mcp/tools_mutate.rs:117`) and rejects the four internal-only kinds;
+- **`Kind` cannot be claimed at the wire boundary**, and the premise that it
+  could was wrong on all three counts. Stronger than when this was written: the
+  `ingest` schema no longer takes a `kind` at all (`src/mcp/tools_mutate.rs`),
+  so there is nothing left for the since-deleted `validate_kind` to reject;
   `Superseded` is an `EntityStatus`, not an `EntityKind`
   (`src/base/types.rs:19-28`), so it was never claimable; and a forged `Fact` is
   unreachable regardless, since the MCP path runs `clamp_confidence(p.conf,
