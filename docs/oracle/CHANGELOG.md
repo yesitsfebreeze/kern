@@ -1,5 +1,29 @@
 # Changelog
 
+- 2026-07-21 — A prose-answering reason model stops silently discarding a delta.
+  `distill` returned `Some([])` both when the model emitted a well-formed empty
+  JSON array (genuine "nothing worth keeping") and when it replied in prose with
+  no parseable array (a weak model ignoring the format) — the intake archived the
+  delta in both cases, so a real conversation the model failed to structure was
+  lost with no error, on the primary ingest path. `parse_claims` now returns
+  `Option<Vec<Claim>>`: `None` when no JSON array parses (prose or malformed
+  span), `Some(vec)` when an array parses even if it filters to empty. `distill`
+  propagates that, so a format failure takes the existing retry path (`distill`
+  → `None` → `extract_claims` → `None` → delta left queued) instead of archiving.
+  A genuine `[]` still archives. The two prior tests that asserted the buggy
+  archive-on-prose behavior are corrected, and
+  `prose_reply_carrying_knowledge_is_not_lost` guards the regression. 72 ingest
+  tests green, clippy clean. Tradeoff, named: a model that *persistently* answers
+  in prose now retries forever, identical to a persistent LLM outage — chosen as
+  the safe side (queue, never lose), and made visible once the `kern intake`
+  status/drain item lands.
+  Decided by: fix-the-root (the ambiguity was one overloaded `Vec::new()` return,
+  split at the source rather than sniffed downstream), verify-before-claiming
+  (contract traced through `intake.rs` before changing it; the genuine-`[]`
+  archive path re-confirmed by test), name-the-tradeoff (infinite retry on a
+  persistent prose model stated, not hidden). Closes the ROADMAP §6a silent-loss
+  item.
+
 - 2026-07-21 — Automatic session capture is declared a non-goal, and the docs are
   reconciled to the two entry points that actually exist. kern has exactly two
   caller-driven ways to write: an agent calls MCP `ingest` (verified wired,

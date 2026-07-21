@@ -349,13 +349,17 @@ section. None is a missing feature; all are live defects.
       queries are exact over the hot graph and lossy over the cold tail, with no
       signal to the caller which they got. Documented at
       `concepts/time.mdx:112`.
-- [ ] **A prose-answering reason model archives deltas having stored nothing.**
-      `Some([])` from a model that replied in prose instead of JSON is
-      indistinguishable from a genuine "nothing worth keeping", so the intake
-      marks the delta done and moves on. Silent data loss on the main ingest
-      path. Distinct from the intake-visibility item below: that one exposes
-      failures, this one is not classified as a failure at all.
-      (`concepts/acceptance.mdx:72`.)
+- [x] **A prose-answering reason model no longer archives deltas having stored
+      nothing.** `parse_claims` now returns `Option`: a reply with no parseable
+      JSON array (prose or a malformed span) is `None`, which `distill` propagates
+      so the intake leaves the delta queued for retry instead of marking it done.
+      A well-formed array that filters to zero claims stays `Some([])` — a genuine
+      "nothing worth keeping" that still archives. A weak model that ignores the
+      JSON format is thus a soft outage, not silent loss (`ingest/distill.rs`,
+      regression-guarded by `prose_reply_carrying_knowledge_is_not_lost`).
+      Tradeoff: a model that *persistently* replies prose retries forever, same as
+      an LLM outage — the safe side, surfaced once the `kern intake` status item
+      below lands.
 - [ ] **Changing the embedding model silently zeroes recall.** Stored vectors
       stop matching query vectors; search returns nothing useful rather than
       erroring. No dimension guard, no model-identity stamp on the index, no

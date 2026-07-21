@@ -16,8 +16,11 @@ pub const DESCRIPTORS: [&str; 7] = [
 	"procedural",
 ];
 
-/// `Some([])` = the LLM responded but nothing parseable/worth keeping (archive).
-/// `None` = no output at all (transient outage — caller must retry, not archive).
+/// `Some([])` = the LLM emitted a well-formed JSON array holding nothing worth
+/// keeping (archive). `None` = no usable output — an empty response OR a prose
+/// reply with no parseable JSON array (a weak model ignoring the format is a soft
+/// outage, not a genuine "nothing"): the caller must retry, never archive, so the
+/// delta is not silently lost.
 pub fn distill(conversation: &str, llm: &dyn Fn(&str) -> String) -> Option<Vec<Claim>> {
 	if conversation.trim().is_empty() {
 		return Some(Vec::new());
@@ -47,19 +50,23 @@ markdown.\n\nCONVERSATION:\n{conversation}\n"
 	if raw.trim().is_empty() {
 		return None;
 	}
-	Some(parse_claims(&raw))
+	parse_claims(&raw)
 }
 
-pub(crate) fn parse_claims(raw: &str) -> Vec<Claim> {
+/// `None` = the reply held no parseable JSON array (prose or malformed span) — a
+/// format failure the caller must retry, not archive. `Some(vec)` = an array
+/// parsed; the vec may be empty once empty-text items are filtered, which is a
+/// genuine "nothing worth keeping".
+pub(crate) fn parse_claims(raw: &str) -> Option<Vec<Claim>> {
 	let (start, end) = match (raw.find('['), raw.rfind(']')) {
 		(Some(s), Some(e)) if e > s => (s, e),
-		_ => return Vec::new(),
+		_ => return None,
 	};
 	let mut items: Vec<serde_json::Value> = match serde_json::from_str(&raw[start..=end]) {
 		Ok(v) => v,
 		Err(e) => {
 			tracing::debug!(target: "kern.distill", error = %e, "claim JSON parse failed");
-			return Vec::new();
+			return None;
 		}
 	};
 	// Unwrap a lone `[[...]]` wrapper (LLM quirk).
@@ -101,7 +108,7 @@ pub(crate) fn parse_claims(raw: &str) -> Vec<Claim> {
 			valid_from,
 		});
 	}
-	out
+	Some(out)
 }
 
 #[cfg(test)]
@@ -141,9 +148,23 @@ mod tests {
 	}
 
 	#[test]
-	fn bad_json_yields_empty() {
+	fn prose_reply_signals_retry_not_archive() {
 		let llm = stub("I could not find anything useful, sorry!");
-		assert!(distill("c", &llm).expect("some").is_empty());
+		assert!(
+			distill("c", &llm).is_none(),
+			"a prose reply with no JSON array is a format failure — retry, never archive"
+		);
+	}
+
+	#[test]
+	fn prose_reply_carrying_knowledge_is_not_lost() {
+		// A weak model that answers in prose instead of JSON must not cause the
+		// delta to be archived having stored nothing.
+		let llm = stub("The user prefers tabs, and they decided to deploy on Fridays.");
+		assert!(
+			distill("a real conversation", &llm).is_none(),
+			"non-JSON reply carrying real knowledge signals retry, so nothing is silently lost"
+		);
 	}
 
 	#[test]
@@ -226,12 +247,18 @@ mod tests {
 	}
 
 	#[test]
-	fn multiple_sibling_arrays_fail_gracefully_to_empty() {
+	fn multiple_sibling_arrays_signal_retry() {
 		let two_siblings = stub(r#"[{"text":"a","kind":"fact"}] [{"text":"b","kind":"fact"}]"#);
 		assert!(
-			distill("c", &two_siblings).expect("some").is_empty(),
-			"sibling arrays are not merged — invalid JSON spans to empty",
+			distill("c", &two_siblings).is_none(),
+			"sibling arrays span to invalid JSON — a format failure, so retry not archive",
 		);
+	}
+
+	#[test]
+	fn len2_array_of_arrays_parses_to_empty() {
+		// Valid JSON array, just the wrong shape: it parsed, so it archives as a
+		// genuine no-claims result rather than retrying forever.
 		let array_of_arrays = stub(r#"[[{"text":"a","kind":"fact"}],[{"text":"b","kind":"fact"}]]"#);
 		assert!(
 			distill("c", &array_of_arrays).expect("some").is_empty(),
