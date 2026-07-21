@@ -2,6 +2,26 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — Tier 0 is closed and the roadmap's own structure is repaired.
+  Item 1 sat in two places at once — open at the top of the ranked list and closed
+  in the appendix — which by this file's rules means the decision was never made.
+  It was: the instrument exists, `e2e/` is it, and the Tier 0 block was the stale
+  copy. Removing it releases what it gated: items 32, 54, 55 and all of tier 8
+  stop being "unjudgeable until a metric exists" and become "apply it, measure,
+  keep it if `recall@1` holds" — the loop item 86's two candidate fixes already ran.
+
+  Repaired in the same pass: two tier headings this session destroyed. The script
+  that closes an item cuts from its `###` to the next one, which swallows any
+  `# Tier` boundary sitting between — so closing item 12 took Tier 2's heading with
+  it and closing item 17 took Tier 3's. The items survived and silently appeared to
+  rank under Tier 1. Both restored, item 16 moved back under Tier 2, and the damage
+  named in the file's own preamble, because a missing heading is invisible: nothing
+  looks wrong, the plan just quietly says something else.
+
+  **Decided by:** the oracle. Two content files disagreeing — here, one file
+  disagreeing with itself — is not a state to tidy away, it is a decision that was
+  never recorded.
+
 - 2026-07-21 — Roadmap item 5: an in-memory kern no longer reads as a durable
   one. Spill-before-drop holds only while a store is bound — with none, `cold_spill`
   is skipped and the victim is removed, which is the intended memory bound and not

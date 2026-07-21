@@ -17,74 +17,19 @@ match would silently repoint those references — the cure is worse. A closed it
 retires its number rather than compacting the list, and a new item takes the next
 free number wherever it ranks.
 
-Stamped 2026-07-21. Re-verified against source after `220af94`, `95fb865`,
-`193757c`, `0fe0728`, `c90aca9`, plus a full sweep of the docs site,
-`FEATURES.md`, `README.md` and `docs/kern/`. Every unchecked item below was
-checked against the tree, not against a document; four survivors of the previous
-version were factually wrong and are corrected in place (28, 44, 71, and the
-deleted "two typed transport surfaces" item).
+Stamped 2026-07-21, re-verified against source rather than against documents.
+Tier 0 is gone: "what measures retrieval quality with no LLM in the scoring loop"
+is answered, and `e2e/` is the answer. That closure releases everything it gated
+— items 32, 54, 55 and the whole of tier 8 are now judgeable the way item 86's two
+candidate fixes were: apply, measure, keep only if `recall@1` holds.
+
+Two headings in this file were destroyed by an editing script that cut from an
+item to the next one and swallowed the tier boundary between them; Tier 2 and
+Tier 3 are restored above their items. Say it here because a lost heading is
+invisible — the items survive and simply appear to rank somewhere they do not.
 
 Context that is not work — north star, competitive position, non-goals, repo
 laws, and what is closed — lives after the ranked list.
-
----
-
-# Tier 0 — the blocker
-
-Nothing below can be claimed as progress until this is answered.
-
-### 1. What measures retrieval quality with no LLM in the scoring loop? `[eval]`
-
-**Deciding behavior: none yet — amend first.**
-
-Everything previously scheduled here (the attribution ablations, the
-`--min-deliver` sweep, `--multihop-paths`, distill-coverage, judge calibration)
-was pointed at the harness deleted in `8d8b19e`. Those flags, binaries and
-traces no longer exist. They are struck rather than migrated: each probed a
-composite score ruled unfit for steering memory work, and re-pointing them at a
-new harness would import the same conflation.
-
-The shape indicated by `8d8b19e`'s own reasoning — isolate the term that is
-actually kern's — is a **retrieval-only** metric over a labelled corpus:
-recall@k, MRR, NDCG against known-relevant ids, no answerer, no judge, so a
-change in the number can only mean a change in what was retrieved. Multi-hop
-becomes "were the linked entities returned", not "did a 3B model phrase it
-well". Sub-questions the amendment must settle:
-
-- (a) Where does labelled ground truth come from? Hand-labelled corpus, a
-      LoCoMo-derived id-mapping (reusing the conversations while discarding the
-      answer key and judge), or synthetic generation? **`FEATURES.md:733-736`
-      currently answers this ("against LoCoMo's per-turn `evidence` labels") —
-      that is a plan living outside this file, which repo law 4 forbids. Either
-      adopt it here as the decision or strike it there.**
-- (b) What is the pass bar, with no rival number left commensurable once the
-      LLM-judged scale is abandoned?
-- (c) Does answer synthesis get measured at all, or is it explicitly out of
-      scope — given that owning it means owning a model's quality?
-- (d) **Ingest is non-deterministic** (`concepts/acceptance.mdx:195-197`): the
-      same delta distilled twice yields different claim sets. A labelled corpus
-      cannot be rebuilt identically, so the harness must either freeze a corpus
-      artifact or score against a fixed store.
-- (e) **Turn-level claim provenance does not exist.** `FEATURES.md:735-736`
-      records the planned metric as needing it; ingest records no
-      claim→source-turn mapping today, so an id-mapping approach has a
-      prerequisite nobody has scheduled.
-
-Two findings from the deleted work survive as unmeasured leads — **evidence-grade
-smoke only, n≤8, not results**, and the first candidates for the replacement to
-check:
-
-- **Multi-hop edges are the suspect, not the search.** `expand()` is a beam
-  search, so "expansion is one hop" is dead. Smoke n=8: 8/8 probes had nearby
-  claims, only 4/8 were linked within 2 hops — pointing at ingest-side edge
-  creation.
-- **Distill coverage may be the floor.** Smoke n=6: `gold_nearest_cosine` p50
-  0.464, 1/6 over 0.6 — but the 0.6 bar was never calibrated (2–4-word golds
-  against sentence-length claims), so it may be measuring the bar.
-
-Also gated on this item, and listed at their own rank below: 32, 54, 55, and
-the whole of tier 8 (61–68). Item 69 is latency and is not gated — the e2e
-harness can still judge it.
 
 ---
 
@@ -182,12 +127,39 @@ one thought. `reembed` (and any direct-writer admin command) needs the same
 advisory lock this item already calls for, or a hub RPC that performs the
 re-embed inside the single writer.
 
+---
+
+# Tier 2 — the last cheap federation fix
+
+Everything else that stood here — confining LWW deltas to `remote-*`, verifying
+entity bodies against their ids, and the `handle_pulse` root-kern fallback — is
+closed. What remains is the local twin of the same exposure, and it needs no peer
+at all.
+
 ### 16. Rate-limit `commit_access` per (producer, thought) `[retrieval]`
 
 The local twin of the counter-inflation exposure in item 13, and the one that
 needs no peer at all: a query adversary can pump one thought's access count
 directly. Adopted on paper at `docs/kern/stigmergy-self-improving.md:271`, never
 scheduled.
+
+---
+
+# Tier 3 — the embeddable-endpoint track
+
+kern's competitive claim is "everything a hosted service structurally cannot
+do". The flip side is that a hosted service serves *many callers* and kern
+assumes exactly one. This is the most valuable track in the file now that item 1 is
+answered, because it converts kern from "my agent's memory" into "the memory layer
+any agentic workflow embeds". It ranks below tier 1 because none of it is a
+live defect, and above tier 5 because no shipped host is blocked on federation.
+
+Two constraints hold across all of it. **ACL is caller-asserted** — the daemon
+cannot verify a caller's principals, exactly like the existing
+`validate_fact_source` boundary, so trust ends at the process edge. And **Facts
+are GC-immune, not ACL-immune** — a Fact the requester cannot see must still not
+be returned. Backward compatibility: empty `principals` means *no filter*, not
+*public only*, or every existing single-agent caller goes blind.
 
 ### 18. ACL + request principal — gates everything else in this tier `[surface]`
 
@@ -614,7 +586,9 @@ A 24-hour one for ranking (`qbst_recency_half_life_secs`,
 (`src/base/heat.rs:18`). The offline NDCG sweep meant to tune either was never
 run (`decisions/stigmergy-over-gardening.mdx:117`). Third input nobody
 reconciled: `docs/kern/stigmergy-self-improving.md:160-170` derives a 1–2 day
-half-life and the shipped value is 7 days. Gated on item 1.
+half-life and the shipped value is 7 days. Now measurable: `e2e/test_recall.py`
+scores a half-life change directly (`recall@1`/`recall@5`/`MRR`), which is the
+sweep that was never run.
 
 ---
 
@@ -664,10 +638,17 @@ belief?
 
 ---
 
-# Tier 8 — retrieval quality, all measurement-gated on item 1
+# Tier 8 — retrieval quality, now measurable
 
-Nothing here can be honestly accepted or rejected until the replacement metric
-exists. They are ranked among themselves by expected effect, not by confidence.
+These were unacceptable-in-principle until an instrument existed. It does now
+(`e2e/test_recall.py`, and the invariants beside it), so each of these can be
+judged the way item 86's two candidate fixes were: apply it, measure, keep it only
+if `recall@1` holds and the exact-match probe stays at rank 1. They are ranked
+among themselves by expected effect, not by confidence.
+
+What the instrument still cannot judge, and what that costs: the fake embedder is
+bag-of-words, so a change that only a real embedding model would reward looks
+neutral here. Item 64's stemmer swap is the clearest case.
 
 ### 61. Move `merge_hits` onto RRF `[retrieval]`
 
