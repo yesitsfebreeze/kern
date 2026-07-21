@@ -3,6 +3,7 @@ use crate::gnn::backward::{act_deriv_mul, BackwardGraphLayer, GraphLayer};
 use crate::gnn::graph::Graph;
 use crate::gnn::layer::{Backward, Layer, LinearLayer};
 use crate::gnn::norm::LayerNorm;
+use crate::gnn::sparse::SparseMatrix;
 use crate::gnn::tensor::Tensor;
 use crate::gnn::GnnError;
 
@@ -10,7 +11,7 @@ pub struct GCNLayer {
 	pub linear: LinearLayer,
 	pub norm: Option<LayerNorm>,
 	pub act: Option<Activation>,
-	last_norm_adj: Option<Tensor>,
+	last_norm_adj: Option<SparseMatrix>,
 	last_pre_act: Option<Tensor>,
 }
 
@@ -41,7 +42,7 @@ impl GCNLayer {
 	}
 
 	pub fn try_forward_graph(&mut self, g: &Graph, features: &Tensor) -> Result<Tensor, GnnError> {
-		let norm_adj = g.normalized_adjacency();
+		let norm_adj = g.normalized_adjacency_sparse();
 		let agg = norm_adj.matmul(features)?;
 		self.last_norm_adj = Some(norm_adj);
 

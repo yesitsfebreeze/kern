@@ -2,6 +2,95 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — filed item 97: **the e2e harness cannot exercise the GNN at all.**
+  `DEFAULT_MIN_THOUGHTS` is 128 and the recall corpus is 36 facts, so no
+  propagation runs in `e2e/` in either column of any A/B. Every "recall
+  unchanged" reported for a GNN change to date describes code that never ran.
+
+  Found by the item 28 slice, which had been handed a recall gate as its safety
+  bar and reported that the gate did not exist rather than banking the green.
+  That change shipped on a bit-identity proof instead — asserted over `to_bits()`
+  across two orientations, four widths and three graph shapes — which is what
+  actually carries it.
+
+  Filed rather than left in that item's prose, because the slice kept its edit
+  inside item 28's section as instructed and a gap living inside a neighbouring
+  item is one nobody schedules. Same reason item 95 was filed out of item 20 last
+  night.
+
+  The uncomfortable part is that the gate was mine. The brief said "recall must
+  be EXACTLY 0.9306 / 0.9722 / 0.9471" and treated that as the bar the change had
+  to clear; it was satisfied by a suite that never invoked the code. A bar nothing
+  can fail is not a bar, and this one had been quietly passing for every GNN
+  change in the file.
+
+  Decided by: verify-before-claiming — a green gate is a claim about coverage,
+  and this one was never checked.
+
+- 2026-07-22 — item 28's remainder closed: the GCN aggregation reads a sparse
+  adjacency instead of a dense N x N one. 73.4 s → 11.6 s at N=4096, 20.5 s →
+  7.4 s at 2048, 5.4 s → 3.9 s at 1024, and bit-identical output.
+
+  Both arms were run back to back in one session rather than compared against
+  the number already in the item, because the two no longer share a bottleneck
+  and a cross-session comparison would have flattered the result. Dense is
+  bandwidth-bound on a 134 MB matrix and shrugs off CPU contention; sparse is
+  CPU-bound on the linear layers and does not. On a busy machine that is 6.3x at
+  N=4096; on an idle one the same after-numbers are 1.6 / 3.3 / 6.6 s, or 12.1x.
+  6.3x is the floor and the number quoted above.
+
+  Measured before implementing, and the measurement moved the target. The item
+  blamed `normalized_adjacency` *materialising* the dense matrix. Materialising
+  was the smallest of the three dense costs at N=4096 — 11.1% of the
+  propagation, against 65.5% for the multiply and 12.8% for a per-backward
+  `transpose` the item never named. All three are consequences of the same dense
+  representation, so the remedy the item proposed was right; its explanation was
+  not, and optimising only the named term would have bought 11%. That is the
+  fourth slice running where an unmeasured cost estimate inside an item pointed
+  at the wrong term.
+
+  **The decision this item was held open for was whether a faster propagation is
+  worth moving ranking. It is not a trade, because it is bit-identical.** The
+  aggregation is the only computation that changed, and two properties make the
+  sparse product agree with the dense one exactly rather than closely: the entry
+  is the same `1.0 / (sqrt(di) * sqrt(dj))` expression over a degree the dense
+  form reaches by summing that many exact `1.0`s, and columns ascend inside a
+  row, so the sparse product visits the same nonzeros in the same order. What it
+  skips are exactly the stored zeros, and `x + 0.0 * b == x` for a
+  `+0.0`-seeded accumulator and finite `b` — item 26's argument in the same
+  shape. Identical inputs through identical downstream code give identical
+  outputs, so `gnn_vector` and therefore recall cannot move.
+
+  The equivalence is asserted over `to_bits()`, deliberately, not a tolerance. A
+  1-ULP tolerance would have accepted writing the normaliser as
+  `1.0 / (di * dj).sqrt()`, which is mathematically the same expression and one
+  bit different — that mutation was run, and the bit assertion caught it where
+  any relative tolerance above 1e-15 would not have.
+
+  **The recall gate the item asked for does not exist**, and that is worth
+  recording rather than quietly passing. `pytest -q -s e2e` is green and recall
+  is 0.9306 / 0.9722 / 0.9471 before and after, identical — but its corpus is 36
+  facts against a `min_thoughts` floor of 128, so no propagation runs in it in
+  either column. It is a true green about nothing. The proof above is what
+  carries this change; the e2e run only shows nothing else broke.
+
+  Two things left unbuilt on purpose. The dense `normalized_adjacency` stays in
+  `src/gnn/graph.rs` though nothing in production calls it: it is the reference
+  the equivalence test compares against, and a reference that lives in the test
+  can drift from the thing that shipped. And the trainer's single `std::thread`
+  was chosen because "each training allocates a dense `num_entities^2`
+  adjacency — 134MB at N=4096"; that is now 0.33 MB, so the reason is gone and
+  the concurrency choice is re-openable — but on its own evidence, not as a
+  rider on this one, which is the mistake this item was created to avoid.
+
+  The `FEATURES.md` edit is line-count neutral on purpose: eleven `ROADMAP.md`
+  anchors cite it by line number below the edited block, and item 93 is open
+  precisely because nothing catches that shift. Inserting five lines nominated
+  eight of them.
+
+  Decided by: verify-before-claiming — the item's named cost was 11% of the
+  cost, and the gate it demanded was measuring nothing.
+
 - 2026-07-22 — merged item 27's batched GC eviction. 192 + 1 + this one = 194,
   by union rebuild.
 

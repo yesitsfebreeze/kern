@@ -22,4 +22,5 @@ pub mod norm;
 pub mod optim;
 pub mod persist;
 pub mod propagate;
+pub mod sparse;
 pub mod tensor;
