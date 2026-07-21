@@ -2,6 +2,22 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — item 9's headline re-scoped to match its own body. The title read
+  "the route exists; `ingest` and `link` cannot take it yet", which names one of
+  the four things still open. The body lists four: `ingest`/`link` (blocked on
+  item 24), `intake drain` (no matching tool exists), `kern mcp`'s long-lived
+  standalone writer, and read-side staleness in `get`/`list`/`query`/`search`.
+  Roadmap titles are the index of what is left, so a title naming a strict
+  subset makes the item scan as nearer done than it is — the verified remainder
+  belongs in the line people read first. Now: "`forget`/`degrade` route to the
+  daemon, the rest do not". No scope moved; the body already said this and the
+  code already matched it. Verified against the landed diff: `route()` has
+  exactly two call sites, `cmd_forget` and `cmd_degrade`
+  (`src/commands/graph_ops.rs:120`, `:261`).
+
+  **Decided by:** verify-before-claiming. The claim checked was the title
+  against the body and the body against the source, and only the title failed.
+
 - 2026-07-21 — item 9's open question is answered: **a one-shot CLI write goes
   to the serving daemon, it does not learn to refuse.** The item named two
   candidates and said the first was right without deciding it. Deciding it: the

@@ -43,7 +43,7 @@ These need no gossip, no flag and no unusual configuration. Every one produces a
 wrong or missing result with no error, which is why they outrank both the
 security work (armed only with federation on) and every feature.
 
-### 9. Two live writers: the route exists; `ingest` and `link` cannot take it yet `[surface]`
+### 9. Two live writers: `forget`/`degrade` route to the daemon, the rest do not `[surface]`
 
 **Decided 2026-07-21, and the decision is implemented for the two commands it
 fits.** The choice named here was between routing the one-shot writes through
