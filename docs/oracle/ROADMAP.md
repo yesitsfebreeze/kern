@@ -183,26 +183,30 @@ a destination graph it holds no lock on, and `maybe_self_heal_store`
 stops both daemons first, self-heal runs before the daemon serves, and neither
 has been proven safe.
 
-The third class *is* this item, and it is the half that is **not** blocked on
-item 24. `with_graph` (`src/commands.rs:453`) loads the graph, mutates it and
-calls `save_graph_unguarded` (`:456`) holding no lock at all. `cmd_forget` and
-`cmd_degrade` reach it safely, because they `route` first and only fall into it
-on `NoDaemon` (`src/commands/graph_ops.rs:120`, `:285`). **`kern graviton
-add`/`remove` (`src/commands/admin.rs:243`, `:259`) and `kern claim-kind
-add`/`rm` (`:290`, `:296`) do not route at all**, so beside a running daemon
-they load a snapshot, mutate it, and write the *whole graph* back over whatever
-the daemon has committed since — a full-graph clobber, not a lost write, and the
-exact race the writer lock and the route exist to close. Unlike `ingest` and
-`link` they assert no trust: `graviton` carries a name, seed text and a mass;
-`claim_kind` a name and a description. Neither mints a Fact, so routing them
-widens item 24's hole no more than `intake drain` did, and the tools they would
-route to already exist and already have matching semantics — `graviton`
-(`src/mcp/tools_admin.rs:87`, schema `:39`) and `claim_kind` (`:161`, schema
-`:52`), both dispatched at `src/mcp.rs:183-184`.
+The third class *was* this item's unblocked half, and it is the one the closure
+above discharged. `with_graph` (`src/commands.rs:453`) loads the graph, mutates
+it and calls `save_graph_unguarded` (`:456`) holding no lock at all. `cmd_forget`
+and `cmd_degrade` reach it safely, because they `route` first and only fall into
+it on `NoDaemon` (`src/commands/graph_ops.rs:120`, `:389`). `kern graviton
+add`/`remove` and `kern claim-kind add`/`rm` did not route at all, so beside a
+running daemon they loaded a snapshot, mutated it, and wrote the *whole graph*
+back over whatever the daemon had committed since — a full-graph clobber, not a
+lost write, and the exact race the writer lock and the route exist to close.
+**Corrected 2026-07-21 — this paragraph said "do not route at all" one commit
+after that stopped being true.** All four now route first
+(`graviton_at`, `src/commands/admin.rs:234`, route calls `:245` and `:290`;
+`claim_kind_at`, `:343`, route calls `:346` and `:363`), keeping `with_graph`
+as the `NoDaemon` fallback. Unlike `ingest` and `link` they assert no trust:
+`graviton` carries a name, seed text and a mass; `claim_kind` a name and a
+description. Neither mints a Fact, so routing them widened item 24's hole no
+more than `intake drain` did, and the tools they route to already existed with
+matching semantics — `graviton` (`src/mcp/tools_admin.rs:87`, schema `:39`) and
+`claim_kind` (`:161`, schema `:52`), both dispatched at `src/mcp.rs:183-184`.
 
-So the item's remainder is two halves, not one: `graviton`/`claim_kind`,
-unblocked and mechanical, and `ingest`/`link`, blocked on item 24. The item does
-not close on the read side alone.
+So the item's remainder is **one** half, not two: `ingest`/`link`, blocked on
+item 24. `graviton`/`claim_kind` were the unblocked half and are closed. The item
+does not close on the read side alone, and it cannot close at all until item 24
+decides how trust crosses the socket.
 
 ---
 
@@ -315,18 +319,77 @@ render the text of every entity on a walk and `retrieve` filtered only
 touching a withheld entity is dropped whole: a chain with a hole in it still says
 the withheld thought exists and what it connects.
 
-**Still ungated — this is what keeps the item open.** The MCP **resources**
-surface (`kern://thoughts`, `kern://thought/{id}`, `src/mcp/resources.rs`)
-returns entity text and accepts no `principals` at all, so today the ACL is a
-filter a cooperating client *asks for*, not a boundary imposed on one; deciding
-this means deciding whether resources get a principal or the server gets a
-session principal, which is the same missing-auth boundary as item 24.
+**The resources surface is now default-deny** — the separable half, done
+2026-07-21. `src/mcp/resources.rs` can name no principal, so the question it can
+answer without item 24 is what such a surface may return *at all*, and the answer
+is: only rows carrying no ACL. All three reads enforce it. `kern://local/thoughts`
+(`resource_thoughts`, the top 50 by rank, text truncated to 200) skips a
+non-public entity *before* it ranks, so a withheld row does not even spend a slot.
+`thought://{id}` (`resource_thought`, full text **plus every incident edge's
+text**) reads a scoped id back as `thought not found` — the same `None` arm and
+the same format string a missing id takes, byte-identical for a given id, and the
+file logs nothing, so the surface that withholds the text does not leak the id's
+existence. `reason://{id}` (`resource_reason`) previously checked nothing at all;
+that was the worst of the three, an unchecked read of scoped entity text through
+an id that is not the entity's. "Non-public" is `Acl::is_public()`
+(`src/base/types.rs`), the same emptiness test `acl_admits` runs, so this surface
+and `matches_filter` cannot drift apart on what "public" means.
+
+**An edge is gated on BOTH its ends, and "did not resolve" is its own answer.**
+`explain_relationship_prompt` (`src/base/util.rs:87`) hands the LLM up to 500
+chars of both endpoint texts and the reply becomes `reason.text`, so the text
+belongs to the endpoints and a public `from` does not make it public — an earlier
+cut of this gated `reason://{id}` on `from` alone and still served an edge whose
+`to` was scoped, naming that scoped id outright. Both ends are checked now. The
+harder half is that `find_entity` (`src/base/search.rs:148`) walks only the
+**resident** kern map — `loaded` is `kerns.get`, `all()` is `kerns.values()`,
+neither sees `unloaded` or the cold tier — so *an id that does not resolve is not
+an id that does not exist*. A GC cold-spill (`src/tick/stigmergy.rs`) or a
+kern-cap unload (`GraphGnn::unload`) leaves a scoped row alive in the store with
+its ACL intact and invisible here, while the edge quoting it survives untouched:
+a kern hosts a reason iff it hosts its `from` (`src/base/reason.rs:78`), so
+`move_entity` leaves an incoming edge behind in the *source* kern and
+`remove_entity` cascades only within one kern. Treating that as "allowed" is a
+fail-open read of scoped text, with no race in it — it is the stable committed
+state. So the endpoint verdict has three outcomes (`Endpoint`), not two: **Scoped**
+drops the edge, **Public** serves it whole, and **Unresolved** serves the edge
+with its `text` withheld. Redaction rather than a drop, because a dangling
+endpoint is ordinary here (`Reason::to` is optional in `add_reason`) and dropping
+every edge with one would hide a public entity's own structure — that is the line
+between default-deny and deny-all. `resource_reason` runs the same rule, except
+that `from` fails closed on Unresolved too: it is the entity the edge hangs off,
+and one that did not resolve is not one that said the read was allowed.
+
+Pinned by seven tests in `src/mcp/resources.rs`, one per guard — each guard
+mutated away fails exactly its own test and no other. The four that predate them
+seed `Entity::default()` and are unchanged, the regression guard that default-deny
+did not become deny-all. This is deliberately narrower than any principal scheme
+item 24 lands — default-deny can only be widened by it, never contradicted.
+
+**Still ungated — this is what keeps the item open.** What is *not* separable is
+how a principal arrives — resources get one per read or the server gets a session
+one — and that is the same missing-auth boundary as item 24. Until then the
+surface serves public rows to any client that can open the transport, and a scoped
+row to nobody; the ACL is still not a boundary a caller can be *held to*, only one
+they cannot get around here. Two residues are deliberate and named rather than
+closed. A **cardinality oracle**: `kern://local/health` and `kern://local/kerns`
+count every entity and reason, scoped included (`graph_health_stats`,
+`src/base/health.rs:44-50`; `k.entities.len()`, `resource_kerns`), so ingesting a
+scoped row moves a number. It discloses no id and no text, and it is the same
+count the operational `health` tool and CLI report — narrowing it is the separate
+question of what an unauthenticated *operational* surface may say, which belongs
+with item 24. And an **Unresolved endpoint id is still named** in the edge body:
+ids are `content_hash(text)`, so at worst that confirms a guessed text, never
+discloses one.
+
 **Gossip egress** replicates a scoped `Entity` to peers with no ACL gate — the
 `Acl` does ride the wire and `merge_entity` never imports a remote ACL over a
 local one, so neither side can widen the other's, but shipping the row at all is
-a trust decision nobody has made. And **`Reason` has no ACL**, so `link`'s
-`explain_relationship_prompt` can still quote a scoped entity's text into an edge
-on a public one.
+a trust decision nobody has made. And **`Reason` still has no ACL of its own**:
+`link`'s `explain_relationship_prompt` writes a scoped entity's text into an edge
+hanging off a public one, and every reader has to re-derive the verdict from the
+endpoints. The resources surface now does. Storing the verdict on the edge at
+write time is the real fix and is not this item.
 
 ### 20. Source-trust weighting `[retrieval]`
 
@@ -950,7 +1013,7 @@ Two leads from `docs/kern/crdts-federation.md`, adopted and never scheduled:
 ### 44. Bi-temporal stamps are never federated `[federation]`
 
 `valid_from` / `valid_to` / `invalidated_at` are `#[serde(skip)]`
-(`src/base/types.rs:302-307`), so each node re-derives its own `as_of` view and
+(`src/base/types.rs:311-316`), so each node re-derives its own `as_of` view and
 two *converged* nodes can answer the same point-in-time query differently
 (`docs/kern/crdts-federation.md:54-62`). The federated twin of item 4.
 
@@ -1124,7 +1187,7 @@ incomplete — no item below produces a wrong answer today.
 
 There is no `Contradicts` reason kind (`src/base/types.rs:77-86`) and no `stance`
 parameter on the ingest schema (`src/mcp/tools_mutate.rs:19-33`);
-`observe_contradict` (`src/base/types.rs:411`) has exactly one caller, GNN
+`observe_contradict` (`src/base/types.rs:420`) has exactly one caller, GNN
 alignment (`src/tick/gnn_propagate.rs:163`). Observer-reputation weighting is
 also unbuilt.
 
@@ -1528,9 +1591,9 @@ every *composition* feeding it, and each one is a different format string: entit
 ids are `content_hash(text)` bare (`src/ingest/place.rs`,
 `src/ingest/file_watcher.rs:129`, `src/ingest/direct.rs:31`,
 `src/ingest/worker.rs:125`), `Source::source_id` is
-`scheme \x00 object \x00 section` (`src/base/types.rs:248-260`), child and named
+`scheme \x00 object \x00 section` (`src/base/types.rs:257-269`), child and named
 ids are `parent_id + nonce` and `parent_id + name + nonce`
-(`types.rs:493`, `:498`), and the HNSW canon has its own (`src/base/hnsw.rs:525`).
+(`types.rs:502`, `:507`), and the HNSW canon has its own (`src/base/hnsw.rs:525`).
 
 The bare-text composition is load-bearing beyond identity: the gossip import
 guard re-derives `content_hash(&e.text()) == e.id` to refuse a forged remote
@@ -1556,7 +1619,7 @@ unremarked.
 Called **once** (corrected 2026-07-21 — it was twice; the second site left with
 the ingest `kind` arg in `216730d`), with the literal `AGENT_SOURCE`
 (`src/mcp/tools_mutate.rs:150`), and it accepts `USER_SOURCE` / `AGENT_SOURCE`
-(`src/base/validate.rs:22`), so it can never fail. Decision:
+(`src/base/validate.rs:21`), so it can never fail. Decision:
 thread a real auth identity (item 18/24), or delete. Delete is correct for a
 single local daemon and needs only sign-off.
 
@@ -1566,7 +1629,7 @@ single local daemon and needs only sign-off.
 (`src/commands/mcp_cmd.rs:290`, `:306`, `:343`) with no `handle_method` override,
 so the trait default returns `None` (`src/trnsprt/src/server.rs:21`). Meanwhile
 `extra_capabilities` advertises `{"resources": {}, "prompts": {}}` (`:346`) to
-match standalone, which *does* serve them (`src/mcp.rs:212-219`, advertised `:158`). Advertised on
+match standalone, which *does* serve them (`src/mcp.rs:212-221`, advertised `:158`). Advertised on
 the normal path, non-functional there. Either forward them or stop advertising.
 
 ### 82. Standalone `kern mcp` runs no gossip `[surface]`
@@ -1696,7 +1759,7 @@ and item 1's instrument staying the scorer.
   `FEATURES.md`.
 - (retired 2026-07-21 — all three fixed) `FEATURES.md:54` now lists `Entity`'s
   `acl` <!-- docs-check: anchor-ok -->; the retired query-cache finding is gone from the file entirely; and
-  `:625-626` marks prompts and resources "served on the standalone path only",
+  `:634-635` marks prompts and resources "served on the standalone path only",
   which is item 81's note.
 
 Deferred design calls, still owed, no blocker and no urgency: quarantine

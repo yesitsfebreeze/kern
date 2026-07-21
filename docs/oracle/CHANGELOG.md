@@ -2,6 +2,69 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — item 18 `[surface]`, the separable half: the MCP **resources**
+  surface is default-deny. `resource_thoughts`, `resource_thought` and
+  `resource_reason` returned entity text to any client that could open the
+  transport with no ACL consulted; `resource_reason` checked nothing at all,
+  which made it a read of scoped entity text through an id that is not the
+  entity's, since `link`'s `explain_relationship_prompt` writes edge text from
+  both endpoint texts. `Acl::is_public()` now lives on `Acl` and `acl_admits`
+  calls it, so "public" has one definition shared with `matches_filter` instead
+  of two copies that could drift.
+
+  **Why this is separable from item 24.** Item 24 is the missing-auth boundary —
+  how a principal *arrives*, per-read or per-session. That question is untouched
+  here and stays open. The separable question is what a surface that can name no
+  principal may return *at all*, and it has an answer that does not depend on the
+  other: only rows carrying no ACL. Default-deny is the floor any principal
+  scheme can only widen, never contradict, so landing it early cannot constrain
+  item 24's design.
+
+  **Decided by: an edge endpoint that does not resolve gets its own verdict —
+  the edge is served, its text is not.** This was the load-bearing call and the
+  first cut got it wrong twice. `find_entity` (`src/base/search.rs:148`) walks
+  only the *resident* kern map: `loaded` is `kerns.get`, `all()` is
+  `kerns.values()`, and neither sees `unloaded` or the cold tier. So "did not
+  resolve" is **not** "does not exist" — a GC cold-spill
+  (`src/tick/stigmergy.rs`) or a kern-cap unload (`GraphGnn::unload`) leaves a
+  scoped row alive in the store with its ACL intact and invisible to this
+  surface, while the edge quoting it survives untouched, because a kern hosts a
+  reason iff it hosts its `from` (`src/base/reason.rs:78`): `move_entity` leaves
+  an incoming edge in the *source* kern and `remove_entity` cascades only within
+  one kern. Reading unresolved as "allowed" would therefore let a scoped row
+  become readable **by disappearing**, with no race in it — that is the stable
+  committed post-GC state, not a window a wider lock would close.
+
+  Failing closed on it was not available: a dangling endpoint is ordinary here
+  (`Reason::to` is optional in `add_reason`), and dropping every edge with one
+  hides a public entity's own structure — default-deny becoming deny-all, which
+  is the failure the four pre-existing tests exist to catch and which they do
+  catch. So the verdict is three-valued (`Endpoint`): **Scoped** drops the edge,
+  **Public** serves it whole, **Unresolved** serves the edge with its `text`
+  withheld. The text is what carries the disclosure — up to 500 chars of both
+  endpoints via `explain_relationship_prompt` — and the ids that remain are
+  `content_hash(text)`, which at worst confirms a guessed text. `resource_reason`
+  runs the same rule with one asymmetry: `from` fails closed on Unresolved too,
+  because it is the entity the edge hangs off and one that did not resolve is not
+  one that said the read was allowed.
+
+  Also decided: **both** ends of an edge are gated, not just `from`. Gating
+  `from` alone still served `reason://{id}` for an edge whose `to` was scoped,
+  naming the scoped id outright beside text written from it.
+
+  Not closed, and named rather than waved off: `kern://local/health` and
+  `kern://local/kerns` count every entity and reason, scoped included
+  (`graph_health_stats`, `src/base/health.rs:44-50`), so a scoped ingest moves a
+  number. No ids, no text, and the same count the operational `health` tool
+  reports — narrowing it is the separate question of what an unauthenticated
+  operational surface may say. Gossip egress still replicates scoped entities
+  ungated, and `Reason` still carries no ACL of its own, so every reader
+  re-derives the verdict from the endpoints; storing it at write time is the real
+  fix. Item 18 stays open on those and on principal arrival.
+
+  Seven unit tests, one per guard: each guard mutated away fails exactly its own
+  test and no other. The four pre-existing resources tests are byte-identical.
+  Baseline 891 → 898.
 - 2026-07-21 — merged item 29, which closed unbuilt and shipped a different fix.
   176 + 1 + this one = 178, by the union rebuild rather than a hand-spliced
   conflict hunk.

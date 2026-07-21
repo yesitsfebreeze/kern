@@ -214,7 +214,7 @@ pub fn delivery_cap(cfg: &RetrievalConfig) -> usize {
 // is to GC alone — a scoped Fact is withheld from a non-member exactly like a
 // scoped Claim.
 fn acl_admits(acl: &Acl, principals: &[String]) -> bool {
-	if acl.scope.is_empty() && acl.users.is_empty() && acl.groups.is_empty() {
+	if acl.is_public() {
 		return true;
 	}
 	principals
