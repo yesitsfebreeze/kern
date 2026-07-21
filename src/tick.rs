@@ -611,7 +611,7 @@ mod tests {
 				id.clone(),
 				Entity {
 					id,
-					vector: vec![1.0, 0.0],
+					vector: vec![1.0, 0.0].into(),
 					..Default::default()
 				},
 			);
@@ -636,7 +636,7 @@ mod tests {
 				id.clone(),
 				Entity {
 					id,
-					vector: vec![0.0, 1.0],
+					vector: vec![0.0, 1.0].into(),
 					..Default::default()
 				},
 			);
@@ -708,7 +708,7 @@ mod tests {
 				id.clone(),
 				Entity {
 					id,
-					vector: vec![0.0, 1.0],
+					vector: vec![0.0, 1.0].into(),
 					..Default::default()
 				},
 			);

@@ -436,9 +436,9 @@ mod tests {
 		k.entities.insert("a".into(), ent("a", vec![1.0, 0.0]));
 		k.entities.insert("b".into(), ent("b", vec![0.0, 1.0]));
 		let mut e1 = edge("a", "b");
-		e1.vector = vec![0.5, 0.5];
+		e1.vector = vec![0.5, 0.5].into();
 		let mut e2 = edge("b", "a");
-		e2.vector = vec![0.4, 0.6];
+		e2.vector = vec![0.4, 0.6].into();
 		add_reason(&mut k, e1);
 		add_reason(&mut k, e2);
 		g.kerns.insert("k".into(), k);

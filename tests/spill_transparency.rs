@@ -46,8 +46,8 @@ fn build(dir: &std::path::Path, threshold: usize) -> GraphGnn {
 		let v = sparse_vec(i);
 		let e = Entity {
 			id: format!("e{i:07}"),
-			gnn_vector: v.clone(),
-			vector: v,
+			gnn_vector: v.clone().into(),
+			vector: v.into(),
 			kind: EntityKind::Claim,
 			chunks: vec![ChunkPart {
 				kind: ChunkPartKind::Context,

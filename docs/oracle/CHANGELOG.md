@@ -69,6 +69,158 @@
   not it, and the first conclusion was withdrawn when its revert-check would not
   fail.
 
+- 2026-07-22 — item 92 updated in place rather than rewritten, and retitled to
+  name the mechanism: "Tests that race a backward-stepping `CLOCK_REALTIME`".
+  The item had guessed wall-clock *lag under load*; the cause is the clock
+  stepping backwards ~2.8 s every ~30 s, found in an unrelated file.
+
+  The guess and the finding are both kept, because the difference between them
+  is the useful part. Lag would have been fixed by widening the margin — the
+  item said so. A backward step cannot be: widening only lengthens the odds,
+  since the trigger recurs every half-minute regardless of how long the margin
+  is. Same symptom, opposite remedy.
+
+  It also explains the evidence that made the item look unresolvable. Six
+  consecutive clean runs disproved nothing against a trigger firing twice a
+  minute, and the correlation was never with load — it was with a long preceding
+  test, which simply spans more backward steps. Filing that disagreement instead
+  of resolving it early is why the entry needed an update rather than a
+  correction.
+
+  Decided by: verify-before-claiming — an unconfirmed mechanism was labelled
+  unconfirmed, and survived contact with the real one.
+
+- 2026-07-22 — a flake fix arrived in the MAIN checkout, not a worktree, and
+  `cycle.sh reap` refused to run because of it — correctly, and that refusal is
+  the reason this is a note rather than a silent clobber. Three cycles were live
+  at the time; reaping into a dirty tree would have mixed an unattributed change
+  into someone else's merge.
+
+  The change itself is good and is kept.
+  `the_poll_loop_resolves_its_deadline_per_pass_not_once_at_startup` slept two
+  seconds on the monotonic clock and compared against `valid_until`, an absolute
+  `SystemTime`. It now waits on the wall clock and restarts its marker if the
+  clock steps backwards, with a thirty-second monotonic cap so a stopped clock
+  fails loudly instead of hanging.
+
+  The environmental finding is worth more than the fix: **this box steps
+  `CLOCK_REALTIME` backwards roughly 2.8 s every 30 s.** That is almost certainly
+  the mechanism behind ROADMAP item 92 — `e2e/test_retention.py` failing
+  intermittently under load, which three observers could not reproduce on demand
+  and which was filed with deliberately conflicting evidence. Item 92 guessed
+  "wall-clock lag under load on WSL2". It was not lag; it is the clock going
+  backwards. Any test comparing a monotonic sleep against a `SystemTime` deadline
+  on this host is a coin flip, and there are others.
+
+  What is not fine is the delivery. A writer outside the worktrees is invisible
+  to the claim ledger, so two of today's collisions and now this all share one
+  cause: the isolation only binds writers that go through it. The reap gate
+  caught this one because a dirty tree is loud. A change committed straight to
+  master would not have been.
+
+  Decided by: verify-before-claiming — the change was verified green and kept on
+  its merits, and the way it arrived is recorded separately from whether it was
+  right.
+
+- 2026-07-22 — three ROADMAP headings still named defects that had been closed,
+  and the heading is the index. Items 28, 29 and 95 all carried struck-through
+  bodies marked closed while their titles read "GNN training runs synchronously
+  on the tick", "a spilled kern still carries two resident indexes" and "the file
+  watcher bypasses clamp_confidence entirely". Every one of those is now false.
+
+  This matters more than a tidy-up because of how the list is actually used.
+  Slice selection each cycle starts with `grep "^### "` — the titles are what a
+  reader scans and what a dispatcher picks from. A body that says "closed" behind
+  a title that says "broken" is invisible to the only step that reads the file at
+  scale, and the cost is a cycle dispatched at work already done. That nearly
+  happened here: 28, 29 and 95 were all live candidates on this fire's shortlist.
+
+  Retitled to name what REMAINS, following item 27's precedent ("GC eviction pays
+  one LMDB commit per victim" after two of its four bullets closed). 28 becomes
+  the 79.7s propagation cost, 29 becomes the measured refusal, 95 states it is
+  closed. The rule the file needs and now has three examples of: **when an item
+  narrows, the title narrows with it** — a title describing the original defect
+  outlives the defect.
+
+  Decided by: fix-the-root — the stale titles were not the error, the error was
+  updating bodies without updating the index that points at them.
+
+- 2026-07-22 — item 95 closed: ingest confidence is clamped by a guard every
+  producer must pass, not by a convention each one remembers. Verified first —
+  the watcher's raw `1.0` really did land on Beta(2,1) = 0.6667, a human CLI
+  claim's posterior and above the 0.6500 a deliberate MCP agent gets.
+
+  The item proposed clamping inside `Worker::submit`. That shape was too narrow:
+  `intake.rs`'s `drain_document` minted a raw `1.0` through `run`, so fixing
+  `submit` would have closed one of two live holes and left the identical defect
+  one method over. The clamp went into `Worker`'s private `job()` instead — now
+  the only place a `Job` is built, with `run_with_acl` no longer assembling one
+  by hand — and every entrance takes a `source_tag` it cannot omit. A producer
+  is now asked "who is asserting this?" by the compiler.
+
+  The tag is the channel, `source.scheme()`: not `USER_SOURCE`, because no human
+  asserted a file that changed on disk; not `AGENT_SOURCE`, because an agent's
+  ceiling belongs to a deliberate assertion and a file appearing is not one. No
+  new `"watcher"` constant, because `clamp_confidence` separates only
+  `USER_SOURCE` from everything else — a second name for the same 0.95 would be
+  the label-that-weights-nothing item 20 already refused. The two paths that know
+  their principal name it: CLI `USER_SOURCE`, MCP and direct-intake replay
+  `AGENT_SOURCE`.
+
+  Ranking moved for `Document`s (0.6667 → 0.6500) and not at all for the recall
+  corpus, which is CLI-ingested: 0.9306 / 0.9722 / 0.9471 before and after,
+  bit-identical to the worst-probe list. The recorded baseline stands unchanged.
+  Supersedes item 20's claim that a user-authored claim does not outrank an
+  auto-ingested one — it now does, by 2.6%, which is a rounding error and not
+  yet a trust model.
+
+  Decided by: fix-the-root
+
+- 2026-07-21 — item 83's double-storage half: one vector, shared, 185.6 MB off
+  the resident total, paid for with 9% on the index walk.
+
+  Item 29 measured that the kern map was the largest resident holder and said
+  why: every vector was stored twice, once in `Kern::entities`/`reasons` and
+  once in the index pointing at it. The premise was checked before anything was
+  built, because six of nine slices that day ended somewhere other than their
+  title pointed. It held — `index_kern_into` passed `t.vector.clone()` to each
+  index and `HnswNode` kept that clone verbatim under the shipped default
+  `QuantizationMode::None`, so the two really were the same floats rather than a
+  normalised copy and a raw one. Under the opt-in `int8` mode the node's float
+  vector was already empty; this change buys nothing there, which is worth
+  knowing before someone re-measures under `kern compress`.
+
+  `Entity::vector`, `Entity::gnn_vector` and `Reason::vector` are now
+  `Embedding = Arc<[f32]>`. `Arc` beat the alternatives on the risk it does
+  *not* carry: it has no `DerefMut`, so an in-place write through one holder
+  that the other would see is a compile error, and the compiler enumerated the
+  ~20 write sites rather than a human doing it. A slab index would have made the
+  same aliasing bug silently expressible and would additionally be meaningless
+  outside the owning graph, where entities are cloned, merged from peers and
+  spilled cold. Borrowing was never available: one struct owns both the map and
+  the index.
+
+  **The trade, stated rather than buried.** Hot RSS at 50k entities x dim 384
+  plus 25k reasons: 510.2 MB → 324.6 MB, −185.6 MB, −36.4%, ten interleaved
+  before/after process pairs with 0.5 MB of spread. Query cost, same runs:
+  +17 µs median on a ~190 µs index walk, +9%, slower in 11 of 15 pairs. Not the
+  refcount — never read on the hot path — and not the indirection; most likely
+  locality, since the index's vectors were allocated together during its build
+  and now point into the scattered kern map. That mechanism is a hypothesis the
+  measurement cannot settle: the host ran at load average 4-6 and the before-arm
+  spread was the same order as the effect.
+
+  Recall is unchanged to four decimals (0.9306 / 0.9722 / 0.9471), which is the
+  evidence that the two copies were identical and nothing depended on a
+  difference between them.
+
+  Supersedes item 29's "halving that needs shared ownership ... across ~20 write
+  sites" as unfunded. Item 83 stays open on the half that matters most: nothing
+  bounds the resident set, and a smaller O(N) term is a later ceiling, not a
+  ceiling.
+
+  Decided by: name-the-tradeoff — the memory win does not get to be reported
+  without the latency it cost.
 - 2026-07-21 — `4e836bb`'s subject is wrong in the same way `3529fce`'s was, and
   twice makes it a pattern with a clean cause. It reads "source-trust weighting —
   a user-authored claim should outrank an auto-ingested one at equal heat,

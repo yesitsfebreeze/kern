@@ -23,7 +23,7 @@ fn beta_params_from_confidence(conf: f32) -> (f32, f32) {
 fn new_statement_entity(
 	id: String,
 	text: &str,
-	vector: Vec<f32>,
+	vector: Embedding,
 	kind: EntityKind,
 	source: Source,
 	external_id: String,
@@ -48,7 +48,7 @@ fn new_statement_entity(
 			index: 0,
 		}],
 		vector,
-		gnn_vector: Vec::new(),
+		gnn_vector: Embedding::default(),
 		score: 0.0,
 		conf_alpha,
 		conf_beta,
@@ -108,7 +108,7 @@ pub(crate) async fn place_document(
 	let mut thought = new_statement_entity(
 		doc_id.to_string(),
 		&job.text,
-		vec,
+		vec.into(),
 		kind,
 		job.source.clone(),
 		external_id,
@@ -246,7 +246,7 @@ pub fn build_chunk_entity(
 	new_statement_entity(
 		util::content_hash(text),
 		text,
-		vec.to_vec(),
+		vec.to_vec().into(),
 		kind,
 		source.clone(),
 		external_id.to_string(),
@@ -352,7 +352,7 @@ mod tests {
 			"id is the content hash"
 		);
 		assert_eq!(e.statements, vec!["hello world".to_string()]);
-		assert_eq!(e.vector, vec![0.1, 0.2, 0.3]);
+		assert_eq!(e.vector[..], [0.1, 0.2, 0.3]);
 		assert_eq!(e.external_id, "sec#chunk0");
 		assert_eq!(e.unlinked_count, 0);
 		assert!(matches!(e.kind, EntityKind::Claim));
@@ -701,7 +701,8 @@ mod tests {
 	fn hide_from_gate_one(g: &Arc<RwLock<GraphGnn>>, sid: &str) {
 		let mut gg = g.write();
 		gg.entity_idx.delete(sid);
-		gg.gnn_entity_idx.insert(sid.to_string(), DUP_VEC.to_vec());
+		gg.gnn_entity_idx
+			.insert(sid.to_string(), DUP_VEC.to_vec().into());
 		assert!(
 			gg.entity_idx.is_empty(),
 			"fixture is only honest while gate 1 has nothing left to hit"

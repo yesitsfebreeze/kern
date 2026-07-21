@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::base::constants::AGENT_SOURCE;
 use crate::base::types::{Acl, EntityKind, Source};
 use crate::base::util;
 use crate::ingest::outcome::OutcomeStatus;
@@ -87,6 +88,9 @@ pub async fn drain_direct_once(
 				job.kind,
 				job.hint,
 				job.confidence,
+				// The payload was minted by the MCP tool and already clamped there;
+				// naming the same principal across the durable hop keeps it clamped.
+				AGENT_SOURCE,
 				job_cfg,
 				job.acl,
 			)

@@ -11,7 +11,7 @@ pub struct HnswHit {
 }
 
 struct HnswNode {
-	vec: Vec<f32>,
+	vec: super::types::Embedding,
 	qvec: Option<QuantizedVec>,
 	layers: Vec<Vec<u32>>,
 }
@@ -163,14 +163,14 @@ impl HnswIndex {
 		self.free.append(&mut self.pending_scrub);
 	}
 
-	pub fn insert(&mut self, id: String, vec: Vec<f32>) {
+	pub fn insert(&mut self, id: String, vec: super::types::Embedding) {
 		if vec.is_empty() || self.slot_of.contains_key(&id) {
 			return;
 		}
 		let level = self.level_for(&id);
 		let (stored_vec, qvec) = match self.quant_mode {
 			QuantizationMode::Int8 | QuantizationMode::Binary => (
-				Vec::new(),
+				super::types::Embedding::from(&[][..]),
 				Some(QuantizedVec::encode(&vec, self.quant_mode)),
 			),
 			_ => (vec.clone(), None),
@@ -675,10 +675,10 @@ mod tests {
 		let mut fwd = HnswIndex::new(16, 128);
 		let mut rev = HnswIndex::new(16, 128);
 		for (id, v) in &corpus {
-			fwd.insert(id.clone(), v.clone());
+			fwd.insert(id.clone(), v.clone().into());
 		}
 		for (id, v) in corpus.iter().rev() {
-			rev.insert(id.clone(), v.clone());
+			rev.insert(id.clone(), v.clone().into());
 		}
 		for (id, _) in &corpus {
 			assert_eq!(
@@ -695,7 +695,7 @@ mod tests {
 		let build = || {
 			let mut idx = HnswIndex::new(16, 128);
 			for (id, v) in &corpus {
-				idx.insert(id.clone(), v.clone());
+				idx.insert(id.clone(), v.clone().into());
 			}
 			idx.structure_digest()
 		};
@@ -712,9 +712,9 @@ mod tests {
 	#[test]
 	fn inserts_and_finds_exact_nearest() {
 		let mut idx = HnswIndex::new(8, 64);
-		idx.insert("x".into(), vec![1.0, 0.0, 0.0]);
-		idx.insert("y".into(), vec![0.0, 1.0, 0.0]);
-		idx.insert("z".into(), vec![0.0, 0.0, 1.0]);
+		idx.insert("x".into(), vec![1.0, 0.0, 0.0].into());
+		idx.insert("y".into(), vec![0.0, 1.0, 0.0].into());
+		idx.insert("z".into(), vec![0.0, 0.0, 1.0].into());
 		let hits = idx.search(&[0.9, 0.1, 0.0], 1, 16);
 		assert_eq!(hits[0].id, "x", "nearest by cosine is x");
 	}
@@ -722,8 +722,8 @@ mod tests {
 	#[test]
 	fn delete_removes_node_from_results() {
 		let mut idx = HnswIndex::new(8, 64);
-		idx.insert("x".into(), vec![1.0, 0.0]);
-		idx.insert("y".into(), vec![0.0, 1.0]);
+		idx.insert("x".into(), vec![1.0, 0.0].into());
+		idx.insert("y".into(), vec![0.0, 1.0].into());
 		idx.delete("x");
 		assert!(idx.search(&[1.0, 0.0], 5, 16).iter().all(|h| h.id != "x"));
 	}
@@ -734,7 +734,7 @@ mod tests {
 		let corpus = random_corpus(3, 200, dim);
 		let mut idx = HnswIndex::new(16, 128);
 		for (id, v) in &corpus {
-			idx.insert(id.clone(), v.clone());
+			idx.insert(id.clone(), v.clone().into());
 		}
 		let slots_before = idx.arena_slots();
 
@@ -745,7 +745,7 @@ mod tests {
 			idx.delete(&victim.0);
 			let nv = rand_vec(&mut rng, dim);
 			let nid = format!("new{i}");
-			idx.insert(nid.clone(), nv.clone());
+			idx.insert(nid.clone(), nv.clone().into());
 			live.push((nid, nv));
 		}
 
@@ -779,7 +779,7 @@ mod tests {
 		let corpus = random_corpus(7, 300, dim);
 		let mut idx = HnswIndex::new(16, 128);
 		for (id, v) in &corpus {
-			idx.insert(id.clone(), v.clone());
+			idx.insert(id.clone(), v.clone().into());
 		}
 		let k = 10;
 		let queries = 25;
@@ -801,7 +801,7 @@ mod tests {
 		let corpus = random_corpus(2024, 400, dim);
 		let mut idx = HnswIndex::new(24, 200);
 		for (id, v) in &corpus {
-			idx.insert(id.clone(), v.clone());
+			idx.insert(id.clone(), v.clone().into());
 		}
 		let k = 5;
 		let mut qrng = rand::rngs::StdRng::seed_from_u64(2025);
@@ -832,7 +832,7 @@ mod tests {
 		let corpus = random_corpus(21, 240, dim);
 		let mut idx = HnswIndex::new(16, 128);
 		for (id, v) in &corpus {
-			idx.insert(id.clone(), v.clone());
+			idx.insert(id.clone(), v.clone().into());
 		}
 		let keep = |id: &str| {
 			id.trim_start_matches('v')
@@ -870,8 +870,8 @@ mod tests {
 	#[test]
 	fn search_filtered_reject_all_is_empty() {
 		let mut idx = HnswIndex::new(8, 64);
-		idx.insert("a".into(), vec![1.0, 0.0]);
-		idx.insert("b".into(), vec![0.0, 1.0]);
+		idx.insert("a".into(), vec![1.0, 0.0].into());
+		idx.insert("b".into(), vec![0.0, 1.0].into());
 		assert!(idx
 			.search_filtered(&[1.0, 0.0], 5, 32, &|_| false)
 			.is_empty());
@@ -883,7 +883,7 @@ mod tests {
 		let corpus = random_corpus(8, 200, dim);
 		let mut idx = HnswIndex::new(16, 128);
 		for (id, v) in &corpus {
-			idx.insert(id.clone(), v.clone());
+			idx.insert(id.clone(), v.clone().into());
 		}
 		let target = "v137";
 		let qv = corpus
@@ -903,8 +903,8 @@ mod tests {
 		let mut f64_idx = HnswIndex::new(16, 128);
 		let mut i8_idx = HnswIndex::with_mode(16, 128, QuantizationMode::Int8);
 		for (id, v) in &corpus {
-			f64_idx.insert(id.clone(), v.clone());
-			i8_idx.insert(id.clone(), v.clone());
+			f64_idx.insert(id.clone(), v.clone().into());
+			i8_idx.insert(id.clone(), v.clone().into());
 		}
 		let k = 10;
 		let queries = 25;
@@ -938,8 +938,8 @@ mod tests {
 		let mut f64_idx = HnswIndex::new(16, 128);
 		let mut bin_idx = HnswIndex::with_mode(16, 128, QuantizationMode::Binary);
 		for (id, v) in &corpus {
-			f64_idx.insert(id.clone(), v.clone());
-			bin_idx.insert(id.clone(), v.clone());
+			f64_idx.insert(id.clone(), v.clone().into());
+			bin_idx.insert(id.clone(), v.clone().into());
 		}
 		let k = 10;
 		let queries = 25;
@@ -976,7 +976,7 @@ mod tests {
 		for i in 0..12 {
 			ix.insert(
 				format!("e{i}"),
-				rand_vec(&mut rand::SeedableRng::seed_from_u64(i), 8),
+				rand_vec(&mut rand::SeedableRng::seed_from_u64(i), 8).into(),
 			);
 		}
 		let before = ix.len();
@@ -992,7 +992,7 @@ mod tests {
 		// The next insert drains the queue before it can take the slot.
 		ix.insert(
 			"fresh".into(),
-			rand_vec(&mut rand::SeedableRng::seed_from_u64(99), 8),
+			rand_vec(&mut rand::SeedableRng::seed_from_u64(99), 8).into(),
 		);
 		assert!(
 			ix.pending_scrub.is_empty(),
@@ -1014,7 +1014,7 @@ mod tests {
 		for i in 0..12 {
 			ix.insert(
 				format!("e{i}"),
-				rand_vec(&mut rand::SeedableRng::seed_from_u64(i), 8),
+				rand_vec(&mut rand::SeedableRng::seed_from_u64(i), 8).into(),
 			);
 		}
 		for i in [2u64, 4, 6, 8] {
@@ -1024,7 +1024,7 @@ mod tests {
 
 		ix.insert(
 			"fresh".into(),
-			rand_vec(&mut rand::SeedableRng::seed_from_u64(77), 8),
+			rand_vec(&mut rand::SeedableRng::seed_from_u64(77), 8).into(),
 		);
 
 		assert!(ix.pending_scrub.is_empty(), "one pass drained all four");

@@ -288,7 +288,7 @@ larger than the feature. The behaviour is pinned by
 **Still open, deliberately deferred:** does the file watcher give `Document`
 entities a tenant-default ACL, or leave them public? Recommend configurable,
 default public-within-tenant, since the tenant boundary is the process.
-`src/ingest/file_watcher.rs:150` hardcodes `Acl::default()` — which is that
+`src/ingest/file_watcher.rs:158` hardcodes `Acl::default()` — which is that
 recommended default — and `Worker::enqueue`'s public delegation keeps it there
 until the decision is made.
 
@@ -413,12 +413,13 @@ distinction nothing records.
 Nor does confidence stand in for it. `clamp_confidence`
 (`src/base/math.rs:201`) caps a non-`USER_SOURCE` write at `MAX_AI_CONFIDENCE`,
 which after `beta_params_from_confidence` (`src/ingest/place.rs:16`) is a 0.667
-against 0.650 posterior — a 2.6% edge over an MCP agent, and none at all over
-the file watcher, which submits `1.0` (`src/ingest/file_watcher.rs:77-83`)
-without passing through the clamp. The item's own headline — a user-authored
-claim outranking an auto-ingested one at equal heat — is therefore still false
-by default; `source_trust = { file = 0.8 }` is now the way to make it true, and
-it is the channel it penalises, not the author.
+against 0.650 posterior — a 2.6% edge over an MCP agent, and since item 95 the
+same 2.6% over the file watcher, whose `tag` is now its `source` `scheme`
+(`src/ingest/file_watcher.rs:80`) instead of a raw `1.0`. So the item's
+own headline — a user-authored claim outranking an auto-ingested one at equal
+heat — is true by default at last, but only by 2.6%, which is a rounding error
+rather than a trust model. `source_trust = { file = 0.8 }` is how to make it
+mean something, and it is the channel it penalises, not the author.
 
 The blocker is an author principal on `Entity`, stamped at each write path — a
 new field, so a store format bump, and it belongs with whoever holds
@@ -693,7 +694,7 @@ for reuse (`src/base/hnsw.rs:136-149`, scrub `:153`, alloc reuse `:109-125`),
 guarded by the test "deleted slots were recycled, arena did not grow" (`:755`). The cost is the
 scan, not the accumulation.
 
-### 28. GNN training runs synchronously on the tick `[lifecycle]`
+### 28. GNN training is off the tick; the propagation itself still costs 79.7s at N=4096 `[lifecycle]`
 
 ~~`TaskKind::GnnPropagate => do_gnn_propagate(...)` runs inline in `process_task`
 on the single tick loop, stalling large kerns.~~ **(closed 2026-07-21.)** The
@@ -750,7 +751,7 @@ reads, so it is its own item with its own recall gate, not a rider on this one.
 Also unaddressed: `gnn_train_refused` reaches MCP health only — `kern status`
 and the RPC `HealthRes` do not carry it.
 
-### 29. A spilled kern still carries two resident indexes `[retrieval]`
+### 29. Spilling all three indexes was measured and refused; it costs 122 MB more `[retrieval]`
 
 ~~DiskANN spill is entity-index-only, so the memory ceiling is pushed back, not
 removed.~~ **The premise is true and the remedy is refused, measured 2026-07-21.**
@@ -818,32 +819,50 @@ resident set, `disk_threshold` defaults to `KERN_CAP_DISABLED`
 (`src/config/graph.rs:20`) with no auto-tuning and no signal on approach, and the
 double-storage in finding 3 is the actual O(N) term.
 
-### 95. The file watcher bypasses `clamp_confidence` entirely `[ingest]`
+### 95. Every ingest entrance now clamps — closed 2026-07-22 `[ingest]`
 
-`file_watcher.rs` calls `worker.submit(..., 1.0, ...)` and neither
-`Worker::submit` nor `run` nor `enqueue` contains a `clamp_confidence` call —
-verified by grep, not inferred. Every other minting path routes through it:
-`cmd_ingest` uses `clamp_confidence(1.0, "user")`, the MCP tool uses
-`clamp_confidence(p.conf, AGENT_SOURCE)` which caps at `MAX_AI_CONFIDENCE`.
+~~**A raw 1.0 from the watcher.**~~ **Done 2026-07-22.** Confirmed before fixing:
+the sink submitted `1.0`, reaching `beta_params_from_confidence` unclamped and
+landing on Beta(2,1) = 0.6667 — exactly a human CLI claim's posterior, and above
+the 0.6500 (Beta(1.95,1.05)) a deliberate MCP agent assertion gets. A file
+appearing on disk outranked an agent that asserted something on purpose.
 
-So an auto-ingested `Document` reaches `beta_params_from_confidence` with a raw
-1.0 and lands on Beta(2,1) = 0.6667 — **exactly the posterior of a human's CLI
-claim**, and above the 0.6500 an MCP agent gets after clamping. A file appearing
-on disk is trusted more than an agent that asserted something deliberately.
+**The bypass was wider than the title.** `intake.rs`'s `drain_document` minted a
+raw `1.0` for a `Source::File` `Document` too, through `run` rather than
+`submit`. Clamping inside `Worker::submit` alone — the shape this item proposed —
+would have closed one of two live holes and left the other, which is the same
+"a convention each caller remembers" failure one method further down.
 
-Found while establishing whether confidence already encodes source trust for
-item 20. It does not, and this is why: item 20's headline — "a user-authored
-claim should outrank an auto-ingested one at equal heat" — is false today, and
-the clamp is the mechanism that was supposed to make it true.
+So the guard went one level lower: `Worker`'s private `job()`
+(`src/ingest/worker.rs:38`) is now the ONLY place a `Job` is built — `run_with_acl`
+no longer assembles one by hand — and it clamps. Every entrance
+(`enqueue`, `enqueue_with_acl`, `submit`, `run`, `run_with_acl`) takes a
+`source_tag` it cannot omit, so a future producer is asked "who is asserting
+this?" by the compiler rather than by a convention. The clamp takes the
+confidence only; `kind` stays the producer's, or a watched file would be
+reclassified from `Document` to `Claim`.
 
-Not fixed alongside item 20 because it **moves ranking**. Clamping the watcher
-changes the posterior of every `Document` in a corpus that has one, so it needs
-its own recall gate and its own before/after, which item 20's bit-identity bar
-explicitly forbade. Two candidate closures: route the watcher through
-`clamp_confidence` with a watcher-specific source tag, or move the clamp inside
-`Worker::submit` so no caller can skip it. The second is the fix-the-root shape
-— a guard every path must pass rather than one each caller must remember — and
-it is the reason this defect existed at all.
+**The `tag` is the channel, `source.scheme()`** — `"file"` for the watcher
+(`src/ingest/file_watcher.rs:80`) and for the intake drain. Not `USER_SOURCE`:
+no human asserted it. Not `AGENT_SOURCE`: an agent's ceiling belongs to a
+deliberate assertion by a non-human principal, and a file changing on disk is
+not an assertion at all. No new `"watcher"` constant either — `clamp_confidence`
+only separates `USER_SOURCE` from everything else, so a new tag would be a
+second name for the same 0.95 ceiling, exactly the label-that-weights-nothing
+item 20 refused. `scheme()` is already what `RetrievalConfig::source_trust`
+keys on, so `source_trust = { file = ... }` is the lever that actually separates
+watcher from agent. The two paths that DO know their principal name it
+explicitly, because `Source` cannot record an author (item 20's open blocker):
+the CLI passes `USER_SOURCE`, MCP and the direct-intake replay pass
+`AGENT_SOURCE`.
+
+**Ranking moved for `Document`s, and not at all for the recall corpus.** A
+watcher or intake `Document` drops 0.6667 → 0.6500; `e2e` recall is unchanged at
+0.9306 / 0.9722 / 0.9471, bit-identical including the worst-probe list, because
+that corpus is ingested through `kern ingest` — the one path that still mints
+1.0. The recorded baseline therefore stands as measured; nothing to update.
+
+Deciding behavior: fix-the-root.
 
 ### 30. Ingest queue `enqueue` detaches with no backpressure `[ingest]`
 
@@ -854,13 +873,13 @@ changed: not a silent drop but unbounded growth. `tokio`'s `send` only errors on
 a closed channel, so every detached task *parked* on a full queue holding its
 whole text — 500 offered to a stalled worker, 500 accepted, nothing refused, and
 that is the failure the new test reproduces when the bound is removed. Now
-`QUEUE_CAP` is the whole bound (`src/ingest/worker.rs:61`): `try_send` refuses
+`QUEUE_CAP` is the whole bound (`src/ingest/worker.rs:72`): `try_send` refuses
 the newest job rather than detaching (`:128`), the refusal is counted
 (`:131`) and reaches every health surface as `ingest_queue_refused`
 (`src/base/health.rs:81`, `src/mcp.rs:145`, `src/commands/admin.rs:85`). The
 one producer that must not be refused waits instead — `submit` awaits capacity
-(`src/ingest/worker.rs:149`) and the file-watcher sink calls it
-(`src/ingest/file_watcher.rs:77`), because a watcher record has no durable
+(`src/ingest/worker.rs:175`) and the file-watcher sink calls it
+(`src/ingest/file_watcher.rs:84`), because a watcher record has no durable
 backstop; the MCP RAM-queue fallback gets a `tool_error`
 (`src/mcp/tools_mutate.rs:331`). Still distinct from the *tick* queue, which is
 bounded at 512 (`FEATURES.md:434-435`).
@@ -1616,7 +1635,7 @@ What survives: the by-name discipline. It is cheap, it catches mode 1
 independently of the build layout, and it is what confirmed both cycles that
 found this.
 
-### 92. `test_retention` fails under load and nobody had written it down `[eval]`
+### 92. Tests that race a backward-stepping `CLOCK_REALTIME` — mechanism found, `test_retention` unfixed `[eval]`
 
 `e2e/test_retention.py::test_a_retention_expires_the_fact_out_of_query_results`
 fails intermittently, and only when the CPU-heavy `test_recall.py` runs before
@@ -1626,12 +1645,32 @@ consecutive `pytest -q e2e/test_recall.py e2e/test_retention.py` runs on
 pristine code, all green. So it is real, load-dependent, and not reliably
 reproducible on demand — which is the worst shape a test can have.
 
-Suspected mechanism, unconfirmed: the test sleeps on Python's `time.sleep`
-(monotonic) and compares against kern's `SystemTime::now()` (wall clock) with a
-2-second margin. Under load on WSL2 the wall clock lags the sleep and the fact
-has not expired yet when the assertion runs. If that is right, the fix is to
-make the margin generous or to drive expiry from an injected instant rather than
-from elapsed real time — a test that races the clock will keep doing so.
+**Mechanism identified 2026-07-22, and it is not what this item guessed.** The
+guess was "under load on WSL2 the wall clock lags the sleep". It does not lag —
+**this host steps `CLOCK_REALTIME` backwards by roughly 2.8 s every 30 s.** Found
+while fixing the same class of failure in
+`the_poll_loop_resolves_its_deadline_per_pass_not_once_at_startup`
+(`src/ingest/intake.rs`), where a two-second monotonic sleep could advance
+realtime by under a second.
+
+That explains everything the original entry recorded as puzzling: why it fails
+only sometimes, why it correlates with a long preceding test rather than with
+load as such (a longer run spans more backward steps), and why three observers
+could not reproduce it on demand — six consecutive clean runs is an ordinary
+outcome when the trigger fires every half-minute against a two-second margin.
+
+So the shape of the fix is settled: **any test comparing a monotonic sleep
+against a `SystemTime` deadline on this host is a coin flip**, and widening the
+margin only lengthens the odds. `intake.rs` now waits on the wall clock itself,
+restarting its marker when the clock steps back and capping on the monotonic
+clock so a stopped clock fails loudly rather than hanging. `e2e/test_retention.py`
+wants the same treatment, or an injected instant.
+
+Worth noting what this cost: the item was filed with deliberately conflicting
+evidence — two observations of failure against six clean runs — because neither
+"flaky" nor "fine" was established. Recording the disagreement rather than
+resolving it early is what left the entry accurate enough to update rather than
+rewrite when the real cause turned up in an unrelated file.
 
 It ranks here rather than in a retrieval tier because retention itself is not
 suspected; the harness is. It is written down because the cost is not the
@@ -1708,8 +1747,8 @@ itself is pinned — `content_hash` (`src/base/util.rs:3`) is sha256-to-lowercas
 and `util.rs:155` asserts length, alphabet and determinism. What is unpinned is
 every *composition* feeding it, and each one is a different format string: entity
 ids are `content_hash(text)` bare (`src/ingest/place.rs`,
-`src/ingest/file_watcher.rs:129`, `src/ingest/direct.rs:31`,
-`src/ingest/worker.rs:125`), `Source::source_id` is
+`src/ingest/file_watcher.rs:137`, `src/ingest/direct.rs:32`,
+`src/ingest/worker.rs:148`), `Source::source_id` is
 `scheme \x00 object \x00 section` (`src/base/types.rs:257-269`), child and named
 ids are `parent_id + nonce` and `parent_id + name + nonce`
 (`types.rs:502`, `:507`), and the HNSW canon has its own (`src/base/hnsw.rs:525`).
@@ -1772,6 +1811,51 @@ unchanged: a safe cap plus an escalation policy. The comment's "currently unsafe
 is a real reason nothing is set — eviction drops unpersisted `children` pushes
 (`src/config/graph.rs:16-17`).
 
+**The double-storage half shipped 2026-07-21; the bounding half is untouched.**
+Item 29 finding 3 assigned it here: every vector was resident twice. Verified
+before building rather than assumed — `index_kern_into` handed the index
+`t.vector.clone()` (`src/base/graph.rs:34`, `gnn_vector` `:38`, reasons `:46`)
+and `HnswNode` stored that clone verbatim, because the shipped default is
+`QuantizationMode::None` (`src/quant.rs:8-9`; int8 is opt-in through
+`kern compress`, and under it the node's float vector was already empty, so this
+buys nothing there). The two copies were the same floats, not a normalised one
+and a raw one — recall is unmoved to four decimals across the change, which is
+the check that would have caught it had they differed. `Entity::vector`,
+`Entity::gnn_vector` and `Reason::vector` are now `Embedding`
+(`src/base/types.rs:586`) and every index holds the map's own allocation.
+
+Measured with `tests/spill_memory.rs` in `resident` mode — 50k entities at dim
+384 each carrying `vector` AND `gnn_vector`, plus 25k reasons, one process per
+reading, ten interleaved before/after pairs in release:
+
+| | hot RSS | index walk, median |
+| --- | --- | --- |
+| before | 510.2 MB | 190 µs |
+| after | **324.6 MB** | 211 µs |
+
+**−185.6 MB, −36.4%**, with 0.5 MB of spread across ten runs. The three
+`*_only` rows are the control — they still copy, and the type now makes that
+copy visible as a `to_vec` (`src/base/graph.rs:336` does the same for the
+DiskANN build input) — and they moved ≤1.3 MB, which is the `Arc` header on
+125k allocations.
+
+The cost is query latency, and naming it is the point: **+17 µs median on a
+~190 µs index walk (+9%), slower in 11 of 15 paired runs.** It is not the atomic
+refcount, which is never touched on the read path, and not the indirection —
+`Arc<[f32]>` derefs exactly as `Vec<f32>` does. The likely mechanism is
+locality: the index's vectors used to be allocated together during its build and
+now point into the scattered kern map. That mechanism is unproven, and the
+measurement cannot settle it — the host carried load average 4-6 from two
+sibling cycles throughout and the before-arm spread was ±60 µs, the same order
+as the effect. What is safe to claim is that it is not a step change.
+
+Still open here, and the reason this item does not close: **nothing bounds the
+resident set.** Halving the O(N) term moves the ceiling; it does not install
+one. Also deliberately unclaimed, so that the number above measures one change:
+`do_reembed` seeds `vector` and `gnn_vector` from the same embed
+(`src/tick/tasks.rs:542-543`) and they could share a third allocation until GNN
+propagation overwrites one — another 76.8 MB at this corpus size.
+
 ### 84. Remaining operational odds and ends `[surface]`
 
 - **`serve.mcp_addr` is a config field with no reader.** Added when item 11
@@ -1804,7 +1888,7 @@ is a real reason nothing is set — eviction drops unpersisted `children` pushes
   renamed file lands as a new `Document` and the old one is neither moved nor
   removed. It duplicates only when the rename *also* edits the file — ids are
   `content_hash(text)`, so an untouched move re-resolves to the same id, while
-  `external_id` is the path (`src/ingest/file_watcher.rs:133`), so a
+  `external_id` is the path (`src/ingest/file_watcher.rs:141`), so a
   move-plus-edit gets a new id under a new external id and supersede never
   fires. It sits in this tier and not in tier 1 because the watcher is **off by
   default** — `WatcherConfig::enabled` is `false` unless a `kern.toml` sets it

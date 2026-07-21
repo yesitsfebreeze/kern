@@ -207,7 +207,7 @@ mod tests {
 	fn ent(id: &str, vector: Vec<f32>, access: u64, fact: bool) -> Entity {
 		let mut e = Entity {
 			id: id.into(),
-			vector,
+			vector: vector.into(),
 			kind: if fact {
 				EntityKind::Fact
 			} else {

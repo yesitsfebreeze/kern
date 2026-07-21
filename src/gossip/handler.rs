@@ -1151,7 +1151,7 @@ mod tests {
 			let k = graph.kerns.get_mut(&root).expect("root");
 			let mut e = Entity {
 				id: "held".into(),
-				vector: vec![1.0, 0.0],
+				vector: vec![1.0, 0.0].into(),
 				..Default::default()
 			};
 			e.gnn_vector = e.vector.clone();

@@ -42,7 +42,7 @@ mod tests {
 
 	fn scored(id: &str, vector: Vec<f32>, score: f64) -> ScoredEntity {
 		let mut entity = mk_entity(id, "t", 0.5, EntityKind::Claim);
-		entity.vector = vector;
+		entity.vector = vector.into();
 		ScoredEntity { entity, score }
 	}
 

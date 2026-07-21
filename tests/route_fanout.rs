@@ -94,7 +94,7 @@ fn entity(i: usize) -> Entity {
 	let w = words_for(i);
 	Entity {
 		id: format!("e{i:08}"),
-		vector: sparse_vec(&w),
+		vector: sparse_vec(&w).into(),
 		kind: EntityKind::Claim,
 		chunks: vec![ChunkPart {
 			kind: ChunkPartKind::Context,
@@ -247,7 +247,7 @@ fn topic_entity(t: usize, i: usize) -> Entity {
 	let refs: Vec<&str> = w.iter().map(String::as_str).collect();
 	Entity {
 		id: format!("t{t:05}_{i:05}"),
-		vector: sparse_vec(&refs),
+		vector: sparse_vec(&refs).into(),
 		kind: EntityKind::Claim,
 		chunks: vec![ChunkPart {
 			kind: ChunkPartKind::Context,

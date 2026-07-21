@@ -191,8 +191,9 @@ async fn drain_entry(
 		// bound is per-claim, because only that one the distiller can know.
 		let mut claim_cfg = cfg.clone();
 		claim_cfg.valid_from = c.valid_from;
+		let tag = src.scheme();
 		let outcome = worker
-			.run(c.text, src, EntityKind::Claim, c.kind, 0.6, claim_cfg)
+			.run(c.text, src, EntityKind::Claim, c.kind, 0.6, tag, claim_cfg)
 			.await;
 		let ok = !matches!(outcome.status, OutcomeStatus::Failed);
 		if !ok {
@@ -223,6 +224,9 @@ async fn drain_document(
 		author: String::new(),
 		url: String::new(),
 	};
+	// Same channel as the watcher, and the same reason: a file dropped into the
+	// intake asserted nothing. This path minted a raw 1.0 too.
+	let tag = src.scheme();
 	let outcome = worker
 		.run(
 			text.to_string(),
@@ -230,6 +234,7 @@ async fn drain_document(
 			EntityKind::Document,
 			String::new(),
 			1.0,
+			tag,
 			cfg.clone(),
 		)
 		.await;
@@ -716,7 +721,27 @@ mod tests {
 			"the first transcript's claim reached the graph"
 		);
 
-		tokio::time::sleep(Duration::from_secs(2)).await;
+		// Wait on the wall clock, not the monotonic one. `valid_until` is an
+		// absolute `SystemTime`, and this box steps `CLOCK_REALTIME` backwards
+		// ~2.8s every ~30s, so a monotonic sleep of two seconds can advance
+		// realtime by less than one — which reads as a deadline pinned at
+		// startup and fails a test about something else entirely.
+		let mut marker = SystemTime::now();
+		let cap = std::time::Instant::now() + Duration::from_secs(30);
+		loop {
+			match SystemTime::now().duration_since(marker) {
+				Ok(d) if d >= Duration::from_secs(2) => break,
+				// The clock stepped backwards mid-wait. Restart from the new
+				// reading: an `Err` here must not read as "the wait is over".
+				Err(_) => marker = SystemTime::now(),
+				Ok(_) => {}
+			}
+			assert!(
+				std::time::Instant::now() < cap,
+				"realtime never advanced two seconds in thirty monotonic ones"
+			);
+			tokio::time::sleep(Duration::from_millis(100)).await;
+		}
 		std::fs::write(intake.join("b.txt"), "user: q\nassistant: beta").unwrap();
 		let both = deadlines_reaching(&graph, 2).await;
 

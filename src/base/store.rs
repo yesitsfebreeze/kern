@@ -7,7 +7,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::base::log_throttle::LogThrottle;
-use crate::base::types::{Entity, Kern};
+use crate::base::types::{Embedding, Entity, Kern};
 use crate::quant::{QuantizationMode, QuantizedVec};
 
 // Headroom is a DURABILITY requirement: a full env fails even the deletes that
@@ -161,14 +161,14 @@ impl ColdRow {
 	// tier never decodes the row it belongs to. `cold_get`/`cold_all` put it back.
 	fn of(e: &Entity) -> Self {
 		let mut entity = e.clone();
-		entity.vector = Vec::new();
+		entity.vector = Embedding::default();
 		ColdRow {
 			entity,
 			temporal: StoredTemporal::of(e),
 		}
 	}
 
-	fn into_entity(self, vector: Vec<f32>) -> Entity {
+	fn into_entity(self, vector: Embedding) -> Entity {
 		let mut e = self.entity;
 		e.vector = vector;
 		self.temporal.apply(&mut e);
@@ -192,10 +192,10 @@ fn decode_vec_into(bytes: &[u8], out: &mut Vec<f32>) {
 	}
 }
 
-fn decode_vec(bytes: &[u8]) -> Vec<f32> {
+fn decode_vec(bytes: &[u8]) -> Embedding {
 	let mut out = Vec::new();
 	decode_vec_into(bytes, &mut out);
-	out
+	out.into()
 }
 
 fn encode_cold(row: &ColdRow) -> Result<Vec<u8>, StoreError> {
@@ -233,14 +233,14 @@ impl StoredKern {
 			}
 			// vector is restored from the side-map on load; gnn_vector is recomputed,
 			// never persisted.
-			e.vector = Vec::new();
-			e.gnn_vector = Vec::new();
+			e.vector = Embedding::default();
+			e.gnn_vector = Embedding::default();
 		}
 		for (id, r) in kern.reasons.iter_mut() {
 			if !r.vector.is_empty() {
 				reason_vecs.insert(id.clone(), StoredVec::encode(&r.vector));
 			}
-			r.vector = Vec::new();
+			r.vector = Embedding::default();
 		}
 		StoredKern {
 			kern,
@@ -254,7 +254,7 @@ impl StoredKern {
 		let mut kern = self.kern;
 		for (id, e) in kern.entities.iter_mut() {
 			if let Some(q) = self.entity_vecs.get(id) {
-				e.vector = q.decode();
+				e.vector = q.decode().into();
 			}
 			if let Some(t) = self.temporal.get(id) {
 				t.apply(e);
@@ -262,7 +262,7 @@ impl StoredKern {
 		}
 		for (id, r) in kern.reasons.iter_mut() {
 			if let Some(q) = self.reason_vecs.get(id) {
-				r.vector = q.decode();
+				r.vector = q.decode().into();
 			}
 		}
 		kern
@@ -647,7 +647,7 @@ impl Store {
 	}
 
 	pub fn cold_all(&self) -> Result<Vec<Entity>, StoreError> {
-		let vecs: HashMap<String, Vec<f32>> = self
+		let vecs: HashMap<String, Embedding> = self
 			.scan_with(self.cold_vec, |b| Ok(decode_vec(b)))?
 			.into_iter()
 			.collect();
@@ -987,11 +987,30 @@ mod tests {
 		k
 	}
 
+	// The append-only law covers the bytes, not the Rust type. `Entity::vector`
+	// became `Arc<[f32]>` for ROADMAP item 83; serde encodes both a `Vec<T>` and
+	// an `Arc<[T]>` as a plain seq, so the persisted layout is unmoved and no
+	// format version turns. This is the guard on that claim.
+	#[test]
+	fn an_embedding_encodes_byte_identically_to_the_vec_it_replaced() {
+		let v = vec![0.5f32, -0.25, 1.0, 0.0];
+		let as_vec = bincode::serde::encode_to_vec(&v, bincode_cfg()).expect("vec encodes");
+		let as_arc = bincode::serde::encode_to_vec(Embedding::from(v.clone()), bincode_cfg())
+			.expect("arc encodes");
+		assert_eq!(
+			as_vec, as_arc,
+			"Arc<[f32]> must occupy the same bincode bytes a Vec<f32> did"
+		);
+		let (back, _) = bincode::serde::decode_from_slice::<Embedding, _>(&as_vec, bincode_cfg())
+			.expect("vec-written bytes decode as an Embedding");
+		assert_eq!(&back[..], &v[..], "round trip is lossless");
+	}
+
 	#[test]
 	fn stored_kern_roundtrip_quantizes_and_drops_gnn() {
 		let mut e = mk_entity("e1", "a fact", 1.0, EntityKind::Claim);
-		e.vector = vec![0.1, -0.2, 0.3, 0.4];
-		e.gnn_vector = vec![1.0, 1.0, 1.0, 1.0];
+		e.vector = vec![0.1, -0.2, 0.3, 0.4].into();
+		e.gnn_vector = vec![1.0, 1.0, 1.0, 1.0].into();
 		let k = kern_with("k", e);
 
 		let back = StoredKern::from_kern(&k).into_kern();
@@ -1015,7 +1034,7 @@ mod tests {
 	fn stored_kern_handles_empty_vectors() {
 		let e = mk_entity("e1", "novec", 0.0, EntityKind::Claim);
 		let mut e = e;
-		e.vector = Vec::new();
+		e.vector = Embedding::default();
 		let k = kern_with("k", e);
 		let sk = StoredKern::from_kern(&k);
 		assert!(
@@ -1031,7 +1050,7 @@ mod tests {
 		let t0 = UNIX_EPOCH + Duration::from_secs(1000);
 		let t1 = UNIX_EPOCH + Duration::from_secs(2000);
 		let mut e = mk_entity("e1", "a claim", 1.0, EntityKind::Claim);
-		e.vector = vec![0.1, 0.2];
+		e.vector = vec![0.1, 0.2].into();
 		e.valid_from = Some(t0);
 		e.valid_to = Some(t1);
 		e.invalidated_at = Some(t1);
@@ -1051,7 +1070,7 @@ mod tests {
 		let d = tmp();
 		let s = Store::open(&dir_of(&d)).unwrap();
 		let mut e = mk_entity("e1", "hello", 2.0, EntityKind::Fact);
-		e.vector = vec![0.5, -0.5, 0.25];
+		e.vector = vec![0.5, -0.5, 0.25].into();
 		let mut kerns = HashMap::new();
 		kerns.insert("root".to_string(), Kern::new("root", ""));
 		kerns.insert("k".to_string(), kern_with("k", e));
@@ -1292,11 +1311,11 @@ mod tests {
 		let d = tmp();
 		let s = Store::open(&dir_of(&d)).unwrap();
 		let mut ex = mk_entity("ex", "x axis", 0.0, EntityKind::Claim);
-		ex.vector = vec![1.0, 0.0];
+		ex.vector = vec![1.0, 0.0].into();
 		let mut ey = mk_entity("ey", "y axis", 0.0, EntityKind::Claim);
-		ey.vector = vec![0.0, 1.0];
+		ey.vector = vec![0.0, 1.0].into();
 		let mut enear = mk_entity("enear", "near x", 0.0, EntityKind::Claim);
-		enear.vector = vec![0.9, 0.1];
+		enear.vector = vec![0.9, 0.1].into();
 		s.cold_spill(&ex).unwrap();
 		s.cold_spill(&ey).unwrap();
 		s.cold_spill(&enear).unwrap();
@@ -1310,7 +1329,7 @@ mod tests {
 
 	// (id, score, vector) — the vector is compared too, because a split tier can
 	// select the right rows and still hand back rows the caller cannot use.
-	type ColdHit = (String, f64, Vec<f32>);
+	type ColdHit = (String, f64, Embedding);
 
 	// The linear scan `cold_search` replaced: decode every row, score it, sort.
 	// Kept here as the reference oracle — an index that selects different rows
@@ -1361,11 +1380,11 @@ mod tests {
 			let mut e = mk_entity(&format!("e{i:04}"), "cold row", 0.0, EntityKind::Claim);
 			e.vector = match i % 20 {
 				// Wrong dimension and empty vectors must be skipped by both paths.
-				7 => vec![0.5; DIM + 1],
-				11 => Vec::new(),
+				7 => vec![0.5; DIM + 1].into(),
+				11 => Embedding::default(),
 				// A repeated vector forces exact cosine ties, so the id tie-break is
 				// exercised rather than assumed.
-				13 => vec![1.0; DIM],
+				13 => vec![1.0; DIM].into(),
 				_ => (0..DIM)
 					.map(|_| (next() % 2000) as f32 / 1000.0 - 1.0)
 					.collect(),
@@ -1648,9 +1667,9 @@ mod tests {
 		// Identical vectors; spill the higher id first so only the id tiebreak (not
 		// scan/insert order) can pick the survivor of `truncate(1)`.
 		let mut eb = mk_entity("b", "dup", 0.0, EntityKind::Claim);
-		eb.vector = vec![1.0, 0.0];
+		eb.vector = vec![1.0, 0.0].into();
 		let mut ea = mk_entity("a", "dup", 0.0, EntityKind::Claim);
-		ea.vector = vec![1.0, 0.0];
+		ea.vector = vec![1.0, 0.0].into();
 		s.cold_spill(&eb).unwrap();
 		s.cold_spill(&ea).unwrap();
 

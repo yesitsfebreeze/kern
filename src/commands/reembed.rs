@@ -49,8 +49,8 @@ pub(super) async fn cmd_reembed(cfg: &crate::config::Config, embed_url: &str, em
 	for kern in g.kerns.values_mut() {
 		for e in kern.entities.values_mut() {
 			if let Some(v) = new_vecs.get(&e.id) {
-				e.vector = v.clone();
-				e.gnn_vector = v.clone();
+				e.vector = v.clone().into();
+				e.gnn_vector = v.clone().into();
 			}
 		}
 	}
@@ -58,7 +58,7 @@ pub(super) async fn cmd_reembed(cfg: &crate::config::Config, embed_url: &str, em
 	for kern in g.kerns.values_mut() {
 		for r in kern.reasons.values_mut() {
 			if let (Some(fv), Some(tv)) = (new_vecs.get(&r.from), new_vecs.get(&r.to)) {
-				r.vector = average_vec(fv, tv);
+				r.vector = average_vec(fv, tv).into();
 			}
 		}
 	}
@@ -173,7 +173,7 @@ async fn reembed_cold(
 			));
 		}
 		for (j, v) in vs.into_iter().enumerate() {
-			cold[start + j].vector = v;
+			cold[start + j].vector = v.into();
 		}
 	}
 
@@ -219,7 +219,7 @@ mod tests {
 				"e1".into(),
 				Entity {
 					id: "e1".into(),
-					vector: vec![9.0, 9.0, 9.0],
+					vector: vec![9.0, 9.0, 9.0].into(),
 					..Default::default()
 				},
 			);
@@ -296,12 +296,12 @@ mod tests {
 		let seed = vec![
 			Entity {
 				id: "c1".into(),
-				vector: old.clone(),
+				vector: old.clone().into(),
 				..Default::default()
 			},
 			Entity {
 				id: "c2".into(),
-				vector: old.clone(),
+				vector: old.clone().into(),
 				..Default::default()
 			},
 		];
@@ -324,7 +324,7 @@ mod tests {
 		let after = store.cold_all().unwrap();
 		assert_eq!(after.len(), 2);
 		assert!(
-			after.iter().all(|e| e.vector == old),
+			after.iter().all(|e| e.vector[..] == old[..]),
 			"no partial write on failure"
 		);
 

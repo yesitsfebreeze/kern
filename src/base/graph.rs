@@ -333,7 +333,7 @@ impl GraphGnn {
 		for kern in self.kerns.values() {
 			for t in kern.entities.values() {
 				if t.status != EntityStatus::Superseded && t.has_vector() {
-					items.insert(t.id.clone(), t.vector.clone());
+					items.insert(t.id.clone(), t.vector.to_vec());
 				}
 			}
 		}
@@ -707,7 +707,7 @@ impl GraphGnn {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::base::types::Entity;
+	use crate::base::types::{Entity, Reason};
 
 	fn empty_unnamed(id: &str, parent: &str, children: &[&str]) -> Kern {
 		let mut k = Kern::new(id, parent);
@@ -784,7 +784,7 @@ mod tests {
 					(*id).into(),
 					Entity {
 						id: (*id).into(),
-						vector: vec![0.5; *dim],
+						vector: vec![0.5; *dim].into(),
 						..Default::default()
 					},
 				);
@@ -822,7 +822,7 @@ mod tests {
 				Entity {
 					id: format!("old{i}"),
 					status: EntityStatus::Superseded,
-					vector: vec![0.5; 3],
+					vector: vec![0.5; 3].into(),
 					..Default::default()
 				},
 			);
@@ -831,7 +831,7 @@ mod tests {
 			"live".into(),
 			Entity {
 				id: "live".into(),
-				vector: vec![0.5; 4],
+				vector: vec![0.5; 4].into(),
 				..Default::default()
 			},
 		);
@@ -880,8 +880,8 @@ mod tests {
 					id.clone(),
 					Entity {
 						id,
-						vector: vec_of(k * 100 + e, 0.0),
-						gnn_vector: vec_of(k * 100 + e, 0.5),
+						vector: vec_of(k * 100 + e, 0.0).into(),
+						gnn_vector: vec_of(k * 100 + e, 0.5).into(),
 						..Default::default()
 					},
 				);
@@ -892,7 +892,7 @@ mod tests {
 					id.clone(),
 					Reason {
 						id,
-						vector: vec_of(k * 100 + r, 1.0),
+						vector: vec_of(k * 100 + r, 1.0).into(),
 						..Default::default()
 					},
 				);
@@ -941,7 +941,7 @@ mod tests {
 				"active".into(),
 				Entity {
 					id: "active".into(),
-					vector: vec![1.0, 0.0],
+					vector: vec![1.0, 0.0].into(),
 					status: EntityStatus::Active,
 					..Default::default()
 				},
@@ -950,7 +950,7 @@ mod tests {
 				"dead".into(),
 				Entity {
 					id: "dead".into(),
-					vector: vec![1.0, 0.0],
+					vector: vec![1.0, 0.0].into(),
 					status: EntityStatus::Superseded,
 					..Default::default()
 				},
@@ -989,7 +989,7 @@ mod tests {
 					format!("e{i}"),
 					Entity {
 						id: format!("e{i}"),
-						vector: vec_of(i),
+						vector: vec_of(i).into(),
 						status: EntityStatus::Active,
 						..Default::default()
 					},
@@ -999,7 +999,7 @@ mod tests {
 				"dead".into(),
 				Entity {
 					id: "dead".into(),
-					vector: vec_of(3),
+					vector: vec_of(3).into(),
 					status: EntityStatus::Superseded,
 					..Default::default()
 				},
@@ -1068,7 +1068,7 @@ mod tests {
 					format!("e{i}"),
 					Entity {
 						id: format!("e{i}"),
-						vector: vec8(i),
+						vector: vec8(i).into(),
 						status: EntityStatus::Active,
 						..Default::default()
 					},
@@ -1122,7 +1122,7 @@ mod tests {
 					format!("e{i}"),
 					Entity {
 						id: format!("e{i}"),
-						vector: vec8(i),
+						vector: vec8(i).into(),
 						status: EntityStatus::Active,
 						..Default::default()
 					},
@@ -1149,7 +1149,7 @@ mod tests {
 					format!("e{i}"),
 					Entity {
 						id: format!("e{i}"),
-						vector: vec8(i),
+						vector: vec8(i).into(),
 						status: EntityStatus::Active,
 						..Default::default()
 					},
@@ -1175,7 +1175,7 @@ mod tests {
 					format!("e{i}"),
 					Entity {
 						id: format!("e{i}"),
-						vector: vec8(i),
+						vector: vec8(i).into(),
 						status: EntityStatus::Active,
 						..Default::default()
 					},
@@ -1183,7 +1183,7 @@ mod tests {
 			}
 		}
 		for i in 100..115 {
-			g.entity_idx.insert(format!("e{i}"), vec8(i));
+			g.entity_idx.insert(format!("e{i}"), vec8(i).into());
 		}
 		assert_eq!(
 			g.pending_disk_delta_len(),
@@ -1225,7 +1225,7 @@ mod tests {
 				"a".into(),
 				Entity {
 					id: "a".into(),
-					vector: vec8(1),
+					vector: vec8(1).into(),
 					status: EntityStatus::Active,
 					..Default::default()
 				},
@@ -1317,5 +1317,97 @@ mod tests {
 		assert_eq!(reaped, 0, "empty ancestor of data is not reaped");
 		assert!(g.loaded("mid").is_some(), "ancestor on path to data kept");
 		assert!(g.loaded("leaf").is_some(), "data kern kept");
+	}
+
+	fn one_entity_one_reason() -> GraphGnn {
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		let mut k = Kern::new("k1", &root);
+		k.entities.insert(
+			"e1".into(),
+			Entity {
+				id: "e1".into(),
+				vector: vec![1.0, 0.0].into(),
+				gnn_vector: vec![0.0, 1.0].into(),
+				..Default::default()
+			},
+		);
+		k.reasons.insert(
+			"r1".into(),
+			Reason {
+				id: "r1".into(),
+				from: "e1".into(),
+				to: "e1".into(),
+				vector: vec![0.6, 0.8].into(),
+				..Default::default()
+			},
+		);
+		g.kerns.insert("k1".into(), k);
+		g.rebuild_index();
+		g
+	}
+
+	// ROADMAP item 83. `strong_count` is the only witness that can tell sharing
+	// from copying: every assertion on length, contents or search results passes
+	// just as well against a duplicate allocation, which is the thing being
+	// removed. 2 = the map's handle plus the index's.
+	#[test]
+	fn rebuild_index_shares_the_map_s_vector_allocation_with_every_index() {
+		let g = one_entity_one_reason();
+		let k = g.loaded("k1").expect("k1");
+		let e = &k.entities["e1"];
+		let r = &k.reasons["r1"];
+		assert_eq!(
+			std::sync::Arc::strong_count(&e.vector),
+			2,
+			"entity_idx must hold the entity's own vector, not a second copy"
+		);
+		assert_eq!(
+			std::sync::Arc::strong_count(&e.gnn_vector),
+			2,
+			"gnn_entity_idx must hold the entity's own gnn_vector, not a second copy"
+		);
+		assert_eq!(
+			std::sync::Arc::strong_count(&r.vector),
+			2,
+			"reason_idx must hold the reason's own vector, not a second copy"
+		);
+	}
+
+	// The risk sharing introduces: a write through one holder reaching the other.
+	// It cannot happen — `Arc<[f32]>` has no `DerefMut`, so every write site
+	// replaces its whole handle — and this pins that the index keeps answering
+	// from the vector it was built with until something re-inserts it. That is
+	// the same staleness window copying had, not a new one.
+	#[test]
+	fn replacing_an_entity_vector_does_not_reach_the_index_copy() {
+		let mut g = one_entity_one_reason();
+		assert_eq!(
+			std::sync::Arc::strong_count(&g.loaded("k1").expect("k1").entities["e1"].vector),
+			2,
+			"the fixture only tests aliasing while the two holders actually share"
+		);
+		g.kerns
+			.get_mut("k1")
+			.expect("k1")
+			.entities
+			.get_mut("e1")
+			.expect("e1")
+			.vector = vec![0.0, 1.0].into();
+
+		let hit = g.entity_idx.search(&[1.0, 0.0], 1, 10);
+		assert_eq!(hit.len(), 1, "the entity is still indexed");
+		assert!(
+			(hit[0].score - 1.0).abs() < 1e-6,
+			"the index still answers from the vector it was built with, score {}",
+			hit[0].score
+		);
+		let e = &g.loaded("k1").expect("k1").entities["e1"];
+		assert_eq!(&e.vector[..], &[0.0, 1.0], "the map holds the new vector");
+		assert_eq!(
+			std::sync::Arc::strong_count(&e.vector),
+			1,
+			"the replacement is the map's alone until a rebuild shares it"
+		);
 	}
 }
