@@ -1,5 +1,34 @@
 # Changelog
 
+- 2026-07-21 — Automatic session capture is declared a non-goal, and the docs are
+  reconciled to the two entry points that actually exist. kern has exactly two
+  caller-driven ways to write: an agent calls MCP `ingest` (verified wired,
+  `mcp/tools_mutate.rs:153`) — the primary path — or a transcript is dropped into
+  `.kern/intake/`, which the daemon drains and distills (verified wired,
+  `spawn_intake` at `commands.rs:632`, `intake::run` at `intake.rs:220`). Neither
+  is broken; both were confirmed in source before any wording changed. What never
+  existed as a shipped feature is *automatic* session capture — the old Claude
+  Code Stop hook (deleted `483b37c`) is not being restored, because that would
+  undo the agent-agnostic decision. `VISION.md`'s first test criterion, which
+  read "intake is a byproduct of working / no manual ingestion step," asserted an
+  auto-capture kern deliberately does not do; it is reworded to the two-entry
+  contract. Five site pages plus `README.md` that implied automatic capture
+  (`index.mdx`, `concepts/architecture.mdx`, `concepts/acceptance.mdx`,
+  `howto/memory-bank.mdx`, the two "automatic loop" `Next` links, and the
+  intake-recall troubleshooting node that told users to "check your client hook"
+  when none ships) are reconciled to it. The two `ROADMAP.md` §6 items that
+  tracked "automatic session intake has no producer" as open work are closed by
+  this decision, not by building a producer; the `kern intake` status/drain item
+  survives on its own merit, no longer a prerequisite for a producer that will
+  never be built.
+  Decided by: fix-the-root (the false promise lived in the VISION wording, so the
+  wording is corrected, not just the pages that echoed it), name-the-tradeoff
+  (zero-touch capture is given up; an honest, agent-agnostic, two-entry contract
+  is gained — any harness can write the drop dir, and no shipped hook ties kern
+  to one agent), verify-before-claiming (both live entry paths were traced to
+  their wiring in source before the docs were touched). Supersedes the "intake is
+  a byproduct of working" criterion and the "no producer" ROADMAP items.
+
 - 2026-07-20 — Cleanup sweep after the docs reconciliation. The e2e harness's
   only third-party dependency is now declared (`e2e/requirements.txt`, recipe
   `just e2e-install`): `just test` runs `pytest -q e2e` and nothing in the repo

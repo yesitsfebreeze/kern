@@ -16,8 +16,11 @@ set, and every open item that closes it, live in `ROADMAP.md`.
 
 A change fails the vision if it breaks any of these:
 
-- **Intake is a byproduct of working.** A session's durable facts land in the
-  graph with no manual ingestion step; an LLM outage queues, never loses.
+- **Two caller-driven ways in, never a hidden one.** Durable facts enter by an
+  agent calling MCP `ingest` (the primary path) or by dropping a transcript into
+  `.kern/intake/` (the backup path, which the daemon distills). kern captures no
+  session on its own — writing to either entry point is the caller's job — and an
+  LLM outage on the intake path queues, never loses.
 - **A graph, not a bag.** Storage is typed thoughts plus reason edges — the
   *why* connecting facts, not a similarity score — and recall can walk them.
   Ids are content hashes, so identical content is the same node everywhere.

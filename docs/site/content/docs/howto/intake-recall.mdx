@@ -167,7 +167,7 @@ The signals worth reading:
   chart={`
 flowchart TD
     A["nothing in the graph"] --> B{".txt files piling up in .kern/intake/?"}
-    B -->|"no, and done/ is empty"| C["nothing is writing deltas — check your client hook"]
+    B -->|"no, and done/ is empty"| C["nothing is writing deltas — kern ships no writer; wire your harness/script to drop files, or use MCP ingest instead"]
     B -->|"yes, never drained"| D{"daemon running?"}
     D -->|"no"| E["start it: kern --daemon"]
     D -->|"yes"| F{"reason endpoint reachable?"}

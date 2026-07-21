@@ -10,19 +10,22 @@ learns on its own, compacts on its own, and (optionally) federates across
 machines on its own.
 
 ```
-session text → intake → distill (LLM) → typed claims → graph → recall
+MCP ingest ─────────────────────► typed claims ─┐
+.kern/intake/ drop → distill (LLM) → typed claims ┴→ graph → recall
 ```
 
 ---
 
 ## What it does
 
-- **Takes files automatically.** A conversation delta (a `.txt` file) dropped in
-  `<cwd>/.kern/intake/` — by your agent, a wrapper, or the `ingest` MCP tool —
-  is drained by the daemon, which runs one LLM distillation pass that pulls out
-  durable *facts*, *decisions*, and *preferences* as typed claims and ingests
-  each into the graph. Nothing is lost on an LLM outage — the delta stays queued
-  until it succeeds.
+- **Two ways in, both caller-driven.** An agent calls the `ingest` MCP tool to
+  store a durable fact directly — the primary path. Or drop a conversation delta
+  (a `.txt` file) into `<cwd>/.kern/intake/` — the daemon drains it and runs one
+  LLM distillation pass that pulls out durable *facts*, *decisions*, and
+  *preferences* as typed claims and ingests each into the graph. The drop dir is
+  agent-agnostic: your agent, a wrapper, or a script writes it — kern ships no
+  writer of its own, and captures no session automatically. Nothing is lost on an
+  LLM outage — a queued delta stays until it succeeds.
 
 - **Recalls into context.** Recall is the `query` MCP tool: relevance-targeted
   against the live graph, with provenance on every result.
@@ -181,7 +184,9 @@ exists, the intake and recall activate for that project. (A
 below.)
 
 **5. Seed the graph** (see *Seed the graph* below), then start a session. From
-then on, the intake and recall are automatic.
+then on, store facts by calling the `ingest` MCP tool (or drop transcripts into
+`.kern/intake/`), and pull them back with `query`. kern captures nothing on its
+own — the writes are yours to make.
 
 To verify it's working, call the `health` MCP tool from your session. Prefer the MCP tools
 over the `kern <subcommand>` CLI for live state — the CLI reads the on-disk
@@ -264,7 +269,7 @@ registration is safe across every project — only directories where a kern is
 (or has been) active get touched.
 
 **Requirements:** the `kern` CLI on `PATH` and a running embedding endpoint
-(Ollama by default) for prompt-time recall.
+(Ollama by default) for recall.
 
 ### Seed the graph
 
@@ -284,8 +289,9 @@ daemon). From an MCP session in the project:
    `add`) once each for the kinds you use: `preference`, `decision`, `project`,
    `fact`, `code-fact`, `reference`, `procedural`.
 
-After seeding, normal sessions populate the graph automatically through the
-intake hook.
+After seeding, populate the graph by calling the `ingest` MCP tool during a
+session, or by dropping transcripts into `.kern/intake/`. kern ships no session
+hook — the write is always a caller's call.
 
 ### MCP tools
 
@@ -312,7 +318,7 @@ that operates itself.
 
 | | Traditional RAG | kern |
 | --- | --- | --- |
-| **Ingestion** | Manual: you run a chunk-and-embed job over a corpus. | Automatic: session deltas distill into typed claims via the intake. |
+| **Ingestion** | Manual: you run a chunk-and-embed job over a corpus. | Caller-driven: an agent calls `ingest`, or a dropped transcript distills into typed claims via the intake — no re-indexing job. |
 | **Unit stored** | Raw text chunks. | Distilled facts/decisions/preferences + *reason edges* between them. |
 | **Retrieval** | top-k vector similarity. | Hybrid vector + BM25 with GNN-blended seeds, edge expansion, RRF + PageRank fusion, optional LLM rerank, diversify. |
 | **Structure** | A flat bag of vectors. | A knowledge graph — recall can follow *why* one fact connects to another. |

@@ -11,8 +11,10 @@ Rust. Second half carries `file:line` anchors for contributors.
 ## Part 1 — What kern is
 
 kern is a **memory daemon**. One long-running process per working directory owns
-a knowledge graph. It takes durable facts out of your sessions on its own,
-keeps itself small on its own, and serves the right context back at recall time.
+a knowledge graph. You feed it durable facts — an agent calls MCP `ingest`, or a
+transcript is dropped into `.kern/intake/` — and from there it keeps itself small
+on its own and serves the right context back at recall time. It captures no
+session automatically; the write is always a caller's call.
 
 The main feature — the one everything else exists to serve — is this:
 
@@ -42,12 +44,17 @@ That single trade explains the whole system:
 ## The flow, in one line
 
 ```
-session text → intake → distill (LLM) → typed claims → graph → tick → recall
+MCP ingest ─────────────────────► typed claims ─┐
+.kern/intake/ drop → distill (LLM) → typed claims ┴→ graph → tick → recall
 ```
+
+Two caller-driven write entries, no automatic capture: an agent calls MCP
+`ingest` to store a claim directly, or a transcript dropped into `.kern/intake/`
+is distilled into claims. Both land in the same graph.
 
 Four independent loops, not one pipeline:
 
-1. **Write loop** — text arrives, gets distilled into claims, gets placed in the graph.
+1. **Write loop** — a claim arrives (via MCP `ingest`) or a dropped transcript is distilled, and is placed in the graph.
 2. **Read loop** — a query arrives, seeds candidates, expands over edges, ranks, returns.
 3. **Maintenance loop** — a tick fires every 60s: deposit heat, cluster, re-embed, evict, persist.
 4. **Federation loop** (off by default) — gossip merges entity bodies with peers.

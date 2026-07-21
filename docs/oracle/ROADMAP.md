@@ -419,15 +419,19 @@ request. One name for all of it — `intake`, everywhere, no second word.
 - [ ] Intake distillation still lacks the relative-date resolution the eval path
       got (§3) — dropped text with "last Tuesday" in it stores unresolved.
 
-- [ ] **Automatic session intake has no producer.** The transcript lane is
-      complete and tested end-to-end, but its writer was a Claude Code Stop hook
-      deleted in `483b37c`, and the plugin was removed when kern was reframed as
-      agent-agnostic. Prompt-time recall is gone; recall is now query-only.
-      Until a producer exists, `VISION.md`'s "intake is a byproduct of working"
-      is false. Restoring agent-specific hooks would undo the agent-agnostic
-      decision — so the answer is the intake itself: **document the drop-a-file
-      contract and let any harness write into it.** That makes the fixes above
-      the prerequisite, not a side quest.
+- [x] **Automatic session capture is a non-goal — closed by decision, not by
+      building a producer.** kern has two caller-driven ways in: an agent calls
+      MCP `ingest` (primary), or any harness/script drops a transcript into
+      `.kern/intake/` (backup, which the daemon distills). kern ships no session
+      hook and captures nothing on its own; that is the intended contract, not a
+      hole. The transcript lane's old writer (a Claude Code Stop hook, deleted in
+      `483b37c`) is not being restored — it would undo the agent-agnostic
+      decision. `VISION.md`'s test criterion was reworded from "byproduct of
+      working / no manual step" to the two-entry contract, and the site pages that
+      implied automatic capture (`index.mdx`, `architecture.mdx`, `memory-bank.mdx`,
+      the two "automatic loop" links, `README.md`) were reconciled to it. The
+      `kern intake` status/drain item above stays wanted, but is no longer a
+      prerequisite for anything.
 - [ ] **CLI vs daemon race** — CLI reads the on-disk graph while the daemon
       holds newer state. Needs `kern status` + advisory locking.
 - [ ] Per-kern entity cap is `KERN_CAP_DISABLED` and marked unsafe to enable.
@@ -504,10 +508,12 @@ fix on the docs side, tracked here so it is not lost):
       less reliable than it reads.
 - [ ] The `id` path in `query` bypasses every filter (§7a) — undocumented at
       `howto/mcp.mdx:73`.
-- [ ] Automatic session intake has no producer, but `index.mdx:11` reads
-      `session text → intake` as if automatic and
-      `howto/intake-recall.mdx:171` tells users to "check your client hook"
-      when none ships.
+- [x] The docs that implied automatic session capture are reconciled: `index.mdx`,
+      `architecture.mdx`, `acceptance.mdx`, `memory-bank.mdx`, `README.md` and the
+      two "automatic loop" links now state the two caller-driven entries (MCP
+      `ingest` + `.kern/intake/` drop) and that kern ships no writer; the
+      intake-recall troubleshooting node no longer points at a nonexistent client
+      hook.
 - [ ] Cosine dedup is paraphrase-evadable, but `howto/seed.mdx:178` calls
       re-running a seed "close to idempotent".
 

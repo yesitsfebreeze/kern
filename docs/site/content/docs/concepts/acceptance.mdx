@@ -2,10 +2,12 @@
 title: "Acceptance & routing"
 ---
 
-Everything that enters kern's graph passes through one gate: raw session text is
-distilled into typed claims, each claim is embedded, and each embedding is either
-merged into something the graph already knows or routed down the kern tree to a
-destination. This page explains what decides which of those happens.
+Everything that enters kern's graph passes through one gate. A claim arrives one
+of two caller-driven ways — an agent calls MCP `ingest` with it directly, or a
+transcript dropped into `.kern/intake/` is distilled into claims first — and from
+there each claim is embedded, and each embedding is either merged into something
+the graph already knows or routed down the kern tree to a destination. This page
+explains what decides which of those happens.
 
 ## The shape of the intake path
 

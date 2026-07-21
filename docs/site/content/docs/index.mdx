@@ -8,8 +8,13 @@ sessions, keeps itself small without manual gardening, and serves the right
 context back when you need it.
 
 ```
-session text → intake → distill (LLM) → typed claims → graph → recall
+MCP ingest ─────────────────────► typed claims ─┐
+.kern/intake/ drop → distill (LLM) → typed claims ┴→ graph → recall
 ```
+
+Two caller-driven ways in — an agent calls MCP `ingest`, or a transcript is
+dropped into `.kern/intake/` for the daemon to distill. kern captures no session
+automatically.
 
 ## Where to start
 

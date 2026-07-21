@@ -14,15 +14,17 @@ This guide covers what it does, how to turn it on, and where the edges are.
 ### Self-learning — intake → distill → recall
 
 A long-running `kern` daemon owns one knowledge graph per working directory.
-Knowledge flows in automatically:
+Knowledge flows in two caller-driven ways — an agent calls MCP `ingest`
+directly, or a transcript is dropped into `.kern/intake/` for the daemon to
+distill (shown below). There is no automatic session capture:
 
 ```
-session text → intake file → distill (LLM) → claims → graph → recall
+.kern/intake/ file → distill (LLM) → claims → graph → recall
 ```
 
 - An **intake delta** (a `.txt` file written to `<cwd>/.kern/intake/` by your
-  agent, a wrapper, or `kern ingest`) holds the new conversation text (user
-  prompts + assistant text only).
+  agent, a wrapper, or `kern ingest` — kern ships no writer of its own) holds
+  the new conversation text (user prompts + assistant text only).
 - The daemon's **the intake** (`ingest::intake`) drains each delta,
   runs **distillation** (`ingest::distill`) — one LLM pass that extracts
   durable facts / decisions / preferences as typed claims — and ingests each
