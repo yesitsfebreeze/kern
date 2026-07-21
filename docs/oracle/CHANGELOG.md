@@ -2,6 +2,71 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — merged item 27's batched GC eviction. 192 + 1 + this one = 194,
+  by union rebuild.
+
+  Worth a line on what the last three slices have in common, because it is not
+  what the roadmap predicted. Item 31 shipped **zero source changes** — routing
+  fan-out is a slope, ~2% of ingest, and the cosine comparison the item blamed
+  measured at zero. Item 27 shipped a 213x speedup on a cost the item had ranked
+  *fourth* in its own list, after three earlier bullets were each withdrawn by
+  measurement. Item 29 refused its remedy outright.
+
+  So the ranking inside a multi-bullet item has been wrong about as often as the
+  ranking between items. Item 27's four bullets closed in the order 3, 4, 1, 2 by
+  value delivered, and the two that mattered were the two nobody had measured.
+  The pattern is not "roadmap items are unreliable" — it is that **an unmeasured
+  cost estimate is a guess wearing a number**, and the file contains many, at
+  every level of nesting.
+
+  What keeps this honest is cheap and already habitual: every slice measures
+  before it implements, and reports the measurement even when it kills the slice.
+  Three of the last four did exactly that.
+
+  Decided by: verify-before-claiming — the ordering within an item deserves the
+  same scepticism as the ordering between items.
+
+- 2026-07-22 — item 27 closed: a GC sweep pays one LMDB commit, not one per
+  victim. 616 s → 2.9 s at 80 000 victims; 4 367 ms → 35 ms at the 100k/800 point
+  the item was written around.
+
+  Verified before implementing, because three of item 27's four bullets had
+  already ended somewhere other than their title pointed. `cold_spill` and
+  `cold_put_all` encode the same rows and issue the same two `put`s per row and
+  differ only in where the transaction boundary sits, so an A/B over identical
+  batches attributes the cost to the commit and nothing adjacent: 9.18 ms per
+  row against 0.21 ms at 100 victims, 6.80 ms against 0.05 ms at 20 000, with
+  the cold tier under its cap in both columns so no trim pass fired in either.
+
+  The item said the open question was not how to batch but what a batched
+  failure means, and that is the decision recorded here. **All-or-nothing was
+  rejected.** Cold GC is the only bound on hot-graph size, so a permanently
+  un-encodable row that took the whole sweep down with it would wedge that bound
+  every hour, forever — and it would buy nothing in exchange, because a batch
+  that fails has written nothing and loses no data under either policy. So a
+  failed batch falls back to the per-victim loop it replaced and the retention
+  semantics are exactly what they were: the bad row stays hot and is retried
+  next sweep, every other victim is still collected. The same fallback absorbs a
+  batch too large for one LMDB transaction by finishing the sweep slowly instead
+  of not at all.
+
+  Two costs accepted and named in the item: the batch clones every victim entity
+  before committing (~80 MB transient at 80 000 victims, of data already resident
+  and about to be freed), and one write transaction is now held for a whole sweep
+  rather than V short ones — a single ~2.9 s hold against 616 s of intermittent
+  ones, so contending writers wait strictly less in total but a single flush can
+  block longer once.
+
+  The equivalence is the whole claim, so it is a test: the batched path evicts
+  exactly the victims the per-victim path evicted and spills exactly the same
+  rows, over a 200-entity mixed population with 80 victims — a one-victim sweep
+  is a single commit either way and would have proved nothing. Fact immunity is
+  pinned separately against the batch, which is a second place it has to hold
+  now that a victim list is handed to the store wholesale.
+
+  Decided by: name-the-tradeoff — batching was never in doubt; which failure
+  mode to buy with it was the only real question.
+
 - 2026-07-22 — `FEATURES.md` stated the acceptance radii as
   `KERN_INNER_RADIUS=0.15, KERN_OUTER_RADIUS=0.35`; `src/base/constants.rs:40-41`
   say 0.35 and 0.75. Both numbers wrong, by more than a factor of two, on the
@@ -221,6 +286,7 @@
 
   Decided by: name-the-tradeoff — the memory win does not get to be reported
   without the latency it cost.
+
 - 2026-07-21 — `4e836bb`'s subject is wrong in the same way `3529fce`'s was, and
   twice makes it a pattern with a clean cause. It reads "source-trust weighting —
   a user-authored claim should outrank an auto-ingested one at equal heat,

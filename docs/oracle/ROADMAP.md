@@ -621,11 +621,12 @@ is a correct record of what was measured before this change, and the ratios in
 it no longer hold. The scan is the larger cost at every eligibility level tested
 here, which is the ordering that item said the numbers would decide.
 
-### 27. GC eviction pays one LMDB commit per victim `[lifecycle]`
+### 27. A GC sweep pays one LMDB commit, not one per victim — closed 2026-07-22 `[lifecycle]`
 
-One item because one sweep pays all of it. The four costs it opened with are now
-settled — two closed earlier, one closed here, one withdrawn — and measuring them
-found the cost that actually dominates the sweep, which was none of the four.
+One item because one sweep paid all of it. The four costs it opened with are
+settled — three closed, one withdrawn — and measuring them found a fifth that
+actually dominated the sweep, which was none of the four. That fifth closed
+2026-07-22 and is the third bullet below.
 
 **Measured 2026-07-21 before touching anything** (`tests/gc_scale.rs`, release,
 one sweep per row). `run_gc` returns before eviction once the victim list is
@@ -657,19 +658,60 @@ nothing else:
   on hot-tier underfill), and an ANN over the cold tier would put a resident index
   back on the tier that exists to not be resident.
 
-- **What remains, and it is new.** Eviction costs 3–10 ms per victim, effectively
-  all of it `cold_spill` opening and committing one LMDB write transaction per
-  victim (`src/base/store.rs:626-631`), driven one at a time by `evict_victims`
-  (`src/tick/stigmergy.rs:101`). 80 000 victims took 279 s of tick. `cold_put_all`
-  (`:666`) already commits a whole batch in one transaction, so the mechanism is
-  there and this is not a hard change.
-  **The open question is not how to batch it but what a batched failure means.**
-  Spill-before-drop is per-victim today: a victim whose spill fails stays hot and
-  is retried next sweep (`kept`, `src/tick/stigmergy.rs:136`). One transaction for
-  the whole list makes that all-or-nothing — a single bad row either holds the
-  entire sweep hot or goes down with the batch. That is a retention decision, not
-  a performance one, which is why this was measured and left rather than fixed in
-  passing.
+- ~~Eviction pays one LMDB commit per victim~~ **Closed 2026-07-22.** It was the
+  commit, and only the commit. `cold_spill` and `cold_put_all` encode the same
+  rows and issue the same two `put`s per row; they differ only in where
+  `write_txn`/`commit` sit, so an A/B over identical batches isolates the
+  transaction boundary and nothing else
+  (`cold_spill_per_victim_vs_batched`, `tests/gc_scale.rs`, release, dense
+  vectors, tier under its cap so no trim pass fires in either column):
+
+  | victims | one commit each | one commit total | per row |
+  |---|---|---|---|
+  | 100 | 918 ms | 20.5 ms | 9.18 ms → 0.21 ms |
+  | 800 | 7 728 ms | 70.2 ms | 9.66 ms → 0.09 ms |
+  | 5 000 | 38 053 ms | 284 ms | 7.61 ms → 0.06 ms |
+  | 20 000 | 136 012 ms | 1 060 ms | 6.80 ms → 0.05 ms |
+
+  `run_gc` now hands the whole victim list to `cold_put_all` in one transaction
+  (`evict_batched`, `src/tick/stigmergy.rs:136`). Whole-sweep effect, both
+  columns measured in one sitting on one machine (so these absolutes are ~2.2x
+  the 2026-07-21 table's, which is a different host):
+
+  | N | victims | before | after |
+  |---|---|---|---|
+  | 10k | 80 | 496 ms | 9.4 ms |
+  | 10k | 800 | 4 660 ms | 28.1 ms |
+  | 10k | 8 000 | 67 811 ms | 250 ms |
+  | 100k | 800 | 4 367 ms | 34.9 ms |
+  | 100k | 8 000 | 46 884 ms | 222 ms |
+  | 100k | 80 000 | 615 919 ms | 2 890 ms |
+
+  The ratio this item opened with has inverted: selection was 0.06% of a
+  100k/800 sweep and is now 8.3% of it.
+
+  **What a batched failure means was the real question, and the answer is that
+  it means nothing new.** A failed batch falls back to the per-victim loop it
+  replaced (`evict_victims`, `src/tick/stigmergy.rs:155`), so the retention
+  semantics are unchanged: the row that cannot be spilled stays hot and is
+  retried next sweep, every other victim is still collected (`kept`,
+  `src/tick/stigmergy.rs:177`). All-or-nothing was the alternative and it was
+  rejected: cold GC is the only bound on hot-graph size, so one permanently
+  un-encodable row would wedge that bound every hour, forever — a liveness
+  failure traded for nothing, since a batch that fails has written nothing and
+  loses no data either way. The fallback also absorbs a batch too large for one
+  LMDB transaction (`MDB_TXN_FULL`) by finishing the sweep slowly instead of not
+  at all.
+
+  Two costs accepted. The batch is a clone of every victim entity before the
+  commit — ~80 MB transient at the 80 000-victim row above, of data already
+  resident and about to be freed. And one LMDB write transaction is now held for
+  the length of a sweep rather than V short ones; at 80 000 victims that is a
+  single ~2.9 s hold against 616 s of intermittent holds, so any contending
+  writer waits strictly less in total, but a single flush can now block ~2.9 s
+  instead of ~7 ms. No deadlock is introduced: nothing inside the transaction
+  takes the graph lock, and `run_gc` holds that lock exclusively for the whole
+  sweep, so no flusher can hold a graph read lock while waiting on the writer.
   Deciding behavior: name-the-tradeoff.
 
 - ~~`cold_cap` decodes the entire 50k-row cold table on every individual spill~~
@@ -1822,7 +1864,7 @@ buys nothing there). The two copies were the same floats, not a normalised one
 and a raw one — recall is unmoved to four decimals across the change, which is
 the check that would have caught it had they differed. `Entity::vector`,
 `Entity::gnn_vector` and `Reason::vector` are now `Embedding`
-(`src/base/types.rs:586`) and every index holds the map's own allocation.
+(`src/base/types.rs:595`) and every index holds the map's own allocation.
 
 Measured with `tests/spill_memory.rs` in `resident` mode — 50k entities at dim
 384 each carrying `vector` AND `gnn_vector`, plus 25k reasons, one process per

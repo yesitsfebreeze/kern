@@ -516,8 +516,8 @@ victim outright.
 **How.** `stigmergy::run_gc` (`src/tick/stigmergy.rs`) collects victims per
 kern where `is_cold_victim` holds (heat below `COLD_HEAT_THRESHOLD=0.01` *and*
 not accessed within `COLD_GC_AGE = 7 days` *and* not an Active `Fact`/`Document`),
-spills each to the cold store, and only on spill success calls `remove_entity`.
-A failed spill keeps the victim hot and retries next pass. Runs on the
+spills the whole list to the cold store in ONE transaction, then `remove_entity`.
+A failed batch retries per victim, so a bad row alone stays hot. Runs on the
 maintenance tick gated by `STIGMERGY_GC_INTERVAL = 1 hour` and clock validity.
 
 Past the cold cap the drop is **counted, not silent**: `cold_cap` increments
