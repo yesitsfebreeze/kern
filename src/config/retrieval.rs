@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::base::constants;
+use crate::base::types::Source;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
@@ -45,6 +47,12 @@ pub struct RetrievalConfig {
 	// outranking local knowledge. 1.0 disables the penalty; 0.0 keeps remote
 	// entities retrievable but always last.
 	pub remote_trust_weight: f64,
+	// Per-source-scheme trust prior, keyed on `Source::scheme()` — file, ticket,
+	// session, agent, inline. An absent key is 1.0, so the empty default leaves
+	// every score bit-identical. This weights the CHANNEL a claim arrived on, not
+	// its author: `kern ingest` and an MCP agent's default ingest both write
+	// `inline`, so no key here separates a human from an agent (ROADMAP 20).
+	pub source_trust: BTreeMap<String, f64>,
 	pub min_deliver_score: f64,
 	pub max_deliver_results: usize,
 	pub important_min_cosine: f64,
@@ -84,6 +92,7 @@ impl Default for RetrievalConfig {
 			fact_score_boost: constants::FACT_SCORE_BOOST,
 			gravity_weight: 0.15,
 			remote_trust_weight: 0.4,
+			source_trust: BTreeMap::new(),
 			min_deliver_score: 0.0,
 			max_deliver_results: 25,
 			important_min_cosine: constants::IMPORTANT_MIN_COSINE,
@@ -138,6 +147,19 @@ impl RetrievalConfig {
 		] {
 			if !(0.0..=1.0).contains(&v) {
 				errs.push(format!("{name} ({v}) must be in [0.0, 1.0]"));
+			}
+		}
+
+		// A misspelled scheme would weight nothing at all and read as a working
+		// knob, so an unknown key is an error rather than a silent no-op.
+		for (scheme, w) in &self.source_trust {
+			if Source::parse_scheme(scheme).is_none() {
+				errs.push(format!(
+					"source_trust key {scheme:?} is not a source scheme (file, ticket, session, agent, inline)"
+				));
+			}
+			if !w.is_finite() || *w < 0.0 {
+				errs.push(format!("source_trust[{scheme:?}] ({w}) must be >= 0.0"));
 			}
 		}
 
@@ -225,6 +247,41 @@ mod tests {
 		assert!(
 			neg_k1.validate().iter().any(|e| e.contains("bm25_k1")),
 			"negative bm25_k1"
+		);
+	}
+
+	// A typo'd scheme weights nothing and reads exactly like a working knob, which
+	// is the failure an operator cannot see from the ranking.
+	#[test]
+	fn an_unknown_or_negative_source_trust_key_is_flagged() {
+		let typo = RetrievalConfig {
+			source_trust: BTreeMap::from([("files".to_string(), 0.5)]),
+			..Default::default()
+		};
+		assert!(
+			typo.validate().iter().any(|e| e.contains("files")),
+			"got {:?}",
+			typo.validate()
+		);
+
+		let negative = RetrievalConfig {
+			source_trust: BTreeMap::from([("file".to_string(), -0.5)]),
+			..Default::default()
+		};
+		assert!(
+			negative.validate().iter().any(|e| e.contains("file")),
+			"got {:?}",
+			negative.validate()
+		);
+
+		let ok = RetrievalConfig {
+			source_trust: BTreeMap::from([("agent".to_string(), 1.5)]),
+			..Default::default()
+		};
+		assert!(
+			ok.validate().is_empty(),
+			"a real scheme above 1.0 lifts it over baseline and is valid: {:?}",
+			ok.validate()
 		);
 	}
 
