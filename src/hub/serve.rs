@@ -223,8 +223,20 @@ fn spawn_reaper(handler: HubRpcHandler, idle_unload_secs: u64) {
 					let alive = handle.alive();
 					if !alive {
 						tracing::info!(target: "kern.hub", root = %root.display(), "reaped dead node");
+						return false;
 					}
-					alive
+					// An adopted node reports alive() unconditionally, so a node
+					// whose project directory was deleted — a finished test's
+					// temp dir — would otherwise be tracked until the hub exits.
+					if !root.is_dir() {
+						tracing::info!(
+							target: "kern.hub",
+							root = %root.display(),
+							"reaped node whose root no longer exists"
+						);
+						return false;
+					}
+					true
 				});
 			}
 			if idle_unload_secs == 0 {

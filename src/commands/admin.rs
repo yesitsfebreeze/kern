@@ -30,7 +30,7 @@ pub(super) fn cmd_compress(src: &str, mode_str: &str, out: Option<&str>) {
 	}
 }
 
-pub(super) fn cmd_health(cfg: &crate::config::Config) {
+pub(super) async fn cmd_health(cfg: &crate::config::Config) {
 	let g = load_graph(cfg);
 	let h = crate::base::health::graph_health_stats(&g);
 
@@ -44,6 +44,24 @@ pub(super) fn cmd_health(cfg: &crate::config::Config) {
 	println!("thoughts:    {} (unnamed: {})", h.entities, h.unnamed);
 	println!("reasons:     {}", h.reasons);
 	println!("descriptors: {}", g.root.descriptors.len());
+	println!(
+		"embed:       {} (dim {}){}",
+		if h.embed_model.is_empty() {
+			"(unstamped)"
+		} else {
+			&h.embed_model
+		},
+		h.embed_dim,
+		if h.embed_mismatch {
+			"  MISMATCH: the index was built with a different model"
+		} else {
+			""
+		},
+	);
+	println!("evicted:     {} cold rows dropped", h.cold_evicted);
+	for line in tick_health_lines(daemon_health().await.as_ref()) {
+		println!("{line}");
+	}
 
 	for k in g.all() {
 		let label = if k.graviton_text.is_empty() {
@@ -58,6 +76,45 @@ pub(super) fn cmd_health(cfg: &crate::config::Config) {
 			k.reasons.len(),
 		);
 	}
+}
+
+// The tick queue lives in the daemon; an offline CLI has no view of it. One
+// attempt, no retry: `kern health` must not stall when nothing is serving.
+async fn daemon_health() -> Option<trnsprt::kern_rpc::HealthRes> {
+	use trnsprt::kern_rpc::KernRpcClient;
+	use trnsprt::typed::{Endpoint, JsonEnvelopeCodec};
+
+	let client = KernRpcClient::<JsonEnvelopeCodec>::connect_endpoint_with_retry(
+		&Endpoint::kern(),
+		1,
+		std::time::Duration::ZERO,
+	)
+	.await
+	.ok()?;
+	client.health().await.ok().filter(|h| h.ok)
+}
+
+fn tick_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> {
+	let Some(h) = h else {
+		return vec!["tick:        (no daemon serving this directory)".to_string()];
+	};
+	let mut lines = vec![
+		format!(
+			"tick:        queue {} | done {} | avg {} ms",
+			h.queue_depth, h.tasks_done, h.task_avg_ms
+		),
+		format!(
+			"degraded:    {} panics | {} failures",
+			h.task_panics, h.task_failures
+		),
+	];
+	if !h.last_task_panic.is_empty() {
+		lines.push(format!("  last panic:   {}", h.last_task_panic));
+	}
+	if !h.last_task_failure.is_empty() {
+		lines.push(format!("  last failure: {}", h.last_task_failure));
+	}
+	lines
 }
 
 // Daemon must be stopped: a live daemon would race and re-persist the bloated graph.
@@ -306,10 +363,49 @@ mod cmd_tests {
 		);
 	}
 
-	#[test]
-	fn cmd_health_runs_on_a_fresh_graph_without_panicking() {
+	#[tokio::test]
+	async fn cmd_health_runs_on_a_fresh_graph_without_panicking() {
 		let (_dir, cfg) = temp_cfg();
-		cmd_health(&cfg);
+		cmd_health(&cfg).await;
+	}
+
+	#[test]
+	fn tick_health_lines_report_both_degradation_counters() {
+		let offline = tick_health_lines(None);
+		assert_eq!(offline.len(), 1, "no daemon -> no invented numbers");
+		assert!(offline[0].contains("no daemon"), "{offline:?}");
+
+		let live = tick_health_lines(Some(&trnsprt::kern_rpc::HealthRes {
+			ok: true,
+			task_panics: 2,
+			last_task_panic: "GnnPropagate[k]: boom".into(),
+			task_failures: 3,
+			last_task_failure: "GnnPropagate[k]: train epoch 0 forward".into(),
+			..Default::default()
+		}))
+		.join("\n");
+		assert!(live.contains("2 panics | 3 failures"), "{live}");
+		assert!(
+			live.contains("last panic:   GnnPropagate[k]: boom"),
+			"{live}"
+		);
+		assert!(
+			live.contains("last failure: GnnPropagate[k]: train epoch 0 forward"),
+			"{live}"
+		);
+	}
+
+	#[test]
+	fn a_clean_daemon_prints_no_last_fault_lines() {
+		let lines = tick_health_lines(Some(&trnsprt::kern_rpc::HealthRes {
+			ok: true,
+			..Default::default()
+		}));
+		assert_eq!(
+			lines.len(),
+			2,
+			"healthy tick reports counts only: {lines:?}"
+		);
 	}
 }
 

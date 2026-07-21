@@ -1,4 +1,5 @@
 mod answer;
+pub mod detached_log;
 mod embed;
 mod gnn;
 mod gossip;
@@ -9,6 +10,7 @@ mod intake;
 pub mod io;
 mod reason;
 mod retrieval;
+mod secrets;
 mod serve;
 mod tick;
 mod watcher;
@@ -23,7 +25,7 @@ pub use ingest::IngestConfig;
 pub use intake::IntakeConfig;
 pub use reason::ReasonConfig;
 pub use retrieval::RetrievalConfig;
-pub use serve::{mcp_token_path, ServeConfig};
+pub use serve::{mcp_token_path, open_private_append, ServeConfig};
 pub use tick::TickConfig;
 pub use watcher::WatcherConfig;
 
@@ -100,8 +102,15 @@ impl Config {
 		let user = dirs::config_dir()
 			.map(|d| d.join("kern").join("kern.toml"))
 			.unwrap_or_else(|| cwd.join(".kern").join("kern.toml"));
+		Self::load_with_user(&user, cwd)
+	}
+
+	/// `load` with the user scope named explicitly. A test that lets `load`
+	/// resolve it reads the developer's real `~/.config/kern/kern.toml` and
+	/// passes or fails on whatever happens to be on that machine.
+	pub fn load_with_user(user: &Path, cwd: &Path) -> Result<Self, io::Error> {
 		let project = cwd.join(".kern").join("kern.toml");
-		let mut cfg: Self = io::load_layered(&user, &project)?;
+		let mut cfg: Self = io::load_layered(user, &project)?;
 		// serde's struct-level default pins data_dir to the *process* cwd. A
 		// caller loading another root (hub merge, any cross-root tooling) must
 		// get that root's store, never its own — re-pin when no config set it.
@@ -110,6 +119,15 @@ impl Config {
 		}
 		cfg.data_dir = graviton_data_dir(&cfg.data_dir, cwd);
 		Ok(cfg)
+	}
+
+	/// Where a detached child's captured output belongs: inside `data_dir`, so a
+	/// relocated store keeps its logs in a directory kern owns. Taking the parent
+	/// instead would drop `daemon.log` straight into `$HOME` for
+	/// `data_dir = "/home/u/kernstore"`. Absolute by the time this runs, so a
+	/// launch from a subdirectory logs where the graph lives.
+	pub fn log_dir(&self) -> PathBuf {
+		PathBuf::from(&self.data_dir).join("logs")
 	}
 
 	// `.git` may be a FILE (worktree/submodule): test existence, not `is_dir()`.
@@ -209,6 +227,23 @@ mod tests {
 			PathBuf::from(&cfg.data_dir),
 			root.join(".kern").join("data"),
 			"configless load must land in the passed root, not the process cwd"
+		);
+	}
+
+	#[test]
+	fn log_dir_stays_inside_the_data_dir_kern_owns() {
+		let root = Path::new("/proj");
+		assert_eq!(
+			Config::default_in(root).log_dir(),
+			root.join(".kern").join("data").join("logs")
+		);
+
+		let mut moved = Config::default_in(root);
+		moved.data_dir = "/var/lib/kern/store".into();
+		assert_eq!(
+			moved.log_dir(),
+			PathBuf::from("/var/lib/kern/store/logs"),
+			"a relocated store keeps its logs inside itself — the parent may be $HOME"
 		);
 	}
 

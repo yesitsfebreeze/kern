@@ -17,7 +17,8 @@ pub fn load_layered<T: DeserializeOwned + Default>(
 ) -> Result<T, Error> {
 	let user_v = read_value(user)?;
 	let project_v = read_value(project)?;
-	let merged = merge_sections(user_v, project_v);
+	let merged =
+		crate::config::secrets::seal_redirected(merge_deep(user_v, project_v.clone()), &project_v);
 	merged
 		.try_into()
 		.map_err(|e: toml::de::Error| Error::Parse(e.to_string()))
@@ -38,13 +39,19 @@ fn read_value(path: &Path) -> Result<toml::Value, Error> {
 	}
 }
 
-/// Section-level merge: a top-level key in `over` REPLACES `base`'s wholesale — NO
-/// deep merge, so user fields the project omits are LOST. Keep a section in one scope.
-fn merge_sections(base: toml::Value, over: toml::Value) -> toml::Value {
+/// Recursive merge at every depth: where both scopes hold a table the two are
+/// merged key by key, so a project setting one field of a section never drops the
+/// user's other fields in it. Arrays are leaves — `over` replaces, never appends
+/// (`watcher.roots` and `gossip.peers` are complete lists, not accumulators).
+fn merge_deep(base: toml::Value, over: toml::Value) -> toml::Value {
 	match (base, over) {
 		(toml::Value::Table(mut a), toml::Value::Table(b)) => {
 			for (k, v) in b {
-				a.insert(k, v);
+				let merged = match a.remove(&k) {
+					Some(existing) => merge_deep(existing, v),
+					None => v,
+				};
+				a.insert(k, merged);
 			}
 			toml::Value::Table(a)
 		}
@@ -88,13 +95,45 @@ mod tests {
 	}
 
 	#[test]
-	fn load_layered_project_section_wholly_replaces_user_section() {
+	fn load_layered_project_field_wins_and_keeps_the_user_fields_it_omits() {
 		let dir = std::env::temp_dir().join(format!("cfgio_ovr_{}", std::process::id()));
 		std::fs::create_dir_all(&dir).unwrap();
 		let user = dir.join("user.toml");
 		let project = dir.join("project.toml");
 		std::fs::write(&user, "[embed]\nurl = \"user-url\"\nkey = \"secret\"\n").unwrap();
-		std::fs::write(&project, "[embed]\nurl = \"proj-url\"\n").unwrap();
+		std::fs::write(&project, "[embed]\nmodel = \"proj-model\"\n").unwrap();
+
+		let merged: toml::Table = load_layered(&user, &project).expect("load_layered");
+		let embed = merged
+			.get("embed")
+			.and_then(|v| v.as_table())
+			.expect("embed table");
+		assert_eq!(
+			embed.get("model").and_then(|v| v.as_str()),
+			Some("proj-model"),
+			"the project leaf wins"
+		);
+		assert_eq!(
+			embed.get("url").and_then(|v| v.as_str()),
+			Some("user-url"),
+			"a field the project omits is inherited, not lost"
+		);
+		assert_eq!(
+			embed.get("key").and_then(|v| v.as_str()),
+			Some("secret"),
+			"the key rides along while the project leaves the endpoint alone"
+		);
+		let _ = std::fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn load_layered_seals_the_key_when_the_project_redirects_the_endpoint() {
+		let dir = std::env::temp_dir().join(format!("cfgio_seal_{}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		let user = dir.join("user.toml");
+		let project = dir.join("project.toml");
+		std::fs::write(&user, "[embed]\nurl = \"user-url\"\nkey = \"secret\"\n").unwrap();
+		std::fs::write(&project, "[embed]\nurl = \"http://attacker.example/v1\"\n").unwrap();
 
 		let merged: toml::Table = load_layered(&user, &project).expect("load_layered");
 		let embed = merged
@@ -103,14 +142,99 @@ mod tests {
 			.expect("embed table");
 		assert_eq!(
 			embed.get("url").and_then(|v| v.as_str()),
-			Some("proj-url"),
-			"project section wins"
+			Some("http://attacker.example/v1"),
+			"the redirect itself still applies"
 		);
-		assert!(
-			embed.get("key").is_none(),
-			"user `key` is NOT inherited — section wholly replaced"
+		assert_eq!(
+			embed.get("key").and_then(|v| v.as_str()),
+			None,
+			"a cloned repo redirecting the endpoint must not harvest the user's credential"
 		);
 		let _ = std::fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn merge_deep_merges_nested_tables_at_depth() {
+		let base: toml::Value = "[a.b]\nx = 1\ny = 2\n"
+			.parse::<toml::Table>()
+			.unwrap()
+			.into();
+		let over: toml::Value = "[a.b]\ny = 9\n[a.c]\nz = 3\n"
+			.parse::<toml::Table>()
+			.unwrap()
+			.into();
+
+		let merged = merge_deep(base, over);
+		let b = merged.get("a").and_then(|a| a.get("b")).expect("a.b");
+		assert_eq!(
+			b.get("x").and_then(|v| v.as_integer()),
+			Some(1),
+			"depth-2 sibling survives"
+		);
+		assert_eq!(
+			b.get("y").and_then(|v| v.as_integer()),
+			Some(9),
+			"depth-2 leaf overridden"
+		);
+		assert_eq!(
+			merged
+				.get("a")
+				.and_then(|a| a.get("c"))
+				.and_then(|c| c.get("z"))
+				.and_then(|v| v.as_integer()),
+			Some(3),
+			"a table only `over` has is added"
+		);
+	}
+
+	#[test]
+	fn merge_deep_leaf_and_array_in_over_replace_the_base() {
+		let base: toml::Value = "[w]\nenabled = true\nroots = [\"a\", \"b\"]\n"
+			.parse::<toml::Table>()
+			.unwrap()
+			.into();
+		let over: toml::Value = "[w]\nroots = [\"c\"]\n"
+			.parse::<toml::Table>()
+			.unwrap()
+			.into();
+
+		let merged = merge_deep(base, over);
+		let w = merged.get("w").expect("w");
+		assert_eq!(
+			w.get("enabled").and_then(|v| v.as_bool()),
+			Some(true),
+			"the scalar `over` omits is kept"
+		);
+		let roots: Vec<&str> = w
+			.get("roots")
+			.and_then(|v| v.as_array())
+			.expect("roots")
+			.iter()
+			.filter_map(|v| v.as_str())
+			.collect();
+		assert_eq!(
+			roots,
+			vec!["c"],
+			"an array is a leaf: replaced, not concatenated"
+		);
+	}
+
+	#[test]
+	fn merge_deep_scalar_in_over_beats_a_table_in_base() {
+		// The conflict must sit BELOW the top level: a top-level clash is settled by
+		// the plain insert the pre-deep-merge code already did, so it proves nothing.
+		let base: toml::Value = "[a.b]\nx = 1\n".parse::<toml::Table>().unwrap().into();
+		let over: toml::Value = "[a]\nb = 7\n".parse::<toml::Table>().unwrap().into();
+
+		let merged = merge_deep(base, over);
+		assert_eq!(
+			merged
+				.get("a")
+				.and_then(|a| a.get("b"))
+				.and_then(|v| v.as_integer()),
+			Some(7),
+			"mismatched kinds one level down: `over` wins outright"
+		);
 	}
 
 	#[test]

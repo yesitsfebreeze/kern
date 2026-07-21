@@ -71,6 +71,13 @@ fn self_exe() -> Result<PathBuf, String> {
 	Ok(exe)
 }
 
+fn node_log_dir(root: &Path) -> PathBuf {
+	match crate::config::Config::load(root) {
+		Ok(cfg) => cfg.log_dir(),
+		Err(_) => crate::config::Config::default_in(root).log_dir(),
+	}
+}
+
 pub async fn spawn(root: &Path) -> Result<NodeHandle, String> {
 	let endpoint = Endpoint::kern_for(root);
 	if probe(&endpoint).await {
@@ -81,12 +88,16 @@ pub async fn spawn(root: &Path) -> Result<NodeHandle, String> {
 		});
 	}
 	let exe = self_exe()?;
+	// The hub-first path is the default posture, so THIS is the daemon whose
+	// silence hides every fail-open defect. A config we cannot read must not
+	// stop the spawn — fall back to the conventional `.kern/data/logs`.
+	let (out, err) = crate::config::detached_log::stdio(&node_log_dir(root), "--daemon");
 	let child = Command::new(exe)
 		.arg("--daemon")
 		.current_dir(root)
 		.stdin(Stdio::null())
-		.stdout(Stdio::null())
-		.stderr(Stdio::null())
+		.stdout(out)
+		.stderr(err)
 		.spawn()
 		.map_err(|e| format!("spawn node for {}: {e}", root.display()))?;
 	for _ in 0..READY_RETRIES {

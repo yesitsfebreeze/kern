@@ -2,6 +2,7 @@ pub(crate) mod admin;
 pub(crate) mod graph_ops;
 mod ingest_cmd;
 mod mcp_cmd;
+mod mcp_restart;
 mod profile_cmd;
 mod query;
 mod reembed;
@@ -252,11 +253,19 @@ pub(crate) fn load_graph(cfg: &crate::config::Config) -> GraphGnn {
 			g
 		}
 	};
+	bind_embed_model(&mut g, cfg);
 	apply_graph_config(&mut g, &cfg.graph);
 	if let Some(lex) = g.lexical() {
 		lex.set_bm25_params(cfg.retrieval.bm25_k1 as f32, cfg.retrieval.bm25_b as f32);
 	}
 	g
+}
+
+// Every store handle in this process is bound to the configured embedding model
+// here — the stamp is what turns a silent model swap into a reported one.
+fn bind_embed_model(g: &mut GraphGnn, cfg: &crate::config::Config) {
+	g.set_embed_model(&cfg.embed.model);
+	crate::base::persist::check_graph_stamp(g);
 }
 
 pub(crate) fn save_graph(g: &GraphGnn) {
@@ -268,6 +277,7 @@ pub(crate) fn save_graph(g: &GraphGnn) {
 pub(crate) fn reload_graph(cfg: &crate::config::Config, old: &GraphGnn) -> GraphGnn {
 	match crate::base::persist::reload_from_disk(old) {
 		Some(mut g) => {
+			bind_embed_model(&mut g, cfg);
 			apply_graph_config(&mut g, &cfg.graph);
 			if let Some(lex) = g.lexical() {
 				lex.set_bm25_params(cfg.retrieval.bm25_k1 as f32, cfg.retrieval.bm25_b as f32);
@@ -510,7 +520,7 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 			.await
 		}
 
-		Commands::Health => admin::cmd_health(cfg),
+		Commands::Health => admin::cmd_health(cfg).await,
 		Commands::Profile { text, no_llm } => profile_cmd::cmd_profile(cfg, &text, no_llm).await,
 		Commands::Gc => admin::cmd_gc(cfg),
 		Commands::Compact => admin::cmd_compact(cfg),
@@ -553,6 +563,9 @@ pub(crate) struct EngineHandle {
 }
 
 pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineHandle {
+	// Stamps uptime for the staleness handshake. Before any await so a health
+	// probe on a slow cold boot cannot read 0 and be mistaken for unknown.
+	crate::base::identity::mark_start();
 	// Must run BEFORE any env opens: the compaction swaps data.mdb, and only
 	// here — post kern.sock win, pre env open — is the dir held exclusively.
 	maybe_self_heal_store(cfg);
@@ -985,6 +998,74 @@ mod entry_point_tests {
 	#[test]
 	fn daemon_subcommand_exists() {
 		let _ = Commands::Daemon;
+	}
+
+	// Proves the WIRING, not the primitive: nothing here calls check_embed_stamp.
+	// A normal open + save must stamp the store, and a later open under a different
+	// model must reach health as a mismatch.
+	#[test]
+	fn a_normal_open_stamps_the_model_and_a_swap_reaches_health() {
+		use crate::base::health::graph_health_stats;
+		use crate::base::store::EmbedStamp;
+		use crate::base::types::{mk_entity, EntityKind, Kern};
+
+		let dir = tempfile::tempdir().unwrap();
+		let data_dir = dir.path().to_string_lossy().into_owned();
+		let cfg = |model: &str| crate::config::Config {
+			data_dir: data_dir.clone(),
+			embed: crate::config::EmbedConfig {
+				model: model.into(),
+				..Default::default()
+			},
+			..Default::default()
+		};
+
+		{
+			let mut g = super::load_graph(&cfg("model-a"));
+			assert_eq!(
+				g.store().unwrap().embed_stamp(),
+				None,
+				"an empty store has no dimension to stamp yet"
+			);
+
+			let root_id = g.root.id.clone();
+			let mut k = Kern::new("k1", &root_id);
+			let mut e = mk_entity("e1", "stamped on save", 1.0, EntityKind::Fact);
+			e.vector = vec![0.25; 4];
+			k.entities.insert("e1".into(), e);
+			g.register(k);
+			super::save_graph(&g);
+
+			assert_eq!(
+				g.store().unwrap().embed_stamp(),
+				Some(EmbedStamp {
+					model: "model-a".into(),
+					dim: 4
+				}),
+				"the save that wrote the vectors also recorded what produced them"
+			);
+			assert!(!g.store().unwrap().embed_mismatch());
+		}
+
+		{
+			let g = super::load_graph(&cfg("model-b"));
+			let h = graph_health_stats(&g);
+			assert!(
+				h.embed_mismatch,
+				"opening under a different model is reported, not silently degraded recall"
+			);
+			assert_eq!(
+				h.embed_model, "model-a",
+				"health names the model that produced the STORED vectors"
+			);
+			assert_eq!(h.embed_dim, 4);
+		}
+
+		let g = super::load_graph(&cfg("model-a"));
+		assert!(
+			!graph_health_stats(&g).embed_mismatch,
+			"reverting the config stops the accusation"
+		);
 	}
 
 	// LMDB forbids double-opening one env per process, so the "external writer"

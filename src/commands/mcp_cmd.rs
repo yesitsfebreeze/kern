@@ -11,12 +11,15 @@ use super::load_graph;
 pub(super) async fn cmd_mcp(cfg: &crate::config::Config) {
 	// Hub-first: a running hub owns node lifecycle (spawn, adopt, unload) so the
 	// proxy never self-spawns a daemon the hub can't see. No hub -> legacy path.
-	if let Some(client) = attach_via_hub(cfg.hub.auto_start).await {
+	let log_dir = cfg.log_dir();
+	if let Some(client) = attach_via_hub(cfg.hub.auto_start, &log_dir).await {
+		let client = replace_if_stale(client, cfg, &log_dir, true).await;
 		run_proxy(client).await;
 		return;
 	}
 	match attach_with_retry(2, 150).await {
 		Ok(client) => {
+			let client = replace_if_stale(client, cfg, &log_dir, false).await;
 			run_proxy(client).await;
 		}
 		Err(e_first) => {
@@ -25,7 +28,7 @@ pub(super) async fn cmd_mcp(cfg: &crate::config::Config) {
 				error = %e_first,
 				"no daemon at kern.sock — auto-spawning detached daemon"
 			);
-			match spawn_daemon() {
+			match spawn_daemon(&log_dir) {
 				Ok(()) => match attach_with_retry(6, 150).await {
 					Ok(client) => {
 						tracing::info!(
@@ -71,14 +74,109 @@ async fn run_proxy(client: KernRpcClient<JsonEnvelopeCodec>) {
 	}
 }
 
-async fn attach_via_hub(auto_start: bool) -> Option<KernRpcClient<JsonEnvelopeCodec>> {
+// One attempt per invocation, by construction: this runs once on the way into
+// the proxy and never loops. A client whose replacement is itself stale
+// proxies anyway rather than restarting again.
+async fn replace_if_stale(
+	client: KernRpcClient<JsonEnvelopeCodec>,
+	cfg: &crate::config::Config,
+	log_dir: &std::path::Path,
+	via_hub: bool,
+) -> KernRpcClient<JsonEnvelopeCodec> {
+	use super::mcp_restart::{verdict, Verdict};
+	use crate::base::identity;
+
+	let health = match client.health().await {
+		Ok(h) => h,
+		// A daemon that will not answer health is not one to judge stale.
+		Err(_) => return client,
+	};
+	let (my_build, my_config) = (identity::build_id(), identity::config_id(cfg));
+	let reason = match verdict(&health, &my_build, &my_config) {
+		Verdict::Fresh => return client,
+		Verdict::Hold(why) => {
+			if health.build_id != my_build || health.config_id != my_config {
+				tracing::warn!(
+					target: "kern.mcp",
+					reason = why,
+					daemon_build = %health.build_id,
+					client_build = %my_build,
+					"attached to a daemon that does not match this client — not restarting"
+				);
+			}
+			return client;
+		}
+		Verdict::Stale(why) => why,
+	};
+
+	if !cfg.hub.auto_restart {
+		tracing::warn!(
+			target: "kern.mcp",
+			reason,
+			"stale daemon — set [hub] auto_restart = true to replace it automatically"
+		);
+		return client;
+	}
+
+	tracing::info!(target: "kern.mcp", reason, "restarting stale daemon");
+	// shutdown() fires the daemon's graceful path: drain, guarded flush, exit.
+	// A refused or dropped call means it is already going down.
+	let _ = client.shutdown().await;
+	drop(client);
+
+	// Wait for the socket to be released before anything re-binds it, or the
+	// respawn loses the race to the corpse and we reattach to what we just killed.
+	for _ in 0..40 {
+		tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+		if attach_with_retry(1, 0).await.is_err() {
+			break;
+		}
+	}
+
+	let fresh = if via_hub {
+		attach_via_hub(cfg.hub.auto_start, log_dir).await
+	} else {
+		match spawn_daemon(log_dir) {
+			Ok(()) => attach_with_retry(40, 250).await.ok(),
+			Err(e) => {
+				tracing::warn!(target: "kern.mcp", error = %e, "respawn after restart failed");
+				None
+			}
+		}
+	};
+	match fresh {
+		Some(c) => {
+			tracing::info!(target: "kern.mcp", "reattached to restarted daemon");
+			c
+		}
+		// Fail open: no memory is recoverable, a dead proxy is not.
+		None => {
+			tracing::warn!(
+				target: "kern.mcp",
+				"could not reattach after restart — falling back to a fresh attach"
+			);
+			match attach_with_retry(40, 250).await {
+				Ok(c) => c,
+				Err(e) => {
+					tracing::error!(target: "kern.mcp", error = %e, "no daemon after restart");
+					std::process::exit(1);
+				}
+			}
+		}
+	}
+}
+
+async fn attach_via_hub(
+	auto_start: bool,
+	log_dir: &std::path::Path,
+) -> Option<KernRpcClient<JsonEnvelopeCodec>> {
 	use trnsprt::hub_rpc::{HubRpcClient, ResolveReq};
 	let hub = match HubRpcClient::<JsonEnvelopeCodec>::connect_hub().await {
 		Ok(h) => h,
 		Err(_) if auto_start => {
 			// Same detach pattern as spawn_daemon; a lost race lands on
 			// AlreadyRunning in the second hub and the retry below still connects.
-			if let Err(e) = spawn_hub() {
+			if let Err(e) = spawn_hub(log_dir) {
 				tracing::warn!(target: "kern.mcp", error = %e, "hub auto-start failed — legacy path");
 				return None;
 			}
@@ -146,24 +244,21 @@ async fn attach_with_retry(
 	Err(last_err.unwrap_or_else(|| AdapterError::Other("no attempts".into())))
 }
 
-fn spawn_hub() -> std::io::Result<()> {
-	spawn_detached("hub")
+fn spawn_hub(log_dir: &std::path::Path) -> std::io::Result<()> {
+	spawn_detached("hub", log_dir)
 }
 
-fn spawn_daemon() -> std::io::Result<()> {
-	spawn_detached("--daemon")
+fn spawn_daemon(log_dir: &std::path::Path) -> std::io::Result<()> {
+	spawn_detached("--daemon", log_dir)
 }
 
-// Drop the child handle — detach flags + null stdio keep it alive past our exit.
-fn spawn_detached(arg: &str) -> std::io::Result<()> {
+// Drop the child handle — detach flags + redirected stdio keep it alive past our exit.
+fn spawn_detached(arg: &str, log_dir: &std::path::Path) -> std::io::Result<()> {
 	use std::process::{Command, Stdio};
 	let exe = std::env::current_exe()?;
+	let (out, err) = crate::config::detached_log::stdio(log_dir, arg);
 	let mut cmd = Command::new(exe);
-	cmd
-		.arg(arg)
-		.stdin(Stdio::null())
-		.stdout(Stdio::null())
-		.stderr(Stdio::null());
+	cmd.arg(arg).stdin(Stdio::null()).stdout(out).stderr(err);
 	#[cfg(windows)]
 	{
 		use std::os::windows::process::CommandExt;
