@@ -91,9 +91,11 @@ It ranks here because "a graph, not a bag — recall can walk them" is a
 
 ### 8. `kern intake` — no way to see or drive the intake `[ingest]`
 
-Nothing reports what is pending, what failed, or why; failures surface only as
-tracing warnings inside the daemon, and there is no `Intake` variant in
-`Commands` (`src/commands.rs:96-182`). Wanted: `kern intake` (list pending +
+**Half done.** The *why* now exists: a failed drain writes the last error to
+`<intake>/errors/<name>.txt`, clears it on the next success, and
+`ingest::intake_status::scan` reports pending (with age and last error), failed
+and done. What is still missing is the surface — there is no `Intake` variant in
+`Commands`, so nothing exposes any of it. Wanted: `kern intake` (list pending +
 failed with the last error) and a one-shot drain so the CLI works with no daemon
 running.
 

@@ -5,6 +5,7 @@ pub mod distill;
 pub mod embed;
 pub mod file_watcher;
 pub mod intake;
+pub mod intake_status;
 pub mod outcome;
 pub mod place;
 pub mod split;

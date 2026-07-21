@@ -22,6 +22,32 @@
   acceptable, off-topic-in-generic is preserved, and the retrieval eval
   remains the instrument that will judge whether routing quality matters.
 
+- 2026-07-21 — Roadmap item 8, first half: a stuck intake delta now says why.
+  `220af94` made the reason model's prose replies retry forever rather than
+  silently archiving the capture — the right side of that trade, and stated at the
+  time to be acceptable only while the retrying is *visible*. It was not: the
+  failure reached a tracing warning inside the daemon and nowhere else, so a delta
+  that never drains looked exactly like one not yet picked up.
+
+  The last error is now written to `<intake>/errors/<name>.txt` on failure and
+  removed on the next success, and `intake_status::scan` reports pending (with age
+  and last error), failed, and done counts. A stale error beside a file that has
+  since succeeded would be worse than none, so clearing is wired into `archive`,
+  the one path every success takes.
+
+  The sidecars live in a subdirectory on purpose: `drain_entry` guards on
+  `is_file`, so a directory is skipped, while an error file sitting in the queue
+  itself would be read back as a delta and ingested. There is a test for exactly
+  that, because it is the kind of mistake that only shows up as mysterious extra
+  claims.
+
+  **Owed, not claimed:** the `kern intake` subcommand and its one-shot drain. Both
+  need a `Commands` variant, and `src/commands.rs` is being restructured by
+  concurrent work; adding an enum arm mid-restructure trades a merge conflict for
+  nothing. Item 8 stays open for that half.
+
+  **Decided by:** fix-the-root.
+
 - 2026-07-21 — Roadmap item 16: `commit_access` is rate-limited, closing Tier 2.
   Retrieval stamps every delivered result, so a caller replaying one query pumped
   that thought's access count *and* its heat without bound — both ranking signals,

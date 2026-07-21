@@ -53,12 +53,32 @@ fn read_text(path: &Path) -> Option<Text> {
 
 // Best effort: on rename failure (cross-device) the source is removed so it is not re-processed.
 pub fn archive(path: &Path, done_dir: &Path) {
+	if let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) {
+		crate::ingest::intake_status::clear_failure(dir, name);
+	}
 	let _ = std::fs::create_dir_all(done_dir);
 	if let Some(name) = path.file_name() {
 		if std::fs::rename(path, done_dir.join(name)).is_err() {
 			let _ = std::fs::remove_file(path);
 		}
 	}
+}
+
+// The queue dir is the file's parent; sidecars live in `<queue>/errors/`.
+fn record_intake_failure(path: &Path, outcome: &crate::ingest::outcome::Outcome) {
+	let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
+		return;
+	};
+	let first = outcome
+		.failures
+		.first()
+		.map(|f| format!("{}/{}: {}", f.scope, f.class, f.error))
+		.unwrap_or_else(|| "no failure detail reported".to_string());
+	crate::ingest::intake_status::record_failure(
+		dir,
+		name,
+		&format!("status={} {}", outcome.status.as_str(), first),
+	);
 }
 
 pub fn finalize(path: &Path, done_dir: &Path, results: &[bool]) -> bool {
@@ -153,6 +173,7 @@ async fn drain_entry(
 		let ok = !matches!(outcome.status, OutcomeStatus::Failed);
 		if !ok {
 			tracing::warn!(target: "kern.ingest.intake", stem = %stem, status = outcome.status.as_str(), "claim ingest failed; leaving delta for retry");
+			record_intake_failure(path, &outcome);
 		}
 		results.push(ok);
 	}
@@ -191,6 +212,7 @@ async fn drain_document(
 	let ok = !matches!(outcome.status, OutcomeStatus::Failed);
 	if !ok {
 		tracing::warn!(target: "kern.ingest.intake", name = %name, status = outcome.status.as_str(), "document ingest failed; leaving in intake for retry");
+		record_intake_failure(path, &outcome);
 	}
 	finalize(path, done, &[ok])
 }
