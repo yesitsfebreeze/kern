@@ -6,25 +6,14 @@ use crate::base::constants::{
 	PULSE_THRESHOLD, STIGMERGY_GC_INTERVAL,
 };
 use crate::base::graph::GraphGnn;
-use crate::base::heat::{self, HeatConfig};
 
 use super::queue::{task, Queue, TaskKind};
 
 // Unix-seconds of the last GC fan-out; single-flighted by compare_exchange.
 static LAST_GC_AT_SECS: AtomicU64 = AtomicU64::new(0);
 
-pub fn pulse(q: &Queue, g: &mut GraphGnn, kern_id: &str, strength: f64) {
-	pulse_with_heat(q, g, kern_id, strength, &HeatConfig::default());
-}
-
-pub fn pulse_with_heat(
-	q: &Queue,
-	g: &mut GraphGnn,
-	kern_id: &str,
-	strength: f64,
-	heat_cfg: &HeatConfig,
-) {
-	deposit_pulse(q, g, kern_id, strength, heat_cfg);
+pub fn pulse(q: &Queue, g: &GraphGnn, kern_id: &str, strength: f64) {
+	fan_out_cluster(q, g, kern_id, strength);
 	if strength >= PULSE_THRESHOLD {
 		maybe_enqueue_stigmergy_gc(q, g);
 		maybe_enqueue_reembed(q, g);
@@ -104,47 +93,26 @@ fn maybe_enqueue_reembed(q: &Queue, g: &GraphGnn) {
 	}
 }
 
-fn deposit_pulse(q: &Queue, g: &mut GraphGnn, kern_id: &str, strength: f64, heat_cfg: &HeatConfig) {
+// The pulse schedules maintenance; it deposits no heat. It used to, and that made
+// heat a function of tree position: the deposit recurs every tick, so ANY positive
+// amount — the smallest that survives f32 is ~1.6e-7 against the 0.01 cold gate —
+// settles at an equilibrium orders of magnitude above the gate and exempts every
+// entity within reach from GC forever, used or not. There is no deposit size that
+// biases survival without granting that exemption, so the deposit is gone and heat
+// is what the vision says it is: a usage signal (ROADMAP item 32).
+fn fan_out_cluster(q: &Queue, g: &GraphGnn, kern_id: &str, strength: f64) {
 	if strength < PULSE_THRESHOLD {
 		return;
 	}
-	let (children, has_thoughts, entity_ids): (Vec<String>, bool, Vec<String>) = {
-		let Some(k) = g.kerns.get(kern_id) else {
-			return;
-		};
-		(
-			k.children.clone(),
-			!k.entities.is_empty(),
-			k.entities.keys().cloned().collect(),
-		)
+	let Some(k) = g.kerns.get(kern_id) else {
+		return;
 	};
-
-	if has_thoughts {
+	if !k.entities.is_empty() {
 		q.enqueue(task(TaskKind::Cluster, kern_id));
 	}
-
-	let deposit = (heat_cfg.deposit_traversal as f64 * strength) as f32;
-	if deposit > 0.0 {
-		let now = SystemTime::now();
-		if let Some(k) = g.kerns.get_mut(kern_id) {
-			for tid in &entity_ids {
-				if let Some(t) = k.entities.get_mut(tid) {
-					t.heat = heat::deposit(
-						t.heat,
-						t.heat_updated_at,
-						now,
-						heat_cfg.half_life_secs,
-						deposit,
-					);
-					t.heat_updated_at = Some(now);
-				}
-			}
-		}
-	}
-
 	let reduced = strength * PULSE_DECAY;
-	for child_id in &children {
-		deposit_pulse(q, g, child_id, reduced, heat_cfg);
+	for child_id in &k.children {
+		fan_out_cluster(q, g, child_id, reduced);
 	}
 }
 
@@ -167,16 +135,7 @@ mod tests {
 		g.kerns.insert("c".into(), c);
 
 		let q = Queue::new(64);
-		deposit_pulse(
-			&q,
-			&mut g,
-			"p",
-			strength,
-			&HeatConfig {
-				half_life_secs: 3600,
-				..HeatConfig::default()
-			},
-		);
+		fan_out_cluster(&q, &g, "p", strength);
 
 		let mut rx = q.take_receiver().unwrap();
 		let mut kerns = Vec::new();
@@ -229,30 +188,98 @@ mod tests {
 		);
 	}
 
+	// The property ROADMAP item 32 is about, driven through the real
+	// `pulse` -> `commit_access_ids` -> `run_gc` lifecycle. Fake time: rewinding
+	// every stamp by one tick is exactly equivalent to advancing the wall clock,
+	// and leaves the code under test untouched. The chain is 8 deep because the
+	// pulse reaches 5 levels (1.0 * 0.5^d >= 0.05 for d <= 4) — a shallower tree
+	// keeps the boundary outside the graph and the test passes either way. The
+	// half-life is compressed to a day so the horizon can clear both gates:
+	// COLD_GC_AGE is a fixed 7 days, and a 1.0 access deposit needs 6.64
+	// half-lives to fall under the 0.01 cold gate.
 	#[test]
-	fn pulse_deposits_using_the_configured_heat_settings_not_the_defaults() {
-		let mut g = GraphGnn::new();
-		let mut k = Kern::new("k", "");
-		let mut e = mk_entity("e", "x", 0.0, EntityKind::Claim);
-		e.heat = 8.0;
-		e.heat_updated_at = Some(SystemTime::now() - Duration::from_secs(100));
-		k.entities.insert("e".into(), e);
-		g.kerns.insert("k".into(), k);
+	fn at_equal_usage_survival_does_not_depend_on_depth() {
+		use crate::base::heat::HeatConfig;
+		use crate::retrieval::score::commit_access_ids;
+		use crate::tick::stigmergy::run_gc;
+		use parking_lot::RwLock;
 
-		let q = Queue::new(64);
+		const DEPTHS: usize = 8;
+		const TICK: Duration = Duration::from_secs(60);
+		const TICKS: usize = 9 * 24 * 60;
 		let cfg = HeatConfig {
-			half_life_secs: 100,
-			deposit_access: 1.0,
-			deposit_traversal: 1.0,
+			half_life_secs: 24 * 60 * 60,
+			..HeatConfig::default()
 		};
-		pulse_with_heat(&q, &mut g, "k", 1.0, &cfg);
+		let kid = |d: usize| format!("k{d}");
 
-		let heat = g.kerns.get("k").unwrap().entities.get("e").unwrap().heat;
-		assert!(
-			(heat - 5.0).abs() < 0.05,
-			"8 halved over the configured 100s half-life plus the configured 1.0 \
-			 traversal deposit = ~5; the one-week default would give ~9, got {heat}"
-		);
+		let now = SystemTime::now();
+		let mut g = GraphGnn::new();
+		for d in 0..DEPTHS {
+			let mut k = Kern::new(kid(d), if d == 0 { String::new() } else { kid(d - 1) });
+			if d + 1 < DEPTHS {
+				k.children = vec![kid(d + 1)];
+			}
+			// Identical stamps and identical starting heat at every depth: one
+			// access at t=0, so position is the only thing that varies.
+			for id in [format!("used{d}"), format!("unused{d}")] {
+				let mut e = mk_entity(&id, "x", 0.0, EntityKind::Claim);
+				e.heat = cfg.deposit_access;
+				e.heat_updated_at = Some(now);
+				e.accessed_at = Some(now);
+				e.created_at = Some(now);
+				k.entities.insert(id, e);
+			}
+			g.register(k);
+		}
+
+		let used: Vec<String> = (0..DEPTHS).map(|d| format!("used{d}")).collect();
+		let graph = Arc::new(RwLock::new(g));
+		let q = Queue::new(4096);
+		for tick in 0..TICKS {
+			{
+				let mut g = graph.write();
+				for k in g.kerns.values_mut() {
+					for e in k.entities.values_mut() {
+						for v in [
+							&mut e.heat_updated_at,
+							&mut e.accessed_at,
+							&mut e.created_at,
+						]
+						.into_iter()
+						.flatten()
+						{
+							*v -= TICK;
+						}
+					}
+				}
+				pulse(&q, &g, &kid(0), 1.0);
+				// `used` is queried every 6h for the whole run; `unused` never again.
+				if tick % (6 * 60) == 0 {
+					commit_access_ids(&mut g, &used, &cfg);
+				}
+			}
+			if tick % 60 == 59 {
+				for d in 0..DEPTHS {
+					run_gc(&graph, &kid(d), &cfg);
+				}
+			}
+		}
+
+		let g = graph.read();
+		for d in 0..DEPTHS {
+			let e = &g.kerns.get(&kid(d)).expect("kern resident").entities;
+			assert!(
+				e.contains_key(&format!("used{d}")),
+				"depth {d}: a thought queried every 6h was collected — usage must keep it"
+			);
+			assert!(
+				!e.contains_key(&format!("unused{d}")),
+				"depth {d}: a thought untouched for 9 days survived while the identical \
+				 thought at depth 7 was collected — survival is tracking tree position, \
+				 not usage"
+			);
+		}
 	}
 
 	#[test]

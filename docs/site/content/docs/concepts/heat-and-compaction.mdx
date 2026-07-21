@@ -6,10 +6,9 @@ One scalar per thought — *heat* — exponential decay, and a background tick t
 
 ## Heat
 
-Dimensionless usage signal; two deposits:
+Dimensionless usage signal; one deposit:
 
-- **Access** — a query returning a thought deposits 1.0 and stamps `accessed_at`.
-- **Pulse** — each maintenance pass walks from the root, depositing 0.5, halved per level, stopping below 0.05 (~4 levels with defaults). Depth is itself a decay term — branches the pulse no longer reaches stop being reinforced.
+- **Access** — a query returning a thought deposits 1.0 and stamps `accessed_at`. Nothing else deposits. The maintenance pulse walks the tree to schedule work, not to reinforce: it did deposit until it was measured, and because the deposit recurred every tick it settled orders of magnitude above the eviction floor, exempting everything within its reach from collection whether or not anyone used it. Survival is usage, never tree position.
 
 Half-life is preset-owned: `relaxed` 30 days (default), `medium` 7 days, `tight` 3 days. No `[heat]` section to set.
 
@@ -56,7 +55,7 @@ Missing or future timestamp (clock skew) = *not* a victim — the predicate fail
   chart={`
 stateDiagram-v2
     [*] --> Hot: ingest
-    Hot --> Hot: query / pulse deposit
+    Hot --> Hot: query deposit
     Hot --> Cooling: no touch, heat decays
     Cooling --> Hot: any access re-deposits
     Cooling --> Victim: cold AND stale AND not durable
@@ -84,7 +83,7 @@ Unconditional survival: ingest as a `Document`, keep it warm, or make it a `Fact
 
 ## Steady state
 
-Working set (queried within a couple of half-lives, plus what the pulse reaches) stays hot and indexed. Cohesive clusters condense into named kerns. Hourly drain moves untouched claims cold. Facts and documents accumulate, never swept. The hot graph tracks what you *use*, not what you have written.
+Working set — queried within 6.64 half-lives, and nothing else — stays hot and indexed. Cohesive clusters condense into named kerns. Hourly drain moves untouched claims cold. Facts and documents accumulate, never swept. The hot graph tracks what you *use*, not what you have written.
 
 ## See also
 

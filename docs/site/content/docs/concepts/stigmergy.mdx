@@ -11,7 +11,7 @@ Ants deposit pheromone; other ants prefer marked paths; pheromone evaporates —
 ## The trace
 
 - **Reads deposit** — a returned thought gets an access-count bump, an `accessed_at` stamp, a heat deposit. Deferred to the tick — recall never blocks on a write, never counts as content mutation.
-- **The pulse deposits** — each pass re-deposits from the root, half strength per level. No biological counterpart, load-bearing: an idle daemon still lays pheromone on its main paths.
+- **The pulse does not deposit** — it walks from the root at half strength per level to *schedule* work, and lays no pheromone. It used to, and a deposit that recurs every tick never evaporates: everything the walk reached became permanently uncollectible. An idle daemon still maintains itself, on the clustering fan-out, not on manufactured heat.
 - **Evaporation** — exponential, lazy, from the age of the last deposit. See [Heat & compaction](./heat-and-compaction.mdx#decay-is-lazy).
 
 ## From trace to collection
@@ -31,7 +31,7 @@ Two action points:
 - **Ingest** — routing picks the child nearest by `cosine_distance / mass`; no match falls to the `generic` catch-all.
 - **Query** — boost proportional to best graviton match × mass (**max**, not sum — overlapping gravitons never double-count). Default weight 0.15; 0 disables; a graviton-free graph pays nothing.
 
-Heat and gravitons compound without being wired together: a well-populated graviton subtree sits nearer the root, is pulsed harder, survives GC more readily. Aiming a graviton is a real statement about what the graph should keep.
+Heat and gravitons are not wired together and do not compound: a graviton biases what is *found*, and being found is what deposits heat. Position in the tree buys nothing on its own — aiming a graviton is a statement about what the graph should surface, and retention follows only if surfacing turns into use.
 
 <Mermaid
   chart={`

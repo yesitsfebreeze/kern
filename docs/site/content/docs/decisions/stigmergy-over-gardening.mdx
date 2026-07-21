@@ -4,7 +4,7 @@ title: "Stigmergy over gardening"
 
 ## Decision
 
-Forgetting is driven by a decaying `heat` scalar deposited by use — reads and the pulse deposit, an hourly collector evicts what goes cold — with no retention policies, quotas, or manual curation.
+Forgetting is driven by a decaying `heat` scalar deposited by use — reads deposit, an hourly collector evicts what goes cold — with no retention policies, quotas, or manual curation.
 
 ## Why
 
@@ -14,11 +14,10 @@ Forgetting is driven by a decaying `heat` scalar deposited by use — reads and 
 
 Shipped constants:
 
-- Read deposits `1.0` heat, off the query hot path.
-- Pulse deposits `0.5 × strength` on every entity reachable from the root, halving per level — reachability itself reinforces, so an idle daemon maintains its own spine.
-- Decay is lazy, from last-deposit age; half-life **7 days**; a deposit decays the stale value first, never resurrecting old magnitude.
+- Read deposits `1.0` heat, off the query hot path. It is the only deposit.
+- Decay is lazy, from last-deposit age; half-life is preset-owned (`relaxed` 30 days by default); a deposit decays the stale value first, never resurrecting old magnitude.
 - Hourly GC demotes entities that are cold (aged heat below `0.01`), stale (untouched 7 days), and not durable — spilled to the cold tier, not deleted.
-- Net: one read survives ~**46 days**; pulse-reachable never qualifies; weekly reads never decay past half peak.
+- Net: one read survives 6.64 half-lives — ~**199 days** on `relaxed`, ~46 on `medium`, ~20 on `tight`; repeat reads never decay past half peak.
 
 ## Rejected
 
@@ -34,8 +33,9 @@ Shipped constants:
 ## Trade-off accepted
 
 - Heat is retention-only; ranking keeps its own two-term freshness boost with a 24-hour half-life — two freshness signals, by design not unification.
-- The 7-day half-life errs heavily toward retention (~46 days per read, not ~1 week as originally derived).
+- The half-life errs heavily toward retention (6.64 half-lives per read, not one, because the cold gate is `0.01` and not half peak).
 - Convergence metrics never built — the access-distribution claim is design intent, not measurement.
+- The pulse used to deposit too, and a recurring deposit of *any* size settles far above the `0.01` gate: everything within its 5-level reach was permanently exempt from collection, used or not. Removed — retention is a consequence of use only (`tests/depth_bias.rs`).
 
 <Callout type="info" title="One administered exception">
 Active `Fact` and `Document` entities are immune to collection (locally — peers
@@ -45,5 +45,5 @@ immunity. See [Heat & compaction](../concepts/heat-and-compaction.mdx).
 
 ## Where you see it
 
-- Unused memories quietly demote to the cold tier after ~6 weeks; anything you recall stays hot.
+- Unused memories quietly demote to the cold tier once heat clears the floor — months on `relaxed`, weeks on `tight`; anything you recall stays hot.
 - Details: [Stigmergy GC & gravitons](../concepts/stigmergy.mdx), [Heat, decay & self-compaction](../concepts/heat-and-compaction.mdx).

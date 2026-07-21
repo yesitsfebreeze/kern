@@ -2,6 +2,62 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — item 32 `[lifecycle]` closed: the tick pulse deposits no heat.
+  Access is now the only deposit, so retention is a function of use and of
+  nothing else.
+
+  **The item was right that survival tracked tree position and wrong about which
+  way.** Measured first, in `tests/depth_bias.rs` — a chain deeper than the pulse
+  can reach, two cohorts at every depth with identical usage, the real `pulse` →
+  `commit_access_ids` → `run_gc` lifecycle driven over simulated months by
+  rewinding entity stamps rather than sleeping. The reach is **5 levels, not the
+  "~4" the item cited from a doc**: 1.0 halved per level stays above the 0.05
+  floor through depth 4. Under `relaxed`, an entity read once and never again was
+  evicted on day 199.3 at depths 5–7 and **ALIVE at depths 0–4**, carrying heat
+  from 1939 (depth 4) to 31 031 (depth 0) against a cold gate of 0.01. Same shape
+  on `medium` (day 46.5) and `tight` (day 20.0). So the defect was not that deep
+  branches decayed; it was that nothing within four levels of the root could ever
+  be collected, used or not — the vision's "the hot graph stays bounded" failing
+  outright, on graphs whose whole tree usually fits inside that reach.
+
+  **No deposit size could have been kept.** The deposit recurs every 60s against
+  a half-life measured in weeks, so equilibrium is deposit/(1−decay-per-tick): any
+  amount above ~1.6e-7 settles above the 0.01 gate and grants the same permanent
+  exemption. That rules out tuning it, and it rules out the fix the item's title
+  implies — propagating *deeper* would have extended the exemption to every entity
+  in the graph and disarmed cold GC completely. Removing the deposit was the only
+  option that leaves heat meaning what `VISION.md` says it means.
+
+  **Stated cost.** Eviction changes: entities in the top five levels that go
+  unread past 6.64 half-lives (~199 days on the default `relaxed`, ~46 on
+  `medium`, ~20 on `tight`) are now collected where before they never could be.
+  They spill to the cold tier first and recall backfills from it, active Facts and
+  Documents keep their immunity, so nothing durable is lost — but a long-idle
+  graph will shed hot rows it used to keep, and that is the point. Gossip's
+  `hottest_local` batch changes with it, from "whatever sits near the root" to
+  what has actually been read. Recall does not move: heat feeds GC and gossip
+  selection, never ranking, and `e2e` re-measured at exactly 0.9306 / 0.9722 /
+  0.9471. The tick got cheaper rather than dearer — the deposit was O(entities in
+  reach) heat writes plus a `Vec<String>` of every entity id per kern, under the
+  graph **write** lock; over 342 kerns / 102 300 entities the same pulse fell from
+  **17 586µs to 341µs**, and now takes a read lock.
+
+  Proven by revert: restoring the deposit inside the walk fails
+  `tick::pulse::tests::at_equal_usage_survival_does_not_depend_on_depth` with
+  "depth 0: a thought untouched for 9 days survived while the identical thought at
+  depth 7 was collected — survival is tracking tree position, not usage". The test
+  is 8 kerns deep and 9 simulated days long on purpose: a tree inside the reach,
+  or a horizon under `COLD_GC_AGE`, passes whether the bias exists or not.
+  `HeatConfig::deposit_traversal` is deleted rather than left at 0.0, and
+  `pulse_with_heat` collapses back into `pulse`, since a heat argument that
+  deposits nothing is a lie the next reader has to disprove. Docs corrected in the
+  same change: `stigmergy.mdx` called the deposit "load-bearing" and claimed a
+  subtree near the root "survives GC more readily" — it survived absolutely —
+  and `stigmergy-over-gardening.mdx` had already written down "pulse-reachable
+  never qualifies" without anyone reading it as the defect it was.
+
+  Decided by: fix-the-root
+
 - 2026-07-21 — item 28 `[lifecycle]` closed: GNN training runs on its own thread,
   not on the tick loop. Unlike the last three perf items, this premise survived
   measurement. A new release-only instrument (`tests/gnn_scale.rs`, in the shape

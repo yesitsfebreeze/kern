@@ -452,13 +452,13 @@ maintains itself.
   synchronous one-shot variant; `enqueue_all` (`:323`) fans a Cluster task out
   to every non-empty kern.
 - **Maintenance tick** (`spawn_maintenance_tick`, `src/commands.rs`) — periodic
-  driver at `TICK_INTERVAL_SECS=60` (0 = event-driven only): pulses heat, gates
-  GC and disk consolidation on clock validity + elapsed interval
-  (`pulse::should_run_gc`, `src/tick/pulse.rs:63`), enqueues persist.
-- **Pulse** (`src/tick/pulse.rs`) — `pulse_with_heat` (`src/tick/pulse.rs:20`) re-deposits heat
-  on entities reachable from the root, decaying strength by `PULSE_DECAY=0.5`
-  per level; below `PULSE_THRESHOLD=0.05` it stops. Heat itself decays lazily
-  by age (`heat::decayed`, half-life based), *not* per tick.
+  driver at `TICK_INTERVAL_SECS=60` (0 = event-driven only): pulses the root,
+  gates GC and disk consolidation on clock validity + elapsed interval
+  (`pulse::should_run_gc`, `src/tick/pulse.rs:52`), enqueues persist.
+- **Pulse** (`src/tick/pulse.rs`) — `pulse` (`src/tick/pulse.rs:15`) fans Cluster tasks out from the root,
+  decaying strength by `PULSE_DECAY=0.5` per level; below `PULSE_THRESHOLD=0.05` it
+  stops, covering 5 levels. Deposits **no** heat, takes the graph by shared reference.
+  Heat decays lazily by age (`heat::decayed`, half-life based), *not* per tick.
 - **Cluster** (`src/tick/cluster.rs` + `tick::do_cluster`) — `vector_cluster`
   (`src/tick/cluster.rs:13`) samples up to `TICK_MAX_CLUSTER_SAMPLE=200`
   entities and groups them; a cluster
