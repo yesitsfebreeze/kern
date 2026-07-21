@@ -2,6 +2,57 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — `docs-check` now reads the line it is pointed at. Item 93's
+  second candidate closure landed: every anchor carrying a line number gets its
+  citing block's content words compared against the cited line's, and an anchor
+  that shares too few is **nominated**, not failed. Tokens lowercase, split on
+  `_` and on the camelCase boundary, keep four characters or more, drop a small
+  stopword set. The bar splits by target kind — two shared words for prose,
+  total silence for code — because prose citing code shares almost nothing by
+  design, and a two-word bar everywhere nominates 117 of 655 anchors, which is
+  the same as nominating nothing. Split, it nominates 38.
+
+  The design constraint was the whole point and it is honored: nominations print
+  under their own heading, say plainly that they are suspicions, and **do not
+  touch the exit code**. `python3 scripts/docs_check.py` exits 0 with all 38
+  standing; only genuinely dead references still exit 1. `--strict-anchors` is
+  the opt-in that makes them fatal, there for a CI that has decided to trust
+  them, which nothing has yet. An adjudicated anchor is silenced in place with a
+  trailing `docs-check: anchor-ok` comment — the historical marker's idiom,
+  counted only outside backticks so a page can still quote it. Item 93's own
+  paragraph is its first user, since its `FEATURES.md:408-409` was never a
+  citation, only an example of one going wrong.
+
+  **The measured false-positive rate is 13 of 39, about 33%**, adjudicated one
+  at a time against the real tree rather than estimated. That is a real number
+  and it is the reason strict is opt-in. The 26 true ones are the predicted
+  damage: `bayesian-belief.md` citing `conf_alpha`/`conf_beta` at a `ChunkPart`
+  struct, `FEATURES.md` citing `classify_prompt` at a `return Vec::new();`,
+  `README.md` citing the cold-tier drop counter at a closing brace — five of six
+  anchors in one `crdts-federation.md` status block are wrong. The thirteen
+  false ones share one cause: the target's distinguishing word is under four
+  characters (`acl`, `rrf`, `run_hub`) or inflected (`fn stem` against
+  "stemmer"). Two are this item's own illustrations and are acquitted in place,
+  leaving 38 standing at 32%.
+
+  One tuning step is recorded as the near-wash it measured as, rather than as
+  the improvement it looked like: splitting the camelCase boundary silenced two
+  false positives **and one true one** — `bayesian-belief.md:16` cites
+  `src/base/types.rs:66-75` for "the seven kinds that exist" when 66-75 is
+  `EntityStatus` and `ReasonKind` starts at 76, and that breakage now hides
+  behind a stray "entity" match. Precision 64% → 67%, recall 27 → 26. Kept on
+  the principle that prose and code should tokenise alike, not on the numbers.
+
+  The selftest carries the proof rather than the claim: a fixture page cites a
+  matching line, a mismatched line, and the mismatched line again with the
+  acquittal marker, and asserts exactly one nomination naming the mismatch. Both
+  directions are asserted, because a checker never observed firing proves
+  nothing — which is how four false-green tests got caught here today.
+
+  Decided by: name-the-tradeoff — the honest 31% is stated in the item, in the
+  output and here, instead of being tuned away into a number that would have
+  made the checker look ready to gate when it is not.
+
 - 2026-07-21 — merging `cycle/1` broke **fifteen** line anchors at once, and the
   count is the point. Both branches had just re-pointed their anchors and both
   were right in their own tree; combining them shifted `FEATURES.md` again and
