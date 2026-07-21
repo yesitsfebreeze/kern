@@ -3,25 +3,12 @@ use crate::base::graph::GraphGnn;
 use crate::base::math::{average_vec, reason_id};
 use crate::base::reason::{add_reason, remove_entity, remove_reason};
 use crate::base::search::find_entity;
-use crate::base::types::{Entity, Kern, Reason, ReasonKind};
+use crate::base::types::{EntityKind, Kern, Reason, ReasonKind};
 use crate::base::util::{explain_relationship_prompt, short_id, truncate};
+use crate::mcp::tools_query::entity_detail_by_id;
 
-use super::route::{route, u64_field, Routed};
+use super::route::{array_field, f64_field, route, str_field, u64_field, Routed};
 use super::{load_graph, save_graph, with_graph, Client, Endpoint};
-
-fn find_entity_by_prefix(g: &GraphGnn, id: &str) -> Option<(Entity, String)> {
-	if let Some(pair) = find_entity(g, id) {
-		return Some(pair);
-	}
-	for k in g.all() {
-		for t in k.entities.values() {
-			if t.id.starts_with(id) {
-				return Some((t.clone(), k.id.clone()));
-			}
-		}
-	}
-	None
-}
 
 fn print_kern(kern: &Kern, g: &GraphGnn, depth: usize) {
 	let indent = "  ".repeat(depth);
@@ -52,55 +39,63 @@ fn print_kern(kern: &Kern, g: &GraphGnn, depth: usize) {
 	}
 }
 
-pub(super) fn cmd_get(cfg: &crate::config::Config, id: &str) {
+// The detail JSON carries kinds as discriminants; the label is what the CLI has
+// always printed, and an unmapped number is shown rather than guessed at.
+fn entity_kind_label(n: u64) -> String {
+	match u8::try_from(n).ok().and_then(EntityKind::from_u8) {
+		Some(k) => format!("{k:?}"),
+		None => n.to_string(),
+	}
+}
+
+fn reason_kind_label(n: u64) -> String {
+	match i32::try_from(n).ok().and_then(ReasonKind::from_i32) {
+		Some(k) => format!("{k:?}"),
+		None => n.to_string(),
+	}
+}
+
+fn print_detail(v: &serde_json::Value) {
+	let id = str_field(v, "id");
+	println!("ID:     {id}");
+	println!("Kind:   {}", entity_kind_label(u64_field(v, "kind")));
+	println!("Score:  {:.4}", f64_field(v, "score"));
+	println!("Access: {}", u64_field(v, "access_count"));
+	println!("Kern:   {}", short_id(str_field(v, "kern")));
+	println!("Text:   {}", str_field(v, "text"));
+
+	let edges = array_field(v, "edges");
+	if edges.is_empty() {
+		return;
+	}
+	println!("Edges:");
+	for e in edges {
+		let from = str_field(e, "from");
+		let outgoing = from == id;
+		println!(
+			"  {} {} score={:.4} {}  {}",
+			if outgoing { "->" } else { "<-" },
+			reason_kind_label(u64_field(e, "kind")),
+			f64_field(e, "score"),
+			short_id(if outgoing { str_field(e, "to") } else { from }),
+			truncate(str_field(e, "text"), 80),
+		);
+	}
+}
+
+// Routed first for the same reason as forget: a serving daemon's graph is newer
+// than anything this process can load, so a local read would print a stale
+// thought — and stale evidence is the defect one step down from a lost write.
+pub(super) async fn cmd_get(cfg: &crate::config::Config, id: &str) {
+	match route("query", serde_json::json!({"id": id})).await {
+		Routed::Done(v) => return print_detail(&v),
+		Routed::Refused(e) => return eprintln!("{e}"),
+		Routed::NoDaemon => {}
+	}
 	let g = load_graph(cfg);
-	let (thought, kern_id) = match find_entity_by_prefix(&g, id) {
-		Some(pair) => pair,
-		None => {
-			if let Some(e) = g.store().and_then(|s| s.cold_get(id).ok().flatten()) {
-				println!("ID:     {}", e.id);
-				println!("Kind:   {:?}", e.kind);
-				println!("Score:  {:.4}", e.score);
-				println!("Access: {}", e.access_count.value_i32());
-				println!("Kern:   (cold)");
-				println!("Text:   {}", e.text());
-				return;
-			}
-			eprintln!("thought not found: {id}");
-			return;
-		}
-	};
-
-	println!("ID:     {}", thought.id);
-	println!("Kind:   {:?}", thought.kind);
-	println!("Score:  {:.4}", thought.score);
-	println!("Access: {}", thought.access_count.value_i32());
-	println!("Kern:   {}", short_id(&kern_id));
-	println!("Text:   {}", thought.text());
-
-	if let Some(kern) = g.kerns.get(&kern_id) {
-		let rids = crate::base::reason::collect_reason_ids(kern, &thought.id);
-		if !rids.is_empty() {
-			println!("Edges:");
-			for rid in &rids {
-				if let Some(re) = kern.reasons.get(rid) {
-					let dir = if re.from == thought.id { "->" } else { "<-" };
-					let other = if re.from == thought.id {
-						&re.to
-					} else {
-						&re.from
-					};
-					println!(
-						"  {} {:?} score={:.4} {}  {}",
-						dir,
-						re.kind,
-						re.score,
-						short_id(other),
-						truncate(&re.text, 80),
-					);
-				}
-			}
-		}
+	match entity_detail_by_id(&g, id) {
+		Some(detail) => print_detail(&detail),
+		None => eprintln!("thought not found: {id}"),
 	}
 }
 
@@ -335,7 +330,7 @@ pub(crate) fn degrade_entity_reasons(g: &mut GraphGnn, kern_id: &str, id: &str) 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::base::types::{Kern, Reason};
+	use crate::base::types::{Entity, Kern, Reason};
 
 	fn edge(from: &str, to: &str, score: f64) -> Reason {
 		Reason {
@@ -484,13 +479,33 @@ mod tests {
 		assert_eq!(forget_entity(&mut g, "nope"), Err("thought not found"));
 	}
 
+	// Proves the printer, not the lookup: both `kern get` paths hand it this shape,
+	// so the labels and the edge direction must come back out of the JSON intact.
 	#[test]
-	fn find_entity_by_prefix_resolves_a_unique_prefix() {
-		let g = graph_with(&[("abc123def", EntityKind::Claim)], &[]);
-		let (hit, kern_id) = find_entity_by_prefix(&g, "abc12").expect("prefix resolves");
-		assert_eq!(hit.id, "abc123def");
-		assert_eq!(kern_id, "kx");
-		assert!(find_entity_by_prefix(&g, "abc123def").is_some());
-		assert!(find_entity_by_prefix(&g, "zzz").is_none());
+	fn detail_json_carries_everything_the_get_printer_needs() {
+		let mut g = graph_with(
+			&[("a", EntityKind::Question), ("b", EntityKind::Claim)],
+			&[("a", "b")],
+		);
+		g.kerns
+			.get_mut("kx")
+			.unwrap()
+			.entities
+			.get_mut("a")
+			.unwrap()
+			.set_text("the question".into());
+		let v = entity_detail_by_id(&g, "a").expect("a resolves");
+
+		assert_eq!(entity_kind_label(u64_field(&v, "kind")), "Question");
+		assert_eq!(str_field(&v, "text"), "the question");
+		assert_eq!(str_field(&v, "kern"), "kx");
+		let edges = array_field(&v, "edges");
+		assert_eq!(edges.len(), 1);
+		assert_eq!(str_field(&edges[0], "from"), "a", "edge points outward");
+		assert_eq!(
+			reason_kind_label(u64_field(&edges[0], "kind")),
+			"Similarity"
+		);
+		assert!(entity_detail_by_id(&g, "nope").is_none());
 	}
 }

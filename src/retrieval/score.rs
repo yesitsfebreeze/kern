@@ -181,13 +181,24 @@ pub fn filter_delivery<T: Scored>(cfg: &RetrievalConfig, results: &mut Vec<T>) {
 			);
 		}
 	}
-	// With MMR on, keep the larger MMR pool — truncating to the delivery cap here would make MMR's len-guard a no-op.
-	let cap = if cfg.mmr_enabled {
+	results.truncate(delivery_cap(cfg));
+}
+
+/// How many results a query may deliver.
+///
+/// One owner, because two callers need it: `filter_delivery` cuts the pool with
+/// it, and the CLI has to ask a serving daemon for exactly this many. Without
+/// that, `kern query` silently returns `seed_k` hits when a daemon is up and the
+/// full delivery pool when one is not — the same command, two answers.
+///
+/// With MMR on, the larger MMR pool is kept: truncating to the delivery cap here
+/// would make MMR's len-guard a no-op.
+pub fn delivery_cap(cfg: &RetrievalConfig) -> usize {
+	if cfg.mmr_enabled {
 		cfg.mmr_pool_size.max(cfg.max_deliver_results)
 	} else {
 		cfg.max_deliver_results
-	};
-	results.truncate(cap);
+	}
 }
 
 // Single filter predicate shared by post-filtering and pre-filtered ANN search (`search_all_filtered`) — the two must never diverge.
@@ -843,6 +854,40 @@ mod query_filter_tests {
 			results[1].score
 		);
 	}
+	// The cap the CLI hands a serving daemon has to be the cap the local read
+	// applies, so it is read from here rather than restated at the call site.
+	#[test]
+	fn delivery_cap_is_the_pool_mmr_keeps_and_the_cut_it_applies() {
+		let cfg = RetrievalConfig {
+			mmr_enabled: true,
+			mmr_pool_size: 50,
+			max_deliver_results: 25,
+			min_deliver_score: 0.0,
+			..Default::default()
+		};
+		assert_eq!(delivery_cap(&cfg), 50, "MMR keeps the larger pool");
+
+		let mut results: Vec<_> = (0..60)
+			.map(|i| ent(&format!("e{i}"), EntityKind::Claim, file_src("/a")))
+			.collect();
+		filter_delivery(&cfg, &mut results);
+		assert_eq!(
+			results.len(),
+			delivery_cap(&cfg),
+			"the cut is that same cap"
+		);
+
+		let off = RetrievalConfig {
+			mmr_enabled: false,
+			..cfg
+		};
+		assert_eq!(
+			delivery_cap(&off),
+			25,
+			"without MMR the delivery cap stands alone"
+		);
+	}
+
 	#[test]
 	fn a_delivery_that_bypasses_the_floor_is_counted() {
 		let cfg = RetrievalConfig {

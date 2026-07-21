@@ -170,6 +170,22 @@ pub fn find_entity(g: &GraphGnn, id: &str) -> Option<(Entity, String)> {
 	None
 }
 
+// Every id kern prints is shortened (`short_id`), so a hand-typed or copied id is
+// normally a prefix; the exact lookup still wins when it hits.
+pub fn find_entity_by_prefix(g: &GraphGnn, id: &str) -> Option<(Entity, String)> {
+	if let Some(pair) = find_entity(g, id) {
+		return Some(pair);
+	}
+	for k in g.all() {
+		for t in k.entities.values() {
+			if t.id.starts_with(id) {
+				return Some((t.clone(), k.id.clone()));
+			}
+		}
+	}
+	None
+}
+
 pub fn find_reason(g: &GraphGnn, id: &str) -> Option<(Reason, String)> {
 	if let Some(kid) = g.kern_of_reason(id) {
 		if let Some(kern) = g.loaded(kid) {
@@ -358,6 +374,27 @@ mod tests {
 			"returns the entity's home kern, not the ref's"
 		);
 		assert!(find_entity(&g, "nope").is_none());
+	}
+
+	#[test]
+	fn find_entity_by_prefix_resolves_a_unique_prefix() {
+		use crate::base::types::{Entity, Kern};
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("kx", "");
+		k.entities.insert(
+			"abc123def".into(),
+			Entity {
+				id: "abc123def".into(),
+				..Default::default()
+			},
+		);
+		g.kerns.insert("kx".into(), k);
+
+		let (hit, kern_id) = find_entity_by_prefix(&g, "abc12").expect("prefix resolves");
+		assert_eq!(hit.id, "abc123def");
+		assert_eq!(kern_id, "kx");
+		assert!(find_entity_by_prefix(&g, "abc123def").is_some());
+		assert!(find_entity_by_prefix(&g, "zzz").is_none());
 	}
 
 	#[test]

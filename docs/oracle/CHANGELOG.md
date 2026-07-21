@@ -2,6 +2,78 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — item 9's **read** half is closed: `kern get` and `kern query`
+  route to a serving daemon before they touch disk, both over the `query` tool
+  that already existed (`{id}` for the detail read, `{text, mode, k}` for the
+  ranked one), with the local load as the `NoDaemon` fallback. Both paths render
+  through one printer over the tool's own JSON, and one id resolver
+  (`entity_detail_by_id`) serves the tool and the CLI, so a routed and a local
+  `get` cannot disagree about what a prefix resolves to.
+
+  **The bug that only showed up when the two paths were measured against each
+  other.** Routing `query` without naming `k` inherits the tool's own default,
+  `seed_k` — well under the delivery pool the local read prints. On the 36-fact
+  e2e corpus that was 25 hits with a daemon up and 36 without, from the same
+  command against the same store: the answer size silently depending on whether
+  something was serving. The cap was a five-line expression inlined in
+  `filter_delivery`, reachable by nobody else, so the CLI had nothing to ask.
+  It is now `retrieval::score::delivery_cap`, one owner, read by the cut and by
+  the router both — and `e2e/test_daemon_reads.py` fails on a count mismatch
+  rather than on a wrong number nobody would have looked at.
+
+  **Two tradeoffs, named rather than found later.** A routed `kern query` embeds
+  with the *daemon's* configured model, so `--embed-model` on that invocation is
+  ignored — correct, because the daemon owns the index the query has to hit, and
+  the same "the daemon owns it" rule the write half took. And `search` and
+  `list` stay local **by decision**: `search` is the raw-ANN probe with no
+  matching tool, `list` prints the on-disk kern tree, and routing them would
+  remove the only way to see what is actually on disk while a daemon runs. That
+  is also what makes them the control in the new e2e — with the CLI's config
+  repointed at an empty data dir, they must go blind in the same breath that
+  `get` and `query` still answer, which is the only thing that proves the answer
+  came over the socket and not off a disk the test forgot to empty.
+
+  Item 9 does not close. `ingest`/`link` (blocked on item 24) and `intake drain`
+  (no matching tool) still write locally; the title now names only those.
+
+  **Decided by:** verify-before-claiming — the count divergence was not visible
+  in any test, in either code path read on its own, or in the implementer's
+  report; it appeared only when the same probe was run through both paths and
+  the outputs compared. And fix-the-root: the fix is one owner for the delivery
+  cap, not a matching constant at the call site.
+
+- 2026-07-21 — `docs/oracle/` reconciled against the tree, and the interesting
+  finds were not in the two files that get audited. `FEATURES.md` and
+  `ROADMAP.md` drifted only in arithmetic and anchors — 156 tracked `.rs` files
+  and ~42.4k lines, not 155/~42.0k; `src/mcp/*` is 2346 LoC and `src/rpc/*` is
+  201; item 82's tick citation and item 84's four `FEATURES.md` line refs had
+  all slid under the commits that landed `route.rs` and `claim_standalone`.
+  `VISION.md` and `SPECIALISTS.md` are where the live lies were, because nothing
+  points a checker at them: `SPECIALISTS.md` still taught "the nine MCP tools"
+  (twelve) and "tarpc `KernRpc`" (there is no tarpc in `Cargo.toml`, `Cargo.lock`
+  or `src/` — the service is this repo's own `service!` macro), and both files
+  still gated the claim standard on ROADMAP item 1 *being open* when item 1 is
+  closed and its own closure record says the standard is unchanged by it.
+  Restated as it actually stands: the scorer exists, runs against a
+  bag-of-words embedder, catches regressions and certifies nothing.
+
+  Two more, same shape. **Repo law 3 named a symbol that does not exist** —
+  `tools::dispatch` is in `VISION.md`, `SPECIALISTS.md` and the law itself, and
+  in no `.rs` file; the single core every surface actually reaches is
+  `mcp::Server::call_tool`, so the law now names it and can be checked. And
+  `FEATURES.md` §23 said item 9 was "now reduced to read-side staleness" in the
+  same bullet that listed `ingest`/`link` and `intake drain` as still writing
+  locally — the item's own title names three things, so §23 now does too. The
+  same tarpc line is on `README.md:116`, outside this directory, so it went to
+  item 85 rather than being fixed silently. And the preamble announced "two
+  headings destroyed" and then explained one of the two as a tier retirement,
+  which is one heading; it now says one.
+
+  **Decided by:** verify-before-claiming. Every number and every anchor here was
+  read off the tree, never off a neighbouring document; `just docs-check` proves
+  existence only, which is exactly why the two files it cannot judge were the
+  ones carrying false statements.
+
 - 2026-07-21 — item 9's last **long-lived** second writer is closed: `kern mcp`'s
   standalone fallback claims the writer lock before it reads the graph, and does
   not boot beside a holder. The route landed earlier today could not reach this

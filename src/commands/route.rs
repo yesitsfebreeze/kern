@@ -60,6 +60,21 @@ pub(crate) fn u64_field(v: &serde_json::Value, key: &str) -> u64 {
 	v.get(key).and_then(|x| x.as_u64()).unwrap_or(0)
 }
 
+pub(crate) fn f64_field(v: &serde_json::Value, key: &str) -> f64 {
+	v.get(key).and_then(|x| x.as_f64()).unwrap_or(0.0)
+}
+
+pub(crate) fn str_field<'a>(v: &'a serde_json::Value, key: &str) -> &'a str {
+	v.get(key).and_then(|x| x.as_str()).unwrap_or("")
+}
+
+pub(crate) fn array_field<'a>(v: &'a serde_json::Value, key: &str) -> &'a [serde_json::Value] {
+	v.get(key)
+		.and_then(|x| x.as_array())
+		.map(Vec::as_slice)
+		.unwrap_or(&[])
+}
+
 #[cfg(all(test, unix))]
 mod tests {
 	use super::*;
@@ -163,6 +178,57 @@ mod tests {
 			1,
 			"the sub-threshold edge is reported as reaped"
 		);
+	}
+
+	// The read half of item 9: `kern get` must read the daemon's live graph, and
+	// the answer must carry everything the CLI prints.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_routed_get_reads_the_serving_daemons_graph() {
+		let ep = scratch_endpoint("get");
+		let srv = kern_with_edge();
+		let graph = srv.graph.clone();
+		serving(srv, &ep).await;
+		graph
+			.write()
+			.kerns
+			.get_mut("kx")
+			.expect("kern")
+			.entities
+			.get_mut("a")
+			.expect("entity")
+			.set_text("only in the daemon".into());
+
+		let out = route_to(&ep, "query", serde_json::json!({"id": "a"})).await;
+		let Routed::Done(v) = out else {
+			panic!("a serving daemon must answer the get");
+		};
+		assert_eq!(str_field(&v, "id"), "a");
+		assert_eq!(
+			str_field(&v, "text"),
+			"only in the daemon",
+			"the text came from the daemon's graph, not from disk"
+		);
+		assert_eq!(str_field(&v, "kern"), "kx");
+		assert_eq!(array_field(&v, "edges").len(), 2, "both incident edges");
+	}
+
+	// A prefix is what kern itself prints (short_id), so the daemon has to resolve
+	// one or every copied id fails the moment a daemon is up.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_routed_get_resolves_a_prefix_like_the_local_read() {
+		let ep = scratch_endpoint("get-prefix");
+		let srv = crate::test_support::mcp_server();
+		let mut k = crate::base::types::Kern::new("kx", "");
+		k.entities
+			.insert("abc123def".into(), crate::test_support::entity("abc123def"));
+		srv.graph.write().kerns.insert("kx".into(), k);
+		serving(srv, &ep).await;
+
+		let out = route_to(&ep, "query", serde_json::json!({"id": "abc12"})).await;
+		let Routed::Done(v) = out else {
+			panic!("a prefix must resolve through the daemon");
+		};
+		assert_eq!(str_field(&v, "id"), "abc123def");
 	}
 
 	// A tool error is the daemon's answer, not a reason to go around it.

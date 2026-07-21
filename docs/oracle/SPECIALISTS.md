@@ -6,12 +6,14 @@ sets; parallelize only what does not overlap.
 
 ## landscape
 
-- **Scope:** `ROADMAP.md` §2 (competitive set), `VISION.md`.
+- **Scope:** `ROADMAP.md` — "How we supersede Zep / Mem0 / Letta / Qdrant",
+  `VISION.md`.
 - **Knows:** the surveyed competitor set (Zep/Graphiti, Mem0, Letta, Cognee;
   YourMemory on the decay+LoCoMo axis; mnemo, AgentDB/ruvector,
   mcp-memory-service on the Rust/embedded/MCP axis; federation has papers but
   no shipped rival), which axes kern leads on feature-wise, and that no
-  quality ranking is claimable until the ROADMAP #1 baseline exists.
+  quality ranking is claimable at all — the e2e scorer catches regressions and
+  certifies nothing, so the claim standard is unchanged by its arrival.
 - **Delegate when:** positioning, "how do we compare", or any claim that
   references another memory system — re-survey before trusting the doc,
   the field moves monthly.
@@ -71,8 +73,10 @@ sets; parallelize only what does not overlap.
 
 - **Scope:** `src/mcp/`, `src/rpc/`, `src/commands/`.
 - **Knows:** the one-dispatch-core law (every surface goes through
-  `tools::dispatch`, never a second copy), the nine MCP tools, tarpc
-  `KernRpc`, and that the CLI races a live daemon (prefer MCP for
-  live state).
+  `mcp::Server::call_tool`, never a second copy), the twelve MCP tools,
+  `KernRpc` over this repo's own `service!` macro (there is no tarpc), the
+  advisory writer lock, and that the CLI still reads off disk and can race a
+  live daemon (prefer MCP for live state) — `forget` and `degrade` are the
+  exceptions, they route to the serving daemon.
 - **Delegate when:** tool schemas or CLI subcommands.
 

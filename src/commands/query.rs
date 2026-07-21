@@ -1,6 +1,8 @@
 use crate::base::search::{find_entity, search_all_unlocked};
 use crate::base::util::{short_id, truncate};
+use crate::mcp::tools_query::base_entity_json;
 
+use super::route::{array_field, f64_field, route, str_field, Routed};
 use super::{load_graph, Client};
 
 pub(super) struct QueryParams<'a> {
@@ -10,6 +12,32 @@ pub(super) struct QueryParams<'a> {
 	pub(super) embed_model: &'a str,
 }
 
+fn print_results(v: &serde_json::Value) {
+	let entities = array_field(v, "entities");
+	if entities.is_empty() {
+		println!("no results");
+		return;
+	}
+	for (i, e) in entities.iter().enumerate() {
+		println!(
+			"{}. [{:.4}] {}  {}",
+			i + 1,
+			f64_field(e, "score"),
+			short_id(str_field(e, "id")),
+			truncate(str_field(e, "text"), 120),
+		);
+	}
+
+	let chains = str_field(v, "chains");
+	if !chains.trim().is_empty() {
+		println!("\n--- Connections ---");
+		print!("{chains}");
+	}
+}
+
+// Routed before the embed call: a serving daemon owns the index this query has to
+// hit, and it embeds with its own configured model — the local path is what runs
+// when nothing is serving.
 pub(super) async fn cmd_query(cfg: &crate::config::Config, params: QueryParams<'_>) {
 	let QueryParams {
 		text,
@@ -17,6 +45,20 @@ pub(super) async fn cmd_query(cfg: &crate::config::Config, params: QueryParams<'
 		embed_url,
 		embed_model,
 	} = params;
+	// `k` is not optional here: the tool's own default is `seed_k`, well under the
+	// delivery pool this command prints locally, so leaving it off would make the
+	// hit count depend on whether a daemon happens to be up.
+	let k = crate::retrieval::score::delivery_cap(&cfg.retrieval);
+	match route(
+		"query",
+		serde_json::json!({"text": text, "mode": mode, "k": k}),
+	)
+	.await
+	{
+		Routed::Done(v) => return print_results(&v),
+		Routed::Refused(e) => return eprintln!("{e}"),
+		Routed::NoDaemon => {}
+	}
 	let g = load_graph(cfg);
 	// Retrieval is LLM-free: only the embedder is needed.
 	let llm_client = Client::new_embed_only(embed_url, embed_model, &cfg.embed.key);
@@ -36,25 +78,13 @@ pub(super) async fn cmd_query(cfg: &crate::config::Config, params: QueryParams<'
 	// No save: read-only — access/heat bumps land on cloned result entities, and
 	// persisting would risk clobbering a daemon's newer on-disk state.
 
-	if result.entities.is_empty() {
-		println!("no results");
-		return;
-	}
-	for (i, st) in result.entities.iter().enumerate() {
-		println!(
-			"{}. [{:.4}] {}  {}",
-			i + 1,
-			st.score,
-			short_id(&st.entity.id),
-			truncate(&st.entity.text(), 120),
-		);
-	}
-
-	let chain_text = crate::retrieval::query::format_chains(&g, &result.path_chains);
-	if !chain_text.trim().is_empty() {
-		println!("\n--- Connections ---");
-		print!("{chain_text}");
-	}
+	let entities: Vec<serde_json::Value> = result
+		.entities
+		.iter()
+		.map(|st| base_entity_json(&st.entity, st.score))
+		.collect();
+	let chains = crate::retrieval::query::format_chains(&g, &result.path_chains);
+	print_results(&serde_json::json!({"entities": entities, "chains": chains}));
 }
 
 pub(super) async fn cmd_search(

@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::base::search::find_entity;
+use crate::base::search::find_entity_by_prefix;
 use crate::base::types::EntityKind;
 use crate::base::util::truncate;
 
@@ -128,11 +128,8 @@ impl Server {
 
 		if !p.id.is_empty() {
 			let g = self.graph.read();
-			return match find_entity(&g, &p.id) {
-				Some((thought, kern_id)) => {
-					let detail = entity_detail(&thought, &kern_id, &g);
-					tool_result_json(&detail)
-				}
+			return match entity_detail_by_id(&g, &p.id) {
+				Some(detail) => tool_result_json(&detail),
 				None => tool_error(&format!("thought not found: {}", p.id)),
 			};
 		}
@@ -288,8 +285,28 @@ impl Server {
 				.collect()
 		};
 
-		tool_result_json(&serde_json::json!({"entities": entities}))
+		let chains = {
+			let g = self.graph.read();
+			retrieval::query::format_chains(&g, &result.path_chains)
+		};
+
+		tool_result_json(&serde_json::json!({"entities": entities, "chains": chains}))
 	}
+}
+
+const COLD_KERN: &str = "(cold)";
+
+// The one id resolver behind both `query` and `kern get`: a second one would let
+// the routed and local reads disagree about what an id resolves to.
+pub(crate) fn entity_detail_by_id(
+	g: &crate::base::graph::GraphGnn,
+	id: &str,
+) -> Option<serde_json::Value> {
+	if let Some((thought, kern_id)) = find_entity_by_prefix(g, id) {
+		return Some(entity_detail(&thought, &kern_id, g));
+	}
+	let cold = g.store().and_then(|s| s.cold_get(id).ok().flatten())?;
+	Some(entity_detail(&cold, COLD_KERN, g))
 }
 
 fn entity_detail(
@@ -327,7 +344,7 @@ fn entity_detail(
 }
 
 // kind/scheme/status labels are consumed by `kern_rpc::query` — do not drop them.
-pub(super) fn base_entity_json(
+pub(crate) fn base_entity_json(
 	entity: &crate::base::types::Entity,
 	score: f64,
 ) -> serde_json::Value {

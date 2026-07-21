@@ -13,14 +13,6 @@ from conftest import wait_until
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="unix sockets only")
 
 
-def node_sockets(runtime):
-	return [
-		p
-		for p in runtime.iterdir()
-		if p.name.startswith("kern-") and p.name != "kern-hub.sock"
-	]
-
-
 def test_hub_binds_serves_status_and_rejects_bogus_unload(project):
 	project.start_hub()
 
@@ -52,7 +44,7 @@ def test_resolve_spawns_a_node_and_unload_reaps_it(project):
 	assert "unloaded" in stdout, f"unload succeeds: out={stdout} err={stderr}"
 
 	wait_until(
-		lambda: not node_sockets(project.runtime),
+		lambda: not project.node_sockets(),
 		10,
 		"node socket lingered after unload",
 	)
@@ -71,7 +63,7 @@ def test_an_idle_node_is_auto_unloaded(project):
 	# clock out. This is an eventual property — the deadline bounds the wait, it
 	# does not measure the latency.
 	wait_until(
-		lambda: not node_sockets(project.runtime),
+		lambda: not project.node_sockets(),
 		30,
 		"idle node was never unloaded",
 	)

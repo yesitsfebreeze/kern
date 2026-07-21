@@ -48,6 +48,19 @@ impl EntityKind {
 			_ => None,
 		}
 	}
+
+	// MCP results carry the discriminant, not the label; readers of a daemon's
+	// answer map it back here rather than duplicating the numbering.
+	pub fn from_u8(v: u8) -> Option<Self> {
+		match v {
+			0 => Some(EntityKind::Fact),
+			1 => Some(EntityKind::Claim),
+			2 => Some(EntityKind::Document),
+			3 => Some(EntityKind::Question),
+			4 => Some(EntityKind::Conclusion),
+			_ => None,
+		}
+	}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -85,6 +98,19 @@ impl ReasonKind {
 			self,
 			ReasonKind::Similarity | ReasonKind::Provenance | ReasonKind::Ratification
 		)
+	}
+
+	pub fn from_i32(v: i32) -> Option<Self> {
+		match v {
+			0 => Some(ReasonKind::Similarity),
+			1 => Some(ReasonKind::Provenance),
+			2 => Some(ReasonKind::Question),
+			3 => Some(ReasonKind::Spawn),
+			4 => Some(ReasonKind::Supersedes),
+			5 => Some(ReasonKind::Ratification),
+			6 => Some(ReasonKind::Rephrase),
+			_ => None,
+		}
 	}
 }
 
