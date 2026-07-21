@@ -223,6 +223,7 @@ pub fn retrieve_profiled(
 			results.retain(|r| score::matches_filter(r.entity, o));
 		}
 	}
+	score::drop_expired(&mut results, opts, std::time::SystemTime::now());
 	score::filter_delivery(cfg, &mut results);
 
 	if let Some(opts) = opts {
@@ -832,5 +833,55 @@ mod tests {
 				r.remote_ids
 			);
 		}
+	}
+	#[test]
+	fn retrieve_drops_an_expired_claim_from_the_default_path() {
+		// Pins the CALL SITE, not the predicate: the unit tests on `drop_expired`
+		// pass unchanged if the call in `retrieve` is deleted, which is exactly how
+		// `valid_until` came to be honoured by a function nothing invoked.
+		use std::time::{Duration, SystemTime};
+		let now = SystemTime::now();
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		{
+			let k = g.kerns.get_mut(&root).expect("root kern");
+			for (id, ttl) in [
+				("live", Some(now + Duration::from_secs(3600))),
+				("expired", Some(now - Duration::from_secs(3600))),
+			] {
+				let mut e = mk_entity(
+					id,
+					"ada keeps her bicycle in the shed",
+					1.0,
+					EntityKind::Claim,
+				);
+				e.vector = vec![1.0, 0.0];
+				e.gnn_vector = vec![1.0, 0.0];
+				e.valid_until = ttl;
+				k.entities.insert(id.into(), e);
+			}
+		}
+		for id in ["live", "expired"] {
+			g.index_entity(id, &root);
+		}
+		g.rebuild_index();
+
+		let cfg = crate::config::RetrievalConfig::default();
+		let w = Weights {
+			content: 0.70,
+			reason: 0.15,
+			edge: 0.15,
+		};
+		let out = retrieve(&g, &cfg, &[1.0, 0.0], "ada bicycle", Mode::Hybrid, None, w);
+
+		let ids: Vec<&str> = out.results.iter().map(|r| r.entity.id.as_str()).collect();
+		assert!(
+			ids.contains(&"live"),
+			"precondition: the live claim is retrieved"
+		);
+		assert!(
+			!ids.contains(&"expired"),
+			"an expired claim must not reach delivery: {ids:?}"
+		);
 	}
 }

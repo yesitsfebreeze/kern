@@ -129,6 +129,22 @@ pub fn below_floor_deliveries() -> u64 {
 	BELOW_FLOOR.load(Ordering::Relaxed)
 }
 
+// Bi-temporal expiry on EVERY delivery, not only when a caller thinks to pass
+// `valid_at`. Until this ran unconditionally, `valid_until` was near-dead code —
+// honoured by `matches_filter` alone, whose only caller was the MCP `valid_at`
+// param — so an expired claim still ranked on the default recall path and
+// "bi-temporal supersede off the recall path" was true only of the write path.
+//
+// Skipped when the query names an instant of its own: a point-in-time query
+// judges validity AT that instant, so a claim that has since expired is exactly
+// what it should return. `valid_at` is already enforced by `matches_filter`.
+pub fn drop_expired<T: Scored>(results: &mut Vec<T>, opts: Option<&QueryOptions>, now: SystemTime) {
+	if opts.is_some_and(|o| o.as_of.is_some() || o.valid_at.is_some()) {
+		return;
+	}
+	results.retain(|r| r.entity().valid_until.is_none_or(|exp| exp >= now));
+}
+
 pub fn filter_delivery<T: Scored>(cfg: &RetrievalConfig, results: &mut Vec<T>) {
 	results.retain(|r| r.entity().status != EntityStatus::Superseded);
 	// Sort HERE, not just in apply_query_options: the truncation below is the delivery
@@ -846,5 +862,68 @@ mod query_filter_tests {
 			before,
 			"a normal delivery must not read as a degradation"
 		);
+	}
+	#[test]
+	fn an_expired_claim_is_dropped_on_the_default_path() {
+		let now = SystemTime::now();
+		let mut live = ent("live", EntityKind::Claim, file_src("/a"));
+		let mut expired = ent("expired", EntityKind::Claim, file_src("/b"));
+		expired.entity.valid_until = Some(now - Duration::from_secs(60));
+		live.entity.valid_until = Some(now + Duration::from_secs(60));
+		let mut results = vec![live, expired];
+
+		drop_expired(&mut results, None, now);
+
+		let ids: Vec<&str> = results.iter().map(|r| r.entity.id.as_str()).collect();
+		assert_eq!(
+			ids,
+			vec!["live"],
+			"an expired claim must not rank when no caller asked about time"
+		);
+	}
+
+	#[test]
+	fn an_entity_with_no_ttl_is_never_dropped() {
+		let now = SystemTime::now();
+		let mut results = vec![ent("forever", EntityKind::Claim, file_src("/a"))];
+		assert!(results[0].entity.valid_until.is_none(), "precondition");
+		drop_expired(&mut results, None, now);
+		assert_eq!(results.len(), 1);
+	}
+
+	#[test]
+	fn a_point_in_time_query_still_sees_a_since_expired_claim() {
+		let now = SystemTime::now();
+		let mut expired = ent("expired", EntityKind::Claim, file_src("/b"));
+		expired.entity.valid_until = Some(now - Duration::from_secs(60));
+		let mut results = vec![expired];
+
+		let opts = QueryOptions {
+			as_of: Some(now - Duration::from_secs(3600)),
+			..Default::default()
+		};
+		drop_expired(&mut results, Some(&opts), now);
+
+		assert_eq!(
+			results.len(),
+			1,
+			"as_of judges validity at ITS instant — expiring it against now would \
+			 make history unqueryable, which is the opposite of the guarantee"
+		);
+	}
+
+	#[test]
+	fn an_explicit_valid_at_is_left_to_matches_filter() {
+		let now = SystemTime::now();
+		let mut expired = ent("expired", EntityKind::Claim, file_src("/b"));
+		expired.entity.valid_until = Some(now - Duration::from_secs(60));
+		let mut results = vec![expired];
+
+		let opts = QueryOptions {
+			valid_at: Some(now - Duration::from_secs(3600)),
+			..Default::default()
+		};
+		drop_expired(&mut results, Some(&opts), now);
+		assert_eq!(results.len(), 1, "the caller named the instant; honour it");
 	}
 }
