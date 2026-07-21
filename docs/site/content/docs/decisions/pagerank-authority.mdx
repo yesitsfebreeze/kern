@@ -2,150 +2,41 @@
 title: "PageRank for authority"
 ---
 
-**kern ranks with a damped, personalised PageRank over the reason graph, fused
-by rank into retrieval's seed set — not with a global authority score, and not
-(yet) with the federated trust machinery the original design centred on.** The
-retrieval half shipped and is on by default: `pagerank`
-(`src/retrieval/pagerank.rs:28`) runs at damping `0.85`, up to `25` iterations,
-teleporting at the query's own seeds, and its top-`100` enter RRF seed fusion
-(`src/retrieval/answer.rs:121`). The federation half — per-peer authority,
-TrustRank seeding, the layered Sybil defences — was **not built**.
+## Decision
 
-## Context
+Every query runs a damped, query-personalised PageRank over the reason graph (damping `0.85`, up to 25 iterations, teleporting at the query's seed hits) and fuses the top results into the seed set by rank (RRF); on by default.
 
-Vector similarity answers one question: *what looks like the query*. It cannot
-answer *what does the neighbourhood of things that look like the query keep
-pointing at*. A well-cited hub two hops from every seed — the entity a dozen
-reasons converge on — scores nothing on cosine if its own text happens not to
-match. The graph knows which entities are structurally load-bearing; before
-this decision, ranking never asked it.
+## Why
 
-The design note (`docs/kern/pagerank-authority.md`) framed the same gap one
-level up: in a federation, a peer cited by thousands of other peers was treated
-identically to a brand-new peer nobody had ever referenced. One mechanism —
-eigenvector-style centrality — plausibly serves both scopes, which is why the
-note evaluated them together.
+- Vector similarity cannot see the well-cited hub whose own text doesn't match the query; the graph knows which entities are load-bearing.
+- Personalisation: the walk restarts at the query's dense and lexical seeds, so rank mass stays in the query's neighbourhood; dangling mass redistributes along the teleport vector, not uniformly, or personalisation leaks back into a global prior.
+- Damping `d = 0.85` → expected walk `1/(1−d) ≈ 6.7` hops — long enough to see structure, short enough that a mutual-citation chain cannot launder rank down its length; self-loops neutral by construction.
+- Fusion consumes ranks only, never raw PageRank masses — no score-magnitude knob to mis-calibrate.
+- Net: structure decides *within* the neighbourhood the query selects, never *instead of* it.
 
-## Alternatives considered
+## Rejected
 
-| Method | What it measures | Why not |
-| --- | --- | --- |
-| Degree centrality | Raw inbound citation count | Trivially gameable — N fake citers buy N units of rank; no transitivity, so a citation from a hub counts the same as one from a leaf. |
-| Eigenvector centrality | Fixed point of adjacency × score | Undamped: diverges on dangling nodes, no convergence guarantee on disconnected components, no recovery from adversarial sinks. |
-| HITS | Separate hub and authority scores | A second eigenvector to maintain, duplicating what damped PageRank already captures; its bipartite framing fits query/doc graphs, not a general reason graph. |
-| SALSA | Stochastic HITS | Same objection, more machinery. |
-| TrustRank | PageRank personalised at known-good seeds | The right Sybil defence for federation — retained in the design for that scope, unbuilt because that scope is unbuilt. |
+| Alternative | Why it lost |
+| --- | --- |
+| Degree centrality | N fake citers buy N rank; no transitivity |
+| Undamped eigenvector centrality | diverges on dangling nodes; no convergence guarantee on disconnected components |
+| HITS / SALSA | a second eigenvector to maintain; bipartite framing fits query/doc graphs, not a reason graph |
+| TrustRank | right Sybil defence for federation-level authority — a scope that is unbuilt |
+| Global (unpersonalised) PageRank | popular entities top every query, relevant or not |
 
-PageRank with damping is the smallest member of the family that handles
-dangling nodes, cycles, and disconnected components while staying a single
-vector with a convergence guarantee.
+## Trade-off accepted
 
-## Why the shipped variant wins
+- Full power iteration per query, nothing persisted between queries — affordable at thought scale with early exit, no incremental updates.
+- The federation half (per-peer authority, TrustRank seeding, Sybil defences) was not built; no rank crosses a machine boundary, so the targeted Sybil surface doesn't exist yet. Prerequisites if per-peer authority ever lands.
 
-Three properties of the implementation carry the decision.
-
-**Personalisation makes it query-aware.** Global PageRank has a failure mode
-the note itself flagged: a globally popular entity rides to the top of every
-query, relevant or not. The shipped teleport vector is built from the query's
-dense and lexical seed hits, weighted by their scores (`teleport_vector`,
-`src/retrieval/pagerank.rs:5`) — so the random walk restarts *at the query*,
-and rank mass concentrates in the query's own graph neighbourhood. The
-query-independent importance scan is deliberately excluded from the teleport
-set (`src/retrieval/answer.rs:122`) for exactly this reason. One subtlety is
-load-bearing: dangling mass is redistributed along the teleport vector, not
-uniformly (`src/retrieval/pagerank.rs:58`) — uniform redistribution would leak
-personalisation back into a global prior on every iteration.
-
-**Damping `d = 0.85` bounds both divergence and collusion.** At `d = 1` the
-walk never restarts and dangling nodes absorb everything; at `d → 0` the graph
-is ignored. `0.85` gives an expected walk length of `1/(1−d) ≈ 6.7` hops —
-long enough to see real structure, short enough that a long chain of
-mutually-citing entities cannot launder rank down its length. Self-loops are
-neutral by construction (pinned by test:
-`self_loops_do_not_inflate_score`, `src/retrieval/pagerank.rs:150`). Iteration
-stops early once the rank vector moves less than `1e-9` L1
-(`src/retrieval/pagerank.rs:49`), so the `25`-iteration ceiling
-(`src/config/retrieval.rs:131`) is a bound, not a cost.
-
-**Rank fusion sidesteps score calibration.** The note weighed two integration
-points — an additive `authority_weight` term in boost scoring, or a fourth
-list in reciprocal-rank fusion — and preferred RRF as the cleaner design. RRF
-is what shipped: the PageRank top-k joins the dense, lexical, and importance
-lists at weight `rrf_global_weight = 0.5` against `1.0` for dense and lexical
-(`src/retrieval/answer.rs:135`), and fusion consumes only ranks, never the raw
-PageRank masses. There is no `authority_weight` knob in the config, and no
-score-magnitude interaction to mis-calibrate.
-
-A worked example, straight from the test suite
-(`personalization_biases_toward_seed_and_conserves_mass`,
-`src/retrieval/pagerank.rs:249`): a graph with two symmetric components,
-`B → A` and `Y → X`. Unseeded, `A` and `X` tie exactly. Seed the walk at `Y` —
-as a query whose dense hits land in that component would — and `X` outranks
-both its unseeded self and `A`, while total rank mass still sums to 1. That is
-the whole mechanism in miniature: structure decides *within* the
-neighbourhood the query selects, and cannot decide *instead of* it.
-
-Where PageRank sits in the full pipeline — after seeding, before expansion —
-is covered in [The retrieval pipeline](../concepts/retrieval.mdx).
-
-<Callout type="warn" title="The unit mechanism works; the end-to-end effect is measured at zero">
-Everything above is pinned by unit tests over `pagerank()` in isolation, and
-those hold. What does not follow is that the authority signal reaches a
-delivered result. `e2e/test_invariants.py` drives the whole CLI query path —
-the same `cfg.retrieval`, so PageRank and expansion are both on — ingests A and
-B, adds an A→B reason edge, and finds that the edge moves one of 8 pairs by one
-rank. An edge is exactly the input this mechanism consumes, so that bounds how
-much of the delivered ranking graph structure currently decides. Item 86 in
-[`ROADMAP.md`](https://github.com/yesitsfebreeze/kern/blob/master/docs/oracle/ROADMAP.md)
-carries the diagnosis.
+<Callout type="warn" title="Unit mechanism works; end-to-end effect measures near zero">
+The mechanism is pinned by unit tests, but an end-to-end test that adds a
+reason edge between two ingested claims moves only one of 8 pairs by one
+rank. Graph structure currently decides very little of the delivered ranking;
+ROADMAP item 86 carries the diagnosis.
 </Callout>
 
-## What shipped vs. what the note assumed
+## Where you see it
 
-The note is a federation-era design (it references the pre-1.0 `crates/`
-layout throughout) and most of its surface area is unbuilt:
-
-- **No DB-level authority.** The `AuthorityTable` — one rank scalar per peer,
-  fed by cross-DB reference edges — does not exist. No per-peer authority
-  signal reaches retrieval or routing.
-- **No TrustRank seeding.** The shipped teleport vector is per-query seed
-  hits, not a curated set of known-good peers. The Sybil-resistance property
-  TrustRank was chosen for is therefore not provided.
-- **No incremental (ACL push) computation.** The note specified
-  Andersen–Chung–Lang push updates to amortise cost on a live graph. Shipped
-  is a full power iteration per query over the entity adjacency — affordable
-  at thought scale with early exit, and nothing is persisted between queries.
-- **None of the layered Sybil defences** — edge-weight caps, pulse-coupled
-  edge validation, temporal slashing of frequently-superseded producers —
-  are in effect. Two were written and never connected: a per-peer
-  `RateClipper` (in the since-deleted `gossip/sybil.rs`, 175 lines) whose
-  `set_clipper()` was never called from anywhere, and
-  `trimmed_mean_merge_hits` (`gossip/merge.rs`, 241 lines), documented in its
-  own comment as "a Sybil-resistant alternative" for fusing per-peer hit
-  lists, which had no caller either. Both were deleted in `dc02a18` as
-  verified-unreachable code.
-  Removing them changed no runtime behaviour, because neither had ever run —
-  they are unbuilt defences that happen to have a reference implementation in
-  git history, not defences that were lost. Federation trust today rests on
-  the transport and merge rules described in
-  [Federation](../concepts/federation.mdx), not on rank.
-- **Thought-level rank feeding split heuristics** (the note's phase 2) was
-  not built; clustering and splitting run on cosine cohesion alone.
-
-<Callout type="warn" title="Read the note's security sections as unimplemented design">
-The note's §5 describes defences for an authority system kern does not
-currently run. Since no rank crosses a machine boundary — each replica
-computes PageRank over its own local graph, per query — the Sybil surface the
-note defends against does not exist yet either. If DB-level authority is ever
-built, that section becomes a prerequisite, not an option.
-</Callout>
-
-## See also
-
-- [The retrieval pipeline](../concepts/retrieval.mdx) — seeding, RRF fusion,
-  and where the PageRank list enters.
-- [Federation](../concepts/federation.mdx) — the trust model that actually
-  governs peers today.
-- [Bayesian confidence](./bayesian-confidence.mdx) — the note anticipated
-  composing observer reputation with rank; neither half of that composition
-  shipped.
+- Within a query's neighbourhood, entities many reasons point at outrank textually-similar leaves.
+- Pipeline position (after seeding, before expansion): [The retrieval pipeline](../concepts/retrieval.mdx). Peer trust today: [Federation](../concepts/federation.mdx).

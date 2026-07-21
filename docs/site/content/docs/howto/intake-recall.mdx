@@ -1,58 +1,34 @@
 ---
-title: "Intake & recall in a session"
+title: "Intake & recall"
 ---
 
-This page gets kern taking in a real working session and feeding context back
-into the next one. You will start a daemon, seed the graph, produce an intake
-delta, confirm it landed, and diagnose the three things that usually go wrong
-first.
+Start a daemon, seed the graph, drop an intake delta, confirm it landed.
 
 ## Before you start
 
-You need a local [Ollama](https://ollama.com) with two models pulled — the
-embedding model and the reason model, which by default also serves answers:
+`kern` on PATH, local [Ollama](https://ollama.com) with both default models:
 
 ```bash
 ollama pull qwen3-embedding:0.6b   # embeddings
-ollama pull granite4:3b            # distillation, reasoning, and /ask answers
+ollama pull granite4:3b            # distillation and reasoning (write path)
 ```
 
-These are the compiled-in defaults (`src/config/embed.rs:6`,
-`src/config/reason.rs:13`). The answer model aliases the reason default
-(`src/config/answer.rs:12`), so one runner serves both legs and no extra wiring
-is needed.
-
 <Callout type="warn">
-The embedding model's dimension is locked into the graph on first ingest.
-Switching embedding models later requires `kern reembed` — otherwise stored
-vectors mismatch new queries and search returns nothing useful. It is not
-silent: the store stamps the model it was built with, `kern health` prints
-`MISMATCH` beside the `embed:` line, and a query vector of the wrong dimension
-is dropped and counted rather than searched as truncated noise.
+Embedding dimension locks into the graph on first ingest; switching models later requires `kern reembed`. Not silent: store stamps its model, `kern health` prints `MISMATCH` beside `embed:`, wrong-dimension query vectors are dropped and counted.
 </Callout>
 
-You also need the `kern` binary on `PATH`.
-
 ## 1. Opt the project in
-
-kern is per-directory. It gates on a `.kern/` folder, and the daemon pins itself
-to the nearest ancestor holding a `.git` or `.kern` directory
-(`Config::resolve_root`, `src/config/mod.rs`), so launching from a subdirectory still finds the
-right graph.
 
 ```bash
 cd /path/to/your/project
 mkdir -p .kern
 ```
 
-No config file is required. Create `.kern/kern.toml` only when you want to
-override a default.
+Pins to the nearest ancestor with `.git` or `.kern`. No config file required — create `.kern/kern.toml` only to override a default.
 
 ## 2. Start the daemon
 
-The simplest path is to let your MCP client start it. `kern mcp` attaches to a
-running daemon over the per-cwd socket, and auto-spawns a detached one if none
-answers (`src/commands/mcp_cmd.rs:11`):
+Let your MCP client start it — `kern mcp` attaches to a running daemon, auto-spawns a detached one if none answers:
 
 ```json
 {
@@ -62,41 +38,23 @@ answers (`src/commands/mcp_cmd.rs:11`):
 }
 ```
 
-The daemon also writes that entry into the project's `.mcp.json` itself on
-startup if it is absent. To run it in the foreground while you are watching it
-work — which is what you want the first time — use:
+The daemon writes this entry into `.mcp.json` on startup if absent. To watch the first run (logs on stderr only; stdout is reserved for JSON-RPC):
 
 ```bash
 RUST_LOG=kern=info kern --daemon
 ```
 
-Expect log lines on stderr, never stdout: stdout is reserved for JSON-RPC when
-running as an MCP server.
-
 ## 3. Seed gravitons and claim kinds
 
-Do this once, from an MCP session in the project, against the running daemon.
-Prefer the MCP tools over the CLI here — the CLI subcommands open the on-disk
-graph directly and can race a live daemon.
+Once per project, via MCP against the running daemon (the CLI can race a live daemon).
 
-Call the `graviton` tool with action `add` for each focus area the graph should
-gravitate around — for example *decisions*, *project state*, *preferences*. Seed
-`text` with **example statements, one per line**: each line is embedded
-separately and mean-pooled into the pull vector, which places the graviton
-measurably closer to real matching claims than an abstract description (see
-[Seed the graph](./seed.mdx)). An optional `mass` (default `1.0`) makes it
-attract and retain more strongly.
-Claims matching no graviton land in a `generic` catch-all; see
-[Acceptance & routing](../concepts/acceptance.mdx) for how that descent works.
+- `graviton` tool, `action: "add"` per focus area — e.g. *decisions*, *project state*, *preferences*.
+- Seed `text`: **example statements, one per line** — each line embedded separately, mean-pooled into the pull vector; routes far better than an abstract description.
+- Optional `mass` (default `1.0`): stronger attraction.
+- Unmatched claims → `generic`. See [Acceptance & routing](../concepts/acceptance.mdx).
+- Built-in claim kinds: `preference`, `decision`, `project`, `fact`, `code-fact`, `reference`, `procedural`. Extras via `claim_kind`; registered kinds are offered to the distillation LLM alongside built-ins.
 
-Seven claim kinds are built in and need no registration
-(`src/ingest/distill.rs:9`): `preference`, `decision`, `project`, `fact`,
-`code-fact`, `reference`, `procedural`. Register extra kinds with `claim_kind`
-when your material needs its own vocabulary — registered kinds are offered to
-the distillation LLM alongside the built-ins. For a direct `ingest`, chunking
-context is the free-text `hint` parameter, not a kind.
-
-The CLI equivalents exist for offline setup, with the daemon stopped:
+CLI equivalents, daemon stopped:
 
 ```bash
 kern graviton add decisions "architectural choices and their rationale" --mass 1.5
@@ -106,9 +64,7 @@ kern claim-kind add incident "a production incident: what broke and the fix"
 
 ## 4. Drop a session into the intake
 
-The intake is agent-agnostic and file-driven. Anything that writes a conversation
-delta as a `.txt` file into `.kern/intake/` feeds it — a client hook, a shell
-wrapper, or your own script:
+Anything writing a `.txt` delta into `.kern/intake/` feeds kern — client hook, shell wrapper, your own script:
 
 ```bash
 cat > .kern/intake/session-$(date +%s).txt <<'EOF'
@@ -118,31 +74,18 @@ user: also the deploy key lives in the ops vault, not in CI secrets
 EOF
 ```
 
-The daemon polls the directory every 5 seconds by default, distills each delta
-in one LLM pass, and ingests the resulting typed claims
-(`src/ingest/intake.rs:142`). A delta is moved into `.kern/intake/done/` only
-once every claim it produced committed; on an LLM outage it stays put and is
-retried on the next poll. Archived deltas are pruned after seven days
-(`src/ingest/intake.rs:67`).
-
-For a synchronous, already-typed ingest that skips distillation entirely, the
-`ingest` MCP tool and `kern ingest` write straight to the worker
-(`src/ingest/direct.rs:20`).
+- Daemon polls every 5s, distills each delta in one LLM pass, ingests the typed claims.
+- Moves to `.kern/intake/done/` only once every claim committed; LLM outage → stays put, retried.
+- Archived deltas pruned after seven days.
+- Synchronous, already-typed ingest (skips distillation): `ingest` MCP tool or `kern ingest`.
 
 ## 5. Recall in the next session
 
-Recall is query-only. Call the `query` MCP tool. It supports `mode`, `kind`,
-  `source`, time ranges, `min_conf`, `as_of` for point-in-time recall, and
-  `include_history` to follow supersede chains. See
-  [Retrieval](../concepts/retrieval.mdx).
+`query` MCP tool: `mode`, `kind`, `source`, time ranges, `min_conf`, `as_of` (point-in-time), `include_history` (supersede chains). Returns scored passages, edges, chains — the agent synthesizes. See [Retrieval](../concepts/retrieval.mdx).
 
-From the shell, `kern search "indentation" --k 5` and `kern query "what did we
-decide about indentation" --answer` do the same against the on-disk graph.
+Shell: `kern search "indentation" --k 5` or `kern query "what did we decide about indentation"`.
 
 ## What a healthy graph looks like
-
-After a session or two, `kern health` (`src/commands/admin.rs:34`) should show
-something like:
 
 ```
 data_dir:    /path/to/project/.kern/data
@@ -159,28 +102,11 @@ degraded:    0 panics | 0 failures
   kern:generic  thoughts:9  reasons:15
 ```
 
-The last four lines are the degradation surface. `embed:` names the model the
-index was actually built with and appends `MISMATCH: the index was built with a
-different model` when the configured model is a different one. `evicted:` counts
-cold rows this process dropped past the 50k cap — unrecoverable, so the count is
-their only trace. `tick:` and `degraded:` come from the running daemon over RPC;
-with none serving this directory they collapse to
-`tick: (no daemon serving this directory)`. Any non-zero panic or failure count
-means maintenance kept running but something is dying, and the line under it
-names the task and kern.
-
-The signals worth reading:
-
-- **`reasons` well above `thoughts`.** Every committed entity attaches a
-  `Similarity` and usually a `Provenance` edge, so a graph with roughly as many
-  edges as nodes means claims are arriving but not connecting.
-- **`gravitons` non-empty.** `(none)` means seeding never happened and
-  everything is piling into `generic`.
-- **`unnamed` small relative to `thoughts`.** Unnamed kerns are holding pens for
-  claims no named kern would accept. A large share means your gravitons do not
-  cover what you are actually feeding it.
-- **`.kern/intake/done/` filling up** while `.kern/intake/` stays near empty.
-  That is the drain keeping pace.
+- `reasons` well above `thoughts` — claims connecting, not just arriving.
+- `gravitons` non-empty — `(none)` means seeding never happened; everything piles into `generic`.
+- `unnamed` small relative to `thoughts` — large share means gravitons don't cover the content.
+- `done/` filling while `.kern/intake/` stays near empty — drain keeping pace.
+- Non-zero panics/failures — something dying; the line beneath names the task.
 
 ## When it does not work
 
@@ -200,52 +126,11 @@ flowchart TD
 `}
 />
 
-**The LLM endpoint is not reachable.** Distillation is the only step that needs
-the reason model, and a dead endpoint is treated as a transient outage: the
-delta is left in `.kern/intake/` and retried forever, so nothing is lost but
-nothing progresses either. Confirm the endpoint directly with
-`curl http://localhost:11434/api/tags`, then check the daemon log for
-`kern.ingest.intake` warnings mentioning "distill got no LLM output".
-
-If you are on WSL (NAT mode) and Ollama runs on the Windows host, a loopback
-URL resolves inside the WSL VM where nothing listens — pin the URL to the
-Windows host gateway (`ip route show default | awk '{print $3}'`) in
-`.kern/kern.toml`.
-
-There is one configuration that disables distillation outright: blanking both
-`[reason].url` and `[embed].url`, since reason falls back to the embed endpoint
-(`Config::reason_url`, `src/config/mod.rs`). The daemon logs an explicit warning under
-`kern.intake` when this happens and deltas simply accumulate until you restart
-with an endpoint configured (`src/commands.rs:916`).
-
-**Nothing is landing in the graph at all.** Check in order: does `.kern/` exist in the
-directory the daemon pinned to (a subdirectory launch re-pins upward and logs
-it); is `[intake].enabled` still `true`; is anything actually writing files into
-the intake. Extension no longer gates the drain — anything readable as text is
-taken, `.txt` as a transcript to distill and everything else as a document — but
-a file that is not valid UTF-8 is moved to `.kern/intake/failed/`, so check
-there too. And if `.kern/intake/` never drains while the reason endpoint answers
-fine, the model is replying with prose instead of JSON: a reply the parser finds
-no JSON array in is a format failure, not "nothing worth keeping", so the delta
-is left queued and retried on every pass rather than archived. Nothing is lost,
-but the same files come back forever until the model follows the format —
-`done/` staying empty while `.kern/intake/` grows is the tell.
-
-**Recall comes back empty.** First check whether the graph has anything at all
-with `kern health`. If it does, the usual cause is an embedding mismatch: the
-graph was built with one embedding model and is being queried with another, so
-every cosine degenerates. You do not have to guess — the store stamps the model
-and dimension it was built with, and `kern health` prints `MISMATCH` beside the
-`embed:` line when the configured model is a different one. Run `kern reembed`
-to rebuild vectors under the current model; it restamps with the model it
-actually used. If the graph has content and the embedding model matches, widen
-the query — `min_conf` gates out freshly distilled claims, which start at 0.6
-and sit low until repeated observation reinforces them.
+- **LLM endpoint unreachable.** Transient: deltas queue and retry forever. Confirm `curl http://localhost:11434/api/tags`; look for `kern.ingest.intake` warnings mentioning "distill got no LLM output". WSL (NAT) with Ollama on the Windows host: `localhost` resolves inside the VM — pin the URL to the host gateway (`ip route show default | awk '{print $3}'`) in `.kern/kern.toml`. Blanking both `[reason].url` and `[embed].url` disables distillation; the daemon logs a warning.
+- **Nothing landing.** Check in order: `.kern/` exists where the daemon pinned; `[intake].enabled` is `true`; something is writing files. Non-UTF-8 → `.kern/intake/failed/`. Endpoint answers but drain never finishes: prose-not-JSON (see chart); `done/` empty while `.kern/intake/` grows is the tell.
+- **Recall empty.** `kern health` shows content: check `MISMATCH` beside `embed:` (fix: `kern reembed`). Otherwise widen the query — `min_conf` gates out fresh claims, which start at 0.6 until reinforced.
 
 ## Tuning
-
-Every knob lives under `[intake]` in `.kern/kern.toml`
-(`src/config/intake.rs:7`):
 
 ```toml
 [intake]
@@ -255,11 +140,8 @@ poll_secs = 5               # drain cadence
 done_retention_secs = 604800
 ```
 
-`poll_secs` must be greater than zero; the config validator rejects `0`
-because it would busy-loop the drain.
+`poll_secs = 0` rejected by the validator (busy-loop).
 
 ---
 
-Related: [Acceptance & routing](../concepts/acceptance.mdx) for what happens to a
-delta after the drain picks it up, [Configure](./configure.mdx) for the full config
-surface, and [MCP](./mcp.mdx) for the tool schemas.
+Related: [Acceptance & routing](../concepts/acceptance.mdx) · [Configure](./configure.mdx) · [MCP](./mcp.mdx)

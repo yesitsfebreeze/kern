@@ -1,8 +1,8 @@
 {
   "pages": [
     "index",
+    "howto",
     "concepts",
-    "decisions",
-    "howto"
+    "decisions"
   ]
 }

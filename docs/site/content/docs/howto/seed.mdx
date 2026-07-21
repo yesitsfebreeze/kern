@@ -2,29 +2,13 @@
 title: "Seed the graph"
 ---
 
-kern normally fills its graph a session at a time, through the intake. This page
-covers the other direction: pushing an existing body of knowledge — design docs,
-an architecture decision log, a README, a pile of notes — into a fresh graph in
-one go, so the first session already has something to recall. At the end you
-will have gravitons, claim kinds, and your existing material in the graph, and
-you will have verified it landed.
-
-## Before you start
-
-You need a running daemon for the project (see
-[Install & run the daemon](./install-run.mdx)) and a reachable embedding endpoint
-— every seeded item is embedded on the way in, and nothing is stored if the
-embedder is down.
+Push existing knowledge — design docs, ADRs, README, notes — into a fresh graph. Needs a running daemon ([Install & run](./install-run.mdx)) and a reachable embedder — nothing is stored if the embedder is down.
 
 ## Step 1 — Add gravitons
 
-Gravitons are the named focus areas the graph gravitates around. Ingest routes
-each new thought to the nearest one, and query ranking boosts thoughts sitting
-near one. Seed these first: content ingested before any graviton exists lands in
-`generic` and stays there.
+Named focus areas: ingest routes each thought to the nearest one, ranking boosts thoughts near one. Seed first — content ingested before any graviton exists lands in `generic` and stays there.
 
-From an MCP session in the project, call the `graviton` tool
-(`src/mcp/tools_admin.rs:41`) once per focus area:
+MCP `graviton` tool, once per focus area:
 
 ```json
 { "action": "add", "name": "decisions",   "text": "We chose LMDB over sled because readers never block writers.\nWe rejected a pluggable backend; an external store adds a network hop.\nDecision: contradiction detection runs on the background tick, with rationale recorded." }
@@ -32,7 +16,7 @@ From an MCP session in the project, call the `graviton` tool
 { "action": "add", "name": "preferences",  "text": "Code style: as few comments as possible.\nOne responsibility per file, split early.\nAlways run the exact gate command before claiming green." }
 ```
 
-The equivalent CLI form (`src/commands.rs:209`):
+CLI equivalent:
 
 ```bash
 kern graviton add decisions "We chose LMDB over sled because readers never block writers.
@@ -40,58 +24,37 @@ We rejected a pluggable backend; an external store adds a network hop."
 kern graviton list
 ```
 
-Seed with **example statements, one per line** — statements shaped like the
-claims you want routed there. A multi-line seed is embedded per line and the
-normalized mean becomes the pull vector (`seed_examples`/`mean_pool`,
-`src/base/accept.rs`). This is measured, not stylistic: against
-qwen3-embedding:0.6b, pooled examples sit ~0.39 median cosine distance from
-held-out claims of the same focus, versus ~0.55 for an abstract description
-("Architectural and design decisions, the alternatives considered…") and
-0.55–0.61 for the same examples embedded as one concatenated blob. A
-single-line seed is embedded whole; keep any one line under the embedding
-model's context window, since each line is one embed call with no chunking.
-An optional `mass` (default `1.0`) makes a graviton pull harder: routing
-compares `distance / mass`, so a graviton at `mass = 2.0` claims content from
-roughly twice as far away.
+Rules:
+
+- **Example statements, one per line** — shaped like the claims you want routed there. Each line embedded separately, mean-pooled into the pull vector; measured to route markedly better than an abstract description or one concatenated blob.
+- Each line is one embed call, no chunking — keep it under the embedding model's context window.
+- Optional `mass` (default `1.0`): routing compares `distance / mass`, so `mass = 2.0` claims content from roughly twice as far away.
 
 <Callout type="info" title="Three to six is usually right">
-Too few and everything lands in one bucket; too many and each one is starved.
-You do not have to get the set right up front — dense `generic` clusters
-promote themselves into new gravitons over time.
+Too few: one bucket. Too many: each starved. Dense `generic` clusters promote themselves into new gravitons over time.
 </Callout>
 
 ## Step 2 — Register claim kinds (optional)
 
-Distillation labels every claim with a kind. The built-ins (`preference`,
-`decision`, `project`, `fact`, `code-fact`, `reference`, `procedural`) cover
-most material; register extra kinds with `claim_kind` when yours needs its own
-vocabulary — registered kinds are offered to the distillation LLM alongside the
-built-ins:
+Built-ins (`preference`, `decision`, `project`, `fact`, `code-fact`, `reference`, `procedural`) cover most material. Extras via `claim_kind`; registered kinds are offered to the distillation LLM alongside built-ins:
 
 ```json
 { "action": "add", "name": "incident",  "description": "A production incident: what broke, the impact, and the remediation." }
 { "action": "add", "name": "benchmark", "description": "A measured performance result and the conditions it was measured under." }
 ```
 
-Or via the CLI (`src/commands.rs:225`):
-
 ```bash
 kern claim-kind add incident "A production incident: what broke, the impact, and the remediation."
 kern claim-kind rm incident
 ```
 
-For per-ingest chunking context, pass the free-text `hint` on the `ingest` call
-("This text describes …") — that is a prompt hint, not a kind.
+Per-ingest chunking context: free-text `hint` on the `ingest` call — a prompt hint, not a kind.
 
 ## Step 3 — Push the content in
 
-There are three intake shapes. They differ in what happens to the text on the
-way in, which is the thing to choose on.
-
 ### Direct ingest, per document
 
-The `ingest` MCP tool (`src/mcp/tools_mutate.rs:16`) takes the text plus
-optional provenance:
+`ingest` MCP tool, text plus optional provenance:
 
 ```json
 {
@@ -104,17 +67,11 @@ optional provenance:
 }
 ```
 
-`sync: true` blocks until the ingest completes and returns the outcome, which is
-what you want when seeding — the default is fire-and-forget, and a batch of
-those gives you no way to tell what failed.
+- `sync: true`: blocks until complete, returns the outcome — use when seeding; the fire-and-forget default gives a batch no way to report failures.
+- `source`: provenance shape — `inline` (default), `file`, `session`, `agent`, or any other string (treated as a ticket system id).
+- `object_id`: stable identity — re-ingest with the same `object_id` is a revision, not a new object.
 
-`source` selects the provenance shape: `inline` (the default), `file`,
-`session`, `agent`, or any other string, which is treated as a ticket system
-identifier. `object_id` is the stable identity for update semantics — re-ingest
-with the same `object_id` and kern treats it as a revision of the same object
-rather than a new one.
-
-The CLI equivalent reads a whole file:
+CLI equivalent:
 
 ```bash
 kern ingest --file docs/decisions/0007-storage-engine.md
@@ -122,31 +79,17 @@ kern ingest "We chose LMDB because readers never block writers."
 ```
 
 <Callout type="warn" title="The CLI and the daemon are separate writers">
-`kern ingest` opens the on-disk graph directly and can race a running
-daemon. It retries on a refused stale flush, but for bulk seeding the
-predictable path is either the MCP tool against the live daemon, or the CLI
-with the daemon stopped. Do not run both at once.
-
-There is a second, deliberate difference: CLI ingest is attributed to the
-`user` source at full confidence, which makes the resulting entities
-**facts** — immune to eviction (`src/base/math.rs:192`). MCP callers are
-agents and are clamped below fact confidence, so their content remains
-subject to decay. If you are seeding durable reference material you want to
-survive GC forever, the CLI path is the one that produces it.
+`kern ingest` opens the graph directly and can race a running daemon — bulk seed via MCP against the live daemon, or CLI with the daemon stopped, never both. Also deliberate: CLI ingest is `user`-sourced at full confidence → **facts**, immune to eviction; MCP callers are agents, clamped below fact confidence, subject to decay. Material that must survive GC forever wants the CLI path.
 </Callout>
 
 ### Bulk, through the intake
 
-For a large pile of prose, drop the files into `<cwd>/.kern/intake/` and let the
-daemon drain them:
+Drop files into `<cwd>/.kern/intake/`; daemon drains (default poll 5s):
 
 ```bash
 mkdir -p .kern/intake
 cp docs/decisions/*.md .kern/intake/
 ```
-
-The intake polls that directory (default every 5s) and takes anything that reads
-as text, whatever its extension. What a file becomes depends on its suffix:
 
 | dropped file | becomes | needs |
 |---|---|---|
@@ -154,96 +97,38 @@ as text, whatever its extension. What a file becomes depends on its suffix:
 | anything else | a `Document`, stored whole and chunked | the embedder only |
 | not valid UTF-8 | quarantined into `.kern/intake/failed/` | — |
 
-So seeding documents works with no reason model configured at all. Each drained
-file is archived to `.kern/intake/done/` once everything from it has been
-ingested; if the LLM or embedder is unreachable, the file stays queued and is
-retried on the next drain, so nothing is lost to an outage.
-
-This path differs from direct ingest in one significant way: it runs
-**distillation** first (`src/ingest/distill.rs:21`) — one LLM pass that extracts
-durable facts, decisions, and preferences as typed claims — and ingests those
-claims rather than the raw text. Use it when your source material is prose that
-needs interpreting. Use direct ingest when the text is already the claim you
-want stored.
+Drained files move to `.kern/intake/done/` once everything ingested; unreachable LLM/embedder leaves them queued for retry. Intake for prose that needs interpreting; direct ingest when the text already is the claim.
 
 ## What happens to your text on the way in
 
-Direct ingest does no LLM work. Understanding the two steps it does perform will
-save you from badly-shaped seed files.
+Direct ingest does no LLM work. Two behaviors shape seed files:
 
-**Splitting is heuristic and paragraph-based.** The text is split on blank lines
-(`src/ingest/split.rs:28`), and the splitter is explicitly called with no LLM —
-an LLM split would put a model call on the commit path
-(`src/ingest/worker.rs:213`). The whole text is also stored as one `Document`
-entity alongside the chunks (`src/ingest/place.rs:76`), so both the parts and
-the whole are retrievable.
+- **Paragraph splitting.** Splits on blank lines; whole text also stored as one `Document` alongside the chunks. **One idea per paragraph** — a wall of text becomes one undifferentiated chunk.
+- **Normal acceptance per chunk.** Graph-wide near-duplicate check (cosine ≥ the preset's dedup threshold, `0.98` on the default `relaxed`), then routing to the nearest graviton. Re-running a seed collapses byte-identical content; a reworded version dedupes only above the threshold.
 
-The practical consequence: **one idea per paragraph, separated by a blank line.**
-A wall of text with no blank lines becomes a single chunk and retrieves as an
-undifferentiated blob.
+Contradiction handling applies: a document may supersede a stored claim, but only on a same-kind near-duplicate with an unambiguous classifier verdict — anything less leaves both standing.
 
-**Every chunk goes through the same acceptance path as anything else**
-(`src/base/accept.rs:41`). Nothing about seeding is privileged. Each chunk is
-checked graph-wide for a near-duplicate (cosine ≥ the preset's dedup
-threshold — `0.98` on the default `relaxed`, `src/config/preset.rs`), routed to the graviton whose effective distance is smallest,
-and committed there. Re-running a seed therefore collapses byte-identical
-content rather than duplicating it — and that is the whole guarantee. The check
-is cosine similarity, not identity, and nothing keys on the file the text came
-from, so a reworded version of something already stored dedupes only if it
-happens to land above the threshold, and lands as a second entity if it does
-not.
-
-That also means seeded content participates in contradiction handling like
-everything else: seed a document that contradicts a stored claim and the older
-one *may* be superseded. The path fails open to coexistence, though. It needs a
-same-kind near-duplicate above the dedup threshold, and then an unambiguous
-CONTRADICT or UPDATE verdict from the background classifier with no mention of
-RELATED in it. Anything short of that — a hedged verdict, an unparseable one, a
-different `kind`, a rewording too distant to pair — leaves both claims standing
-side by side.
-
-→ [Acceptance & routing](../concepts/acceptance.mdx) ·
-[Time & contradiction](../concepts/time.mdx)
+→ [Acceptance & routing](../concepts/acceptance.mdx) · [Time & contradiction](../concepts/time.mdx)
 
 ## Step 4 — Check it landed
-
-Call the `health` MCP tool, or run:
 
 ```bash
 kern health
 ```
 
-which prints the data directory, the graviton names, the kern / thought /
-reason / claim-kind counts, the embedding model and dimension the index was
-built with, the cold-eviction total and the tick's queue and fault counts, then
-a per-kern breakdown. Three things to look at:
+- **Thought count moved** roughly as expected. Zero → embedding failed; see [Configure models](./configure.mdx).
+- **Thoughts distributed across gravitons.** All-in-one: graviton texts too similar, or content seeded before gravitons existed.
+- **No `MISMATCH` on `embed:`.** If present: `kern reembed` before trusting the counts.
 
-- **Thought count moved** by roughly what you expect. A count of zero after a
-  seed run means embedding failed — check the endpoint in
-  [Configure models](./configure.mdx).
-- **Thoughts are distributed across gravitons**, not all sitting in one. Every
-  thought landing in the same place usually means the graviton texts are too
-  similar to each other, or you seeded content before the gravitons existed.
-- **No `MISMATCH` on the `embed:` line.** A bulk seed embedded under a different
-  model than the one the graph was built with lands vectors that no query can
-  reach. Run `kern reembed` before trusting the counts.
-
-Then confirm the content is actually retrievable:
+Confirm retrieval (from MCP, the `query` tool exercises the full pipeline):
 
 ```bash
 kern search "which storage engine did we choose" --k 5
 kern list
 ```
 
-`kern search` runs a retrieval and prints the top hits; `kern list` walks the
-kern tree and prints each thought under its kern. From an MCP session, the
-`query` tool is the equivalent and is the one that exercises the full pipeline.
-
 ## After seeding
 
-Nothing further is required. Normal sessions populate the graph through the intake
-from here, and the background tick starts folding your seeded content into the
-same heat, decay, and clustering cycle as everything else.
+Nothing further. Sessions populate via the intake; the tick folds seeded content into the same heat, decay, and clustering cycle.
 
-→ [Intake & recall](./intake-recall.mdx) ·
-[Heat, decay & self-compaction](../concepts/heat-and-compaction.mdx)
+→ [Intake & recall](./intake-recall.mdx) · [Heat, decay & self-compaction](../concepts/heat-and-compaction.mdx)

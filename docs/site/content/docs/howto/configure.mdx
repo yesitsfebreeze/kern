@@ -2,32 +2,22 @@
 title: "Configure models"
 ---
 
-kern talks to three model endpoints. This page explains what each one is
-responsible for, how to size it, and how to point kern at your models. At the
-end you will have a `kern.toml` that works — or, if you run a local Ollama with
-the default models pulled, the confidence to write no config at all.
+kern talks to two model endpoints. With a local Ollama and the default models pulled, no config is needed.
 
 ## You may not need a config file
 
-kern is configless by default. With no `kern.toml` anywhere, every setting comes
-from the shipped defaults (`Config::default_in`, `src/config/mod.rs`), which assume a local Ollama
-at `http://localhost:11434`. The answer role aliases the reason model, so two
-pulls cover all three roles and you are done:
+No `kern.toml`: defaults assume a local Ollama at `http://localhost:11434`:
 
 ```bash
 ollama pull qwen3-embedding:0.6b   # embeddings
-ollama pull granite4:3b            # distillation / reasoning, and the ask oracle
+ollama pull granite4:3b            # distillation / reasoning (write path)
 ```
 
-A config file only exists to override those. Everything in it is optional, and
-any section you omit keeps its default.
+A config file only overrides; omitted sections keep their defaults.
 
 ## Presets — the whole tuning surface is one line
 
-Memory tuning is a posture, not thirty knobs. The preset owns every heat,
-dedup, and retrieval-breadth setting (`src/config/preset.rs`); the `[heat]`,
-`[ingest]`, and `[retrieval]` sections are not accepted in `kern.toml` — a
-config that sets them refuses to load with a pointer here.
+The preset owns every heat, dedup, and retrieval-breadth setting. `[heat]`, `[ingest]`, `[retrieval]` sections are not accepted — a config that sets them refuses to load. Unknown preset name: refuses to load.
 
 ```toml
 preset = "tight"
@@ -35,113 +25,51 @@ preset = "tight"
 
 | Preset | Posture | What it means |
 | --- | --- | --- |
-| `relaxed` | **The default.** Keep more, deliver more, forget slower | 30-day heat half-life, near-identical-only dedup (0.98), broad search (`seed_k` 25, 800 expansions), up to 40 results / 8 answer facts |
-| `medium` | Balanced | 7-day half-life, 0.95 dedup, `seed_k` 15, 500 expansions, 25 results / 5 answer facts |
-| `tight` | Lean graph, sharp recall | 3-day half-life, aggressive dedup (0.90), narrow search (`seed_k` 10, 250 expansions), 12 results / 4 answer facts |
+| `relaxed` | **The default.** Keep more, forget slower | 30-day heat half-life, near-identical-only dedup (0.98), broad search (`seed_k` 25, 800 expansions), up to 40 results |
+| `medium` | Balanced | 7-day half-life, 0.95 dedup, `seed_k` 15, 500 expansions, 25 results |
+| `tight` | Lean graph, sharp recall | 3-day half-life, aggressive dedup (0.90), narrow search (`seed_k` 10, 250 expansions), 12 results |
 
-No `preset` line means `relaxed`. An unknown preset name refuses to load, same
-as any other invalid config.
+`relaxed` when losing a stray fact hurts more than noise; `tight` for high-churn codebases where stale memory misleads.
 
-Stay on `relaxed` for long-running projects where losing a stray fact hurts
-more than noise; use `tight` for high-churn codebases where stale memory
-misleads more than forgotten memory costs; `medium` is the middle when both
-hurt equally.
+## The two model roles
 
-## The three model roles
+### `embed`
 
-### `embed` — the embedding model
-
-**On the critical path for:** every ingest and every query. Nothing enters the
-graph without being embedded, and every retrieval embeds the query text. It is
-the highest-frequency call kern makes.
-
-**Sizing:** small. The default is `qwen3-embedding:0.6b`
-(`src/config/embed.rs:6`). Embedding quality matters, but a bigger model here
-buys less than a bigger reason model and costs you on every single operation.
+Critical path for every ingest and query — the highest-frequency call. Keep it small; default `qwen3-embedding:0.6b` is fine. `embed.url` and `embed.model` are the only required settings — validation rejects a config with either blank.
 
 <Callout type="warn" title="The embedding dimension locks the graph">
-The first ingest fixes the vector dimension for the whole graph. Change the
-embedding model later and stored vectors no longer match query vectors. This is
-no longer silent: the model and dimension are stamped in the store and checked
-at open, a mismatch raises the `embed_mismatch` flag on `health`, and a query
-vector of the wrong dimension is dropped and counted instead of searching
-truncated noise. Queries still answer — fail-open — they just answer badly.
-`kern reembed` is the only escape, and it re-embeds everything, restamping with
-the model it used.
+First ingest fixes the vector dimension for the whole graph. Change the model later and stored vectors no longer match query vectors. Not silent — store stamps its model, `health` raises `embed_mismatch`, wrong-dimension query vectors are dropped and counted. Queries still answer — badly. `kern reembed` is the only escape; it re-embeds everything and restamps.
 </Callout>
 
-`embed.url` and `embed.model` are the only two settings kern actually requires;
-`Config::validate` rejects a config with either blank
-(`src/config/mod.rs`).
+### `reason`
 
-### `reason` — distillation and reasoning
+Critical path for the intake: one distillation pass per drained session decides what is remembered — an unextracted claim never enters the graph. Also used for contradiction classification and `link` reasons. Default `granite4:3b`, sized for a small GPU. **Spend headroom here first** — off the read path, so a slower model costs ingest latency, not recall latency.
 
-**On the critical path for:** the intake. One distillation pass per drained
-session extracts durable facts, decisions, and preferences as typed claims. Also
-used for contradiction classification in the background tick, and for writing
-the reason text on an edge when `link` is called without one.
+### There is no answer role
 
-**Sizing:** this is the quality lever that matters most. Distillation decides
-what is remembered at all — a claim the reason model fails to extract is a claim
-that never enters the graph, and no amount of retrieval tuning recovers it. The
-default is `granite4:3b` (`src/config/reason.rs:13`), chosen to run comfortably
-on a small GPU. If you have headroom, spend it here first.
-
-It is off the read path entirely, so a slower model costs you ingest latency,
-not recall latency.
-
-### `answer` — the user-facing ask oracle
-
-**On the critical path for:** the streamed answer over MCP, when a query asks
-for one. It receives the already-retrieved nodes and glues them into prose; it
-does no retrieval and no reasoning about what to fetch.
-
-**Sizing:** smallest model that reliably grounds its output in the passages it
-was given. This call is latency-critical — a human is watching it stream — and
-its job is narrow. The default aliases the reason default
-(`src/config/answer.rs:12`), so one runner serves both legs and a single local
-Ollama needs no extra wiring.
+`query` returns scored passages; the calling agent synthesizes. A config carrying an `[answer]` section refuses to load.
 
 ## Where the config file lives
 
-Two scopes, both optional (`Config::load_with_user`, `src/config/mod.rs`):
+Both optional:
 
 | Scope | Path |
 | --- | --- |
 | Project | `<project root>/.kern/kern.toml` |
 | User | `<XDG_CONFIG>/kern/kern.toml` |
 
-The project root is the nearest ancestor directory containing `.git`, falling
-back to the nearest containing `.kern` (`Config::resolve_root`, `src/config/mod.rs`) — so kern finds
-the same config whether you launch it from the root or from a subdirectory.
+Project root: nearest ancestor with `.git`, else nearest with `.kern` — subdirectory launches find the same config.
 
 <Callout type="warn" title="Precedence is per-key, and a redirect drops the key">
-Scopes deep-merge (`src/config/io.rs`): a project key overrides the same user
-key, and keys the project omits are inherited. If your user config sets
-`[reason] url` and `key`, and your project config sets only `[reason] model`,
-your `url` and `key` survive. Arrays and scalars replace wholesale — they are
-leaves, never appended.
-
-One deliberate exception: **a scope that sets a section's `url` does not inherit
-that section's `key`** (`src/config/secrets.rs`). Otherwise a project config
-committed in a repo you cloned could point `[embed] url` at its own endpoint and
-harvest the credential you set globally — and since `reason_key`/`answer_key`
-fall back to `embed.key`, redirecting any one endpoint would reach it. Redirect
-an endpoint and you supply its key, or go without.
+Scopes deep-merge: project key overrides user key, omitted keys inherited; arrays and scalars replace wholesale. Exception: **a scope that sets a section's `url` does not inherit that section's `key`** — otherwise a cloned repo's config could point `[embed] url` at its own endpoint and harvest your global credential. Redirect an endpoint → supply its key or go without.
 </Callout>
 
-An invalid config aborts startup: kern prints the offending key to stderr and
-exits **78** (`EX_CONFIG`), for both an unparseable file and one that fails
-validation (`src/main.rs`). An *absent* config is legitimate and still defaults
-silently.
-
-There is no environment-variable override layer. API keys live in plaintext in
-the TOML — treat the file accordingly.
+- Invalid config aborts startup: offending key on stderr, exit **78** (`EX_CONFIG`). Absent config defaults silently.
+- No environment-variable layer; API keys live in plaintext in the TOML — treat the file accordingly.
 
 ## A complete Ollama config
 
-Everything below is a default made explicit. Delete any line you are not
-changing.
+Every line is a default made explicit — delete any you are not changing:
 
 ```toml
 [embed]
@@ -153,49 +81,19 @@ key   = ""
 url   = "http://localhost:11434"
 model = "granite4:3b"
 key   = ""
-
-[answer]
-url   = ""              # blank -> falls back to [reason]'s endpoint
-model = "granite4:3b"
-key   = ""              # blank -> inherits [reason]'s key
 ```
 
-### The fallback chain
-
-Blank values are not errors — they are how you say "same as the leg above"
-(`Config::reason_url` / `Config::answer_url`, `src/config/mod.rs`):
-
-- `answer.url` blank → uses the resolved `reason` url.
-  `answer.key` blank → uses the resolved `reason` key.
-- `reason.url` blank → uses `embed.url`.
-  `reason.key` blank → uses `embed.key`.
-
-So a single endpoint serving all three models needs the URL written exactly
-once, in `[embed]`. The default `[answer]` section ships with a blank `url`
-precisely so that the common case — one local Ollama — requires no wiring at
-all.
+Blank = "same as the leg above": `reason.url` blank → `embed.url`; `reason.key` blank → `embed.key`. One endpoint for both models: write the URL once, in `[embed]`.
 
 <Callout type="info" title="WSL2 loopback needs an explicit URL">
-Running kern inside WSL2 (NAT mode) against an Ollama on the Windows host,
-a `localhost` URL resolves inside the WSL VM, not on the host — set
-`embed.url` to the Windows host gateway in `.kern/kern.toml`. Find it with
-`ip route show default | awk '{print $3}'`. Mirrored-mode WSL2 and an
-in-distro Ollama keep plain `localhost`.
+WSL2 NAT with Ollama on the Windows host: `localhost` resolves inside the VM. Set `embed.url` to the host gateway (`ip route show default | awk '{print $3}'`). Mirrored-mode WSL2 and in-distro Ollama keep plain `localhost`.
 </Callout>
 
-## Pointing at a remote or OpenAI-compatible endpoint
+## OpenAI-compatible and remote endpoints
 
-kern speaks two protocols and picks between them by inspecting the URL
-(`src/llm.rs:525`). It uses Ollama's native API (`/api/embed`, `/api/chat`) only
-when the URL looks local *and* does not end in `/v1`. Anything else gets the
-OpenAI-compatible API (`/v1/embeddings`, `/v1/chat/completions`), with the `key`
-sent as a bearer token.
+Protocol is picked from the URL: Ollama-native (`/api/embed`, `/api/chat`) only when the URL looks local *and* does not end in `/v1`; anything else gets the OpenAI-compatible API (`/v1/embeddings`, `/v1/chat/completions`) with `key` as bearer token. A trailing `/v1` is stripped before building the request path — writing it is what selects the protocol.
 
-A trailing `/v1` is stripped before the request path is built, so writing it or
-omitting it produces the same URL — but writing it is what selects the
-OpenAI-compatible protocol.
-
-**A hosted OpenAI-compatible provider:**
+**Hosted OpenAI-compatible provider:**
 
 ```toml
 [embed]
@@ -206,14 +104,9 @@ model = "qwen3-embedding:0.6b"
 url   = "https://api.example.com/v1"
 model = "some-instruct-model"
 key   = "sk-..."
-
-[answer]
-url   = ""                                 # inherits reason's url and key
-model = "some-small-model"
 ```
 
-**A local OpenAI-compatible server** (vLLM, llama.cpp, LM Studio) — the `/v1`
-suffix is **required** here, not optional:
+**Local OpenAI-compatible server** (vLLM, llama.cpp, LM Studio) — `/v1` **required**, else a `localhost` URL is treated as Ollama-native and requests go to `/api/chat`, which your server does not serve:
 
 ```toml
 [reason]
@@ -221,54 +114,29 @@ url   = "http://localhost:8000/v1"
 model = "Qwen/Qwen2.5-7B-Instruct"
 ```
 
-Without the `/v1`, a `localhost` URL is treated as Ollama-native and every
-request goes to `/api/chat`, which your server does not serve.
+**Remote Ollama** on a non-local host: always driven OpenAI-compatible — point at `http://host:11434/v1` and be explicit.
 
 <Callout type="info" title="Context size and keep-alive are not config keys">
-`num_ctx` (embed 2048, reason 8192, answer 8192), `keep_alive` (embed and
-answer 10m, reason 2m) and the reason leg's `num_gpu: 0` are constants in
-`src/llm.rs:501-514`, not `kern.toml` fields. There is no key that changes any
-of them. They are also Ollama-native options: on the OpenAI-compatible `/v1`
-path kern sends none of them, so a vLLM or llama.cpp server sizes its own
-context and residency and the numbers above do not apply to it.
+`num_ctx` (embed 2048, reason 8192) and `keep_alive` (embed 10m, reason 2m) are compiled-in constants, Ollama-native only. On the `/v1` path kern sends none of them.
 </Callout>
-
-**A remote Ollama** stays on the native protocol only if it is reachable at a
-local address. A non-local host is always driven over the OpenAI-compatible
-path, which Ollama also serves — so point it at `http://host:11434/v1` and be
-explicit.
 
 ## Verify
 
-Restart the daemon, then check that the endpoints actually answer:
+Restart the daemon, then:
 
 ```bash
 kern health                                    # graph loads, config parsed
 kern search "anything" --k 3                   # exercises the embed leg
-kern query "what is this project about" --answer   # exercises reason + answer
+kern query "what is this project about"        # full retrieval, LLM-free
 ```
 
-The one-off flags `--embed-url`, `--embed-model`, `--reason-url`, and
-`--reason-model` override config for a single command
-(`src/commands.rs:66`) — useful for testing an endpoint before committing it to
-the file.
-
-If embedding fails, ingest and query both return nothing rather than erroring
-loudly: kern fails open on LLM outages by design, and that particular no-op is
-still uncounted — check stderr for the actual connection error.
-
-One embedding failure mode *is* visible. The store stamps the model and vector
-dimension it was built with and re-checks them at open (`src/base/store.rs:473`),
-so pointing `[embed] model` at a different model sets `embed_mismatch`, which
-`kern health` prints as `MISMATCH: the index was built with a different model`
-next to the `embed:` line. Queries keep working but drop any vector whose
-dimension disagrees with the index rather than searching truncated noise. The
-fix is `kern reembed`, which rebuilds every vector and restamps with the model
-it actually used. An *unstamped* store — one written before stamping existed —
-adopts the current model on first open and is not a mismatch.
+- Reason leg is write-path only — drop a delta into `.kern/intake/` and watch it drain ([Intake & recall](./intake-recall.mdx)).
+- `--embed-url`, `--embed-model`, `--reason-url`, `--reason-model` override config for a single command — test an endpoint before committing it.
+- Embedding failure: ingest and query return nothing rather than erroring (fail open) — check stderr for the connection error.
+- Mismatch is visible: `kern health` prints `MISMATCH: the index was built with a different model` beside `embed:`; fix with `kern reembed`. An unstamped store (pre-stamping build) adopts the current model on first open — not a mismatch.
 
 ## Related
 
-- [Install & run the daemon](./install-run.mdx)
+- [Install & run](./install-run.mdx)
 - [Seed the graph](./seed.mdx)
-- [The retrieval pipeline](../concepts/retrieval.mdx) — where each model sits.
+- [The retrieval pipeline](../concepts/retrieval.mdx)

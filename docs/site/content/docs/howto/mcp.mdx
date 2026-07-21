@@ -2,16 +2,11 @@
 title: "Wire up MCP"
 ---
 
-By the end of this page your agent will list kern's twelve tools and be able to
-query and write the project's graph mid-session. You will also know which tool to
-reach for when, and what to check when the client shows zero tools.
-
-Start from a project that has a `.kern/` directory — see
-[Install & run the daemon](./install-run.mdx).
+Get your agent listing kern's twelve tools against the project's graph. Start from a project with `.kern/` — see [Install & run](./install-run.mdx).
 
 ## 1. Register the server
 
-kern speaks MCP over stdio. Point your client at the binary:
+stdio:
 
 ```json
 {
@@ -24,16 +19,10 @@ kern speaks MCP over stdio. Point your client at the binary:
 }
 ```
 
-That is the repo's own `.mcp.json`, verbatim. The daemon writes exactly this
-entry itself on startup if the file is missing the `kern` key —
-`ensure_mcp_registered` (`src/commands/mcp_cmd.rs:437`) only inserts absent keys,
-so a customised entry of yours is never overwritten.
+- Daemon writes exactly this into `.mcp.json` on startup if the `kern` key is missing; a customised entry is never overwritten.
+- Windows clients that won't search PATH: absolute path as `command` (`C:\Users\<you>\.kern\bin\kern.exe` style).
 
-Windows is the same config; the client resolves `kern` from PATH the same way.
-If your client will not search PATH, give the absolute path the installer
-printed (`C:\Users\<you>\.kern\bin\kern.exe` style) as `command`.
-
-## 2. What `kern mcp` actually does
+## 2. What `kern mcp` does
 
 <Mermaid
   chart={`
@@ -48,119 +37,42 @@ flowchart TD
 `}
 />
 
-`cmd_mcp` (`src/commands/mcp_cmd.rs:11`) tries the per-cwd socket twice, then
-spawns a detached `kern --daemon` and retries six times, and only then falls back
-to serving MCP standalone in the client's own process. So one config entry is
-enough to bring kern up — you do not have to start the daemon separately.
+One config entry brings kern up — no separate daemon start needed.
 
 <Callout type="warn">
-Standalone fallback means a *second* writer against the same LMDB
-environment. It is a safety net, not a mode to run in: if your client's tools
-work but the graph never grows across sessions, you are probably falling back
-silently. Start a daemon by hand and check the socket exists.
+Standalone fallback is a second writer against the same LMDB environment — a safety net, not a mode. Tools work but the graph never grows across sessions: you are falling back silently; start a daemon by hand and check the socket.
 </Callout>
 
 ## 3. The tools
 
-Twelve tools, defined in `src/mcp/tools*.rs` and dispatched in one place —
-`call_tool`, `src/mcp.rs:160`. Your client can introspect every schema; what it
-cannot tell you is when to reach for which.
-
 ### Reading
 
-**`query`** — the one you will use most. Hybrid vector + lexical retrieval over
-the graph, returning scored thoughts, with `answer: true` to synthesize an LLM
-answer over the top results. Needs at least one of `text` or `id`
-(`src/mcp/tools_query.rs:11`).
-
-Reach past the plain `text` search when you need precision:
-
-- `kind` (`fact` / `document` / `normal`), `source` and `min_conf` to cut noise.
-- `since` / `before` for a window, `sort` plus `ascending` for recency.
-- `as_of` for a bi-temporal point query: what was believed at that instant,
-  following the supersede chain back rather than returning today's revision.
-- `include_history: true` when you want the superseded revisions alongside the
-  live ones, flagged `history: true` — the honest answer to "did this change?"
-
-**`health`** — graviton, kern, entity, reason, unnamed and claim-kind counts,
-plus the degradation signals: tick queue depth and average task latency,
-`task_panics` / `task_failures` with the most recent of each rendered, the
-`cold_evicted` total, and the `embed_model` / `embed_dim` the index was built
-with alongside an `embed_mismatch` flag. Use it as a liveness probe, to
-sanity-check that ingestion is landing, and to tell a degraded daemon from a
-healthy one — kern fails open, so a panicking maintenance task keeps the daemon
-serving and shows up only here.
+- **`query`** — hybrid vector + lexical retrieval; scored thoughts with edges and path chains, no synthesis. Needs `text` or `id`. Filters: `kind` (`fact` / `document` / `normal`), `source`, `min_conf`; `since` / `before`, `sort` + `ascending`; `as_of` for what was believed at a past instant; `include_history: true` for superseded revisions (flagged `history: true`).
+- **`health`** — counts plus degradation: tick queue and latency, `task_panics` / `task_failures`, `cold_evicted`, `embed_model` / `embed_dim` with `embed_mismatch`. kern fails open — a degraded daemon keeps serving and shows up only here.
 
 ### Writing
 
-**`ingest`** — put text into the graph. Pass `object_id` when the text is a
-revision of something already stored: that is what gives you update semantics
-instead of a duplicate node. `hint` is free text folded into the chunking
-prompt ("This text describes …"), `conf`
-weights the claim, and `sync: true` blocks until the ingest completes rather than
-returning as soon as it is queued (`src/mcp/tools_mutate.rs:16`).
-
-**`link`** — create a reason edge between two thoughts. Leave `reason` empty and
-the LLM writes the justification. Use it when you know two facts are connected in
-a way retrieval would not infer from similarity.
-
-**`forget`** — remove a thought and cascade-delete its edges. Facts are immune,
-so this is for retracting noise, not for rewriting history — use a superseding
-`ingest` with the same `object_id` for that.
-
-**`degrade`** — the feedback channel. When a retrieval path led somewhere wrong,
-pass the bad result's id as `query_id` and the edges along that path lose score.
-This is how kern learns from a bad answer without you deleting anything.
-
-**`move`** — relocate a thought to another kern by `id` and `to_kern`, carrying
-its outgoing edges and restamping cross-kern references
-(`src/mcp/tools_mutate.rs:70`). Use it when routing put something in the wrong
-place and you would rather correct it than re-ingest.
+- **`ingest`** — put text in. `object_id` = update semantics for revisions; `hint` folded into the chunking prompt; `conf` weights the claim; `sync: true` blocks until complete.
+- **`link`** — reason edge between two thoughts. Empty `reason`: the LLM writes the justification.
+- **`forget`** — remove a thought, cascade-delete its edges. Facts immune; rewrite history via superseding `ingest` with the same `object_id`.
+- **`degrade`** — feedback. Bad result's id as `query_id`: edges along that path lose score.
+- **`move`** — relocate a thought to another kern (`id`, `to_kern`), edges carried.
 
 ### Shaping and maintenance
 
-**`graviton`** — named focus attractors that queries and ingest gravitate
-toward, replacing the old single per-kern "purpose". `action: "add"` with a name
-and seed `text` — example statements, one per line, each embedded separately
-and mean-pooled into the pull vector (measurably better placement than an
-abstract description; see [Seed the graph](./seed.mdx)) — optionally a `mass`
-— routing uses cosine distance divided by mass, so a heavier graviton pulls
-harder, and anything matching nothing falls through to `generic`. `list` and
-`remove` do what they say (`src/mcp/tools_admin.rs:41`). This is the main knob
-for telling a project's memory what it is *about*.
-
-**`claim_kind`** — register a claim kind (`add` with a markdown `description`,
-or `rm`). Registered kinds extend the built-in set (`preference`, `decision`,
-`project`, `fact`, `code-fact`, `reference`, `procedural`) that transcript
-distillation may label claims with.
-
-**`pulse`** — force a clustering pass across the tree, enqueuing cluster tasks
-for every kern with thoughts. The background tick does this on its own; call it
-after a bulk seed when you do not want to wait.
-
-**`setup`** — returns step-by-step wiring instructions for the calling agent:
-seed gravitons, install the capture rule or hook in the host's instruction
-file, verify with an ingest/health/query round-trip. Idempotent — it reports
-what is already `[done]` for this project (`src/mcp/tools_setup.rs`). Call it
-once per new project or new agent host; the agent does the wiring, kern never
-writes into a host's config itself.
-
-**`gc`** — reap empty and orphan kerns from the running daemon's graph and
-persist, live, no restart needed. Returns before/after kern counts and the
-`data.mdb` size. Note the size may not drop: LMDB frees pages inside the file but
-only returns disk on compaction, which happens on the next restart or via offline
-`kern compact`.
+- **`graviton`** — focus attractors. `add` with name and seed `text` (example statements, one per line — [Seed the graph](./seed.mdx)), optional `mass` (routing divides distance by mass); `list`, `remove`. Unmatched → `generic`.
+- **`claim_kind`** — `add` with a markdown `description`, or `rm`; extends the built-in set distillation may label with.
+- **`pulse`** — force a clustering pass now. Useful after a bulk seed.
+- **`setup`** — wiring instructions for the calling agent: seed gravitons, install the capture hook, verify with an ingest/health/query round-trip. Idempotent — reports what is already `[done]`. Once per new project or agent host.
+- **`gc`** — reap empty/orphan kerns live. Returns before/after counts and `data.mdb` size (may not drop — LMDB returns disk only on compaction: next restart or offline `kern compact`).
 
 <Callout type="info">
-A useful default loop for an agent: `query` to recall, `ingest` durable
-conclusions as you reach them, `degrade` when a recall misfires, and leave
-`pulse`/`gc` to the tick unless you just bulk-loaded.
+Default loop: `query` to recall, `ingest` durable conclusions, `degrade` on a misfire; leave `pulse`/`gc` to the tick unless you just bulk-loaded.
 </Callout>
 
-## 4. Verify the tools are live
+## 4. Verify
 
-Ask your client to list tools; you should see all twelve. From a shell, drive the
-stdio surface directly:
+List tools in your client — expect all twelve. Or drive stdio:
 
 ```bash
 printf '%s\n' \
@@ -169,7 +81,7 @@ printf '%s\n' \
   | kern mcp
 ```
 
-Then confirm the graph answers, not just the transport:
+Confirm the graph answers, not just the transport:
 
 ```bash
 printf '%s\n' \
@@ -178,65 +90,33 @@ printf '%s\n' \
   | kern mcp
 ```
 
-A `health` result with non-zero `entities` means you are talking to a populated
-graph. Zero entities on a fresh project is expected — [seed it](./seed.mdx).
+Non-zero `entities` = populated graph. Zero on a fresh project is expected — [seed it](./seed.mdx).
 
 ## 5. Zero tools in the client
 
-Work down this list:
-
-1. **Is `kern` on the client's PATH?** GUI clients often do not inherit your
-   shell PATH. Run `kern --help` from a plain login shell; if that works but the
-   client does not, use an absolute `command`.
-2. **Did the client capture stdout?** kern's stdio surface speaks JSON-RPC on
-   stdout, and logs go to stderr for exactly that reason (`src/main.rs:27`).
-   Anything your shell profile prints on startup will corrupt the stream — do not
-   wrap the command in a shell that echoes.
-3. **Is the working directory right?** The daemon and its socket are per-cwd. A
-   client launched outside the project attaches to a different graph. kern
-   re-pins to the nearest ancestor with `.kern/`, but only if there is one above
-   the launch directory.
-4. **Is a stale socket blocking the attach?** If the daemon died hard, remove
-   `$XDG_RUNTIME_DIR/kern-*.sock` and let `kern mcp` respawn.
-5. **Did the config abort the boot?** An unparseable or invalid `kern.toml`
-   makes every `kern` invocation exit **78** with the offending key on stderr,
-   `kern mcp` included, so the client sees a process that dies immediately.
-   Deleting the file is a valid fix — an absent config boots on defaults.
-6. **Read the logs.** `RUST_LOG=kern=info kern mcp` prints whether it went proxy
-   (`kern.mcp_proxy` "attached to running daemon") or fell back to standalone
-   (`kern.mcp` "auto-spawn failed"). The daemon `kern mcp` spawned for you is
-   detached, but not silent: its stdout and stderr append to
-   `.kern/data/logs/daemon.log` (and the hub's to `hub.log`), owner-only, so the
-   reason a spawn failed survives the next restart.
+1. **`kern` on the client's PATH?** GUI clients often don't inherit shell PATH — use an absolute `command`.
+2. **stdout clean?** JSON-RPC rides stdout; logs go to stderr. A shell profile echoing on startup corrupts the stream.
+3. **Working directory right?** Daemon and socket are per-cwd; re-pins to the nearest ancestor with `.kern/` only if one exists above.
+4. **Stale socket?** Daemon died hard: remove `$XDG_RUNTIME_DIR/kern-*.sock`, let `kern mcp` respawn.
+5. **Config aborting the boot?** Invalid `kern.toml` exits **78** with the offending key on stderr — the client sees an immediately dying process. Deleting the file is a valid fix.
+6. **Read the logs.** `RUST_LOG=kern=info kern mcp` prints proxy ("attached to running daemon") vs standalone ("auto-spawn failed"). Spawned daemon output appends to `.kern/data/logs/daemon.log`.
 
 <Callout type="warn" title="Prompts and resources are stdio-standalone only">
-The server advertises `resources` and `prompts` capabilities, and the
-standalone path serves them — `kern://local/health`, `.../thoughts`,
-`.../kerns`, `.../claim-kinds` plus a `research` prompt. In **proxy** mode,
-the normal path when a daemon is running, `resources/list` and `prompts/list`
-are not forwarded and return `-32601 method not found`. Do not build on them;
-the tools are the stable surface.
+In proxy mode, `resources/list` and `prompts/list` are not forwarded — `-32601 method not found`. The tools are the stable surface.
 </Callout>
 
 ## MCP over HTTP
-
-For clients that want an endpoint rather than a subprocess, start the daemon with
-an address:
 
 ```bash
 kern --daemon --mcp-addr 127.0.0.1:3000
 ```
 
-This is MCP Streamable HTTP despite the module name, and it is never served
-unauthenticated: a bearer token is read from — or minted into —
-`.kern/data/mcp-token` on first use (`src/mcp/sse.rs:9`). Send it as
-`Authorization: Bearer <token>`. The bind address comes from the `--mcp-addr`
-flag alone; `kern.toml` has no field for it.
+- MCP Streamable HTTP, never unauthenticated: bearer token read from — or minted into — `.kern/data/mcp-token` on first use. Send `Authorization: Bearer <token>`.
+- Bind address from `--mcp-addr` only; `kern.toml` has no field for it.
 
 ## Next
 
-- [Configure models](./configure.mdx) — swap the embedding and reasoning endpoints.
-- [Intake & recall](./intake-recall.mdx) — the `.kern/intake/` drop path that fills the graph alongside MCP `ingest`.
-- [The retrieval pipeline](../concepts/retrieval.mdx) — what `query` does inside.
-- [Stigmergy GC & gravitons](../concepts/stigmergy.mdx) — why `degrade` and
-  `graviton` matter.
+- [Configure models](./configure.mdx)
+- [Intake & recall](./intake-recall.mdx)
+- [The retrieval pipeline](../concepts/retrieval.mdx)
+- [Stigmergy GC & gravitons](../concepts/stigmergy.mdx)

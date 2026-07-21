@@ -2,213 +2,85 @@
 title: "Acceptance & routing"
 ---
 
-Everything that enters kern's graph passes through one gate. A claim arrives one
-of two caller-driven ways — an agent calls MCP `ingest` with it directly, or a
-transcript dropped into `.kern/intake/` is distilled into claims first — and from
-there each claim is embedded, and each embedding is either merged into something
-the graph already knows or routed down the kern tree to a destination. This page
-explains what decides which of those happens.
+One gate for everything entering the graph: a claim arrives via MCP `ingest` or intake distillation, is embedded, then merged into something already known or routed down the kern tree. Two stages, failing differently:
 
-## The shape of the intake path
-
-A conversation delta arrives as a `.txt` file in `.kern/intake/` (documents dropped
-there take the same write path without the distill step). Nothing about
-that file is trusted: it is a transcript, full of greetings, tool output, and
-one-off mechanics that nobody wants to remember. The intake path's job is to
-throw almost all of it away and keep the small remainder in a form the graph can
-reason about later.
-
-That happens in two distinct stages, and it is worth keeping them separate in
-your head because they fail differently:
-
-1. **Distillation** turns text into *claims*. This is the only LLM call on the
-   path, and it is where the decision "is any of this worth keeping" is made.
-2. **Acceptance** turns a claim into a *placed entity*. This is pure vector
-   math and graph traversal — no model involved — and it decides *where* the
-   claim lives and whether it collapses into an existing one.
+1. **Distillation** — transcript → claims. The only LLM call on the path; decides *whether* anything is kept.
+2. **Acceptance** — places a claim. Pure vector math + traversal, no model; decides *where* it lives or whether it collapses into an existing thought.
 
 <Mermaid
   chart={`
 flowchart TD
     A[".kern/intake/*.txt"] --> B{"distill: one LLM pass"}
-    B -->|"no output, or no parseable array"| C["leave delta queued, retry later"]
-    B -->|"parsed array"| D["typed claims"]
-    B -->|"parsed empty array"| E["archive, nothing kept"]
-    D --> F["split into chunks + embed"]
-    F --> G{"near-duplicate above threshold?"}
-    G -->|"yes"| H["reinforce existing entity, add Rephrase edge"]
-    G -->|"no"| I["route down the kern tree"]
-    I --> J{"child graviton within accept floor?"}
+    B -->|"no usable output"| C["leave delta queued, retry"]
+    B -->|"claims"| D["typed claims"]
+    B -->|"empty array"| E["archive, nothing kept"]
+    D --> F["split + embed"]
+    F --> G{"near-duplicate?"}
+    G -->|"yes"| H["reinforce existing + Rephrase edge"]
+    G -->|"no"| I["route down kern tree"]
+    I --> J{"graviton match?"}
     J -->|"yes"| I
-    J -->|"no, at root"| K["generic catch-all kern"]
+    J -->|"no, at root"| K["generic catch-all"]
     J -->|"no, at a named kern"| L["unnamed holding-pen child"]
-    K --> M["commit: index, Similarity + Provenance edges"]
+    K --> M["commit: index + Similarity + Provenance edges"]
     L --> M
 `}
 />
 
-## Distillation: one pass, structured output
+## Distillation
 
-The distiller sends the whole delta to the reason endpoint with a prompt that
-asks for a JSON array of `{text, kind, valid_from?}` objects and nothing else —
-see `src/ingest/distill.rs:21`. The prompt is explicit about consolidation: one
-claim per distinct fact, complete standalone statements, no sentence fragments,
-and an empty array when nothing survives.
+One LLM pass over the whole delta → JSON array of `{text, kind, valid_from?}`. Forgiving parse — prose around the array, double-nesting, blank entries tolerated or dropped. Outage safety lives in the return value:
 
-Parsing is deliberately forgiving (`src/ingest/distill.rs:53`). It locates the
-first `[` and the last `]` and parses the span between them, so a model that
-wraps its answer in prose still yields claims. It unwraps a lone `[[...]]`
-nesting, a common local-model quirk. Entries with empty or missing `text` are
-dropped rather than stored as blanks.
-
-The return type carries the distinction that makes the intake outage-safe.
-`Some(claims)` means the model answered; `Some([])` means it answered *and*
-judged nothing worth keeping, which archives the delta. `None` means the reply
-held nothing usable — no output at all from a dead endpoint or a timeout, or a
-reply with no parseable JSON array anywhere in it (`parse_claims`,
-`src/ingest/distill.rs:60`) — and the caller leaves the delta in the intake
-directory instead of archiving it (`src/ingest/intake.rs:24`). Deltas are
-archived only after every claim they produced committed successfully
-(`src/ingest/intake.rs:58`).
+| Result | Action |
+| --- | --- |
+| Claims | Process; archive the delta only after every claim committed. |
+| Empty array | Model judged nothing worth keeping; archive. |
+| Nothing usable (dead endpoint, timeout, no parseable JSON) | Leave queued, retry. Nothing silently lost. |
 
 <Callout type="warn">
-That safety has a cost worth knowing. A reason model that *persistently* answers
-in prose rather than JSON is treated as a permanent outage: the delta is never
-lost, but it is also never archived, so the intake retries it forever and never
-drains. If the intake directory keeps growing while the graph does not, suspect
-the model's instruction following before you suspect the plumbing.
+A reason model that persistently answers in prose looks like a permanent outage: deltas never lost, never archived, intake retries forever. `.kern/intake/` growing while the graph does not → suspect the model's instruction following.
 </Callout>
 
-## What a typed claim is
+## Claim kinds
 
-A claim is a self-contained statement plus a kind naming what *kind* of
-knowledge it is, plus an optional instant at which it became true. Seven kinds
-are built in (`src/ingest/distill.rs:9`); kinds registered via the `claim_kind`
-tool extend the set:
+Seven built-in; the `claim_kind` tool registers more:
 
 | Kind | What it holds |
 | --- | --- |
 | `preference` | How the user wants things done. |
-| `decision` | A choice made, ideally with its rationale. |
+| `decision` | A choice made, with rationale. |
 | `project` | Ongoing state of the work. |
 | `fact` | A durable truth about the domain. |
 | `code-fact` | A structural truth about the codebase. |
 | `reference` | An external pointer worth keeping. |
-| `procedural` | A learned workflow, rule, or convention — how we do X. |
+| `procedural` | A learned workflow or convention. |
 
-Any `kind` the model invents outside the built-in + registered set falls back to `fact` rather than
-being rejected (`src/ingest/distill.rs:87`), so a hallucinated label costs you
-type precision but never the claim itself. `valid_from` is parsed only when it
-is a real ISO timestamp; a value like `"since March"` is ignored without
-failing the claim, which is what feeds the bi-temporal window described in
-[Time & supersede](./time.mdx).
+- Invented kind falls back to `fact` — type precision lost, never the claim.
+- `valid_from` kept only when it parses as a real ISO timestamp.
+- Distilled claims enter at confidence 0.6 — a model's reading, not your assertion.
 
-Each claim is then enqueued as its own ingest job at confidence `0.6`
-(`src/ingest/intake.rs:144`) — lower than a directly ingested document, because
-a claim is a model's reading of a conversation, not something you asserted. The
-kind rides along on the claim's `Source::Session`, so provenance records
-which kind produced it.
+## Routing
 
-## Routing: where a claim lands
+Descends the kern tree by graviton (focus vector + mass). Every child scored `cosine_distance / mass`, converted to an acceptance probability against the kern's radii; best probability below the floor (0.5) = no match. Mass is the tuning knob — heavier attracts from further away.
 
-Once a claim has a vector, placement is decided by `accept_with_dedup`
-(`src/base/accept.rs:30`). It computes the duplicate verdict once, then descends
-the kern tree.
+- Root is a pure dispatcher; no match at the root falls into `generic` — dense `generic` clusters later promote into new gravitons.
+- A named kern can refuse — a poor fit lands in a reusable unnamed holding-pen child, descent continues.
+- Descent bounded at 64 levels.
 
-Descent is graviton-driven. Each named kern carries a **graviton** — a focus
-vector with a mass. For every loaded child, routing computes an effective
-distance of `cosine_distance / mass` and converts it to an acceptance
-probability against the kern's inner and outer radii
-(`src/base/accept.rs:732`); the child with the highest probability wins, and a
-best probability below `ACCEPT_FLOOR` (0.5) means no child matched
-(`src/base/accept.rs:747`). Mass is the tuning knob: a heavier graviton both
-attracts claims from further away and holds onto them.
+Commit: index the vector, `Similarity` edge to nearest neighbour, `Provenance` edge to source document, supersede path if the claim carries an external id.
 
-Two special cases keep the tree well-formed:
+## Merge, not reject
 
-- **The root is a pure dispatcher.** A claim that matches no root graviton falls
-  through into a `generic` catch-all child rather than committing onto the root
-  itself (`src/base/accept.rs:130`). Dense `generic` clusters are what later
-  promote into new gravitons.
-- **A named kern can refuse.** If the claim's acceptance probability against the
-  kern it landed on is below the floor, it is pushed into a single reusable
-  unnamed child — a holding pen — and descent continues (`src/base/accept.rs:157`).
+- Near-duplicate (cosine ≥ dedup threshold — 0.98 on default `relaxed`) is *evidence*: reinforces the existing thought's confidence.
+- Text/vector never overwritten (id = content hash). Different phrasing → `Rephrase` edge; only a *same-kind* rephrase reaches the contradiction detector — a claim must never supersede a fact.
+- Genuine rejection is narrow: empty text, an unembeddable chunk. Embedding failures retried with backoff; job outcomes distinguish partial from clean success.
 
-Descent is bounded at 64 levels so a pathological graph cannot spin.
+## Why distill at all
 
-Commit then does three things beyond the insert (`src/base/accept.rs:167`): it
-indexes the vector, attaches a `Similarity` edge to the nearest existing
-neighbour, and attaches a `Provenance` edge back to the source document. If the
-claim carries an external id, it also runs the supersede path, which is how a
-new revision retires an old one instead of duplicating it.
+Raw-transcript embedding: conversational noise in the vector space, no type (no kind-aware routing, same-kind supersede guard, or kind-filtered queries), no consolidation — five phrasings become five permanent neighbours.
 
-## What gets rejected, and what gets merged
-
-Very little is *rejected* outright. The intake path prefers to merge.
-
-**Deduplication** happens twice, at the same threshold, for different reasons.
-Before building an entity at all, ingest asks the HNSW index for the single
-nearest neighbour and treats a score at or above `INGEST_DEDUP_THRESHOLD`
-(0.95, `src/base/constants.rs:22`) as a hit (`src/ingest/dedup.rs:11`).
-Acceptance repeats the check graph-wide as it commits
-(`src/base/accept.rs:44`), so a claim cannot slip through a stale index into a
-second copy of itself.
-
-A duplicate is not discarded — it is *evidence*. `update_existing_entity`
-(`src/ingest/dedup.rs:28`) reinforces the existing entity's Beta-distributed
-confidence and bumps its `updated_at`. The stored text and vector are never
-overwritten, because the entity's id is the content hash of that text;
-overwriting would break identity. When the new phrasing differs, a `Rephrase`
-edge records it, and only a *same-kind* rephrase is offered to the
-contradiction detector (`src/ingest/dedup.rs:41`) — a preference must never be
-allowed to supersede a fact.
-
-Genuine rejection is narrow: empty text, an empty conversation, an unembeddable
-chunk. Embedding failures are classified transient or permanent and retried
-with backoff before they become failures (`src/ingest/embed.rs:34`), and the
-resulting job status distinguishes `Committed`, `Partial`, `Deduped`, and
-`Failed` (`src/ingest/outcome.rs:1`) so a partial success is not mistaken for a
-clean one.
-
-## Why distill through an LLM at all?
-
-The obvious cheaper design is to embed the raw transcript and let retrieval sort
-it out. kern does not, and the reason is that the two stages above are only
-separable because the first one runs.
-
-Embedding raw text gives you chunks whose boundaries are wherever the blank
-lines happened to fall (`src/ingest/split.rs:28` — the on-commit split is
-deliberately heuristic, never a second LLM call). Those chunks carry the
-conversation's noise into the vector space: greetings, tool output, and
-half-finished thoughts all get embeddings and all compete for recall slots. They
-also carry no type, which forecloses everything downstream — kind-aware
-routing, the same-kind supersede guard, `valid_from`, and any query filtered by
-`kind`. And they carry no consolidation: five phrasings of one fact become five
-neighbours at cosine 0.93, just under the dedup threshold, permanently.
-
-The cost of distilling is real and worth naming plainly:
-
-- **Latency.** The LLM call is the only unbounded step on the path. Graph
-  operations are sub-millisecond; a distillation pass is seconds. The intake is
-  asynchronous precisely so this never blocks a session, and the client is
-  configured to keep the model warm and cap its context
-  (`src/llm.rs:512`) so the cost does not compound.
-- **A model dependency.** Transcript distillation without a reason endpoint does not run at all;
-  deltas accumulate unprocessed until one is configured.
-- **Non-determinism.** The same delta distilled twice yields different claim
-  sets. The parser's leniency and the kind fallback exist because the
-  output is not a contract.
-
-What it buys back is that everything after distillation is deterministic. Once a
-claim exists, placement, deduplication, supersede, and recall are pure functions
-of vectors and graph structure — no model in the loop, no prompt to regress.
-kern pays for one non-deterministic step at write time so that read time never
-has to be.
+Cost: seconds of latency (async, never blocks a session), hard dependency on a reason endpoint, non-deterministic output. Buys: everything after distillation is deterministic — one non-deterministic step at write time, none at read time.
 
 ---
 
-Next: how claims are found again in [Retrieval](./retrieval.mdx), how they age out
-in [Heat & compaction](./heat-and-compaction.mdx), and how superseded revisions
-stay recoverable in [Time & supersede](./time.mdx). To actually run this path
-against a live session, see
-[Intake & recall in a session](../howto/intake-recall.mdx).
+Next: [Retrieval](./retrieval.mdx) · [Heat & compaction](./heat-and-compaction.mdx) · [Time & supersede](./time.mdx) · [Intake & recall in a session](../howto/intake-recall.mdx)

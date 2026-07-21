@@ -2,161 +2,51 @@
 title: "CRDTs over consensus"
 ---
 
-**Federated state in kern converges through conflict-free replicated data types
-— per-field merge operations that commute — not through a leader, a lock, or any
-consensus protocol.** Status: partially shipped. Counters and last-write-wins
-registers are live on the wire today; the planned OR-Set stage was deliberately
-reversed rather than built; anti-entropy does not exist. Federation itself is
-off by default — see [Federation](../concepts/federation.mdx) for the mechanism
-and its security posture.
+## Decision
 
-## The constraint
+Federated state converges through per-field merge operations that commute — no leader, no lock, no consensus protocol; counters and LWW registers are live on the wire, anti-entropy is not built, federation itself off by default.
 
-kern daemons are laptops and workstations, not servers. They sleep, drop off
-the network, and rejoin hours later. Gossip between them is push-based flooding
-with random fanout — best-effort by construction, so any message can arrive
-late, twice, or not at all. On top of that transport, several fields mutate
-concurrently on multiple replicas: two daemons answering the same query both
-bump an entity's access count; two daemons re-score the same reason edge; two
-daemons independently capture the same fact.
+## Why
 
-Without formal merge semantics, concurrent writes resolve by whichever gossip
-message happens to arrive last — wall-clock last-writer-wins with an arbitrary
-"last". Increments get silently overwritten instead of summed, and partitioned
-replicas can diverge permanently. The requirement the design has to meet is
-**strong eventual consistency**: any two replicas that have seen the same set
-of updates hold the same state, regardless of delivery order, with no
-coordination round anywhere.
+- kern daemons are laptops: they sleep, drop off, rejoin hours later. Gossip is best-effort flooding — any message can arrive late, twice, or never.
+- Commutative, associative, idempotent merges make the transport *allowed* to be unreliable — order and duplication stop mattering.
+- Target is strong eventual consistency: replicas that saw the same updates hold the same state, any order, no coordination round.
 
-## Alternatives considered
+Per-field joins:
 
-**A leader (Raft/Paxos-style consensus).** One daemon arbitrates writes; the
-rest replicate its log. Fails on availability: the fleet is two or three
-sometimes-connected machines, and the moment the leader sleeps — which laptops
-do — every other replica either stalls or triggers an election among peers
-that may not even be able to reach each other. Running failover machinery to
-coordinate two laptops is a coordinator in all but name, and kern's federation
-thesis is explicitly leaderless.
+| Field | Join |
+| --- | --- |
+| access / traversal counters | G-Counter: per-replica slot, merge = pointwise max, value = sum |
+| `created_at` | min (earliest observation wins) |
+| `accessed_at`, `updated_at` | max |
+| edge score, `valid_until` | LWW on `(lamport, producer)` — never wall clock |
+| `status` | monotone toward `Superseded`, never back |
 
-**Distributed locks.** Acquire a lock, write, release. Fails on latency and on
-partition semantics: it puts a network round trip on the write path of a memory
-system meant to be invisible, and when the lock holder is unreachable there is
-no correct behaviour — block indefinitely, or proceed and be inconsistent.
+Load-bearing details:
 
-**Wall-clock last-writer-wins everywhere.** The zero-effort option, and what
-the pre-CRDT code effectively did. Fails on counters — two concurrent `+1`s
-must produce `+2`, but LWW keeps only one — and clock skew between machines
-makes "last" a lie with no bound on how wrong it can be.
+- Deltas carry the sender's absolute slot total, not an increment — increments are lost if an earlier delta was missed; absolute totals self-heal.
+- LWW ties break on `(lamport, producer)`, so clock skew cannot lose an update.
 
-CRDTs are what remains: make every merge operation commutative, associative,
-and idempotent, and the transport is *allowed* to be unreliable. Order and
-duplication stop mattering because the algebra absorbs them.
+## Rejected
 
-## What each field gets
+| Alternative | Why it lost |
+| --- | --- |
+| Raft/Paxos leader | leader sleeps (laptops do) → fleet stalls or elects among unreachable peers; failover machinery for two laptops |
+| Distributed locks | network round trip on the write path; no correct behaviour when the holder is unreachable |
+| Wall-clock LWW everywhere | two concurrent `+1`s must sum to `+2` but LWW keeps one; clock skew makes "last" a lie |
 
-The research pass inventoried every federated field and assigned the smallest
-CRDT primitive that preserves its semantics. What shipped
-(`src/base/merge.rs:87`, `merge_entity`; `src/base/merge.rs:122`,
-`merge_reason`):
+## Trade-off accepted
 
-| Field | Join | Where |
-|---|---|---|
-| `access_count`, `traversal_count` | G-Counter: per-replica slot, merge = pointwise max, value = sum | `src/crdt.rs:5` |
-| `created_at` | min — earliest observation wins | `src/base/merge.rs:100` |
-| `accessed_at`, `updated_at`, `heat_updated_at` | max | `src/base/merge.rs:101` |
-| `valid_until` | LWW on `(lamport, producer)` | `src/base/merge.rs:104` |
-| `Reason.score` | LWW on `(lamport, producer)` | `src/base/merge.rs:124` |
-| `status` | monotone toward `Superseded`, never back | `src/base/merge.rs:95` |
-| `superseded_by` | lexically greater id wins — deterministic, not semantic | `src/base/merge.rs:78` |
-
-The G-Counter is why concurrent increments survive: each replica only ever
-raises its own slot, merge takes the per-slot max, and the materialized value
-is the sum — so two daemons each observing three accesses converge to six, in
-any order, any number of times (`src/crdt.rs:29`, with the algebraic laws
-pinned by inline tests). LWW ties are broken by a total order over
-`(lamport, producer)` (`src/crdt.rs:48`), not wall clock, so clock skew cannot
-lose an update — the Lamport clock is bumped on every local mutation and
-ratcheted on every inbound delta (`observe_lamport`, `src/base/graph.rs:450`).
-
-Worked example: laptop and workstation both hold reason edge *R*. The laptop's
-retrieval traverses it twice; the workstation's LLM pass re-scores it. Both
-changes gossip. Traversals land in different G-Counter slots and sum; the score
-carries the higher `(lamport, producer)` stamp and wins on both machines
-identically. Neither daemon coordinated, neither write was lost, and replaying
-either message changes nothing.
-
-## How it rides the existing wire
-
-The study's key wire-format claim held: the change was purely additive. A
-`Delta` kind was appended to the gossip envelope (`src/gossip/types.rs:12`)
-carrying a `CrdtDeltaPayload` (`src/gossip/types.rs:117`) — object id, target
-field, replica slot, value, and the LWW stamp. Local mutators queue deltas
-(`push_delta`, `src/base/graph.rs:465`, fed from the access-commit path at
-`src/retrieval/score.rs:255` and the ingest path at `src/ingest/place.rs:130`),
-and a heartbeat-paced flush drains and broadcasts them
-(`src/gossip/handler.rs:191`). The receiver validates and applies
-(`src/gossip/handler.rs:359`).
-
-One deviation from the study's `GCounterInc { by }` design is deliberate and
-load-bearing: a delta carries the sender's **absolute replica-slot total**, not
-an increment (`src/gossip/types.rs:114`). Under the receiver's max-merge an
-increment would be lost if any earlier delta was missed; an absolute total is
-self-healing — the latest one to arrive carries the whole history of that slot.
-
-## What shipped versus what the note assumed
-
-The research note was a staged plan over the old `crates/` layout. Reality
-diverged in ways worth stating plainly:
-
-- **Shipped and live:** G-Counter (`src/crdt.rs` — the only CRDT type in the
-  file), LWW via bare `(lamport, producer)` fields plus the `lww_wins` helper,
-  the content-addressed entity/edge join in `src/base/merge.rs`, and the
-  `Delta` send/receive loop. The note's "no live sender yet" caveat is stale:
-  `start_delta_flush` broadcasts on every heartbeat.
-- **PN-Counter: never built.** `unlinked_count` remains a plain `i32`
-  (`src/base/types.rs:285`) and is simply not federated.
-- **OR-Set for `statements`: reversed, not deferred.** The plan assumed
-  statements accumulate across peers. The shipped invariant is stronger:
-  an entity's id *is* the content hash of its text, so a same-id peer has
-  identical content by construction, and a differing one is asserting text its
-  id does not hash to. Statements are therefore **never imported**
-  (`src/base/merge.rs:113`). The `Statements` wire target still exists but the
-  sender always emits an empty payload and the receiver rejects it outright
-  (`src/gossip/handler.rs:448`) — kept on the wire so an older peer cannot
-  inject statement text under a content-addressed id.
-- **Typed CRDT registers (the note's Stage 2): not built as types.** LWW and
-  set-union semantics are enforced by hand at each call site rather than by an
-  `LwwRegister<T>` type. The semantics hold; the type system does not enforce
-  them.
-- **Anti-entropy (Stage 3): not built.** There is no `AntiEntropy` message
-  kind, no catch-up snapshot, no merkle comparison. A replica that misses a
-  delta stays behind until an absolute-total delta or an entity sync happens to
-  cover the gap — and entity sync only ever carries a node's hottest 32, so
-  cold state has no bounded propagation guarantee.
-- **Confidence is replica-local, a deliberate deviation.** The note mapped
-  every mutable field to a primitive; the implementation exempts
-  `conf_alpha`/`conf_beta` entirely (`src/base/merge.rs:93`) because a max-join
-  on confidence is an irreversible poisoning pin — one peer asserting high
-  confidence would raise it everywhere with no way back down. Trust never
-  crosses the wire.
+- No anti-entropy — a replica that misses a delta stays behind until an absolute-total delta or entity sync covers the gap; entity sync carries only the hottest 32, so cold state has no bounded propagation guarantee.
+- Confidence never crosses the wire — `conf_alpha`/`conf_beta` exempt from merge; a max-join on belief would be an irreversible poisoning pin.
+- Statements never imported — an entity's id is the content hash of its text; a differing peer asserts text its id doesn't hash to and is rejected outright.
+- CRDT semantics enforced by hand at call sites, not by typed registers.
+- Convergence of state, not truth — two contradicting facts survive on both machines; adjudication belongs to supersession, not a merge thread.
 
 <Callout type="warn" title="SEC is not Byzantine tolerance">
-CRDTs guarantee convergence among honest replicas. A malicious peer can still
-inflate counters or spray entities; the shipped mitigations are the inbound
-delta clamp, the quarantined remote namespace, and the wholesale strip of
-ranking signals at the boundary — see
-[Knowledge, not gradients](./knowledge-not-gradients.mdx) for that layer, and
-the transport warning in [Federation](../concepts/federation.mdx) for what the
-protocol does not protect.
-</Callout>
-
-## What convergence deliberately does not do
-
-The CRDT layer converges *state*, not *truth*. Two daemons that learned
-contradicting facts hold two distinct content-addressed entities, and set-union
-existence means both survive on both machines — the merge never adjudicates
-which is right, because a background merge thread is the worst place to decide
-that. Contradiction is handled by supersession and validity windows, the same
-machinery that handles it locally; see
-[Time and supersession](../concepts/time.mdx) and the walkthrough in
+CRDTs guarantee convergence among honest replicas. Hostile peers are bounded
+by the inbound delta clamp, the quarantined remote namespace, and signal
+stripping at the boundary — see
+[Knowledge, not gradients](./knowledge-not-gradients.mdx) and
 [Federation](../concepts/federation.mdx).
+</Callout>

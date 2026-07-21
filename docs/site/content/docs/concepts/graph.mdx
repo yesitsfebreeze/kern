@@ -2,128 +2,84 @@
 title: "The graph: nodes, edges, claims"
 ---
 
-kern stores memory as a graph of *thoughts* connected by *justified edges*, held in a tree of containers called kerns and persisted to a single LMDB environment. This page describes that data model — it is the structure every other concept page assumes you already hold in your head.
+Memory is a graph: *thoughts* connected by *justified edges*, held in a tree of kerns, persisted to one LMDB file. The data model every other page assumes.
 
-## Why a graph and not a vector store
+## Why a graph, not a vector store
 
-A flat vector store answers exactly one question: *which stored chunks are close to this query embedding?* That is a useful question, and kern still asks it — [Retrieval](./retrieval.mdx) seeds every query with an HNSW search. But similarity is a symmetric, unlabelled, query-time-only relation. It tells you two chunks are near each other in embedding space. It cannot tell you *why*, and it forgets the relationship the moment the query ends.
+Similarity is symmetric, unlabelled, query-time only. A kern edge is a stored, typed, directional assertion. Buys:
 
-An edge in kern is a stored, typed, directional assertion. "This claim came from that document." "This revision replaced that one." "This claim was rephrased as this text." Those are facts about the memory itself, and they are worth three things a cosine score cannot buy:
+- **Traversal** — retrieval expands from seeds along edges; a non-matching thought is reachable through one that matches. (Reaching is not yet ranking — caveat in [Retrieval](./retrieval.mdx).)
+- **Explanation** — edges carry a written reason; results return the chain walked.
+- **Non-similar relations** — "deadline is March" / "deadline is April": near-identical vectors, opposite meanings — stored explicitly as a supersede edge. See [Time](./time.mdx).
 
-**Traversal.** Retrieval expands outward from its seeds along edges, so a document that is not similar to your query can *reach* the candidate set because it is the provenance of a claim that is. Similarity alone has no mechanism for "one hop away and highly relevant." Reaching is not the same as ranking, and today they come apart: `e2e/test_invariants.py` probes with A's text over 8 linked A→B pairs and the edge moves exactly one of them, by one rank. The edge is stored and walkable; the walk's evidence is then discarded, because an entity that was also a content hit keeps the larger of its two scores rather than combining them. Item 86 in [`ROADMAP.md`](https://github.com/yesitsfebreeze/kern/blob/master/docs/oracle/ROADMAP.md).
+## Thoughts
 
-**Explanation.** Each edge carries a `text` field that a background task fills in with the reason for the connection, and retrieval records the chain of edges it walked. A result can therefore be presented with its derivation rather than as a bare snippet.
-
-**Non-similar relations.** The most important relationships between two claims are frequently *not* similarity. "Deadline is March" and "deadline is April" are near-identical in embedding space and mean opposite things. A vector store ranks them as near-duplicates and returns both. kern represents that relation explicitly as a supersede edge — see [Time & contradiction](./time.mdx).
-
-## The two node kinds
-
-### Thoughts (`Entity`)
-
-A thought is a single durable unit of memory: one claim, one fact, one chunk of a document. It is defined at `src/base/types.rs:246`.
-
-Every thought has a `kind` (`src/base/types.rs:19`) that determines how the rest of the system treats it:
+One atomic unit of memory; `kind` decides treatment:
 
 | Kind | Meaning |
 | --- | --- |
-| `Fact` | A durable assertion from a trusted source. GC-immune while active — facts are never auto-forgotten. |
-| `Claim` | The default. Something distilled from a session that may or may not survive. |
+| `Fact` | Durable assertion from a trusted source. Never auto-forgotten while active. |
+| `Claim` | The default. Distilled from a session; may or may not survive. |
 | `Document` | A chunk of an ingested source document. |
-| `Question` | An open question the system seeded for itself. |
-| `Answer` | A resolution to a question. |
-| `Conclusion` | Something the system derived rather than observed. |
+| `Question` / `Conclusion` | Internal-only — seeded and resolved by the system itself. |
 
-Only `Fact` and `Claim` may be supplied by a caller; the other four are internal-only and the MCP surface rejects them (`src/base/validate.rs:24`). `Fact` additionally requires a trusted source — a user or an agent, not an arbitrary ingested file (`src/base/validate.rs:33`).
+Callers may supply only `Fact` and `Claim` (rest rejected at the MCP surface); `Fact` additionally requires a trusted source (user or agent, not an arbitrary file).
 
-Beyond kind, a thought carries:
+Also on a thought:
 
-- **Confidence** as a beta distribution, stored as `conf_alpha`/`conf_beta` and read through `conf_mean()`/`conf_variance()` (`src/base/types.rs:370`). Each corroboration calls `observe_support`, each contradiction `observe_contradict`. Confidence is therefore evidence-weighted rather than a single number someone typed in: a claim seen five times and never contradicted is distinguishable from one seen once.
-- **Heat and access counts**, which drive eviction — see [Heat & compaction](./heat-and-compaction.mdx).
-- **Two vectors**: `vector` is the content embedding, `gnn_vector` is a structural embedding a background task recomputes from the thought's neighbourhood. Retrieval blends both.
-- **A validity window** (`valid_from`, `valid_to`, `invalidated_at`) and a `status` of `Active` or `Superseded`. This is the bi-temporal machinery covered on [Time & contradiction](./time.mdx).
-- **Provenance** as a typed `Source` enum — file, ticket, session, agent, or inline — each with its own URI scheme.
+- **Confidence** — Beta distribution; corroborations and contradictions are observations, so a claim seen five times outranks one seen once.
+- **Heat + access counts** — drive eviction; see [Heat](./heat-and-compaction.mdx).
+- **Two vectors** — content embedding + structural embedding recomputed from the neighbourhood; retrieval blends both.
+- **Validity window + status** (`Active`/`Superseded`) — bi-temporal machinery; see [Time](./time.mdx).
+- **Provenance** — typed source: file, ticket, session, agent, or inline.
 
-### Justified edges (`Reason`)
+## Justified edges
 
-An edge is defined at `src/base/types.rs:408`. It points `from` one thought `to` another, carries a `kind` (`src/base/types.rs:66`), an optional explanatory `text`, its own vector, and a CRDT-mergeable `score`.
+`from` → `to`, with a kind, optional explanatory text, own vector:
 
-The edge kinds are:
+| Kind | Meaning |
+| --- | --- |
+| `Similarity` | Attached at commit to the nearest neighbour — no thought is isolated. |
+| `Provenance` | Thought → its source document. |
+| `Supersedes` | New revision → the one it replaced. |
+| `Rephrase` | Same thought, different wording; alternate phrasing lives in the edge text. |
+| `Question` / `Spawn` / `Ratification` | Question linkage, kern lineage, corroboration. |
 
-- **`Similarity`** — attached at commit time to the nearest existing neighbour, so a new thought is never isolated.
-- **`Provenance`** — links a thought to the document it came from.
-- **`Supersedes`** — the new revision points at the one it replaced.
-- **`Rephrase`** — a local annotation recording that the same thought was seen worded differently. It is the only edge kind whose `to` is deliberately empty; the alternate phrasing lives in `text`.
-- **`Question`**, **`Spawn`**, **`Ratification`** — question linkage, kern spawn lineage, and corroboration respectively.
+## Claims, not raw transcripts
 
-`is_semantic()` (`src/base/types.rs:86`) marks the subset — `Similarity`, `Provenance`, `Ratification` — that retrieval treats as meaning-bearing for expansion, as opposed to the bookkeeping kinds.
+A transcript in `.kern/intake/` is never stored as memory. One LLM pass distills typed claims — atomic (independently retrievable, supersedable), typed at birth (kind-aware retention), deduplicated against everything known. Empty distillation archives the delta; no output at all (outage) leaves it queued for retry — nothing silently lost. See [Acceptance](./acceptance.mdx).
 
-<Callout type="info">
-An edge's `to_net_id` is non-empty only when the target lives on another node in a federated deployment. That single field is what makes `is_remote()` cheap and what lets the graph hold edges across a machine boundary. See [Federation](./federation.mdx).
-</Callout>
+## Identity: content hashes
 
-## What a claim is, and how it differs from a raw delta
+Id = SHA-256 of the text.
 
-A raw delta is a session transcript: a `.txt` file dropped into `.kern/intake/`. It is unstructured, redundant, full of conversational scaffolding, and enormous relative to its information content. kern never stores one as memory.
+- Identical content = same node everywhere, forever. Federation merge is set union — no coordinator.
+- **Text and vector never overwritten under an existing id** — a near-duplicate with different phrasing gets a `Rephrase` edge; the tick decides contradiction later.
+- A duplicate (cosine above the preset's dedup threshold — 0.98 on default `relaxed`) is not discarded: it bumps the existing thought's confidence.
 
-Instead a single LLM pass distills the delta into a JSON array of typed claims — text, kind, and an optional `valid_from` — and only those become thoughts. The distinction matters for three reasons:
+## The kern tree
 
-1. **A claim is atomic.** One statement, independently retrievable, independently supersedable. A transcript is not; you cannot invalidate half a paragraph.
-2. **A claim is typed at birth.** The distillation prompt asks for one of seven claim kinds (preference, decision, project, fact, code-fact, reference, procedural), which is what lets the system apply different retention rules to a stated preference than to a passing observation.
-3. **A claim is deduplicated against everything already known**, which a transcript cannot be — near-identical conversations produce near-identical text but not necessarily new information.
-
-If the LLM returns an empty array, the delta is archived as containing nothing worth keeping. If the LLM returns nothing at all — an outage — the delta stays queued and is retried. Nothing dropped in the intake is silently lost. [Intake & recall](../howto/intake-recall.mdx) covers the operator's side of this.
-
-## Identity: content hashes and dedup
-
-A thought's id is the SHA-256 of its text (`src/base/util.rs:22`, applied at `src/ingest/place.rs:252`). This is the single most consequential decision in the data model.
-
-The immediate consequence is that identical content is the same node, everywhere, on every machine, forever. Existence becomes a set union rather than a merge negotiation, which is what makes conflict-free replication across federated nodes work without a coordinator — two nodes that independently learned the same fact converge on it automatically because they independently computed the same id.
-
-The second consequence is an invariant the ingest path enforces: **never overwrite the text or vector under an existing id** (`src/base/accept.rs:55`). If the id is the hash of the text, mutating the text would make the id a lie. So when ingestion finds a near-duplicate whose phrasing differs, it does not rewrite the existing thought — it records a `Rephrase` edge carrying the new wording and lets the tick decide whether that new wording is a contradiction that should supersede.
-
-Deduplication happens at two thresholds. Ingest-time dedup runs at cosine 0.95 (`INGEST_DEDUP_THRESHOLD`, `src/base/constants.rs:22`) via a top-1 HNSW probe with `DEDUP_EF=64` (`src/ingest/dedup.rs:16`). The acceptance path re-checks the same threshold graph-wide before routing (`src/base/accept.rs:44`); a duplicate is committed as a no-op that bumps confidence on the existing thought instead of creating a node.
-
-<Callout type="warn">
-Because ids are content-addressed, changing how a hash input is composed is a breaking change to every existing graph. `Source::source_id` at `src/base/types.rs:223` carries this warning in the code for exactly that reason.
-</Callout>
-
-## Containers: the kern tree
-
-Thoughts do not live in one flat pool. They live in `Kern` containers (`src/base/types.rs:456`) arranged in a tree, each holding its own `entities` and `reasons` maps plus the adjacency indexes over them.
-
-A named kern has a **graviton** — a text label and a centroid vector — plus a `mass` (default 1.0) and two radii, `inner_radius` (0.15) and `outer_radius` (0.35) from `src/base/constants.rs:32`. Acceptance descends the tree by picking the child whose graviton is nearest under `cosine_distance / mass`, so a heavier graviton both attracts more strongly and retains what it has. At each named kern an acceptance probability is computed from the distance and the radii (`acceptance_probability`, `src/base/accept.rs:753`); if it falls below the floor, the thought spawns an unnamed child and descends further rather than being forced into a poor fit.
-
-The root is a pure dispatcher: it never commits a thought itself, and anything matching no graviton falls through to a `generic` catch-all child. [Acceptance](./acceptance.mdx) covers the routing rules in full.
+Thoughts live in `Kern` containers in a tree. A named kern has a **graviton** — label, centroid vector, mass (default 1.0). Routing descends by `cosine_distance / mass` — a heavier graviton attracts more strongly. The root never holds thoughts; no match falls to a `generic` catch-all. See [Acceptance](./acceptance.mdx).
 
 <Mermaid
   chart={`
 flowchart TD
     C[intake delta .txt] -->|LLM distill| CL[typed claims]
     CL -->|embed| A{dedup?}
-    A -->|"cosine ≥ 0.95"| D[bump confidence<br/>+ Rephrase edge]
+    A -->|near-duplicate| D[bump confidence<br/>+ Rephrase edge]
     A -->|new| R[route down kern tree]
     R --> K[commit into leaf kern]
     K --> S[Similarity edge<br/>→ nearest neighbour]
     K --> P[Provenance edge<br/>→ source document]
-    K --> H[hot tier: LMDB kern rows]
+    K --> H[hot tier]
     H -->|"heat decay + GC"| CO[cold tier: capped 50k]
 `}
 />
 
-The whole in-memory forest is one `GraphGnn` (`src/base/graph.rs:64`): the kern map, the root, two HNSW indexes (content vectors and GNN vectors), the edge incidence map, a Lamport clock, and a `mutation_epoch` counter that persistence depends on.
+## Storage
 
-## How it is stored
+One LMDB environment per data directory, three tables: kern rows, cold tier, graph metadata. Values are versioned zstd — an older reader rejects a newer file rather than misparsing it.
 
-One LMDB environment per data directory holds everything, in three databases: `kern` rows, the `cold` tier, and graph `meta` (`src/base/store.rs:339`). Values are `zstd(bincode)` behind a format version byte, so an older reader rejects a newer file rather than misparsing it.
-
-**Vectors are stored quantized.** `StoredVec` (`src/base/store.rs:119`) holds an int8 array plus a scale factor, cutting vector memory roughly fourfold. `StoredKern` (`src/base/store.rs:211`) strips vectors out of the thoughts before serializing and keeps them in side-maps; GNN vectors are never persisted at all, because they are cheaper to recompute from structure than to store.
-
-**The schema is append-only.** Persisted structs and enums grow by adding fields at the end, never by reordering or removing, because bincode decodes positionally and `serde(default)` does not fill missing trailing bytes. `Kern::mass` sits last in the struct for this reason, and a `KernPreMass` mirror exists purely so pre-mass rows still decode (`src/base/types.rs:495`). Every schema change is guarded by a round-trip test.
-
-**Writes are guarded, not blind.** `flush_guarded` (`src/base/store.rs:594`) carries the `mutation_epoch` the in-memory snapshot was taken at. If the on-disk epoch has advanced past it, the flush is refused rather than committed — a stale snapshot can never overwrite newer state. The caller absorbs the newer disk rows and retries.
-
-**Two tiers.** The hot tier is the resident graph. When heat decay marks a thought as cold, GC spills it to the cold tier *before* dropping it from memory (`src/tick/stigmergy.rs:93`) — if the spill fails, the thought stays hot and is retried next pass. The cold tier is a latest-wins keyed table capped at 50,000 entries (`COLD_MAX_ENTRIES`, `src/base/constants.rs:17`) and is searched brute-force (`src/base/store.rs:685`) only when the hot graph returns fewer results than requested. Facts and documents are exempt from cold eviction entirely while active (`is_cold_victim`, `src/tick/stigmergy.rs:27`).
-
-A cold row is a `ColdRow` (`src/base/store.rs:170`), not a bare entity: it carries the `valid_from` / `valid_to` / `invalidated_at` triple that `Entity` marks `serde(skip)`, so a cold-recovered revision still answers `as_of` correctly instead of reading as valid at every instant.
-
-The tradeoff the cold tier makes is explicit: it is a bounded, unindexed tail. It preserves the recent past cheaply and searches it slowly, and past 50k entries the oldest genuinely go away. That is a memory bound, not a bug — but it is a counted one: every row `cold_cap` (`src/base/store.rs:712`) drops increments a process-lifetime `cold_evicted` total that `health` reports, because a dropped non-durable entity is unrecoverable and the count is its only trace. [Heat & compaction](./heat-and-compaction.mdx) explains why an unbounded memory is the failure mode being avoided.
+- **Int8-quantized vectors** on disk (~4× smaller); structural vectors recomputed, not persisted.
+- **Epoch-guarded writes** — a stale in-memory snapshot never overwrites newer disk state.
+- **Two tiers** — GC spills to the cold tier *before* dropping from memory; a failed spill keeps it hot. Cold tier: capped (50,000 entries), unindexed tail, searched only when the hot graph comes up short. Active `Fact`s and `Document`s never evicted. Past the cap the oldest rows genuinely go — each drop counted by `health`.

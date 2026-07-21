@@ -2,150 +2,53 @@
 title: "Bayesian confidence"
 ---
 
-**A thought's confidence is a Beta distribution — pseudo-counts
-`conf_alpha`/`conf_beta` updated by weighted observations — not a scalar that
-the latest writer overwrites.** This shipped in full on every entity
-(`src/base/types.rs:262`): ingest seeds the tuple from the declared confidence
-exactly as the design note proposed, corroborating observations move it, and
-the derived mean is what ranking multiplies by. What did **not** ship is the
-explicit contradiction surface — there is no `Contradicts` edge kind, no
-`stance` parameter on ingest, no observer-reputation weighting, and no evidence
-decay.
+## Decision
 
-## Context
-
-kern's thesis is that in a substrate shared by many agents, **convergence
-across independent observers is the truth signal**. One agent asserting X is
-weak evidence; ten agents from different contexts asserting X should approach
-certainty; one dissenter in that population should be absorbed, not dominate.
-
-A scalar confidence cannot represent any of that. It has no variance and no
-sample count, so "one observer, conf 0.9" and "twenty observers, mean 0.9" are
-indistinguishable — yet they warrant completely different treatment when
-observer twenty-one disagrees. And every update rule available to a scalar is
-bad: overwrite is last-writer-wins, max lets a single overconfident source pin
-the value forever, and averaging forgets how much evidence the average stands
-on.
-
-## Alternatives considered
-
-- **Keep the scalar** (status quo ante). Fails as above: no way to distinguish
-  corroboration from assertion, and a lone `conf=1.0` write fixes truth.
-- **Integer support/oppose counters.** Capture sample size but not observer
-  confidence — a tentative guess and a firm assertion each count 1 — and yield
-  no principled uncertainty measure.
-- **Full belief networks** (propagating conditional dependencies between
-  claims). The canonical machinery, and wildly over-scoped: kern's claims are
-  not wired into a dependency DAG, and the inference cost would sit on the
-  ingest path.
-- **Beta-distributed belief** — the conjugate prior for a Bernoulli "is this
-  proposition true". Two floats, closed-form updates, mean and variance for
-  free. Adopted.
-
-## Why the Beta tuple wins, with the shipped numbers
-
-The update rules are three one-liners on `Entity` (`src/base/types.rs:394`):
+A thought's confidence is a Beta distribution — pseudo-counts `conf_alpha`/`conf_beta` updated by weighted observations, ranking multiplied by the posterior mean — not a scalar the latest writer overwrites.
 
 ```
-observe_support(w):    conf_alpha += clamp(w, 0, 1)
-observe_contradict(w): conf_beta  += clamp(w, 0, 1)
-mean = α / (α + β)        variance = αβ / ((α+β)²(α+β+1))
+observe_support(w):    α += clamp(w, 0, 1)
+observe_contradict(w): β += clamp(w, 0, 1)
+mean = α / (α + β)
 ```
 
-The clamp is the outvoting property: no single observation, however shrill, is
-worth more than one full vote.
+Ingest seeds `(α, β) = (1 + conf, 1 + (1 − conf))` — a uniform prior nudged toward the observer's stated confidence.
 
-Seeding maps the ingest `conf` onto a uniform prior
-(`beta_params_from_confidence`, `src/ingest/place.rs:16`):
-`(α, β) = (1 + conf, 1 + (1 − conf))`. The prior biases the opening posterior
-toward the observer's stated confidence without committing to it.
+## Why
 
-Worked through with real path values — distilled claims enter at `conf = 0.6`
-([Acceptance & routing](../concepts/acceptance.mdx)):
+- kern's truth signal is convergence across independent observers; a scalar has no sample count — "one observer, conf 0.9" and "twenty observers, mean 0.9" are indistinguishable, yet warrant opposite treatment on dissent.
+- Every scalar update rule fails: overwrite is last-writer-wins, max lets one overconfident source pin truth forever, averaging forgets how much evidence it stands on.
+- The clamp is the outvoting property: no observation is worth more than one vote. Ten concordant observations reach mean ≈ 0.83; one full-strength dissent drops it ~0.09 — visible, not decisive.
 
-| Event | α | β | mean | variance |
-| --- | --- | --- | --- | --- |
-| First ingest at `conf 0.6` | 1.6 | 1.4 | 0.533 | 0.062 |
-| A second, independent observation (dedup hit, `+0.6`) | 2.2 | 1.4 | 0.611 | 0.052 |
-| Eight more concordant observations | 7.0 | 1.4 | 0.833 | 0.015 |
-| One full-strength dissent (`observe_contradict(1.0)`) | 7.0 | 2.4 | 0.745 | 0.018 |
+Observers today:
 
-Two observations move a coin-flip prior to a modest lean; ten make it a tight
-belief; one dissenter against ten is visible — an 0.09 drop — but nowhere near
-decisive. That asymmetry between "moves the needle" and "pins the needle" is
-the entire point, and no scalar update rule produces it.
+- Ingest dedup — a near-duplicate above the preset's dedup threshold (0.98 on default `relaxed`) adds support to the existing entity; text and vector never overwritten (id is the content hash).
+- GNN propagation — after each re-embedding pass, content-vector/structural-vector alignment supports, misalignment contradicts. The only contradiction writer.
+- Never peers — `conf_alpha`/`conf_beta` are never imported; a peer can gossip a claim, not belief in one.
 
-The tuple then flows into ranking through one function: `refresh_score`
-(`src/base/types.rs:390`) writes the posterior mean into `Entity.score`, and
-`apply_boosts` multiplies each result's retrieval score by it
-(`src/retrieval/score.rs:82`). Corroborated claims outrank asserted ones with
-no extra machinery.
+## Rejected
 
-## Who actually observes
+| Alternative | Why it lost |
+| --- | --- |
+| Keep the scalar | a lone `conf=1.0` write fixes truth |
+| Integer support/oppose counters | a tentative guess and a firm assertion each count 1; no principled uncertainty |
+| Full belief networks | over-scoped; claims aren't a dependency DAG, and inference cost would sit on the ingest path |
 
-Three shipped writers, one of which the note never anticipated:
+## Trade-off accepted
 
-- **Ingest dedup.** A near-duplicate at or above the 0.95 threshold is treated
-  as evidence, not discarded: `merge_duplicate` calls
-  `observe_support(new_score)` on the existing entity
-  (`src/base/accept.rs:57`, reached via `src/ingest/dedup.rs:23`). Text and
-  vector are never overwritten — the id is the content hash — so
-  re-observation reinforces belief without mutating identity.
-- **GNN propagation.** After each learned re-embedding pass, the cosine
-  alignment between an entity's content vector and its new structural vector
-  is read as an observation: alignment `≥ 0.5` supports at weight `w`,
-  misalignment contradicts at `1 − w` (`src/tick/gnn_propagate.rs:154`). An
-  entity whose graph neighbourhood keeps agreeing with its content gains
-  confidence; one the structure pulls away from loses it. This is currently
-  the **only** caller of `observe_contradict` in the tree.
-- **Trust boundaries.** Under federation the tuple is deliberately
-  replica-local: `conf_alpha`/`conf_beta` are never imported from peers
-  (`src/base/merge.rs:93`, pinned by poisoning tests), and remote-kern
-  entities have theirs zeroed. A peer can gossip a claim; it cannot gossip
-  *belief in* a claim. Ten peers asserting X only converges a replica that
-  ingests X ten times through its own gate.
+- No `stance` parameter on ingest — disagreement requires asserting a conflicting claim and letting the classifier rule.
+- No observer-reputation weighting (planned composition with PageRank authority never built on either side).
+- No evidence decay: `α` and `β` only grow, so stale consensus takes proportionally many new observations to unseat.
+- Reason edges keep a plain last-writer-wins score, not a tuple.
 
 <Callout type="info" title="Contradiction resolves by supersession, not by β">
-The note proposed routing semantic contradictions into `β`. What shipped is
-sharper: a same-kind near-duplicate whose text conflicts goes to an LLM
-classifier on the background tick, and an unambiguous verdict **supersedes**
-the old claim outright rather than down-weighting it
-(`src/tick/tasks.rs:114`). Beta confidence answers "how corroborated is this
-claim"; supersession answers "which revision is current". Keeping them
-separate avoids the degenerate state where a superseded claim lingers at
-mid-confidence. See [Time & contradiction](../concepts/time.mdx).
+A same-kind near-duplicate whose text conflicts goes to an LLM classifier on
+the background tick; an unambiguous verdict supersedes the old claim outright.
+Beta confidence answers "how corroborated"; supersession answers "which
+revision is current". See [Time & contradiction](../concepts/time.mdx).
 </Callout>
 
-## What shipped vs. what the note assumed
+## Where you see it
 
-The note (`docs/kern/bayesian-belief.md`) predates the current layout; its
-core proposal — the tuple, the seeding formula, fractional-weight conjugate
-updates, backward-compatible derived scalar — shipped essentially verbatim.
-The deltas:
-
-- **No `ReasonKind::Contradicts`.** The edge vocabulary
-  (`src/base/types.rs:66`) has `Rephrase` and `Supersedes`; explicit
-  contradiction edges were not added, and contradiction is handled by the
-  supersession path above.
-- **No `stance` parameter on ingest.** Every ingest observation is support;
-  `observe_contradict` is reachable only from GNN alignment. An agent cannot
-  yet register disagreement short of asserting a conflicting claim and letting
-  the classifier rule.
-- **No observer-reputation weighting.** The note planned to scale `w` by a
-  per-producer reputation composed with [PageRank
-  authority](./pagerank-authority.mdx); neither half was built.
-- **No evidence decay.** `α` and `β` only grow. Stale consensus therefore
-  takes proportionally many new observations to unseat, rather than decaying
-  toward the prior; the tick-based `γ` damping remains an open design.
-- **Reason edges do not carry belief.** They kept a scalar `score` with
-  last-writer-wins CRDT metadata (`src/base/types.rs:418`), not a tuple — the
-  note's open question, resolved toward "no" by default.
-
-## See also
-
-- [Acceptance & routing](../concepts/acceptance.mdx) — where `conf` comes from
-  and how duplicates become evidence.
-- [Time & contradiction](../concepts/time.mdx) — the supersession machinery
-  that handles what `β` was once proposed for.
-- [The retrieval pipeline](../concepts/retrieval.mdx) — where confidence
-  multiplies into ranking.
+- Corroborated claims outrank merely asserted ones, no extra machinery.
+- See [Acceptance & routing](../concepts/acceptance.mdx) and [The retrieval pipeline](../concepts/retrieval.mdx).

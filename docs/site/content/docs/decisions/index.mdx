@@ -2,43 +2,14 @@
 title: "Design decisions"
 ---
 
-Every non-obvious mechanism in kern exists because an alternative was
-considered and rejected. This section is the rationale of record: one page per
-decision, each stating the constraint that forced a choice, the alternatives
-that failed, the reasoning that picked the winner, and — honestly — which parts
-of the original design have shipped and which have not.
+One page per non-obvious mechanism: what was decided, why, what lost, what we knowingly gave up — current behaviour lives in [Concepts](../concepts/why-kern.mdx).
 
-These pages are ported from the research notes in
-[`docs/kern/`](https://github.com/yesitsfebreeze/kern/blob/master/docs/kern/README.md)
-and re-verified against the current source tree. Where a note assumed something
-the code no longer does, the page says so. Code references are current
-`src/…:line` locations, not the note's historical ones.
-
-## Self-organization
-
-- **[Stigmergy over gardening](./stigmergy-over-gardening.mdx)** — why the
-  graph maintains itself through use-marks (heat, decay, eviction, clustering)
-  instead of manual curation or scheduled cleanup jobs.
-- **[PageRank for authority](./pagerank-authority.mdx)** — why retrieval
-  weights results by graph centrality rather than raw similarity alone.
-- **[Bayesian confidence](./bayesian-confidence.mdx)** — why belief in a claim
-  is a Beta distribution updated by independent observations, not a counter or
-  a flag.
-- **[Edit convergence](./edit-convergence.mdx)** — the Wikipedia-NPOV-style
-  model for how contradicting observations converge on durable, neutral
-  thoughts.
-
-## Federation
-
-- **[CRDTs over consensus](./crdts-over-consensus.mdx)** — why replicas merge
-  through commutative joins instead of electing a leader or taking locks.
-- **[Knowledge, not gradients](./knowledge-not-gradients.mdx)** — why kern
-  gossips typed claims between peers instead of doing federated learning.
-
-## Retrieval & indexing
-
-- **[DiskANN-style spill](./diskann-spill.mdx)** — why the on-disk ANN index
-  exists, and why it is an opt-in spill rather than the default backend.
-
-For how each mechanism actually behaves today, the [Concepts](../concepts/why-kern.mdx)
-pages are the reference; these pages explain why it behaves that way.
+| Decision | In one sentence |
+| --- | --- |
+| [Stigmergy over gardening](./stigmergy-over-gardening.mdx) | Forgetting is driven by a decaying heat scalar deposited by use, not by retention policies or manual curation. |
+| [PageRank for authority](./pagerank-authority.mdx) | Retrieval runs a damped, query-personalised PageRank over the reason graph and fuses it by rank. |
+| [Bayesian confidence](./bayesian-confidence.mdx) | Belief in a claim is a Beta distribution updated by weighted observations, not a scalar the last writer overwrites. |
+| [Edit convergence](./edit-convergence.mdx) | Conflicting statements resolve by supersession chains, not Wikipedia-style revision machinery. |
+| [CRDTs over consensus](./crdts-over-consensus.mdx) | Replicas converge through commutative per-field merges — no leader, no locks. |
+| [Knowledge, not gradients](./knowledge-not-gradients.mdx) | Peers gossip typed claims, never model updates; only federated learning's robustness tricks were kept. |
+| [DiskANN-style spill](./diskann-spill.mdx) | Past a size threshold the vector index spills to a memory-mapped Vamana snapshot; opt-in, not default. |

@@ -1,8 +1,10 @@
-import { source } from '@/lib/source';
-import { llms } from 'fumadocs-core/source';
+import { llmsTxt, basePath } from '@/lib/llm-txt.mjs';
 
 export const revalidate = false;
 
-export function GET() {
-  return new Response(llms(source).index());
+export function GET(request: Request) {
+  if (process.env.NODE_ENV === 'development') {
+    return new Response(llmsTxt(new URL(request.url).origin + basePath));
+  }
+  return new Response(llmsTxt());
 }

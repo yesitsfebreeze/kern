@@ -2,149 +2,48 @@
 title: "Stigmergy over gardening"
 ---
 
-**kern decides what to forget through use-marks — heat deposited by reads and by
-the pulse, evaporating exponentially — rather than through curation, retention
-policies, or scheduled cleanup rules.** The core of this decision shipped: every
-entity carries a decaying `heat` scalar (`src/base/heat.rs:7`), retrieval and
-the pulse both deposit into it, and an hourly collector evicts what has gone
-cold (`run_gc`, `src/tick/stigmergy.rs`). The convergence metrics the original note
-proposed — the instrument for proving the model works — were not built, and the
-ranking-side unification it proposed did not happen. Both gaps are detailed
-below.
+## Decision
 
-## Context
+Forgetting is driven by a decaying `heat` scalar deposited by use — reads and the pulse deposit, an hourly collector evicts what goes cold — with no retention policies, quotas, or manual curation.
 
-A memory system that only accretes is eventually useless: recall degrades as
-the candidate set grows, and the graph's structure stops meaning anything. So
-something has to decide what to drop, and the question is *who writes that
-policy*. The design note this page ports
-(`docs/kern/stigmergy-self-improving.md`) started from an honest observation
-about the pre-1.0 code: kern already had the *shape* of a trace-and-decay
-system — an access count, a last-access timestamp, a tree-walking pulse — but
-without the discipline of one. The decay rate was an untunable constant, two
-redundant freshness signals interacted in non-obvious ways, and the pulse
-walked the tree without reinforcing anything, pure overhead.
+## Why
 
-The decision was whether to formalise that machinery into an explicit
-stigmergic model — one scalar, one deposit rule, one evaporation rate, one
-floor — or to replace it with an administered retention policy.
+- Three knobs total: deposit magnitude, evaporation rate, threshold floor. Everything else emergent.
+- Policy knobs multiply — every administered rule ("but keep facts") is another interacting special case.
+- Retention becomes a consequence of use, not a policy someone maintains.
 
-## Alternatives considered
+Shipped constants:
 
-**Administered retention** — LRU lists, per-kern quotas, TTLs, "keep the last
-N", or a human pruning by hand. Every variant requires someone to encode, in
-advance, what will matter later. A TTL deletes the fact you needed on day 31; a
-quota evicts by an ordering (insertion, size, age) that has no relationship to
-usefulness; manual gardening does not scale past one attentive operator and
-silently stops happening. The deeper failure is architectural: policy knobs
-multiply. Each special case ("but keep facts", "but not this project") becomes
-another rule, and the rules interact.
+- Read deposits `1.0` heat, off the query hot path.
+- Pulse deposits `0.5 × strength` on every entity reachable from the root, halving per level — reachability itself reinforces, so an idle daemon maintains its own spine.
+- Decay is lazy, from last-deposit age; half-life **7 days**; a deposit decays the stale value first, never resurrecting old magnitude.
+- Hourly GC demotes entities that are cold (aged heat below `0.01`), stale (untouched 7 days), and not durable — spilled to the cold tier, not deleted.
+- Net: one read survives ~**46 days**; pulse-reachable never qualifies; weekly reads never decay past half peak.
 
-**Richer stigmergy variants** were also weighed and explicitly rejected in the
-note, and remain unbuilt by choice:
+## Rejected
 
-- *Per-edge pheromone* (heat on reasons, not entities) — storage cost for a
-  weak signal until the reason graph is much denser. Edges do carry a
-  `traversal_count`, but it feeds edge scoring, not retention.
-- *Multiple pheromone types* (food/danger in real ant colonies) — a single
-  scalar suffices; entity kinds already provide orthogonal typing.
-- *Continuous fluid models* — discrete decay matches the tick-based
-  architecture.
-- *Cross-peer heat gossip* — heat is deliberately local provenance. What a
-  peer found useful is not evidence about what this replica will need, and a
-  gossiped usage signal is an obvious injection surface.
+| Alternative | Why it lost |
+| --- | --- |
+| TTLs | delete the fact you needed on day 31 |
+| LRU / quotas | evict by an ordering (insertion, size, age) unrelated to usefulness |
+| Manual gardening | doesn't scale past one attentive operator; silently stops happening |
+| Per-edge pheromone | storage cost for a weak signal; traversal counts feed scoring, not retention |
+| Multiple pheromone types | one scalar suffices; entity kinds already provide orthogonal typing |
+| Cross-peer heat gossip | a peer's usage is not evidence of yours; an injection surface |
 
-## Why the trace wins
+## Trade-off accepted
 
-The stigmergic model has three knobs — deposit magnitude, evaporation rate,
-threshold floor — and everything else is emergent. Retention becomes a
-consequence of the system's own behaviour rather than a policy someone
-maintains: what gets read stays; what the structure keeps reachable stays warm;
-what neither happens to evaporates.
+- Heat is retention-only; ranking keeps its own two-term freshness boost with a 24-hour half-life — two freshness signals, by design not unification.
+- The 7-day half-life errs heavily toward retention (~46 days per read, not ~1 week as originally derived).
+- Convergence metrics never built — the access-distribution claim is design intent, not measurement.
 
-The shipped mechanics, in brief (the full treatment is in
-[Stigmergy GC & gravitons](../concepts/stigmergy.mdx) and
-[Heat, decay & self-compaction](../concepts/heat-and-compaction.mdx)):
-
-- Reads deposit `1.0` heat via `stamp_access` (`src/retrieval/score.rs:247`),
-  off the query hot path.
-- The pulse re-deposits `0.5 × strength` on every entity it reaches walking
-  down from the root (`src/tick/pulse.rs:113`), decaying geometrically per
-  level (`PULSE_DECAY = 0.5`, floor `0.05`, `src/base/constants.rs:47`). This
-  is the note's key structural addition: reachability from the root is itself a
-  reinforcement signal, so an idle daemon still maintains its own spine.
-- Decay is lazy — computed from the age of the last deposit, never on a timer
-  (`heat::decayed`, `src/base/heat.rs:25`), with a **7-day half-life** by
-  default (`src/base/heat.rs:18`). A deposit decays the stale value first,
-  then adds (`src/base/heat.rs:41`), so a deposit never resurrects old
-  magnitude.
-- Once an hour, `run_gc` evicts entities that are cold (*aged* heat below
-  `0.01`), stale (untouched for 7 days), and not durable
-  (`is_cold_victim`, `src/tick/stigmergy.rs:27`) — spilling each victim to the
-  cold tier before dropping it.
-
-Worked through with the shipped constants: a claim ingested and read exactly
-once starts at heat `1.0`. It falls below the `0.01` floor after
-`log2(100) ≈ 6.6` half-lives — about **46 days** — and only then, being also
-older than the 7-day staleness gate, becomes a GC victim. A claim the pulse
-still reaches at strength `0.5` gets topped up every maintenance pass and never
-qualifies. A claim read even once a week never decays past half its peak. The
-system's hot set converges on what is actually used plus what is structurally
-central, with nobody writing a policy that says so.
-
-<Callout type="info" title="Durability is the one administered exception">
-One rule is deliberately policy, not emergence: active `Fact` and `Document`
-entities are immune to collection, and supersession revokes the immunity. The
-stigmergic field governs everything the user has not explicitly marked as
-load-bearing. See
-[Heat & compaction](../concepts/heat-and-compaction.mdx#what-stops-it-deleting-something-you-still-needed)
-for the exact guarantee.
+<Callout type="info" title="One administered exception">
+Active `Fact` and `Document` entities are immune to collection (locally — peers
+cannot pin storage by labelling gossip `kind=Fact`). Supersession revokes the
+immunity. See [Heat & compaction](../concepts/heat-and-compaction.mdx).
 </Callout>
 
-## What shipped vs. what the note assumed
+## Where you see it
 
-The note is point-in-time (it references the pre-1.0 `crates/` layout) and
-several of its proposals landed differently or not at all.
-
-**The qbst unification did not happen.** The note's central formula proposal —
-replace the two-term ranking boost (`log` access count + exponential recency)
-with the single heat scalar — is not what shipped. Heat became a *retention*
-signal only. Ranking still uses the original two-term `qbst`
-(`qbst`, `src/retrieval/score.rs:64`) with its own separate constants: access weight
-`0.02`, recency weight `0.05`, recency half-life **24 hours**, cap `0.1`
-(`src/base/constants.rs:10`). The note's complaint that the 24h half-life was
-hard-coded is half-resolved — it is now configurable via
-`qbst_recency_half_life_secs` (`src/config/retrieval.rs:32`) — but kern today
-runs two freshness signals with different half-lives: a 24-hour one for
-ranking, a 7-day one for retention. Defensible (ranking freshness and retention
-are different questions) but it is a divergence the note argued against, and
-the offline NDCG sweep that was supposed to tune either constant was never run.
-
-**The half-life is 7 days, not the proposed 36 hours.** The note's §4.1
-derivation argued for 1–2 days so that "a week of silence overrides a month of
-heat". The shipped default errs heavily toward retention; with the GC floor at
-`0.01` the effective memory of a single access is ~46 days, not ~1 week.
-
-**The convergence metrics were not built.** The Gini coefficient, top-10
-stability, and median-path-length criteria — the note's §5, the instrument for
-answering "is the access distribution actually converging?" — do not exist.
-`src/tick/stigmergy.rs` exists under the name the note reserved for the metrics
-module, but contains the GC instead. Until something like them is built, the
-claim that the corpus converges on efficient paths is a design intention, not a
-measurement.
-
-**Two things shipped that the note never asked for.** Spill-before-drop:
-eviction writes the victim to a capped cold LMDB tier first and keeps it hot if
-the write fails (`evict_victims`, `src/tick/stigmergy.rs`), so GC is a
-demotion, not a deletion. And a federation carve-out: durable-kind immunity
-holds only for local kerns — a peer cannot pin unreclaimable storage by
-labelling its gossip `kind=Fact` (`src/tick/stigmergy.rs`).
-
-## See also
-
-- [Stigmergy GC & gravitons](../concepts/stigmergy.mdx) — the mechanism as it
-  behaves today, including the gravitons that bias what survives.
-- [Heat, decay & self-compaction](../concepts/heat-and-compaction.mdx) — the
-  decay function, the tick, and the retention guarantee in full.
-- [The retrieval pipeline](../concepts/retrieval.mdx) — where the still-separate
-  `qbst` boost sits in ranking.
+- Unused memories quietly demote to the cold tier after ~6 weeks; anything you recall stays hot.
+- Details: [Stigmergy GC & gravitons](../concepts/stigmergy.mdx), [Heat, decay & self-compaction](../concepts/heat-and-compaction.mdx).

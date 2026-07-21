@@ -60,3 +60,8 @@ NUL
 /docs/site/out/
 /docs/site/.source/
 /docs/site/next-env.d.ts
+
+# docs site: generated LLM page mirrors + build output
+/docs/site/public/
+/docs/site/out/
+/docs/site/.next/

@@ -2,44 +2,38 @@
 title: "kern"
 ---
 
-**A self-learning memory substrate for AI agents.** One long-running daemon per
-working directory owns a knowledge graph that structures the durable facts you
-hand it, keeps itself small without manual gardening, and serves the right
-context back when you need it.
+**Self-learning memory for AI agents.** One daemon per project, one knowledge
+graph. Recall = sub-millisecond graph walk. No LLM call at read time, no cloud.
 
 ```
 MCP ingest ─────────────────────► typed claims ─┐
 .kern/intake/ drop → distill (LLM) → typed claims ┴→ graph → recall
 ```
 
-Two caller-driven ways in — an agent calls MCP `ingest`, or a transcript is
-dropped into `.kern/intake/` for the daemon to distill. kern captures no session
-automatically.
+No automatic capture — writes are always the caller's call.
 
-## Where to start
+## Start here
 
-- **New here?** [Why kern exists](./concepts/why-kern.mdx) — the problem, and why
-  chunk-embed-retrieve does not solve it.
-- **Want it running?** [Install & run the daemon](./howto/install-run.mdx), then
-  [The memory bank](./howto/memory-bank.mdx).
-- **Want the whole system in one diagram?** [Architecture](./concepts/architecture.mdx).
+1. [Install & run](./howto/install-run.mdx)
+2. [Wire up MCP](./howto/mcp.mdx)
+3. [Seed the graph](./howto/seed.mdx)
 
-**Concepts** explain the mental model — read these to understand what kern is
-doing and why. **How-to** pages are task-shaped: you have a goal, they get you
-there.
+**[How-to](./howto/install-run.mdx)** — tasks ·
+**[Concepts](./concepts/why-kern.mdx)** — mental model ·
+**[Decisions](./decisions/index.mdx)** — why it's built this way
 
 <Callout type="warn" title="Maturity">
-Federation is `building`, not shipped, and its transport is currently
-unauthenticated and unencrypted. See [Federation](./concepts/federation.mdx)
-before enabling it.
+Federation is `building`: unauthenticated, unencrypted. Read
+[Federation](./concepts/federation.mdx) before enabling.
 </Callout>
 
-## Beyond these pages
+## For LLMs
 
-- **[Vision](https://github.com/yesitsfebreeze/kern/blob/master/docs/oracle/VISION.md)** — what kern is and why it exists.
-- **[README](https://github.com/yesitsfebreeze/kern/blob/master/README.md)** — install, configure, and run it.
-- **[Design decisions](./decisions/index.mdx)** — the models and trade-off
-  analyses behind the self-organizing, federated design, now indexed on this
-  site.
-- **[Roadmap](https://github.com/yesitsfebreeze/kern/blob/master/docs/oracle/ROADMAP.md)** — the north star, the measured baseline, and every open work item.
-- **API** — rustdoc for every crate (`cargo doc --open`).
+[/llms.txt](/llms.txt) — whole system, one page
+
+## Elsewhere
+
+[README](https://github.com/yesitsfebreeze/kern/blob/master/README.md) ·
+[Vision](https://github.com/yesitsfebreeze/kern/blob/master/docs/oracle/VISION.md) ·
+[Roadmap](https://github.com/yesitsfebreeze/kern/blob/master/docs/oracle/ROADMAP.md) ·
+API: `cargo doc --open`

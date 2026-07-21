@@ -2,21 +2,14 @@
 title: "The retrieval pipeline"
 ---
 
-This page follows one query from the text you type to the ranked thoughts that come back. Every stage is hand-written in `src/retrieval/` — there is no external ANN library, no reranking service, no vector database underneath — so each stage's cost and each stage's failure mode is something you can read.
-
-The short version: kern seeds candidates from three independent sources (dense vectors, BM25, and a query-independent importance scan), fuses them by rank rather than by score, walks the reason graph outward from the fused seeds, then boosts, filters, and diversifies what the walk produced. Optional LLM steps (HyDE at the front, reranking and synthesis at the back) bracket the graph-only core.
-
-## The shape of a query
-
-The graph-only core is `retrieve_profiled` (`src/retrieval/answer.rs:172`). It is deliberately LLM-free, because the daemon holds a read lock on the graph for exactly that span and nothing else — every LLM call in the pipeline runs outside the lock (`src/retrieval/answer.rs:297`, `query_locked`).
+A query seeds candidates from three sources (dense vectors, BM25, importance scan), fuses them by rank, walks the reason graph, then boosts, filters, diversifies. LLM-free except embedding the query text — no HyDE, no rerank, no synthesis; the caller gets scored thoughts, edges, and path chains, and synthesizes itself.
 
 <Mermaid
   chart={`
 flowchart TD
-    Q[query text + embedding] --> H[HyDE: short queries only]
-    H --> S1[dense seed: HNSW/DiskANN]
-    H --> S2[lexical seed: BM25]
-    H --> S3[importance scan: heat + facts]
+    Q[query text + embedding] --> S1[dense seed: ANN]
+    Q --> S2[lexical seed: BM25]
+    Q --> S3[importance scan: heat + facts]
     S1 --> PR[personalized PageRank]
     S2 --> PR
     S1 --> F[RRF fusion]
@@ -25,197 +18,58 @@ flowchart TD
     PR --> F
     F --> E[beam expansion over reason edges]
     E --> M[merge seeds + neighbours]
-    M --> B[boosts: confidence, QBST, fact, gravity]
+    M --> B[boosts: confidence, access, fact, gravity]
     B --> FD[filter: superseded, floor, query options]
     FD --> D[dedup by section + MMR]
-    D --> R[LLM rerank - optional]
-    R --> A[LLM synthesis - optional]
-    A --> C[cold-tier backfill]
+    D --> C[cold-tier backfill]
 `}
 />
 
-## Stage by stage
+## Stages
 
-### HyDE — repairing queries that are too short to embed well
+- **Dense seeding** — content-vector index + structural (GNN) index, blended 0.4/0.6 (fixed constant, not tuned). Query filters (kind, source, confidence, time window) applied *during* ANN traversal — a filtered top-15 is actually 15.
+- **Lexical seeding** — BM25 over an in-RAM inverted index. Catches the literal tokens embedders smooth away: identifiers, error codes, version strings.
+- **Importance scan** — query-independent third source: anything over a low cosine floor that is a `Fact` or accessed 3+ times. O(N) per query (the clearest scaling gap); down-weighted so popular-but-irrelevant cannot ride to the top.
+- **PageRank** — personalized: teleport to the query's seeds, damping 0.85. What the matching neighbourhood keeps pointing at — a signal cosine cannot produce. Rationale: [PageRank for authority](../decisions/pagerank-authority.mdx).
+- **RRF fusion** — by rank, not score: BM25, cosine, and rank mass are not comparable numbers, so no normalization to tune or break.
+- **Expansion** — bounded beam search over reason edges from every seed; each surviving path returned as a chain of entities and labelled edges.
+- **Merge + boosts** — corroboration bonus for entities found by two routes; then score × confidence, an access/recency term, a flat `Fact` bonus, graviton pull (max over gravitons — no double-count).
+- **Filter, dedup, MMR** — superseded dropped; delivery floor applies unless nothing clears it (weak results over nothing); same-section chunks collapse to their best; MMR λ 0.75.
+- **Cold backfill** — fewer than `k` hot results scans the cold tier, flags hits `cold:true`; `as_of` stays exact over backfill.
 
-A three-word query embeds badly: there is not enough text for the embedder to place it anywhere meaningful in vector space. `expand_query` (`src/retrieval/hyde.rs:4`) asks the LLM to write a paragraph that *would* answer the query, embeds that, and blends it with the real query vector at `hyde_fusion_weight` (default 0.5), re-normalizing the result.
-
-The important detail, and one the README glosses: this fires **only for short queries**. The gate at `src/retrieval/hyde.rs:15` returns the query vector untouched once the query reaches `hyde_min_query_tokens` (default 6). A long query already carries enough signal; paying an LLM round-trip to paraphrase it would add latency and drift.
-
-- **Adds:** usable vector geometry for queries that have none.
-- **Costs:** one LLM generation plus one embedding call, on the queries that trigger it. It is the single most expensive stage when it runs.
-
-### Dense seeding — approximate nearest neighbours over two vector spaces
-
-`seed_with_important` (`src/retrieval/seed.rs:51`) reaches `search_all_unlocked` (`src/base/search.rs:92`), which runs the query against **two** indexes: the content-vector index and the GNN-vector index, then combines them in `merge_hits` (`src/base/search.rs:63`) at a fixed 0.4 content / 0.6 structure blend (`src/base/search.rs:60-61`).
-
-When query options are active — a source, a kind, a confidence floor, a time window — the search switches to `search_all_filtered` (`src/base/search.rs:110`), which applies the predicate *during* the ANN traversal rather than after it. Post-filtering an unfiltered top-k is the classic filtered-ANN bug: ask for 15 and filter down to 2. The shared predicate lives in one place (`matches_keep`, `src/retrieval/seed.rs:77`) and is reused by the lexical seed and the post-filter so the three can never disagree.
-
-- **Adds:** semantic recall — matches that share no words with the query.
-- **Costs:** two graph traversals per query; the 2026-07-16 hot-path profiling pass attributed roughly 40 µs of a 103 µs query to this stage (the bench doc has since been retired along with the saturated trace — see the measurement note below).
-
-<Callout type="info">
-The 0.4/0.6 blend is a fixed constant, not a tuned one. It is an open question on the roadmap; treat it as a starting point rather than a measured optimum.
+<Callout type="warn" title="A reason edge cannot yet lift its neighbour into the results">
+Measured, not suspected: over 8 linked A→B pairs probed with text matching only A, the edge moves one pair by one rank. An entity reached both by content and across an edge keeps the larger of its two scores — the edge contributes nothing. **No claim that traversal improves what is recalled is true today.** Item 86 in [`ROADMAP.md`](https://github.com/yesitsfebreeze/kern/blob/master/docs/oracle/ROADMAP.md).
 </Callout>
 
-### Lexical seeding — the exact match vectors keep missing
+## Indexes
 
-BM25 over an in-RAM inverted index (`src/base/lexical.rs:62`, filtered variant at `:67`), wrapped by `seed_lexical` (`src/retrieval/seed.rs:86`). Dense retrieval is systematically bad at rare literal tokens — identifiers, error codes, proper nouns, version strings — because the embedder smooths them into their neighbourhood. BM25 is exactly good at those, and bad at everything dense retrieval is good at.
+| Index | Notes |
+| --- | --- |
+| HNSW | Resident, the default. Memory for latency; rebuilt on load. |
+| DiskANN | Opt-in via `[graph] disk_threshold`, off by default. Mmapped disk graph for kerns too big to stay resident; held to recall@10 ≥ 0.90 vs brute force. [DiskANN-style spill](../decisions/diskann-spill.mdx). |
+| BM25 | In-RAM inverted index; memory proportional to vocabulary. |
 
-- **Adds:** exact-token recall that no embedding provides.
-- **Costs:** an inverted index kept in RAM alongside the vectors, rebuilt from the graph.
+Vectors stored int8-quantized (4× smaller); a test pins int8 top-10 agreement with full-precision float at ≥ 75%. Binary quantization exists but is deliberately not user-selectable — recall floor too low without a rescoring pass.
 
-### The importance scan — what the graph knows regardless of the query
+## Structural vector
 
-`seed_important` (`src/retrieval/seed.rs:127`) does a parallel scan over every entity, keeping anything that clears a cosine floor (`important_min_cosine`, 0.20) and is either a `Fact` or has been accessed at least `important_access_threshold` (3) times. It is a third, query-*independent* candidate source: the things this graph has repeatedly proven useful.
+A background tick trains a small per-kern GNN over the real reason edges, writing each thought a second, structural vector — thoughts that never share vocabulary drift together if the graph keeps connecting them. Weighted 0.6 in dense seeding. Needs 128+ thoughts in a kern; the most expensive background cost.
 
-Two honest caveats. It is O(N) on every retrieve — at corpus scale it needs an index, and this is the pipeline's clearest scaling gap. And because it is query-blind, it is down-weighted to `rrf_global_weight` (0.5) in fusion and deliberately excluded from PageRank's teleport set (`src/retrieval/answer.rs:122`), or a globally popular but irrelevant thought would ride to the top of every query.
+## Measurement
 
-- **Adds:** heat and durability as a retrieval signal, not just a ranking tiebreak.
-- **Costs:** a full scan per query.
+e2e drives `kern query` over a self-authored corpus with no LLM in scoring: recall@1 **0.9583**, recall@5 **1.0000**, MRR **0.9792** (2026-07-21, reproducible bit-for-bit). Two limits travel with it:
 
-### PageRank — authority from graph structure
-
-`pagerank` (`src/retrieval/pagerank.rs:28`) runs a **personalized** PageRank: the teleport vector is the query's own dense and lexical seeds, weighted by their scores (`teleport_vector`, `src/retrieval/pagerank.rs:5`), damping 0.85, up to 25 iterations with early exit once the rank vector stops moving. Dangling mass is redistributed along the teleport vector rather than uniformly (`src/retrieval/pagerank.rs:58`), which is what keeps the personalization from washing out.
-
-This is what pure vector similarity structurally cannot do. Cosine distance asks "what looks like the query"; PageRank asks "what does the neighbourhood of things that look like the query keep pointing at". A well-cited hub two hops from every seed earns rank mass even if its own text matches nothing — the unit tests pin that. Whether it reaches a *delivered* result is a separate question, and the one end-to-end measurement that exists says the graph-structure signals barely move the outcome: see the expansion callout below. The design rationale, including what was deliberately *not* built (DB-level authority, TrustRank seeding, Sybil defences), is in [PageRank for authority](../decisions/pagerank-authority.mdx).
-
-### RRF fusion — combining lists whose scores mean different things
-
-A BM25 score, a cosine similarity, and a PageRank mass are not comparable numbers. Reciprocal-rank fusion (`src/retrieval/fuse.rs:4`) sidesteps the problem by discarding the scores entirely and summing `weight / (k + rank)` across lists, with `rrf_k` = 60. Dense and lexical carry weight 1.0; the importance and PageRank lists carry `rrf_global_weight` = 0.5 (`src/retrieval/answer.rs:137`).
-
-- **Adds:** a single ranking over four incommensurable sources, with no score normalization to tune or break.
-- **Costs:** rank information is all it keeps — a dense hit that is *overwhelmingly* better than rank 2 gets no credit for the margin.
-
-### Expansion — following the reasons
-
-The seeds are a set of points. `expand` (`src/retrieval/expand.rs:178`) makes them a subgraph: a best-first beam walk out along reason edges from every seed, up to `max_expansions` (500), pruning any neighbour scoring below `frontier_best * decay` (0.25), where `frontier_best` is the best score seen among *neighbours* rather than among seeds. Each surviving path is materialized as a `PathChain` — the actual sequence of entities and the labelled edges between them — which is what later gets rendered into the answer prompt as *why* these facts belong together.
-
-Neighbour scoring (`score_neighbor`, `src/retrieval/expand.rs:315`) is a weighted sum of three terms: the neighbour's own content similarity to the query, the *edge's* vector similarity to the query, and the edge's own confidence plus a log traversal boost. Mode weights come from `Weights::for_mode` (`src/retrieval/seed.rs:37`).
-
-- **Adds:** explanation. Each delivered result can be shown with the labelled edges that led to it rather than as a bare snippet.
-- **Costs:** bounded work per query.
-
-<Callout type="warn" title="A reason edge still cannot lift its neighbour into the results">
-Measured, not suspected. `e2e/test_invariants.py` ingests A and B, creates an
-A→B reason edge, and probes with text that matches A only — so the edge is the
-only thing that can surface B. Over 8 such pairs, the edge currently moves one
-of them, by one rank. The invariant stays a strict `xfail`.
-
-One of the two causes is closed. The beam threshold used to be `best_seed ×
-decay`, comparing a seed's pure query cosine (up to 1.0) against a neighbour
-score whose ceiling is `w.reason + w.edge = 0.30` for a neighbour the query does
-not match directly — measured at 0.2411 against a 0.2500 bar, so whenever a seed
-matched well the walk was structurally dead. `frontier_best`
-(`src/retrieval/expand.rs:199`) now takes the bar from the best score seen among
-*neighbours*, so the first hop off any seed is always explored.
-
-The open cause is that `visited` allows one pop per entity and `results` keeps
-the **max** per entity (`src/retrieval/expand.rs:189`), so an entity reached both
-by content seeding and across an edge keeps its seed score and the edge
-contributes nothing. Pooling the two instead moves all 8 pairs — and drops the
-exact-match probe from rank 1 to rank 3, which the recall suite caught. So:
-**no claim that traversal improves what is recalled is true today.** Item 86 in
-[`ROADMAP.md`](https://github.com/yesitsfebreeze/kern/blob/master/docs/oracle/ROADMAP.md)
-carries both findings.
-</Callout>
-
-### Merge, boosts, and gravity
-
-`merge` (`src/retrieval/merge.rs:8`) pools seed and expansion scores per entity through a log-sum-exp accumulator, so an entity found by two independent routes earns roughly `+ln(2)`. The result is a magnitude, not a probability, and can exceed 1.0.
-
-`apply_boosts` (`src/retrieval/score.rs:85`) then folds in the non-similarity signals: the score is multiplied by the entity's confidence, plus a QBST access/recency term (`qbst`, `src/retrieval/score.rs:64` — log access count and an exponential recency decay, capped), plus a flat bonus for `Fact` entities. `apply_gravity` (`src/retrieval/gravity.rs:9`) adds a pull toward the kern tree's gravitons, taking the **max** over gravitons rather than the sum so overlapping attractors never double-count. Gravity is a routing-coherence signal by design, not a quality win: it costs one similarity comparison per graviton per query, and its effect on ranking quality is currently unmeasured.
-
-### Filtering, dedup, and MMR
-
-`filter_delivery` (`src/retrieval/score.rs:119`) drops superseded entities (see [Time and supersession](./time.mdx)), applies the `min_deliver_score` floor — but only if at least one result clears it, so a hard query returns weak results rather than nothing — and truncates. With MMR enabled it truncates to the larger MMR pool, since truncating to the delivery cap first would leave MMR nothing to diversify.
-
-`dedup_by_section` (`src/retrieval/diversify.rs:6`) collapses chunks of the same source section to their best representative. `mmr` (`src/retrieval/diversify.rs:46`) then does maximal marginal relevance over the pool: greedily pick the candidate maximizing `λ·sim(query) − (1−λ)·max sim(already picked)`.
+- Floors sit below the measured values — a **regression detector**: says kern got worse, never that kern is good.
+- Embedder is a deterministic feature-hashed bag of words — measures kern's machinery over a fixed lexical signal, not an embedding model's semantics.
 
 <Callout type="warn">
-`mmr_lambda` is the pipeline's sharpest quality lever. At the old default of 0.45, diversity outweighed relevance and MMR pushed legitimate near-duplicate cluster hits below rank 10. The default is now 0.75, chosen by design intent rather than by measurement: ingest-time dedup already removes true duplicates, so retrieval-time MMR does not need to sacrifice relevance to buy diversity. Nothing sweeps it. The recall baseline below runs with this value, so a change to it is *detectable* as a move in that number — which is not the same as knowing 0.75 is right.
-</Callout>
-
-### Rerank, synthesis, and cold backfill
-
-`llm_rerank` (`src/retrieval/rerank.rs:11`) is off by default. When on, it hands the head of the list to the LLM and asks for a permutation of indices; a malformed response leaves the order untouched. The pool is hard-capped at 32 candidates (`src/retrieval/rerank.rs:9`) regardless of configuration, because ~300 characters per candidate would otherwise blow the context window.
-
-`synthesize` (`src/retrieval/answer.rs:265`) builds the answer prompt from the path chains plus the top thoughts. Two abstention behaviours are worth knowing: the prompt instructs the model to reply with the exact `NO_ANSWER` string when the context does not contain the answer, and an empty context short-circuits to that string with no LLM call at all (`src/retrieval/answer.rs:282`) — cheaper and more reliable than asking a model to notice it has nothing.
-
-Finally, if the hot graph returned fewer than `k` results, the MCP query tool backfills from the cold tier (`src/mcp/tools_query.rs:251`), a bounded brute-force cosine scan over LMDB (`src/base/store.rs:685`). Those hits are flagged `cold:true` so callers can tell. A cold row now carries the bi-temporal triple alongside the entity (`ColdRow`, `src/base/store.rs:170`), so an `as_of` filter is exact over a backfilled hit rather than treating it as valid at every instant.
-
-### The query cache
-
-`QueryCache` (`src/retrieval/cache.rs:20`) is an LRU of at most 256 entries keyed on the query vector, matched by cosine ≥ 0.97 — so a paraphrase hits the same entry. Correctness comes from a version stamp: every entry carries the graph's `mutation_epoch` at the moment it was computed, and any mismatch is a miss. Because the epoch is captured under the same read lock as retrieval, a write racing the unlocked LLM phase makes the new entry *born stale* — a miss on the next lookup, never a stale serve (`src/retrieval/cache.rs:75`).
-
-## Index structures and their tradeoffs
-
-Three indexes back the pipeline, behind a `VectorBackend` enum (`src/base/vector_backend.rs:8`) that lets a kern be resident or disk-spilled without the callers knowing.
-
-**HNSW** (`src/base/hnsw.rs:25`) is the resident default: a hierarchical navigable small-world graph, deterministic-build and id-stable, supporting `insert`/`search` (`:140`, `:222`) and a genuinely pre-filtered `search_filtered` (`:247`). It trades memory for latency — every vector and every layer of the graph sits on the heap and is rebuilt from the graph on load, so RSS and load time grow with the kern without bound.
-
-**DiskANN** (`src/base/diskann.rs:151` build, `:302` open, `:377` search) is the answer to that ceiling. It builds a disk-resident graph — degree 32, build list 64, alpha 1.2 (`src/base/diskann.rs:29`) — and mmaps it, taking the vectors off the resident heap. It engages only once a kern exceeds the configured `disk_threshold`, which defaults to never; small deployments are byte-for-byte unchanged. Post-snapshot writes buffer in an in-RAM delta with tombstones, folded back by a periodic consolidation task. The tradeoff is build time and a recall floor: the standalone index is held to recall@10 ≥ 0.90 against brute force. Rationale and remaining gaps — no product quantization yet, GNN and reason indexes still resident — are in [DiskANN-style spill](../decisions/diskann-spill.mdx).
-
-**BM25** (`src/base/lexical.rs:24`) is an in-RAM inverted index with tunable `k1`/`b`, rebuilt from the graph. Cheap to build, cheap to query, and its memory is proportional to vocabulary rather than to dimensions.
-
-## Quantization: what precision is actually given up
-
-`QuantizedVec::encode` (`src/quant.rs:59`) supports three modes (`src/quant.rs:8`): `None` (f32, 4 bytes per dimension), `Int8` (1 byte), and `Binary` (0.125 bytes). Int8 uses a symmetric per-vector scale fixed at encode time, with distance computed directly on the codes (`quantized_cosine_distance`, `src/quant.rs:159`).
-
-What you actually give up is measured, not assumed. `int8_recall_tracks_f64` (`src/base/hnsw.rs:874`) builds parallel f64 and int8 indexes over the same 300-vector corpus and asserts the top-10 sets agree on at least 75% of results across 25 queries. That is the guarantee: **int8 is not lossless, and the test pins the floor rather than claiming parity.** Int8 storage is a flat 4× cut in vector memory — one byte per dimension instead of four.
-
-Binary is implemented and tested (`src/base/hnsw.rs:909`) but deliberately **not user-selectable** — `QuantizationMode::parse` (`src/quant.rs:16`) rejects it, because its recall floor is too low without a rescoring pass that does not exist yet.
-
-## What graph structure adds that vectors cannot
-
-Two of the ranking signals come from graph shape rather than text.
-
-The first is **PageRank authority**, above: a structural prior over what the graph collectively points at, personalized to this query's seeds.
-
-The second is **learned re-embedding**. A background tick trains a small graph neural network per kern (`run_learned_propagation`, `src/gnn/propagate.rs:61`) — a 2-layer GCN, `dim → dim/2 → dim`, 24 epochs of Adam minimizing a link-prediction loss over real reason edges against sampled negatives. The output is blended with the input features at 0.6 self-weight, normalized, and written back as each entity's `gnn_vector`. It requires at least 128 thoughts in a kern to run at all.
-
-That second vector is what the dense seed weights at 0.6. The effect is that two thoughts which never share vocabulary — so their content vectors are far apart — drift *toward each other in GNN space* if the graph keeps connecting them through reasons. Content embedding can only see the text of one thought at a time; this sees the shape around it. It is also the pipeline's most expensive background cost: training is synchronous on the tick, CPU-only, and per-kern rather than shared.
-
-## What this actually measures
-
-`e2e/` is the retrieval instrument. `e2e/test_recall.py` drives `kern query`
-over a corpus the test itself authors — so it knows the correct text for every
-probe — and scores recall@1, recall@5 and MRR by rank arithmetic over the
-binary's own stdout, with **no LLM anywhere in the scoring loop**. Recorded
-2026-07-21 and reproducible bit-for-bit: recall@1 **0.9583**, recall@5
-**1.0000**, MRR **0.9792**. Beside it, `e2e/test_invariants.py` asserts one
-property per `VISION.md` criterion; its first finding is the reason-edge
-result in the expansion section above.
-
-Two limits travel with that number, and it means nothing without both:
-
-- **The floors make it a regression detector, not a quality claim.** They sit
-  below the measured values on purpose. The suite can say kern got worse; it can
-  never say kern is good.
-- **The embedder is a feature-hashed bag of words** (`e2e/fake_llm.py`), chosen
-  so the number is identical on every machine. It therefore measures kern's
-  machinery over a fixed lexical signal, not a real embedding model's semantics.
-
-The earlier numbers stay withdrawn. The synthetic workload trace and the LoCoMo
-eval were both deleted on 2026-07-20: the LoCoMo score collapsed ingest,
-retrieval and answering into one LLM-judged number dominated by the answerer (a
-grounded run with the whole conversation in the prompt and kern bypassed scored
-0.187, versus 0.027 for kern on the same slice), and the synthetic trace had
-saturated at recall@10 1.0.
-
-<Callout type="warn">
-No number on this page is comparable to anything Zep, Mem0 or Letta publish —
-different corpus, different embedder, different scoring. kern makes **no quality
-claim of any kind**: not SOTA, not parity, not "better than". A judge-scored
-end-to-end figure is not a retrieval figure either, and a strict judge is not
-comparable to a lenient one in either direction. Never quote a retrieval number
-that did not come from a run.
+No number here is comparable to anything Zep, Mem0, or Letta publish — different corpus, embedder, scoring. kern makes **no quality claim of any kind**. Never quote a retrieval number that did not come from a run.
 </Callout>
 
 ## Related
 
-- [The graph](./graph.mdx) — entities, reasons, and the structure retrieval walks.
-- [Acceptance and routing](./acceptance.mdx) — how thoughts get into the index in the first place.
-- [Time and supersession](./time.mdx) — why superseded entities never seed, and how `as_of` queries work.
-- [Heat and compaction](./heat-and-compaction.mdx) — where the access counts feeding QBST and the importance scan come from.
-- [Configure](../howto/configure.mdx) — every constant named on this page.
+- [The graph](./graph.mdx) — the structure retrieval walks.
+- [Acceptance](./acceptance.mdx) — how thoughts get in.
+- [Time](./time.mdx) — why superseded thoughts never seed; `as_of`.
+- [Heat & compaction](./heat-and-compaction.mdx) — where access counts come from.
+- [Configure](../howto/configure.mdx) — the knobs.
