@@ -62,15 +62,39 @@ pub(super) async fn cmd_reembed(cfg: &crate::config::Config, embed_url: &str, em
 	println!("reembed: hot graph done ({} entities)", new_vecs.len());
 
 	match reembed_cold(g.store(), &client).await {
-		Ok(0) => println!("reembed: complete — model is now '{embed_model}'"),
 		Ok(n) => {
-			println!("reembed: cold tier done ({n} entities)");
+			if n > 0 {
+				println!("reembed: cold tier done ({n} entities)");
+			}
+			restamp(&g, embed_model, &new_vecs);
 			println!("reembed: complete — model is now '{embed_model}'");
 		}
+		// No restamp: hot vectors are new but cold rows are old-dim, and the old
+		// stamp is what keeps `health` reporting the mismatch until the re-run.
 		Err(e) => eprintln!(
 			"reembed: {e}\nreembed: hot graph is on '{embed_model}' but the cold tier still \
 			 uses the old model — re-run once the embed endpoint is healthy"
 		),
+	}
+}
+
+// `check_embed_stamp` deliberately never adopts on mismatch — a config swap must
+// not rewrite the record of what produced the stored vectors. A completed
+// re-embed is the one legitimate transition, so it restamps explicitly here.
+fn restamp(
+	g: &crate::base::graph::GraphGnn,
+	embed_model: &str,
+	new_vecs: &HashMap<String, Vec<f32>>,
+) {
+	let (Some(store), Some(dim)) = (g.store(), new_vecs.values().next().map(|v| v.len())) else {
+		return;
+	};
+	let stamp = crate::base::store::EmbedStamp {
+		model: embed_model.to_string(),
+		dim,
+	};
+	if let Err(e) = store.set_embed_stamp(&stamp) {
+		eprintln!("reembed: restamp failed ({e}) — health keeps reporting a mismatch; re-run");
 	}
 }
 
@@ -153,6 +177,69 @@ async fn reembed_cold(
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[tokio::test]
+	async fn a_completed_reembed_restamps_the_store_with_the_new_model() {
+		use crate::base::store::{EmbedCheck, EmbedStamp, Store};
+		use crate::base::types::Entity;
+
+		// Fake embed endpoint: one 2-dim vector per input, any batch size.
+		let app = axum::Router::new().route(
+			"/api/embed",
+			axum::routing::post(|body: axum::Json<serde_json::Value>| async move {
+				let n = body["input"].as_array().map_or(1, |a| a.len());
+				let vecs: Vec<Vec<f64>> = (0..n).map(|_| vec![0.1, 0.2]).collect();
+				axum::Json(serde_json::json!({ "embeddings": vecs }))
+			}),
+		);
+		let (url, server) = crate::test_support::spawn_http(app).await;
+
+		let dir = tempfile::tempdir().unwrap();
+		let mut cfg = crate::config::Config::default_in(dir.path());
+		cfg.embed.model = "new-model".into();
+
+		// A store holding one 3-dim entity, stamped with the model that made it.
+		{
+			let store = std::sync::Arc::new(Store::open(&cfg.data_dir).unwrap());
+			let mut g = crate::base::graph::GraphGnn::new();
+			g.data_dir = cfg.data_dir.clone();
+			let mut child = crate::base::types::Kern::new("k", &g.root.id);
+			child.entities.insert(
+				"e1".into(),
+				Entity {
+					id: "e1".into(),
+					vector: vec![9.0, 9.0, 9.0],
+					..Default::default()
+				},
+			);
+			g.root.children.push("k".to_string());
+			g.kerns.insert("k".into(), child);
+			crate::base::persist::save_graph_into(&store, &g).unwrap();
+			store
+				.set_embed_stamp(&EmbedStamp {
+					model: "old-model".into(),
+					dim: 3,
+				})
+				.unwrap();
+		}
+
+		cmd_reembed(&cfg, &url, "new-model").await;
+
+		let store = Store::open(&cfg.data_dir).unwrap();
+		let verdict = store
+			.check_embed_stamp(&EmbedStamp {
+				model: "new-model".into(),
+				dim: 2,
+			})
+			.unwrap();
+		assert_eq!(
+			verdict,
+			EmbedCheck::Match,
+			"the stamp must record the model that now owns every stored vector"
+		);
+		assert!(!store.embed_mismatch(), "restamp clears the mismatch flag");
+		server.abort();
+	}
 
 	#[tokio::test]
 	async fn embed_all_errs_when_server_returns_a_mismatched_vector_count() {
