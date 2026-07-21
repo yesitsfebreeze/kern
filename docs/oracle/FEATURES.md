@@ -1246,9 +1246,12 @@ Ranked by leverage:
    `src/commands/mcp_cmd.rs`). The read side is done: `get` and `query` route
    through the same `query` tool and print through one printer, with the local
    load as the `NoDaemon` fallback; `search` and `list` stay local by decision.
-   `ingest` and `link` do not route — over `call_tool` they would land at agent
-   trust, so that half waits on socket auth (item 24), and `intake drain` has no
-   matching tool. Open as `ROADMAP.md` item 9, now reduced to those two.
+   `kern link` no longer clobbers a racing commit — it flushes through
+   `save_graph_guarded` (`src/commands/graph_ops.rs`) — but it still does not
+   route, and neither does `ingest`: over `call_tool` they would land at agent
+   trust, so that half waits on socket auth (item 24). `intake drain` has no
+   matching tool. Open as `ROADMAP.md` item 9 on exactly those two:
+   `ingest`/`link` routing and `intake drain`.
 6. **GNN training is synchronous** on the tick — move to a background thread
    pool or incremental updates to avoid stalling large kerns.
 7. **Distill prompt** is one-shot and global — per-kind prompts +

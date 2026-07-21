@@ -1,7 +1,8 @@
 use crate::base::util::short_id;
 
 use super::{
-	load_graph, save_graph, with_graph, ClaimKindAction, Client, GravitonAction, UnnamedAction,
+	load_graph, save_graph_unguarded, with_graph, ClaimKindAction, Client, GravitonAction,
+	UnnamedAction,
 };
 
 pub(super) fn cmd_compress(src: &str, mode_str: &str, out: Option<&str>) {
@@ -149,7 +150,7 @@ pub(super) fn cmd_gc(cfg: &crate::config::Config) {
 	};
 	let mut g = load_graph(cfg);
 	let (before, reaped, after) = g.gc_empty_kerns_counted();
-	save_graph(&g);
+	save_graph_unguarded(&g);
 	println!("gc: reaped {reaped} empty kerns ({before} -> {after})");
 
 	// Drop the graph FIRST to release its env handle: compact_dir closes its own
@@ -456,7 +457,7 @@ mod cmd_tests {
 
 pub(super) fn cmd_register(cfg: &crate::config::Config, path: &str) {
 	// The loaded graph is bound to the SOURCE store, so write into a freshly
-	// opened destination store — save_graph would write back to the source.
+	// opened destination store — save_graph_unguarded would write back to the source.
 	match crate::base::persist::load_dir(path) {
 		Ok(g) => match crate::base::store::Store::open(&cfg.data_dir) {
 			Ok(dest) => {
@@ -644,7 +645,7 @@ async fn cmd_hub_merge(src: &str, dst: &str) {
 	}
 	let before = crate::base::health::graph_health_stats(&dst_g);
 	let changed = crate::base::merge::absorb_graph(&mut dst_g, src_g);
-	save_graph(&dst_g);
+	save_graph_unguarded(&dst_g);
 	let after = crate::base::health::graph_health_stats(&dst_g);
 	println!(
 		"merged {} -> {}: {} rows joined, entities {} -> {}, kerns {} -> {} (src untouched)",

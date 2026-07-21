@@ -128,6 +128,8 @@ impl Server {
 
 		if !p.id.is_empty() {
 			let g = self.graph.read();
+			// Prefix and cold tier both included so `kern get` can route here
+			// without resolving fewer ids than it did reading the store itself.
 			return match entity_detail_by_id(&g, &p.id) {
 				Some(detail) => tool_result_json(&detail),
 				None => tool_error(&format!("thought not found: {}", p.id)),
@@ -294,10 +296,13 @@ impl Server {
 	}
 }
 
+// What the CLI prints for a thought no kern still holds. A cold hit has no kern
+// id, and the label is the one `kern get` has always shown for that case.
 const COLD_KERN: &str = "(cold)";
 
-// The one id resolver behind both `query` and `kern get`: a second one would let
-// the routed and local reads disagree about what an id resolves to.
+// The one id resolver behind both the `query` tool and `kern get`: a second one
+// would let the routed and local reads disagree about what an id resolves to —
+// prefix or cold, resolved here or resolved by a daemon, same answer.
 pub(crate) fn entity_detail_by_id(
 	g: &crate::base::graph::GraphGnn,
 	id: &str,
@@ -306,7 +311,11 @@ pub(crate) fn entity_detail_by_id(
 		return Some(entity_detail(&thought, &kern_id, g));
 	}
 	let cold = g.store().and_then(|s| s.cold_get(id).ok().flatten())?;
-	Some(entity_detail(&cold, COLD_KERN, g))
+	let mut v = entity_detail(&cold, COLD_KERN, g);
+	// The label is for the printer; the flag is for anything reading the JSON,
+	// which should not have to match on a sentinel kern id.
+	v["cold"] = serde_json::Value::Bool(true);
+	Some(v)
 }
 
 fn entity_detail(

@@ -212,23 +212,67 @@ mod tests {
 		assert_eq!(array_field(&v, "edges").len(), 2, "both incident edges");
 	}
 
-	// A prefix is what kern itself prints (short_id), so the daemon has to resolve
-	// one or every copied id fails the moment a daemon is up.
+	// An entity the daemon never flushed: a `get` that reads the store instead of
+	// asking the owner reports "not found" for something that exists.
 	#[tokio::test(flavor = "multi_thread")]
-	async fn a_routed_get_resolves_a_prefix_like_the_local_read() {
-		let ep = scratch_endpoint("get-prefix");
-		let srv = crate::test_support::mcp_server();
-		let mut k = crate::base::types::Kern::new("kx", "");
-		k.entities
-			.insert("abc123def".into(), crate::test_support::entity("abc123def"));
-		srv.graph.write().kerns.insert("kx".into(), k);
+	async fn a_routed_get_reads_the_daemons_unflushed_state() {
+		let ep = scratch_endpoint("get-unflushed");
+		let srv = kern_with_edge();
+		srv
+			.graph
+			.write()
+			.kerns
+			.get_mut("kx")
+			.expect("kern")
+			.entities
+			.insert(
+				"only-in-ram".into(),
+				crate::test_support::entity("only-in-ram"),
+			);
 		serving(srv, &ep).await;
 
-		let out = route_to(&ep, "query", serde_json::json!({"id": "abc12"})).await;
+		let out = route_to(&ep, "query", serde_json::json!({"id": "only-in-ram"})).await;
+		let Routed::Done(v) = out else {
+			panic!("a serving daemon must answer the get");
+		};
+		assert_eq!(
+			str_field(&v, "id"),
+			"only-in-ram",
+			"the entity came from the daemon's live graph"
+		);
+	}
+
+	// A prefix is what kern itself prints (`short_id`), so the daemon has to
+	// resolve one or every copied id fails the moment a daemon is up — the fix
+	// for staleness would become a miss.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_routed_get_still_resolves_a_prefix() {
+		let ep = scratch_endpoint("get-prefix");
+		let srv = kern_with_edge();
+		// A full-length id nobody would type, so "9f3c" is a genuine prefix and
+		// not an exact hit that would pass with prefix matching removed.
+		srv
+			.graph
+			.write()
+			.kerns
+			.get_mut("kx")
+			.expect("kern")
+			.entities
+			.insert(
+				"9f3c8d21b4e07a65".into(),
+				crate::test_support::entity("9f3c8d21b4e07a65"),
+			);
+		serving(srv, &ep).await;
+
+		let out = route_to(&ep, "query", serde_json::json!({"id": "9f3c"})).await;
 		let Routed::Done(v) = out else {
 			panic!("a prefix must resolve through the daemon");
 		};
-		assert_eq!(str_field(&v, "id"), "abc123def");
+		assert_eq!(
+			str_field(&v, "id"),
+			"9f3c8d21b4e07a65",
+			"the prefix resolved to the full id"
+		);
 	}
 
 	// A tool error is the daemon's answer, not a reason to go around it.

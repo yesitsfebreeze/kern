@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::base::math::average_vec;
 
-use super::{load_graph, save_graph, Client};
+use super::{load_graph, save_graph_unguarded, Client};
 
 const BATCH: usize = 64;
 
@@ -69,7 +69,7 @@ pub(super) async fn cmd_reembed(cfg: &crate::config::Config, embed_url: &str, em
 	// swap the stamp exists to catch. Only after the rewrite succeeded.
 	g.set_embed_model(embed_model);
 	g.rebuild_index();
-	save_graph(&g);
+	save_graph_unguarded(&g);
 	println!("reembed: hot graph done ({} entities)", new_vecs.len());
 
 	match reembed_cold(g.store(), &client).await {

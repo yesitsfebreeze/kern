@@ -123,10 +123,36 @@ to inspect *the store*, and routing them would remove the only way to see what
 is actually on disk while a daemon is up — which is also what makes them the
 control in `e2e/test_daemon_reads.py`.
 
+**Neither read was a copy of the `forget` route, and the reason is the
+constraint this item had been missing:** the daemon's tool surface is narrower
+than the CLI's read commands, so a naive route trades staleness for lost
+capability. `get` only became routable after `query{id}` was widened to match
+what `cmd_get` resolves — a prefix, and the cold tier (`find_entity_by_prefix`
+in `src/base/search.rs`, and the `cold_get` fallback both now reach through
+`entity_detail_by_id` in `src/mcp/tools_query.rs`). `query` only became routable
+after `tool_query` learned to return path chains, without which a routed
+`kern query` would have silently lost its "--- Connections ---" section. Each
+route cost a widening of the tool first; that is the shape of the remaining work
+too.
+
 Two things remain, and the title names them. `ingest` and `link` (blocked on
-item 24) and `intake drain` (needs a tool first) still write the store
-directly — one-shot, guarded by `save_graph_guarded`, so they lose a write
-rather than a whole graph. The item does not close on the read side alone.
+item 24) and `intake drain` (needs a tool first) still write the store directly.
+They are one-shot, so the exposure is a lost write rather than a lost graph —
+and all three are now guarded. `cmd_ingest` (`src/commands/ingest_cmd.rs`) and
+`intake drain`'s `flush` (`src/commands/intake_cmd.rs`) retry through
+`persist::flush_guarded`; `cmd_link` joined them 2026-07-21 via
+`link_and_persist` (`src/commands/graph_ops.rs`) and `save_graph_guarded`, so a
+daemon committing underneath any of them gets a refused flush and a reload
+rather than a clobber. The unguarded entry point is now named
+`save_graph_unguarded` and carries its precondition, which is what made the
+remaining two unlocked callers visible: `cmd_hub_merge`
+(`src/commands/admin.rs`) writes a destination graph it holds no lock on, and
+`maybe_self_heal_store` (`src/commands.rs`) rewrites the store during boot
+recovery. Both are narrower than the CLI race — hub merge stops both daemons
+first, self-heal runs before the daemon serves — but neither has been proven
+safe, and neither belongs to this item.
+
+The item does not close on the read side alone.
 
 ---
 
@@ -157,7 +183,7 @@ populate it. Four parts:
   (`src/mcp/tools_mutate.rs:19-31`), threaded through `ingest::Job` into
   `place.rs`.
 - Accept `principals` on `query` — no identity param exists
-  (`QueryArgs`, `src/mcp/tools_query.rs:95-108`).
+  (`QueryArgs`, `src/mcp/tools_query.rs:76-107`).
 - Enforce in `matches_filter` (`src/retrieval/score.rs:194-232`), which has no
   ACL predicate.
 - **Guard the id path.** `src/mcp/tools_query.rs:129-138` returns
@@ -228,7 +254,7 @@ half the harness can already claim.
 ### 25. O(N) importance scan per retrieve `[retrieval]`
 
 `seed_important` iterates `g.all()` × `kern.entities.values()`
-(`src/retrieval/seed.rs:138-171`), called unconditionally once per retrieve
+(`src/retrieval/seed.rs:127-174`), called unconditionally once per retrieve
 (`src/retrieval/query.rs`, in `retrieve_profiled`). Rayon-parallel, but still full-corpus per
 query. Top structural debt in the repo.
 
@@ -493,7 +519,7 @@ fallback and no way to distinguish discovery-failed from no-peers-present
 
 `TcpStream::connect` per call at `src/gossip/transport.rs:37` (`send_msg`) and
 `:45` (`send_and_receive`). No pooling. Separately, the `trnsprt` client has no
-pooling either (`FEATURES.md:818-819`) — that one is not gossip and is not gated
+pooling either (`FEATURES.md:832-833`) — that one is not gossip and is not gated
 on 33.
 
 ### 47. Hub phase 3: gossip moves hub-side `[hub]`
@@ -509,7 +535,7 @@ port-clash validation in `src/config/serve.rs` to collapse. (Corrected again
 item 84 owns.)
 
 Beside it: **hub↔node version skew is unmanaged** beyond same-binary spawning
-(`FEATURES.md:924-925`).
+(`FEATURES.md:938-939`).
 
 ### Decisions owed before the federation build
 
@@ -608,13 +634,23 @@ Depends on item 62 (the convergence metric) existing.
 ### 55. Two freshness signals, different half-lives, neither ever tuned `[retrieval]`
 
 A 24-hour one for ranking (`qbst_recency_half_life_secs`,
-`src/config/retrieval.rs:32/90`) and a 7-day one for retention
-(`src/base/heat.rs:18`). The offline NDCG sweep meant to tune either was never
-run (`decisions/stigmergy-over-gardening.mdx:117`). Third input nobody
-reconciled: `docs/kern/stigmergy-self-improving.md:160-170` derives a 1–2 day
-half-life and the shipped value is 7 days. Now measurable: `e2e/test_recall.py`
-scores a half-life change directly (`recall@1`/`recall@5`/`MRR`), which is the
-sweep that was never run.
+`src/config/retrieval.rs:31`, defaulted from `QBST_RECENCY_HALF_LIFE`,
+`src/base/constants.rs:12`) and the retention one on `HeatConfig`. The offline
+NDCG sweep meant to tune either was never run
+(`decisions/stigmergy-over-gardening.mdx:117`). Third input nobody reconciled:
+`docs/kern/stigmergy-self-improving.md:160-170` derives a 1–2 day half-life.
+
+**Restated 2026-07-21 — the old "7-day retention" wording was stale.** The 7 days
+at `src/base/heat.rs:18` is the struct default and is never what runs:
+`Config::load` applies the preset unconditionally (`src/config/mod.rs:104`,
+`:132`) and `Preset::apply` is the only writer of `heat.half_life_secs`
+(`src/config/preset.rs`). The shipped default is `relaxed` = **30 days**; medium
+is 7, tight is 3. So the two signals are 24h vs 30d by default, and the gap to
+the derived 1–2 days is a factor of 15–30, not 3.5. The knobs also stopped being
+config edits — a retention retune is now a commit against `preset.rs`, which is
+item 87's surface, and the two should be swept together. Now measurable:
+`e2e/test_recall.py` scores a half-life change directly
+(`recall@1`/`recall@5`/`MRR`), which is the sweep that was never run.
 
 ---
 
@@ -831,7 +867,7 @@ served that way decays, clusters and GCs normally, and simply does not federate.
 - Hand-rolled tool schemas; no batch query
   (`FEATURES.md:566-567`).
 - The LLM client is Ollama-centric with no retry/backoff policy object
-  (`FEATURES.md:764-765`).
+  (`FEATURES.md:778-779`).
 - Watcher `.gitignore` parsing is approximate; no rename tracking
   (`FEATURES.md:965-966`).
 - `unnamed` lists only; there is no `promote` (`FEATURES.md:692`).

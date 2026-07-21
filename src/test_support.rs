@@ -61,3 +61,22 @@ pub(crate) async fn spawn_http(app: axum::Router) -> (String, JoinHandle<()>) {
 	let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 	(format!("http://{addr}"), handle)
 }
+
+// A second writer committing straight through the shared store — how a daemon
+// advances the epoch underneath a one-shot CLI command mid-flight.
+pub(crate) fn commit_extra_kern_via_store(
+	g: &std::sync::Arc<parking_lot::RwLock<crate::base::graph::GraphGnn>>,
+	kern: crate::base::types::Kern,
+) {
+	let gg = g.read();
+	let store = gg.store().expect("graph has a bound store");
+	let mut kerns = std::collections::HashMap::new();
+	for k in gg.all() {
+		kerns.insert(k.id.clone(), k.clone());
+	}
+	kerns.insert(gg.root.id.clone(), gg.root.clone());
+	kerns.insert(kern.id.clone(), kern);
+	store
+		.save_all_kerns(&kerns, &gg.network_id, gg.quant_mode)
+		.expect("external commit through the shared store");
+}

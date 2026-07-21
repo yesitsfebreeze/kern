@@ -2,6 +2,36 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — the read-side routing was built twice, by two sessions that could
+  not see each other, and the merge is a reconciliation rather than a pick. Both
+  branches routed `kern get` through the `query` tool with the local load as the
+  `NoDaemon` fallback; both moved `find_entity_by_prefix` into `base::search` and
+  added `EntityKind::from_u8` / `ReasonKind::from_i32` for the discriminants the
+  MCP payload carries. What each side had alone is what survived.
+
+  From `cycle/1`: `kern query` routes too — which the other side had ruled out
+  because the `query` tool returned no path chains, a gap closed by making the
+  tool return them, so the CLI's "--- Connections ---" section survives the trip.
+  With it, `retrieval::score::delivery_cap` as one owner for the delivery cut, so
+  a routed query cannot answer with fewer hits than the local one; a single
+  `entity_detail_by_id` behind both the tool and `kern get`, so prefix and cold
+  lookups cannot diverge between them; and `e2e/test_daemon_reads.py`, where
+  `search`/`list` going blind against an emptied data dir is the control that
+  proves `get`/`query` answered over the socket.
+
+  From master: `kern link` flushing through `save_graph_guarded` with
+  `save_graph` renamed to `save_graph_unguarded` (a separate half of item 9,
+  kept whole); the prefix test built on a full-length id rather than a
+  one-character one that is an exact match dressed as a prefix; the
+  daemon's-unflushed-state test, a case the live-graph test does not cover; and
+  a `"cold": true` flag on the detail JSON so a reader need not match on the
+  `(cold)` sentinel the printer shows.
+
+  Where the two conflicted: the shared printer prints `{:?}` kind labels
+  (`Question`), not `as_str` ones (`question`) — the wording `kern get` has
+  always had, since a printer extracted to prevent drift should not itself be
+  the drift. One printer, one resolver, one delivery cap.
+
 - 2026-07-21 — item 9's **read** half is closed: `kern get` and `kern query`
   route to a serving daemon before they touch disk, both over the `query` tool
   that already existed (`{id}` for the detail read, `{text, mode, k}` for the
@@ -74,6 +104,112 @@
   existence only, which is exactly why the two files it cannot judge were the
   ones carrying false statements.
 
+- 2026-07-21 — `kern get` routes to the serving daemon, and the reason the other
+  three reads did not follow is the finding, not an excuse. Item 9's read half
+  says `get`, `list`, `query` and `search` load from disk and can report older
+  than live state. Routing looked like four copies of the `forget` change. It is
+  not: **the daemon's tool surface is narrower than the CLI's read commands**, so
+  a naive route trades staleness for lost capability.
+
+  - `get` — `query{id}` did exact-match only, while `cmd_get` accepts a prefix
+    and falls back to the cold tier. Routing it as-was would have turned a hit
+    into "thought not found". So `find_entity_by_prefix` moved to
+    `src/base/search.rs` and the tool's id path gained both the prefix and the
+    cold fallback *first*; only then did routing become a transport swap instead
+    of a behaviour cut. Both paths now render through one `print_entity_detail`
+    reading the same JSON the tool returns, so routed and local output cannot
+    drift — the same discipline the `forget`/`degrade` printers already had.
+  - `query` — the tool returns `{entities}` and no path chains, so routing it
+    would silently drop the CLI's "--- Connections ---" section. The tool has to
+    return chains before this can move.
+  - `list`, `search` — no tool exists at all. Adding one is a decision about the
+    unauthenticated RPC surface (item 24), not a mechanical port.
+
+  `EntityKind::from_u8` and `ReasonKind::from_i32` exist now because the shared
+  printer decodes the discriminants the MCP payload carries; the payload format
+  is unchanged, so no agent contract moved.
+
+  **The prefix test passed before the code did, and that is the second false
+  green in two changes.** It asked for id `"a"` against an entity named `"a"` —
+  an exact match dressed as a prefix, green with prefix matching removed. It now
+  uses a full-length id and asks for four characters of it, and fails without the
+  widening on "a prefix must resolve through the daemon".
+
+  Evidence: `just check` clean, 829/829 nextest, e2e recall 0.9306 / 0.9722 /
+  0.9471 unchanged, docs-check 588.
+
+  Decided by: verify-before-claiming — every routed read was checked against what
+  the local command actually resolved, which is what exposed the prefix and
+  cold-tier gaps — and name-the-tradeoff for stopping at one of four reads with
+  the blocker for each of the other three written down.
+
+- 2026-07-21 — `kern link` stops clobbering a concurrent writer, closing the one
+  half of item 9 that needed no auth. `cmd_link` called the unguarded save, which
+  writes the whole kern map with no epoch check, so a daemon commit landing
+  between the command's load and its flush vanished. It now flushes through
+  `save_graph_guarded`, the same refuse-absorb-retry path `cmd_ingest` and
+  `intake drain` already used.
+
+  The root, and why the rename is part of the fix: nothing at the call site said
+  the plain `save_graph` was conditional. It is safe only under the writer lock,
+  which `gc`, `compact` and `reembed` hold and `cmd_link` never did — so the
+  hazard was invisible to anyone adding a fourth caller. It is now
+  `save_graph_unguarded`, with the precondition on the function. Two remaining
+  callers are named by that rename and NOT fixed here, because neither is the
+  claimed item and both want their own decision: `cmd_hub_merge`
+  (`src/commands/admin.rs`) writes a destination graph it does not lock, and
+  `maybe_self_heal_store` (`src/commands.rs`) rewrites during boot recovery.
+
+  **The first regression test for this was worthless and the second one was
+  too.** Version one called `save_graph_guarded` itself and asserted the helper's
+  behaviour — it passed with the fix reverted. Version two drove `cmd_link` end
+  to end, and also passed reverted, for a subtler reason: `cmd_link` loads its
+  graph *inside* itself, so an external commit staged beforehand is simply loaded
+  and written back, and the race never occurs. Only after extracting
+  `link_and_persist`, which takes the already-loaded graph by value, could a
+  genuinely stale graph be handed to the flush. That version fails without the
+  guard on `the concurrent writer's kern survived the link's flush` and passes
+  with it. Both false greens were caught by reverting the fix and re-running —
+  the test that is never seen to fail is not known to test anything.
+
+  Evidence: `just check` clean, 827/827 nextest, e2e recall 0.9306 / 0.9722 /
+  0.9471 unchanged against baseline, docs-check 586.
+
+  Decided by: verify-before-claiming — the fix was three lines and the honest
+  test was the whole job — and fix-the-root, for renaming the unguarded path
+  rather than fixing the one caller that happened to be reported.
+
+- 2026-07-21 — verification pass over the standalone-lock commit (`c375c5e`).
+  The code and the tests hold: `just check` clean, 826/826 nextest with the
+  three new `standalone_tests` among them, doctests clean, 16 passed / 4 skipped
+  e2e with recall@1 0.9306, recall@5 0.9722, MRR 0.9471 — bit-identical to the
+  0.9306 / 0.9722 / 0.9471 item 86 recorded as the current master baseline, and
+  above every floor (0.9000 / 0.9500 / 0.9200), 0 unretrieved.
+  `just docs-check` green on 579 references.
+
+  Two doc claims did not hold and were corrected. **`FEATURES.md` §23 item 5**
+  closed with "Open as `ROADMAP.md` item 9, now reduced to read-side staleness"
+  two sentences after listing `ingest`/`link` and `intake drain` as also open —
+  the paragraph contradicted itself, and the shorter claim is the one a reader
+  keeps. It now names all three. **`ROADMAP.md` item 9** said the three
+  remaining direct writers are "one-shot, guarded by `save_graph_guarded`, so
+  they lose a write rather than a whole graph". Two of the three are:
+  `cmd_ingest` and `intake drain`'s `flush` both retry through
+  `persist::flush_guarded`. `cmd_link` does not — it calls the unguarded
+  `save_graph` (`src/commands/graph_ops.rs:195` -> `persist::save_all` ->
+  `Store::save_all_kerns`), which writes the whole kern map with no epoch check.
+  So a `kern link` racing the daemon still clobbers, and the item now says so
+  and flags it as the one piece of item 9 that needs neither auth nor a new
+  tool. The tradeoff paragraph above ("`save_graph_guarded` bounds a one-shot to
+  losing a write") is left standing as written — it is true of the guard, and
+  rewriting a landed entry hides that the exception was found later, not known
+  at the time.
+
+  **Decided by:** verify-before-claiming. The claim checked was the prose
+  against the call graph rather than against the neighbouring prose, which is
+  the only way "guarded" gets caught: the two commands anyone would spot-check
+  are guarded, and the third is the one that reads like it must be.
+
 - 2026-07-21 — item 9's last **long-lived** second writer is closed: `kern mcp`'s
   standalone fallback claims the writer lock before it reads the graph, and does
   not boot beside a holder. The route landed earlier today could not reach this
@@ -104,6 +240,51 @@
   the corruption rarer and leaves it possible. The root is that the standalone
   server never asked whether anyone else owned the dir, and it is the one writer
   no probe can answer that for.
+
+- 2026-07-21 — item 55 was measuring the wrong retention half-life, and eight
+  `ROADMAP.md` citations had drifted off the lines they name. The item said the
+  two freshness signals are 24 hours for ranking and **7 days** for retention,
+  citing `src/base/heat.rs:18`. That line does hold `7 * 24 * 60 * 60` and
+  `docs-check` is happy with it — but it is the `HeatConfig::default()` value and
+  it is never what runs. `Config::load` applies the preset unconditionally
+  (`src/config/mod.rs:104`, `:132`) and `Preset::apply` is the sole writer of
+  `heat.half_life_secs`; the default preset is `relaxed`, which sets **30 days**
+  (`src/config/preset.rs`). `FEATURES.md:979` already recorded 30d, so the two
+  oracle files disagreed and the plan held the stale half. The real gap against
+  the 1–2 days `docs/kern/stigmergy-self-improving.md:160-170` derives is 15–30×,
+  not 3.5×, and retuning it is now a commit against `preset.rs` rather than a
+  config edit — so item 55 is swept together with item 87, and says so.
+
+  The eight citations are the ordinary cost of `FEATURES.md` being edited under
+  a plan that indexes it by line: `FEATURES.md` gained ~14 lines above the
+  transport, LLM, watcher, config and CLI sections, so items 46, 47, 84 (four
+  bullets) and 85 all pointed a dozen-odd lines short — at real prose, which is
+  why nothing caught it. Re-pointed to `:832-833`, `:938-939`, `:778-779`,
+  `:956-957`, `:683`, `:972-974`, `:567-568`. Three source citations went the
+  same way: `wire_fetch` is at `src/commands.rs:1003` (`:1002` is
+  `start_entity_sync`), cited twice — item 36 and the closed list; `QueryArgs` is
+  `src/mcp/tools_query.rs:76-107`, not a mid-struct slice ending past its own
+  brace; and item 25's `seed_important` range excluded the `g.all()` half of the
+  product it describes, now `:127-174`.
+
+  Everything else in the sweep held. Items 18, 19, 20, 21, 22, 24, 26, 27, 28,
+  29, 30, 31, 51, 56, 57, 62, 64, 69, 70, 79, 81, 82, 83, 84 and 87 were each
+  re-read against source and are still true, including the ones easiest to close
+  by accident: `principals`/`scope` appear nowhere in the MCP schemas,
+  `forget_by_source` / `source_trust` / `ReviewState` / `gini` / `rust-stemmers`
+  / speculative decode exist nowhere in the tree, `serve.mcp_addr` still has no
+  reader (`src/commands.rs:803` resolves `cli.mcp_addr` alone), and only
+  `GnnPropagate` calls `record_task_failure`. Item 9 was verified line by line —
+  `route()` has exactly the two call sites it claims, the lock guards exactly
+  `reembed`/`compact`/`gc`, and the `ingest`/`link` trust asymmetry it is blocked
+  on is real (`cmd_ingest` mints at `clamp_confidence(1.0, "user")`, `tool_link`
+  writes `MAX_AI_CONFIDENCE`). No item appears in both the open list and "Closed
+  and verified".
+
+  **Decided by:** verify-before-claiming. `docs-check` proves a cited line
+  exists; it cannot prove the line still says what it was cited for, and both
+  failure modes here — a struct default the loader overwrites, and a citation
+  that slid onto neighbouring prose — pass it cleanly.
 
 - 2026-07-21 — item 9's headline re-scoped to match its own body. The title read
   "the route exists; `ingest` and `link` cannot take it yet", which names one of

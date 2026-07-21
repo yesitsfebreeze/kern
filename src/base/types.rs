@@ -49,10 +49,11 @@ impl EntityKind {
 		}
 	}
 
-	// MCP results carry the discriminant, not the label; readers of a daemon's
-	// answer map it back here rather than duplicating the numbering.
-	pub fn from_u8(v: u8) -> Option<Self> {
-		match v {
+	// The inverse of the `as u8` the MCP payload carries: a reader decoding a
+	// daemon's answer has the discriminant, not the variant, and maps it back
+	// here rather than duplicating the numbering.
+	pub fn from_u8(n: u8) -> Option<Self> {
+		match n {
 			0 => Some(EntityKind::Fact),
 			1 => Some(EntityKind::Claim),
 			2 => Some(EntityKind::Document),
@@ -85,6 +86,20 @@ pub enum ReasonKind {
 }
 
 impl ReasonKind {
+	// The inverse of the `as i32` the MCP edge payload carries.
+	pub fn from_i32(n: i32) -> Option<Self> {
+		match n {
+			0 => Some(ReasonKind::Similarity),
+			1 => Some(ReasonKind::Provenance),
+			2 => Some(ReasonKind::Question),
+			3 => Some(ReasonKind::Spawn),
+			4 => Some(ReasonKind::Supersedes),
+			5 => Some(ReasonKind::Ratification),
+			6 => Some(ReasonKind::Rephrase),
+			_ => None,
+		}
+	}
+
 	pub fn fallback_label(self) -> Option<&'static str> {
 		match self {
 			ReasonKind::Supersedes => Some("superseded by a newer version"),
@@ -98,19 +113,6 @@ impl ReasonKind {
 			self,
 			ReasonKind::Similarity | ReasonKind::Provenance | ReasonKind::Ratification
 		)
-	}
-
-	pub fn from_i32(v: i32) -> Option<Self> {
-		match v {
-			0 => Some(ReasonKind::Similarity),
-			1 => Some(ReasonKind::Provenance),
-			2 => Some(ReasonKind::Question),
-			3 => Some(ReasonKind::Spawn),
-			4 => Some(ReasonKind::Supersedes),
-			5 => Some(ReasonKind::Ratification),
-			6 => Some(ReasonKind::Rephrase),
-			_ => None,
-		}
 	}
 }
 

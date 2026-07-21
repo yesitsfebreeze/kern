@@ -170,8 +170,11 @@ pub fn find_entity(g: &GraphGnn, id: &str) -> Option<(Entity, String)> {
 	None
 }
 
-// Every id kern prints is shortened (`short_id`), so a hand-typed or copied id is
-// normally a prefix; the exact lookup still wins when it hits.
+// Exact first, then a unique-enough prefix: every id kern prints is shortened
+// (`short_id`), so a copied id is normally a prefix. Lives here rather than in
+// the CLI because the daemon's id lookup has to accept exactly what the CLI
+// accepts — a routed read that resolved fewer ids than the local one would
+// trade staleness for a miss.
 pub fn find_entity_by_prefix(g: &GraphGnn, id: &str) -> Option<(Entity, String)> {
 	if let Some(pair) = find_entity(g, id) {
 		return Some(pair);
