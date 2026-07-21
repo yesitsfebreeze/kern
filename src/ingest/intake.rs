@@ -721,7 +721,27 @@ mod tests {
 			"the first transcript's claim reached the graph"
 		);
 
-		tokio::time::sleep(Duration::from_secs(2)).await;
+		// Wait on the wall clock, not the monotonic one. `valid_until` is an
+		// absolute `SystemTime`, and this box steps `CLOCK_REALTIME` backwards
+		// ~2.8s every ~30s, so a monotonic sleep of two seconds can advance
+		// realtime by less than one — which reads as a deadline pinned at
+		// startup and fails a test about something else entirely.
+		let mut marker = SystemTime::now();
+		let cap = std::time::Instant::now() + Duration::from_secs(30);
+		loop {
+			match SystemTime::now().duration_since(marker) {
+				Ok(d) if d >= Duration::from_secs(2) => break,
+				// The clock stepped backwards mid-wait. Restart from the new
+				// reading: an `Err` here must not read as "the wait is over".
+				Err(_) => marker = SystemTime::now(),
+				Ok(_) => {}
+			}
+			assert!(
+				std::time::Instant::now() < cap,
+				"realtime never advanced two seconds in thirty monotonic ones"
+			);
+			tokio::time::sleep(Duration::from_millis(100)).await;
+		}
 		std::fs::write(intake.join("b.txt"), "user: q\nassistant: beta").unwrap();
 		let both = deadlines_reaching(&graph, 2).await;
 
