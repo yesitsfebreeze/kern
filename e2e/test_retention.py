@@ -11,10 +11,11 @@ mocking. RETENTION is kept short and the durable control fact carries the whole
 
 import time
 
-from ranking import hits
+from ranking import full_id, hits
 
 EPHEMERAL = "The pager rotation this week belongs to Ada"
 DURABLE = "Marrow the cat refuses to eat anything except salmon"
+ID_PROBE = "The oncall handset lives in the second drawer of the Helsinki desk"
 
 # DEDUPED_NEAR is the same token bag as DEDUPED, so the fake embedder returns an
 # identical vector and `find_duplicate` — the FIRST dedup gate — merges it, while
@@ -88,6 +89,40 @@ def test_a_retention_expires_the_fact_out_of_query_results(project):
 	found, stdout, stderr = texts_for(project, DURABLE)
 	assert DURABLE in found, (
 		f"expiry took the whole graph with it: out={stdout} err={stderr}"
+	)
+
+
+def test_an_expired_fact_is_served_by_id_but_flagged(project):
+	"""The id surface is the second read surface and it has no `drop_expired` in
+	front of it. Item 22 closed green while `kern get <id>` served an expired fact
+	as if it were current, because this file only ever asked the ranked path.
+
+	The ranked path drops; the id path answers a named row, so it answers — with
+	the expiry stated. A test that only checked the ranked path here would pass
+	with the id path still lying, which is exactly the gap being closed.
+	"""
+	stdout, stderr = project.run("ingest", ID_PROBE, "--retention-secs", str(RETENTION))
+	assert "status=committed" in stdout, f"ttl ingest failed: out={stdout} err={stderr}"
+
+	# Captured before the deadline: `search` is the only printer of a short id, and
+	# resolving one after expiry is the thing under test, not a precondition of it.
+	thought_id = full_id(project, ID_PROBE)
+
+	got, stderr = project.run("get", thought_id)
+	assert "Expired:" not in got, (
+		f"nothing is expired before its deadline: out={got} err={stderr}"
+	)
+
+	wait_past_deadline(RETENTION)
+	wait_until_dropped(project, ID_PROBE, ID_PROBE)
+
+	got, stderr = project.run("get", thought_id)
+	assert ID_PROBE in got, (
+		"an explicit id must not be answered with 'thought not found' for a row that "
+		f"is still on disk: out={got} err={stderr}"
+	)
+	assert "Expired:" in got, (
+		f"the id path served an expired fact as if it were current: out={got} err={stderr}"
 	)
 
 

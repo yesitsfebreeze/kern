@@ -2,6 +2,60 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — retention now reaches the id read surface, and it does it by
+  **flagging, not hiding**. Item 91 `[retrieval]` closed.
+
+  The gap was real and every line of the item checked out against source:
+  `drop_expired` had one call site, the ranked path, and `tool_query` returns
+  `entity_detail_by_id` before any `QueryOptions` exists — so a fact ingested
+  with `--retention-secs 60` vanished from `kern query` after the deadline and
+  was still served in full by `kern get` and MCP `query{id}`, forever, because
+  GC never reads `valid_until` and a non-superseded `Fact` is GC-immune.
+
+  The item prescribed a filter on the id path. It did not ship, and the reason
+  is the question the item deferred rather than an easier fix. **An id is a
+  direct question and deserves a direct answer.** `kern query` is asked "what is
+  true now" and is right to drop an expired claim; `kern get <id>` is asked
+  "what is this row", and answering `thought not found` about a row sitting on
+  disk is a false statement with no way for the caller to check it — not a
+  softer failure than serving it, a harder one, because it is unfalsifiable and
+  permanent. So the resolver annotates: `expired` and `valid_until` on the JSON
+  whenever a retention is set, an `Expired:` line on the `kern get` printout.
+  Same shape as the `cold` flag that already rides on that JSON, for the same
+  reason — the caller should not have to infer a fact about a row from its
+  absence.
+
+  **Why not-found lost.** It matches the ranked path's semantics, which is a
+  real argument and the item's own recommendation. It lost because item 9
+  deliberately widened this surface — `query{id}` takes a prefix and falls back
+  to the cold tier precisely so `kern get` loses nothing by routing — and a
+  silent drop narrows it back to an error message indistinguishable from a
+  mistyped id. A caller who wants ranked-path semantics on an id already has
+  them: read the flag and discard. A caller who wants the row has no way to
+  recover it from a not-found. Asymmetric, so the reversible option wins.
+
+  Bi-temporal is untouched and now pinned where it was not before. `as_of` /
+  `valid_at` still skip `drop_expired`, and that escape had unit tests only on
+  the predicate — the same shape of hole that let `valid_until` be honoured by a
+  function nothing called. `retrieve_drops_an_expired_claim_from_the_default_path`
+  now runs the corpus twice and asserts the named-instant query still returns
+  the since-expired claim, so deleting the early return fails at the call site.
+
+  Both new tests were reverted and re-run before either was believed: the id
+  test fails `left: Null, right: Bool(true)`, the bi-temporal half fails with
+  `["live"]`, and the e2e test fails against a real binary printing the expired
+  fact with no marker — which is the defect itself, reproduced. `e2e` floors
+  unmoved at 0.9306 / 0.9722 / 0.9471.
+
+  Not bought: item 18's fourth bullet still needs its own guard. It wants ACL on
+  the id path, and an ACL denial cannot be a flag on the row it denies — the
+  text would ship with it. Item 91's claim that closing it would hand 18 that
+  bullet was wrong.
+
+  Decided by: name-the-tradeoff — the item had already chosen the filter, and
+  the two failure modes were only comparable once "silently reporting not-found
+  for a row that exists" was stated as the cost it is.
+
 - 2026-07-21 — merging `cycle/1` broke **fifteen** line anchors at once, and the
   count is the point. Both branches had just re-pointed their anchors and both
   were right in their own tree; combining them shifted `FEATURES.md` again and

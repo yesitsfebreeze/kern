@@ -502,5 +502,27 @@ mod tests {
 			!ids.contains(&"expired"),
 			"an expired claim must not reach delivery: {ids:?}"
 		);
+
+		// Same corpus, same call site, one instant named: expiry is for the
+		// implicit "now", so a point-in-time query must still see the history.
+		let opts = crate::retrieval::score::QueryOptions {
+			as_of: Some(now - Duration::from_secs(7200)),
+			..Default::default()
+		};
+		let out = retrieve(
+			&g,
+			&cfg,
+			&[1.0, 0.0],
+			"ada bicycle",
+			Mode::Hybrid,
+			Some(&opts),
+			w,
+		);
+		let ids: Vec<&str> = out.results.iter().map(|r| r.entity.id.as_str()).collect();
+		assert!(
+			ids.contains(&"expired"),
+			"a query that names its own instant judges validity THERE — dropping the \
+			 since-expired claim would make history unqueryable: {ids:?}"
+		);
 	}
 }
