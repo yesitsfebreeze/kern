@@ -50,7 +50,7 @@ fn entity(i: usize, victim: bool) -> Entity {
 	let old = now - (COLD_GC_AGE + Duration::from_secs(60));
 	Entity {
 		id: format!("e{i:07}"),
-		vector: sparse_vec(i),
+		vector: sparse_vec(i).into(),
 		kind: if i.is_multiple_of(5) {
 			EntityKind::Fact
 		} else {
@@ -203,7 +203,7 @@ fn cold_spill_scale() {
 				.map(|i| {
 					let mut e = entity(i, true);
 					if dense {
-						e.vector = dense_vec(i);
+						e.vector = dense_vec(i).into();
 					}
 					e
 				})

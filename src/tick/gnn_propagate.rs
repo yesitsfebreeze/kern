@@ -4,7 +4,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::base::graph::GraphGnn;
-use crate::base::types::{EntityStatus, Kern};
+use crate::base::types::{Embedding, EntityStatus, Kern};
 use crate::gnn::graph::Graph;
 use crate::gnn::propagate::{self, GnnConfig, GnnSnapshot};
 
@@ -142,7 +142,7 @@ fn apply_gnn_updates(
 		return;
 	}
 	let mut graph = g.write();
-	let mut changed: Vec<(String, Vec<f32>)> = Vec::new();
+	let mut changed: Vec<(String, Embedding)> = Vec::new();
 	if let Some(kern) = graph.kerns.get_mut(kern_id) {
 		for (entity_id, vec) in &updates {
 			if vec.is_empty() {
@@ -155,7 +155,7 @@ fn apply_gnn_updates(
 				if t.status == EntityStatus::Superseded {
 					continue;
 				}
-				let vec32: Vec<f32> = vec.iter().map(|&x| x as f32).collect();
+				let vec32: Embedding = vec.iter().map(|&x| x as f32).collect();
 				let w = cosine_align(&t.vector, &vec32);
 				if w >= 0.5 {
 					t.observe_support(w);
@@ -357,7 +357,7 @@ mod tests {
 			let kern = gg.kerns.get("k").unwrap();
 			assert_eq!(
 				kern.entities["e0"].gnn_vector,
-				vec![0.25f32, 0.5, 0.75],
+				vec![0.25f32, 0.5, 0.75].into(),
 				"gnn_vector overwritten (narrowed at the boundary)"
 			);
 			assert_eq!(kern.gnn_weights, vec![9, 9], "kern gnn_weights stored");

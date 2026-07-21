@@ -351,7 +351,7 @@ mod tests {
 		let mut g = GraphGnn::new();
 		let root = g.root.id.clone();
 		let mut e = mk_entity("hot", "the sky is blue", 0.0, EntityKind::Claim);
-		e.vector = vec![1.0, 0.0, 0.0, 0.0];
+		e.vector = vec![1.0, 0.0, 0.0, 0.0].into();
 		accept::accept(&mut g, &root, e, "");
 		let graph = RwLock::new(g);
 
@@ -398,7 +398,7 @@ mod tests {
 			let mut g = GraphGnn::new();
 			let kid = g.root.id.clone();
 			let mut local = mk_entity("local", local_text, 0.0, EntityKind::Claim);
-			local.vector = vec![1.0, 0.0, 0.0, 0.0];
+			local.vector = vec![1.0, 0.0, 0.0, 0.0].into();
 			g.kerns
 				.get_mut(&kid)
 				.unwrap()
@@ -406,13 +406,14 @@ mod tests {
 				.insert("local".into(), local);
 			g.index_entity("local", &kid);
 			g.entity_idx
-				.insert("local".into(), vec![1.0, 0.0, 0.0, 0.0]);
+				.insert("local".into(), vec![1.0, 0.0, 0.0, 0.0].into());
 
 			g.register(Kern::new(PHANTOM, &kid));
 			let mut evil = mk_entity("evil", remote_text, 0.0, EntityKind::Claim);
-			evil.vector = vec![1.0, 0.0, 0.0, 0.0];
+			evil.vector = vec![1.0, 0.0, 0.0, 0.0].into();
 			assert!(merge_remote_entity(&mut g, PHANTOM, evil));
-			g.entity_idx.insert("evil".into(), vec![1.0, 0.0, 0.0, 0.0]);
+			g.entity_idx
+				.insert("evil".into(), vec![1.0, 0.0, 0.0, 0.0].into());
 			g
 		}
 
@@ -485,8 +486,8 @@ mod tests {
 					1.0,
 					EntityKind::Claim,
 				);
-				e.vector = vec![1.0, 0.0];
-				e.gnn_vector = vec![1.0, 0.0];
+				e.vector = vec![1.0, 0.0].into();
+				e.gnn_vector = vec![1.0, 0.0].into();
 				e.valid_until = ttl;
 				k.entities.insert(id.into(), e);
 			}
@@ -555,8 +556,8 @@ mod tests {
 				1.0,
 				EntityKind::Claim,
 			);
-			open.vector = vec![1.0, 0.0];
-			open.gnn_vector = vec![1.0, 0.0];
+			open.vector = vec![1.0, 0.0].into();
+			open.gnn_vector = vec![1.0, 0.0].into();
 			k.entities.insert("open".into(), open);
 
 			// Orthogonal to the query, so it is never a SEED — the only way it can
@@ -568,8 +569,8 @@ mod tests {
 				1.0,
 				EntityKind::Claim,
 			);
-			secret.vector = vec![0.0, 1.0];
-			secret.gnn_vector = vec![0.0, 1.0];
+			secret.vector = vec![0.0, 1.0].into();
+			secret.gnn_vector = vec![0.0, 1.0].into();
 			secret.acl = Acl {
 				scope: "acme".into(),
 				..Default::default()

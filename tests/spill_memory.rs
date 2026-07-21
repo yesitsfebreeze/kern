@@ -75,8 +75,8 @@ fn build_kerns(g: &mut GraphGnn, n: usize) {
 		let v = sparse_vec(i);
 		let e = Entity {
 			id: format!("e{i:07}"),
-			gnn_vector: v.clone(),
-			vector: v,
+			gnn_vector: v.clone().into(),
+			vector: v.into(),
 			kind: if i.is_multiple_of(5) {
 				EntityKind::Fact
 			} else {
@@ -96,7 +96,7 @@ fn build_kerns(g: &mut GraphGnn, n: usize) {
 			id: format!("r{i:07}"),
 			from: format!("e{i:07}"),
 			to: format!("e{:07}", (i * 7 + 3) % n),
-			vector: sparse_vec(n + i),
+			vector: sparse_vec(n + i).into(),
 			..Default::default()
 		};
 		k.by_from
@@ -138,7 +138,7 @@ fn items(g: &GraphGnn, which: Index) -> Vec<(&str, &[f32])> {
 fn fill(g: &GraphGnn, which: Index) -> VectorBackend {
 	let mut idx = VectorBackend::resident(16, 200, g.quant_mode);
 	for (id, v) in items(g, which) {
-		idx.insert(id.to_string(), v.to_vec());
+		idx.insert(id.to_string(), v.to_vec().into());
 	}
 	idx
 }
@@ -196,16 +196,28 @@ fn child(mode: &str, n: usize) {
 	let cold = rss_bytes();
 	// mmap-backed pages only count once touched, so a cold reading flatters the
 	// disk backend. 200 searches is the honest steady state under query load.
-	for i in 0..200 {
-		let q = sparse_vec(i * 37);
-		std::hint::black_box(kern::base::search::search_all_unlocked(&g, &q, 20));
-		std::hint::black_box(kern::base::search::search_reasons_all_unlocked(&g, &q, 20));
+	//
+	// The same 200 searches are the latency instrument: sharing the vector
+	// between the kern map and the index puts an `Arc` between the distance loop
+	// and its floats, and that lands on the retrieval hot path. Queries are
+	// pre-embedded so the reading is index walk only. The first 20 are discarded
+	// as warm-up (page faults on the first touch of every structure).
+	let queries: Vec<Vec<f32>> = (0..200).map(|i| sparse_vec(i * 37)).collect();
+	let mut search_ns: u64 = 0;
+	for (i, q) in queries.iter().enumerate() {
+		let t0 = std::time::Instant::now();
+		std::hint::black_box(kern::base::search::search_all_unlocked(&g, q, 20));
+		std::hint::black_box(kern::base::search::search_reasons_all_unlocked(&g, q, 20));
+		if i >= 20 {
+			search_ns += t0.elapsed().as_nanos() as u64;
+		}
 	}
+	let search_us = search_ns / 180 / 1000;
 	let hot = rss_bytes();
 	let peak = peak_rss_bytes();
 
 	println!(
-		"RESULT mode={mode} n={n} cold={cold} hot={hot} peak={peak} entity_idx={} entity_variant={} gnn_idx={} reason_idx={}",
+		"RESULT mode={mode} n={n} cold={cold} hot={hot} peak={peak} search_us={search_us} entity_idx={} entity_variant={} gnn_idx={} reason_idx={}",
 		g.entity_idx.len(),
 		if matches!(g.entity_idx, VectorBackend::Disk { .. }) {
 			"disk"
@@ -283,8 +295,8 @@ fn spill_memory_report() {
 		n / 2
 	);
 	println!(
-		"{:<19} {:>12} {:>12} {:>12} {:>14} {:>10} {:>10} {:>10}",
-		"mode", "cold MB", "hot MB", "peak MB", "hot-data MB", "entity", "gnn", "reason"
+		"{:<19} {:>12} {:>12} {:>12} {:>14} {:>11} {:>10} {:>10} {:>10}",
+		"mode", "cold MB", "hot MB", "peak MB", "hot-data MB", "query us", "entity", "gnn", "reason"
 	);
 	for (mode, line) in &lines {
 		let cold: u64 = field(line, "cold").parse().unwrap();
@@ -292,12 +304,13 @@ fn spill_memory_report() {
 		let peak: u64 = field(line, "peak").parse().unwrap();
 		let tag = format!("{mode}/{}", field(line, "entity_variant"));
 		println!(
-			"{:<19} {:>12.1} {:>12.1} {:>12.1} {:>14.1} {:>10} {:>10} {:>10}",
+			"{:<19} {:>12.1} {:>12.1} {:>12.1} {:>14.1} {:>11} {:>10} {:>10} {:>10}",
 			tag,
 			mb(cold),
 			mb(hot),
 			mb(peak),
 			mb(hot.saturating_sub(base)),
+			field(line, "search_us"),
 			field(line, "entity_idx"),
 			field(line, "gnn_idx"),
 			field(line, "reason_idx"),

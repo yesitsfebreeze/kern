@@ -75,7 +75,7 @@ mod tests {
 		let mut g = GraphGnn::new();
 		let root = g.root.id.clone();
 		let mut e = mk_entity(id, "text", 1.0, EntityKind::Claim);
-		e.vector = vec;
+		e.vector = vec.into();
 		g.get_mut(&root).unwrap().entities.insert(id.to_string(), e);
 		g.rebuild_index();
 		Arc::new(RwLock::new(g))
