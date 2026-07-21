@@ -14,12 +14,20 @@ use crate::base::types::{Entity, EntityKind};
 
 const SKEW_WARN_SECS: u64 = 300;
 static CLOCK_SKEW: AtomicU64 = AtomicU64::new(0);
+static UNSPILLED_DROPS: AtomicU64 = AtomicU64::new(0);
 static SKEW_WARN: LogThrottle = LogThrottle::new(SKEW_WARN_SECS);
 
 // Entities GC could not age because their timestamp is in the future. Nonzero
 // means compaction is stalled on a clock problem, not on policy.
 pub fn clock_skew_skips() -> u64 {
 	CLOCK_SKEW.load(Ordering::Relaxed)
+}
+
+// Entities dropped with no cold store to spill into. Unrecoverable by design —
+// an in-memory kern has nowhere to put them — so the count is the only trace,
+// and the only thing separating that deployment from a durable one.
+pub fn unspilled_drops() -> u64 {
+	UNSPILLED_DROPS.load(Ordering::Relaxed)
 }
 
 // SECURITY: durable-kind immunity only holds for LOCAL kerns. A peer-supplied
@@ -87,12 +95,18 @@ pub fn run_gc(graph: &Arc<RwLock<GraphGnn>>, kern_id: &str, heat_cfg: &HeatConfi
 		return;
 	}
 
-	// Spill-before-drop: eviction must never lose data.
+	// Spill-before-drop: eviction must never lose data — while a store is bound.
 	let store = g.store();
 	let kept = evict_victims(&mut g, kern_id, &victims, |e| match &store {
 		Some(s) => s.cold_spill(e).is_ok(),
-		// No cold store bound: dropping IS the intended memory bound, not a bug.
-		None => true,
+		// No cold store bound (in-memory kern): dropping IS the intended memory
+		// bound, not a bug — there is nowhere to spill to. It is still a real loss,
+		// and the spill-before-drop guarantee does not hold here, so count it rather
+		// than let an in-memory deployment look like a durable one.
+		None => {
+			UNSPILLED_DROPS.fetch_add(1, Ordering::Relaxed);
+			true
+		}
 	});
 	if kept > 0 {
 		tracing::warn!(
@@ -481,6 +495,34 @@ mod tests {
 			clock_skew_skips(),
 			before,
 			"a healthy clock must not read as a degradation"
+		);
+	}
+	#[test]
+	fn an_in_memory_kern_counts_what_it_drops_with_nowhere_to_spill() {
+		// Spill-before-drop is a guarantee of a PERSISTED kern. With no store bound
+		// there is nowhere to spill to and dropping is the intended memory bound —
+		// but an in-memory deployment must not look durable, so the loss is counted.
+		// Drives the real run_gc: a closure written in the test would prove nothing.
+		let g = graph_with_cold_claim("victim");
+		assert!(g.store().is_none(), "precondition: no cold store bound");
+		let g = Arc::new(RwLock::new(g));
+
+		let before = unspilled_drops();
+		run_gc(&g, "k", &HeatConfig::default());
+
+		assert!(
+			!g.read()
+				.kerns
+				.get("k")
+				.expect("kern k")
+				.entities
+				.contains_key("victim"),
+			"precondition: the cold claim was actually evicted"
+		);
+		assert_eq!(
+			unspilled_drops(),
+			before + 1,
+			"an unrecoverable drop must be countable, or in-memory reads as durable"
 		);
 	}
 }

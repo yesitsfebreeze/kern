@@ -144,14 +144,6 @@ concrete and cheap to check: all 8 pairs must move, `recall@1` must hold at
 It ranks here because "a graph, not a bag — recall can walk them" is a
 `VISION.md` criterion, and the walk still changes almost no outcome.
 
-### 5. In-memory mode drops entities with no spill `[lifecycle]`
-
-The spill-before-drop guarantee holds only for a persisted kern. With no store
-bound, `cold_spill` is skipped and the victim is removed —
-`src/tick/stigmergy.rs:63-66`, `None => true`, commented "No cold store bound:
-dropping IS the intended memory bound". Intentional in code, undocumented in
-`README.md:37-38`, which states the guarantee unqualified.
-
 ### 8. `kern intake` — no way to see or drive the intake `[ingest]`
 
 Nothing reports what is pending, what failed, or why; failures surface only as
@@ -1035,6 +1027,11 @@ Numbers are stable identifiers, retired on close — a closed item leaves its
 number behind rather than compacting the list, because items cite each other by
 number ("blocked on item 13") and renumbering would silently repoint them.
 
+- **In-memory drops are documented and counted** — was item 5. Spill-before-drop
+  is a guarantee of a persisted kern; with no store bound there is nowhere to spill
+  to, so the victim is dropped outright. Intended, now stated in `README.md` and
+  carried by `unspilled_drops` on all three health surfaces, so an in-memory
+  deployment cannot read as a durable one.
 - **Every fail-open path is counted** — was item 7. Dead embed endpoint, clock
   skew stalling GC, the `min_deliver_score` bypass and the 50k remote ceiling each
   carry a counter, a throttled log and a health field on MCP, RPC and `kern health`

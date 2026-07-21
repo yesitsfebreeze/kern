@@ -93,6 +93,7 @@ impl KernRpc for KernRpcHandler {
 				clock_skew_skips: u64_at("clock_skew_skips"),
 				ingest_dropped_chunks: u64_at("ingest_dropped_chunks"),
 				remote_cap_dropped: u64_at("remote_cap_dropped"),
+				unspilled_drops: u64_at("unspilled_drops"),
 				embed_model: str_at("embed_model"),
 				embed_dim: u64_at("embed_dim"),
 				embed_mismatch: payload

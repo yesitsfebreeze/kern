@@ -27,6 +27,10 @@ pub struct HealthStats {
 	pub ingest_dropped_chunks: u64,
 	// New remote ids refused because their phantom kern is at the entity cap.
 	pub remote_cap_dropped: u64,
+	// Entities dropped with no cold store bound. Spill-before-drop does not hold
+	// for an in-memory kern; this is how far that deployment has diverged from a
+	// durable one.
+	pub unspilled_drops: u64,
 }
 
 pub fn graph_health_stats(g: &GraphGnn) -> HealthStats {
@@ -70,6 +74,7 @@ pub fn graph_health_stats(g: &GraphGnn) -> HealthStats {
 		clock_skew_skips: crate::tick::stigmergy::clock_skew_skips(),
 		ingest_dropped_chunks: crate::ingest::worker::ingest_dropped_chunks(),
 		remote_cap_dropped: crate::base::merge::remote_cap_dropped(),
+		unspilled_drops: crate::tick::stigmergy::unspilled_drops(),
 	}
 }
 

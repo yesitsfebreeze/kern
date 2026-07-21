@@ -2,6 +2,20 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — Roadmap item 5: an in-memory kern no longer reads as a durable
+  one. Spill-before-drop holds only while a store is bound — with none, `cold_spill`
+  is skipped and the victim is removed, which is the intended memory bound and not
+  a bug, but `README.md` stated the guarantee unconditionally and nothing counted
+  the loss. Both fixed: the README says which deployment the guarantee covers, and
+  `unspilled_drops` joins the other degradation counters on MCP, the RPC DTO and
+  `kern health`.
+
+  Same standard as item 7, and the first draft of its test failed it: the test
+  passed a closure of its own into `evict_victims` and asserted that closure ran,
+  proving nothing about production. It now drives the real `run_gc`.
+
+  **Decided by:** verify-before-claiming.
+
 - 2026-07-21 — Roadmap items 7, 13, 14, 15 and 17: the fail-open paths are
   countable, an unauthenticated peer can no longer reach a local row, and an
   expired claim stops ranking.

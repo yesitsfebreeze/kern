@@ -39,8 +39,10 @@ MCP ingest ─────────────────────► ty
   eventually age out. Rows pushed out past that cap are counted and reported by
   `health` (`src/base/store.rs:752`), so the tail's loss rate is observable
   rather than silent. Spill-before-drop needs a store: with no store bound
-  (in-memory mode) the victim is dropped outright (`src/tick/stigmergy.rs:63`) —
-  dropping *is* the intended memory bound there. Similar thoughts cluster into
+  (in-memory mode) the victim is dropped outright (`src/tick/stigmergy.rs`) —
+  dropping *is* the intended memory bound there, and it is counted too, so an
+  in-memory deployment cannot quietly read as a durable one (`unspilled_drops`
+  on `health`). Similar thoughts cluster into
   child kerns. The hot graph stays small; the long tail stays cheap.
 
 - **Remembers across time.** Knowledge carries a bi-temporal window. When a new

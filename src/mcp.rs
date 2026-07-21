@@ -142,6 +142,7 @@ impl Server {
 			"clock_skew_skips": h.clock_skew_skips,
 			"ingest_dropped_chunks": h.ingest_dropped_chunks,
 			"remote_cap_dropped": h.remote_cap_dropped,
+			"unspilled_drops": h.unspilled_drops,
 		})
 	}
 }
@@ -380,6 +381,7 @@ mod tests {
 			"clock_skew_skips",
 			"ingest_dropped_chunks",
 			"remote_cap_dropped",
+			"unspilled_drops",
 		] {
 			assert!(!h[key].is_null(), "{key} must reach the MCP surface");
 		}
