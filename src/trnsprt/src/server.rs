@@ -90,7 +90,7 @@ pub(crate) fn dispatch(server: &dyn McpServer, frame: &Value) -> Option<Value> {
 			});
 			id.map(|id| ok_response(id, reply))
 		}
-		"notifications/initialized" | "initialized" => None,
+		"notifications/initialized" => None,
 		"tools/list" => {
 			if is_notification {
 				return None;

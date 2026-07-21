@@ -13,7 +13,6 @@ pub struct DirectJob {
 	pub text: String,
 	pub source: Source,
 	pub kind: EntityKind,
-	#[serde(alias = "descriptor")]
 	pub hint: String,
 	pub confidence: f64,
 }

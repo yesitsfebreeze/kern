@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-// repr(u8) values are on-wire: append variants, never renumber.
+// serde/bincode encode the declaration index, so variant ORDER is on-wire;
+// reordering is a breaking wire change (alpha: peers upgrade together).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum GossipKind {
@@ -37,8 +38,6 @@ pub enum GossipPayload {
 pub struct SpherePayload {
 	pub network_id: String,
 	pub kern_id: String,
-	// Serialized as Vec<f64> to keep the wire format stable.
-	#[serde(with = "crate::base::util::vec_f64_compat")]
 	pub graviton_vec: Vec<f32>,
 	pub graviton_text: String,
 	pub entity_id: String,
@@ -51,8 +50,6 @@ pub struct SpherePayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuestionPayload {
 	pub reason_id: String,
-	pub from_id: String,
-	#[serde(with = "crate::base::util::vec_f64_compat")]
 	pub reason_vec: Vec<f32>,
 	pub question_text: String,
 }
@@ -120,14 +117,10 @@ pub struct CrdtDeltaPayload {
 	pub target: CrdtTarget,
 	pub replica: String,
 	pub value: u64,
-	#[serde(default)]
 	pub lamport: u64,
-	#[serde(default)]
 	pub producer: String,
 	// Encoded LWW value for ReasonScore / ValidUntil (bincode of the f64 / Option<SystemTime>).
-	#[serde(default)]
 	pub lww_value: Vec<u8>,
 	// Encoded OR-Set delta for Statements (bincode of Vec<String> adds).
-	#[serde(default)]
 	pub orset_delta: Vec<u8>,
 }

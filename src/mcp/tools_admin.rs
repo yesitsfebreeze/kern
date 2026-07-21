@@ -37,11 +37,11 @@ pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 		}),
 		serde_json::json!({
 			"name": "graviton",
-			"description": "Manage gravitons: multiple named focus attractors (replacing the old single 'purpose') that queries and ingest gravitate toward. Routing uses effective distance = cosine distance / mass, so heavier gravitons pull harder; non-matches fall through to `generic`. action=list (default) returns gravitons with mass; action=add needs name+text and takes optional mass (default 1.0); action=remove needs name.",
+			"description": "Manage gravitons: multiple named focus attractors that queries and ingest gravitate toward. Routing uses effective distance = cosine distance / mass, so heavier gravitons pull harder; non-matches fall through to `generic`. action=list (default) returns gravitons with mass; action=add needs name+text and takes optional mass (default 1.0); action=remove needs name.",
 			"inputSchema": {
 				"type": "object",
 				"properties": {
-					"action": {"type": "string", "enum": ["list", "add", "remove"], "description": "list (default) | add | remove"},
+					"action": {"type": "string", "enum": ["list", "add", "remove", "rm"], "description": "list (default) | add | remove"},
 					"name": {"type": "string", "description": "graviton name (required for add/remove)"},
 					"text": {"type": "string", "description": "seed text embedded into the routing vector (required for add) — a phrase, a full document, or a whole message all work"},
 					"mass": {"type": "number", "description": "gravitational mass (default 1.0); heavier pulls harder"},

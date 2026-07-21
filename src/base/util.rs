@@ -1,24 +1,5 @@
 use sha2::{Digest, Sha256};
 
-// Keeps in-memory Vec<f32> byte-identical to the legacy Vec<f64> wire shape:
-// write widens f32→f64, read narrows f64→f32. Changing this desyncs every store.
-pub mod vec_f64_compat {
-	use serde::{Deserialize, Deserializer, Serializer};
-
-	pub fn serialize<S: Serializer>(v: &[f32], s: S) -> Result<S::Ok, S::Error> {
-		s.collect_seq(v.iter().map(|&x| x as f64))
-	}
-
-	pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<f32>, D::Error> {
-		Ok(
-			Vec::<f64>::deserialize(d)?
-				.into_iter()
-				.map(|x| x as f32)
-				.collect(),
-		)
-	}
-}
-
 pub fn content_hash(s: &str) -> String {
 	let hash = Sha256::digest(s.as_bytes());
 	hex::encode(hash)
@@ -235,80 +216,5 @@ mod tests {
 	#[test]
 	fn now_nanos_is_after_epoch() {
 		assert!(now_nanos() > 0);
-	}
-}
-
-#[cfg(test)]
-mod vec_f64_compat_tests {
-	use serde::{Deserialize, Serialize};
-
-	#[derive(Serialize, Deserialize, PartialEq, Debug)]
-	struct Legacy {
-		name: String,
-		v: Vec<f64>,
-		tail: u32,
-	}
-
-	#[derive(Serialize, Deserialize, PartialEq, Debug)]
-	struct Current {
-		name: String,
-		#[serde(with = "super::vec_f64_compat")]
-		v: Vec<f32>,
-		tail: u32,
-	}
-
-	fn cfg() -> impl bincode::config::Config {
-		bincode::config::standard()
-	}
-
-	#[test]
-	fn shimmed_f32_encodes_byte_identically_to_legacy_f64() {
-		let legacy = Legacy {
-			name: "e".into(),
-			v: vec![0.5, -1.25, 3.0],
-			tail: 7,
-		};
-		let current = Current {
-			name: "e".into(),
-			v: vec![0.5, -1.25, 3.0],
-			tail: 7,
-		};
-		let lb = bincode::serde::encode_to_vec(&legacy, cfg()).unwrap();
-		let cb = bincode::serde::encode_to_vec(&current, cfg()).unwrap();
-		assert_eq!(
-			lb, cb,
-			"wire bytes must match the legacy f64 layout exactly"
-		);
-	}
-
-	#[test]
-	fn legacy_f64_bytes_decode_into_f32_with_following_fields_intact() {
-		let legacy = Legacy {
-			name: "old-row".into(),
-			v: vec![0.1, -0.2, 0.3],
-			tail: 42,
-		};
-		let bytes = bincode::serde::encode_to_vec(&legacy, cfg()).unwrap();
-		let (cur, _): (Current, _) = bincode::serde::decode_from_slice(&bytes, cfg()).unwrap();
-		assert_eq!(cur.name, "old-row");
-		assert_eq!(
-			cur.tail, 42,
-			"field after the vector decodes at the right offset"
-		);
-		for (got, want) in cur.v.iter().zip([0.1f32, -0.2, 0.3]) {
-			assert!((got - want).abs() < 1e-7, "{got} vs {want}");
-		}
-	}
-
-	#[test]
-	fn f32_round_trip_is_lossless() {
-		let current = Current {
-			name: "rt".into(),
-			v: vec![0.1f32, f32::MIN_POSITIVE, 12345.678, -0.0, 1.0e-30],
-			tail: 0,
-		};
-		let bytes = bincode::serde::encode_to_vec(&current, cfg()).unwrap();
-		let (back, _): (Current, _) = bincode::serde::decode_from_slice(&bytes, cfg()).unwrap();
-		assert_eq!(back, current);
 	}
 }

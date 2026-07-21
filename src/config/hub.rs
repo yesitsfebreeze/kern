@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub struct HubConfig {
 	// `kern mcp` spawns a detached machine-level hub when none answers, same as
 	// it already auto-spawns a project daemon. false = hub is opt-in via
-	// `kern hub`; the legacy direct-connect path still works either way.
+	// `kern hub`; the direct-connect fallback works either way.
 	pub auto_start: bool,
 	// A client attaching to a daemon built from a different binary, or booted
 	// against a different config, restarts it before proxying. Without this a

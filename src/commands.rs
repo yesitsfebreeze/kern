@@ -172,9 +172,6 @@ pub enum Commands {
 		#[arg(long)]
 		out: Option<String>,
 	},
-	Migrate {
-		path: Option<String>,
-	},
 	Daemon,
 	Hub {
 		#[command(subcommand)]
@@ -532,16 +529,6 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 		Commands::Unnamed { action } => admin::cmd_unnamed(cfg, action),
 		Commands::Mcp => mcp_cmd::cmd_mcp(cfg).await,
 		Commands::Compress { src, mode, out } => admin::cmd_compress(&src, &mode, out.as_deref()),
-		Commands::Migrate { path } => {
-			let dir = path.unwrap_or_else(|| cfg.data_dir.clone());
-			match crate::base::migrate::migrate_dir(&dir) {
-				Ok(r) => println!(
-					"migrated {} kerns ({} entities) → {dir}/data.mdb (old .kern files left in place)",
-					r.kerns, r.entities
-				),
-				Err(e) => eprintln!("migrate: {e}"),
-			}
-		}
 		Commands::Daemon => {
 			// main.rs intercepts Daemon first; this arm is kept as a fallthrough.
 			run_server(&Cli::daemon(), cfg).await;
@@ -607,9 +594,9 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 		Arc::new(parking_lot::RwLock::new(None));
 	let bq_slot = shared_bq.clone();
 	let broadcast_q_wrapper: crate::tick::tasks::BroadcastQuestionFunc =
-		Arc::new(move |rid, from, vec, text| {
+		Arc::new(move |rid, vec, text| {
 			if let Some(f) = bq_slot.read().as_ref() {
-				f(rid, from, vec, text);
+				f(rid, vec, text);
 			}
 		});
 	let entry = registry.open(
@@ -981,7 +968,7 @@ async fn start_gossip(
 			});
 			let q_node = node.clone();
 			let broadcast_q: crate::tick::tasks::BroadcastQuestionFunc =
-				Arc::new(move |rid: &str, from_id: &str, rvec: &[f32], rtext: &str| {
+				Arc::new(move |rid: &str, rvec: &[f32], rtext: &str| {
 					let stamp = crate::base::util::now_nanos();
 					let msg = crate::gossip::types::GossipMessage {
 						kind: crate::gossip::types::GossipKind::Question,
@@ -990,7 +977,6 @@ async fn start_gossip(
 						payload: crate::gossip::types::GossipPayload::Question(
 							crate::gossip::types::QuestionPayload {
 								reason_id: rid.to_string(),
-								from_id: from_id.to_string(),
 								reason_vec: rvec.to_vec(),
 								question_text: rtext.to_string(),
 							},

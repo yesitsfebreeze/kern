@@ -10,7 +10,7 @@ use super::load_graph;
 
 pub(super) async fn cmd_mcp(cfg: &crate::config::Config) {
 	// Hub-first: a running hub owns node lifecycle (spawn, adopt, unload) so the
-	// proxy never self-spawns a daemon the hub can't see. No hub -> legacy path.
+	// proxy never self-spawns a daemon the hub can't see. No hub -> direct path.
 	let log_dir = cfg.log_dir();
 	if let Some(client) = attach_via_hub(cfg.hub.auto_start, &log_dir).await {
 		let client = replace_if_stale(client, cfg, &log_dir, true).await;
@@ -177,7 +177,7 @@ async fn attach_via_hub(
 			// Same detach pattern as spawn_daemon; a lost race lands on
 			// AlreadyRunning in the second hub and the retry below still connects.
 			if let Err(e) = spawn_hub(log_dir) {
-				tracing::warn!(target: "kern.mcp", error = %e, "hub auto-start failed — legacy path");
+				tracing::warn!(target: "kern.mcp", error = %e, "hub auto-start failed — direct path");
 				return None;
 			}
 			let mut connected = None;
@@ -194,7 +194,7 @@ async fn attach_via_hub(
 					h
 				}
 				None => {
-					tracing::warn!(target: "kern.mcp", "auto-started hub never answered — legacy path");
+					tracing::warn!(target: "kern.mcp", "auto-started hub never answered — direct path");
 					return None;
 				}
 			}
@@ -210,7 +210,7 @@ async fn attach_via_hub(
 		.await
 		.ok()?;
 	if !res.ok {
-		tracing::warn!(target: "kern.mcp", error = %res.err, "hub resolve failed — legacy path");
+		tracing::warn!(target: "kern.mcp", error = %res.err, "hub resolve failed — direct path");
 		return None;
 	}
 	let endpoint = trnsprt::typed::Endpoint::parse(&res.endpoint);

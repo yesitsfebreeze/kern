@@ -23,24 +23,15 @@ const KERN_DB: &str = "kern";
 const COLD_DB: &str = "cold";
 const META_DB: &str = "meta";
 const META_KEY: &str = "graph";
-// Own meta key (not in GraphMeta) so pre-epoch stores read 0.
+// Own meta key (not in GraphMeta) so a store with no epoch row reads 0.
 const EPOCH_KEY: &str = "epoch";
 // Own meta key so an unstamped store is "unknown", never a mismatch.
 const EMBED_KEY: &str = "embed";
 
-// Version byte prepended ahead of the zstd frame so an old reader rejects a newer
-// value instead of mis-decoding it.
-const FORMAT_V1: u8 = 1;
-// V2 appends StoredKern::temporal; the embedded Kern/Entity layout is unchanged,
-// so V1 decodes via StoredKernV1.
-const FORMAT_V2: u8 = 2;
-// V3 appends Kern::mass; the pre-mass embedded layout decodes via KernPreMass.
-const FORMAT_V3: u8 = 3;
-// V4 is COLD-tier only: the value is a ColdRow, not a bare Entity. Cold rows at
-// any earlier version are pre-temporal bare Entities — identified by the version
-// byte, never by a failed parse (ColdRow is Entity ++ StoredTemporal, so a
-// truncated ColdRow parses cleanly as an Entity and loses its stamps in silence).
-const FORMAT_V4: u8 = 4;
+// Version byte prepended ahead of the zstd frame so a reader rejects any other
+// format instead of mis-decoding it. Alpha: exactly one version is ever
+// decodable — a mismatch is a clean BadVersion, never a migration.
+const FORMAT_V5: u8 = 5;
 const ZSTD_LEVEL: i32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,41 +77,23 @@ fn encode_at<T: Serialize>(ver: u8, v: &T) -> Result<Vec<u8>, StoreError> {
 }
 
 fn encode<T: Serialize>(v: &T) -> Result<Vec<u8>, StoreError> {
-	encode_at(FORMAT_V3, v)
+	encode_at(FORMAT_V5, v)
 }
 
 fn strip_version(bytes: &[u8]) -> Result<(u8, Vec<u8>), StoreError> {
 	let (&ver, body) = bytes.split_first().ok_or(StoreError::BadVersion(0))?;
-	if !(FORMAT_V1..=FORMAT_V4).contains(&ver) {
+	if ver != FORMAT_V5 {
 		return Err(StoreError::BadVersion(ver));
 	}
 	Ok((ver, zstd::decode_all(body)?))
 }
 
-// For values whose layout is identical across V1/V2; StoredKern must use
-// decode_stored_kern instead.
 fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, StoreError> {
 	let (_ver, raw) = strip_version(bytes)?;
 	let (v, _) = bincode::serde::decode_from_slice(&raw, bincode_cfg())?;
 	Ok(v)
 }
 
-fn decode_stored_kern(bytes: &[u8]) -> Result<StoredKern, StoreError> {
-	let (ver, raw) = strip_version(bytes)?;
-	match ver {
-		FORMAT_V3 => Ok(bincode::serde::decode_from_slice(&raw, bincode_cfg())?.0),
-		FORMAT_V2 => {
-			let (v2, _): (StoredKernV2, _) = bincode::serde::decode_from_slice(&raw, bincode_cfg())?;
-			Ok(v2.into())
-		}
-		FORMAT_V1 => {
-			let (v1, _): (StoredKernV1, _) = bincode::serde::decode_from_slice(&raw, bincode_cfg())?;
-			Ok(v1.into())
-		}
-		// V4 is a cold-tier shape; a kern value never carries it.
-		_ => Err(StoreError::BadVersion(ver)),
-	}
-}
 
 // Do NOT persist QuantizedVec directly — its skip_serializing_if desyncs
 // positional bincode. Every field here is always present.
@@ -197,23 +170,15 @@ impl ColdRow {
 }
 
 fn encode_cold(row: &ColdRow) -> Result<Vec<u8>, StoreError> {
-	encode_at(FORMAT_V4, row)
+	encode_at(FORMAT_V5, row)
 }
 
-// Version-dispatched, never parse-sniffed: below V4 the value predates ColdRow
-// and is a bare Entity. A decode failure here is real corruption and must reach
-// scan_with's warning instead of being swallowed by a fallback that succeeds.
+// A decode failure here is real corruption and must reach scan_with's warning
+// instead of being swallowed by a fallback that succeeds.
 fn decode_cold(bytes: &[u8]) -> Result<ColdRow, StoreError> {
-	let (ver, raw) = strip_version(bytes)?;
-	if ver == FORMAT_V4 {
-		let (row, _) = bincode::serde::decode_from_slice::<ColdRow, _>(&raw, bincode_cfg())?;
-		return Ok(row);
-	}
-	let (entity, _) = bincode::serde::decode_from_slice::<Entity, _>(&raw, bincode_cfg())?;
-	Ok(ColdRow {
-		entity,
-		temporal: StoredTemporal::default(),
-	})
+	let (_ver, raw) = strip_version(bytes)?;
+	let (row, _) = bincode::serde::decode_from_slice::<ColdRow, _>(&raw, bincode_cfg())?;
+	Ok(row)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -221,7 +186,6 @@ pub struct StoredKern {
 	pub kern: Kern,
 	pub entity_vecs: HashMap<String, StoredVec>,
 	pub reason_vecs: HashMap<String, StoredVec>,
-	// Appended field — new in FORMAT_V2.
 	pub temporal: HashMap<String, StoredTemporal>,
 }
 
@@ -276,45 +240,6 @@ impl StoredKern {
 	}
 }
 
-// FORMAT_V2 mirror: pre-mass Kern with the temporal side-map.
-#[derive(Serialize, Deserialize)]
-struct StoredKernV2 {
-	kern: crate::base::types::KernPreMass,
-	entity_vecs: HashMap<String, StoredVec>,
-	reason_vecs: HashMap<String, StoredVec>,
-	temporal: HashMap<String, StoredTemporal>,
-}
-
-impl From<StoredKernV2> for StoredKern {
-	fn from(v2: StoredKernV2) -> Self {
-		StoredKern {
-			kern: v2.kern.into(),
-			entity_vecs: v2.entity_vecs,
-			reason_vecs: v2.reason_vecs,
-			temporal: v2.temporal,
-		}
-	}
-}
-
-// FORMAT_V1 mirror without the temporal side-map; the embedded entity bytes are
-// identical across versions.
-#[derive(Serialize, Deserialize)]
-struct StoredKernV1 {
-	kern: crate::base::types::KernPreMass,
-	entity_vecs: HashMap<String, StoredVec>,
-	reason_vecs: HashMap<String, StoredVec>,
-}
-
-impl From<StoredKernV1> for StoredKern {
-	fn from(v1: StoredKernV1) -> Self {
-		StoredKern {
-			kern: v1.kern.into(),
-			entity_vecs: v1.entity_vecs,
-			reason_vecs: v1.reason_vecs,
-			temporal: HashMap::new(),
-		}
-	}
-}
 
 // Identity of the model that produced the stored vectors. A query embedded by a
 // different model scores as noise against them — cosine truncates to the shorter
@@ -637,7 +562,7 @@ impl Store {
 	pub fn load_all_kerns(
 		&self,
 	) -> Result<(HashMap<String, Kern>, String, QuantizationMode), StoreError> {
-		let stored: Vec<(String, StoredKern)> = self.scan_with(self.kern, decode_stored_kern)?;
+		let stored: Vec<(String, StoredKern)> = self.scan_with(self.kern, decode::<StoredKern>)?;
 		let mut kerns = HashMap::with_capacity(stored.len());
 		for (id, sk) in stored {
 			kerns.insert(id, sk.into_kern());
@@ -656,7 +581,7 @@ impl Store {
 	pub fn load_one_kern(&self, id: &str) -> Result<Option<Kern>, StoreError> {
 		Ok(
 			self
-				.get_with(self.kern, id, decode_stored_kern)?
+				.get_with(self.kern, id, decode::<StoredKern>)?
 				.map(StoredKern::into_kern),
 		)
 	}
@@ -897,29 +822,23 @@ mod tests {
 		})
 		.unwrap();
 		assert_eq!(
-			bytes[0], FORMAT_V3,
+			bytes[0], FORMAT_V5,
 			"first byte is the current write version"
 		);
 	}
 
 	#[test]
-	fn decode_accepts_both_v1_and_v2_for_layout_invariant_values() {
+	fn decode_rejects_older_version_bytes() {
 		let mut bytes = encode(&Sample {
 			name: "x".into(),
 			nums: vec![1.0],
 		})
 		.unwrap();
-		let want = Sample {
-			name: "x".into(),
-			nums: vec![1.0],
-		};
-		assert_eq!(decode::<Sample>(&bytes).unwrap(), want, "V2 decodes");
-		bytes[0] = FORMAT_V1;
-		assert_eq!(
-			decode::<Sample>(&bytes).unwrap(),
-			want,
-			"V1 tag still decodes"
-		);
+		bytes[0] = FORMAT_V5 - 1;
+		match decode::<Sample>(&bytes) {
+			Err(StoreError::BadVersion(v)) => assert_eq!(v, FORMAT_V5 - 1),
+			other => panic!("expected BadVersion, got {other:?}"),
+		}
 	}
 
 	#[test]
@@ -1048,7 +967,7 @@ mod tests {
 	}
 
 	#[test]
-	fn stored_kern_v2_roundtrips_temporal_stamps() {
+	fn stored_kern_roundtrips_temporal_stamps() {
 		let t0 = UNIX_EPOCH + Duration::from_secs(1000);
 		let t1 = UNIX_EPOCH + Duration::from_secs(2000);
 		let mut e = mk_entity("e1", "a claim", 1.0, EntityKind::Claim);
@@ -1059,71 +978,12 @@ mod tests {
 		let k = kern_with("k", e);
 
 		let bytes = encode(&StoredKern::from_kern(&k)).unwrap();
-		assert_eq!(bytes[0], FORMAT_V3, "kern rows are written as V3");
-		let back = decode_stored_kern(&bytes).unwrap().into_kern();
+		assert_eq!(bytes[0], FORMAT_V5, "kern rows carry the live version");
+		let back = decode::<StoredKern>(&bytes).unwrap().into_kern();
 		let be = &back.entities["e1"];
 		assert_eq!(be.valid_from, Some(t0), "valid_from survives");
 		assert_eq!(be.valid_to, Some(t1), "valid_to survives");
 		assert_eq!(be.invalidated_at, Some(t1), "invalidated_at survives");
-	}
-
-	#[test]
-	fn stored_kern_v1_blob_decodes_with_none_temporal() {
-		let mut e = mk_entity("e1", "old claim", 1.0, EntityKind::Fact);
-		e.vector = vec![0.3, 0.4];
-		let k = kern_with("k", e);
-
-		let sk = StoredKern::from_kern(&k);
-		let v1 = StoredKernV1 {
-			kern: sk.kern.into(),
-			entity_vecs: sk.entity_vecs,
-			reason_vecs: sk.reason_vecs,
-		};
-		let raw = bincode::serde::encode_to_vec(&v1, bincode_cfg()).unwrap();
-		let comp = zstd::encode_all(raw.as_slice(), ZSTD_LEVEL).unwrap();
-		let mut bytes = vec![FORMAT_V1];
-		bytes.extend_from_slice(&comp);
-
-		let back = decode_stored_kern(&bytes).unwrap().into_kern();
-		let be = &back.entities["e1"];
-		assert_eq!(
-			be.text(),
-			"old claim",
-			"entity content intact across V1 decode"
-		);
-		assert!((be.vector[0] - 0.3).abs() < 0.02, "vector recovered");
-		assert_eq!(be.valid_from, None, "V1 entity has no valid_from");
-		assert_eq!(be.valid_to, None, "V1 entity has no valid_to");
-		assert_eq!(be.invalidated_at, None, "V1 entity is not invalidated");
-	}
-
-	#[test]
-	fn v1_kern_row_loads_through_the_store_not_skipped() {
-		let d = tmp();
-		let s = Store::open(&dir_of(&d)).unwrap();
-		let k = kern_with("k", mk_entity("e1", "legacy", 1.0, EntityKind::Claim));
-		let sk = StoredKern::from_kern(&k);
-		let v1 = StoredKernV1 {
-			kern: sk.kern.into(),
-			entity_vecs: sk.entity_vecs,
-			reason_vecs: sk.reason_vecs,
-		};
-		let raw = bincode::serde::encode_to_vec(&v1, bincode_cfg()).unwrap();
-		let comp = zstd::encode_all(raw.as_slice(), ZSTD_LEVEL).unwrap();
-		let mut bytes = vec![FORMAT_V1];
-		bytes.extend_from_slice(&comp);
-		{
-			let mut wtxn = s.env.write_txn().unwrap();
-			s.kern.put(&mut wtxn, "k", bytes.as_slice()).unwrap();
-			wtxn.commit().unwrap();
-		}
-
-		let (loaded, _, _) = s.load_all_kerns().unwrap();
-		assert!(
-			loaded.contains_key("k"),
-			"V1 row loaded, not skipped as corrupt"
-		);
-		assert_eq!(loaded["k"].entities["e1"].text(), "legacy");
 	}
 
 	#[test]
@@ -1437,34 +1297,15 @@ mod tests {
 	}
 
 	#[test]
-	fn legacy_bare_entity_cold_row_still_decodes() {
-		let d = tmp();
-		let s = Store::open(&dir_of(&d)).unwrap();
-		let mut e = mk_entity("old", "pre-temporal", 0.0, EntityKind::Claim);
-		e.vector = vec![1.0, 0.0];
-		{
-			let bytes = encode(&e).unwrap();
-			let mut wtxn = s.env.write_txn().unwrap();
-			s.cold.put(&mut wtxn, "old", bytes.as_slice()).unwrap();
-			wtxn.commit().unwrap();
-		}
-
-		let got = s.cold_get("old").unwrap().expect("legacy row decodes");
-		assert_eq!(got.text(), "pre-temporal");
-		assert_eq!(got.valid_from, None, "legacy row has no stamps");
-		assert_eq!(s.cold_search(&[1.0, 0.0], 1).unwrap().len(), 1);
-	}
-
-	#[test]
-	fn a_current_version_cold_row_is_never_decoded_as_a_stampless_entity() {
+	fn a_cold_row_missing_its_tail_is_never_decoded_as_a_stampless_entity() {
 		let d = tmp();
 		let s = Store::open(&dir_of(&d)).unwrap();
 		let mut e = mk_entity("trunc", "lost its tail", 0.0, EntityKind::Claim);
 		e.valid_from = Some(UNIX_EPOCH + Duration::from_secs(10));
-		// A V4 value whose ColdRow tail is missing: the old parse-sniffing decoder
-		// fell back to a bare Entity and returned all three stamps as None.
+		// A current-version value whose ColdRow tail is missing: a bare Entity
+		// parses cleanly as a ColdRow prefix, so only a strict decode catches it.
 		{
-			let bytes = encode_at(FORMAT_V4, &e).unwrap();
+			let bytes = encode_at(FORMAT_V5, &e).unwrap();
 			let mut wtxn = s.env.write_txn().unwrap();
 			s.cold.put(&mut wtxn, "trunc", bytes.as_slice()).unwrap();
 			wtxn.commit().unwrap();
@@ -1555,7 +1396,7 @@ mod tests {
 	fn an_unstamped_store_adopts_the_current_embed_model() {
 		let d = tmp();
 		let s = Store::open(&dir_of(&d)).unwrap();
-		assert_eq!(s.embed_stamp(), None, "a legacy store carries no stamp");
+		assert_eq!(s.embed_stamp(), None, "an unstamped store reads None");
 		assert_eq!(
 			s.check_embed_stamp(&stamp("qwen3", 1024)).unwrap(),
 			EmbedCheck::Adopted,

@@ -10,7 +10,6 @@ pub mod lexical;
 pub mod log_throttle;
 pub mod math;
 pub mod merge;
-pub mod migrate;
 pub mod persist;
 pub mod reason;
 pub mod search;

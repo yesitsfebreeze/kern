@@ -1,144 +1,8 @@
-use super::graph::{migrate_root_id, GraphGnn};
-use super::store::bincode_cfg;
+use super::graph::GraphGnn;
 use super::types::Kern;
 use super::util;
 use crate::quant::QuantizationMode;
-use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::ffi::OsStr;
-use std::fs;
-#[cfg(test)]
-use std::io::Write;
-use std::path::{Path, PathBuf};
-
-#[derive(Debug, thiserror::Error)]
-pub enum PersistError {
-	#[error("io: {0}")]
-	Io(#[from] std::io::Error),
-	#[error("bincode encode: {0}")]
-	BincodeEncode(#[from] bincode::error::EncodeError),
-	#[error("bincode decode: {0}")]
-	BincodeDecode(#[from] bincode::error::DecodeError),
-	#[error("missing node: {0}")]
-	MissingNode(String),
-	#[error("atomic rename {tmp:?} -> {dst:?}: {source}")]
-	TmpRename {
-		tmp: PathBuf,
-		dst: PathBuf,
-		#[source]
-		source: std::io::Error,
-	},
-}
-
-#[cfg(test)]
-fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
-	let mut p = path.as_os_str().to_owned();
-	p.push(suffix);
-	PathBuf::from(p)
-}
-
-// Same dir (same volume) so rename is atomic on both Windows and Unix.
-#[cfg(test)]
-fn tmp_path(path: &Path) -> PathBuf {
-	append_suffix(path, ".tmp")
-}
-
-// fsync before rename: the crash-atomicity guarantee.
-#[cfg(test)]
-fn atomic_write(path: &Path, data: &[u8]) -> Result<(), PersistError> {
-	let tmp = tmp_path(path);
-	{
-		let mut f = fs::File::create(&tmp)?;
-		f.write_all(data)?;
-		f.sync_all()?;
-	}
-	if let Err(source) = fs::rename(&tmp, path) {
-		let _ = fs::remove_file(&tmp);
-		return Err(PersistError::TmpRename {
-			tmp,
-			dst: path.to_path_buf(),
-			source,
-		});
-	}
-	Ok(())
-}
-
-fn sweep_stale_tmp(dir: &Path) {
-	let entries = match fs::read_dir(dir) {
-		Ok(e) => e,
-		Err(_) => return,
-	};
-	for entry in entries.flatten() {
-		let path = entry.path();
-		if path.extension() == Some(OsStr::new("tmp")) {
-			tracing::warn!(
-				target: "kern::persist",
-				tmp = %path.display(),
-				"removing stale .tmp file from incomplete prior write"
-			);
-			let _ = fs::remove_file(&path);
-		}
-	}
-}
-
-#[derive(Serialize, Deserialize)]
-struct QuantMeta {
-	mode: QuantizationMode,
-}
-
-fn quant_dir_sidecar(dir: &str) -> PathBuf {
-	Path::new(dir).join("_quant.meta")
-}
-
-fn read_quant_mode(sidecar: &Path) -> QuantizationMode {
-	let data = match fs::read(sidecar) {
-		Ok(d) => d,
-		Err(_) => return QuantizationMode::None,
-	};
-	bincode::serde::decode_from_slice::<QuantMeta, _>(&data, bincode_cfg())
-		.map(|(m, _)| m.mode)
-		.unwrap_or(QuantizationMode::None)
-}
-
-#[cfg(test)]
-pub fn save_kern(dir: &str, kern: &Kern) -> Result<(), PersistError> {
-	let path = Path::new(dir).join(format!("{}.kern", kern.id));
-	let data = bincode::serde::encode_to_vec(kern, bincode_cfg())?;
-	atomic_write(&path, &data)?;
-	Ok(())
-}
-
-// Unversioned file shards: current shape first, pre-mass fallback — bincode
-// never fills serde(default) on missing trailing bytes.
-pub fn load_kern(dir: &str, id: &str) -> Result<Kern, PersistError> {
-	let path = Path::new(dir).join(format!("{id}.kern"));
-	let data = fs::read(path)?;
-	let mut kern = match bincode::serde::decode_from_slice::<Kern, _>(&data, bincode_cfg()) {
-		Ok((k, _)) => k,
-		Err(e) => {
-			match bincode::serde::decode_from_slice::<crate::base::types::KernPreMass, _>(
-				&data,
-				bincode_cfg(),
-			) {
-				Ok((old, _)) => old.into(),
-				Err(_) => return Err(e.into()),
-			}
-		}
-	};
-	backfill_created_at(&mut kern);
-	Ok(kern)
-}
-
-// Backfills pre-field shards.
-fn backfill_created_at(kern: &mut Kern) {
-	let now = std::time::SystemTime::now();
-	for t in kern.entities.values_mut() {
-		if t.created_at.is_none() {
-			t.created_at = Some(now);
-		}
-	}
-}
 
 pub fn load_dir(dir: &str) -> Result<GraphGnn, crate::base::store::StoreError> {
 	use crate::base::store::Store;
@@ -160,7 +24,7 @@ fn graph_from_store(
 	store: std::sync::Arc<crate::base::store::Store>,
 	dir: &str,
 ) -> Result<GraphGnn, crate::base::store::StoreError> {
-	let (mut kerns, mut network_id, quant_mode) = store.load_all_kerns()?;
+	let (kerns, mut network_id, quant_mode) = store.load_all_kerns()?;
 	if network_id.is_empty() {
 		network_id = util::uuid_v4();
 	}
@@ -182,10 +46,6 @@ fn graph_from_store(
 		return Ok(g);
 	}
 
-	for k in kerns.values_mut() {
-		migrate_root_id(k, &network_id);
-		backfill_created_at(k);
-	}
 	let root = kerns
 		.get("root")
 		.cloned()
@@ -200,76 +60,6 @@ fn graph_from_store(
 	);
 	g.set_store(store);
 	g.set_flushed_epoch(loaded_epoch);
-	Ok(g)
-}
-
-pub fn load_legacy_dir(dir: &str) -> Result<GraphGnn, PersistError> {
-	sweep_stale_tmp(Path::new(dir));
-	let mut root = load_kern(dir, "root")?;
-	let mut network_id = load_network_id(dir);
-	if network_id.is_empty() {
-		network_id = util::uuid_v4();
-	}
-	migrate_root_id(&mut root, &network_id);
-
-	let mut kerns = HashMap::new();
-	let root_id = root.id.clone();
-	kerns.insert(root_id.clone(), root);
-
-	let unloaded = std::collections::HashSet::new();
-
-	let ids: Vec<String> = fs::read_dir(dir)?
-		.filter_map(Result::ok)
-		.filter_map(|entry| {
-			let name = entry.file_name().to_string_lossy().to_string();
-			let id = name.strip_suffix(".kern")?;
-			if id == root_id || id == "_meta" {
-				return None;
-			}
-			Some(id.to_string())
-		})
-		.collect();
-
-	let decoded: Vec<Result<Kern, (String, PersistError)>> = ids
-		.par_iter()
-		.map(|id| match load_kern(dir, id) {
-			Ok(mut k) => {
-				migrate_root_id(&mut k, &network_id);
-				Ok(k)
-			}
-			Err(e) => Err((id.clone(), e)),
-		})
-		.collect();
-
-	let mut skipped = 0usize;
-	for result in decoded {
-		match result {
-			Ok(k) => {
-				kerns.insert(k.id.clone(), k);
-			}
-			Err((id, e)) => {
-				skipped += 1;
-				tracing::warn!(target: "kern.persist", kern = %id, error = %e, "skipping corrupt/unreadable kern file");
-			}
-		}
-	}
-	if skipped > 0 {
-		tracing::warn!(target: "kern.persist", skipped, dir = %dir, "load_dir skipped corrupt kern file(s)");
-	}
-
-	let root_kern = kerns
-		.get(&root_id)
-		.ok_or_else(|| PersistError::MissingNode(root_id.clone()))?
-		.clone();
-	let quant_mode = read_quant_mode(&quant_dir_sidecar(dir));
-	let g = GraphGnn::from_saved_with_mode(
-		root_kern,
-		network_id,
-		dir.to_string(),
-		kerns,
-		unloaded,
-		quant_mode,
-	);
 	Ok(g)
 }
 
@@ -406,52 +196,11 @@ pub fn compress_dir(
 	save_graph_into(&dest, &g)
 }
 
-#[derive(Serialize, Deserialize)]
-struct GraphMeta {
-	network_id: String,
-}
-
-fn load_network_id(dir: &str) -> String {
-	let path = Path::new(dir).join("_meta.kern");
-	let data = match fs::read(&path) {
-		Ok(d) => d,
-		Err(_) => return String::new(),
-	};
-	match bincode::serde::decode_from_slice::<GraphMeta, _>(&data, bincode_cfg()) {
-		Ok((m, _)) => m.network_id,
-		Err(_) => String::new(),
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
 	use crate::base::graph::GraphGnn;
 	use tempfile::tempdir;
-
-	#[test]
-	fn atomic_write_cleans_tmp_and_errors_when_rename_fails() {
-		// Renaming a file onto an existing DIRECTORY errors on every platform.
-		let dir = tempdir().unwrap();
-		let dst = dir.path().join("target");
-		fs::create_dir(&dst).unwrap();
-
-		let err = atomic_write(&dst, b"payload").unwrap_err();
-		assert!(matches!(err, PersistError::TmpRename { .. }), "got {err:?}");
-		assert!(
-			!tmp_path(&dst).exists(),
-			"the .tmp file must be cleaned up on rename failure"
-		);
-	}
-
-	#[test]
-	fn atomic_write_then_read_round_trips_on_the_happy_path() {
-		let dir = tempdir().unwrap();
-		let path = dir.path().join("ok.bin");
-		atomic_write(&path, b"hello").expect("write succeeds");
-		assert_eq!(fs::read(&path).unwrap(), b"hello");
-		assert!(!tmp_path(&path).exists(), "no .tmp left behind on success");
-	}
 
 	#[test]
 	fn merged_root_overlays_authoritative_fields_over_stale_map_entry() {
@@ -472,43 +221,6 @@ mod tests {
 			merged.claim_kinds.get("chat").map(String::as_str),
 			Some("desc")
 		);
-	}
-
-	#[test]
-	fn root_persist_via_merged_root_survives_reload() {
-		let dir = tempdir().unwrap();
-		let mut g = GraphGnn::new();
-		g.data_dir = dir.path().to_string_lossy().to_string();
-		g.root.graviton_text = "P".to_string();
-		g.root.claim_kinds.insert("k".to_string(), "v".to_string());
-
-		fs::create_dir_all(&g.data_dir).unwrap();
-		save_kern(&g.data_dir, &merged_root(&g)).unwrap();
-
-		let reloaded = load_kern(&g.data_dir, &g.root.id).unwrap();
-		assert_eq!(reloaded.graviton_text, "P");
-		assert_eq!(reloaded.claim_kinds.get("k").map(String::as_str), Some("v"));
-	}
-
-	#[test]
-	fn named_kern_with_graviton_vec_round_trips() {
-		// Guards bincode's positional layout: reordering `Kern`'s fields shifts
-		// every decoded value and corrupts live graphs.
-		let dir = tempdir().unwrap();
-		let d = dir.path().to_string_lossy().to_string();
-		let mut k = Kern::new("graviton-work", "root");
-		k.graviton_text = "work".to_string();
-		k.graviton_vec = vec![0.1, -0.2, 0.3, 0.4];
-		k.inner_radius = 0.15;
-		k.outer_radius = 0.55;
-		save_kern(&d, &k).unwrap();
-
-		let back = load_kern(&d, "graviton-work").unwrap();
-		assert_eq!(back.graviton_text, "work");
-		assert_eq!(back.graviton_vec, vec![0.1, -0.2, 0.3, 0.4]);
-		assert_eq!(back.inner_radius, 0.15);
-		assert_eq!(back.outer_radius, 0.55);
-		assert!(back.is_named() && back.has_graviton());
 	}
 
 	#[test]
@@ -537,65 +249,5 @@ mod tests {
 		let d = dir.path().to_string_lossy().to_string();
 		let g = load_dir(&d).expect("an empty store is a fresh store, not an error");
 		assert!(g.loaded("root").is_some() || g.map().is_empty());
-	}
-
-	#[test]
-	fn load_dir_skips_corrupt_kern_files() {
-		let dir = tempdir().unwrap();
-		let d = dir.path().to_string_lossy().to_string();
-		save_kern(&d, &Kern::new("root", "")).unwrap();
-		save_kern(&d, &Kern::new("child1", "root")).unwrap();
-		fs::write(format!("{d}/bad.kern"), b"not a valid bincode kern").unwrap();
-
-		let g = load_legacy_dir(&d).expect("load_legacy_dir tolerates a corrupt sibling");
-		assert!(g.loaded("child1").is_some(), "valid sibling still loads");
-		assert!(
-			g.map().keys().all(|k| k != "bad"),
-			"corrupt kern is skipped, not inserted"
-		);
-	}
-
-	#[test]
-	fn load_dir_loads_every_sibling() {
-		let dir = tempdir().unwrap();
-		let d = dir.path().to_string_lossy().to_string();
-		save_kern(&d, &Kern::new("root", "")).unwrap();
-		for i in 0..64 {
-			save_kern(&d, &Kern::new(format!("child{i}"), "root")).unwrap();
-		}
-		fs::write(format!("{d}/bad.kern"), b"not a valid bincode kern").unwrap();
-
-		let g = load_legacy_dir(&d).expect("load_legacy_dir loads a large sibling set");
-		assert_eq!(g.map().len(), 65, "root + 64 children all present");
-		for i in 0..64 {
-			assert!(g.loaded(&format!("child{i}")).is_some(), "child{i} loaded");
-		}
-		assert!(
-			g.map().keys().all(|k| k != "bad"),
-			"corrupt sibling skipped"
-		);
-	}
-}
-
-#[cfg(test)]
-mod mass_compat {
-	use crate::base::store::bincode_cfg;
-	use crate::base::types::{Kern, KernPreMass};
-	use tempfile::tempdir;
-
-	#[test]
-	fn pre_mass_shard_loads_with_default_mass() {
-		let dir = tempdir().unwrap();
-		let d = dir.path().to_string_lossy().to_string();
-		let mut k = Kern::new("k1", "root");
-		k.graviton_text = "work".into();
-		k.graviton_vec = vec![0.1, 0.2];
-		let old: KernPreMass = k.into();
-		let data = bincode::serde::encode_to_vec(&old, bincode_cfg()).unwrap();
-		std::fs::write(dir.path().join("k1.kern"), &data).unwrap();
-
-		let back = super::load_kern(&d, "k1").expect("pre-mass shard must load");
-		assert_eq!(back.graviton_text, "work");
-		assert_eq!(back.mass, 1.0, "missing trailing mass defaults to 1.0");
 	}
 }

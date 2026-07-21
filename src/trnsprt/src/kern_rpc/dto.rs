@@ -47,7 +47,7 @@ pub struct HealthRes {
 	#[serde(default)]
 	pub embed_mismatch: bool,
 	// Fail-open degradations. Each is a path that returns something rather than
-	// erroring, so the count is the only way to tell a degraded answer from a
+	// erroring, so the count is the only way to tell a degraded result from a
 	// good one: queries the dimension guard dropped, deliveries that bypassed
 	// `min_deliver_score` because nothing cleared it, and entities GC could not
 	// age because their timestamp is in the future.

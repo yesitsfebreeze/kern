@@ -23,8 +23,7 @@ pub enum EntityKind {
 	Claim = 1,
 	Document = 2,
 	Question = 3,
-	Answer = 4,
-	Conclusion = 5,
+	Conclusion = 4,
 }
 
 impl EntityKind {
@@ -35,7 +34,6 @@ impl EntityKind {
 			EntityKind::Claim => "claim",
 			EntityKind::Document => "document",
 			EntityKind::Question => "question",
-			EntityKind::Answer => "answer",
 			EntityKind::Conclusion => "conclusion",
 		}
 	}
@@ -46,7 +44,6 @@ impl EntityKind {
 			"claim" => Some(EntityKind::Claim),
 			"document" => Some(EntityKind::Document),
 			"question" => Some(EntityKind::Question),
-			"answer" => Some(EntityKind::Answer),
 			"conclusion" => Some(EntityKind::Conclusion),
 			_ => None,
 		}
@@ -249,45 +246,31 @@ pub struct Entity {
 	pub external_id: String,
 	pub superseded_by: String,
 	pub kind: EntityKind,
-	#[serde(default)]
 	pub status: EntityStatus,
 	pub statements: Vec<String>,
 	pub chunks: Vec<ChunkPart>,
-	#[serde(with = "util::vec_f64_compat")]
 	pub vector: Vec<f32>,
-	#[serde(with = "util::vec_f64_compat")]
 	pub gnn_vector: Vec<f32>,
 	pub score: f64,
-	#[serde(default)]
 	pub conf_alpha: f32,
-	#[serde(default)]
 	pub conf_beta: f32,
 	pub source: Source,
-	#[serde(default)]
 	pub created_at: Option<SystemTime>,
 	pub acl: Acl,
-	#[serde(default)]
 	pub access_count: GCounter,
 	pub accessed_at: Option<SystemTime>,
-	#[serde(default)]
 	pub heat: f32,
-	#[serde(default)]
 	pub heat_updated_at: Option<SystemTime>,
-	#[serde(default)]
 	pub updated_at: Option<SystemTime>,
-	#[serde(default)]
 	pub valid_until: Option<SystemTime>,
-	#[serde(default)]
 	pub valid_until_lamport: u64,
-	#[serde(default)]
 	pub valid_until_producer: String,
 	pub producer_id: String,
 	pub unlinked_count: i32,
-	#[serde(default)]
 	pub dirty: bool,
-	// serde(skip) is load-bearing: keeps bincode byte-identical to pre-temporal
-	// snapshots (StoredKern's side-map persists these). valid_from/valid_to = world
-	// time, invalidated_at = transaction time.
+	// serde(skip) is load-bearing: StoredKern's side-map persists these, never the
+	// embedded entity bytes. valid_from/valid_to = world time, invalidated_at =
+	// transaction time.
 	#[serde(skip)]
 	pub valid_from: Option<SystemTime>,
 	#[serde(skip)]
@@ -413,17 +396,12 @@ pub struct Reason {
 	pub to_net_id: String,
 	pub kind: ReasonKind,
 	pub text: String,
-	#[serde(with = "util::vec_f64_compat")]
 	pub vector: Vec<f32>,
 	pub score: f64,
-	#[serde(default)]
 	pub score_lamport: u64,
-	#[serde(default)]
 	pub score_producer: String,
-	#[serde(default)]
 	pub traversal_count: GCounter,
 	pub producer_id: String,
-	#[serde(default)]
 	pub dirty: bool,
 }
 
@@ -457,7 +435,6 @@ pub struct Kern {
 	pub id: String,
 	pub root_id: String,
 	pub graviton_text: String,
-	#[serde(with = "util::vec_f64_compat")]
 	pub graviton_vec: Vec<f32>,
 	pub inner_radius: f64,
 	pub outer_radius: f64,
@@ -473,96 +450,12 @@ pub struct Kern {
 	pub source_index: HashMap<String, String>,
 	pub claim_kinds: HashMap<String, String>,
 
-	#[serde(default)]
 	pub gnn_weights: Vec<u8>,
 
-	// Trailing position keeps bincode's positional decode of pre-mass shards working (serde(default) fills it).
-	#[serde(default = "default_mass")]
 	pub mass: f64,
 
 	#[serde(skip)]
 	pub last_access: Option<SystemTime>,
-}
-
-fn default_mass() -> f64 {
-	1.0
-}
-
-// Pre-mass positional mirror of `Kern` for bincode decode of old rows/shards —
-// bincode never fills serde(default) on missing trailing bytes. Field order must
-// track `Kern` exactly, minus `mass`.
-#[derive(Serialize, Deserialize)]
-pub struct KernPreMass {
-	pub id: String,
-	pub root_id: String,
-	pub graviton_text: String,
-	#[serde(with = "util::vec_f64_compat")]
-	pub graviton_vec: Vec<f32>,
-	pub inner_radius: f64,
-	pub outer_radius: f64,
-	pub spawn_reason_id: String,
-	pub parent: String,
-	pub children: Vec<String>,
-	pub entities: HashMap<String, Entity>,
-	pub refs: HashMap<String, EntityRef>,
-	pub reasons: HashMap<String, Reason>,
-	pub by_from: HashMap<String, Vec<String>>,
-	pub by_to: HashMap<String, Vec<String>>,
-	pub source_index: HashMap<String, String>,
-	pub claim_kinds: HashMap<String, String>,
-	#[serde(default)]
-	pub gnn_weights: Vec<u8>,
-}
-
-// Test-side inverse for fabricating legacy blobs.
-impl From<Kern> for KernPreMass {
-	fn from(k: Kern) -> Self {
-		KernPreMass {
-			id: k.id,
-			root_id: k.root_id,
-			graviton_text: k.graviton_text,
-			graviton_vec: k.graviton_vec,
-			inner_radius: k.inner_radius,
-			outer_radius: k.outer_radius,
-			spawn_reason_id: k.spawn_reason_id,
-			parent: k.parent,
-			children: k.children,
-			entities: k.entities,
-			refs: k.refs,
-			reasons: k.reasons,
-			by_from: k.by_from,
-			by_to: k.by_to,
-			source_index: k.source_index,
-			claim_kinds: k.claim_kinds,
-			gnn_weights: k.gnn_weights,
-		}
-	}
-}
-
-impl From<KernPreMass> for Kern {
-	fn from(o: KernPreMass) -> Self {
-		Kern {
-			id: o.id,
-			root_id: o.root_id,
-			graviton_text: o.graviton_text,
-			graviton_vec: o.graviton_vec,
-			inner_radius: o.inner_radius,
-			outer_radius: o.outer_radius,
-			spawn_reason_id: o.spawn_reason_id,
-			parent: o.parent,
-			children: o.children,
-			entities: o.entities,
-			refs: o.refs,
-			reasons: o.reasons,
-			by_from: o.by_from,
-			by_to: o.by_to,
-			source_index: o.source_index,
-			claim_kinds: o.claim_kinds,
-			gnn_weights: o.gnn_weights,
-			mass: 1.0,
-			last_access: None,
-		}
-	}
 }
 
 // The only non-deterministic input to kern-id derivation.
@@ -808,7 +701,6 @@ mod tests {
 			EntityKind::Claim,
 			EntityKind::Document,
 			EntityKind::Question,
-			EntityKind::Answer,
 			EntityKind::Conclusion,
 		] {
 			let json = serde_json::to_string(&k).expect("serialize");

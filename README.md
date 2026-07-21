@@ -54,9 +54,7 @@ MCP ingest ─────────────────────► ty
   tick, so recall stays LLM-free. `as_of` is exact over both tiers: a cold row
   carries `valid_from`/`valid_to`/`invalidated_at` beside the entity
   (`src/base/store.rs:169`), so an evicted revision answers the same window it
-  answered while hot. One gap remains — a row spilled by a build older than the
-  V4 cold format decodes as a bare entity with no stamps
-  (`src/base/store.rs:197`) and reads as valid at every instant.
+  answered while hot.
 
 - **Federates (opt-in).** Multiple nodes share knowledge over LAN gossip with no
   coordinator. Each node heartbeats peers and merges entity bodies via a
@@ -96,16 +94,16 @@ minimal:
    keeps that index's score. The GNN vector is what a background tick keeps
    re-embedding from graph structure.
 2. **Expand** — walk reason edges out from the seeds
-   (`src/retrieval/expand.rs:178`) and return the traversal chain as provenance;
-   optionally **HyDE** a hypothetical answer to broaden recall. Measured: adding
+   (`src/retrieval/expand.rs:178`) and return the traversal chain as provenance.
+   Measured: adding
    a reason edge between two thoughts changes no delivered ranking — linked and
    unlinked pairs score identically to four decimals. The edge is created and is
    walkable; it does not reach the score. Open — see `docs/oracle/ROADMAP.md`.
 3. **Fuse** — reciprocal-rank fusion of the vector and lexical lists, with
    PageRank centrality weighting the fused seeds.
-4. **Rerank** (optional) — an LLM reranker reorders the head of the list.
-5. **Diversify** — drop near-duplicates so the `k` results actually differ.
-6. **Answer** (optional) — synthesize an LLM answer over the top results.
+4. **Diversify** — drop near-duplicates so the `k` results actually differ.
+5. **Deliver** — passages, enriched edges, and path chains. No synthesis:
+   the whole read path is LLM-free, and the calling agent synthesizes.
 
 Cold-store results fill remaining slots (marked `cold:true`) when the hot graph
 returns fewer than `k`.
@@ -156,8 +154,7 @@ models pulled:
 
 ```bash
 ollama pull qwen3-embedding:0.6b  # embeddings (default)
-ollama pull granite4:3b       # distillation / reasoning (default)
-# the /ask oracle answer model defaults to the same granite4:3b
+ollama pull granite4:3b       # distillation / reasoning (default; write path only)
 ```
 
 **1. Install the binary.** A prebuilt binary for your platform (built by CI and
@@ -221,17 +218,8 @@ To verify it's working, call the `health` MCP tool from your session. Prefer the
 over the `kern <subcommand>` CLI for live state — the CLI reads the on-disk
 graph directly and can race the running daemon.
 
-**Upgrading from the legacy file-shard store?** Earlier builds persisted each
-kern as a separate bincode shard in `.kern/data/`. Run `kern migrate` (with the
-daemon stopped) once per data directory to import them into the new LMDB store:
-
-```bash
-kern migrate              # migrates <cwd>/.kern/data/ in-place
-kern migrate /dir         # or target a specific data directory
-```
-
-The old shard files are left in place; remove them once you've verified recall is
-working. New projects need no migration — the LMDB store is created automatically.
+kern is alpha: store and wire formats change without migration paths. A store
+written by an older build is rejected at load — wipe `.kern/data` and reingest.
 
 ### Configure
 

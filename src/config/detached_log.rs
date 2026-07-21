@@ -1,4 +1,4 @@
-//! Captured output for a detached child. Two spawners need it — the legacy
+//! Captured output for a detached child. Two spawners need it — the direct
 //! `kern mcp` fallback and the hub's per-root node — and a child whose stdio is
 //! `/dev/null` is a child whose failures are unobservable, which is the whole
 //! reason this exists.

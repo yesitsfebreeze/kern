@@ -81,7 +81,8 @@ pub struct GraphGnn {
 	lexical: Option<Arc<LexicalIndex>>,
 	max_loaded_kerns: usize,
 	disk_threshold: usize,
-	// Must stay GLOBAL — per-kern versions are unsound under HyDE.
+	// Must stay GLOBAL — the adjacency cache and the dirty-flush loops compare
+	// one number for the whole graph; per-kern versions would miss cross-kern edits.
 	mutation_epoch: u64,
 	flushed_epoch: u64,
 	adjacency_cache: parking_lot::RwLock<Option<(u64, Arc<EntityAdjacency>)>>,
@@ -395,7 +396,6 @@ impl GraphGnn {
 				.clone()
 				.and_then(|s| s.load_one_kern(id).ok().flatten());
 			if let Some(mut k) = loaded {
-				migrate_root_id(&mut k, &self.network_id);
 				k.last_access = Some(SystemTime::now());
 				index_kern_into(
 					&k,
@@ -701,17 +701,6 @@ impl GraphGnn {
 			lex.rebuild_from_graph(&g);
 		}
 		g
-	}
-}
-
-pub fn migrate_root_id(k: &mut Kern, network_id: &str) {
-	if k.root_id.is_empty() {
-		k.root_id = network_id.to_string();
-	}
-	for t in k.entities.values_mut() {
-		if t.root_id.is_empty() {
-			t.root_id = network_id.to_string();
-		}
 	}
 }
 

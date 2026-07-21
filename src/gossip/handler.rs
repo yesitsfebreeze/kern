@@ -982,7 +982,6 @@ mod tests {
 			origin: "o".into(),
 			payload: GossipPayload::Question(QuestionPayload {
 				reason_id: "r".into(),
-				from_id: "a".into(),
 				reason_vec: vec![],
 				question_text: String::new(),
 			}),
@@ -1169,7 +1168,6 @@ mod tests {
 			origin: "prober:1".into(),
 			payload: GossipPayload::Question(QuestionPayload {
 				reason_id: format!("r{i}"),
-				from_id: String::new(),
 				reason_vec: vec![1.0, 0.0],
 				question_text: String::new(),
 			}),

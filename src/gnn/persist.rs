@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// On-disk weight format version. Bump on any `WeightFile`/`TensorRecord` shape
-/// change (old files rejected, not mis-decoded) and add a migration path.
+/// change — old files are rejected, not mis-decoded and not migrated.
 pub const WEIGHT_FILE_VERSION: u32 = 1;
 
 #[derive(Debug, Error)]

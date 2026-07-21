@@ -25,7 +25,7 @@ use super::cluster::{
 use super::queue::{task, task_extra, Queue, TaskKind};
 
 pub use crate::types::{EmbedFunc, LlmFunc};
-pub type BroadcastQuestionFunc = Arc<dyn Fn(&str, &str, &[f32], &str) + Send + Sync>;
+pub type BroadcastQuestionFunc = Arc<dyn Fn(&str, &[f32], &str) + Send + Sync>;
 
 fn strip_name_prefixes(raw: &str) -> String {
 	let mut name = raw.trim().to_string();
@@ -426,7 +426,6 @@ pub fn do_resolve(
 			kern.reasons.get(rid).map(|r| {
 				(
 					r.id.clone(),
-					r.from.clone(),
 					r.vector.clone(),
 					r.text.clone(),
 				)
@@ -436,8 +435,8 @@ pub fn do_resolve(
 		None
 	};
 
-	if let (Some(bq), Some((id, from_id, rvec, rtext))) = (bq, broadcast_data) {
-		bq(&id, &from_id, &rvec, &rtext);
+	if let (Some(bq), Some((id, rvec, rtext))) = (bq, broadcast_data) {
+		bq(&id, &rvec, &rtext);
 	}
 }
 
