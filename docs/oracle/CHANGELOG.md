@@ -2,6 +2,57 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — item 28 `[lifecycle]` closed: GNN training runs on its own thread,
+  not on the tick loop. Unlike the last three perf items, this premise survived
+  measurement. A new release-only instrument (`tests/gnn_scale.rs`, in the shape
+  of `tests/gc_scale.rs`) put one propagation at 0.64s at 128 entities — the
+  smallest kern that trains at all, `min_thoughts` — 6.4s at 1024, 21.6s at 2048
+  and 79.7s at 4096, against `stigmergy_gc` at 0.151ms, `commit_access` at
+  0.002ms and `idle_sweep` at 0.000ms on the same graphs. The stall was then
+  measured on the real loop rather than argued from the source: the recall path's
+  own heat write-back, the `CommitAccess` task an MCP query enqueues, landed in
+  2.2ms with nothing ahead of it and in **56 787 ms** with one propagation ahead
+  of it at 2048 entities. After the change, 1.2ms.
+
+  **The overlap policy is coalesce-then-refuse, and the coalescing is the
+  interesting half.** A second propagation request for a kern already waiting is
+  folded into the waiting one rather than queued, because the propagation
+  snapshots the graph when it *runs*, not when it is enqueued — so the job
+  already in line will train on everything the newer request would have seen.
+  Only genuinely different kerns can queue, eight of them, and past that the
+  newest is refused and counted, which is the shape item 30 settled on for the
+  ingest queue. Rejected: `spawn_blocking`, whose 512-wide pool would train every
+  kern at once while each training allocates a dense N×N adjacency — 134 MB at
+  4096 entities alone; and an unbounded queue, which is precisely the growth
+  defect item 30 had just closed elsewhere.
+
+  **The panic story is relocation, not improvement, and saying otherwise would
+  have been the easy lie.** Item 2 is closed, so the inline arm was already
+  contained by `run_guarded`; moving the work moves that containment rather than
+  adding it. A bare thread would have been strictly *worse* — the first panicking
+  propagation kills the trainer and every later one silently never runs. The
+  revert test proves exactly that: with the trainer's `catch_unwind` removed the
+  `kern-gnn` thread dies and the panic count stays 0. It is kept, and it records
+  through the same `Queue::record_task_panic` the health surfaces already read,
+  so `GnnPropagate` remains the one task that reports a contained failure.
+
+  Moving training off the loop opened one race the inline version could not have,
+  and it is fixed in the same change: an entity superseded *during* training
+  would have been re-inserted into `gnn_entity_idx` by the apply step, undoing
+  the supersede removal, so `apply_gnn_updates` now re-checks status at write
+  time as well as at snapshot time.
+
+  `pytest -q -s e2e` returns 0.9306 / 0.9722 / 0.9471, unchanged — which is what
+  says the propagation still produces what ranking reads. What is left, and the
+  reason the item is closed rather than deleted, is the cost itself: 79.7s at
+  4096 is untouched, because `normalized_adjacency` materialises a dense N×N
+  matrix over a graph ingest keeps sparse at roughly one similarity edge per
+  entity. A sparse adjacency would make training linear in edges instead of
+  quadratic in nodes, but it changes the numerics ranking reads and so needs its
+  own recall gate rather than a ride on this one. Also left: `gnn_train_refused`
+  reaches MCP health only, not `kern status` or the RPC `HealthRes`.
+
+  Decided by: verify-before-claiming
 - 2026-07-21 — item 27 `[lifecycle]` narrowed to one bullet it never contained.
   Both remaining claims were measured first (`tests/gc_scale.rs`, release, new
   here alongside `tests/seed_scale.rs`). **Victim selection does not dominate and

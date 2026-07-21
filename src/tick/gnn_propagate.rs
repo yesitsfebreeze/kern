@@ -149,6 +149,12 @@ fn apply_gnn_updates(
 				continue;
 			}
 			if let Some(t) = kern.entities.get_mut(entity_id) {
+				// Re-checked here, not only in `build_gnn_snapshot`: training no longer
+				// runs under the tick loop, so an entity can be superseded between the
+				// snapshot and this write, and inserting it would undo that removal.
+				if t.status == EntityStatus::Superseded {
+					continue;
+				}
 				let vec32: Vec<f32> = vec.iter().map(|&x| x as f32).collect();
 				let w = cosine_align(&t.vector, &vec32);
 				if w >= 0.5 {

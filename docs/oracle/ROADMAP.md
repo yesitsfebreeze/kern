@@ -553,10 +553,60 @@ scan, not the accumulation.
 
 ### 28. GNN training runs synchronously on the tick `[lifecycle]`
 
-`TaskKind::GnnPropagate => do_gnn_propagate(...)` runs inline in `process_task`
-on the single tick loop (`process_task`, `src/tick.rs:85`; the arm at `:97`),
-stalling large kerns — and, per item
-2, taking every other maintenance task down with it if it panics.
+~~`TaskKind::GnnPropagate => do_gnn_propagate(...)` runs inline in `process_task`
+on the single tick loop, stalling large kerns.~~ **(closed 2026-07-21.)** The
+stall was measured before it was changed, by a new instrument in the shape of
+`tests/gc_scale.rs` — `tests/gnn_scale.rs`, `#[ignore]`d, release-only. At the
+shipped defaults — `min_thoughts` 128 and `train_epochs` 24
+(`src/gnn/propagate.rs:16-17`) — over 384-dim vectors, one propagation cost
+0.64s at 128 entities, 6.4s
+at 1024, 21.6s at 2048 and 79.7s at 4096. Every other tick task at the same
+sizes was sub-millisecond: `stigmergy_gc` 0.151ms, `commit_access` 0.002ms,
+`idle_sweep` 0.000ms at N=4096. On the real loop (`tick::start`) the recall
+path's own heat write-back — `CommitAccess`, enqueued at
+`src/mcp/tools_query.rs:196` — landed in 2.2ms with nothing ahead of it and in
+**56,787ms** with one propagation ahead of it at N=2048. The premise held.
+
+Training now runs on a dedicated thread (`src/tick/trainer.rs`), and the tick
+arm only hands it the kern id (`src/tick.rs:116-121`). Same measurement after:
+1.2ms at N=2048, down from 56,787ms. Decisions, all three deliberate:
+
+- **Where.** One `std::thread`, not `spawn_blocking`: that pool is 512 wide, so
+  every kern would train at once and each training allocates a dense
+  `num_entities^2` adjacency — 134MB at N=4096 alone.
+- **Overlap.** The waiting set is keyed by kern id, so a second request for a
+  kern already waiting is *coalesced*, not queued (`Submit::Coalesced`,
+  `src/tick/trainer.rs:82`) — the waiting job snapshots the graph when it runs,
+  so it already covers what the newer request would have seen. Past
+  `TRAIN_QUEUE_CAP` distinct kerns (`:16`) the newest is refused and counted
+  (`:87`, `:97`), the shape item 30 settled on, and the count reaches MCP health
+  as `gnn_train_refused` (`src/mcp.rs:146`).
+- **Panic.** Item 2 is closed, so the inline arm was already contained by
+  `run_guarded` — moving the work does not improve that, it *relocates* it, and
+  a bare thread would have been strictly worse: the first panicking propagation
+  would kill the trainer and every later one would silently never run. The
+  trainer therefore catches per job (`src/tick/trainer.rs:61`) and records
+  through the same `Queue::record_task_panic` the health surfaces already read,
+  so `GnnPropagate` keeps being the one task that reports a contained failure.
+
+Moving training off the loop also opened a write-back race the inline version
+could not have: an entity superseded *during* training would have been
+re-inserted into `gnn_entity_idx` by the apply step, undoing the supersede
+removal. `apply_gnn_updates` now re-checks status at write time
+(`src/tick/gnn_propagate.rs:155`).
+
+Remaining, and the reason this item is closed rather than deleted: **the cost
+itself is untouched.** A propagation still takes 79.7s at N=4096; it just no
+longer takes maintenance with it. The cost is quadratic in entities because
+`normalized_adjacency` materialises a dense N x N `Tensor`
+(`src/gnn/graph.rs:133-167`) which every `try_forward_graph` then multiplies
+(`src/gnn/gcn.rs:44-45`) — while the real graph is sparse, since ingest gives
+each entity at most one similarity edge (`add_similarity_reason`,
+`src/base/accept.rs:378`). A sparse adjacency would make training linear in
+edges instead of quadratic in nodes, but it changes the numerics the ranking
+reads, so it is its own item with its own recall gate, not a rider on this one.
+Also unaddressed: `gnn_train_refused` reaches MCP health only — `kern status`
+and the RPC `HealthRes` do not carry it.
 
 ### 29. A spilled kern still carries two resident indexes `[retrieval]`
 
@@ -964,7 +1014,7 @@ incomplete — no item below produces a wrong answer today.
 There is no `Contradicts` reason kind (`src/base/types.rs:77-86`) and no `stance`
 parameter on the ingest schema (`src/mcp/tools_mutate.rs:19-33`);
 `observe_contradict` (`src/base/types.rs:411`) has exactly one caller, GNN
-alignment (`src/tick/gnn_propagate.rs:157`). Observer-reputation weighting is
+alignment (`src/tick/gnn_propagate.rs:163`). Observer-reputation weighting is
 also unbuilt.
 
 ### 57. No evidence decay `[lifecycle]`

@@ -438,9 +438,9 @@ maintains itself.
   counters: `panics` (a task that died) and `failures` (a task that ended early
   and re-enqueues forever), each keeping the most recent `TaskFault`
   (`src/tick/queue.rs:38` — kind, kern, message).
-- **Driver** (`tick::start`, `src/tick.rs:37`) — one async task drains the
+- **Driver** (`tick::start`, `src/tick.rs:38`) — one async task drains the
   queue and dispatches via `process_task`. Every task runs inside `run_guarded`
-  (`src/tick.rs:54`), which wraps `process_task` in
+  (`src/tick.rs:65`), which wraps `process_task` in
   `catch_unwind(AssertUnwindSafe(…))`: a panicking maintenance task now costs
   one task, not decay/GC/persist/clustering/idle-sweep for the rest of the
   process's life. The panic is logged with its kind and kern and recorded via
@@ -448,8 +448,8 @@ maintains itself.
   half-written, which is exactly what the error line says (the graph lock does
   not poison, so `AssertUnwindSafe` is deliberate). A panicking task's duration
   is *not* fed to `task_avg_ms` — averaging work that never finished would make
-  the metric lie as failures climb. `tick_sync` (`src/tick.rs:308`) is the
-  synchronous one-shot variant; `enqueue_all` (`:299`) fans a Cluster task out
+  the metric lie as failures climb. `tick_sync` (`src/tick.rs:332`) is the
+  synchronous one-shot variant; `enqueue_all` (`:323`) fans a Cluster task out
   to every non-empty kern.
 - **Maintenance tick** (`spawn_maintenance_tick`, `src/commands.rs`) — periodic
   driver at `TICK_INTERVAL_SECS=60` (0 = event-driven only): pulses heat, gates
@@ -587,11 +587,11 @@ Trained per-kern on the tick.
 **Where.** `src/gnn/*` (2450 LoC, 13 files). Driven by
 `tick::gnn_propagate::do_gnn_propagate`.
 
-**Gaps.** Training is synchronous on the tick (can stall a large kern). No GPU.
+**Gaps.** Training is quadratic in a kern's entities — 79.7s at 4096 (`tests/gnn_scale.rs`); off the tick since 2026-07-21 (`src/tick/trainer.rs`). No GPU.
 Weights are per-kern, not shared across the tree. Link prediction only — no
 node-classification objective. *Corrected 2026-07-21:* a repeatedly failing
 propagation does **not** re-enqueue every tick. `GnnPropagate` is enqueued only
-when `do_cluster` did structural work (`if did_structural_work`, `src/tick.rs:166`),
+when `do_cluster` did structural work (`if did_structural_work`, `src/tick.rs:190`),
 so a quiescent kern retries nothing; the climbing `task_failures` count
 (`src/tick/gnn_propagate.rs:46`) is still the only visibility when it does.
 
@@ -1377,8 +1377,8 @@ Ranked by leverage:
    trust, so that half waits on socket auth (item 24). `intake drain` got its
    `intake_drain` tool 2026-07-21 and routes. Open as `ROADMAP.md` item 9 on
    `ingest`/`link` routing alone.
-6. **GNN training is synchronous** on the tick — move to a background thread
-   pool or incremental updates to avoid stalling large kerns.
+6. **GNN training is quadratic in entities** — 79.7s at 4096; off the tick
+   since 2026-07-21 (item 28), but the dense N x N adjacency is untouched.
 7. **Distill prompt** is one-shot and global — per-kind prompts +
    chunking for long deltas would raise claim quality.
 8. (retired 2026-07-21 — one scrub pass per sweep, not one per victim)
