@@ -2,6 +2,33 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — the one cross-slice interaction anyone raised today was checked
+  and is a non-issue, and checking it is the point. Item 28's author flagged that
+  item 32 rewrote `src/tick/pulse.rs`, where `deposit_pulse` was the path
+  enqueueing `TaskKind::Cluster` — one of the three sites that lead to
+  `GnnPropagate`. If item 32 changed how often kerns are enqueued for clustering,
+  the practical frequency of GNN training changed with it, and neither slice's
+  measurements would account for that.
+
+  It did not. `fan_out_cluster` keeps the identical traversal: the same
+  `strength < PULSE_THRESHOLD` early return, the same
+  `if !k.entities.is_empty()` enqueue, the same `strength * PULSE_DECAY`
+  recursion into children. The diff removes only the heat-deposit lines and
+  relaxes the graph lock from `&mut` to `&`. Clustering cadence, and therefore
+  GNN training cadence, is unchanged.
+
+  Worth recording as its own entry rather than folded into the merge note,
+  because it is the first time the parallel structure produced a specific,
+  falsifiable question about how two slices compose — the previous entry admits
+  the suite is what says they compose and nobody reasons about it. Here someone
+  did, named the mechanism, and it took one grep to settle. An agent flagging
+  "this lands next to my work and neither of us measured it" is the cheapest
+  review this loop has, and it only happened because the author kept looking
+  after its own work was committed.
+
+  Decided by: verify-before-claiming — a plausible interaction is not an
+  interaction, and the difference is one command.
+
 - 2026-07-21 — merged item 32, the pulse heat deposit removal. 179 + 1 + this
   one = 181, by union rebuild.
 
