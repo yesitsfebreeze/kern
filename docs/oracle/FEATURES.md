@@ -229,10 +229,10 @@ cold backfill.
   `search_filtered` (`:273`, pre-filtered ANN that shares one filter predicate
   with post-filtering). Quantization-aware: stores `QuantizedVec` (int8) when
   configured. `structure_digest` for parity checks.
-- **DiskANN** (`src/base/diskann.rs`, 609 LoC) — disk-resident graph index.
+- **DiskANN** (`src/base/diskann.rs`, 665 LoC) — disk-resident graph index.
   `build_and_save` (Params `r=32, build_l=64, alpha=1.2`) writes
-  `meta.bin`/`vectors.bin`/`graph.bin`; `DiskIndex::open`/`search` (`:377`) /
-  `search_hits_filtered` (`:392`). Selected when a kern exceeds `disk_threshold`.
+  `meta.bin`/`vectors.bin`/`graph.bin`; `DiskIndex::open`/`search` (`:385`) /
+  `search_hits_filtered` (`:400`). Selected when a kern exceeds `disk_threshold`.
 - **BM25 LexicalIndex** (`src/base/lexical.rs:24`) — in-RAM inverted index,
   `k1`/`b` tunable (`set_bm25_params`), `rebuild_from_graph` (`:117`),
   `search`/`search_filtered` (`:62`/`:67`).

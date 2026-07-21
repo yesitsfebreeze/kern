@@ -21,9 +21,9 @@ How it works:
   delta back into a fresh snapshot once it grows past
   `DISK_CONSOLIDATE_MIN_DELTA`, at most hourly, so the delta stays bounded.
 
-Still standalone (`src/base/diskann.rs:151` `build_and_save` + mmap
-`DiskIndex::open`/`search` at `src/base/diskann.rs:302` and
-`src/base/diskann.rs:377`). This note previously published a "recall@10 ≥ 0.90
+Still standalone (`src/base/diskann.rs:157` `build_and_save` + mmap
+`DiskIndex::open`/`search` at `src/base/diskann.rs:310` and
+`src/base/diskann.rs:385`). This note previously published a "recall@10 ≥ 0.90
 vs brute force" figure here; it came from tooling that no longer exists and is
 **withdrawn**, not superseded. The retrieval instrument that landed since
 (`e2e/test_recall.py` — recall@1 / recall@5 / MRR, no LLM in the scoring loop)
@@ -40,8 +40,19 @@ spill), and `DiskIndex` mmaps full `f32` vectors — no product quantization. PQ
 is not a pending next step: it is an explicit **non-goal** in `ROADMAP.md`,
 re-promotable only if a replacement retrieval metric shows a gap it would close.
 The RAM-of-codes decomposition below is retained as reference for that case. The
-resident-index gap is tracked in `ROADMAP.md` — "A spilled kern still carries two
-resident indexes".
+resident-index gap was tracked in `ROADMAP.md` — "A spilled kern still carries two
+resident indexes" — and was **closed 2026-07-21 by measurement rather than by
+code**: spilling those two as well costs 122 MB more at 50k entities, and
+spilling the entity index alone does not lower resident size at all once queries
+touch the snapshot (510.3 MB resident vs 512.1 MB spilled). See item 29 for the
+table and `tests/spill_memory.rs` for the instrument.
+
+A figure for this index against brute force now exists, from tooling that does:
+`tests/spill_transparency.rs` reports recall@10 = 0.9940 for the spilled path
+against exact cosine, versus 1.0000 for the resident HNSW on the same corpus.
+The caveats on `e2e/test_recall.py` below apply to it unchanged — feature-hashed
+embeddings, a fixed synthetic corpus, a regression detector and not a quality
+claim — so it is not comparable to anything published elsewhere.
 
 > **Reality drift since this doc was written.** The original slice-A target below
 > (replace `cold.rs`'s O(n) JSONL scan) is OBSOLETE: `cold.rs` and `persist.rs`
@@ -51,9 +62,11 @@ resident indexes".
 > **hot/resident** ceiling: per loaded kern the in-memory `HnswIndex` holds every
 > entity vector on the heap and is rebuilt on load, so RSS and load-time grow with
 > the kern without bound. PQ (vectors compressed in RAM) is still unbuilt; the
-> current `DiskIndex` mmaps full f32 vectors, which already removes them from the
-> resident heap — PQ is a separable RAM-of-codes optimization, not a
-> prerequisite, and a non-goal today (see above).
+> current `DiskIndex` mmaps full f32 vectors, which moves them off the *heap* but
+> not out of RSS — the pages fault straight back in under query load, and the
+> corpus is resident a second time in `Kern::entities` regardless (measured; see
+> above) — PQ is a separable RAM-of-codes optimization, not a prerequisite, and a
+> non-goal today (see above).
 > The "ceiling today" list below is retained for historical context.
 
 ## The ceiling today
