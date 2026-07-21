@@ -65,3 +65,7 @@ NUL
 /docs/site/public/
 /docs/site/out/
 /docs/site/.next/
+
+# live worktree ledger for the 15-minute workflow loop — per-machine runtime
+# state, rewritten every firing; never committed (see the file itself)
+/worktrees.md
