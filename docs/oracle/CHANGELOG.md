@@ -2,6 +2,104 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — merged item 92's closure. 195 + 2 + this one = 198, by union
+  rebuild; the duplicate-94 renumber survived the merge and `### 96` is now
+  unique.
+
+  Two slices in a row corrected this file rather than the code, and both found
+  the same shape of error: **a number written down once and then cited as
+  established.** Item 26's slice found the instrument it inherited was unfair —
+  it charged the full-width reference a sort the confined path never pays, which
+  is where the recorded 1.43x came from; measured fairly it is 1.19x. Item 92's
+  slice found the recorded clock constant was one sample — the invariant is a
+  ~3.8% rate, not a 2.8 s step, and the step scales with however long the sync is
+  delayed.
+
+  Neither number was invented. Both were real observations that stopped being
+  observations the moment they were written without their method. The habit that
+  catches it is already in every brief — measure before implementing — but these
+  two show the second half: **measure again when the number came from a previous
+  pass**, because a figure in this file carries no error bars, no method, and no
+  date unless someone put them there.
+
+  Both slices also corrected records I wrote. That is the system working in the
+  direction it is supposed to: the loop has now caught roadmap items, subagent
+  claims, merge subjects, and the orchestrator's own notes, using the same check
+  each time — read the thing itself.
+
+  Decided by: verify-before-claiming — a recorded measurement is a claim like any
+  other, and it ages.
+
+- 2026-07-22 — two of my own records were wrong and the item 92 slice found both.
+
+  **The clock figure was a sample reported as a constant.** I recorded "steps
+  `CLOCK_REALTIME` backwards ~2.8 s every ~30 s" from one incidental observation.
+  Measured properly by two independent methods, the invariant is different:
+  **realtime runs ~3.8% slow and the sync repays the whole accrued drift in one
+  backward jump.** A 300 s window gave 9 steps averaging -1.243 s at 32.25 s
+  apart; a later window stretched to 47.45 s and its step grew to -1.816 s.
+  1.243/32.25 = 3.85%, 1.816/47.45 = 3.83%. The rate is constant; the step is
+  not. My 2.8 s was real — it just needed a sync delayed to ~73 s, which is
+  exactly what a long preceding test buys, and which is why the flake correlated
+  with `test_recall` rather than with load.
+
+  **The fix I asked for had already shipped.** I wrote that
+  `e2e/test_retention.py` "wants the same treatment". It got it in `588e53a`,
+  seven hours before I wrote that sentence. `wait_past_deadline` has waited on an
+  absolute realtime target with a monotonic cap since then. I wrote that update
+  from the item rather than from the file — the precise failure this loop has
+  caught in six roadmap items and now in me.
+
+  The slice therefore shipped **no code fix, and the absence is the result.** It
+  also disproved the alternative I proposed: an injected instant loses because
+  `drop_expired` returns early whenever `valid_at`/`as_of` is set, so the test
+  would exercise the filtered reader while production expiry rides the
+  unconditional pass.
+
+  Its method is the part worth keeping. Waiting for this flake is not a test —
+  the *reverted, defective* code passed 12 consecutive runs, which is exactly why
+  three observers could not reproduce it. So it constructed the step with an
+  `LD_PRELOAD` shim subtracting a monotonic-derived offset from `CLOCK_REALTIME`
+  only, consistent across pytest and every `kern` subprocess. Reverted: 0 of 5.
+  Shipped: 5 of 5. That the Rust binary also expired correctly proves the shim
+  reached past Python.
+
+  Decided by: verify-before-claiming — I asserted a constant from one sample and
+  a defect from a document, and the check that would have caught either was
+  reading the thing itself.
+
+- 2026-07-22 — item 92 closed with no test change: `e2e/test_retention.py` was
+  already carrying the fix, and the mechanism's constant was wrong.
+
+  The item asked for a fix and named the file. The file already waited on the
+  wall clock and polled for the drop, and had since 2026-07-21 17:57 — seven
+  hours before the commit that updated the item to say it did not. Nothing was
+  implemented; the record was.
+
+  Measuring the clock rather than trusting the entry moved the number too. Two
+  methods sharing no code path — a 50 ms two-clock sampler, and `/proc/uptime`
+  against `date(2)` — agree on **-1.243 s every 32.25 s**, not the recorded
+  2.8 s every 30 s. And the two figures disagree about *which quantity is
+  constant*: a period that stretched to 47.45 s carried a step that grew to
+  1.816 s, the same 3.85%. Realtime runs ~3.8% slow and the sync repays the
+  accrued drift in one jump. A margin is unsafe because the loss scales with the
+  wait, not because a fixed 2.8 s might land in it.
+
+  That is what made the flake unreproducible, and the pre-fix shape proves it:
+  12 of 12 green interleaved with `test_recall.py` against the host's own clock.
+  A revert-check that waits for this flake cannot fail on demand, so the step was
+  built instead — an `LD_PRELOAD` shim warping `CLOCK_REALTIME` as a pure
+  function of `CLOCK_MONOTONIC`, so driver and subprocesses share one warped
+  clock. At 2.8 s every 5 s the pre-fix shape fails 5 of 5 on its original
+  message; the shipped shape passes 5 of 5, and the whole file passes.
+
+  An injected `valid_at` was declined: the CLI has no such flag, and
+  `drop_expired` short-circuits whenever one is set, so it would have tested the
+  filtered reader instead of the unconditional pass production expiry rides.
+
+  Decided by: verify-before-claiming — the item claimed a file was unfixed and
+  a constant was 2.8 s, and both claims were cheaper to check than to inherit.
+
 - 2026-07-22 — item 26's full-reach regression closed: the power iteration runs
   full-width loops once the reached set is closed and covers 90% or more of the
   graph, which is past where the confined walk stops paying for itself.
@@ -32,6 +130,7 @@
   index order the `+0.0` argument depends on.
 
   Decided by: name-the-tradeoff.
+
 - 2026-07-22 — merged item 27's batched GC eviction. 192 + 1 + this one = 194,
   by union rebuild.
 

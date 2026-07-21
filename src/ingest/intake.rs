@@ -722,10 +722,11 @@ mod tests {
 		);
 
 		// Wait on the wall clock, not the monotonic one. `valid_until` is an
-		// absolute `SystemTime`, and this box steps `CLOCK_REALTIME` backwards
-		// ~2.8s every ~30s, so a monotonic sleep of two seconds can advance
-		// realtime by less than one — which reads as a deadline pinned at
-		// startup and fails a test about something else entirely.
+		// absolute `SystemTime`, and this box runs `CLOCK_REALTIME` ~3.8% slow
+		// and steps it backwards by the accrued drift once per ~32s, so a
+		// monotonic sleep of two seconds can advance realtime by less than one —
+		// which reads as a deadline pinned at startup and fails a test about
+		// something else entirely.
 		let mut marker = SystemTime::now();
 		let cap = std::time::Instant::now() + Duration::from_secs(30);
 		loop {
