@@ -2,6 +2,91 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — merged item 26's confined PageRank, and resolved the `CHANGELOG`
+  collision by rebuilding the union rather than splicing the conflict hunk. Last
+  time the splice silently dropped four entries that lived outside the hunk on
+  screen, and reading the diff did not reveal it — only Ruling 1's before/after
+  count did. So the method is now: take one parent's file whole, prepend only the
+  entries the other parent has that the merge base does not, and state the
+  arithmetic. 166 + 2 + this one = 169.
+
+  Worth writing down because it is the second time a merge has been the thing
+  that damaged the record rather than the work. A conflict in an append-only log
+  is not really a conflict — both sides appended, nothing disagreed — but the
+  three-way markers present it as one, and hand-editing inside them is where
+  entries go missing. The union is computable, so it should be computed.
+
+  What landed: the power iteration confined to the reachable set, bit-identical
+  by the `+0.0` argument, 18.8 ms -> 1.7 ms at 1% eligibility with recall exactly
+  unchanged; item 26 left open on the 1.4x regression at full reach; and item 94,
+  the shared `target-dir` reporting green on stale code. `docs-check` green at
+  691 references with no anchors nominated — the third consecutive merge to break
+  no citations.
+
+  Decided by: fix-the-root — the recurring damage was the resolution method, not
+  the conflicts, so the method changed.
+
+- 2026-07-21 — filed item 94: the shared `target-dir` behind the parallel cycles
+  can report green on stale code. A cycle saw `873 passed` with its own three
+  new tests absent from that run; `touch src/lib.rs` brought the count to a
+  self-consistent 867. Checked before believing the scarier version: this is
+  NOT cross-worktree contamination — four trees produce four distinct binary
+  hashes, and `across 7 binaries` is the normal count for a four-package
+  workspace with integration tests. The main checkout reporting 872 where a
+  worktree reports 865 is different code, not a mixed run.
+
+  The rule this leaves behind is the useful part: **an aggregate pass count is
+  not evidence that a new test ran.** Verifying this cycle used the discipline
+  the item now records — `-E 'test(pagerank)'`, ten tests named and ten results
+  read, which a stale binary containing none of them cannot satisfy.
+
+  Not fixed here. Per-worktree target dirs are correct by construction and cost
+  a cold build each plus ~33 GB; a staleness guard keeps the cache the sharing
+  was adopted for. Flipping the build layout under three live cycles would stall
+  all three, and one incident is not yet a trend.
+
+  Decided by: verify-before-claiming — the reported symptom was taken seriously
+  and the reported cause was not; the cause turned out narrower than claimed,
+  and the narrower version is the one worth defending against.
+
+- 2026-07-21 — item 26 asked for a cached PageRank vector recomputed on a tick,
+  on the stated grounds that "the scores depend on the graph, not on the query".
+  They depend on the query. `fuse_hybrid_seeds` personalises the teleport vector
+  at the query's dense and lexical seeds, so a per-graph vector is the *global*
+  PageRank that `decisions/pagerank-authority.mdx` already weighed and rejected —
+  "popular entities top every query, relevant or not". Caching it would not have
+  been a faster version of this feature; it would have been the alternative the
+  feature exists to avoid, arriving as a performance change with the ranking
+  regression buried inside it.
+
+  So the premise was checked before the work was done, and the closure changed.
+  What ships instead is exact: the power iteration is confined to the teleport
+  support and everything downstream of it. Every node outside that set holds a
+  literal `0.0` in both rank vectors, so every term the full-width loop added for
+  it was `+0.0` and every term it summed was unchanged — walking the reached set
+  in ascending order leaves the surviving terms in the same order, which makes
+  the result identical rather than close. The test compares bit patterns against
+  a verbatim copy of the loop that was replaced, over 108 configurations of
+  graph, seed set, `top_k` and iteration cap. e2e recall is unmoved to four
+  decimals: 0.9306 / 0.9722 / 0.9471.
+
+  Measured, `tests/seed_scale.rs` in release at N=100k: a flat 18.8 / 17.9 /
+  18.1 / 17.1 ms across 1 / 10 / 50 / 100% eligibility became 1.7 / 3.1 / 1.9 /
+  1.3 ms, and a filtered retrieve went 24.0 ms to 7.1 ms. Three post-change runs
+  spread those points over 1.3–6.0 ms, so the band is what is claimed and not
+  any single point in it; the before figures sat at 17–19 ms, well outside it.
+  The cost now tracks
+  reach rather than N, which is a different shape, not a smaller version of the
+  same one — so the tradeoff is stated where it can be found: at full reach the
+  confined walk is **1.4× slower** than what it replaced, because it indexes
+  through a list where the full-width loops vectorise over a slice. That is
+  measured too, by an instrument kept next to the code rather than described in
+  prose, and item 26 stays open on exactly it.
+
+  Decided by: avoided-question-first — the item named its own answer, the
+  avoided question was whether that answer was compatible with the ranking it
+  was not allowed to move, and it was not.
+
 - 2026-07-21 — `Acl` stopped being decorative. It has been on `Entity` since the
   beginning and was only ever written as `Acl::default()`, so no caller could
   populate it and no reader consulted it. Item 18's three remaining bullets
@@ -81,6 +166,7 @@
   was re-measured at 866, not the number passed down. fix-the-root — one gate
   that holds is worth less than knowing which reads run it, so the surfaces were
   enumerated and the three that bypassed it are the actual defect.
+
 - 2026-07-21 — item 89 `[ingest]` closed: retention reaches the two entrances
   that have no caller to pass a flag, and it has a `kern.toml` home the item
   itself pointed at the wrong section for. A `.txt` transcript and a watched
@@ -140,6 +226,7 @@
   file on earth can set. The root is *which sections a user may write*, so the
   key went to the sections that describe the sources rather than to the one the
   item happened to name.
+
 - 2026-07-21 — an `id` read now runs the same filters a ranked read runs, and the
   one filter it must never run stays off. `tool_query` returned
   `entity_detail_by_id` and returned *before* `build_query_options` was ever
@@ -175,6 +262,7 @@
   Decided by: fix-the-root — the early return was the root, not the missing
   `kind` check. Special-casing one filter at the branch would have left the next
   one to be dropped the same silent way.
+
 - 2026-07-21 — the pre-commit hook refused this merge twice, and the second
   refusal caught a real loss. Merging `cycle/2` carried its `ROADMAP.md` edits
   into master while adding no new `CHANGELOG.md` entry: the resolution kept both

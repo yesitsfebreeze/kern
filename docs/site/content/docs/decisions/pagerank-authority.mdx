@@ -26,7 +26,7 @@ Every query runs a damped, query-personalised PageRank over the reason graph (da
 
 ## Trade-off accepted
 
-- Full power iteration per query, nothing persisted between queries — affordable at thought scale with early exit, no incremental updates.
+- A power iteration per query, nothing persisted between queries — and nothing *can* be, because the teleport is personalised: a per-graph vector would be the global PageRank rejected above. The walk is confined to the seeds' reach, so it costs what the query touches, not what the graph holds; a query whose seeds reach the whole graph still pays for the whole graph. No incremental updates.
 - The federation half (per-peer authority, TrustRank seeding, Sybil defences) was not built; no rank crosses a machine boundary, so the targeted Sybil surface doesn't exist yet. Prerequisites if per-peer authority ever lands.
 
 <Callout type="warn" title="Unit mechanism works; end-to-end effect measures near zero">
