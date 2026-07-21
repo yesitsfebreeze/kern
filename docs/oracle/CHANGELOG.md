@@ -64,6 +64,51 @@
   server never asked whether anyone else owned the dir, and it is the one writer
   no probe can answer that for.
 
+- 2026-07-21 — item 55 was measuring the wrong retention half-life, and eight
+  `ROADMAP.md` citations had drifted off the lines they name. The item said the
+  two freshness signals are 24 hours for ranking and **7 days** for retention,
+  citing `src/base/heat.rs:18`. That line does hold `7 * 24 * 60 * 60` and
+  `docs-check` is happy with it — but it is the `HeatConfig::default()` value and
+  it is never what runs. `Config::load` applies the preset unconditionally
+  (`src/config/mod.rs:104`, `:132`) and `Preset::apply` is the sole writer of
+  `heat.half_life_secs`; the default preset is `relaxed`, which sets **30 days**
+  (`src/config/preset.rs`). `FEATURES.md:979` already recorded 30d, so the two
+  oracle files disagreed and the plan held the stale half. The real gap against
+  the 1–2 days `docs/kern/stigmergy-self-improving.md:160-170` derives is 15–30×,
+  not 3.5×, and retuning it is now a commit against `preset.rs` rather than a
+  config edit — so item 55 is swept together with item 87, and says so.
+
+  The eight citations are the ordinary cost of `FEATURES.md` being edited under
+  a plan that indexes it by line: `FEATURES.md` gained ~14 lines above the
+  transport, LLM, watcher, config and CLI sections, so items 46, 47, 84 (four
+  bullets) and 85 all pointed a dozen-odd lines short — at real prose, which is
+  why nothing caught it. Re-pointed to `:832-833`, `:938-939`, `:778-779`,
+  `:956-957`, `:683`, `:972-974`, `:567-568`. Three source citations went the
+  same way: `wire_fetch` is at `src/commands.rs:1003` (`:1002` is
+  `start_entity_sync`), cited twice — item 36 and the closed list; `QueryArgs` is
+  `src/mcp/tools_query.rs:76-107`, not a mid-struct slice ending past its own
+  brace; and item 25's `seed_important` range excluded the `g.all()` half of the
+  product it describes, now `:127-174`.
+
+  Everything else in the sweep held. Items 18, 19, 20, 21, 22, 24, 26, 27, 28,
+  29, 30, 31, 51, 56, 57, 62, 64, 69, 70, 79, 81, 82, 83, 84 and 87 were each
+  re-read against source and are still true, including the ones easiest to close
+  by accident: `principals`/`scope` appear nowhere in the MCP schemas,
+  `forget_by_source` / `source_trust` / `ReviewState` / `gini` / `rust-stemmers`
+  / speculative decode exist nowhere in the tree, `serve.mcp_addr` still has no
+  reader (`src/commands.rs:803` resolves `cli.mcp_addr` alone), and only
+  `GnnPropagate` calls `record_task_failure`. Item 9 was verified line by line —
+  `route()` has exactly the two call sites it claims, the lock guards exactly
+  `reembed`/`compact`/`gc`, and the `ingest`/`link` trust asymmetry it is blocked
+  on is real (`cmd_ingest` mints at `clamp_confidence(1.0, "user")`, `tool_link`
+  writes `MAX_AI_CONFIDENCE`). No item appears in both the open list and "Closed
+  and verified".
+
+  **Decided by:** verify-before-claiming. `docs-check` proves a cited line
+  exists; it cannot prove the line still says what it was cited for, and both
+  failure modes here — a struct default the loader overwrites, and a citation
+  that slid onto neighbouring prose — pass it cleanly.
+
 - 2026-07-21 — item 9's headline re-scoped to match its own body. The title read
   "the route exists; `ingest` and `link` cannot take it yet", which names one of
   the four things still open. The body lists four: `ingest`/`link` (blocked on

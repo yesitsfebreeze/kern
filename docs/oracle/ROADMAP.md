@@ -140,7 +140,7 @@ populate it. Four parts:
   (`src/mcp/tools_mutate.rs:19-31`), threaded through `ingest::Job` into
   `place.rs`.
 - Accept `principals` on `query` — no identity param exists
-  (`QueryArgs`, `src/mcp/tools_query.rs:95-108`).
+  (`QueryArgs`, `src/mcp/tools_query.rs:76-107`).
 - Enforce in `matches_filter` (`src/retrieval/score.rs:194-232`), which has no
   ACL predicate.
 - **Guard the id path.** `src/mcp/tools_query.rs:129-138` returns
@@ -211,7 +211,7 @@ half the harness can already claim.
 ### 25. O(N) importance scan per retrieve `[retrieval]`
 
 `seed_important` iterates `g.all()` × `kern.entities.values()`
-(`src/retrieval/seed.rs:138-171`), called unconditionally once per retrieve
+(`src/retrieval/seed.rs:127-174`), called unconditionally once per retrieve
 (`src/retrieval/query.rs`, in `retrieve_profiled`). Rayon-parallel, but still full-corpus per
 query. Top structural debt in the repo.
 
@@ -362,7 +362,7 @@ sorts by heat and truncates to `ENTITY_SYNC_BATCH = 32` per heartbeat
 (`src/gossip/handler.rs:156`, sorted `:181`),
 so cold entities may never propagate and a partitioned node that rejoins never
 catches up. (`Fetch` is live — `wire_fetch` installs the handler at
-`src/commands.rs:1002` and the question path issues it — but it is single-id, not a
+`src/commands.rs:1003` and the question path issues it — but it is single-id, not a
 catch-up mechanism.) Two pieces adopted on paper and unscheduled: **back-off
 pacing** with exponential jitter keyed to a divergence estimate
 (`docs/kern/fl-vs-knids-federation.md:163-168`), and **batch-size / push-vs-pull
@@ -476,7 +476,7 @@ fallback and no way to distinguish discovery-failed from no-peers-present
 
 `TcpStream::connect` per call at `src/gossip/transport.rs:37` (`send_msg`) and
 `:45` (`send_and_receive`). No pooling. Separately, the `trnsprt` client has no
-pooling either (`FEATURES.md:818-819`) — that one is not gossip and is not gated
+pooling either (`FEATURES.md:832-833`) — that one is not gossip and is not gated
 on 33.
 
 ### 47. Hub phase 3: gossip moves hub-side `[hub]`
@@ -492,7 +492,7 @@ port-clash validation in `src/config/serve.rs` to collapse. (Corrected again
 item 84 owns.)
 
 Beside it: **hub↔node version skew is unmanaged** beyond same-binary spawning
-(`FEATURES.md:924-925`).
+(`FEATURES.md:938-939`).
 
 ### Decisions owed before the federation build
 
@@ -591,13 +591,23 @@ Depends on item 62 (the convergence metric) existing.
 ### 55. Two freshness signals, different half-lives, neither ever tuned `[retrieval]`
 
 A 24-hour one for ranking (`qbst_recency_half_life_secs`,
-`src/config/retrieval.rs:32/90`) and a 7-day one for retention
-(`src/base/heat.rs:18`). The offline NDCG sweep meant to tune either was never
-run (`decisions/stigmergy-over-gardening.mdx:117`). Third input nobody
-reconciled: `docs/kern/stigmergy-self-improving.md:160-170` derives a 1–2 day
-half-life and the shipped value is 7 days. Now measurable: `e2e/test_recall.py`
-scores a half-life change directly (`recall@1`/`recall@5`/`MRR`), which is the
-sweep that was never run.
+`src/config/retrieval.rs:31`, defaulted from `QBST_RECENCY_HALF_LIFE`,
+`src/base/constants.rs:12`) and the retention one on `HeatConfig`. The offline
+NDCG sweep meant to tune either was never run
+(`decisions/stigmergy-over-gardening.mdx:117`). Third input nobody reconciled:
+`docs/kern/stigmergy-self-improving.md:160-170` derives a 1–2 day half-life.
+
+**Restated 2026-07-21 — the old "7-day retention" wording was stale.** The 7 days
+at `src/base/heat.rs:18` is the struct default and is never what runs:
+`Config::load` applies the preset unconditionally (`src/config/mod.rs:104`,
+`:132`) and `Preset::apply` is the only writer of `heat.half_life_secs`
+(`src/config/preset.rs`). The shipped default is `relaxed` = **30 days**; medium
+is 7, tight is 3. So the two signals are 24h vs 30d by default, and the gap to
+the derived 1–2 days is a factor of 15–30, not 3.5. The knobs also stopped being
+config edits — a retention retune is now a commit against `preset.rs`, which is
+item 87's surface, and the two should be swept together. Now measurable:
+`e2e/test_recall.py` scores a half-life change directly
+(`recall@1`/`recall@5`/`MRR`), which is the sweep that was never run.
 
 ---
 
@@ -814,14 +824,14 @@ served that way decays, clusters and GCs normally, and simply does not federate.
 - Hand-rolled tool schemas; no batch query
   (`FEATURES.md:566-567`).
 - The LLM client is Ollama-centric with no retry/backoff policy object
-  (`FEATURES.md:764-765`).
+  (`FEATURES.md:778-779`).
 - Watcher `.gitignore` parsing is approximate; no rename tracking
-  (`FEATURES.md:942-943`).
-- `unnamed` lists only; there is no `promote` (`FEATURES.md:668-669`).
+  (`FEATURES.md:956-957`).
+- `unnamed` lists only; there is no `promote` (`FEATURES.md:683`).
 - GNN has no GPU path, weights are per-kern rather than shared, and the objective
   is link-prediction only (`FEATURES.md:528`).
 - Under WSL2 NAT a loopback Ollama URL must be hand-pinned; kern neither rewrites
-  nor warns (`FEATURES.md:958`).
+  nor warns (`FEATURES.md:972-974`).
 - RPC socket bind→chmod race — sub-millisecond, umask default — recorded as an
   accepted risk (`concepts/security.mdx:40-43`); revisit only if the umask
   alternative stops being worse.
@@ -878,7 +888,7 @@ and item 1's instrument staying the scorer.
   `FEATURES.md`.
 - (retired 2026-07-21 — all three fixed) `FEATURES.md:54` now lists `Entity`'s
   `acl`; the retired query-cache finding is gone from the file entirely; and
-  `:565` marks prompts and resources "served on the standalone path only",
+  `:567-568` marks prompts and resources "served on the standalone path only",
   which is item 81's note.
 
 Deferred design calls, still owed, no blocker and no urgency: quarantine
@@ -1126,7 +1136,7 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   `broadcast_q` invoked by `do_resolve` (`src/tick/tasks.rs:372`), `handle_question`
   live-dispatched (`src/gossip/handler.rs:44`).
 - **`Fetch` is wired** — `wire_fetch` installs the handler at
-  `src/commands.rs:1002`. Single-id, so it is not anti-entropy (item 36), but it
+  `src/commands.rs:1003`. Single-id, so it is not anti-entropy (item 36), but it
   is not dead.
 - **`union_statements` never existed**; remote heat is no longer pinnable
   (`src/base/merge.rs:20`, applied `:153`).
