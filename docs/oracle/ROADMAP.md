@@ -898,22 +898,63 @@ still does not. "The LLM call is the only unbounded step on the path"
 (`concepts/acceptance.mdx:189-192`), and with the answer leg removed (2026-07-21)
 the distill leg is now the only LLM on any path — no latency work has landed on it.
 
-### 31. Routing and structural debt in the hot types `[retrieval]`
+### 31. Structural debt in the hot types `[retrieval]`
+
+Both routing bullets are retired; what remains is serialization and index shape.
 
 Recorded in `FEATURES.md` gap blocks, planned nowhere:
 
 - ~~Routing does a vector lookup per level, O(depth·log n), and unnamed children
   are unbounded per parent~~ **(retired 2026-07-21 — verified false on both
   counts; the FEATURES gap block it quoted is corrected at `FEATURES.md:126`).**
+  ~~Per-parent fan-out is a real cliff and stays on this item's list~~
+  **(measured and retired 2026-07-22 — the width is real and unbounded, but it
+  costs a linear ~2% at the widths the graph reaches, and the scan the wording
+  blames is not where even that goes).** The location holds:
   `route_to_child_id` (`src/base/accept.rs:880`) is a linear scan over the
-  parent's loaded named children against each child's stored `graviton_vec` — no
-  index is consulted, so the cost is O(depth · children) and the "cached per-kern
-  centroid" the item wanted is what `graviton_vec` already is. Unnamed children
-  are capped at one per parent on the routing path by
-  `get_or_spawn_unnamed_child` (`src/base/accept.rs:642`, guarded by
+  parent's loaded named children against each child's stored `graviton_vec`,
+  reached from `route_entity` (`src/base/accept.rs:218`) once per accepted
+  entity — per distilled claim and per chunk (`src/ingest/place.rs:133`,
+  `src/ingest/place.rs:212`) — descending up to `MAX_ACCEPT_DEPTH`, in practice
+  two levels. Unnamed children are capped at one per parent on the routing path
+  by `get_or_spawn_unnamed_child` (`src/base/accept.rs:642`, guarded by
   `src/base/accept.rs:932`); only tick clustering makes more, one per spawnable
-  cluster and deliberately (`src/tick.rs:196`). Per-parent fan-out is a real
-  cliff and stays on this item's list; an index lookup was never the cost.
+  cluster and deliberately (`src/tick.rs:196`).
+
+  Instrument: `tests/route_fanout.rs`, release, `--ignored`. Fan-out costs
+  **0.14-0.18us per child** across runs, of an accept that costs **1.4-2.1ms**
+  at 20k entities — 0.5% at width 64, ~5% at 512, ~24% at 4096. The accept is
+  dominated by the two HNSW searches it runs (the dedup gate at
+  `src/base/accept.rs:39`, the similarity reason at `src/base/accept.rs:314`)
+  plus two index inserts, which is why width has to reach the thousands before
+  it registers. A named/unnamed A/B over the same walk — identical descent,
+  cosine skipped — attributes **-0.009, -0.001 and +0.003us per child** to the
+  `graviton_vec` comparison on three runs: zero every time. What the width actually buys is two
+  `Vec<String>` clones per descent (`src/base/accept.rs:216`,
+  `src/base/accept.rs:681`) and a linear resident-map probe for the generic
+  child; the comparison the bullet named is free.
+
+  Nothing caps named children per parent, and unlike the other two claims this
+  one survives measurement. Only two things create a child with a routable
+  `graviton_vec`: `add_graviton_with_mass` (`src/base/accept.rs:754`),
+  human-declared and root-only, and tick naming (`src/tick/tasks.rs:236`), whose
+  result `promote_to_root_if_generic` (`src/base/accept.rs:819`) lifts to root.
+  Driving that real accept → cluster → name → promote loop, root fan-out tracks
+  distinct cohesive topics very nearly 1:1 — 8 topics -> 8 children, 64 -> 55,
+  256 -> 191. `GRAVITON_DEDUP_THRESHOLD` collapses only topics whose graviton
+  names embed within 0.85 of each other, which is a fact about the corpus, not a
+  bound on the structure. Disabling promotion does not shrink the width, it
+  relocates it: `generic` then holds all 191 and routing scans them one level
+  deeper.
+
+  So the width is real and the cost of it is linear — ~2% of an ingest at 191
+  children, and it needs some thousands of distinct cohesive topics before it is
+  a fifth. That is a slope, not a cliff, and no optimisation is shipped for it.
+  Recording the lever in case the slope ever matters: it is the `Vec<String>`
+  clone, not an index over children. The clone in `route_entity` exists only to
+  end a borrow and can be replaced by holding `&kern.children` alongside the
+  `&GraphGnn` the scan already takes; an index would be write-path work on every
+  spawn and every rename, buying back a comparison that measures as free.
 - `Entity` is a ~30-field flat struct (serialization cost on every store round
   trip) and `Kern` carries no per-kern stats — mean heat, fill ratio — that
   clustering could reuse (`FEATURES.md:90-92`).
