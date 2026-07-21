@@ -120,7 +120,7 @@ intake .kern/intake  pending=2 stuck=1 failed=1 done=37
   failed logo.png  (not text; quarantined, never retried)
 ```
 
-`STUCK` carries the last failure and is the whole diagnosis; `wait` means not picked up yet. `kern intake drain` runs one pass in this process, so you can drive the queue with no daemon at all and read the error immediately.
+`STUCK` carries the last failure and is the whole diagnosis; `wait` means not picked up yet. `kern intake drain` forces one pass — routed to the daemon when one is serving so it never drains twice, in this process when none is — so you can drive the queue with no daemon at all and read the error immediately.
 
 <Mermaid
   chart={`

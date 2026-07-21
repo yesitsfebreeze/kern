@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import time
@@ -13,7 +14,16 @@ ROOT = Path(__file__).resolve().parent.parent
 @pytest.fixture(scope="session")
 def kern_bin():
 	subprocess.run(["cargo", "build", "--bin", "kern"], cwd=ROOT, check=True)
-	return ROOT / "target" / "debug" / "kern"
+	# Asked, not assumed: a worktree can point build.target-dir at a shared cache,
+	# and `<repo>/target` is then a directory that never gets written.
+	meta = subprocess.run(
+		["cargo", "metadata", "--format-version", "1", "--no-deps"],
+		cwd=ROOT,
+		capture_output=True,
+		text=True,
+		check=True,
+	)
+	return Path(json.loads(meta.stdout)["target_directory"]) / "debug" / "kern"
 
 
 @pytest.fixture(scope="session")
@@ -45,18 +55,22 @@ class KernProject:
 		}
 		self._children = []
 
-	def write_config(self, data_dir=None):
+	def write_config(self, data_dir=None, intake_enabled=True):
 		"""(Re)write the project kern.toml. `data_dir` is cwd-relative.
 
 		Config is read once per process, at startup — so rewriting this while a
 		daemon runs repoints the *next* CLI invocation without moving the store
 		the daemon already holds open.
+
+		`intake_enabled=False` stops the daemon spawning its own intake poll
+		loop; `kern intake drain` ignores the flag, being an explicit request.
 		"""
 		head = f'data_dir = "{data_dir}"\n\n' if data_dir else ""
 		(self.cwd / ".kern" / "kern.toml").write_text(
 			f"{head}"
 			f'[embed]\nurl = "{self.llm_url}"\nmodel = "fake-embed"\n\n'
 			f'[reason]\nurl = "{self.llm_url}"\nmodel = "fake-reason"\n\n'
+			f"[intake]\nenabled = {str(intake_enabled).lower()}\n\n"
 		)
 
 	def run(self, *args, timeout=120):

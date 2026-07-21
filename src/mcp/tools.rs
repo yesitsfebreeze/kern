@@ -2,6 +2,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
 	let mut defs = super::tools_query::tool_schemas();
 	defs.extend(super::tools_mutate::tool_schemas());
 	defs.extend(super::tools_admin::tool_schemas());
+	defs.extend(super::tools_intake::tool_schemas());
 	defs.extend(super::tools_setup::tool_schemas());
 	defs
 }
@@ -37,6 +38,7 @@ mod tests {
 			"claim_kind",
 			"pulse",
 			"gc",
+			"intake_drain",
 			"setup",
 		];
 		assert_eq!(names, expected, "tool set must match (order intentional)");
@@ -54,6 +56,26 @@ mod tests {
 				"{name}: inputSchema.type must be 'object'"
 			);
 		}
+	}
+
+	// `kern intake drain` routes through this tool, so a missing schema hides it
+	// from the daemon's tool list and a missing arm answers "unknown tool" — both
+	// send the CLI back to draining locally beside the daemon's own loop. A
+	// second arm is the other failure: two dispatch copies drift apart silently.
+	#[test]
+	fn intake_drain_is_declared_once_and_dispatched_once() {
+		let defs = tool_definitions();
+		assert_eq!(
+			defs.iter().filter(|d| d["name"] == "intake_drain").count(),
+			1,
+			"intake_drain must appear in tool_schemas() exactly once"
+		);
+		let dispatch = include_str!("../mcp.rs");
+		assert_eq!(
+			dispatch.matches("\"intake_drain\" =>").count(),
+			1,
+			"exactly one arm in the single `match name`"
+		);
 	}
 
 	#[test]

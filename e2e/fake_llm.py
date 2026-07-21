@@ -4,7 +4,9 @@ Serves the native API kern speaks to a localhost URL without /v1:
 - POST /api/embed  -> feature-hashed bag-of-words vectors; token overlap
   yields real cosine similarity, so retrieval ranking is meaningful.
 - POST /api/chat   -> echoes the last user message back as the completion,
-  so a test can assert what reached any chat-completion prompt.
+  so a test can assert what reached any chat-completion prompt. The one
+  exception is the intake distill prompt, which the echo cannot satisfy (see
+  `distilled`).
 """
 
 import hashlib
@@ -25,6 +27,28 @@ def embed(text):
 		vec[idx] += 1.0 if h[4] & 1 else -1.0
 	norm = math.sqrt(sum(v * v for v in vec)) or 1.0
 	return [v / norm for v in vec]
+
+
+_DISTILL = "Output ONLY a JSON array"
+
+
+def distilled(prompt):
+	"""Answer the intake distill prompt in the shape it asks for.
+
+	The echo cannot: src/ingest/distill.rs::parse_claims spans the first '[' to
+	the last ']', and the prompt's own "If nothing is worth keeping, output []"
+	puts prose inside that span, so an echoed prompt always parses as garbage.
+	Every `assistant:` line of the conversation becomes one claim.
+	"""
+	body = prompt.split("CONVERSATION:", 1)[-1]
+	claims = []
+	for line in body.splitlines():
+		if not line.startswith("assistant:"):
+			continue
+		text = line.split(":", 1)[1].strip()
+		if text:
+			claims.append({"text": text, "kind": "fact"})
+	return json.dumps(claims)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -51,7 +75,8 @@ class _Handler(BaseHTTPRequestHandler):
 			for msg in req.get("messages", []):
 				if msg.get("role") == "user":
 					last = msg.get("content", "")
-			self._reply({"message": {"role": "assistant", "content": last}, "done": True})
+			reply = distilled(last) if _DISTILL in last else last
+			self._reply({"message": {"role": "assistant", "content": reply}, "done": True})
 		else:
 			self.send_error(404)
 

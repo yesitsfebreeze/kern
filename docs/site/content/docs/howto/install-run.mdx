@@ -83,7 +83,7 @@ kern: another daemon already running at /run/user/1000/kern-3f2a91c4.sock — ex
 - Climbing `cold_evicted`: 50k cold cap dropping old thoughts for good.
 - `MISMATCH` on the `embed:` line: index built with a different model — `kern reembed`.
 - No daemon: prints `tick: (no daemon serving this directory)` instead of blocking.
-- `.kern/intake/` should drain, not accumulate — `kern intake` names anything `STUCK` and why (usually a missing `[reason]` model). Nothing lost; deltas stay queued, and `kern intake drain` runs a pass with no daemon.
+- `.kern/intake/` should drain, not accumulate — `kern intake` names anything `STUCK` and why (usually a missing `[reason]` model). Nothing lost; deltas stay queued, and `kern intake drain` forces a pass — through the daemon when one is serving, in-process when none is.
 
 Logs: stderr, default level `warn`. Detached children append to `.kern/data/logs/daemon.log` / `hub.log` — never truncated.
 

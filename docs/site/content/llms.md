@@ -26,7 +26,7 @@
 
 ## Surfaces
 
-- **MCP** (stdio + HTTP/SSE), 12 tools: `query`, `ingest`, `link`, `forget`, `degrade`, `move`, `health`, `graviton`, `claim_kind`, `pulse`, `gc`, `setup`. `setup` returns wiring instructions; kern never writes host config.
+- **MCP** (stdio + HTTP/SSE), 13 tools: `query`, `ingest`, `link`, `forget`, `degrade`, `move`, `health`, `graviton`, `claim_kind`, `pulse`, `gc`, `intake_drain`, `setup`. `setup` returns wiring instructions; kern never writes host config.
 - **CLI** `kern <subcommand>`: reads on-disk graph directly, can race a live daemon. MCP for live state; stop daemon before `kern reembed` / `kern compact`.
 - **Local RPC** socket per project, no auth (local trust).
 
