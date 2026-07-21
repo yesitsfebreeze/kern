@@ -2,6 +2,86 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — merged item 29, which closed unbuilt and shipped a different fix.
+  176 + 1 + this one = 178, by the union rebuild rather than a hand-spliced
+  conflict hunk.
+
+  The pattern across today is now clear enough to state as a finding rather than
+  an anecdote. **Nine slices ran; six ended somewhere other than their title
+  pointed.** Item 25 asked for an index twice and got neither — first because the
+  scan did not dominate, then because it had no sound freshness signal and the
+  real defect was that it was never parallel within a kern. Item 26's premise was
+  false: PageRank is query-personalised, so the caching it prescribed was the
+  rejected design. Item 27's first bullet was 0.06% of the sweep and its second
+  was real for a different reason (bincode decode, not cosine). Item 28's panic
+  clause cited an item that had already closed. Item 29's premise held but its
+  remedy made memory *worse* by 122 MB, and chasing the variance found a build
+  that was not reproducible.
+
+  What made the difference every time was the same rule: measure before
+  implementing, and treat the item as a hypothesis. The two items that shipped
+  what they asked for — 28 and 30 — are the two whose measurements confirmed
+  them. That is the loop working, not failing: an item is a hypothesis written
+  down by someone who could not run the experiment yet.
+
+  The corollary is uncomfortable and worth keeping: **a slice title is the least
+  reliable sentence in the file**, and any automation that names a merge after
+  the slice rather than the diff — as `3529fce` did — will be wrong precisely on
+  the passes where the work was most useful.
+
+  Decided by: verify-before-claiming — six of nine.
+
+- 2026-07-21 — item 29 closed with no index-spilling code, and the DiskANN build
+  made reproducible instead. The item said a spilled kern still carries two
+  resident indexes. It does — `rebuild_index` hardcodes `gnn_entity_idx` and
+  `reason_idx` resident (`src/base/graph.rs:289-290`) — so for once the premise
+  held. What had never been checked is whether spilling them would help.
+
+  Measured with `tests/spill_memory.rs`, one process per configuration because
+  glibc does not return HNSW's many ~1.5 KB vector allocations, and RSS read
+  twice — cold, and hot after 200 searches, since mmap pages are only resident
+  once touched. At 50k entities, dim 384: all-resident 510.3 MB hot; entity
+  spilled 512.1 MB hot; **all three spilled 632.3 MB hot.** Doing what the item
+  asked costs 122 MB. Spilling the entity index alone looks like it saves 71.4 MB
+  and gives every byte back the moment a query touches the snapshot.
+
+  So the trade that spill actually makes is not the one its decision doc claimed
+  ("drops heap by the full vector set"): it converts ~97 MB of unreclaimable
+  anonymous heap into clean file-backed page cache. Worth having under memory
+  pressure, and not a ceiling moving. `diskann-spill.mdx` and
+  `docs/kern/diskann-disk-index.md` were corrected in the same change.
+
+  The largest resident holder turned out to be no index at all — the kern map is
+  260.7 MB of the 512.1, because every vector is stored twice, once in
+  `Kern::entities` and once in the index pointing at it. Spill relocates one
+  copy. Removing one needs shared ownership across ~20 write sites, so it is
+  named in item 83 rather than attempted here.
+
+  **What did ship** is the defect the measurement exposed: `build_and_save` was
+  not reproducible, despite a seeded RNG and a comment asserting it was. Two
+  hashed containers reach the adjacency and the `sort_by` ranking candidates is
+  stable, so every tied cosine distance broke in per-process hash order — the
+  same corpus built a different index in every process. Only a corpus with tied
+  distances can detect this, which is why the first version of the guard passed
+  against dense random floats and proved nothing. Two `BTreeSet`s
+  (`src/base/diskann.rs:123`, `:180`); reverting the first differs by
+  22740/76800 adjacency bytes, the second by 446/76800, and reverting
+  `greedy`'s visited list by none — so that one was not changed.
+
+  **The tradeoff, named:** reproducibility here costs a `BTreeSet` insert where a
+  `HashSet` insert was, on sets of ≤ 64 ids, against a per-candidate cosine over
+  384 dimensions — unmeasurable, and not measured. The real cost is that
+  `tests/spill_transparency.rs` now records what spill costs in recall and it is
+  not zero: 1.0000 resident vs 0.9940 spilled against brute force, 0.9940
+  overlap. Spill is **not** answer-preserving. It cannot be — it swaps HNSW for
+  Vamana — so the round-trip test asserts recorded floors, not equality, and
+  saying otherwise anywhere in the docs would have been the easier lie.
+  `e2e` recall unchanged at 0.9306 / 0.9722 / 0.9471; the default path never
+  spills, so nothing here reaches it.
+
+  Decided by: verify-before-claiming — the item was tested as a hypothesis, and
+  the remedy it prescribed was priced before being refused.
+
 - 2026-07-21 — item 28 `[lifecycle]` closed: GNN training runs on its own thread,
   not on the tick loop. Unlike the last three perf items, this premise survived
   measurement. A new release-only instrument (`tests/gnn_scale.rs`, in the shape
@@ -53,6 +133,7 @@
   reaches MCP health only, not `kern status` or the RPC `HealthRes`.
 
   Decided by: verify-before-claiming
+
 - 2026-07-21 — item 94's fix simplifies to "delete the file". Cargo's default
   `target-dir` is `<workspace-root>/target`, which inside a git worktree is that
   worktree's own directory, so isolation is what you get by doing nothing.
@@ -144,6 +225,7 @@
   entity mutation is unobservable and that the scan was not parallel at all;
   building the index on an epoch that cannot see the mutation would have shipped
   a silent recall bug instead of fixing either.
+
 - 2026-07-21 — item 27 `[lifecycle]` narrowed to one bullet it never contained.
   Both remaining claims were measured first (`tests/gc_scale.rs`, release, new
   here alongside `tests/seed_scale.rs`). **Victim selection does not dominate and
@@ -195,6 +277,7 @@
   decision rather than a performance one.
 
   Decided by: verify-before-claiming
+
 - 2026-07-21 — item 94 corrected: the shared `target-dir` **does** leak between
   worktrees, and the earlier entry saying it does not was wrong. That entry
   checked the wrong artifact class. Lib-test binaries really do get one hash per

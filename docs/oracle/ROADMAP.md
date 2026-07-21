@@ -664,14 +664,71 @@ and the RPC `HealthRes` do not carry it.
 
 ### 29. A spilled kern still carries two resident indexes `[retrieval]`
 
-DiskANN spill is entity-index-only: `rebuild_index` (`src/base/graph.rs:286`) hardcodes
-`gnn_entity_idx` and `reason_idx` to `VectorBackend::resident(...)` (`:289-290`)
-while only `entity_idx` takes the spill branch (`:296-300`). The memory ceiling
-is pushed back, not removed. Compounded: `disk_threshold` defaults to
-`KERN_CAP_DISABLED` and nothing auto-tunes it
-(`decisions/diskann-spill.mdx:131-134`, `src/config/graph.rs:20`), so the
-ceiling DiskANN exists to remove is undefended in every default deployment, with
-no signal on approach.
+~~DiskANN spill is entity-index-only, so the memory ceiling is pushed back, not
+removed.~~ **The premise is true and the remedy is refused, measured 2026-07-21.**
+The two indexes are exactly where the item said: `rebuild_index` hardcodes
+`gnn_entity_idx` and `reason_idx` to `VectorBackend::resident(...)`
+(`src/base/graph.rs:289-290`) while only `entity_idx` takes the spill branch
+(`:296-297`). What was never checked is whether spilling them would help. It
+would not; it costs 122 MB.
+
+The instrument is `tests/spill_memory.rs` — one process per configuration
+(glibc does not return HNSW's many ~1.5 KB vector allocations, so a
+free-direction reading inside one process is a lie), RSS from
+`/proc/self/statm`, and **two readings: cold, and hot after 200 searches.** The
+hot one is the honest one, because mmap pages are only resident once touched.
+50k entities at dim 384, each with `vector` AND `gnn_vector`
+(`src/base/types.rs:280-281`), plus 25k reasons with vectors (`:427`):
+
+| configuration | cold MB | **hot MB** |
+| --- | --- | --- |
+| kern map alone, no indexes | 260.7 | 260.7 |
+| + entity index (resident) | 358.1 | 358.1 |
+| + GNN index (resident) | 358.5 | 358.5 |
+| + reason index (resident) | 309.6 | 309.6 |
+| all three resident — today's default | 510.3 | 510.3 |
+| entity spilled — today's `disk_threshold` path | 438.9 | **512.1** |
+| all three spilled — what this item asked for | 449.2 | **632.3** |
+
+Three findings, in the order they overturn the item:
+
+1. **Spilling frees nothing under load.** It looks like 71.4 MB (510.3 → 438.9)
+   until a query touches the snapshot; then it is 512.1, *above* never spilling.
+   The vectors mmap is faulted straight back in, and `DiskIndex` additionally
+   keeps `ids: Vec<String>` resident (`src/base/diskann.rs:304`). What spill
+   actually changes is the *kind* of memory: ~97 MB of unreclaimable heap becomes
+   clean, file-backed, reclaimable page cache. That is worth having under memory
+   pressure. It is not a ceiling moving, and `decisions/diskann-spill.mdx:48`
+   claiming heap drops "by the full vector set" was corrected in the same change.
+2. **Doing what this item asked makes it worse by 122 MB** (632.3 vs 510.3 hot).
+   Three `ids` vectors instead of one, three adjacency mmaps walked at open, three
+   builds' arenas retained. Priced by the `spilled_all` mode without shipping it.
+3. **The largest resident holder is not an index and never was.** The kern map is
+   260.7 MB of the 512.1 — 51% — because every vector is stored *twice*: once in
+   `Kern::entities`/`reasons`, once in the index that points at it
+   (`HnswNode::vec`, `src/base/hnsw.rs:14`). Spill relocates one of the two
+   copies. Nothing removes either. Halving that needs shared ownership of the
+   vector between the kern map and the index, which is a type change across
+   ~20 write sites, not an index-backend swap.
+
+**Closed as written.** No index-spilling code shipped. What the pass did ship is
+the defect it found on the way: `build_and_save` was **not reproducible** despite
+a seeded RNG and a comment claiming it was — two hashed containers reached the
+adjacency, and the `sort_by` that ranks candidates is stable, so every tied
+cosine distance broke in per-process hash order. Same corpus, different index,
+every process. Both now `collect` into a `BTreeSet` (`src/base/diskann.rs:123`,
+`:180`); guarded by
+`the_same_corpus_builds_a_byte_identical_index` (22740/76800 adjacency bytes
+differ when the first is reverted, 446/76800 when the second is) and by
+`tests/spill_transparency.rs`, which also records what spilling costs in recall:
+resident 1.0000 vs spilled 0.9940 against brute force, overlap 0.9940. Spill is
+therefore **not** answer-preserving — it swaps one approximation for another, and
+identical answers were never on offer.
+
+Still open, and belonging to item 83 rather than here: nothing bounds the
+resident set, `disk_threshold` defaults to `KERN_CAP_DISABLED`
+(`src/config/graph.rs:20`) with no auto-tuning and no signal on approach, and the
+double-storage in finding 3 is the actual O(N) term.
 
 ### 30. Ingest queue `enqueue` detaches with no backpressure `[ingest]`
 
@@ -1416,9 +1473,9 @@ does not exist. Wanted: track it under `scripts/` and install it via
 than stated.** The item was written off `docs/kern/diskann-disk-index.md:142-143`
 ("no WAL and no atomic-rename-per-segment") and never checked against the build.
 Per-segment atomic rename *does* exist: `atomic_write`
-(`src/base/diskann.rs:285-289`) writes `<path>.tmp` then `std::fs::rename`, and
-`build_and_save` uses it for all three segments — meta (`:264`), vectors
-(`:272`), graph (`:281`). `DiskIndex::open` (`:302-347`) then rejects a divergent
+(`src/base/diskann.rs:293-297`) writes `<path>.tmp` then `std::fs::rename`, and
+`build_and_save` uses it for all three segments — meta (`:272`), vectors
+(`:280`), graph (`:289`). `DiskIndex::open` (`:310-355`) then rejects a divergent
 set rather than reading it: ids-length vs count, entry point in range, both mmap
 lengths against the meta's `count × dim × 4` / `count × r × 4`, and every
 adjacency slot either `SENTINEL` or a valid node id — the last one specifically
