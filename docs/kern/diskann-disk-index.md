@@ -1,11 +1,11 @@
 # DiskANN-style disk-resident index — design
 
-**Status (updated 2026-06-12): WIRED (opt-in, entity index only).** DiskANN now
+**Status (updated 2026-07-21): WIRED (opt-in, entity index only).** DiskANN now
 serves the live entity vector search above a configurable threshold — it is the
-architecture's designated answer to the unbounded resident-set ceiling (see
-`src/config/graph.rs`: huge-corpus scaling is "the DiskANN index's job, not this
-cap"; `src/base/constants.rs`: no entity-eviction cap ships, so a resident kern's
-in-RAM HNSW grows unbounded).
+architecture's designated answer to the unbounded resident-set ceiling. The spill
+decision is one line (`src/base/graph.rs:295`), and nothing else bounds the
+resident set: `KERN_CAP_DISABLED` (`src/base/constants.rs:29-30`) caps kerns, not
+entities, so below the threshold a kern's in-RAM HNSW grows with the corpus.
 
 How it works:
 - `GraphGnn`'s entity/gnn/reason indices are a `VectorBackend` enum
@@ -21,12 +21,19 @@ How it works:
   delta back into a fresh snapshot once it grows past
   `DISK_CONSOLIDATE_MIN_DELTA`, at most hourly, so the delta stays bounded.
 
-Still standalone (`src/base/diskann.rs`): `build_and_save` + mmap
-`DiskIndex::open`/`search`. This note previously published a "recall@10 ≥ 0.90
+Still standalone (`src/base/diskann.rs:151` `build_and_save` + mmap
+`DiskIndex::open`/`search` at `src/base/diskann.rs:302` and
+`src/base/diskann.rs:377`). This note previously published a "recall@10 ≥ 0.90
 vs brute force" figure here; it came from tooling that no longer exists and is
-**withdrawn**, not superseded — no current number replaces it, and none may be
-stated until the question in `ROADMAP.md` ("What measures retrieval quality with
-no LLM in the scoring loop?") is answered.
+**withdrawn**, not superseded. The retrieval instrument that landed since
+(`e2e/test_recall.py` — recall@1 / recall@5 / MRR, no LLM in the scoring loop)
+does not replace it and cannot: it scores the default resident backend (spill is
+off until `[graph] disk_threshold` is set, and nothing in `e2e/` sets it), its
+embeddings are feature-hashed bag of words rather than a real embedding model,
+and its floors make it a regression detector — it can say kern got worse, never
+that kern or this index is good, and no number it prints is comparable to
+anything published elsewhere. No figure for this index against brute force
+exists.
 
 **Not shipped:** `gnn_entity_idx`/`reason_idx` stay resident (entity-only
 spill), and `DiskIndex` mmaps full `f32` vectors — no product quantization. PQ
@@ -129,8 +136,9 @@ shipped, as the `delta`/`tombstones` fields and the `DiskConsolidate` task.
 - **mmap on Windows.** `memmap2` works cross-platform but file-locking and
   flush semantics differ; the daemon is per-cwd and single-writer, which helps.
 - **Incremental Vamana quality.** Naive incremental inserts degrade the graph;
-  RobustPrune + periodic full rebuild is the usual answer. Needs a recall
-  regression harness (no bench harness exists yet — see CHANGELOG 2026-07-20).
+  RobustPrune + periodic full rebuild is the usual answer. Nothing measures that
+  degradation: `e2e/test_recall.py` scores the resident path against regression
+  floors and never builds a snapshot.
 - **Crash consistency.** Disk graph + vectors + the bincode metadata must not
   diverge on a mid-write crash. Write-ahead or atomic rename per segment.
 - **Compatibility.** Per repo policy ("no compat, clean base"), the disk format

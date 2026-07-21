@@ -52,7 +52,7 @@ twice.
 ## Discovery and gossip
 
 A gossip-enabled node does three things on startup
-(`src/commands.rs:858`): it binds a TCP listener for gossip messages, it starts
+(`src/commands.rs:937`): it binds a TCP listener for gossip messages, it starts
 periodic announce loops, and — if discovery is on — it joins a UDP multicast
 group.
 
@@ -110,7 +110,7 @@ have live senders wired from the tick loop. **Fetch** backs the question path:
 when a peer's answer references an entity body the local node lacks,
 `spawn_fetch_entity` (`src/gossip/handler.rs:71`) issues a fetch, and the
 holder answers it through the handler installed at startup
-(`src/commands.rs:894`).
+(`src/commands.rs:973`).
 
 <Callout type="info" title="Top-32-by-heat is not replication">
 A node only ever broadcasts its hottest entities. A fact that was captured
@@ -268,7 +268,7 @@ cannot do, is in [Security](./security.mdx).
 | Entity-body sync, hottest 32 per heartbeat | works |
 | CRDT counter + LWW deltas | works |
 | OR-Set deltas for `statements` | **dead by design** — sender emits empty (`src/gossip/handler.rs:216`), receiver rejects the target (`src/gossip/handler.rs:448`) |
-| Single-entity fetch RPC | works — handler wired at startup (`src/commands.rs:894`), issued by the question path |
+| Single-entity fetch RPC | works — handler wired at startup (`src/commands.rs:973`), issued by the question path |
 | Anti-entropy / catch-up for cold entities | **not built** |
 | Authentication, encryption, signatures | **not built** |
 

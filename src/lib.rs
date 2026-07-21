@@ -13,6 +13,7 @@ pub mod quant;
 pub mod retrieval;
 pub mod rpc;
 pub mod store;
+pub mod takeover;
 pub mod tick;
 pub mod types;
 

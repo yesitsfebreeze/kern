@@ -83,7 +83,9 @@ kern stores two things. **Thoughts** are distilled claims — a fact, a decision
 a preference. **Reasons** are justified edges between thoughts: not a similarity
 score, but a written statement of *why* one connects to the other. Retrieval
 seeds candidates by vector and lexical match, then expands outward along those
-edges, so an answer can be assembled from facts that no single query embeds near.
+edges, and renders the walked chain as the derivation behind a result. What that
+expansion does *not* yet do is change the ranking — see the maturity section
+below before relying on it for multi-hop recall.
 
 The edges are derived at write time, when an LLM is already in the loop
 distilling the session (`src/ingest/distill.rs:21`). That is the trade the whole
@@ -149,7 +151,7 @@ And the graph forgets. That is the feature, but it means a non-`fact` thought
 you never touch again will eventually leave the hot graph. If you need
 guaranteed permanence for something, it has to be a fact — and only the CLI
 makes one. `kind` is derived from confidence and a fact needs full confidence
-(`src/base/math.rs:206`), which `kern ingest` reaches because it writes as the
+(`src/base/math.rs:207`), which `kern ingest` reaches because it writes as the
 user; an agent calling the MCP tool is clamped below it. From MCP the levers are
 a `Document` or keeping the thought warm.
 
@@ -170,21 +172,39 @@ Enable it only on a network segment where you trust every host. See
 [Security](./security.mdx) for what it does not protect.
 </Callout>
 
-**Recall quality is currently unmeasured.** A LoCoMo baseline was recorded on
-2026-07-19 (overall 0.137) but the eval was deleted on 2026-07-20 once it was
-shown to measure answer quality more than memory: handed the entire
-conversation with kern bypassed, the same 3B answerer scored only 0.187, so the
-ceiling was set by the answerer rather than by retrieval. That number is
-therefore withdrawn rather than restated here. A retrieval-only replacement
-(recall@k / MRR / NDCG against per-turn evidence labels, no LLM in the loop) is
-planned; until it runs, this page makes no quality claim.
+**There is a retrieval baseline, and it is a regression detector — not a quality
+claim.** `e2e/test_recall.py` scores `kern query` over a corpus the test writes
+itself, with no LLM anywhere in the scoring loop: recall@1 0.9583, recall@5
+1.0000, MRR 0.9792, recorded 2026-07-21 and reproducible bit-for-bit. Two limits
+travel with it. Its floors sit below those values to catch a drop, so the suite
+can say kern got worse and can never say kern is good. And its embedder is a
+feature-hashed bag of words (`e2e/fake_llm.py`), deliberately, so the number is
+a property of kern's machinery over a fixed lexical signal rather than of an
+embedding model's semantics. Nothing here is comparable to a figure another
+system publishes.
+
+The earlier LoCoMo baseline (overall 0.137, 2026-07-19) stays withdrawn: the
+eval was deleted on 2026-07-20 once it was shown to measure answer quality more
+than memory — handed the entire conversation with kern bypassed, the same 3B
+answerer scored only 0.187, so the ceiling was set by the answerer, not by
+retrieval.
+
+**A reason edge still cannot lift its neighbour into the results.** The first
+thing the new instrument found: over 8 linked pairs probed with text matching
+only one end, the edge moves one pair by one rank. The edge is created and
+walkable; the walk's evidence is then thrown away, because an entity that was
+also a content hit keeps the larger of its two scores instead of combining them.
+That is item 86 in
+[`ROADMAP.md`](https://github.com/yesitsfebreeze/kern/blob/master/docs/oracle/ROADMAP.md),
+and it means the multi-hop gap described at the top of this page is one kern
+models but does not yet close.
 
 The honest summary: the architecture on this page is implemented, the
-self-maintenance genuinely works, and the retrieval quality that the architecture
-is *supposed* to buy has not landed yet. If you want a memory substrate whose
-design you can read, run locally, and measure yourself, kern is that today. If
-you want best-in-class recall accuracy out of the box, the numbers above say it
-is not there yet.
+self-maintenance genuinely works, retrieval has a reproducible floor under it,
+and the hop-dependent recall the architecture is *supposed* to buy is measurably
+not delivered yet. If you want a memory substrate whose design you can read, run
+locally, and measure yourself, kern is that today. If you want best-in-class
+recall accuracy out of the box, it is not there yet.
 
 ## Where to go next
 

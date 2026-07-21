@@ -88,6 +88,18 @@ neighbourhood the query selects, and cannot decide *instead of* it.
 Where PageRank sits in the full pipeline — after seeding, before expansion —
 is covered in [The retrieval pipeline](../concepts/retrieval.mdx).
 
+<Callout type="warn" title="The unit mechanism works; the end-to-end effect is measured at zero">
+Everything above is pinned by unit tests over `pagerank()` in isolation, and
+those hold. What does not follow is that the authority signal reaches a
+delivered result. `e2e/test_invariants.py` drives the whole CLI query path —
+the same `cfg.retrieval`, so PageRank and expansion are both on — ingests A and
+B, adds an A→B reason edge, and finds that the edge moves one of 8 pairs by one
+rank. An edge is exactly the input this mechanism consumes, so that bounds how
+much of the delivered ranking graph structure currently decides. Item 86 in
+[`ROADMAP.md`](https://github.com/yesitsfebreeze/kern/blob/master/docs/oracle/ROADMAP.md)
+carries the diagnosis.
+</Callout>
+
 ## What shipped vs. what the note assumed
 
 The note is a federation-era design (it references the pre-1.0 `crates/`

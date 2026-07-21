@@ -13,11 +13,8 @@ fn strip_deleted_marker(s: &str) -> &str {
 // client start costs more than the staleness it detects. The path is
 // deliberately excluded — `cargo install` hardlinks target/release, and the two
 // paths are the same build, so including the path would make them fight.
-fn exe_fingerprint() -> Option<String> {
-	let exe = std::env::current_exe().ok()?;
-	let shown = exe.to_string_lossy().to_string();
-	let path = std::path::PathBuf::from(strip_deleted_marker(&shown));
-	let md = std::fs::metadata(&path).ok()?;
+pub fn path_fingerprint(path: &std::path::Path) -> Option<String> {
+	let md = std::fs::metadata(path).ok()?;
 	let mtime = md
 		.modified()
 		.ok()?
@@ -25,6 +22,18 @@ fn exe_fingerprint() -> Option<String> {
 		.ok()?
 		.as_nanos();
 	Some(format!("{}-{}", md.len(), mtime))
+}
+
+/// The path this process was launched from, with the post-rebuild
+/// " (deleted)" marker stripped so it stays pollable and respawnable.
+pub fn self_exe_path() -> Option<std::path::PathBuf> {
+	let exe = std::env::current_exe().ok()?;
+	let shown = exe.to_string_lossy().to_string();
+	Some(std::path::PathBuf::from(strip_deleted_marker(&shown)))
+}
+
+fn exe_fingerprint() -> Option<String> {
+	path_fingerprint(&self_exe_path()?)
 }
 
 fn short(s: &str) -> String {

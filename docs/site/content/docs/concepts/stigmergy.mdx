@@ -27,7 +27,7 @@ substantiate the self-organisation claim — is in
 ## The trace a read leaves
 
 Retrieval is not read-only in the bookkeeping sense. When a query returns an
-entity, `stamp_access` (`src/retrieval/score.rs:217`) does three things to it:
+entity, `stamp_access` (`src/retrieval/score.rs:247`) does three things to it:
 increments a per-replica access counter, sets `accessed_at`, and deposits heat.
 
 Where that stamping happens matters. The MCP query path takes only a read lock
@@ -37,7 +37,7 @@ while ranking, and pushes the access stamps onto the tick queue as a
 `src/tick/tasks.rs:448`). The trace is deposited off the hot path — a recall
 never blocks on a write, and the stamp deliberately avoids bumping the graph's
 mutation epoch so it does not invalidate the query cache
-(`src/retrieval/score.rs:236`).
+(`commit_access_ids`, `src/retrieval/score.rs:266`).
 
 The second depositor is the pulse. Every maintenance pass walks the kern tree
 from the root and re-deposits heat on the entities it reaches, at half strength
@@ -54,10 +54,10 @@ function and its consequences.
 
 ## From trace to collection
 
-`run_gc` (`src/tick/stigmergy.rs:41`) runs per kern, once an hour
+`run_gc` (`src/tick/stigmergy.rs`) runs per kern, once an hour
 (`STIGMERGY_GC_INTERVAL`), gated on a clock sanity check that refuses to sweep
 when the clock is unreadable or has gone backwards. It collects the entities for
-which `is_cold_victim` (`src/tick/stigmergy.rs:13`) holds, which is the
+which `is_cold_victim` (`src/tick/stigmergy.rs:27`) holds, which is the
 conjunction of:
 
 - **not durable** — `Fact` and `Document` are immune while active; supersession
@@ -69,8 +69,10 @@ conjunction of:
 
 Every victim is written to the cold LMDB table before it is dropped from the hot
 graph, and a failed write keeps it hot for the next pass (`evict_victims`,
-`src/tick/stigmergy.rs:78`). The full guarantee, including where it stops being
-absolute, is set out in [Heat, decay &
+`src/tick/stigmergy.rs`). The spilled row carries the entity's bi-temporal
+triple with it (`ColdRow`, `src/base/store.rs:170`), so a demoted revision still
+answers an `as_of` query correctly. The full guarantee, including where it stops
+being absolute, is set out in [Heat, decay &
 self-compaction](./heat-and-compaction.mdx#what-stops-it-deleting-something-you-still-needed).
 
 What is worth naming here is the *shape* of the policy rather than its
@@ -81,7 +83,8 @@ ranking. Retention emerges from usage; it is not administered.
 
 <Callout type="info" title="The known cost of that simplicity">
 Victim selection is O(entities) per kern per sweep, and the cold tier is
-brute-force cosine search with no index. Both are acceptable at current
+brute-force cosine search with no index. Neither is counted; what *is* counted
+is the eviction past the cold cap. Both costs are acceptable at current
 scale, and both are tracked as open work in
 [`ROADMAP.md`](https://github.com/yesitsfebreeze/kern/blob/master/docs/oracle/ROADMAP.md)
 rather than quietly ignored.
@@ -95,7 +98,7 @@ heat, they are set deliberately.
 A graviton is a named focus attractor stored as a child kern of the root: a name
 (`graviton_text`), an embedding of its seed text (`graviton_vec`), and a scalar
 `mass` defaulting to `1.0`. You manage them through the `graviton` MCP tool
-(`tool_graviton`, `src/mcp/tools_admin.rs:89`) with `action=list|add|remove`;
+(`tool_graviton`, `src/mcp/tools_admin.rs:87`) with `action=list|add|remove`;
 seed text may be a short phrase or a representative passage, embedded whole. Keep
 it under the embedding model's context window: the seed text is embedded in one
 call with no chunking, so anything past that window is truncated and a
@@ -185,7 +188,9 @@ it.
 
 The sweep is autonomous, but it is not opaque. The `health` MCP tool reports
 graviton, kern, entity and reason counts, which is the fastest way to see
-whether unnamed-kern churn is accumulating. The `gc` tool (`tool_gc`,
+whether unnamed-kern churn is accumulating. It also reports `cold_evicted` —
+rows this process dropped past the cold tier's 50k cap — so the one place the
+retention story stops being lossless is a number rather than an inference. The `gc` tool (`tool_gc`,
 `src/mcp/tools_admin.rs:178`) is a *different* collector from the one on this
 page — it reaps empty and orphan kerns from the live graph and persists, rather
 than evicting cold entities — and it is the right thing to reach for when the

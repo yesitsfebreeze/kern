@@ -58,6 +58,12 @@ pub enum StoreError {
 	BincodeDecode(#[from] bincode::error::DecodeError),
 	#[error("bad value format version: {0}")]
 	BadVersion(u8),
+	// A load that would silently produce an empty graph over a non-empty store.
+	// Surfaced as an error so callers fall into the epoch-0 fallback, where the
+	// guarded flush REFUSES to write and absorbs disk instead — self-healing.
+	// Swallowing it here is what turned a bad read into a wiped store.
+	#[error("store has {kerns} kern rows but no root — refusing to load as empty")]
+	RootMissing { kerns: usize },
 }
 
 // Shared by both backends so encodings never drift; the 1 GiB alloc cap rejects

@@ -288,6 +288,26 @@ pub async fn bind_kern_listener(endpoint: &Endpoint) -> Result<BindOutcome, Bind
 	}
 }
 
+/// Takeover: adopt fd 0 as the already-bound kern.sock listener, inherited
+/// from a predecessor daemon that is handing over. No bind, no AlreadyRunning
+/// probe — probing would consume a queued client connect from the shared
+/// backlog. Unix only; a named pipe server handle cannot cross processes.
+#[cfg(unix)]
+pub fn adopt_kern_listener(endpoint: &Endpoint) -> Result<LocalListener, BindError> {
+	use std::os::fd::FromRawFd;
+	let Endpoint::Unix(path) = endpoint;
+	// SAFETY: the takeover contract places the listener at fd 0 (the successor
+	// is spawned with it as stdin) and nothing else in this process reads stdin
+	// in daemon mode.
+	let std_listener = unsafe { std::os::unix::net::UnixListener::from_raw_fd(0) };
+	std_listener.set_nonblocking(true)?;
+	let inner = tokio::net::UnixListener::from_std(std_listener)?;
+	Ok(LocalListener {
+		inner,
+		socket_path: path.clone(),
+	})
+}
+
 pub struct LocalListener {
 	#[cfg(unix)]
 	inner: tokio::net::UnixListener,
@@ -297,6 +317,17 @@ pub struct LocalListener {
 	pipe_name: String,
 	#[cfg(windows)]
 	current: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
+}
+
+#[cfg(unix)]
+impl LocalListener {
+	/// A dup of the listening fd, for handing to a successor process. The dup
+	/// carries close-on-exec (the spawn path clears it by dup2-ing into a
+	/// stdio slot), so holding one leaks nothing into unrelated children.
+	pub fn dup_fd(&self) -> std::io::Result<std::os::fd::OwnedFd> {
+		use std::os::fd::AsFd;
+		self.inner.as_fd().try_clone_to_owned()
+	}
 }
 
 impl LocalListener {

@@ -310,8 +310,23 @@ impl McpServer for ProxyServer {
 			args: args.clone(),
 		};
 		let res = crate::llm::block_on_in_place(async move {
-			let c = client.lock().await;
-			c.call_tool(req).await
+			let first = {
+				let c = client.lock().await;
+				c.call_tool(req.clone()).await
+			};
+			match first {
+				Ok(r) => Ok(r),
+				// The daemon hot-reloads by handing its socket to a successor,
+				// which severs established connections. Reconnect (riding out
+				// the successor's graph load) and retry once. Safe to re-issue:
+				// ingest is content-addressed and deduped, queries are reads.
+				Err(_) => {
+					let fresh = attach_with_retry(40, 250).await?;
+					let res = fresh.call_tool(req).await;
+					*client.lock().await = fresh;
+					res
+				}
+			}
 		})
 		.ok_or_else(|| McpError::Rpc {
 			code: -32000,

@@ -7,7 +7,7 @@ the pulse, evaporating exponentially — rather than through curation, retention
 policies, or scheduled cleanup rules.** The core of this decision shipped: every
 entity carries a decaying `heat` scalar (`src/base/heat.rs:7`), retrieval and
 the pulse both deposit into it, and an hourly collector evicts what has gone
-cold (`src/tick/stigmergy.rs:41`). The convergence metrics the original note
+cold (`run_gc`, `src/tick/stigmergy.rs`). The convergence metrics the original note
 proposed — the instrument for proving the model works — were not built, and the
 ranking-side unification it proposed did not happen. Both gaps are detailed
 below.
@@ -66,7 +66,7 @@ The shipped mechanics, in brief (the full treatment is in
 [Stigmergy GC & gravitons](../concepts/stigmergy.mdx) and
 [Heat, decay & self-compaction](../concepts/heat-and-compaction.mdx)):
 
-- Reads deposit `1.0` heat via `stamp_access` (`src/retrieval/score.rs:217`),
+- Reads deposit `1.0` heat via `stamp_access` (`src/retrieval/score.rs:247`),
   off the query hot path.
 - The pulse re-deposits `0.5 × strength` on every entity it reaches walking
   down from the root (`src/tick/pulse.rs:113`), decaying geometrically per
@@ -80,7 +80,7 @@ The shipped mechanics, in brief (the full treatment is in
   magnitude.
 - Once an hour, `run_gc` evicts entities that are cold (*aged* heat below
   `0.01`), stale (untouched for 7 days), and not durable
-  (`is_cold_victim`, `src/tick/stigmergy.rs:14`) — spilling each victim to the
+  (`is_cold_victim`, `src/tick/stigmergy.rs:27`) — spilling each victim to the
   cold tier before dropping it.
 
 Worked through with the shipped constants: a claim ingested and read exactly
@@ -110,7 +110,7 @@ several of its proposals landed differently or not at all.
 replace the two-term ranking boost (`log` access count + exponential recency)
 with the single heat scalar — is not what shipped. Heat became a *retention*
 signal only. Ranking still uses the original two-term `qbst`
-(`src/retrieval/score.rs:61`) with its own separate constants: access weight
+(`qbst`, `src/retrieval/score.rs:64`) with its own separate constants: access weight
 `0.02`, recency weight `0.05`, recency half-life **24 hours**, cap `0.1`
 (`src/base/constants.rs:10`). The note's complaint that the 24h half-life was
 hard-coded is half-resolved — it is now configurable via
@@ -135,10 +135,10 @@ measurement.
 
 **Two things shipped that the note never asked for.** Spill-before-drop:
 eviction writes the victim to a capped cold LMDB tier first and keeps it hot if
-the write fails (`evict_victims`, `src/tick/stigmergy.rs:78`), so GC is a
+the write fails (`evict_victims`, `src/tick/stigmergy.rs`), so GC is a
 demotion, not a deletion. And a federation carve-out: durable-kind immunity
 holds only for local kerns — a peer cannot pin unreclaimable storage by
-labelling its gossip `kind=Fact` (`src/tick/stigmergy.rs:12`).
+labelling its gossip `kind=Fact` (`src/tick/stigmergy.rs`).
 
 ## See also
 

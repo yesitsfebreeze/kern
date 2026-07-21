@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -11,17 +10,13 @@ pub enum Error {
 	Parse(String),
 }
 
-pub fn load_layered<T: DeserializeOwned + Default>(
-	user: &Path,
-	project: &Path,
-) -> Result<T, Error> {
+pub fn merged_value(user: &Path, project: &Path) -> Result<toml::Value, Error> {
 	let user_v = read_value(user)?;
 	let project_v = read_value(project)?;
-	let merged =
-		crate::config::secrets::seal_redirected(merge_deep(user_v, project_v.clone()), &project_v);
-	merged
-		.try_into()
-		.map_err(|e: toml::de::Error| Error::Parse(e.to_string()))
+	Ok(crate::config::secrets::seal_redirected(
+		merge_deep(user_v, project_v.clone()),
+		&project_v,
+	))
 }
 
 fn read_value(path: &Path) -> Result<toml::Value, Error> {
@@ -79,13 +74,13 @@ mod tests {
 	}
 
 	#[test]
-	fn load_layered_merges_project_section_over_missing_user() {
+	fn merged_value_merges_project_section_over_missing_user() {
 		let dir = std::env::temp_dir().join(format!("cfgio_ll_{}", std::process::id()));
 		std::fs::create_dir_all(&dir).unwrap();
 		let user = dir.join("user.toml");
 		let project = dir.join("project.toml");
 		std::fs::write(&project, "[section]\nenabled = true\n").unwrap();
-		let merged: toml::Table = load_layered(&user, &project).expect("load_layered");
+		let merged = merged_value(&user, &project).expect("merged_value");
 		let enabled = merged
 			.get("section")
 			.and_then(|s| s.get("enabled"))
@@ -95,7 +90,7 @@ mod tests {
 	}
 
 	#[test]
-	fn load_layered_project_field_wins_and_keeps_the_user_fields_it_omits() {
+	fn merged_value_project_field_wins_and_keeps_the_user_fields_it_omits() {
 		let dir = std::env::temp_dir().join(format!("cfgio_ovr_{}", std::process::id()));
 		std::fs::create_dir_all(&dir).unwrap();
 		let user = dir.join("user.toml");
@@ -103,7 +98,7 @@ mod tests {
 		std::fs::write(&user, "[embed]\nurl = \"user-url\"\nkey = \"secret\"\n").unwrap();
 		std::fs::write(&project, "[embed]\nmodel = \"proj-model\"\n").unwrap();
 
-		let merged: toml::Table = load_layered(&user, &project).expect("load_layered");
+		let merged = merged_value(&user, &project).expect("merged_value");
 		let embed = merged
 			.get("embed")
 			.and_then(|v| v.as_table())
@@ -127,7 +122,7 @@ mod tests {
 	}
 
 	#[test]
-	fn load_layered_seals_the_key_when_the_project_redirects_the_endpoint() {
+	fn merged_value_seals_the_key_when_the_project_redirects_the_endpoint() {
 		let dir = std::env::temp_dir().join(format!("cfgio_seal_{}", std::process::id()));
 		std::fs::create_dir_all(&dir).unwrap();
 		let user = dir.join("user.toml");
@@ -135,7 +130,7 @@ mod tests {
 		std::fs::write(&user, "[embed]\nurl = \"user-url\"\nkey = \"secret\"\n").unwrap();
 		std::fs::write(&project, "[embed]\nurl = \"http://attacker.example/v1\"\n").unwrap();
 
-		let merged: toml::Table = load_layered(&user, &project).expect("load_layered");
+		let merged = merged_value(&user, &project).expect("merged_value");
 		let embed = merged
 			.get("embed")
 			.and_then(|v| v.as_table())
@@ -238,7 +233,7 @@ mod tests {
 	}
 
 	#[test]
-	fn load_layered_keeps_sections_present_in_only_one_scope() {
+	fn merged_value_keeps_sections_present_in_only_one_scope() {
 		let dir = std::env::temp_dir().join(format!("cfgio_keep_{}", std::process::id()));
 		std::fs::create_dir_all(&dir).unwrap();
 		let user = dir.join("user.toml");
@@ -246,7 +241,7 @@ mod tests {
 		std::fs::write(&user, "[reason]\nmodel = \"qwen\"\n").unwrap();
 		std::fs::write(&project, "[embed]\nurl = \"p\"\n").unwrap();
 
-		let merged: toml::Table = load_layered(&user, &project).expect("load");
+		let merged = merged_value(&user, &project).expect("merged_value");
 		assert_eq!(
 			merged
 				.get("reason")

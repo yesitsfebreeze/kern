@@ -12,8 +12,9 @@ Ticket: `A01F62NW` — "Study CRDTs for conflict-free federated kern state"
 > inline lamport-stamped fields on `Entity` rather than as a named
 > `LWWRegister` type; and **OR-Set for `statements` was reversed, not deferred**
 > — see the note in §6 below. `Delta` has a live sender
-> (`gossip::handler::start_delta_flush`, wired at `src/commands.rs:895`), and
-> inbound deltas are still clamped on receipt. Anti-entropy was not built
+> (`gossip::handler::start_delta_flush` at `src/gossip/handler.rs:191`, wired at
+> `src/commands.rs:974`), and inbound deltas are still clamped on receipt
+> (`GOSSIP_CRDT_DELTA_MAX`, `src/gossip/handler.rs:353`). Anti-entropy was not built
 > (`ROADMAP.md` — "Anti-entropy"). Type and path names below predate the
 > `Thought`→`Entity` rename and the move from `crates/` to `src/`.
 

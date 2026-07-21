@@ -10,7 +10,7 @@ the default models pulled, the confidence to write no config at all.
 ## You may not need a config file
 
 kern is configless by default. With no `kern.toml` anywhere, every setting comes
-from the shipped defaults (`src/config/mod.rs:56`), which assume a local Ollama
+from the shipped defaults (`Config::default_in`, `src/config/mod.rs`), which assume a local Ollama
 at `http://localhost:11434`. The answer role aliases the reason model, so two
 pulls cover all three roles and you are done:
 
@@ -21,6 +21,31 @@ ollama pull granite4:3b            # distillation / reasoning, and the ask oracl
 
 A config file only exists to override those. Everything in it is optional, and
 any section you omit keeps its default.
+
+## Presets — the whole tuning surface is one line
+
+Memory tuning is a posture, not thirty knobs. The preset owns every heat,
+dedup, and retrieval-breadth setting (`src/config/preset.rs`); the `[heat]`,
+`[ingest]`, and `[retrieval]` sections are not accepted in `kern.toml` — a
+config that sets them refuses to load with a pointer here.
+
+```toml
+preset = "tight"
+```
+
+| Preset | Posture | What it means |
+| --- | --- | --- |
+| `relaxed` | **The default.** Keep more, deliver more, forget slower | 30-day heat half-life, near-identical-only dedup (0.98), broad search (`seed_k` 25, 800 expansions), up to 40 results / 8 answer facts |
+| `medium` | Balanced | 7-day half-life, 0.95 dedup, `seed_k` 15, 500 expansions, 25 results / 5 answer facts |
+| `tight` | Lean graph, sharp recall | 3-day half-life, aggressive dedup (0.90), narrow search (`seed_k` 10, 250 expansions), 12 results / 4 answer facts |
+
+No `preset` line means `relaxed`. An unknown preset name refuses to load, same
+as any other invalid config.
+
+Stay on `relaxed` for long-running projects where losing a stray fact hurts
+more than noise; use `tight` for high-churn codebases where stale memory
+misleads more than forgotten memory costs; `medium` is the middle when both
+hurt equally.
 
 ## The three model roles
 
@@ -36,14 +61,18 @@ buys less than a bigger reason model and costs you on every single operation.
 
 <Callout type="warn" title="The embedding dimension locks the graph">
 The first ingest fixes the vector dimension for the whole graph. Change the
-embedding model later and stored vectors no longer match query vectors —
-search silently returns nothing useful rather than erroring. `kern reembed`
-is the only escape, and it re-embeds everything.
+embedding model later and stored vectors no longer match query vectors. This is
+no longer silent: the model and dimension are stamped in the store and checked
+at open, a mismatch raises the `embed_mismatch` flag on `health`, and a query
+vector of the wrong dimension is dropped and counted instead of searching
+truncated noise. Queries still answer — fail-open — they just answer badly.
+`kern reembed` is the only escape, and it re-embeds everything, restamping with
+the model it used.
 </Callout>
 
 `embed.url` and `embed.model` are the only two settings kern actually requires;
 `Config::validate` rejects a config with either blank
-(`src/config/mod.rs:130`).
+(`src/config/mod.rs`).
 
 ### `reason` — distillation and reasoning
 
@@ -75,7 +104,7 @@ Ollama needs no extra wiring.
 
 ## Where the config file lives
 
-Two scopes, both optional (`src/config/mod.rs:99`):
+Two scopes, both optional (`Config::load_with_user`, `src/config/mod.rs`):
 
 | Scope | Path |
 | --- | --- |
@@ -83,7 +112,7 @@ Two scopes, both optional (`src/config/mod.rs:99`):
 | User | `<XDG_CONFIG>/kern/kern.toml` |
 
 The project root is the nearest ancestor directory containing `.git`, falling
-back to the nearest containing `.kern` (`src/config/mod.rs:116`) — so kern finds
+back to the nearest containing `.kern` (`Config::resolve_root`, `src/config/mod.rs`) — so kern finds
 the same config whether you launch it from the root or from a subdirectory.
 
 <Callout type="warn" title="Precedence is per-key, and a redirect drops the key">
@@ -134,7 +163,7 @@ key   = ""              # blank -> inherits [reason]'s key
 ### The fallback chain
 
 Blank values are not errors — they are how you say "same as the leg above"
-(`src/config/mod.rs:146` and `:162`):
+(`Config::reason_url` / `Config::answer_url`, `src/config/mod.rs`):
 
 - `answer.url` blank → uses the resolved `reason` url.
   `answer.key` blank → uses the resolved `reason` key.
@@ -195,6 +224,15 @@ model = "Qwen/Qwen2.5-7B-Instruct"
 Without the `/v1`, a `localhost` URL is treated as Ollama-native and every
 request goes to `/api/chat`, which your server does not serve.
 
+<Callout type="info" title="Context size and keep-alive are not config keys">
+`num_ctx` (embed 2048, reason 8192, answer 8192), `keep_alive` (embed and
+answer 10m, reason 2m) and the reason leg's `num_gpu: 0` are constants in
+`src/llm.rs:501-514`, not `kern.toml` fields. There is no key that changes any
+of them. They are also Ollama-native options: on the OpenAI-compatible `/v1`
+path kern sends none of them, so a vLLM or llama.cpp server sizes its own
+context and residency and the numbers above do not apply to it.
+</Callout>
+
 **A remote Ollama** stays on the native protocol only if it is reachable at a
 local address. A non-local host is always driven over the OpenAI-compatible
 path, which Ollama also serves — so point it at `http://host:11434/v1` and be
@@ -212,12 +250,22 @@ kern query "what is this project about" --answer   # exercises reason + answer
 
 The one-off flags `--embed-url`, `--embed-model`, `--reason-url`, and
 `--reason-model` override config for a single command
-(`src/commands.rs:65`) — useful for testing an endpoint before committing it to
+(`src/commands.rs:66`) — useful for testing an endpoint before committing it to
 the file.
 
 If embedding fails, ingest and query both return nothing rather than erroring
-loudly: kern fails open on LLM outages by design. Check stderr for the actual
-connection error.
+loudly: kern fails open on LLM outages by design, and that particular no-op is
+still uncounted — check stderr for the actual connection error.
+
+One embedding failure mode *is* visible. The store stamps the model and vector
+dimension it was built with and re-checks them at open (`src/base/store.rs:473`),
+so pointing `[embed] model` at a different model sets `embed_mismatch`, which
+`kern health` prints as `MISMATCH: the index was built with a different model`
+next to the `embed:` line. Queries keep working but drop any vector whose
+dimension disagrees with the index rather than searching truncated noise. The
+fix is `kern reembed`, which rebuilds every vector and restamps with the model
+it actually used. An *unstamped* store — one written before stamping existed —
+adopts the current model on first open and is not a mismatch.
 
 ## Related
 

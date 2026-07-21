@@ -47,7 +47,7 @@ directory deployment model.
 **The cold tier as the answer.** The original plan's first phase targeted the
 cold tier's O(n) JSONL scan. That problem dissolved before the wiring landed:
 the cold tier moved into LMDB with int8-on-disk vectors and a bounded scan
-capped at 50,000 entries (`src/base/store.rs:515`,
+capped at 50,000 entries (`src/base/store.rs:685`,
 `src/base/constants.rs:17`), so cold recall no longer degrades linearly. What
 remained — and what DiskANN actually fixes — is the **hot, resident** ceiling.
 
@@ -75,7 +75,7 @@ shipped standalone index (`src/base/diskann.rs`) is exactly that:
 The live wiring hides the choice behind a two-variant enum
 (`src/base/vector_backend.rs:8`): `Resident(HnswIndex)` or
 `Disk { snapshot, delta, tombstones }`. Callers cannot tell which they have.
-`rebuild_index` makes the spill decision (`src/base/graph.rs:234`): once the
+`rebuild_index` makes the spill decision (`src/base/graph.rs:285`): once the
 resident searchable-entity count exceeds `disk_threshold`, it builds a
 snapshot under `<data_dir>/diskann/entity` and switches the entity index to
 the disk variant. Any build or open failure logs and falls back to the

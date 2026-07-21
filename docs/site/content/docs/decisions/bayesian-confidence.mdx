@@ -94,7 +94,7 @@ Three shipped writers, one of which the note never anticipated:
 - **GNN propagation.** After each learned re-embedding pass, the cosine
   alignment between an entity's content vector and its new structural vector
   is read as an observation: alignment `≥ 0.5` supports at weight `w`,
-  misalignment contradicts at `1 − w` (`src/tick/gnn_propagate.rs:141`). An
+  misalignment contradicts at `1 − w` (`src/tick/gnn_propagate.rs:154`). An
   entity whose graph neighbourhood keeps agreeing with its content gains
   confidence; one the structure pulls away from loses it. This is currently
   the **only** caller of `observe_contradict` in the tree.

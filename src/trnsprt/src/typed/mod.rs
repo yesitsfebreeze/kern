@@ -8,6 +8,8 @@ pub use adapter::{Adapter, InprocAdapter};
 pub use channel::Channel;
 pub use codec::{Codec, JsonEnvelopeCodec};
 pub use error::{AdapterError, CodecError, RpcError};
+#[cfg(unix)]
+pub use local::adopt_kern_listener;
 #[cfg(windows)]
 pub use local::NamedPipeAdapter;
 #[cfg(unix)]

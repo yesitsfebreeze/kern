@@ -76,7 +76,7 @@ any order, any number of times (`src/crdt.rs:29`, with the algebraic laws
 pinned by inline tests). LWW ties are broken by a total order over
 `(lamport, producer)` (`src/crdt.rs:48`), not wall clock, so clock skew cannot
 lose an update — the Lamport clock is bumped on every local mutation and
-ratcheted on every inbound delta (`src/base/graph.rs:389`).
+ratcheted on every inbound delta (`observe_lamport`, `src/base/graph.rs:450`).
 
 Worked example: laptop and workstation both hold reason edge *R*. The laptop's
 retrieval traverses it twice; the workstation's LLM pass re-scores it. Both
@@ -91,7 +91,7 @@ The study's key wire-format claim held: the change was purely additive. A
 `Delta` kind was appended to the gossip envelope (`src/gossip/types.rs:12`)
 carrying a `CrdtDeltaPayload` (`src/gossip/types.rs:117`) — object id, target
 field, replica slot, value, and the LWW stamp. Local mutators queue deltas
-(`src/base/graph.rs:404`, fed from the access-commit path at
+(`push_delta`, `src/base/graph.rs:465`, fed from the access-commit path at
 `src/retrieval/score.rs:255` and the ingest path at `src/ingest/place.rs:130`),
 and a heartbeat-paced flush drains and broadcasts them
 (`src/gossip/handler.rs:191`). The receiver validates and applies

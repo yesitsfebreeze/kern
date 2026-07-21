@@ -8,7 +8,9 @@ mod hub;
 mod ingest;
 mod intake;
 pub mod io;
+mod preset;
 mod reason;
+mod reload;
 mod retrieval;
 mod secrets;
 mod serve;
@@ -23,7 +25,9 @@ pub use graph::GraphConfig;
 pub use hub::HubConfig;
 pub use ingest::IngestConfig;
 pub use intake::IntakeConfig;
+pub use preset::Preset;
 pub use reason::ReasonConfig;
+pub use reload::ReloadConfig;
 pub use retrieval::RetrievalConfig;
 pub use serve::{mcp_token_path, open_private_append, ServeConfig};
 pub use tick::TickConfig;
@@ -39,6 +43,7 @@ use crate::base::heat::HeatConfig;
 #[serde(default)]
 pub struct Config {
 	pub data_dir: String,
+	pub preset: Preset,
 	pub embed: EmbedConfig,
 	pub reason: ReasonConfig,
 	pub answer: AnswerConfig,
@@ -53,6 +58,7 @@ pub struct Config {
 	pub intake: IntakeConfig,
 	pub graph: GraphConfig,
 	pub hub: HubConfig,
+	pub reload: ReloadConfig,
 }
 
 impl Default for Config {
@@ -75,12 +81,13 @@ fn graviton_data_dir(data_dir: &str, cwd: &Path) -> String {
 
 impl Config {
 	pub fn default_in(cwd: &Path) -> Self {
-		Self {
+		let mut cfg = Self {
 			data_dir: cwd
 				.join(".kern")
 				.join("data")
 				.to_string_lossy()
 				.into_owned(),
+			preset: Preset::default(),
 			embed: EmbedConfig::default(),
 			reason: ReasonConfig::default(),
 			answer: AnswerConfig::default(),
@@ -95,7 +102,11 @@ impl Config {
 			intake: IntakeConfig::default(),
 			graph: GraphConfig::default(),
 			hub: HubConfig::default(),
-		}
+			reload: ReloadConfig::default(),
+		};
+		let preset = cfg.preset;
+		preset.apply(&mut cfg);
+		cfg
 	}
 
 	pub fn load(cwd: &Path) -> Result<Self, io::Error> {
@@ -110,7 +121,19 @@ impl Config {
 	/// passes or fails on whatever happens to be on that machine.
 	pub fn load_with_user(user: &Path, cwd: &Path) -> Result<Self, io::Error> {
 		let project = cwd.join(".kern").join("kern.toml");
-		let mut cfg: Self = io::load_layered(user, &project)?;
+		let merged = io::merged_value(user, &project)?;
+		for section in ["heat", "ingest", "retrieval"] {
+			if merged.get(section).is_some() {
+				return Err(io::Error::Parse(format!(
+					"[{section}] is preset-managed — set preset = \"relaxed\" | \"medium\" | \"tight\" at the top level instead"
+				)));
+			}
+		}
+		let mut cfg: Self = merged
+			.try_into()
+			.map_err(|e: toml::de::Error| io::Error::Parse(e.to_string()))?;
+		let preset = cfg.preset;
+		preset.apply(&mut cfg);
 		// serde's struct-level default pins data_dir to the *process* cwd. A
 		// caller loading another root (hub merge, any cross-root tooling) must
 		// get that root's store, never its own — re-pin when no config set it.
@@ -349,5 +372,67 @@ mod tests {
 			"retrieval error surfaced + tagged: {err}"
 		);
 		assert!(err.contains("seed_k"), "the specific issue is named: {err}");
+	}
+
+	fn root_with(toml: &str) -> tempfile::TempDir {
+		let dir = tempfile::tempdir().unwrap();
+		let kern = dir.path().join(".kern");
+		std::fs::create_dir_all(&kern).unwrap();
+		std::fs::write(kern.join("kern.toml"), toml).unwrap();
+		dir
+	}
+
+	#[test]
+	fn configless_load_defaults_to_relaxed() {
+		let dir = tempfile::tempdir().unwrap();
+		let root = dir.path().canonicalize().unwrap();
+		std::fs::create_dir_all(root.join(".kern")).unwrap();
+		let cfg = Config::load(&root).expect("load");
+		assert_eq!(cfg.preset, Preset::Relaxed);
+		assert_eq!(cfg.retrieval.seed_k, 25);
+		assert_eq!(cfg.heat.half_life_secs, 30 * 24 * 60 * 60);
+	}
+
+	#[test]
+	fn preset_key_applies_its_tier() {
+		let dir = root_with("preset = \"tight\"\n");
+		let cfg = Config::load(&dir.path().canonicalize().unwrap()).expect("load");
+		assert_eq!(cfg.preset, Preset::Tight);
+		assert_eq!(cfg.retrieval.seed_k, 10);
+		assert_eq!(cfg.heat.half_life_secs, 3 * 24 * 60 * 60);
+	}
+
+	#[test]
+	fn preset_managed_sections_refuse_to_load() {
+		for section in ["heat", "ingest", "retrieval"] {
+			let dir = root_with(&format!("[{section}]\nanything = 1\n"));
+			let err = Config::load(&dir.path().canonicalize().unwrap()).unwrap_err();
+			let msg = err.to_string();
+			assert!(
+				msg.contains(section) && msg.contains("preset"),
+				"[{section}] must be refused with a pointer to presets: {msg}"
+			);
+		}
+	}
+
+	#[test]
+	fn project_preset_beats_user_preset() {
+		let dir = tempfile::tempdir().unwrap();
+		let user = dir.path().join("user.toml");
+		std::fs::write(&user, "preset = \"tight\"\n").unwrap();
+		let root = root_with("preset = \"medium\"\n");
+		let cfg = Config::load_with_user(&user, &root.path().canonicalize().unwrap()).expect("load");
+		assert_eq!(cfg.preset, Preset::Medium);
+		assert_eq!(cfg.retrieval.seed_k, 15);
+	}
+
+	#[test]
+	fn unknown_preset_name_refuses_to_load() {
+		let dir = root_with("preset = \"loose\"\n");
+		let err = Config::load(&dir.path().canonicalize().unwrap()).unwrap_err();
+		assert!(
+			err.to_string().contains("relaxed"),
+			"the error names the valid tiers: {err}"
+		);
 	}
 }
