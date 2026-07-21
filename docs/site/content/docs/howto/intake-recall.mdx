@@ -110,24 +110,35 @@ degraded:    0 panics | 0 failures
 
 ## When it does not work
 
+Start with `kern intake`. A queued delta is retried forever rather than dropped, so a permanently stuck one looks exactly like a fresh one until you ask:
+
+```
+$ kern intake
+intake .kern/intake  pending=2 stuck=1 failed=1 done=37
+  wait   sess-a41.txt                     4s
+  STUCK  sess-a39.txt                     3h  the reason model returned no parseable claims (prose reply, or endpoint unreachable)
+  failed logo.png  (not text; quarantined, never retried)
+```
+
+`STUCK` carries the last failure and is the whole diagnosis; `wait` means not picked up yet. `kern intake drain` runs one pass in this process, so you can drive the queue with no daemon at all and read the error immediately.
+
 <Mermaid
   chart={`
 flowchart TD
-    A["nothing in the graph"] --> B{".txt files piling up in .kern/intake/?"}
-    B -->|"no, and done/ is empty"| C["nothing is writing deltas — kern ships no writer; wire your harness/script to drop files, or use MCP ingest instead"]
-    B -->|"yes, never drained"| D{"daemon running?"}
-    D -->|"no"| E["start it: kern --daemon"]
-    D -->|"yes"| F{"reason endpoint reachable?"}
-    F -->|"no"| G["fix [reason].url / pull the model"]
-    F -->|"yes"| H["model is replying prose, not JSON — every delta requeues, so the drain never finishes"]
-    B -->|"drained, done/ filling"| I{"kern health shows thoughts?"}
-    I -->|"no"| J["embed endpoint failing — check logs for kern.ingest"]
-    I -->|"yes"| K["graph is fine; recall is the problem"]
+    A["nothing in the graph"] --> B["kern intake"]
+    B -->|"pending=0, done=0"| C["nothing is writing deltas — kern ships no writer; wire your harness/script to drop files, or use MCP ingest instead"]
+    B -->|"STUCK entries"| D["the line names the cause: no [reason] endpoint, prose reply, or the embed/ingest failure verbatim"]
+    B -->|"pending>0, all wait"| E{"daemon running?"}
+    E -->|"no"| F["start it: kern --daemon, or drain once: kern intake drain"]
+    E -->|"yes"| G["drain is mid-pass; re-run kern intake"]
+    B -->|"done filling"| H{"kern health shows thoughts?"}
+    H -->|"no"| I["embed endpoint failing — check logs for kern.ingest"]
+    H -->|"yes"| J["graph is fine; recall is the problem"]
 `}
 />
 
-- **LLM endpoint unreachable.** Transient: deltas queue and retry forever. Confirm `curl http://localhost:11434/api/tags`; look for `kern.ingest.intake` warnings mentioning "distill got no LLM output". WSL (NAT) with Ollama on the Windows host: `localhost` resolves inside the VM — pin the URL to the host gateway (`ip route show default | awk '{print $3}'`) in `.kern/kern.toml`. Blanking both `[reason].url` and `[embed].url` disables distillation; the daemon logs a warning.
-- **Nothing landing.** Check in order: `.kern/` exists where the daemon pinned; `[intake].enabled` is `true`; something is writing files. Non-UTF-8 → `.kern/intake/failed/`. Endpoint answers but drain never finishes: prose-not-JSON (see chart); `done/` empty while `.kern/intake/` grows is the tell.
+- **LLM endpoint unreachable.** Transient: deltas queue and retry forever. `kern intake` shows them `STUCK` with the reason; confirm with `curl http://localhost:11434/api/tags`. WSL (NAT) with Ollama on the Windows host: `localhost` resolves inside the VM — pin the URL to the host gateway (`ip route show default | awk '{print $3}'`) in `.kern/kern.toml`. Blanking both `[reason].url` and `[embed].url` disables distillation; the daemon logs a warning.
+- **Nothing landing.** Check in order: `.kern/` exists where the daemon pinned; `[intake].enabled` is `true`; something is writing files. Non-UTF-8 → `.kern/intake/failed/`. Endpoint answers but drain never finishes: prose-not-JSON — `kern intake` names it.
 - **Recall empty.** `kern health` shows content: check `MISMATCH` beside `embed:` (fix: `kern reembed`). Otherwise widen the query — `min_conf` gates out fresh claims, which start at 0.6 until reinforced.
 
 ## Tuning

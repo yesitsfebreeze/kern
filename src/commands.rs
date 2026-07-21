@@ -1,6 +1,7 @@
 pub(crate) mod admin;
 pub(crate) mod graph_ops;
 mod ingest_cmd;
+mod intake_cmd;
 mod mcp_cmd;
 mod mcp_restart;
 mod profile_cmd;
@@ -136,6 +137,13 @@ pub enum Commands {
 		#[command(flatten)]
 		llm: LlmArgs,
 	},
+	/// Show the intake queue, or drain it once with no daemon running.
+	Intake {
+		#[command(subcommand)]
+		action: Option<IntakeAction>,
+		#[command(flatten)]
+		llm: LlmArgs,
+	},
 	Health,
 	Profile {
 		#[arg(long, default_value = "what is this project about")]
@@ -199,6 +207,14 @@ pub enum HubAction {
 	},
 	/// Stop the hub daemon; nodes stay up.
 	Stop,
+}
+
+#[derive(Subcommand)]
+pub enum IntakeAction {
+	/// Pending and failed deltas, with the last error for anything stuck.
+	Status,
+	/// Run one drain pass in this process; no daemon required.
+	Drain,
 }
 
 #[derive(Subcommand)]
@@ -507,6 +523,19 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 				&from,
 				&to,
 				&reason,
+				embed_url,
+				embed_model,
+				reason_url,
+				reason_model,
+			)
+			.await
+		}
+
+		Commands::Intake { action, llm } => {
+			let (embed_url, embed_model, reason_url, reason_model) = llm.resolve(cfg);
+			intake_cmd::cmd_intake(
+				cfg,
+				action,
 				embed_url,
 				embed_model,
 				reason_url,

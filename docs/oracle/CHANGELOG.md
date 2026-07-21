@@ -2,6 +2,22 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — The intake has a surface, and the retry-forever tradeoff is
+  finally visible: `kern intake` / `kern intake status` prints pending (age,
+  last error), quarantined and done; `kern intake drain` runs one pass
+  in-process with no daemon, via a `drain_now` wrapper that shares `drain_once`
+  with the daemon loop so a one-shot can never diverge from what the daemon
+  would have done. Building the surface found the substantive bug: three paths
+  left a delta queued and wrote **no** error sidecar — no `[reason]` endpoint
+  configured, a reason model replying prose, and a transient read error — so
+  the exact cases ROADMAP item 8 exists to expose showed in the report as
+  ordinary "waiting". All three now record why through one `record_stuck`
+  funnel. The drain reuses `cmd_ingest`'s guarded flush retry, so a running
+  daemon yields a refused flush and reload rather than a clobber; the advisory
+  lock that would prevent the contention outright stays item 9.
+  Decided by: fix-the-root — the missing CLI was the reported symptom, the
+  unrecorded failures were the reason the intake was invisible in the first
+  place.
 - 2026-07-21 — The walk pays: ROADMAP item 86 closed with bounded
   source-weighted traversal credit in `expand` — each examined edge credits its
   far endpoint `source_score × edge_evidence` (once per edge-endpoint, summed,

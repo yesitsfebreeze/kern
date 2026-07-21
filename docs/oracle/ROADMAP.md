@@ -39,21 +39,6 @@ These need no gossip, no flag and no unusual configuration. Every one produces a
 wrong or missing result with no error, which is why they outrank both the
 security work (armed only with federation on) and every feature.
 
-### 8. `kern intake` — no way to see or drive the intake `[ingest]`
-
-**Half done.** The *why* now exists: a failed drain writes the last error to
-`<intake>/errors/<name>.txt`, clears it on the next success, and
-`ingest::intake_status::scan` reports pending (with age and last error), failed
-and done. What is still missing is the surface — there is no `Intake` variant in
-`Commands`, so nothing exposes any of it. Wanted: `kern intake` (list pending +
-failed with the last error) and a one-shot drain so the CLI works with no daemon
-running.
-
-Raised in rank by `220af94`: a reason model that persistently replies prose now
-retries forever rather than losing the delta — the safe side, and deliberately
-chosen, but that tradeoff is only acceptable while it is *visible*. This item is
-what makes it visible.
-
 ### 9. Two live writers against one LMDB environment `[surface]`
 
 Merged from what were two items, because it is one failure with two entrances.
@@ -933,6 +918,19 @@ an overall eval score that makes specialization worth funding.
 
 ## Closed and verified — do not re-open
 
+- **The intake is visible and drivable** — was item 8, closed 2026-07-21.
+  `kern intake` (alias `kern intake status`) prints pending with age, the last
+  error for anything stuck, quarantined `failed/` entries and the `done` count;
+  `kern intake drain` runs one pass in-process so the CLI works with no daemon,
+  sharing `drain_once` with the daemon's loop so the two can never diverge.
+  Building it exposed the real hole: the three paths that leave a delta queued
+  **recorded no sidecar at all** — no `[reason]` endpoint, a reason model
+  answering prose, and a transient read error. Those are exactly the
+  retry-forever cases this item exists to surface, so each now writes why, and
+  `a_transcript_left_queued_records_why_it_is_stuck` holds the line. The drain
+  flushes through the same guarded retry as `cmd_ingest`, so a running daemon
+  makes it a refused-flush-and-reload, never a clobber (item 9 still owns the
+  lock).
 - **A reason edge lifts its neighbour into the results** — was item 86, the
   instrument's first finding, closed 2026-07-21. The design question — how does
   a walk pay without letting a well-connected node outrank a direct match — is

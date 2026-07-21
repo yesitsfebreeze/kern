@@ -346,9 +346,18 @@ Nothing is lost on an LLM outage — the delta stays queued until it succeeds.
   adapts the repo file watcher into ingest jobs.
 - **Outcome** (`src/ingest/outcome.rs`) — `OutcomeStatus` (`Committed`/`Partial`/`Deduped`/`Failed`, `src/ingest/outcome.rs:2`),
   `FailureReport::document_permanent` for non-retryable errors.
+- **Status & sidecars** (`src/ingest/intake_status.rs`) — every path that leaves
+  a delta queued writes why to `<intake>/errors/<name>.txt` through
+  `record_stuck`, cleared on the next success; `scan` reports pending (age +
+  last error), quarantined and done. Without this a delta retried forever is
+  indistinguishable from one not yet picked up.
+- **CLI** (`src/commands/intake_cmd.rs`) — `kern intake` (alias `intake
+  status`) prints that report; `kern intake drain` runs one pass in-process via
+  `intake::drain_now`, sharing `drain_once` with the daemon loop, and flushes
+  through the same guarded retry as `cmd_ingest`.
 
 **Where.** `src/ingest/*` (2836 LoC, 12 files). Spawned by `spawn_intake`
-(`src/commands.rs`).
+(`src/commands.rs`); driven manually by `src/commands/intake_cmd.rs`.
 
 **Gaps.** Distill prompt is one-shot; long deltas may truncate. No per-kind
 prompt tuning. Dedup threshold is global, not per-kind.

@@ -66,19 +66,25 @@ pub fn archive(path: &Path, done_dir: &Path) {
 
 // The queue dir is the file's parent; sidecars live in `<queue>/errors/`.
 fn record_intake_failure(path: &Path, outcome: &crate::ingest::outcome::Outcome) {
-	let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
-		return;
-	};
 	let first = outcome
 		.failures
 		.first()
 		.map(|f| format!("{}/{}: {}", f.scope, f.class, f.error))
 		.unwrap_or_else(|| "no failure detail reported".to_string());
-	crate::ingest::intake_status::record_failure(
-		dir,
-		name,
+	record_stuck(
+		path,
 		&format!("status={} {}", outcome.status.as_str(), first),
 	);
+}
+
+// Every path that leaves a delta queued must land here. A delta retried forever
+// with no sidecar is indistinguishable from one not yet picked up, which is the
+// invisibility `kern intake` exists to end.
+fn record_stuck(path: &Path, message: &str) {
+	let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
+		return;
+	};
+	crate::ingest::intake_status::record_failure(dir, name, message);
 }
 
 pub fn finalize(path: &Path, done_dir: &Path, results: &[bool]) -> bool {
@@ -141,7 +147,13 @@ async fn drain_entry(
 			archive(path, failed);
 			return false;
 		}
-		None => return false,
+		None => {
+			record_stuck(
+				path,
+				"unreadable (transient IO error); left queued for retry",
+			);
+			return false;
+		}
 	};
 	if text.trim().is_empty() {
 		archive(path, done);
@@ -152,11 +164,21 @@ async fn drain_entry(
 	}
 	let Some(llm) = llm else {
 		tracing::warn!(target: "kern.ingest.intake", path = %path.display(), "transcript needs a reason LLM to distill; leaving in intake");
+		record_stuck(
+			path,
+			"no [reason] endpoint configured — a .txt transcript cannot be distilled",
+		);
 		return false;
 	};
 	let (stem, claims) = match extract_claims(path, extra_kinds, llm.as_ref()) {
 		Some(v) => v,
-		None => return false,
+		None => {
+			record_stuck(
+				path,
+				"the reason model returned no parseable claims (prose reply, or endpoint unreachable)",
+			);
+			return false;
+		}
 	};
 	let mut results = Vec::with_capacity(claims.len());
 	for c in claims {
@@ -215,6 +237,36 @@ async fn drain_document(
 		record_intake_failure(path, &outcome);
 	}
 	finalize(path, done, &[ok])
+}
+
+// One pass over the queue, for a CLI with no daemon running. The looping
+// `run` below is the daemon's caller; both share `drain_once` so a one-shot
+// drain can never diverge from what the daemon would have done.
+#[allow(clippy::too_many_arguments)]
+pub async fn drain_now(
+	intake_dir: &Path,
+	worker: &Worker,
+	llm: Option<&LlmFunc>,
+	extra_kinds: &[String],
+	dedup_threshold: f64,
+	done_retention: Duration,
+	now: SystemTime,
+) -> usize {
+	let cfg = crate::ingest::Config {
+		dedup_threshold,
+		..Default::default()
+	};
+	drain_once(
+		intake_dir,
+		&intake_dir.join("done"),
+		worker,
+		llm,
+		extra_kinds,
+		&cfg,
+		done_retention,
+		now,
+	)
+	.await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -511,5 +563,78 @@ mod tests {
 		assert!(entities > 0, "the document reached the graph");
 
 		server.abort();
+	}
+
+	// A delta retried forever with no sidecar reads exactly like one not yet
+	// picked up. Every path that leaves a delta in the queue must say why, or
+	// `kern intake` reports a permanently stuck transcript as merely waiting.
+	#[tokio::test]
+	async fn a_transcript_left_queued_records_why_it_is_stuck() {
+		use crate::base::graph::GraphGnn;
+		use crate::ingest::intake_status::{last_failure, scan};
+		use parking_lot::RwLock;
+
+		let embedder = crate::llm::Client::new_embed_only("http://127.0.0.1:1", "m", "");
+		let graph = Arc::new(RwLock::new(GraphGnn::new()));
+		let worker = Arc::new(Worker::new(graph.clone(), embedder, None, None, None));
+
+		let dir = tempdir().unwrap();
+		let intake = dir.path().to_path_buf();
+		let no_llm = intake.join("needs-distill.txt");
+		std::fs::write(&no_llm, "user: hi\nassistant: a fact").unwrap();
+		let prose = intake.join("prose-reply.txt");
+		std::fs::write(&prose, "user: hi\nassistant: another fact").unwrap();
+
+		let cfg = crate::ingest::Config::default();
+		// No LLM at all: the transcript cannot even be attempted.
+		drain_once(
+			&intake,
+			&intake.join("done"),
+			&worker,
+			None,
+			&[],
+			&cfg,
+			Duration::from_secs(3600),
+			SystemTime::now(),
+		)
+		.await;
+
+		assert!(no_llm.exists(), "precondition: the delta is still queued");
+		assert!(
+			last_failure(&intake, "needs-distill.txt")
+				.unwrap_or_default()
+				.contains("[reason]"),
+			"a transcript with no reason endpoint says so"
+		);
+
+		// An LLM that answers, but never in the parseable shape.
+		let prose_llm: LlmFunc = Arc::new(|_p: &str| "Sure! Here are the facts:".to_string());
+		drain_once(
+			&intake,
+			&intake.join("done"),
+			&worker,
+			Some(&prose_llm),
+			&[],
+			&cfg,
+			Duration::from_secs(3600),
+			SystemTime::now(),
+		)
+		.await;
+
+		assert!(prose.exists(), "precondition: the delta is still queued");
+		assert!(
+			last_failure(&intake, "prose-reply.txt")
+				.unwrap_or_default()
+				.contains("no parseable claims"),
+			"a prose-answering reason model says so"
+		);
+
+		let report = scan(&intake, SystemTime::now());
+		assert_eq!(
+			report.stuck(),
+			2,
+			"both are STUCK, not merely pending: {:?}",
+			report.pending
+		);
 	}
 }
