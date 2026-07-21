@@ -96,18 +96,23 @@ pub fn run_gc(graph: &Arc<RwLock<GraphGnn>>, kern_id: &str, heat_cfg: &HeatConfi
 	}
 
 	// Spill-before-drop: eviction must never lose data — while a store is bound.
-	let store = g.store();
-	let kept = evict_victims(&mut g, kern_id, &victims, |e| match &store {
-		Some(s) => s.cold_spill(e).is_ok(),
+	let kept = match g.store() {
+		Some(store) => evict_batched(
+			&mut g,
+			kern_id,
+			&victims,
+			|batch| store.cold_put_all(batch),
+			|e| store.cold_spill(e).is_ok(),
+		),
 		// No cold store bound (in-memory kern): dropping IS the intended memory
 		// bound, not a bug — there is nowhere to spill to. It is still a real loss,
 		// and the spill-before-drop guarantee does not hold here, so count it rather
 		// than let an in-memory deployment look like a durable one.
-		None => {
+		None => evict_victims(&mut g, kern_id, &victims, |_| {
 			UNSPILLED_DROPS.fetch_add(1, Ordering::Relaxed);
 			true
-		}
-	});
+		}),
+	};
 	if kept > 0 {
 		tracing::warn!(
 			target: "kern.stigmergy",
@@ -118,6 +123,47 @@ pub fn run_gc(graph: &Arc<RwLock<GraphGnn>>, kern_id: &str, heat_cfg: &HeatConfi
 	}
 }
 
+// One LMDB commit for the whole victim list. A commit is ~9ms and the rest of a
+// spill is microseconds, so a sweep's cost was V fsyncs; this makes it one.
+//
+// A failed batch falls back to the per-victim path, which keeps the failure
+// semantics exactly as they were: the bad row stays hot and is retried next
+// sweep, every other victim is still collected. All-or-nothing was the
+// alternative and it is worse here — cold GC is the only bound on hot-graph
+// size, so one un-encodable row would wedge that bound every hour, forever.
+// The fallback also absorbs an over-large batch (MDB_TXN_FULL) by finishing the
+// sweep slowly instead of not at all.
+fn evict_batched(
+	g: &mut GraphGnn,
+	kern_id: &str,
+	victims: &[String],
+	spill_all: impl FnOnce(&[Entity]) -> Result<(), crate::base::store::StoreError>,
+	spill_one: impl FnMut(&Entity) -> bool,
+) -> usize {
+	let batch: Vec<Entity> = victims
+		.iter()
+		.filter_map(|id| entity_of(g, kern_id, id))
+		.collect();
+	if let Err(err) = spill_all(&batch) {
+		tracing::warn!(
+			target: "kern.stigmergy",
+			kern = %kern_id,
+			victims = victims.len(),
+			%err,
+			"batched cold spill failed; retrying this sweep one victim at a time"
+		);
+		return evict_victims(g, kern_id, victims, spill_one);
+	}
+	evict_victims(g, kern_id, victims, |_| true)
+}
+
+fn entity_of(g: &GraphGnn, kern_id: &str, id: &str) -> Option<Entity> {
+	g.kerns
+		.get(kern_id)
+		.and_then(|k| k.entities.get(id))
+		.cloned()
+}
+
 fn evict_victims(
 	g: &mut GraphGnn,
 	kern_id: &str,
@@ -126,12 +172,7 @@ fn evict_victims(
 ) -> usize {
 	let mut kept = 0usize;
 	for id in victims {
-		let victim = g
-			.kerns
-			.get(kern_id)
-			.and_then(|k| k.entities.get(id))
-			.cloned();
-		if let Some(e) = victim {
+		if let Some(e) = entity_of(g, kern_id, id) {
 			if !spill(&e) {
 				kept += 1;
 				continue;
@@ -158,6 +199,190 @@ mod tests {
 			heat,
 			accessed_at,
 			..Default::default()
+		}
+	}
+
+	// Five kinds in one kern so a sweep has to separate victims from immune rows
+	// rather than collect everything it walks: stale Claim (victim), fresh Claim,
+	// stale active Fact (immune), stale superseded Fact (victim), stale Document
+	// (immune).
+	fn mixed_population(dir: &tempfile::TempDir) -> (GraphGnn, Arc<crate::base::store::Store>) {
+		use crate::base::store::Store;
+		use crate::base::types::EntityStatus;
+
+		let store = Arc::new(Store::open(&dir.path().to_string_lossy()).unwrap());
+		let now = SystemTime::now();
+		let old = now - (COLD_GC_AGE + Duration::from_secs(1));
+		let mut k = Kern::new("k", "");
+		for i in 0..200usize {
+			let (kind, stale, superseded) = match i % 5 {
+				0 => (EntityKind::Claim, true, false),
+				1 => (EntityKind::Claim, false, false),
+				2 => (EntityKind::Fact, true, false),
+				3 => (EntityKind::Fact, true, true),
+				_ => (EntityKind::Document, true, false),
+			};
+			let mut e = ent(kind, 0.0, Some(if stale { old } else { now }));
+			e.id = format!("e{i:03}");
+			e.vector = vec![i as f32, 1.0, -1.0].into();
+			if superseded {
+				e.status = EntityStatus::Superseded;
+			}
+			k.entities.insert(e.id.clone(), e);
+		}
+		let mut g = GraphGnn::new();
+		g.kerns.insert("k".into(), k);
+		g.set_store(store.clone());
+		(g, store)
+	}
+
+	fn victim_ids(g: &GraphGnn) -> Vec<String> {
+		let now = SystemTime::now();
+		let mut v: Vec<String> = g.kerns["k"]
+			.entities
+			.values()
+			.filter(|e| is_cold_victim(e, now, HL, false))
+			.map(|e| e.id.clone())
+			.collect();
+		v.sort();
+		v
+	}
+
+	fn hot_ids(g: &GraphGnn) -> Vec<String> {
+		let mut v: Vec<String> = g.kerns["k"].entities.keys().cloned().collect();
+		v.sort();
+		v
+	}
+
+	fn cold_ids(s: &crate::base::store::Store) -> Vec<String> {
+		let mut v: Vec<String> = s.cold_all().unwrap().into_iter().map(|e| e.id).collect();
+		v.sort();
+		v
+	}
+
+	// The whole claim of the batched path. A one-victim sweep proves nothing —
+	// there both paths are a single commit — so this runs the mixed population,
+	// where a divergence in immunity, ordering, or the batch snapshot shows up.
+	#[test]
+	fn batched_eviction_evicts_exactly_what_the_per_victim_path_evicted() {
+		let d_batch = tempfile::tempdir().unwrap();
+		let d_each = tempfile::tempdir().unwrap();
+		let (mut g_batch, s_batch) = mixed_population(&d_batch);
+		let (mut g_each, s_each) = mixed_population(&d_each);
+
+		let victims = victim_ids(&g_batch);
+		assert_eq!(
+			victims,
+			victim_ids(&g_each),
+			"precondition: both graphs start identical"
+		);
+		assert!(
+			victims.len() > 1,
+			"precondition: a multi-victim sweep, or the two paths cannot be told apart"
+		);
+
+		let kept_batch = evict_batched(
+			&mut g_batch,
+			"k",
+			&victims,
+			|b| s_batch.cold_put_all(b),
+			|e| s_batch.cold_spill(e).is_ok(),
+		);
+		let kept_each = evict_victims(&mut g_each, "k", &victims, |e| s_each.cold_spill(e).is_ok());
+
+		assert_eq!(kept_batch, kept_each, "same number held back");
+		assert_eq!(
+			hot_ids(&g_batch),
+			hot_ids(&g_each),
+			"the batched sweep must leave exactly the survivors the per-victim sweep left"
+		);
+		assert_eq!(
+			cold_ids(&s_batch),
+			cold_ids(&s_each),
+			"the batched sweep must spill exactly the rows the per-victim sweep spilled"
+		);
+		assert_eq!(
+			cold_ids(&s_batch),
+			victims,
+			"and those rows are the victims"
+		);
+	}
+
+	// The failure semantics chosen for the batched path: a failed batch degrades
+	// to the per-victim behaviour it replaced, so the bad row stays hot and every
+	// other victim is still collected. All-or-nothing was the alternative and it
+	// was rejected — cold GC is the only bound on hot-graph size, so one
+	// permanently un-encodable row would wedge that bound every hour, forever.
+	#[test]
+	fn a_failed_batch_falls_back_per_victim_instead_of_holding_the_sweep() {
+		let dir = tempfile::tempdir().unwrap();
+		let (mut g, _store) = mixed_population(&dir);
+		let victims = victim_ids(&g);
+		assert!(victims.len() > 1, "precondition: a multi-victim sweep");
+		let poison = victims[victims.len() / 2].clone();
+
+		let kept = evict_batched(
+			&mut g,
+			"k",
+			&victims,
+			|_| Err(crate::base::store::StoreError::BadVersion(9)),
+			|e| e.id != poison,
+		);
+
+		assert_eq!(
+			kept, 1,
+			"only the row that failed its own spill is held back"
+		);
+		let hot = hot_ids(&g);
+		assert!(
+			hot.contains(&poison),
+			"the row that cannot be spilled stays hot and is retried next sweep"
+		);
+		for id in victims.iter().filter(|v| **v != poison) {
+			assert!(
+				!hot.contains(id),
+				"a failed batch must not hold the rest of the sweep hot, but {id} survived"
+			);
+		}
+	}
+
+	// Facts are GC-immune while Active, and the batch is a second place that
+	// immunity has to hold: a victim list is built once and handed to the store
+	// wholesale, so a leak here spills a Fact nothing asked to evict.
+	#[test]
+	fn a_batched_sweep_never_spills_or_drops_an_active_fact() {
+		let dir = tempfile::tempdir().unwrap();
+		let (g, store) = mixed_population(&dir);
+		let immune: Vec<String> = g.kerns["k"]
+			.entities
+			.values()
+			.filter(|e| matches!(e.kind, EntityKind::Fact | EntityKind::Document) && !e.is_superseded())
+			.map(|e| e.id.clone())
+			.collect();
+		let victims = victim_ids(&g);
+		assert!(
+			immune.len() > 1 && victims.len() > 1,
+			"precondition: many of each"
+		);
+
+		let g = Arc::new(RwLock::new(g));
+		run_gc(&g, "k", &HeatConfig::default());
+
+		let hot = hot_ids(&g.read());
+		let cold = cold_ids(&store);
+		for id in &immune {
+			assert!(
+				hot.contains(id),
+				"batched sweep dropped active durable {id}"
+			);
+			assert!(
+				!cold.contains(id),
+				"batched sweep spilled active durable {id}"
+			);
+		}
+		for id in &victims {
+			assert!(!hot.contains(id), "victim {id} survived the batched sweep");
+			assert!(cold.contains(id), "victim {id} was dropped without a spill");
 		}
 	}
 
