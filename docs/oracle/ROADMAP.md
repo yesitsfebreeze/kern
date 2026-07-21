@@ -360,14 +360,57 @@ Nothing here is cached, so the first cheap closure to weigh is persisting the
 vector and recomputing on a tick rather than per query — the scores change with
 the graph, not with the query, so per-query recomputation is pure waste.
 
-### 27. The GC sweep is superlinear in two remaining places `[lifecycle]`
+### 27. GC eviction pays one LMDB commit per victim `[lifecycle]`
 
-One item because one sweep pays all four costs. **Two are closed**; the two that
-remain are the scans, not the accumulation:
+One item because one sweep pays all of it. The four costs it opened with are now
+settled — two closed earlier, one closed here, one withdrawn — and measuring them
+found the cost that actually dominates the sweep, which was none of the four.
 
-- Victim selection is O(entities) per kern per sweep (`src/tick/stigmergy.rs:87-92`).
-- The cold tier is a brute-force cosine scan with no index — `cold_search` decodes
-  and scores every row (`src/base/store.rs:629-648`).
+**Measured 2026-07-21 before touching anything** (`tests/gc_scale.rs`, release,
+one sweep per row). `run_gc` returns before eviction once the victim list is
+empty, so a sweep over a kern with zero victims *is* the selection scan and
+nothing else:
+
+| N entities | victims | whole sweep | selection scan | selection's share |
+|---|---|---|---|---|
+| 10k | 0 | 0.70 ms | 0.70 ms | 100% |
+| 10k | 800 | 4 370 ms | 0.70 ms | 0.02% |
+| 100k | 0 | 3.82 ms | 3.82 ms | 100% |
+| 100k | 800 | 6 045 ms | 3.82 ms | 0.06% |
+| 100k | 80 000 | 278 764 ms | 3.82 ms | 0.001% |
+
+- ~~Victim selection is O(entities) per kern per sweep~~ **Withdrawn 2026-07-21 —
+  measured, not fixed.** 3.8 ms at 100k entities against a 6 045 ms sweep. It is
+  also linear, never superlinear: one predicate per entity, once per GC interval,
+  on a background tick. No index was written and none would help — the predicate
+  is decayed heat, a function of `now` and each entity's own `heat_updated_at`
+  (`src/tick/stigmergy.rs:49`), so no ordering of entities survives the clock
+  advancing.
+
+- ~~The cold tier is a brute-force cosine scan with no index~~ **Closed
+  2026-07-21.** It was never the scan that cost: 87–99% of `cold_search` was
+  bincode-decoding a whole `Entity` per row to reach its vector. Vectors moved to
+  their own LMDB table, so the scan scores off raw floats (`src/base/store.rs:692`)
+  and decodes only the k winners (`:709-711`). At the 50k cap, 470 ms → 28 ms per
+  call. No index was added: this is on the *recall* path (`src/mcp/tools_query.rs:210`,
+  on hot-tier underfill), and an ANN over the cold tier would put a resident index
+  back on the tier that exists to not be resident.
+
+- **What remains, and it is new.** Eviction costs 3–10 ms per victim, effectively
+  all of it `cold_spill` opening and committing one LMDB write transaction per
+  victim (`src/base/store.rs:626-631`), driven one at a time by `evict_victims`
+  (`src/tick/stigmergy.rs:101`). 80 000 victims took 279 s of tick. `cold_put_all`
+  (`:666`) already commits a whole batch in one transaction, so the mechanism is
+  there and this is not a hard change.
+  **The open question is not how to batch it but what a batched failure means.**
+  Spill-before-drop is per-victim today: a victim whose spill fails stays hot and
+  is retried next sweep (`kept`, `src/tick/stigmergy.rs:136`). One transaction for
+  the whole list makes that all-or-nothing — a single bad row either holds the
+  entire sweep hot or goes down with the batch. That is a retention decision, not
+  a performance one, which is why this was measured and left rather than fixed in
+  passing.
+  Deciding behavior: name-the-tradeoff.
+
 - ~~`cold_cap` decodes the entire 50k-row cold table on every individual spill~~
   **Closed 2026-07-21.** `cold_spill` now calls `cold_cap_amortized`, which trims
   only once the tier is a slack margin (1024 rows) past the cap and then cuts back

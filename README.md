@@ -206,7 +206,7 @@ Recall needs no wiring — it is the `query` MCP tool.
 Ollama. The daemon pins itself to the nearest ancestor holding `.git`, else the
 nearest holding `.kern/`, else the launch directory
 (`src/config/mod.rs:153-164`), and creates `.kern/data/` there on open
-(`src/base/store.rs:283-284`) plus `.kern/intake/` for the drop dir. `mkdir .kern`
+(`src/base/store.rs:314-315`) plus `.kern/intake/` for the drop dir. `mkdir .kern`
 in a directory that has neither marker if you want the graph somewhere the walk
 would not have chosen. (A `<cwd>/.kern/kern.toml` is only for overriding
 defaults — see *Configure* below.)

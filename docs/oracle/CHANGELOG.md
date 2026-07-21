@@ -2,6 +2,58 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — item 27 `[lifecycle]` narrowed to one bullet it never contained.
+  Both remaining claims were measured first (`tests/gc_scale.rs`, release, new
+  here alongside `tests/seed_scale.rs`). **Victim selection does not dominate and
+  was not touched**: 3.8 ms at 100k entities against a 6 045 ms sweep, 0.06% of
+  it, and linear rather than superlinear — one predicate per entity once per GC
+  interval. No index was written, and none would have worked: eligibility is
+  decayed heat, a function of `now` and each entity's own `heat_updated_at`, so
+  no static ordering survives the clock advancing. That is the second perf claim
+  in this file withdrawn by its own instrument, after item 25.
+
+  **The cold-tier scan did dominate, but not for the stated reason, and the fix
+  is not an index.** `cold_search` cost 470 ms per call at the 50k cap, on the
+  *recall* path — it fires whenever the hot tier underfills `k`. 87–99% of that
+  was bincode-decoding a whole `Entity` per row to reach a vector, not the cosine
+  arithmetic: `cold_all`, the same decode with no scoring, cost 343 ms of the
+  393 ms. So vectors moved out of the row into their own LMDB table; the scan
+  scores off raw little-endian floats and decodes only the k winners. 470 ms →
+  28 ms at 50k rows, 72 → 6 ms at 10k. Still a full scan, deliberately: the cold
+  tier exists to *not* be resident, and an ANN over it would put the index back.
+
+  **What it costs.** One extra `put` per spill, inside the transaction that was
+  already being committed, so no added commit and no added fsync — across three
+  paired release runs the per-spill time difference stayed inside run-to-run
+  noise (2.3–9.8 ms either way), which is to say it is not measurable. The cost
+  is disk: the side table holds vectors uncompressed where the row zstd'd them.
+  At 5 000 spills of 384-dim *dense* vectors — what an embedding model returns —
+  20.63 MB → 21.34 MB, +3.4%. On a highly compressible vector distribution it is
+  far worse: the sparse fixture went 0.95 MB → 21.34 MB, 22×. Memory moved the
+  other way: a search now buffers 50k `(id, score)` pairs instead of 50k decoded
+  entities, tens of MB less peak. The store format is bumped to `FORMAT_V6`
+  rather than migrated, per the alpha no-compatibility rule; old stores are
+  rejected cleanly and reingested.
+
+  Selection equivalence is pinned by
+  `cold_search_selects_exactly_what_the_linear_scan_did`, which compares the new
+  path against the old linear scan over a 600-row generated tier — ids, scores
+  *and* vectors, across 8 queries × 5 values of k, with wrong-dimension, empty
+  and deliberately tied vectors in the fixture. Comparing vectors is not
+  decoration: an earlier version compared only ids and scores and passed with the
+  vector join deleted. `pytest -q -s e2e` returns 0.9306 / 0.9722 / 0.9471,
+  unchanged, which is what says GC still forgets exactly what it forgot before.
+
+  Supersedes item 27's title and its two open bullets. What is left is the cost
+  the measurement actually found and the item never listed: `cold_spill` opens
+  and commits one LMDB write transaction per victim, 3–10 ms each, 279 s for a
+  80 000-victim sweep. Batching it is easy — `cold_put_all` already does — and is
+  left open on purpose, because one transaction for the whole list turns
+  per-victim spill-before-drop into all-or-nothing, and that is a retention
+  decision rather than a performance one.
+
+  Decided by: verify-before-claiming
+
 - 2026-07-21 — item 89 `[ingest]` closed: retention reaches the two entrances
   that have no caller to pass a flag, and it has a `kern.toml` home the item
   itself pointed at the wrong section for. A `.txt` transcript and a watched
