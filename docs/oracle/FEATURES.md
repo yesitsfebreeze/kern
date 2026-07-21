@@ -336,9 +336,9 @@ Nothing is lost on an LLM outage — the delta stays queued until it succeeds.
 
 **How.**
 
-- **Intake** (`src/ingest/intake.rs`) — `run()` (`:220`) polls `.kern/intake/`,
-  `extract_claims` (`:11`) distills, `archive`/`finalize` (`:49`/`:58`) move
-  processed deltas to a `done/` dir, `prune_done` (`:67`) ages them out.
+- **Intake** (`src/ingest/intake.rs`) — `run()` (`:303`) polls `.kern/intake/`,
+  `extract_claims` (`:13`) distills, `archive`/`finalize` (`:55`/`:90`) move
+  processed deltas to a `done/` dir, `prune_done` (`:99`) ages them out.
 - **Distill** (`src/ingest/distill.rs`) — a structured prompt asks the LLM for
   a JSON array of `{text, kind, valid_from?}` where `kind` is one of the 7
   built-in claim kinds (`DEFAULT_KINDS`, `src/ingest/distill.rs:9`) or a
@@ -362,7 +362,7 @@ Nothing is lost on an LLM outage — the delta stays queued until it succeeds.
   from the caller's duration to that absolute instant, so the CLI flag and the
   MCP field cannot drift. `0` (or absent) means no TTL; a duration that
   overflows the clock is an error, never a silent no-TTL. `new_statement_entity`
-  stamps it on both the document and the chunk path (`place.rs:113`, `:197`),
+  stamps it on both the document and the chunk path (`place.rs:106`, `:229`),
   where the existing `valid_until` LWW lamport/producer stamping and pending
   delta finally have a writer to fire for. `DirectJob` carries the resolved
   instant, not the duration, because a durable direct job may sit in the intake
@@ -398,18 +398,18 @@ TTL bounds a lifetime, so merging two bounds keeps the **lower** one, which is
 commutative and idempotent and therefore converges under any replay order. A
 fresh lamport/producer is stamped and a `ValidUntil` delta queued only when the
 stored deadline actually moves or was never stamped, and always against the
-**survivor's** id — the discarded incoming entity never gossips one. **Known
-cost:** ingest can only ever *shorten* a deadline. There is no way to lengthen
-one through ingest; that needs an explicit update path, or `forget` +
-re-ingest.
+**survivor's** id — the discarded incoming entity never gossips one, is never
+acked back to the caller, and never enters the lexical index. **Known cost:**
+ingest can only ever *shorten* a deadline. There is no way to lengthen one
+through ingest; that needs an explicit update path, or `forget` + re-ingest.
 
 **Gaps.** Distill prompt is one-shot; long deltas may truncate. No per-kind
 prompt tuning. Dedup threshold is global, not per-kind. Retention still reaches
 only two of four entrances — the `.txt` distillation path and the file watcher
 offer no retention, and there is no `kern.toml` default for it (ROADMAP item
 89) — and `DirectJob` carries `valid_until` but drops `valid_from` (item 90).
-Separately, a dedup caught by the *second* gate is mis-reported as `committed`
-and leaves the discarded id in the lexical index (item 91).
+Separately, a near-duplicate's alternate wording survives only on a `Rephrase`
+reason and is indexed neither lexically nor densely (item 94).
 
 ---
 

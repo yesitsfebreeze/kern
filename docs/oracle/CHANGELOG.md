@@ -2,6 +2,51 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — item 91 `[ingest]` closed: the second dedup gate stopped lying,
+  on both counts. What it was lying about was an **id**. `place_document`
+  returned an unconditional `Some(doc_id)` — the content hash of the text the
+  caller handed in — on every exit except the first dedup gate. When
+  `accept_with_dedup`'s wider `entity_idx ∪ gnn_entity_idx` scan deduped, that
+  hash named an entity that had just been discarded whole. Everything
+  downstream then believed it: `finalize_doc_identity` infers dedup from
+  `surviving_id != content_id`, so a content hash coming back read as a fresh
+  commit and the caller was told `Committed` for a document that was merged into
+  another one, holding an id that resolves to nothing. `finalize_doc_identity`
+  was never wrong and is untouched — it was being fed a lying id, and the fix is
+  one line: return `Some(result.entity_id)`.
+
+  **Gating the index is the right half, and the alternative was considered.**
+  The second half was `lex.insert` running unconditionally in both
+  `place_document` and `place_chunks`, after a branch that may have dropped the
+  entity. The obvious-looking alternative — reindex the wording under the
+  *survivor's* id rather than drop it — was rejected here because it is a
+  different, larger change wearing this item's clothes. What was actually in the
+  index was a posting for an id nothing resolves to, and `seed_lexical` does not
+  filter by graph presence, so that ghost reached `fuse::rrf`, got rescored to
+  `0.0` by `find_entity_ref_in_graph`'s `unwrap_or(0.0)`, and spent a slot of a
+  bounded seed list. Deleting it is a strict win with no recall to trade.
+  Carrying the merged wording forward is a real and separate gap — it is missing
+  on *both* gates and always has been, since `merge_duplicate` parks the
+  alternate wording on a `Rephrase` reason that is minted with an empty vector
+  and that the tick's enrichment pass skips for want of a `to`. That is filed as
+  item 94, ranked first in tier 8, not smuggled in here.
+
+  Proven by reverting each half separately rather than by the tests passing:
+  putting `Some(doc_id.to_string())` back fails
+  `a_second_gate_dedup_reports_deduped_and_the_surviving_id` on
+  `left: 0302188… right: 64989cc…` while leaving the lexical test green;
+  ungating the two `lex.insert`s fails
+  `place_chunks_second_gate_keeps_the_discarded_id_out_of_the_lexical_index`
+  alone. 862 tests pass, and the e2e floors are unmoved at
+  0.9306 / 0.9722 / 0.9471 — which is a statement about a 36-fact corpus with no
+  near-duplicate pair in it, not a measurement of this fix. Also folded in:
+  `place_document` no longer clones the whole `Entity` under the write guard,
+  since `tid`/`joined` are the only things read off it afterwards and neither
+  depends on guard-held state.
+  Decided by: name-the-tradeoff — "gate the insert" and "reindex under the
+  survivor" are not the same fix, and closing the item on the first without
+  filing the second would have banked a silent recall gap as done work.
+
 - 2026-07-21 — three parallel cycles reconciled into one doc set, and item 93's
   content check earned its keep on the first merge it saw. `cycle/3` (item 19)
   merged master carrying item 93 and item 91 `[retrieval]`; every source file
