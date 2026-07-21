@@ -33,8 +33,12 @@ ghpages.zip
 # the watcher, so nothing under it belongs in the repo
 /.splinter/
 
-# local tooling / vaults (not part of the product)
-/.pi/
+# local tooling / vaults (not part of the product). `update.sh` is the one
+# exception: it is this repo declaring what a fresh checkout must install, so it
+# has to ship. Ignore the contents, not the directory, or git never descends far
+# enough to see the unignore.
+/.pi/*
+!/.pi/update.sh
 /.claude
 /.obsidian
 /.jd/

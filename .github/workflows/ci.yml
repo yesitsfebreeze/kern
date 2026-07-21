@@ -9,6 +9,62 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # `just check` is the only definition of this repo's formatting and lint bar.
+  # CI runs the recipe rather than copies of its command lines so the two
+  # cannot drift.
+  lint:
+    name: lint (fmt + clippy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: extractions/setup-just@v3
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-lint-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-lint-cargo-
+      - name: Static checks (just check)
+        run: just check
+
+  # e2e/ is the only cover for the hub lifecycle and the instrument retrieval
+  # quality is measured with, so it gates merges like the unit tests do.
+  # Linux only: e2e/test_hub.py:13 skips the whole hub module on win32 (unix
+  # sockets), so a Windows e2e job would report green on nothing.
+  e2e:
+    name: e2e (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: extractions/setup-just@v3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-e2e-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-e2e-cargo-
+      - name: Install harness deps (just e2e-install)
+        run: just e2e-install
+      # conftest.py builds the binary itself; building here warms the cache
+      # above and keeps a compile failure out of the pytest report.
+      - name: Build kern
+        run: cargo build --bin kern --locked
+      - name: E2E (just e2e)
+        run: just e2e
+
   # Full build + test on the three native runner archs (tests actually execute).
   test:
     name: test (${{ matrix.target }})
@@ -84,9 +140,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Never branch on grep's exit code across these paths: GNU grep returns 2
+      # for a missing path EVEN WHEN IT MATCHED, and `.splinter` is gitignored,
+      # so the old `if grep …` could never fire on a runner. Test the output.
       - name: No scrubbed synonyms for the intake
         run: |
-          if grep -rniE 's''pool' src docs .splinter README.md; then
+          hits=$(grep -rniE 's''pool' src docs e2e scripts README.md || true)
+          if [ -n "$hits" ]; then
+            echo "$hits"
             echo "::error::banned word: the intake is called the intake"
             exit 1
           fi

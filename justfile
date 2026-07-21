@@ -34,11 +34,13 @@ daemon:
 test:
     cargo nextest run --workspace
     cargo test --doc --workspace
-    pytest -q e2e
+    pytest -q -s e2e
 
-# E2E harness alone: real binary against a deterministic fake LLM
+# E2E harness alone: real binary against a deterministic fake LLM.
+# -s so the recall metric prints on a GREEN run too — a number only visible when
+# it trips is a number nobody watches drift toward the floor.
 e2e:
-    pytest -q e2e
+    pytest -q -s e2e
 
 # apply formatting
 fmt:
@@ -87,9 +89,11 @@ docs:
 docs-build:
     cd docs/site && npm run build
 
-# install e2e harness dependencies
+# install e2e harness dependencies. Plain install first: --break-system-packages
+# is unknown to pip < 23 and would turn a working environment into a hard error,
+# so it is the fallback for a PEP 668 distro python, not the default.
 e2e-install:
-    pip install -r e2e/requirements.txt
+    pip install -r e2e/requirements.txt || pip install --break-system-packages -r e2e/requirements.txt
 
 # install docs site dependencies
 docs-install:

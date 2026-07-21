@@ -65,12 +65,18 @@ def test_an_idle_node_is_auto_unloaded(project):
 	assert "spawned" in stdout, f"resolve boots a node: out={stdout} err={stderr}"
 
 	# Never queried after boot -> idle from startup; the 2s threshold with the
-	# matched reaper cadence must clear it well inside the window.
+	# matched reaper cadence must clear it well inside the window. Poll the socket
+	# rather than shelling out to `hub status`: each poll would spawn a process,
+	# and on a loaded CI runner the polling cost, not the reaper, is what runs the
+	# clock out. This is an eventual property — the deadline bounds the wait, it
+	# does not measure the latency.
 	wait_until(
-		lambda: "no nodes" in project.run("hub", "status")[0],
+		lambda: not node_sockets(project.runtime),
 		30,
 		"idle node was never unloaded",
 	)
+	stdout, _ = project.run("hub", "status")
+	assert "no nodes" in stdout, f"the reaped node is gone from status too: {stdout}"
 
 
 def test_a_second_hub_refuses_the_taken_socket(project):
