@@ -1177,11 +1177,12 @@ are built, never run.
 
 Ranked by leverage:
 
-1. **A reason edge changes no ranking** — measured, not suspected
-   (`e2e/test_invariants.py`, `ROADMAP.md` item 86). The graph half of "a graph,
-   not a bag" is inert at retrieval; every hop-dependent claim rests on it.
-2. **O(N) importance scan per retrieve** (`retrieval/seed.rs`) — index it; it's
-   the scaling cliff at query time.
+1. (retired 2026-07-21 — ROADMAP item 86 closed) a reason edge does lift its
+   neighbour now: bounded source-weighted traversal credit in `expand`, clamped
+   below the strongest voucher, all 8 linked pairs in the top 5.
+2. **O(N) importance scan per retrieve** (`src/retrieval/seed.rs:127`) —
+   `seed_important` walks every entity each query (`par_iter`, `:139`); index
+   it, it's the scaling cliff at query time. Open as `ROADMAP.md` item 25.
 3. **Federation security** — add auth + encryption before any real deployment;
    before that, close the local-row reach of CRDT deltas and pulses and verify
    entity content against claimed ids, neither of which needs auth (`ROADMAP.md`
@@ -1190,15 +1191,20 @@ Ranked by leverage:
    Trust model: `docs/site/content/docs/concepts/security.mdx`.
 4. **Per-kern entity cap** — `KERN_CAP_DISABLED` today; a safe cap + escalation
    policy would bound memory deterministically.
-5. **CLI vs daemon race** — add `kern status` + advisory locking so the CLI
-   can't clobber a live graph.
+5. **CLI vs daemon race, serving half** — the destructive half is closed:
+   `src/base/lock.rs` is an advisory writer lock and `reembed`/`compact`/`gc`
+   refuse while a daemon holds it, with `kern status` reporting the holder. The
+   one-shot writes (`ingest`, `link`, `forget`, `degrade`, `intake drain`) still
+   open the store directly and reconcile through the guarded flush, so the CLI
+   can report from a graph older than live state. Open as `ROADMAP.md` item 9.
 6. **GNN training is synchronous** on the tick — move to a background thread
    pool or incremental updates to avoid stalling large kerns.
 7. **Distill prompt** is one-shot and global — per-kind prompts +
    chunking for long deltas would raise claim quality.
-8. **`HnswIndex::delete` is O(nodes × edges)** — it scans every node and every
-   layer to scrub inbound edges (`src/base/hnsw.rs:118`), once per GC victim.
-   (There is nothing to compact: the slot goes on a `free` list and is reused.)
+8. (retired 2026-07-21 — one scrub pass per sweep, not one per victim)
+   `HnswIndex::delete` (`src/base/hnsw.rs:136`) drops the node and pushes the
+   slot to `pending_scrub`; `scrub_pending` (`:153`) clears every dead slot in a
+   single walk, and only then may a slot enter `free`, so nothing can alias it.
 9. (retired 2026-07-21 — the LLM rerank left with the answer leg) a small
    cross-encoder trained on `degrade` feedback could replace it.
 10. **Only `GnnPropagate` reports a contained failure** — the panic guard covers
@@ -1207,5 +1213,7 @@ Ranked by leverage:
 
 ---
 
-*Scraped from source at `v1.1.0` (commit `0fda4f4`). Update this file when a
-subsystem's public surface changes — it is the canonical feature inventory.*
+*Scraped from source at `v1.1.0`, last reconciled against the tree 2026-07-21.
+Update this file when a subsystem's public surface changes — it is the canonical
+feature inventory. The stamp is a date, not a commit: a commit hash here ages
+into a lie the moment the next one lands, and nothing checks it.*

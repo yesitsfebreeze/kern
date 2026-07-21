@@ -2,6 +2,31 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — `FEATURES.md` §23 and the `ROADMAP.md` preamble reconciled
+  against the tree, not against each other. Three of the ten ranked improvement
+  opportunities described a repo that no longer exists: "a reason edge changes
+  no ranking" (closed with item 86's traversal credit), "add `kern status` +
+  advisory locking" (shipped — narrowed to the serving half that item 9 still
+  owns), and "`HnswIndex::delete` is O(nodes × edges)" (one scrub pass per
+  sweep since `pending_scrub`). Each retired in place with the date and the
+  reason, the convention entry 9 already used, so the ranking's shape survives
+  its own closures. The consolidated list is the one part of `FEATURES.md` that
+  restates other files' state, which is why it drifted while every subsystem
+  section stayed current — three closures each updated their own section and
+  none walked back to §23. The preamble's "Tier 2 and Tier 3 are restored"
+  note now says only Tier 3: Tier 2 has no heading because closing item 16
+  retired the whole band, and a reader hunting a heading that was deliberately
+  removed reads it as the same editing-script damage the note warns about.
+  Tier numbers retire on close exactly as item numbers do — now stated. The
+  `FEATURES.md` footer's `0fda4f4` scrape stamp is replaced by a date: a commit
+  hash there is stale on the next commit and `docs_check.py` cannot see it.
+  Existence is green (562 references) — the check proves a cited line exists,
+  never that it still says what it was cited for, which is the exact gap this
+  pass closed by hand.
+  Decided by: verify-before-claiming — a documented gap that source has already
+  closed is an unverified claim with a longer half-life than any code bug, since
+  the next reader plans work against it.
+
 - 2026-07-21 — A direct-writer admin command can no longer be clobbered:
   `src/base/lock.rs` is an advisory writer lock over the data dir, held for the
   daemon's lifetime and taken by `reembed`, `compact` and `gc`, which now

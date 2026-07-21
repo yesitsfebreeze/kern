@@ -24,9 +24,13 @@ is answered, and `e2e/` is the answer. That closure releases everything it gated
 candidate fixes were: apply, measure, keep only if `recall@1` holds.
 
 Two headings in this file were destroyed by an editing script that cut from an
-item to the next one and swallowed the tier boundary between them; Tier 2 and
-Tier 3 are restored above their items. Say it here because a lost heading is
-invisible — the items survive and simply appear to rank somewhere they do not.
+item to the next one and swallowed the tier boundary between them; Tier 3 is
+restored above its items. Say it here because a lost heading is invisible — the
+items survive and simply appear to rank somewhere they do not. Tier 2 — "the
+last cheap federation fix" — is a different absence and not a bug: item 16 was
+its only item and closing it retired the whole band, exactly as Tier 0 went.
+Tier numbers retire on close like item numbers do; a gap in the sequence is the
+record, not a loss.
 
 Context that is not work — north star, competitive position, non-goals, repo
 laws, and what is closed — lives after the ranked list.
