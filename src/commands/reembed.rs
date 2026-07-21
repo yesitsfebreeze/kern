@@ -52,6 +52,11 @@ pub(super) async fn cmd_reembed(cfg: &crate::config::Config, embed_url: &str, em
 		}
 	}
 
+	// Stamp the model that actually produced these vectors, not the configured
+	// one. `load_graph` bound `cfg.embed.model`; saving under that would record a
+	// false identity, make `health` report the wrong dimension, and mask the very
+	// swap the stamp exists to catch. Only after the rewrite succeeded.
+	g.set_embed_model(embed_model);
 	g.rebuild_index();
 	save_graph(&g);
 	println!("reembed: hot graph done ({} entities)", new_vecs.len());

@@ -1,7 +1,42 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use super::graph::GraphGnn;
 use super::hnsw::HnswHit;
+use super::log_throttle::LogThrottle;
 use super::types::{Entity, Reason};
 use super::util::cmp_rank;
+
+const DIM_WARN_SECS: u64 = 60;
+static DIM_REJECTED: AtomicU64 = AtomicU64::new(0);
+static DIM_WARN: LogThrottle = LogThrottle::new(DIM_WARN_SECS);
+
+// Queries dropped by the dimension guard since this process opened. A dropped
+// query returns nothing, so the count is its only trace.
+pub fn query_dim_rejected() -> u64 {
+	DIM_REJECTED.load(Ordering::Relaxed)
+}
+
+// cosine() truncates to the shorter side, so a query embedded by a different
+// model scores as noise and ranks that noise as if it were recall. Recall is
+// fail-open — this degrades to "no hits", never a panic — but a silent no-op is
+// what let the mismatch hide, so it is counted and (throttled) logged.
+fn dim_guard(g: &GraphGnn, vec: &[f32]) -> bool {
+	if g.query_dim_ok(vec) {
+		return true;
+	}
+	let total = DIM_REJECTED.fetch_add(1, Ordering::Relaxed) + 1;
+	if DIM_WARN.allow() {
+		tracing::warn!(
+			target: "kern.search",
+			query_dim = vec.len(),
+			index_dim = g.entity_vector_dim().unwrap_or(0),
+			total_rejected = total,
+			"query vector dimension disagrees with the indexed dimension — returning no hits; \
+			 re-embed with the stored model or run `kern reembed` (further rejections counted, not logged)"
+		);
+	}
+	false
+}
 
 #[derive(Debug, Clone)]
 pub struct EntityHit {
@@ -55,7 +90,7 @@ fn merge_hits(primary: Vec<HnswHit>, gnn: Vec<HnswHit>, k: usize) -> Vec<EntityH
 }
 
 pub fn search_all_unlocked(g: &GraphGnn, vec: &[f32], k: usize) -> Vec<EntityHit> {
-	if vec.is_empty() {
+	if vec.is_empty() || !dim_guard(g, vec) {
 		return Vec::new();
 	}
 	let ef = (k * 2).max(64);
@@ -78,7 +113,7 @@ pub fn search_all_filtered(
 	k: usize,
 	keep: &dyn Fn(&str) -> bool,
 ) -> Vec<EntityHit> {
-	if vec.is_empty() {
+	if vec.is_empty() || !dim_guard(g, vec) {
 		return Vec::new();
 	}
 	let ef = (k * 2).max(64);
@@ -96,7 +131,7 @@ pub fn search_all_filtered(
 }
 
 pub fn search_reasons_all_unlocked(g: &GraphGnn, vec: &[f32], k: usize) -> Vec<ReasonHit> {
-	if g.reason_idx.is_empty() || vec.is_empty() {
+	if g.reason_idx.is_empty() || vec.is_empty() || !dim_guard(g, vec) {
 		return Vec::new();
 	}
 	let ef = (k * 2).max(64);
@@ -164,6 +199,51 @@ mod tests {
 			g.entity_idx.insert(format!("e{i}"), vec![x, y, z]);
 		}
 		g
+	}
+
+	// Entities live in a kern (not just the index) so the graph can report an
+	// indexed dimension — that is what the guard compares against.
+	fn indexed(dim: usize) -> GraphGnn {
+		use crate::base::types::{Entity, Kern};
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		let mut k = Kern::new("k1", &root);
+		for i in 0..8 {
+			let id = format!("e{i}");
+			let mut v = vec![0.1_f32; dim];
+			v[i % dim] = 1.0;
+			k.entities.insert(
+				id.clone(),
+				Entity {
+					id,
+					vector: v,
+					..Default::default()
+				},
+			);
+		}
+		g.register(k);
+		g.rebuild_index();
+		g
+	}
+
+	#[test]
+	fn a_query_of_the_wrong_dimension_is_a_counted_no_op() {
+		let g = indexed(4);
+		assert!(
+			!search_all_unlocked(&g, &[1.0, 0.1, 0.1, 0.1], 5).is_empty(),
+			"the matching dimension still searches"
+		);
+
+		let before = query_dim_rejected();
+		assert!(
+			search_all_unlocked(&g, &[1.0, 0.1, 0.1], 5).is_empty(),
+			"a 3-dim query against a 4-dim index returns nothing, not truncated noise"
+		);
+		assert!(search_all_filtered(&g, &[1.0, 0.1, 0.1], 5, &|_| true).is_empty());
+		assert!(
+			query_dim_rejected() >= before + 2,
+			"a fail-open no-op is still counted"
+		);
 	}
 
 	fn even(id: &str) -> bool {

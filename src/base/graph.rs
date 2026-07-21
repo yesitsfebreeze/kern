@@ -85,6 +85,10 @@ pub struct GraphGnn {
 	mutation_epoch: u64,
 	flushed_epoch: u64,
 	adjacency_cache: parking_lot::RwLock<Option<(u64, Arc<EntityAdjacency>)>>,
+	entity_dim_cache: parking_lot::RwLock<Option<usize>>,
+	// The CONFIGURED embedding model, bound at open. Empty until a caller that has
+	// a config binds it; the store stamp is only written once it is known.
+	embed_model: String,
 }
 
 pub struct EntityAdjacency {
@@ -170,6 +174,8 @@ impl GraphGnn {
 			mutation_epoch: 0,
 			flushed_epoch: 0,
 			adjacency_cache: parking_lot::RwLock::new(None),
+			entity_dim_cache: parking_lot::RwLock::new(None),
+			embed_model: String::new(),
 		}
 	}
 
@@ -192,6 +198,14 @@ impl GraphGnn {
 
 	pub fn set_store(&mut self, store: Arc<Store>) {
 		self.store = Some(store);
+	}
+
+	pub fn set_embed_model(&mut self, model: &str) {
+		self.embed_model = model.to_string();
+	}
+
+	pub fn embed_model(&self) -> &str {
+		&self.embed_model
 	}
 
 	pub fn store(&self) -> Option<Arc<Store>> {
@@ -223,7 +237,54 @@ impl GraphGnn {
 		self.lexical.clone()
 	}
 
+	// Length of the indexed entity vectors. Nothing enforces one dimension per
+	// index, so the dominant length is the honest answer; ties break to the larger.
+	// The filter MUST mirror index_kern_into — a dimension the index excludes would
+	// reject every legitimate query on a supersede-heavy store.
+	fn dominant_entity_dim(&self) -> Option<usize> {
+		let mut counts: HashMap<usize, usize> = HashMap::new();
+		for kern in self.kerns.values() {
+			for t in kern.entities.values() {
+				if t.status != EntityStatus::Superseded && t.has_vector() {
+					*counts.entry(t.vector.len()).or_default() += 1;
+				}
+			}
+		}
+		counts
+			.into_iter()
+			.max_by_key(|&(dim, n)| (n, dim))
+			.map(|(dim, _)| dim)
+	}
+
+	// ONE source of truth for both health and the query guard. The scan is
+	// O(all entities), so it must not run per query: keying the memo on
+	// mutation_epoch made it miss on every `get_mut`, and since accept_with_dedup
+	// searches then commits, ingesting N entities into M cost N full walks.
+	// An unknown answer is deliberately NOT cached — an empty store is cheap to
+	// rescan, and caching None there would disable the guard for the daemon's life.
+	pub fn entity_vector_dim(&self) -> Option<usize> {
+		if let Some(dim) = *self.entity_dim_cache.read() {
+			return Some(dim);
+		}
+		let dim = self.dominant_entity_dim();
+		if let Some(d) = dim {
+			*self.entity_dim_cache.write() = Some(d);
+		}
+		dim
+	}
+
+	// cosine() truncates to the shorter side, so a query from another embedding
+	// model scores as noise instead of failing. Unknown never blocks.
+	pub fn query_dim_ok(&self, query_vec: &[f32]) -> bool {
+		match self.entity_vector_dim() {
+			Some(dim) => query_vec.len() == dim,
+			None => true,
+		}
+	}
+
 	pub fn rebuild_index(&mut self) {
+		// The one place the indexed dimension can change wholesale (reembed, load).
+		*self.entity_dim_cache.write() = None;
 		self.gnn_entity_idx = VectorBackend::resident(16, 200, self.quant_mode);
 		self.reason_idx = VectorBackend::resident(16, 200, self.quant_mode);
 		self.src_index.clear();
@@ -625,6 +686,8 @@ impl GraphGnn {
 			mutation_epoch: 0,
 			flushed_epoch: 0,
 			adjacency_cache: parking_lot::RwLock::new(None),
+			entity_dim_cache: parking_lot::RwLock::new(None),
+			embed_model: String::new(),
 		};
 		g.rebuild_index();
 		if let Some(lex) = g.lexical.clone() {
@@ -712,6 +775,81 @@ mod tests {
 		assert!(
 			adj.id_to_idx.contains_key("evil"),
 			"the remote entity stays a NODE — it is still rankable, it just gets no votes"
+		);
+	}
+
+	#[test]
+	fn query_dim_guard_follows_the_dominant_indexed_dimension() {
+		let vecs = |g: &mut GraphGnn, dims: &[(&str, usize)]| {
+			let root = g.root.id.clone();
+			let mut k = Kern::new("k1", &root);
+			for (id, dim) in dims {
+				k.entities.insert(
+					(*id).into(),
+					Entity {
+						id: (*id).into(),
+						vector: vec![0.5; *dim],
+						..Default::default()
+					},
+				);
+			}
+			g.kerns.insert("k1".into(), k);
+			g.rebuild_index();
+		};
+
+		let mut g = GraphGnn::new();
+		assert_eq!(g.entity_vector_dim(), None, "nothing indexed yet");
+		assert!(
+			g.query_dim_ok(&[0.1, 0.2]),
+			"an unknown dimension never blocks a query"
+		);
+
+		vecs(&mut g, &[("a", 4), ("b", 4), ("c", 3)]);
+		assert_eq!(g.entity_vector_dim(), Some(4), "the majority length wins");
+		assert!(g.query_dim_ok(&[0.0; 4]));
+		assert!(
+			!g.query_dim_ok(&[0.0; 3]),
+			"a query from another embedding model scores as noise — flag it"
+		);
+	}
+
+	#[test]
+	fn superseded_vectors_never_decide_the_indexed_dimension() {
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		let mut k = Kern::new("k1", &root);
+		// The index skips Superseded, so a supersede-heavy store must not report the
+		// dimension of vectors the index does not hold — every query would be rejected.
+		for i in 0..5 {
+			k.entities.insert(
+				format!("old{i}"),
+				Entity {
+					id: format!("old{i}"),
+					status: EntityStatus::Superseded,
+					vector: vec![0.5; 3],
+					..Default::default()
+				},
+			);
+		}
+		k.entities.insert(
+			"live".into(),
+			Entity {
+				id: "live".into(),
+				vector: vec![0.5; 4],
+				..Default::default()
+			},
+		);
+		g.kerns.insert("k1".into(), k);
+		g.rebuild_index();
+
+		assert_eq!(
+			g.entity_vector_dim(),
+			Some(4),
+			"only searchable entities define the dimension"
+		);
+		assert!(
+			g.query_dim_ok(&[0.0; 4]),
+			"a legitimate query is not rejected"
 		);
 	}
 

@@ -265,6 +265,39 @@ pub fn load_legacy_dir(dir: &str) -> Result<GraphGnn, PersistError> {
 	Ok(g)
 }
 
+// The identity of the vectors about to be written. `None` until BOTH halves are
+// known: the configured model (bound at open) and a dimension the graph actually
+// holds. Stamping a dimension of 0 on an empty store would make the first real
+// ingest look like a model change.
+fn stamp_of(g: &GraphGnn) -> Option<crate::base::store::EmbedStamp> {
+	let model = g.embed_model();
+	if model.is_empty() {
+		return None;
+	}
+	Some(crate::base::store::EmbedStamp {
+		model: model.to_string(),
+		dim: g.entity_vector_dim()?,
+	})
+}
+
+// Fail-open: a stamp that cannot be read or written must never block a save.
+fn check_stamp(store: &crate::base::store::Store, stamp: Option<&crate::base::store::EmbedStamp>) {
+	let Some(stamp) = stamp else {
+		return;
+	};
+	if let Err(e) = store.check_embed_stamp(stamp) {
+		tracing::warn!(target: "kern.store", error = %e, "embedding stamp check failed; continuing");
+	}
+}
+
+// Call once a graph is bound to its configured model, so a model swap is caught
+// at open instead of at the first save.
+pub fn check_graph_stamp(g: &GraphGnn) {
+	if let Some(store) = g.store() {
+		check_stamp(&store, stamp_of(g).as_ref());
+	}
+}
+
 pub fn merged_root(g: &GraphGnn) -> Kern {
 	let root_id = g.root.id.clone();
 	let mut merged = g
@@ -288,6 +321,7 @@ pub fn save_graph_into(
 	store: &crate::base::store::Store,
 	g: &GraphGnn,
 ) -> Result<(), crate::base::store::StoreError> {
+	check_stamp(store, stamp_of(g).as_ref());
 	let mut kerns = g.map().clone();
 	kerns.insert(g.root.id.clone(), merged_root(g));
 	store.save_all_kerns(&kerns, &g.network_id, g.quant_mode)?;
@@ -300,6 +334,7 @@ pub fn flush_guarded(
 ) -> Result<crate::base::store::FlushOutcome, crate::base::store::StoreError> {
 	match g.store() {
 		Some(store) => {
+			check_stamp(&store, stamp_of(g).as_ref());
 			let mut kerns = g.map().clone();
 			kerns.insert(g.root.id.clone(), merged_root(g));
 			store.flush_guarded(&kerns, &g.network_id, g.quant_mode, expected)
@@ -314,6 +349,7 @@ pub struct FlushSnapshot {
 	kerns: HashMap<String, Kern>,
 	network_id: String,
 	quant_mode: QuantizationMode,
+	stamp: Option<crate::base::store::EmbedStamp>,
 }
 
 // Call under the read guard; drop it before flush_snapshot runs.
@@ -326,6 +362,7 @@ pub fn snapshot_for_flush(g: &GraphGnn) -> Option<FlushSnapshot> {
 		kerns,
 		network_id: g.network_id.clone(),
 		quant_mode: g.quant_mode,
+		stamp: stamp_of(g),
 	})
 }
 
@@ -335,6 +372,7 @@ pub fn flush_snapshot(
 	snap: &FlushSnapshot,
 	expected: u64,
 ) -> Result<crate::base::store::FlushOutcome, crate::base::store::StoreError> {
+	check_stamp(&snap.store, snap.stamp.as_ref());
 	snap
 		.store
 		.flush_guarded(&snap.kerns, &snap.network_id, snap.quant_mode, expected)

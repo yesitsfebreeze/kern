@@ -6,6 +6,7 @@ use heed::{CompactionOption, Database, Env, EnvOpenOptions};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::base::log_throttle::LogThrottle;
 use crate::base::types::{Entity, Kern};
 use crate::quant::{QuantizationMode, QuantizedVec};
 
@@ -13,6 +14,7 @@ use crate::quant::{QuantizationMode, QuantizedVec};
 // would free space (MDB_MAP_FULL).
 const MAP_SIZE: usize = 16 * 1024 * 1024 * 1024;
 const MAX_DBS: u32 = 3;
+const COLD_EVICT_WARN_SECS: u64 = 300;
 
 const KERN_DB: &str = "kern";
 const COLD_DB: &str = "cold";
@@ -20,6 +22,8 @@ const META_DB: &str = "meta";
 const META_KEY: &str = "graph";
 // Own meta key (not in GraphMeta) so pre-epoch stores read 0.
 const EPOCH_KEY: &str = "epoch";
+// Own meta key so an unstamped store is "unknown", never a mismatch.
+const EMBED_KEY: &str = "embed";
 
 // Version byte prepended ahead of the zstd frame so an old reader rejects a newer
 // value instead of mis-decoding it.
@@ -29,6 +33,11 @@ const FORMAT_V1: u8 = 1;
 const FORMAT_V2: u8 = 2;
 // V3 appends Kern::mass; the pre-mass embedded layout decodes via KernPreMass.
 const FORMAT_V3: u8 = 3;
+// V4 is COLD-tier only: the value is a ColdRow, not a bare Entity. Cold rows at
+// any earlier version are pre-temporal bare Entities — identified by the version
+// byte, never by a failed parse (ColdRow is Entity ++ StoredTemporal, so a
+// truncated ColdRow parses cleanly as an Entity and loses its stamps in silence).
+const FORMAT_V4: u8 = 4;
 const ZSTD_LEVEL: i32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,19 +66,23 @@ pub(crate) fn bincode_cfg() -> impl bincode::config::Config {
 	bincode::config::standard().with_limit::<{ 1024 * 1024 * 1024 }>()
 }
 
-// [FORMAT_V3] ++ zstd(bincode(v)).
-fn encode<T: Serialize>(v: &T) -> Result<Vec<u8>, StoreError> {
+// [ver] ++ zstd(bincode(v)).
+fn encode_at<T: Serialize>(ver: u8, v: &T) -> Result<Vec<u8>, StoreError> {
 	let raw = bincode::serde::encode_to_vec(v, bincode_cfg())?;
 	let comp = zstd::encode_all(raw.as_slice(), ZSTD_LEVEL)?;
 	let mut out = Vec::with_capacity(comp.len() + 1);
-	out.push(FORMAT_V3);
+	out.push(ver);
 	out.extend_from_slice(&comp);
 	Ok(out)
 }
 
+fn encode<T: Serialize>(v: &T) -> Result<Vec<u8>, StoreError> {
+	encode_at(FORMAT_V3, v)
+}
+
 fn strip_version(bytes: &[u8]) -> Result<(u8, Vec<u8>), StoreError> {
 	let (&ver, body) = bytes.split_first().ok_or(StoreError::BadVersion(0))?;
-	if !(FORMAT_V1..=FORMAT_V3).contains(&ver) {
+	if !(FORMAT_V1..=FORMAT_V4).contains(&ver) {
 		return Err(StoreError::BadVersion(ver));
 	}
 	Ok((ver, zstd::decode_all(body)?))
@@ -91,11 +104,12 @@ fn decode_stored_kern(bytes: &[u8]) -> Result<StoredKern, StoreError> {
 			let (v2, _): (StoredKernV2, _) = bincode::serde::decode_from_slice(&raw, bincode_cfg())?;
 			Ok(v2.into())
 		}
-		// FORMAT_V1 (validated by strip_version): pre-temporal, pre-mass layout.
-		_ => {
+		FORMAT_V1 => {
 			let (v1, _): (StoredKernV1, _) = bincode::serde::decode_from_slice(&raw, bincode_cfg())?;
 			Ok(v1.into())
 		}
+		// V4 is a cold-tier shape; a kern value never carries it.
+		_ => Err(StoreError::BadVersion(ver)),
 	}
 }
 
@@ -134,6 +148,63 @@ impl StoredTemporal {
 	fn is_set(e: &Entity) -> bool {
 		e.valid_from.is_some() || e.valid_to.is_some() || e.invalidated_at.is_some()
 	}
+
+	fn of(e: &Entity) -> Self {
+		StoredTemporal {
+			valid_from: e.valid_from,
+			valid_to: e.valid_to,
+			invalidated_at: e.invalidated_at,
+		}
+	}
+
+	fn apply(&self, e: &mut Entity) {
+		e.valid_from = self.valid_from;
+		e.valid_to = self.valid_to;
+		e.invalidated_at = self.invalidated_at;
+	}
+}
+
+// A cold row carries the temporal triple the same way StoredKern does — without
+// it a cold-recovered revision is valid at every instant.
+#[derive(Serialize, Deserialize)]
+pub struct ColdRow {
+	pub entity: Entity,
+	pub temporal: StoredTemporal,
+}
+
+impl ColdRow {
+	fn of(e: &Entity) -> Self {
+		ColdRow {
+			entity: e.clone(),
+			temporal: StoredTemporal::of(e),
+		}
+	}
+
+	fn into_entity(self) -> Entity {
+		let mut e = self.entity;
+		self.temporal.apply(&mut e);
+		e
+	}
+}
+
+fn encode_cold(row: &ColdRow) -> Result<Vec<u8>, StoreError> {
+	encode_at(FORMAT_V4, row)
+}
+
+// Version-dispatched, never parse-sniffed: below V4 the value predates ColdRow
+// and is a bare Entity. A decode failure here is real corruption and must reach
+// scan_with's warning instead of being swallowed by a fallback that succeeds.
+fn decode_cold(bytes: &[u8]) -> Result<ColdRow, StoreError> {
+	let (ver, raw) = strip_version(bytes)?;
+	if ver == FORMAT_V4 {
+		let (row, _) = bincode::serde::decode_from_slice::<ColdRow, _>(&raw, bincode_cfg())?;
+		return Ok(row);
+	}
+	let (entity, _) = bincode::serde::decode_from_slice::<Entity, _>(&raw, bincode_cfg())?;
+	Ok(ColdRow {
+		entity,
+		temporal: StoredTemporal::default(),
+	})
 }
 
 #[derive(Serialize, Deserialize)]
@@ -156,14 +227,7 @@ impl StoredKern {
 				entity_vecs.insert(id.clone(), StoredVec::encode(&e.vector));
 			}
 			if StoredTemporal::is_set(e) {
-				temporal.insert(
-					id.clone(),
-					StoredTemporal {
-						valid_from: e.valid_from,
-						valid_to: e.valid_to,
-						invalidated_at: e.invalidated_at,
-					},
-				);
+				temporal.insert(id.clone(), StoredTemporal::of(e));
 			}
 			// vector is restored from the side-map on load; gnn_vector is recomputed,
 			// never persisted.
@@ -191,9 +255,7 @@ impl StoredKern {
 				e.vector = q.decode();
 			}
 			if let Some(t) = self.temporal.get(id) {
-				e.valid_from = t.valid_from;
-				e.valid_to = t.valid_to;
-				e.invalidated_at = t.invalidated_at;
+				t.apply(e);
 			}
 		}
 		for (id, r) in kern.reasons.iter_mut() {
@@ -245,6 +307,25 @@ impl From<StoredKernV1> for StoredKern {
 	}
 }
 
+// Identity of the model that produced the stored vectors. A query embedded by a
+// different model scores as noise against them — cosine truncates to the shorter
+// side rather than failing, so nothing else would ever notice.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct EmbedStamp {
+	pub model: String,
+	pub dim: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmbedCheck {
+	Adopted,
+	Match,
+	Mismatch {
+		stored: EmbedStamp,
+		current: EmbedStamp,
+	},
+}
+
 #[derive(Serialize, Deserialize)]
 struct GraphMeta {
 	network_id: String,
@@ -259,6 +340,10 @@ pub struct Store {
 	cold: Database<Str, Bytes>,
 	meta: Database<Str, Bytes>,
 	dir: std::path::PathBuf,
+	cold_evicted: std::sync::atomic::AtomicU64,
+	cold_evict_warn: LogThrottle,
+	embed_mismatch_warn: LogThrottle,
+	embed_mismatch: std::sync::atomic::AtomicBool,
 }
 
 impl Store {
@@ -286,6 +371,10 @@ impl Store {
 			cold,
 			meta,
 			dir: path.to_path_buf(),
+			cold_evicted: std::sync::atomic::AtomicU64::new(0),
+			cold_evict_warn: LogThrottle::new(COLD_EVICT_WARN_SECS),
+			embed_mismatch_warn: LogThrottle::new(COLD_EVICT_WARN_SECS),
+			embed_mismatch: std::sync::atomic::AtomicBool::new(false),
 		})
 	}
 
@@ -336,13 +425,6 @@ impl Store {
 		Ok(())
 	}
 
-	fn scan<T: DeserializeOwned>(
-		&self,
-		db: Database<Str, Bytes>,
-	) -> Result<Vec<(String, T)>, StoreError> {
-		self.scan_with(db, decode)
-	}
-
 	fn scan_with<T>(
 		&self,
 		db: Database<Str, Bytes>,
@@ -369,6 +451,81 @@ impl Store {
 			.ok()
 			.flatten()
 			.unwrap_or(0)
+	}
+
+	// Missing/garbled reads as "unstamped" — health is diagnostic and must never
+	// fail a load. check_embed_stamp must NOT use this: it cannot tell absent from
+	// unreadable, and it writes.
+	pub fn embed_stamp(&self) -> Option<EmbedStamp> {
+		self.get::<EmbedStamp>(self.meta, EMBED_KEY).ok().flatten()
+	}
+
+	pub fn set_embed_stamp(&self, stamp: &EmbedStamp) -> Result<(), StoreError> {
+		self
+			.embed_mismatch
+			.store(false, std::sync::atomic::Ordering::Relaxed);
+		self.put(self.meta, EMBED_KEY, stamp)
+	}
+
+	// Loud and recorded, never fatal: intake and recall are fail-open, and a store
+	// that refuses to open is worse than one that answers badly while saying so.
+	// The mismatched stamp is left on disk — it still describes what is stored.
+	pub fn check_embed_stamp(&self, current: &EmbedStamp) -> Result<EmbedCheck, StoreError> {
+		// An unreadable stamp is NOT an unstamped store. Adopting over it would
+		// destroy the only record of which model produced the stored vectors.
+		let stored = self.get::<EmbedStamp>(self.meta, EMBED_KEY).map_err(|e| {
+			tracing::error!(
+				target: "kern.store",
+				error = %e,
+				"embedding stamp unreadable — leaving it intact; the stored model is unknown this run"
+			);
+			e
+		})?;
+		let Some(stored) = stored else {
+			self.set_embed_stamp(current)?;
+			tracing::info!(
+				target: "kern.store",
+				model = %current.model,
+				dim = current.dim,
+				"unstamped store adopts the configured embedding model"
+			);
+			return Ok(EmbedCheck::Adopted);
+		};
+		if stored == *current {
+			// The operator may have reverted; a stale flag would keep accusing.
+			self
+				.embed_mismatch
+				.store(false, std::sync::atomic::Ordering::Relaxed);
+			return Ok(EmbedCheck::Match);
+		}
+		self
+			.embed_mismatch
+			.store(true, std::sync::atomic::Ordering::Relaxed);
+		// Throttled: the check now runs on every flush, and save_graph_guarded
+		// retries up to 5×, so an un-reembedded store would emit this per save
+		// forever. The `embed_mismatch` flag is the durable signal; only the line
+		// is rate-limited.
+		if self.embed_mismatch_warn.allow() {
+			tracing::error!(
+				target: "kern.store",
+				stored_model = %stored.model,
+				stored_dim = stored.dim,
+				current_model = %current.model,
+				current_dim = current.dim,
+				"embedding model changed — stored vectors no longer match query vectors; \
+				 recall stays near zero until `kern reembed`"
+			);
+		}
+		Ok(EmbedCheck::Mismatch {
+			stored,
+			current: current.clone(),
+		})
+	}
+
+	pub fn embed_mismatch(&self) -> bool {
+		self
+			.embed_mismatch
+			.load(std::sync::atomic::Ordering::Relaxed)
 	}
 
 	// Read inside the open txn so the guard's check and the write commit atomically.
@@ -488,23 +645,36 @@ impl Store {
 	}
 
 	pub fn cold_spill(&self, entity: &Entity) -> Result<(), StoreError> {
-		self.put(self.cold, &entity.id, entity)?;
+		let bytes = encode_cold(&ColdRow::of(entity))?;
+		let mut wtxn = self.env.write_txn()?;
+		self.cold.put(&mut wtxn, &entity.id, &bytes)?;
+		wtxn.commit()?;
 		self.cold_cap(crate::base::constants::COLD_MAX_ENTRIES)?;
 		Ok(())
 	}
 
 	pub fn cold_get(&self, id: &str) -> Result<Option<Entity>, StoreError> {
-		self.get(self.cold, id)
+		Ok(
+			self
+				.get_with(self.cold, id, decode_cold)?
+				.map(ColdRow::into_entity),
+		)
 	}
 
 	pub fn cold_all(&self) -> Result<Vec<Entity>, StoreError> {
-		Ok(self.scan(self.cold)?.into_iter().map(|(_, e)| e).collect())
+		Ok(
+			self
+				.scan_with(self.cold, decode_cold)?
+				.into_iter()
+				.map(|(_, r)| r.into_entity())
+				.collect(),
+		)
 	}
 
 	pub fn cold_put_all(&self, entities: &[Entity]) -> Result<(), StoreError> {
 		let mut wtxn = self.env.write_txn()?;
 		for e in entities {
-			let bytes = encode(e)?;
+			let bytes = encode_cold(&ColdRow::of(e))?;
 			self.cold.put(&mut wtxn, &e.id, &bytes)?;
 		}
 		wtxn.commit()?;
@@ -516,10 +686,11 @@ impl Store {
 		if query_vec.is_empty() || k == 0 {
 			return Ok(Vec::new());
 		}
-		let rows: Vec<(String, Entity)> = self.scan(self.cold)?;
+		let rows: Vec<(String, ColdRow)> = self.scan_with(self.cold, decode_cold)?;
 		let mut scored: Vec<(Entity, f64)> = rows
 			.into_iter()
-			.filter_map(|(_, e)| {
+			.map(|(_, r)| r.into_entity())
+			.filter_map(|e| {
 				if e.vector.len() != query_vec.len() {
 					return None;
 				}
@@ -538,7 +709,7 @@ impl Store {
 		Ok(scored)
 	}
 
-	fn cold_cap(&self, max: usize) -> Result<(), StoreError> {
+	pub(crate) fn cold_cap(&self, max: usize) -> Result<(), StoreError> {
 		let len = {
 			let rtxn = self.env.read_txn()?;
 			self.cold.len(&rtxn)? as usize
@@ -546,15 +717,40 @@ impl Store {
 		if len <= max {
 			return Ok(());
 		}
-		let mut rows: Vec<(String, Entity)> = self.scan(self.cold)?;
-		rows.sort_by_key(|r| std::cmp::Reverse(r.1.created_at));
+		let mut rows: Vec<(String, ColdRow)> = self.scan_with(self.cold, decode_cold)?;
+		rows.sort_by_key(|r| std::cmp::Reverse(r.1.entity.created_at));
 		let drop_ids: Vec<String> = rows.into_iter().skip(max).map(|(id, _)| id).collect();
 		let mut wtxn = self.env.write_txn()?;
 		for id in &drop_ids {
 			self.cold.delete(&mut wtxn, id.as_str())?;
 		}
 		wtxn.commit()?;
+		if !drop_ids.is_empty() {
+			let evicted = drop_ids.len();
+			// The counter is the durable signal and is never throttled; the LINE is.
+			// A full tier evicts on every spill, and one GC sweep spills once per
+			// victim, so an unthrottled warn here drowns the log forever.
+			let total = self
+				.cold_evicted
+				.fetch_add(evicted as u64, std::sync::atomic::Ordering::Relaxed)
+				+ evicted as u64;
+			if self.cold_evict_warn.allow() {
+				tracing::warn!(
+					target: "kern.store",
+					evicted,
+					cap = max,
+					total_evicted = total,
+					"cold tier over capacity — oldest entities permanently dropped (further evictions counted, not logged)"
+				);
+			}
+		}
 		Ok(())
+	}
+
+	// Process-lifetime total; a non-durable entity dropped here is gone for good,
+	// so the count is the only trace it ever existed.
+	pub fn cold_evicted(&self) -> u64 {
+		self.cold_evicted.load(std::sync::atomic::Ordering::Relaxed)
 	}
 }
 
@@ -733,7 +929,7 @@ mod tests {
 			)
 			.unwrap();
 		}
-		let mut rows: Vec<(String, Sample)> = s.scan(s.kern).unwrap();
+		let mut rows: Vec<(String, Sample)> = s.scan_with(s.kern, decode).unwrap();
 		rows.sort_by(|a, b| a.0.cmp(&b.0));
 		assert_eq!(rows.len(), 5);
 		assert_eq!(rows[2].0, "k2");
@@ -1162,6 +1358,234 @@ mod tests {
 		assert!(s.cold_get("new").unwrap().is_some(), "newest kept");
 		assert!(s.cold_get("mid").unwrap().is_some(), "second-newest kept");
 		assert!(s.cold_get("old").unwrap().is_none(), "oldest evicted");
+	}
+
+	#[test]
+	fn cold_spill_round_trips_the_temporal_triple() {
+		let d = tmp();
+		let s = Store::open(&dir_of(&d)).unwrap();
+		let t0 = UNIX_EPOCH + Duration::from_secs(1000);
+		let t1 = UNIX_EPOCH + Duration::from_secs(2000);
+		let mut e = mk_entity("a", "revision", 0.0, EntityKind::Claim);
+		e.created_at = Some(t0);
+		e.valid_from = Some(t0);
+		e.valid_to = Some(t1);
+		e.invalidated_at = Some(t1);
+		s.cold_spill(&e).unwrap();
+
+		let got = s.cold_get("a").unwrap().unwrap();
+		assert_eq!(
+			got.valid_from,
+			Some(t0),
+			"valid_from survives the cold tier"
+		);
+		assert_eq!(got.valid_to, Some(t1), "valid_to survives the cold tier");
+		assert_eq!(got.invalidated_at, Some(t1), "invalidated_at survives");
+		assert!(got.is_valid_at(t0), "valid at the window start");
+		assert!(
+			!got.is_valid_at(t1),
+			"half-open window: not valid at valid_to"
+		);
+		assert!(
+			!got.is_valid_at(UNIX_EPOCH),
+			"not valid before valid_from — as_of must not lie over the cold tail"
+		);
+		assert_eq!(s.cold_all().unwrap()[0].valid_to, Some(t1));
+	}
+
+	#[test]
+	fn legacy_bare_entity_cold_row_still_decodes() {
+		let d = tmp();
+		let s = Store::open(&dir_of(&d)).unwrap();
+		let mut e = mk_entity("old", "pre-temporal", 0.0, EntityKind::Claim);
+		e.vector = vec![1.0, 0.0];
+		{
+			let bytes = encode(&e).unwrap();
+			let mut wtxn = s.env.write_txn().unwrap();
+			s.cold.put(&mut wtxn, "old", bytes.as_slice()).unwrap();
+			wtxn.commit().unwrap();
+		}
+
+		let got = s.cold_get("old").unwrap().expect("legacy row decodes");
+		assert_eq!(got.text(), "pre-temporal");
+		assert_eq!(got.valid_from, None, "legacy row has no stamps");
+		assert_eq!(s.cold_search(&[1.0, 0.0], 1).unwrap().len(), 1);
+	}
+
+	#[test]
+	fn a_current_version_cold_row_is_never_decoded_as_a_stampless_entity() {
+		let d = tmp();
+		let s = Store::open(&dir_of(&d)).unwrap();
+		let mut e = mk_entity("trunc", "lost its tail", 0.0, EntityKind::Claim);
+		e.valid_from = Some(UNIX_EPOCH + Duration::from_secs(10));
+		// A V4 value whose ColdRow tail is missing: the old parse-sniffing decoder
+		// fell back to a bare Entity and returned all three stamps as None.
+		{
+			let bytes = encode_at(FORMAT_V4, &e).unwrap();
+			let mut wtxn = s.env.write_txn().unwrap();
+			s.cold.put(&mut wtxn, "trunc", bytes.as_slice()).unwrap();
+			wtxn.commit().unwrap();
+		}
+		assert!(
+			s.cold_get("trunc").is_err(),
+			"a malformed current-version row must ERROR, not silently lose its stamps"
+		);
+		assert!(
+			s.cold_all().unwrap().is_empty(),
+			"scan_with's corruption warning fires because the decode really failed"
+		);
+
+		// Round-trip through the real writer keeps the stamps.
+		s.cold_spill(&e).unwrap();
+		assert_eq!(
+			s.cold_get("trunc").unwrap().unwrap().valid_from,
+			e.valid_from
+		);
+	}
+
+	#[test]
+	fn cold_cap_counts_every_eviction() {
+		let d = tmp();
+		let s = Store::open(&dir_of(&d)).unwrap();
+		assert_eq!(s.cold_evicted(), 0, "nothing evicted yet");
+		for (i, id) in ["old", "mid", "new"].iter().enumerate() {
+			let mut e = mk_entity(id, id, 1.0, EntityKind::Claim);
+			e.created_at = Some(UNIX_EPOCH + Duration::from_secs(100 * (i as u64 + 1)));
+			s.cold_spill(&e).unwrap();
+		}
+		s.cold_cap(3).unwrap();
+		assert_eq!(s.cold_evicted(), 0, "a cap that fits evicts nothing");
+		s.cold_cap(2).unwrap();
+		assert_eq!(s.cold_evicted(), 1, "one row dropped is one counted");
+		s.cold_cap(0).unwrap();
+		assert_eq!(s.cold_evicted(), 3, "the counter accumulates, never resets");
+	}
+
+	#[test]
+	fn a_cold_tier_pinned_at_capacity_counts_every_eviction_but_logs_once() {
+		use std::sync::atomic::{AtomicUsize, Ordering};
+		use std::sync::Arc;
+		use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+
+		struct CountWarns(Arc<AtomicUsize>);
+		impl<S: tracing::Subscriber> Layer<S> for CountWarns {
+			fn on_event(&self, e: &tracing::Event<'_>, _: Context<'_, S>) {
+				if *e.metadata().level() == tracing::Level::WARN {
+					self.0.fetch_add(1, Ordering::Relaxed);
+				}
+			}
+		}
+
+		let warns = Arc::new(AtomicUsize::new(0));
+		let d = tmp();
+		let s = Store::open(&dir_of(&d)).unwrap();
+		// A tier at max evicts on EVERY spill, and one GC sweep spills once per
+		// victim — the pre-fix code emitted one warn line per victim, forever.
+		tracing::subscriber::with_default(
+			tracing_subscriber::registry().with(CountWarns(warns.clone())),
+			|| {
+				for i in 0..50u64 {
+					let mut e = mk_entity(&format!("e{i}"), "x", 1.0, EntityKind::Claim);
+					e.created_at = Some(UNIX_EPOCH + Duration::from_secs(i + 1));
+					s.cold_spill(&e).unwrap();
+					s.cold_cap(1).unwrap();
+				}
+			},
+		);
+
+		assert_eq!(s.cold_evicted(), 49, "every eviction reaches the counter");
+		assert_eq!(
+			warns.load(Ordering::Relaxed),
+			1,
+			"49 evictions produce ONE log line, not 49"
+		);
+	}
+
+	fn stamp(model: &str, dim: usize) -> EmbedStamp {
+		EmbedStamp {
+			model: model.into(),
+			dim,
+		}
+	}
+
+	#[test]
+	fn an_unstamped_store_adopts_the_current_embed_model() {
+		let d = tmp();
+		let s = Store::open(&dir_of(&d)).unwrap();
+		assert_eq!(s.embed_stamp(), None, "a legacy store carries no stamp");
+		assert_eq!(
+			s.check_embed_stamp(&stamp("qwen3", 1024)).unwrap(),
+			EmbedCheck::Adopted,
+			"unknown adopts, never accuses"
+		);
+		assert_eq!(s.embed_stamp(), Some(stamp("qwen3", 1024)), "stamp written");
+		assert!(!s.embed_mismatch());
+		assert_eq!(
+			s.check_embed_stamp(&stamp("qwen3", 1024)).unwrap(),
+			EmbedCheck::Match,
+			"the adopted stamp is silent on the next open"
+		);
+		assert!(!s.embed_mismatch());
+	}
+
+	#[test]
+	fn a_changed_embed_model_or_dimension_is_flagged() {
+		let d = tmp();
+		let s = Store::open(&dir_of(&d)).unwrap();
+		s.set_embed_stamp(&stamp("qwen3", 1024)).unwrap();
+
+		assert_eq!(
+			s.check_embed_stamp(&stamp("nomic", 1024)).unwrap(),
+			EmbedCheck::Mismatch {
+				stored: stamp("qwen3", 1024),
+				current: stamp("nomic", 1024),
+			},
+			"a different model name is a mismatch at the same dimension"
+		);
+		assert!(s.embed_mismatch(), "the mismatch is recorded for health");
+		assert_eq!(
+			s.embed_stamp(),
+			Some(stamp("qwen3", 1024)),
+			"the disk stamp still describes what is stored"
+		);
+
+		s.set_embed_stamp(&stamp("qwen3", 1024)).unwrap();
+		assert!(!s.embed_mismatch(), "restamping clears the flag");
+		assert_eq!(
+			s.check_embed_stamp(&stamp("qwen3", 768)).unwrap(),
+			EmbedCheck::Mismatch {
+				stored: stamp("qwen3", 1024),
+				current: stamp("qwen3", 768),
+			},
+			"a different dimension is a mismatch at the same model name"
+		);
+		assert!(s.embed_mismatch());
+
+		assert_eq!(
+			s.check_embed_stamp(&stamp("qwen3", 1024)).unwrap(),
+			EmbedCheck::Match,
+			"reverting to the stored model matches again"
+		);
+		assert!(
+			!s.embed_mismatch(),
+			"health must stop accusing once the operator has reverted"
+		);
+	}
+
+	#[test]
+	fn the_embed_stamp_survives_reopen() {
+		let d = tmp();
+		let dir = dir_of(&d);
+		{
+			let s = Store::open(&dir).unwrap();
+			s.check_embed_stamp(&stamp("qwen3", 1024)).unwrap();
+		}
+		let s2 = Store::open(&dir).unwrap();
+		assert_eq!(
+			s2.check_embed_stamp(&stamp("qwen3", 1024)).unwrap(),
+			EmbedCheck::Match,
+			"a stamp adopted in one process is durable"
+		);
 	}
 
 	#[test]
