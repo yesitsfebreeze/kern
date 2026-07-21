@@ -4,9 +4,9 @@ use crate::base::constants::AGENT_SOURCE;
 use crate::base::math::clamp_confidence;
 use crate::base::reason::move_entity;
 use crate::base::search::find_entity;
-use crate::base::types::{EntityKind, Source};
+use crate::base::types::Source;
 use crate::base::util::explain_relationship_prompt;
-use crate::base::validate::{validate_conf, validate_fact_source, validate_kind};
+use crate::base::validate::{validate_conf, validate_fact_source};
 use crate::ingest;
 
 pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
@@ -101,24 +101,16 @@ struct IngestArgs {
 	url: String,
 	#[serde(default)]
 	conf: f64,
-	#[serde(default, alias = "descriptor")]
+	#[serde(default)]
 	hint: String,
 	#[serde(default)]
 	sync: bool,
-	#[serde(default)]
-	kind: Option<EntityKind>,
 }
 
 // Caller boundary: an agent caller can mint neither Fact-kind nor Fact-confidence
-// entities.
+// entities. Kind is derived from clamped confidence, never caller-supplied.
 fn validate_ingest(p: &IngestArgs) -> Result<(), String> {
 	validate_conf(p.conf).map_err(|e| e.to_string())?;
-	if let Some(k) = p.kind {
-		validate_kind(k).map_err(|e| e.to_string())?;
-		if k == EntityKind::Fact {
-			validate_fact_source(AGENT_SOURCE).map_err(|e| e.to_string())?;
-		}
-	}
 	if p.conf >= crate::base::constants::FACT_CONFIDENCE {
 		validate_fact_source(AGENT_SOURCE).map_err(|e| e.to_string())?;
 	}
@@ -404,10 +396,8 @@ impl Server {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-
 	use crate::base::reason::add_reason;
-	use crate::base::types::{Entity, Kern, Reason};
+	use crate::base::types::{Entity, EntityKind, Kern, Reason};
 	use crate::mcp::Server;
 
 	fn make_server() -> Server {

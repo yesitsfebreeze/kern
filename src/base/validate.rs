@@ -1,5 +1,4 @@
 use crate::base::constants::{AGENT_SOURCE, USER_SOURCE};
-use crate::base::types::EntityKind;
 
 pub const CONF_MIN: f64 = 0.0;
 pub const CONF_MAX: f64 = 1.0;
@@ -8,8 +7,6 @@ pub const CONF_MAX: f64 = 1.0;
 pub enum ValidateError {
 	#[error("conf {0} out of range [0.0..=1.0]")]
 	ConfOutOfRange(f64),
-	#[error("thought kind {0:?} is internal-only and not accepted from callers")]
-	InternalKind(EntityKind),
 	#[error("fact-tier conf requires trusted source (got source={0:?})")]
 	FactFromUntrustedSource(String),
 }
@@ -19,15 +16,6 @@ pub fn validate_conf(conf: f64) -> Result<f64, ValidateError> {
 		return Err(ValidateError::ConfOutOfRange(conf));
 	}
 	Ok(conf)
-}
-
-pub fn validate_kind(kind: EntityKind) -> Result<EntityKind, ValidateError> {
-	match kind {
-		EntityKind::Claim | EntityKind::Fact => Ok(kind),
-		EntityKind::Document | EntityKind::Question | EntityKind::Answer | EntityKind::Conclusion => {
-			Err(ValidateError::InternalKind(kind))
-		}
-	}
 }
 
 pub fn validate_fact_source(source: &str) -> Result<(), ValidateError> {
@@ -71,24 +59,6 @@ mod tests {
 		assert_eq!(validate_conf(0.0), Ok(0.0));
 		assert_eq!(validate_conf(1.0), Ok(1.0));
 		assert_eq!(validate_conf(0.5), Ok(0.5));
-	}
-
-	#[test]
-	fn internal_kinds_rejected() {
-		for k in [
-			EntityKind::Document,
-			EntityKind::Question,
-			EntityKind::Answer,
-			EntityKind::Conclusion,
-		] {
-			assert_eq!(validate_kind(k), Err(ValidateError::InternalKind(k)));
-		}
-	}
-
-	#[test]
-	fn caller_kinds_allowed() {
-		assert_eq!(validate_kind(EntityKind::Claim), Ok(EntityKind::Claim));
-		assert_eq!(validate_kind(EntityKind::Fact), Ok(EntityKind::Fact));
 	}
 
 	#[test]
