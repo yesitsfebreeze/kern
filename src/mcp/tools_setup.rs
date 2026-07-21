@@ -131,7 +131,11 @@ impl crate::mcp::Server {
 		let (gravitons, thoughts, descriptors) = {
 			let g = self.graph.read();
 			let h = crate::base::health::graph_health_stats(&g);
-			(h.gravitons, h.entities as u64, g.root.descriptors.len() as u64)
+			(
+				h.gravitons,
+				h.entities as u64,
+				g.root.descriptors.len() as u64,
+			)
 		};
 		let intake_dir = self.cfg.intake.dir.clone();
 		let mcp_registered = std::env::current_dir()
