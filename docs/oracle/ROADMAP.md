@@ -655,11 +655,12 @@ is a correct record of what was measured before this change, and the ratios in
 it no longer hold. The scan is the larger cost at every eligibility level tested
 here, which is the ordering that item said the numbers would decide.
 
-### 27. GC eviction pays one LMDB commit per victim `[lifecycle]`
+### 27. A GC sweep pays one LMDB commit, not one per victim — closed 2026-07-22 `[lifecycle]`
 
-One item because one sweep pays all of it. The four costs it opened with are now
-settled — two closed earlier, one closed here, one withdrawn — and measuring them
-found the cost that actually dominates the sweep, which was none of the four.
+One item because one sweep paid all of it. The four costs it opened with are
+settled — three closed, one withdrawn — and measuring them found a fifth that
+actually dominated the sweep, which was none of the four. That fifth closed
+2026-07-22 and is the third bullet below.
 
 **Measured 2026-07-21 before touching anything** (`tests/gc_scale.rs`, release,
 one sweep per row). `run_gc` returns before eviction once the victim list is
@@ -691,19 +692,60 @@ nothing else:
   on hot-tier underfill), and an ANN over the cold tier would put a resident index
   back on the tier that exists to not be resident.
 
-- **What remains, and it is new.** Eviction costs 3–10 ms per victim, effectively
-  all of it `cold_spill` opening and committing one LMDB write transaction per
-  victim (`src/base/store.rs:626-631`), driven one at a time by `evict_victims`
-  (`src/tick/stigmergy.rs:101`). 80 000 victims took 279 s of tick. `cold_put_all`
-  (`:666`) already commits a whole batch in one transaction, so the mechanism is
-  there and this is not a hard change.
-  **The open question is not how to batch it but what a batched failure means.**
-  Spill-before-drop is per-victim today: a victim whose spill fails stays hot and
-  is retried next sweep (`kept`, `src/tick/stigmergy.rs:136`). One transaction for
-  the whole list makes that all-or-nothing — a single bad row either holds the
-  entire sweep hot or goes down with the batch. That is a retention decision, not
-  a performance one, which is why this was measured and left rather than fixed in
-  passing.
+- ~~Eviction pays one LMDB commit per victim~~ **Closed 2026-07-22.** It was the
+  commit, and only the commit. `cold_spill` and `cold_put_all` encode the same
+  rows and issue the same two `put`s per row; they differ only in where
+  `write_txn`/`commit` sit, so an A/B over identical batches isolates the
+  transaction boundary and nothing else
+  (`cold_spill_per_victim_vs_batched`, `tests/gc_scale.rs`, release, dense
+  vectors, tier under its cap so no trim pass fires in either column):
+
+  | victims | one commit each | one commit total | per row |
+  |---|---|---|---|
+  | 100 | 918 ms | 20.5 ms | 9.18 ms → 0.21 ms |
+  | 800 | 7 728 ms | 70.2 ms | 9.66 ms → 0.09 ms |
+  | 5 000 | 38 053 ms | 284 ms | 7.61 ms → 0.06 ms |
+  | 20 000 | 136 012 ms | 1 060 ms | 6.80 ms → 0.05 ms |
+
+  `run_gc` now hands the whole victim list to `cold_put_all` in one transaction
+  (`evict_batched`, `src/tick/stigmergy.rs:136`). Whole-sweep effect, both
+  columns measured in one sitting on one machine (so these absolutes are ~2.2x
+  the 2026-07-21 table's, which is a different host):
+
+  | N | victims | before | after |
+  |---|---|---|---|
+  | 10k | 80 | 496 ms | 9.4 ms |
+  | 10k | 800 | 4 660 ms | 28.1 ms |
+  | 10k | 8 000 | 67 811 ms | 250 ms |
+  | 100k | 800 | 4 367 ms | 34.9 ms |
+  | 100k | 8 000 | 46 884 ms | 222 ms |
+  | 100k | 80 000 | 615 919 ms | 2 890 ms |
+
+  The ratio this item opened with has inverted: selection was 0.06% of a
+  100k/800 sweep and is now 8.3% of it.
+
+  **What a batched failure means was the real question, and the answer is that
+  it means nothing new.** A failed batch falls back to the per-victim loop it
+  replaced (`evict_victims`, `src/tick/stigmergy.rs:155`), so the retention
+  semantics are unchanged: the row that cannot be spilled stays hot and is
+  retried next sweep, every other victim is still collected (`kept`,
+  `src/tick/stigmergy.rs:177`). All-or-nothing was the alternative and it was
+  rejected: cold GC is the only bound on hot-graph size, so one permanently
+  un-encodable row would wedge that bound every hour, forever — a liveness
+  failure traded for nothing, since a batch that fails has written nothing and
+  loses no data either way. The fallback also absorbs a batch too large for one
+  LMDB transaction (`MDB_TXN_FULL`) by finishing the sweep slowly instead of not
+  at all.
+
+  Two costs accepted. The batch is a clone of every victim entity before the
+  commit — ~80 MB transient at the 80 000-victim row above, of data already
+  resident and about to be freed. And one LMDB write transaction is now held for
+  the length of a sweep rather than V short ones; at 80 000 victims that is a
+  single ~2.9 s hold against 616 s of intermittent holds, so any contending
+  writer waits strictly less in total, but a single flush can now block ~2.9 s
+  instead of ~7 ms. No deadlock is introduced: nothing inside the transaction
+  takes the graph lock, and `run_gc` holds that lock exclusively for the whole
+  sweep, so no flusher can hold a graph read lock while waiting on the writer.
   Deciding behavior: name-the-tradeoff.
 
 - ~~`cold_cap` decodes the entire 50k-row cold table on every individual spill~~
@@ -932,22 +974,63 @@ still does not. "The LLM call is the only unbounded step on the path"
 (`concepts/acceptance.mdx:189-192`), and with the answer leg removed (2026-07-21)
 the distill leg is now the only LLM on any path — no latency work has landed on it.
 
-### 31. Routing and structural debt in the hot types `[retrieval]`
+### 31. Structural debt in the hot types `[retrieval]`
+
+Both routing bullets are retired; what remains is serialization and index shape.
 
 Recorded in `FEATURES.md` gap blocks, planned nowhere:
 
 - ~~Routing does a vector lookup per level, O(depth·log n), and unnamed children
   are unbounded per parent~~ **(retired 2026-07-21 — verified false on both
   counts; the FEATURES gap block it quoted is corrected at `FEATURES.md:126`).**
+  ~~Per-parent fan-out is a real cliff and stays on this item's list~~
+  **(measured and retired 2026-07-22 — the width is real and unbounded, but it
+  costs a linear ~2% at the widths the graph reaches, and the scan the wording
+  blames is not where even that goes).** The location holds:
   `route_to_child_id` (`src/base/accept.rs:880`) is a linear scan over the
-  parent's loaded named children against each child's stored `graviton_vec` — no
-  index is consulted, so the cost is O(depth · children) and the "cached per-kern
-  centroid" the item wanted is what `graviton_vec` already is. Unnamed children
-  are capped at one per parent on the routing path by
-  `get_or_spawn_unnamed_child` (`src/base/accept.rs:642`, guarded by
+  parent's loaded named children against each child's stored `graviton_vec`,
+  reached from `route_entity` (`src/base/accept.rs:218`) once per accepted
+  entity — per distilled claim and per chunk (`src/ingest/place.rs:133`,
+  `src/ingest/place.rs:212`) — descending up to `MAX_ACCEPT_DEPTH`, in practice
+  two levels. Unnamed children are capped at one per parent on the routing path
+  by `get_or_spawn_unnamed_child` (`src/base/accept.rs:642`, guarded by
   `src/base/accept.rs:932`); only tick clustering makes more, one per spawnable
-  cluster and deliberately (`src/tick.rs:196`). Per-parent fan-out is a real
-  cliff and stays on this item's list; an index lookup was never the cost.
+  cluster and deliberately (`src/tick.rs:196`).
+
+  Instrument: `tests/route_fanout.rs`, release, `--ignored`. Fan-out costs
+  **0.14-0.18us per child** across runs, of an accept that costs **1.4-2.1ms**
+  at 20k entities — 0.5% at width 64, ~5% at 512, ~24% at 4096. The accept is
+  dominated by the two HNSW searches it runs (the dedup gate at
+  `src/base/accept.rs:39`, the similarity reason at `src/base/accept.rs:314`)
+  plus two index inserts, which is why width has to reach the thousands before
+  it registers. A named/unnamed A/B over the same walk — identical descent,
+  cosine skipped — attributes **-0.009, -0.001 and +0.003us per child** to the
+  `graviton_vec` comparison on three runs: zero every time. What the width actually buys is two
+  `Vec<String>` clones per descent (`src/base/accept.rs:216`,
+  `src/base/accept.rs:681`) and a linear resident-map probe for the generic
+  child; the comparison the bullet named is free.
+
+  Nothing caps named children per parent, and unlike the other two claims this
+  one survives measurement. Only two things create a child with a routable
+  `graviton_vec`: `add_graviton_with_mass` (`src/base/accept.rs:754`),
+  human-declared and root-only, and tick naming (`src/tick/tasks.rs:236`), whose
+  result `promote_to_root_if_generic` (`src/base/accept.rs:819`) lifts to root.
+  Driving that real accept → cluster → name → promote loop, root fan-out tracks
+  distinct cohesive topics very nearly 1:1 — 8 topics -> 8 children, 64 -> 55,
+  256 -> 191. `GRAVITON_DEDUP_THRESHOLD` collapses only topics whose graviton
+  names embed within 0.85 of each other, which is a fact about the corpus, not a
+  bound on the structure. Disabling promotion does not shrink the width, it
+  relocates it: `generic` then holds all 191 and routing scans them one level
+  deeper.
+
+  So the width is real and the cost of it is linear — ~2% of an ingest at 191
+  children, and it needs some thousands of distinct cohesive topics before it is
+  a fifth. That is a slope, not a cliff, and no optimisation is shipped for it.
+  Recording the lever in case the slope ever matters: it is the `Vec<String>`
+  clone, not an index over children. The clone in `route_entity` exists only to
+  end a borrow and can be replaced by holding `&kern.children` alongside the
+  `&GraphGnn` the scan already takes; an index would be write-path work on every
+  spawn and every rename, buying back a comparison that measures as free.
 - `Entity` is a ~30-field flat struct (serialization cost on every store round
   trip) and `Kern` carries no per-kern stats — mean heat, fill ratio — that
   clustering could reuse (`FEATURES.md:90-92`).
@@ -1628,7 +1711,7 @@ What survives: the by-name discipline. It is cheap, it catches mode 1
 independently of the build layout, and it is what confirmed both cycles that
 found this.
 
-### 92. `test_retention` fails under load and nobody had written it down `[eval]`
+### 92. Tests that race a backward-stepping `CLOCK_REALTIME` — mechanism found, `test_retention` unfixed `[eval]`
 
 `e2e/test_retention.py::test_a_retention_expires_the_fact_out_of_query_results`
 fails intermittently, and only when the CPU-heavy `test_recall.py` runs before
@@ -1638,12 +1721,32 @@ consecutive `pytest -q e2e/test_recall.py e2e/test_retention.py` runs on
 pristine code, all green. So it is real, load-dependent, and not reliably
 reproducible on demand — which is the worst shape a test can have.
 
-Suspected mechanism, unconfirmed: the test sleeps on Python's `time.sleep`
-(monotonic) and compares against kern's `SystemTime::now()` (wall clock) with a
-2-second margin. Under load on WSL2 the wall clock lags the sleep and the fact
-has not expired yet when the assertion runs. If that is right, the fix is to
-make the margin generous or to drive expiry from an injected instant rather than
-from elapsed real time — a test that races the clock will keep doing so.
+**Mechanism identified 2026-07-22, and it is not what this item guessed.** The
+guess was "under load on WSL2 the wall clock lags the sleep". It does not lag —
+**this host steps `CLOCK_REALTIME` backwards by roughly 2.8 s every 30 s.** Found
+while fixing the same class of failure in
+`the_poll_loop_resolves_its_deadline_per_pass_not_once_at_startup`
+(`src/ingest/intake.rs`), where a two-second monotonic sleep could advance
+realtime by under a second.
+
+That explains everything the original entry recorded as puzzling: why it fails
+only sometimes, why it correlates with a long preceding test rather than with
+load as such (a longer run spans more backward steps), and why three observers
+could not reproduce it on demand — six consecutive clean runs is an ordinary
+outcome when the trigger fires every half-minute against a two-second margin.
+
+So the shape of the fix is settled: **any test comparing a monotonic sleep
+against a `SystemTime` deadline on this host is a coin flip**, and widening the
+margin only lengthens the odds. `intake.rs` now waits on the wall clock itself,
+restarting its marker when the clock steps back and capping on the monotonic
+clock so a stopped clock fails loudly rather than hanging. `e2e/test_retention.py`
+wants the same treatment, or an injected instant.
+
+Worth noting what this cost: the item was filed with deliberately conflicting
+evidence — two observations of failure against six clean runs — because neither
+"flaky" nor "fine" was established. Recording the disagreement rather than
+resolving it early is what left the entry accurate enough to update rather than
+rewrite when the real cause turned up in an unrelated file.
 
 It ranks here rather than in a retrieval tier because retention itself is not
 suspected; the harness is. It is written down because the cost is not the

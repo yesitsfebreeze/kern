@@ -32,6 +32,190 @@
   index order the `+0.0` argument depends on.
 
   Decided by: name-the-tradeoff.
+- 2026-07-22 — merged item 27's batched GC eviction. 192 + 1 + this one = 194,
+  by union rebuild.
+
+  Worth a line on what the last three slices have in common, because it is not
+  what the roadmap predicted. Item 31 shipped **zero source changes** — routing
+  fan-out is a slope, ~2% of ingest, and the cosine comparison the item blamed
+  measured at zero. Item 27 shipped a 213x speedup on a cost the item had ranked
+  *fourth* in its own list, after three earlier bullets were each withdrawn by
+  measurement. Item 29 refused its remedy outright.
+
+  So the ranking inside a multi-bullet item has been wrong about as often as the
+  ranking between items. Item 27's four bullets closed in the order 3, 4, 1, 2 by
+  value delivered, and the two that mattered were the two nobody had measured.
+  The pattern is not "roadmap items are unreliable" — it is that **an unmeasured
+  cost estimate is a guess wearing a number**, and the file contains many, at
+  every level of nesting.
+
+  What keeps this honest is cheap and already habitual: every slice measures
+  before it implements, and reports the measurement even when it kills the slice.
+  Three of the last four did exactly that.
+
+  Decided by: verify-before-claiming — the ordering within an item deserves the
+  same scepticism as the ordering between items.
+
+- 2026-07-22 — item 27 closed: a GC sweep pays one LMDB commit, not one per
+  victim. 616 s → 2.9 s at 80 000 victims; 4 367 ms → 35 ms at the 100k/800 point
+  the item was written around.
+
+  Verified before implementing, because three of item 27's four bullets had
+  already ended somewhere other than their title pointed. `cold_spill` and
+  `cold_put_all` encode the same rows and issue the same two `put`s per row and
+  differ only in where the transaction boundary sits, so an A/B over identical
+  batches attributes the cost to the commit and nothing adjacent: 9.18 ms per
+  row against 0.21 ms at 100 victims, 6.80 ms against 0.05 ms at 20 000, with
+  the cold tier under its cap in both columns so no trim pass fired in either.
+
+  The item said the open question was not how to batch but what a batched
+  failure means, and that is the decision recorded here. **All-or-nothing was
+  rejected.** Cold GC is the only bound on hot-graph size, so a permanently
+  un-encodable row that took the whole sweep down with it would wedge that bound
+  every hour, forever — and it would buy nothing in exchange, because a batch
+  that fails has written nothing and loses no data under either policy. So a
+  failed batch falls back to the per-victim loop it replaced and the retention
+  semantics are exactly what they were: the bad row stays hot and is retried
+  next sweep, every other victim is still collected. The same fallback absorbs a
+  batch too large for one LMDB transaction by finishing the sweep slowly instead
+  of not at all.
+
+  Two costs accepted and named in the item: the batch clones every victim entity
+  before committing (~80 MB transient at 80 000 victims, of data already resident
+  and about to be freed), and one write transaction is now held for a whole sweep
+  rather than V short ones — a single ~2.9 s hold against 616 s of intermittent
+  ones, so contending writers wait strictly less in total but a single flush can
+  block longer once.
+
+  The equivalence is the whole claim, so it is a test: the batched path evicts
+  exactly the victims the per-victim path evicted and spills exactly the same
+  rows, over a 200-entity mixed population with 80 victims — a one-victim sweep
+  is a single commit either way and would have proved nothing. Fact immunity is
+  pinned separately against the batch, which is a second place it has to hold
+  now that a victim list is handed to the store wholesale.
+
+  Decided by: name-the-tradeoff — batching was never in doubt; which failure
+  mode to buy with it was the only real question.
+
+- 2026-07-22 — `FEATURES.md` stated the acceptance radii as
+  `KERN_INNER_RADIUS=0.15, KERN_OUTER_RADIUS=0.35`; `src/base/constants.rs:40-41`
+  say 0.35 and 0.75. Both numbers wrong, by more than a factor of two, on the
+  constants that decide whether an entity joins a kern or spawns a new one.
+
+  Found by the item 31 slice while measuring routing, and flagged rather than
+  fixed because it sat outside that slice's section. Fixed here in the same
+  worktree, with the source anchor added so the next drift is nominated instead
+  of merely wrong: `docs-check` verifies a cited line still says what the citing
+  sentence claims, and this line cited nothing at all.
+
+  Worth the entry because of what it says about the check's reach. Nine hundred
+  tests, an anchor nominator and a citation checker all passed over this for the
+  entire life of the file — none of them compares a documented *value* against
+  the constant it names. Anchored prose gets checked; unanchored prose is
+  unfalsifiable. The cheap discipline that follows: when a doc states a number
+  from source, cite the source line, or the number is a rumour.
+
+  Decided by: verify-before-claiming — a stated constant is a claim, and this one
+  had never been checked against the thing it claims.
+
+- 2026-07-22 — item 31's last surviving bullet, "per-parent fan-out in routing is
+  a real cliff", is retired unfixed. `tests/route_fanout.rs` (release,
+  `--ignored`) prices it two ways, and the item is right about the structure and
+  wrong about the cost.
+
+  **The width is real and nothing bounds it.** Root fan-out tracks the number of
+  distinct cohesive topics almost exactly: 8 topics -> 8 named children, 64 ->
+  55, 256 -> 191, driving the real accept → cluster → name → promote loop.
+  `GRAVITON_DEDUP_THRESHOLD` collapses only topics whose graviton names embed
+  within 0.85 of each other — a fact about the corpus, not a cap. Disabling
+  promotion does not shrink the width, it moves it one level down into `generic`.
+
+  **The cost of that width is linear and small.** A child costs 0.14-0.18us
+  across runs, on an accept that costs 1.4-2.1ms at 20k entities: ~2% at 191
+  children, ~5% at 512, ~24% at 4096 — and a graph with 4096 distinct themes
+  holds far more than 20k entities, so the real fraction is lower still. Ingest is two HNSW searches and
+  two inserts; routing is a rounding error beside them. A slope, not a cliff.
+
+  **And the scan the item blames is not where even that goes.** Running the same
+  descent with the children unnamed — identical walk, cosine skipped — moves the
+  per-child figure by -0.009, -0.001 and +0.003us on three runs — zero every
+  time. The width is paid in two `Vec<String>` clones per descent and a linear
+  resident-map probe for the generic child, not in `cosine_distance` against `graviton_vec`. That is the
+  third time this item has named the wrong line; its two 2026-07-21 retirements
+  were misattributions too. The pattern is that every version of it was written
+  from the shape of the code rather than from a run.
+
+  So no index over children shipped. Naming the tradeoff that was declined: an
+  index is write-path work on every spawn and every rename, and what it buys
+  back is a comparison that measures as free. If the slope ever matters, the
+  lever is deleting the clone, and item 31 now says so instead of pointing at
+  the index. Supersedes the "real cliff" claim recorded under item 31 on
+  2026-07-21.
+
+  Recorded because the first draft of this entry claimed the opposite — that
+  fan-out was sublinear and `TICK_MAX_CLUSTER_SAMPLE` suppressed it. That came
+  from a generator whose 32-word vocabulary made distinct topics produce
+  identical graviton names, which the 0.85 gate then collapsed. It was caught
+  only by trying to make the assertion fail and finding it could not be, which
+  is the entire reason that step exists.
+
+  Decided by: verify-before-claiming — the cliff was measured before it was
+  climbed, the instrument that priced the width also proved the named cause was
+  not it, and the first conclusion was withdrawn when its revert-check would not
+  fail.
+
+- 2026-07-22 — item 92 updated in place rather than rewritten, and retitled to
+  name the mechanism: "Tests that race a backward-stepping `CLOCK_REALTIME`".
+  The item had guessed wall-clock *lag under load*; the cause is the clock
+  stepping backwards ~2.8 s every ~30 s, found in an unrelated file.
+
+  The guess and the finding are both kept, because the difference between them
+  is the useful part. Lag would have been fixed by widening the margin — the
+  item said so. A backward step cannot be: widening only lengthens the odds,
+  since the trigger recurs every half-minute regardless of how long the margin
+  is. Same symptom, opposite remedy.
+
+  It also explains the evidence that made the item look unresolvable. Six
+  consecutive clean runs disproved nothing against a trigger firing twice a
+  minute, and the correlation was never with load — it was with a long preceding
+  test, which simply spans more backward steps. Filing that disagreement instead
+  of resolving it early is why the entry needed an update rather than a
+  correction.
+
+  Decided by: verify-before-claiming — an unconfirmed mechanism was labelled
+  unconfirmed, and survived contact with the real one.
+
+- 2026-07-22 — a flake fix arrived in the MAIN checkout, not a worktree, and
+  `cycle.sh reap` refused to run because of it — correctly, and that refusal is
+  the reason this is a note rather than a silent clobber. Three cycles were live
+  at the time; reaping into a dirty tree would have mixed an unattributed change
+  into someone else's merge.
+
+  The change itself is good and is kept.
+  `the_poll_loop_resolves_its_deadline_per_pass_not_once_at_startup` slept two
+  seconds on the monotonic clock and compared against `valid_until`, an absolute
+  `SystemTime`. It now waits on the wall clock and restarts its marker if the
+  clock steps backwards, with a thirty-second monotonic cap so a stopped clock
+  fails loudly instead of hanging.
+
+  The environmental finding is worth more than the fix: **this box steps
+  `CLOCK_REALTIME` backwards roughly 2.8 s every 30 s.** That is almost certainly
+  the mechanism behind ROADMAP item 92 — `e2e/test_retention.py` failing
+  intermittently under load, which three observers could not reproduce on demand
+  and which was filed with deliberately conflicting evidence. Item 92 guessed
+  "wall-clock lag under load on WSL2". It was not lag; it is the clock going
+  backwards. Any test comparing a monotonic sleep against a `SystemTime` deadline
+  on this host is a coin flip, and there are others.
+
+  What is not fine is the delivery. A writer outside the worktrees is invisible
+  to the claim ledger, so two of today's collisions and now this all share one
+  cause: the isolation only binds writers that go through it. The reap gate
+  caught this one because a dirty tree is loud. A change committed straight to
+  master would not have been.
+
+  Decided by: verify-before-claiming — the change was verified green and kept on
+  its merits, and the way it arrived is recorded separately from whether it was
+  right.
 
 - 2026-07-22 — three ROADMAP headings still named defects that had been closed,
   and the heading is the index. Items 28, 29 and 95 all carried struck-through
@@ -132,6 +316,7 @@
 
   Decided by: name-the-tradeoff — the memory win does not get to be reported
   without the latency it cost.
+
 - 2026-07-21 — `4e836bb`'s subject is wrong in the same way `3529fce`'s was, and
   twice makes it a pattern with a clean cause. It reads "source-trust weighting —
   a user-authored claim should outrank an auto-ingested one at equal heat,

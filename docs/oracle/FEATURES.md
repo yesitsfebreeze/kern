@@ -121,7 +121,7 @@ supersedes an existing one. The core write path every ingestion funnels through.
    the nearest existing neighbor and a `Provenance` reason to the source doc.
 
 **Where.** `src/base/accept.rs` (1452 LoC). Radii defaults in `constants.rs`
-(`KERN_INNER_RADIUS=0.15`, `KERN_OUTER_RADIUS=0.35`).
+(`KERN_INNER_RADIUS=0.35`, `KERN_OUTER_RADIUS=0.75`, `src/base/constants.rs:40-41`).
 
 **Gaps.** *Both halves of this block were wrong and are corrected 2026-07-21.*
 Routing does **no** index lookup per level: `route_to_child_id`
@@ -516,8 +516,8 @@ victim outright.
 **How.** `stigmergy::run_gc` (`src/tick/stigmergy.rs`) collects victims per
 kern where `is_cold_victim` holds (heat below `COLD_HEAT_THRESHOLD=0.01` *and*
 not accessed within `COLD_GC_AGE = 7 days` *and* not an Active `Fact`/`Document`),
-spills each to the cold store, and only on spill success calls `remove_entity`.
-A failed spill keeps the victim hot and retries next pass. Runs on the
+spills the whole list to the cold store in ONE transaction, then `remove_entity`.
+A failed batch retries per victim, so a bad row alone stays hot. Runs on the
 maintenance tick gated by `STIGMERGY_GC_INTERVAL = 1 hour` and clock validity.
 
 Past the cold cap the drop is **counted, not silent**: `cold_cap` increments

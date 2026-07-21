@@ -189,6 +189,51 @@ fn dense_vec(seed: usize) -> Vec<f32> {
 	v
 }
 
+// Isolates the transaction boundary and nothing else: `cold_spill` and
+// `cold_put_all` encode the same rows and issue the same two `put`s per row —
+// they differ only in where `write_txn`/`commit` sit. Whatever separates these
+// two columns IS the per-victim commit.
+#[test]
+#[ignore = "minutes in release; run explicitly with --ignored"]
+fn cold_spill_per_victim_vs_batched() {
+	for victims in [100usize, 800, 5_000, 20_000] {
+		let batch: Vec<Entity> = (0..victims)
+			.map(|i| {
+				let mut e = entity(i, true);
+				e.vector = dense_vec(i).into();
+				e
+			})
+			.collect();
+
+		let d1 = tempfile::tempdir().unwrap();
+		let s1 = Store::open(&d1.path().to_string_lossy()).unwrap();
+		let t = Instant::now();
+		for e in &batch {
+			s1.cold_spill(e).unwrap();
+		}
+		let per_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+		let d2 = tempfile::tempdir().unwrap();
+		let s2 = Store::open(&d2.path().to_string_lossy()).unwrap();
+		let t = Instant::now();
+		s2.cold_put_all(&batch).unwrap();
+		let batch_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+		assert_eq!(
+			s1.cold_all().unwrap().len(),
+			s2.cold_all().unwrap().len(),
+			"both paths must land the same rows or the comparison is meaningless"
+		);
+		println!(
+			"victims={victims:<7} per_victim={per_ms:10.3}ms ({:7.4}ms each)  \
+			 one_txn={batch_ms:9.3}ms ({:7.4}ms each)  speedup={:6.1}x",
+			per_ms / victims as f64,
+			batch_ms / victims as f64,
+			per_ms / batch_ms
+		);
+	}
+}
+
 // The write side of the same tier. `run_gc` spills one victim at a time, so the
 // per-spill cost is what a sweep multiplies by V — and it is what any change
 // that adds a second write to the tier has to be paid for out of.
