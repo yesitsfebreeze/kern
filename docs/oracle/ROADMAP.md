@@ -263,7 +263,7 @@ the end, and they are what keeps this item open. What shipped:
   unfiltered seed path — the same predicate either way.
 - ~~**Guard the id path.**~~ **Done 2026-07-21.** `src/mcp/tools_query.rs:133-153`
   now builds `QueryOptions` first and runs the resolved row through
-  `retrieval::score::matches_filter` (`src/retrieval/score.rs:226`) before it
+  `retrieval::score::matches_filter` (`src/retrieval/score.rs:231`) before it
   renders, so the id read honours every filter the ranked read honours —
   `query {id, kind: "claim"}` on a `Fact` answers `thought not found`
   (`id_filter_tests`, same file). Previously it returned `entity_detail_by_id`
@@ -393,12 +393,37 @@ write time is the real fix and is not this item.
 
 ### 20. Source-trust weighting `[retrieval]`
 
-User-authored claims should outrank auto-ingested claims of equal heat.
-`apply_boosts` has no source-trust prior (`src/retrieval/score.rs:90-102`). Add
-`source_trust_user` / `_agent` / `_auto` to `RetrievalConfig`, default all `1.0`
-so ranking does not move until configured, and multiply in the boost step —
-**post-fusion, not in RRF**, which is rank-based. Independent of 21; can run
-parallel after 18.
+- ~~**A trust prior in the boost step.**~~ **Done 2026-07-21.** `apply_boosts`
+  (`src/retrieval/score.rs:90`) now multiplies the composite by
+  `RetrievalConfig::source_trust` (`src/config/retrieval.rs:55`), a map keyed on
+  `Source::scheme()`. Empty by default, and an absent key is exactly `1.0`, so an
+  unconfigured kern scores bit-identically. Post-fusion, as required — RRF is
+  rank-based and a multiplier there would be meaningless.
+
+**What remains is the part the item assumed and the data does not carry: an
+`Entity` knows the CHANNEL it arrived on, never its AUTHOR.** `Source` is
+`{File, Ticket, Session, Agent, Inline}` — a URI scheme. `kern ingest`, the
+human path, writes `Source::Inline` (`src/commands/ingest_cmd.rs:62`), and the
+MCP `ingest` tool's default writes `Source::Inline` too
+(`src/mcp/tools_mutate.rs:215`). One tag, two trust principals: no weighting
+keyed on scheme can separate a person from an agent, so `source_trust_user` and
+`source_trust_agent` were not built — they would have been labels for a
+distinction nothing records.
+
+Nor does confidence stand in for it. `clamp_confidence`
+(`src/base/math.rs:201`) caps a non-`USER_SOURCE` write at `MAX_AI_CONFIDENCE`,
+which after `beta_params_from_confidence` (`src/ingest/place.rs:16`) is a 0.667
+against 0.650 posterior — a 2.6% edge over an MCP agent, and none at all over
+the file watcher, which submits `1.0` (`src/ingest/file_watcher.rs:77-83`)
+without passing through the clamp. The item's own headline — a user-authored
+claim outranking an auto-ingested one at equal heat — is therefore still false
+by default; `source_trust = { file = 0.8 }` is now the way to make it true, and
+it is the channel it penalises, not the author.
+
+The blocker is an author principal on `Entity`, stamped at each write path — a
+new field, so a store format bump, and it belongs with whoever holds
+`src/base/types.rs`. Deciding behavior: fix-the-root. Until then, do not add
+`_user` / `_agent` knobs; they would read as working and weight nothing.
 
 ### 21. Review / draft lifecycle `[surface]`
 
@@ -497,9 +522,9 @@ changes an input to the importance gate (`has_vector`, kind, `access_count`)
 while leaving the epoch untouched.
 
 Worse, the one mutation that *creates* importance is epoch-silent on purpose:
-`commit_access_ids` (`src/retrieval/score.rs:341`) stamps access on every
+`commit_access_ids` (`src/retrieval/score.rs:346`) stamps access on every
 delivered result and deliberately bypasses `get_mut` so it will not invalidate
-the semantic query cache (`src/retrieval/score.rs:340`). An eligible-set index
+the semantic query cache (`src/retrieval/score.rs:345`). An eligible-set index
 keyed on the epoch would never see a Claim cross
 `important_access_threshold` — stale forever, in the direction that silently
 drops seeds and moves recall with no error anywhere.
@@ -792,6 +817,33 @@ Still open, and belonging to item 83 rather than here: nothing bounds the
 resident set, `disk_threshold` defaults to `KERN_CAP_DISABLED`
 (`src/config/graph.rs:20`) with no auto-tuning and no signal on approach, and the
 double-storage in finding 3 is the actual O(N) term.
+
+### 95. The file watcher bypasses `clamp_confidence` entirely `[ingest]`
+
+`file_watcher.rs` calls `worker.submit(..., 1.0, ...)` and neither
+`Worker::submit` nor `run` nor `enqueue` contains a `clamp_confidence` call —
+verified by grep, not inferred. Every other minting path routes through it:
+`cmd_ingest` uses `clamp_confidence(1.0, "user")`, the MCP tool uses
+`clamp_confidence(p.conf, AGENT_SOURCE)` which caps at `MAX_AI_CONFIDENCE`.
+
+So an auto-ingested `Document` reaches `beta_params_from_confidence` with a raw
+1.0 and lands on Beta(2,1) = 0.6667 — **exactly the posterior of a human's CLI
+claim**, and above the 0.6500 an MCP agent gets after clamping. A file appearing
+on disk is trusted more than an agent that asserted something deliberately.
+
+Found while establishing whether confidence already encodes source trust for
+item 20. It does not, and this is why: item 20's headline — "a user-authored
+claim should outrank an auto-ingested one at equal heat" — is false today, and
+the clamp is the mechanism that was supposed to make it true.
+
+Not fixed alongside item 20 because it **moves ranking**. Clamping the watcher
+changes the posterior of every `Document` in a corpus that has one, so it needs
+its own recall gate and its own before/after, which item 20's bit-identity bar
+explicitly forbade. Two candidate closures: route the watcher through
+`clamp_confidence` with a watcher-specific source tag, or move the clamp inside
+`Worker::submit` so no caller can skip it. The second is the fix-the-root shape
+— a guard every path must pass rather than one each caller must remember — and
+it is the reason this defect existed at all.
 
 ### 30. Ingest queue `enqueue` detaches with no backpressure `[ingest]`
 

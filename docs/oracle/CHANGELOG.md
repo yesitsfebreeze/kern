@@ -2,6 +2,62 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — filed item 95 while verifying item 20: the file watcher bypasses
+  `clamp_confidence` entirely, so an auto-ingested `Document` lands on Beta(2,1)
+  = 0.6667, exactly a human CLI claim's posterior and above the 0.6500 an MCP
+  agent gets after clamping. A file appearing on disk is trusted more than an
+  agent that asserted something on purpose.
+
+  It was found and described by the item-20 slice but left unfiled, inside that
+  item's prose. Filing it is the point: item 20's headline is "a user-authored
+  claim should outrank an auto-ingested one at equal heat", and this is the
+  mechanism that was supposed to make that true. A defect that lives only as a
+  sentence inside a neighbouring item is one nobody will ever schedule.
+
+  Deliberately not fixed alongside item 20, because clamping the watcher moves
+  the posterior of every `Document` and therefore moves ranking — which item
+  20's bit-identity bar forbade. The root-shaped closure is to move the clamp
+  inside `Worker::submit` so no caller can skip it, rather than adding a third
+  call site each future caller must remember; the guard-every-path-must-pass
+  version is exactly what its absence cost here.
+
+  Decided by: fix-the-root — the defect is that the clamp is a convention
+  callers follow rather than a gate they cannot avoid.
+
+- 2026-07-21 — source-trust weighting ships as a per-scheme multiplier in
+  `apply_boosts`, and the `_user` / `_agent` knobs ROADMAP item 20 asked for do
+  not ship at all, because nothing in the tree records who authored a claim.
+  `Entity.source` is a `Source` — `{File, Ticket, Session, Agent, Inline}` — a
+  URI scheme describing the channel. `kern ingest`, the human path, writes
+  `Source::Inline`; the MCP `ingest` tool's default writes `Source::Inline`.
+  One tag, two trust principals. A knob named `source_trust_user` could only
+  have been keyed on that tag, so it would have read as working and weighted an
+  agent identically to a person.
+
+  Confidence does not cover for it either, which was the other way the item
+  could have been closed. `clamp_confidence` caps a non-`USER_SOURCE` write at
+  `MAX_AI_CONFIDENCE`, worth a 0.667-against-0.650 posterior — a 2.6% edge over
+  an MCP agent, and none whatever over the file watcher, which submits `1.0` and
+  never passes through the clamp. So the item's headline claim, a user-authored
+  claim outranking an auto-ingested one at equal heat, was false in both
+  directions it could have been true.
+
+  What shipped is the honest half: `RetrievalConfig::source_trust`, a map keyed
+  on `Source::scheme()`, multiplied into the composite post-fusion. Empty by
+  default and an absent key is exactly `1.0`, so recall is unmoved — 0.9306 /
+  0.9722 / 0.9471, and a bit-identity test on the score words rather than a
+  tolerance. `source_trust = { file = 0.8 }` now buys the ranking the item
+  wanted, while naming the thing it actually penalises. Unknown keys fail
+  `validate` rather than weighting nothing quietly.
+
+  Item 20 stays open on the one thing left: an author principal on `Entity`,
+  which is a new field and a store format bump, and belongs with whoever holds
+  `src/base/types.rs`.
+
+  Decided by: fix-the-root — a knob keyed on a signal the tree does not record
+  is not a smaller version of the feature, it is a label for a distinction
+  nothing makes.
+
 - 2026-07-21 — the one cross-slice interaction anyone raised today was checked
   and is a non-issue, and checking it is the point. Item 28's author flagged that
   item 32 rewrote `src/tick/pulse.rs`, where `deposit_pulse` was the path
