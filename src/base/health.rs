@@ -31,6 +31,9 @@ pub struct HealthStats {
 	// for an in-memory kern; this is how far that deployment has diverged from a
 	// durable one.
 	pub unspilled_drops: u64,
+	// Jobs the ingest queue refused because it was full. Nonzero means a producer
+	// is outrunning the LLM leg and text was handed back, not stored.
+	pub ingest_queue_refused: u64,
 }
 
 pub fn graph_health_stats(g: &GraphGnn) -> HealthStats {
@@ -75,6 +78,7 @@ pub fn graph_health_stats(g: &GraphGnn) -> HealthStats {
 		ingest_dropped_chunks: crate::ingest::worker::ingest_dropped_chunks(),
 		remote_cap_dropped: crate::base::merge::remote_cap_dropped(),
 		unspilled_drops: crate::tick::stigmergy::unspilled_drops(),
+		ingest_queue_refused: crate::ingest::worker::ingest_queue_refused(),
 	}
 }
 

@@ -142,6 +142,7 @@ impl Server {
 			"ingest_dropped_chunks": h.ingest_dropped_chunks,
 			"remote_cap_dropped": h.remote_cap_dropped,
 			"unspilled_drops": h.unspilled_drops,
+			"ingest_queue_refused": h.ingest_queue_refused,
 		})
 	}
 }
@@ -400,6 +401,7 @@ mod tests {
 			"ingest_dropped_chunks",
 			"remote_cap_dropped",
 			"unspilled_drops",
+			"ingest_queue_refused",
 		] {
 			assert!(!h[key].is_null(), "{key} must reach the MCP surface");
 		}
