@@ -53,6 +53,97 @@
   reaches MCP health only, not `kern status` or the RPC `HealthRes`.
 
   Decided by: verify-before-claiming
+- 2026-07-21 — item 94's fix simplifies to "delete the file". Cargo's default
+  `target-dir` is `<workspace-root>/target`, which inside a git worktree is that
+  worktree's own directory, so isolation is what you get by doing nothing.
+  Confirmed rather than assumed: `cycle/2` has no `.cargo/` at all and resolves
+  to `kern-cycles/2/target` unprompted.
+
+  Which means the entire contamination defect was self-inflicted — introduced by
+  a launch step that wrote a `.cargo/config.toml` pointing every worktree at the
+  main checkout's cache, to buy a warm build. Pointing that file at a per-tree
+  path also works, and is what three live trees currently do, but it is a second
+  thing to keep correct forever. Not writing the file has no failure mode.
+
+  Worth recording as its own entry because the first correction to item 94 fixed
+  the diagnosis and left the remedy one step short: it said "give each worktree
+  its own target-dir", which is true but reads as "configure something", when
+  the actual instruction is "stop configuring something". A fix that requires
+  ongoing correctness is worse than one that requires nothing, and the launch
+  step that caused this is exactly the kind that gets copied forward unexamined.
+
+  Decided by: fix-the-root — the root was the config file's existence, not its
+  contents.
+
+- 2026-07-21 — `3529fce`'s subject says "item 25, the importance scan indexed"
+  and **no index was built**. The merge subject was generated from the slice
+  title — the work that was *asked for* — rather than from the diff, which
+  refused the index on evidence and parallelised the inner loop instead. Checked
+  before writing this: no `importance_index` symbol exists anywhere in `src/`,
+  and `an_eligibility_change_is_reflected_with_no_epoch_bump` — the test that
+  exists specifically to fail if someone memoises this scan — is present and
+  green.
+
+  Recorded because `git log` is the first place anyone looks and that subject is
+  a lie about the tree. `ROADMAP.md` item 25 and the entry below it are both
+  accurate; only the commit subject is wrong, and a commit subject cannot be
+  corrected in place once it is pushed. So the correction lives here, where the
+  next reader of the history will also be looking.
+
+  The general shape is worth naming: **a slice title is a hypothesis, and this
+  loop keeps disproving them.** Four perf items today ended somewhere other than
+  where their title pointed — 25 twice, 26's premise, 27's first bullet. Any
+  automation that names a merge after the slice rather than the diff will
+  therefore be wrong precisely on the passes where the work was most useful.
+
+  Decided by: verify-before-claiming — the subject asserted an index, the tree
+  was checked for one, and it is not there.
+
+- 2026-07-21 — item 25 narrowed, and the index it asked for deliberately not
+  built. Re-measuring after item 26 confirmed the scan now dominates every
+  eligibility level — 39.7 / 60.1 / 72.1 / 71.2% of retrieve at N=100k, against
+  a PageRank that item 26 cut from a flat ~20 ms to ~2–3 ms — so the item was
+  live and the old "PageRank first" table it carried is replaced.
+
+  Then the index turned out to have no sound freshness signal.
+  `bump_mutation_epoch` has three callers, all inside `graph.rs`, while
+  `GraphGnn::kerns` and `Kern::entities` are public and ~20 non-test sites write
+  through them directly. The decisive one is `commit_access_ids`, which stamps
+  access on every delivered result and bypasses `get_mut` *on purpose* so it will
+  not invalidate the semantic query cache — so the single mutation that creates
+  importance is exactly the one an epoch-keyed index can never see. Proven, not
+  argued: a `mutation_epoch`-keyed memo over `seed_important` makes the new
+  `an_eligibility_change_is_reflected_with_no_epoch_bump` fail on the access
+  crossing. That test ships as the guard against the next attempt.
+
+  What did ship is the root the measurement exposed: the scan was never parallel
+  on the corpus everyone actually has. `par_iter().flat_map_iter(...)` split over
+  *kerns* and walked each kern's entities on one thread, so a single-kern graph
+  scanned serially on 8 idle cores — and this item had described itself as
+  "rayon-parallel" throughout. Splitting the inner walk gives 1.9–3.9× at N=100k
+  (35.7 -> 12.0 ms at full eligibility) with recall bit-for-bit unchanged at
+  0.9306 / 0.9722 / 0.9471, and the selection proven bit-identical against an
+  independently written sequential gate rather than merely equivalent.
+
+  **The tradeoff, named:** this buys nothing at N=10k, where the numbers sit
+  inside the noise of a box running three worktrees. It is a large-corpus fix
+  that leaves the O(N) walk intact — the cliff is postponed, not removed, and
+  anyone reading "faster" here should read "still linear".
+
+  Also found, and worth someone's attention: the shared `target-dir` **does**
+  serve artifacts across worktrees, which item 94 explicitly ruled out. A clean
+  tree at 5d0a2bc failed to compile against a `HealthRes` field that does not
+  exist in its own source — slot 2's in-flight `ingest_queue_refused` — because
+  `libtrnsprt-*.rmeta` is last-writer-wins between trees. `touch`ing the local
+  `dto.rs` fixes it; a sibling rebuild brings it back. Every build in this pass
+  needed that touch first. Not filed here, because this pass owns one item.
+
+  174 entries.
+
+  Decided by: fix-the-root — the item asked for an index, but the root was that
+  entity mutation is unobservable and that the scan was not parallel at all;
+  building the index on an epoch that cannot see the mutation would have shipped
+  a silent recall bug instead of fixing either.
 - 2026-07-21 — item 27 `[lifecycle]` narrowed to one bullet it never contained.
   Both remaining claims were measured first (`tests/gc_scale.rs`, release, new
   here alongside `tests/seed_scale.rs`). **Victim selection does not dominate and

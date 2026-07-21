@@ -371,44 +371,98 @@ half the harness can already claim.
 
 ### 25. O(N) importance scan per retrieve `[retrieval]`
 
-`seed_important` iterates `g.all()` × `kern.entities.values()`
-(`src/retrieval/seed.rs:127-174`), called unconditionally once per retrieve
-(`src/retrieval/query.rs`, in `retrieve_profiled`). Rayon-parallel, but still full-corpus per
-query.
+`seed_important` (`src/retrieval/seed.rs:127`) iterates `g.all()` ×
+`kern.entities`, called unconditionally once per retrieve
+(`src/retrieval/query.rs`, in `retrieve_profiled`).
 
-**Measured 2026-07-21 before touching it** (`tests/seed_scale.rs`, release,
-20 reps per configuration). The cliff is real and it is O(N × eligible):
+**Narrowed 2026-07-21, after item 26 landed.** The scan is 1.9–3.9× faster and
+its share of retrieve is roughly halved, but it is still O(N): what this pass
+removed was a parallelism bug, not the linear walk. The index the item asks for
+turned out to be blocked, and the blocker is named below so the next attempt
+does not rediscover it.
 
-| N | eligible | `seed_important` | share of retrieve |
+**The old tables are replaced, not amended — both were measured before item 26.**
+Re-measured with the same instrument (`tests/seed_scale.rs`, release, 20 reps per
+configuration), the PageRank comparison inverts. PageRank is now ~2–3 ms rather
+than a flat ~20 ms, so the scan is the larger cost everywhere above 1%
+eligibility:
+
+| N=100k | scan | PageRank | scan ÷ PageRank | scan as share of retrieve |
+|---|---|---|---|---|
+| 1% eligible | 2.37 ms | 2.46 ms | 1.0× | 39.7% |
+| 10% eligible | 6.74 ms | 2.93 ms | 2.3× | 60.1% |
+| 50% eligible | 18.82 ms | 2.08 ms | 9.0× | 72.1% |
+| 100% eligible | 35.69 ms | 2.54 ms | 14.1× | 71.2% |
+
+The superseded row "100k, 1%, 12.3% of retrieve" is not a contradiction: the
+scan cost the same, but retrieve no longer carries PageRank's 20 ms, so the same
+absolute cost is a far larger share. The old item said the numbers would decide
+the ordering; they have.
+
+**Fixed here: the scan was never actually parallel on the ordinary corpus.**
+`kerns.par_iter().flat_map_iter(...)` parallelised over *kerns* and walked each
+kern's entities on a single thread, so a one-kern graph — what `e2e/` builds and
+what a fresh install is — scanned the whole corpus serially however many cores
+were free. This item's own "Rayon-parallel" claim was wrong in exactly the case
+that matters. The inner walk now splits too
+(`src/retrieval/seed.rs:149`), on 8 cores:
+
+| N=100k | before | after | |
 |---|---|---|---|
-| 10k | 1% | 0.14 ms | 10.7% |
-| 10k | 100% | 2.61 ms | 53.1% |
-| 100k | 1% | 2.98 ms | 12.3% |
-| 100k | 100% | 34.42 ms | 54.6% |
+| 1% eligible | 2.37 ms | 1.24 ms | 1.9× |
+| 10% eligible | 6.74 ms | 1.73 ms | 3.9× |
+| 50% eligible | 18.82 ms | 8.19 ms | 2.3× |
+| 100% eligible | 35.69 ms | 12.04 ms | 3.0× |
 
-So the item is justified at scale — but **it is not the top structural debt it
-claimed to be, and the same run says why.** Item 26's PageRank is a *flat* ~20 ms
-per query at N=100k, independent of eligibility (measured as default minus
-`pagerank_enabled: false`: 20.0 / 21.0 / 19.6 / 18.1 ms across 1/10/50/100%).
-The scan only overtakes it once more than half the corpus is eligible:
+Recall is exactly unchanged (0.9306 / 0.9722 / 0.9471). The selection is
+bit-identical rather than merely equivalent —
+`parallel_importance_scan_equals_the_sequential_scan_it_replaces` compares ids,
+rank positions and score *bit patterns* against an independently written
+sequential gate over a generated three-kern graph. At N=10k the change is inside
+the noise floor of a box running three worktrees, and it buys nothing there;
+the win is a large-corpus win.
 
-| N=100k | scan | PageRank | PageRank ÷ scan |
-|---|---|---|---|
-| 1% eligible | 2.98 ms | 20.03 ms | 6.7× |
-| 10% eligible | 8.61 ms | 21.02 ms | 2.4× |
-| 50% eligible | 18.40 ms | 19.56 ms | 1.1× |
-| 100% eligible | 34.41 ms | 18.11 ms | 0.5× |
+**The index is blocked on the absence of an entity-mutation chokepoint, and
+`mutation_epoch` is not one.** `bump_mutation_epoch`
+(`src/base/graph.rs:439`) has exactly three callers, all inside `graph.rs`:
+`get_mut`, `register`, `deregister`. But `GraphGnn::kerns` and `Kern::entities`
+are public fields, and ~20 non-test sites mutate them directly without passing
+through any of the three — `merge_remote_entity` (`src/base/merge.rs`) inserts a
+fresh Fact, `reembed` replaces every vector through `values_mut`, gossip writes
+phantom-kern entities, clustering moves entities between kerns. Each of those
+changes an input to the importance gate (`has_vector`, kind, `access_count`)
+while leaving the epoch untouched.
 
-A filtered query — the ordinary case — is dominated by PageRank, not by this
-scan. **Item 26 should be done first**, and this item's "top structural debt in
-the repo" claim is withdrawn: it was asserted, never measured. Ranking is not
-changed here because position is rank and reordering wants its own decision;
-this note is the evidence for that decision when it is taken.
+Worse, the one mutation that *creates* importance is epoch-silent on purpose:
+`commit_access_ids` (`src/retrieval/score.rs:341`) stamps access on every
+delivered result and deliberately bypasses `get_mut` so it will not invalidate
+the semantic query cache (`src/retrieval/score.rs:340`). An eligible-set index
+keyed on the epoch would never see a Claim cross
+`important_access_threshold` — stale forever, in the direction that silently
+drops seeds and moves recall with no error anywhere.
 
-Indexing this is still worth doing after 26. The shape wanted is an index over
-the importance predicate so the scan visits eligible entities rather than all of
-them — which is precisely why the win tracks eligibility, and why a corpus where
-everything is eligible cannot be helped by an index at all.
+That is verified rather than argued: installing a `mutation_epoch`-keyed memo
+over `seed_important` makes
+`an_eligibility_change_is_reflected_with_no_epoch_bump` fail on "crossing the
+access threshold makes an entity important on the very next retrieve". The test
+is left behind as the guard, so the next attempt at an index fails loudly
+instead of shipping the regression quietly.
+
+**What is left is therefore a different question: what makes entity mutation
+observable?** Two candidates, neither cheap. Make `Kern::entities` private behind
+an accessor that versions its kern — correct by construction, but mechanical
+across ~40 call sites in `ingest/`, `tick/`, `gossip/` and `commands/`. Or
+hand-maintain the eligible set at each mutation site the way `entity_idx`
+already is — the convention the codebase actually uses, and the reason
+`merged_remote_entity_is_vector_searchable_without_rebuild` exists — at the price
+of a fifth thing every mutation site must remember. Not decided here.
+
+The costs to weigh when it is: an eligible-id set is ~80 B per eligible entity
+(a `String` plus its set slot), so ~8 MB at N=100k fully eligible, and it puts
+O(1) index maintenance on every write plus a full O(N) rebuild whenever the
+freshness signal is lost. An index that slows ingest to speed up query is the
+trade, and it only pays where eligibility is low — a corpus where everything is
+eligible cannot be helped by an index at all.
 
 ### 26. PageRank costs whatever the seeds reach, and there is no cheap answer when they reach everything `[retrieval]`
 
@@ -1307,6 +1361,17 @@ results that may describe another branch's code". The staleness-guard
 alternative (a `just` recipe failing when the binary is older than the newest
 source) is now moot for the same reason: it would have caught mode 1 and been
 blind to mode 2.
+
+**The correct action is to delete the file, not to maintain a path.** Cargo's
+default `target-dir` is already `<workspace-root>/target`, which in a worktree
+is that worktree's own directory — isolation is what you get by doing nothing.
+Confirmed on a tree with no `.cargo/` at all: it resolves to
+`kern-cycles/2/target` unprompted. So the whole defect was introduced by adding
+a `.cargo/config.toml` pointing at the main checkout, and the fix is to stop
+writing that file when a worktree is created rather than to write it with a
+different path. A per-tree path works but is a second thing to keep correct, and
+the launch step that wrote the shared one is exactly the kind of step that gets
+copied forward unexamined.
 
 What survives: the by-name discipline. It is cheap, it catches mode 1
 independently of the build layout, and it is what confirmed both cycles that
