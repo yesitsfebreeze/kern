@@ -46,6 +46,17 @@ pub struct HealthRes {
 	pub embed_dim: u64,
 	#[serde(default)]
 	pub embed_mismatch: bool,
+	// Fail-open degradations. Each is a path that returns something rather than
+	// erroring, so the count is the only way to tell a degraded answer from a
+	// good one: queries the dimension guard dropped, deliveries that bypassed
+	// `min_deliver_score` because nothing cleared it, and entities GC could not
+	// age because their timestamp is in the future.
+	#[serde(default)]
+	pub query_dim_rejected: u64,
+	#[serde(default)]
+	pub below_floor_deliveries: u64,
+	#[serde(default)]
+	pub clock_skew_skips: u64,
 	// Staleness identity. `build_id` fingerprints the running executable,
 	// `config_id` the resolved config, so an edited kern.toml reads as stale
 	// even when the binary did not move. Empty from daemons predating the
@@ -102,6 +113,12 @@ mod dto_serde_tests {
 		assert!(h.embed_model.is_empty());
 		assert_eq!(h.embed_dim, 0);
 		assert!(!h.embed_mismatch, "an old daemon is not a mismatching one");
+		assert_eq!(h.query_dim_rejected, 0);
+		assert_eq!(h.below_floor_deliveries, 0);
+		assert_eq!(
+			h.clock_skew_skips, 0,
+			"an old daemon reports no degradation"
+		);
 		assert!(h.build_id.is_empty(), "unknown build, not a stale one");
 		assert!(h.config_id.is_empty());
 		assert_eq!(h.uptime_ms, 0);
@@ -131,6 +148,9 @@ mod dto_serde_tests {
 			embed_model: "qwen3".into(),
 			embed_dim: 1024,
 			embed_mismatch: true,
+			query_dim_rejected: 11,
+			below_floor_deliveries: 12,
+			clock_skew_skips: 13,
 			build_id: "a1b2c3d4e5f60718".into(),
 			config_id: "0f1e2d3c4b5a6978".into(),
 			uptime_ms: 90_000,
@@ -144,6 +164,9 @@ mod dto_serde_tests {
 		assert_eq!(back.embed_model, "qwen3");
 		assert_eq!(back.embed_dim, 1024);
 		assert!(back.embed_mismatch);
+		assert_eq!(back.query_dim_rejected, 11);
+		assert_eq!(back.below_floor_deliveries, 12);
+		assert_eq!(back.clock_skew_skips, 13);
 		assert_eq!(back.build_id, src.build_id);
 		assert_eq!(back.config_id, src.config_id);
 		assert_eq!(back.uptime_ms, 90_000);

@@ -137,6 +137,9 @@ impl Server {
 			"embed_model": h.embed_model,
 			"embed_dim": h.embed_dim,
 			"embed_mismatch": h.embed_mismatch,
+			"query_dim_rejected": h.query_dim_rejected,
+			"below_floor_deliveries": h.below_floor_deliveries,
+			"clock_skew_skips": h.clock_skew_skips,
 		})
 	}
 }
@@ -365,7 +368,15 @@ mod tests {
 	async fn health_carries_the_store_signals_to_the_mcp_surface() {
 		let srv = crate::test_support::mcp_server();
 		let h = srv.health_stats();
-		for key in ["cold_evicted", "embed_model", "embed_dim", "embed_mismatch"] {
+		for key in [
+			"cold_evicted",
+			"embed_model",
+			"embed_dim",
+			"embed_mismatch",
+			"query_dim_rejected",
+			"below_floor_deliveries",
+			"clock_skew_skips",
+		] {
 			assert!(!h[key].is_null(), "{key} must reach the MCP surface");
 		}
 		assert_eq!(h["cold_evicted"], 0);

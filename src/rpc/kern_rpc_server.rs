@@ -88,6 +88,9 @@ impl KernRpc for KernRpcHandler {
 				task_failures: u64_at("task_failures"),
 				last_task_failure: str_at("last_task_failure"),
 				cold_evicted: u64_at("cold_evicted"),
+				query_dim_rejected: u64_at("query_dim_rejected"),
+				below_floor_deliveries: u64_at("below_floor_deliveries"),
+				clock_skew_skips: u64_at("clock_skew_skips"),
 				embed_model: str_at("embed_model"),
 				embed_dim: u64_at("embed_dim"),
 				embed_mismatch: payload

@@ -1,5 +1,8 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::base::graph::GraphGnn;
 use crate::base::heat::{self, HeatConfig};
+use crate::base::log_throttle::LogThrottle;
 use crate::base::types::{Entity, EntityKind, EntityStatus};
 use crate::base::util::cmp_partial;
 use crate::config::RetrievalConfig;
@@ -116,6 +119,16 @@ pub fn is_remote_entity(g: &GraphGnn, entity_id: &str) -> bool {
 		.is_some_and(crate::base::merge::is_remote_kern_id)
 }
 
+const BELOW_FLOOR_WARN_SECS: u64 = 60;
+static BELOW_FLOOR: AtomicU64 = AtomicU64::new(0);
+static BELOW_FLOOR_WARN: LogThrottle = LogThrottle::new(BELOW_FLOOR_WARN_SECS);
+
+// Deliveries that bypassed `min_deliver_score` because nothing cleared it. The
+// caller cannot tell such a result from a good one, so the count is its trace.
+pub fn below_floor_deliveries() -> u64 {
+	BELOW_FLOOR.load(Ordering::Relaxed)
+}
+
 pub fn filter_delivery<T: Scored>(cfg: &RetrievalConfig, results: &mut Vec<T>) {
 	results.retain(|r| r.entity().status != EntityStatus::Superseded);
 	// Sort HERE, not just in apply_query_options: the truncation below is the delivery
@@ -127,6 +140,23 @@ pub fn filter_delivery<T: Scored>(cfg: &RetrievalConfig, results: &mut Vec<T>) {
 	let floor = cfg.min_deliver_score;
 	if results.iter().any(|r| r.score() >= floor) {
 		results.retain(|r| r.score() >= floor);
+	} else if !results.is_empty() {
+		// Deliberate: a query whose entire candidate set is below the quality floor
+		// returns that set rather than nothing, so recall degrades instead of going
+		// blank. But an unflagged bypass is indistinguishable from a confident
+		// answer, which is the whole complaint in ROADMAP item 7 — count it.
+		let total = BELOW_FLOOR.fetch_add(1, Ordering::Relaxed) + 1;
+		if BELOW_FLOOR_WARN.allow() {
+			tracing::warn!(
+				target: "kern.retrieval",
+				floor,
+				best = results.first().map(|r| r.score()).unwrap_or(0.0),
+				candidates = results.len(),
+				total_bypasses = total,
+				"no candidate cleared min_deliver_score — delivering the below-floor set \
+				 rather than nothing (further bypasses counted, not logged)"
+			);
+		}
 	}
 	// With MMR on, keep the larger MMR pool — truncating to the delivery cap here would make MMR's len-guard a no-op.
 	let cap = if cfg.mmr_enabled {
@@ -773,6 +803,48 @@ mod query_filter_tests {
 			(results[1].score - 1.0).abs() < 1e-9,
 			"claim got {}",
 			results[1].score
+		);
+	}
+	#[test]
+	fn a_delivery_that_bypasses_the_floor_is_counted() {
+		let cfg = RetrievalConfig {
+			min_deliver_score: 5.0,
+			..Default::default()
+		};
+		let mut results = vec![ent("a", EntityKind::Claim, file_src("/a"))];
+		results[0].score = 0.1;
+
+		let before = below_floor_deliveries();
+		filter_delivery(&cfg, &mut results);
+
+		assert_eq!(
+			results.len(),
+			1,
+			"fail-open: the below-floor set is still delivered"
+		);
+		assert_eq!(
+			below_floor_deliveries(),
+			before + 1,
+			"but the bypass is counted, so a degraded answer is distinguishable"
+		);
+	}
+
+	#[test]
+	fn a_delivery_that_clears_the_floor_is_not_counted() {
+		let cfg = RetrievalConfig {
+			min_deliver_score: 0.05,
+			..Default::default()
+		};
+		let mut results = vec![ent("a", EntityKind::Claim, file_src("/a"))];
+		results[0].score = 0.1;
+
+		let before = below_floor_deliveries();
+		filter_delivery(&cfg, &mut results);
+		assert_eq!(results.len(), 1);
+		assert_eq!(
+			below_floor_deliveries(),
+			before,
+			"a normal delivery must not read as a degradation"
 		);
 	}
 }

@@ -1,5 +1,8 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
+
+use crate::base::log_throttle::LogThrottle;
 
 use parking_lot::RwLock;
 
@@ -8,6 +11,16 @@ use crate::base::graph::GraphGnn;
 use crate::base::heat::{self, HeatConfig};
 use crate::base::reason::remove_entity;
 use crate::base::types::{Entity, EntityKind};
+
+const SKEW_WARN_SECS: u64 = 300;
+static CLOCK_SKEW: AtomicU64 = AtomicU64::new(0);
+static SKEW_WARN: LogThrottle = LogThrottle::new(SKEW_WARN_SECS);
+
+// Entities GC could not age because their timestamp is in the future. Nonzero
+// means compaction is stalled on a clock problem, not on policy.
+pub fn clock_skew_skips() -> u64 {
+	CLOCK_SKEW.load(Ordering::Relaxed)
+}
 
 // SECURITY: durable-kind immunity only holds for LOCAL kerns. A peer-supplied
 // kind=Fact in a phantom kern would otherwise be permanently unreclaimable.
@@ -34,7 +47,23 @@ fn is_cold_victim(
 	};
 	match now.duration_since(last_touch) {
 		Ok(age) => age > COLD_GC_AGE,
-		Err(_) => false,
+		// A timestamp in the future means an unreadable or rewound clock. Refusing
+		// to reclaim is the safe side — but it is also indefinite: nothing else
+		// bounds the hot graph, so a skewed clock stops compaction for as long as
+		// it is skewed, and until now said nothing at all (ROADMAP item 7).
+		Err(_) => {
+			let total = CLOCK_SKEW.fetch_add(1, Ordering::Relaxed) + 1;
+			if SKEW_WARN.allow() {
+				tracing::warn!(
+					target: "kern.gc",
+					entity = %entity.id,
+					total_skewed = total,
+					"entity timestamp is in the future — GC cannot age it, so compaction is \
+					 stalled for it; check the system clock (further skew counted, not logged)"
+				);
+			}
+			false
+		}
 	}
 }
 
@@ -408,6 +437,50 @@ mod tests {
 		assert!(
 			store.cold_get("fact").unwrap().is_none(),
 			"the immune fact was never spilled"
+		);
+	}
+	#[test]
+	fn a_future_timestamp_is_not_reclaimed_and_is_counted() {
+		// A rewound or unreadable clock makes every entity look untouchable, and
+		// nothing else bounds the hot graph — so refusing to reclaim is right, and
+		// refusing silently is the defect.
+		let future = SystemTime::now() + Duration::from_secs(3600);
+		let e = ent(EntityKind::Claim, 0.0, Some(future));
+
+		let before = clock_skew_skips();
+		let victim = is_cold_victim(
+			&e,
+			SystemTime::now(),
+			HeatConfig::default().half_life_secs,
+			false,
+		);
+
+		assert!(!victim, "a future timestamp must never be reclaimed");
+		assert_eq!(
+			clock_skew_skips(),
+			before + 1,
+			"and the stall must be countable, not silent"
+		);
+	}
+
+	#[test]
+	fn a_normal_old_entity_is_reclaimed_without_counting_skew() {
+		let old = SystemTime::now() - (COLD_GC_AGE + Duration::from_secs(1));
+		let e = ent(EntityKind::Claim, 0.0, Some(old));
+
+		let before = clock_skew_skips();
+		let victim = is_cold_victim(
+			&e,
+			SystemTime::now(),
+			HeatConfig::default().half_life_secs,
+			false,
+		);
+
+		assert!(victim, "precondition: a cold, old claim is a victim");
+		assert_eq!(
+			clock_skew_skips(),
+			before,
+			"a healthy clock must not read as a degradation"
 		);
 	}
 }

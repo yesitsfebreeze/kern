@@ -507,5 +507,4 @@ mod tests {
 			"and the walk must be recorded as a chain"
 		);
 	}
-
 }

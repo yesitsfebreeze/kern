@@ -16,6 +16,12 @@ pub struct HealthStats {
 	// Queries dropped by the dimension guard since this process opened. Nonzero
 	// with embed_mismatch false means something upstream embeds off-model.
 	pub query_dim_rejected: u64,
+	// Deliveries that bypassed `min_deliver_score` because nothing cleared it —
+	// a degraded answer the caller cannot distinguish from a confident one.
+	pub below_floor_deliveries: u64,
+	// Entities GC could not age because their timestamp is in the future.
+	// Nonzero means compaction is stalled on a clock problem, not on policy.
+	pub clock_skew_skips: u64,
 }
 
 pub fn graph_health_stats(g: &GraphGnn) -> HealthStats {
@@ -55,6 +61,8 @@ pub fn graph_health_stats(g: &GraphGnn) -> HealthStats {
 		},
 		embed_mismatch: store.map(|s| s.embed_mismatch()).unwrap_or(false),
 		query_dim_rejected: crate::base::search::query_dim_rejected(),
+		below_floor_deliveries: crate::retrieval::score::below_floor_deliveries(),
+		clock_skew_skips: crate::tick::stigmergy::clock_skew_skips(),
 	}
 }
 
