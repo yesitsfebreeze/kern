@@ -25,11 +25,18 @@ pub(crate) fn edge(from: &str, to: &str) -> Reason {
 	}
 }
 
+// A dead port: nothing in the default rig should reach an embedder.
 pub(crate) fn mcp_server() -> crate::mcp::Server {
+	mcp_server_with_embed_url("http://127.0.0.1:1")
+}
+
+// Same server against a live stub embedder, for tests that have to follow an
+// ingest all the way into the graph rather than stop at the tool boundary.
+pub(crate) fn mcp_server_with_embed_url(url: &str) -> crate::mcp::Server {
 	use parking_lot::RwLock;
 	use std::sync::Arc;
 	let graph = Arc::new(RwLock::new(crate::base::graph::GraphGnn::new()));
-	let embedder = crate::llm::Client::new_embed_only("http://127.0.0.1:1", "test", "");
+	let embedder = crate::llm::Client::new_embed_only(url, "test", "");
 	let worker = Arc::new(crate::ingest::Worker::new(
 		graph.clone(),
 		embedder,

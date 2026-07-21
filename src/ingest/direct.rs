@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::base::types::{EntityKind, Source};
+use crate::base::types::{Acl, EntityKind, Source};
 use crate::base::util;
 use crate::ingest::outcome::OutcomeStatus;
 use crate::ingest::Worker;
@@ -19,6 +19,11 @@ pub struct DirectJob {
 	// and this payload may sit in the intake for a whole poll interval first.
 	#[serde(default)]
 	pub valid_until: Option<std::time::SystemTime>,
+	// Carried across the durable hop for the same reason as `valid_until`: the
+	// caller's principal is gone by the time the drain runs, so an ACL dropped
+	// here would silently republish a scoped ingest as public.
+	#[serde(default)]
+	pub acl: Acl,
 }
 
 pub fn intake_direct(direct_dir: &Path, job: &DirectJob) -> std::io::Result<String> {
@@ -76,13 +81,14 @@ pub async fn drain_direct_once(
 			..cfg.clone()
 		};
 		let outcome = worker
-			.run(
+			.run_with_acl(
 				job.text,
 				job.source,
 				job.kind,
 				job.hint,
 				job.confidence,
 				job_cfg,
+				job.acl,
 			)
 			.await;
 		if matches!(outcome.status, OutcomeStatus::Failed) {
@@ -120,6 +126,7 @@ mod tests {
 			hint: "audit-finding".into(),
 			confidence: 0.7,
 			valid_until: None,
+			acl: Acl::default(),
 		}
 	}
 

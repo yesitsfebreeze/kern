@@ -20,6 +20,10 @@ pub(crate) struct Job {
 	pub(crate) hint: String,
 	pub(crate) confidence: f64,
 	pub(crate) config: Config,
+	// Stamped onto whatever this job places. `Acl::default()` is public — the
+	// documented default for every producer with no principal to name (the file
+	// watcher, the intake drain).
+	pub(crate) acl: Acl,
 	pub(crate) result_tx: Option<oneshot::Sender<Outcome>>,
 }
 
@@ -62,6 +66,23 @@ impl Worker {
 		confidence: f64,
 		config: Config,
 	) -> String {
+		self.enqueue_with_acl(text, source, kind, hint, confidence, config, Acl::default())
+	}
+
+	// `enqueue` plus the requesting principal's ACL. The plain form is this with
+	// `Acl::default()` — public — which is what a producer that has no principal
+	// to name (the file watcher, the intake drain) still gets.
+	#[allow(clippy::too_many_arguments)]
+	pub fn enqueue_with_acl(
+		&self,
+		text: String,
+		source: Source,
+		kind: EntityKind,
+		hint: String,
+		confidence: f64,
+		config: Config,
+		acl: Acl,
+	) -> String {
 		let doc_id = util::content_hash(&text);
 		let job = Job {
 			text,
@@ -70,6 +91,7 @@ impl Worker {
 			hint,
 			confidence,
 			config,
+			acl,
 			result_tx: None,
 		};
 		let tx = self.tx.clone();
@@ -88,6 +110,23 @@ impl Worker {
 		confidence: f64,
 		config: Config,
 	) -> Outcome {
+		self
+			.run_with_acl(text, source, kind, hint, confidence, config, Acl::default())
+			.await
+	}
+
+	// See `enqueue_with_acl`: the plain `run` is this with a public ACL.
+	#[allow(clippy::too_many_arguments)]
+	pub async fn run_with_acl(
+		&self,
+		text: String,
+		source: Source,
+		kind: EntityKind,
+		hint: String,
+		confidence: f64,
+		config: Config,
+		acl: Acl,
+	) -> Outcome {
 		let (result_tx, result_rx) = oneshot::channel();
 		let job = Job {
 			text,
@@ -96,6 +135,7 @@ impl Worker {
 			hint,
 			confidence,
 			config,
+			acl,
 			result_tx: Some(result_tx),
 		};
 		if let Err(e) = self.tx.send(job).await {
@@ -420,6 +460,7 @@ mod tests {
 			hint: String::new(),
 			confidence: 1.0,
 			config: Config::default(),
+			acl: Acl::default(),
 			result_tx: None,
 		}
 	}

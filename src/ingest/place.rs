@@ -30,6 +30,7 @@ fn new_statement_entity(
 	confidence: f64,
 	valid_until: Option<SystemTime>,
 	unlinked_count: i32,
+	acl: Acl,
 ) -> Entity {
 	let conf = confidence.clamp(0.0, 1.0) as f32;
 	let (conf_alpha, conf_beta) = beta_params_from_confidence(conf);
@@ -53,7 +54,7 @@ fn new_statement_entity(
 		conf_beta,
 		source,
 		created_at: Some(SystemTime::now()),
-		acl: Acl::default(),
+		acl,
 		access_count: GCounter::new(),
 		accessed_at: None,
 		heat: 0.0,
@@ -96,6 +97,7 @@ pub(crate) async fn place_document(
 			job.confidence,
 			kind,
 			job.config.valid_until,
+			&job.acl,
 			defer_contradiction,
 		);
 		return (Some(existing_id), None);
@@ -113,6 +115,7 @@ pub(crate) async fn place_document(
 		job.confidence,
 		job.config.valid_until,
 		unlinked,
+		job.acl.clone(),
 	);
 	thought.valid_from = job.config.valid_from;
 
@@ -180,6 +183,7 @@ pub(crate) fn place_chunks(
 				job.confidence,
 				job.kind,
 				job.config.valid_until,
+				&job.acl,
 				defer_contradiction,
 			);
 			placed += 1;
@@ -195,6 +199,7 @@ pub(crate) fn place_chunks(
 			&external_id,
 			job.confidence,
 			job.config.valid_until,
+			job.acl.clone(),
 		);
 		thought.valid_from = job.config.valid_from;
 		let tid = thought.id.clone();
@@ -227,6 +232,7 @@ pub(crate) fn place_chunks(
 	placed
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_chunk_entity(
 	text: &str,
 	vec: &[f32],
@@ -235,6 +241,7 @@ pub fn build_chunk_entity(
 	external_id: &str,
 	confidence: f64,
 	valid_until: Option<SystemTime>,
+	acl: Acl,
 ) -> Entity {
 	new_statement_entity(
 		util::content_hash(text),
@@ -246,6 +253,7 @@ pub fn build_chunk_entity(
 		confidence,
 		valid_until,
 		0,
+		acl,
 	)
 }
 
@@ -280,6 +288,7 @@ mod tests {
 			hint: String::new(),
 			confidence,
 			config: Config::default(),
+			acl: Acl::default(),
 			result_tx: None,
 		}
 	}
@@ -335,6 +344,7 @@ mod tests {
 			"sec#chunk0",
 			1.0,
 			None,
+			Acl::default(),
 		);
 		assert_eq!(
 			e.id,
@@ -361,6 +371,7 @@ mod tests {
 			"e",
 			5.0,
 			None,
+			Acl::default(),
 		);
 		assert_eq!((hi.conf_alpha, hi.conf_beta), (2.0, 1.0));
 		let lo = build_chunk_entity(
@@ -371,6 +382,7 @@ mod tests {
 			"e",
 			-3.0,
 			None,
+			Acl::default(),
 		);
 		assert_eq!((lo.conf_alpha, lo.conf_beta), (1.0, 2.0));
 	}
