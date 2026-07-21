@@ -174,8 +174,8 @@ be returned. Default semantics: empty `principals` means *no filter*, not
 
 ### 18. ACL + request principal — gates everything else in this tier `[surface]`
 
-`Entity` already carries `Acl` (`src/base/types.rs:259`; struct `{scope, users,
-groups}` at `:92-96`), and it is only ever written as `Acl::default()`
+`Entity` already carries `Acl` (`src/base/types.rs:287`; struct `{scope, users,
+groups}` at `:120-124`), and it is only ever written as `Acl::default()`
 (`src/ingest/place.rs:56`, `src/ingest/file_watcher.rs:136`), so nothing can
 populate it. Four parts:
 
@@ -184,11 +184,13 @@ populate it. Four parts:
   `place.rs`.
 - Accept `principals` on `query` — no identity param exists
   (`QueryArgs`, `src/mcp/tools_query.rs:76-107`).
-- Enforce in `matches_filter` (`src/retrieval/score.rs:194-232`), which has no
+- Enforce in `matches_filter` (`src/retrieval/score.rs:205-243`), which has no
   ACL predicate.
-- **Guard the id path.** `src/mcp/tools_query.rs:129-138` returns
-  `find_entity(&g, &p.id)` directly, before `build_query_options` (`:158`) is
-  ever called — no filter of any kind runs. Without this guard ACL is decorative.
+- **Guard the id path.** `src/mcp/tools_query.rs:129-137` returns
+  `entity_detail_by_id(&g, &p.id)` directly, before `build_query_options`
+  (`:157`) is ever called — no filter of any kind runs. Without this guard ACL is
+  decorative, and the read-side route of item 9 put `kern get` behind this same
+  unfiltered path.
 
 Decide alongside: does the file watcher give `Document` entities a tenant-default
 ACL, or leave them public? Recommend configurable, default public-within-tenant,
@@ -206,7 +208,7 @@ explicit, never default.**
 ### 20. Source-trust weighting `[retrieval]`
 
 User-authored claims should outrank auto-ingested claims of equal heat.
-`apply_boosts` has no source-trust prior (`src/retrieval/score.rs:82-94`). Add
+`apply_boosts` has no source-trust prior (`src/retrieval/score.rs:84-96`). Add
 `source_trust_user` / `_agent` / `_auto` to `RetrievalConfig`, default all `1.0`
 so ranking does not move until configured, and multiply in the boost step —
 **post-fusion, not in RRF**, which is rank-based. Independent of 21; can run
@@ -222,12 +224,36 @@ auto-distilled claims out of retrieval until a human curates them. No
 `ReviewState`, `exclude_pending` or `promote` exists in `src/`. Requires 18's
 `QueryOptions` work first — review filters are more `matches_filter` predicates.
 
-### 22. Per-source TTL `[ingest]`
+### 88. A retention that lands on a duplicate is silently dropped `[ingest]`
 
-An ingest-time `retention` duration setting `valid_until`. Nearly free — one
-param plus one timestamp — and the bi-temporal expiry path now enforces it on
-every retrieve, so the setting has a reader the moment it has a writer
-(unblocked 2026-07-21; `drop_expired`, `src/retrieval/score.rs`).
+Item 22 gave `retention_secs` a writer, but only where an entity is *created*.
+`place_document` and `place_chunks` both return through `find_duplicate` →
+`update_existing_entity` (`src/ingest/dedup.rs:23`) before they ever reach
+`new_statement_entity`, and that merge touches text, confidence and kind — never
+`valid_until`. So ingesting text you asked to expire in an hour, over text
+already in the graph, reports `deduped` and leaves an entity that never expires.
+The caller is told it deduped; it is not told the TTL went nowhere.
+
+Ranks above 89 because it is a correctness gap in a shipped flag rather than
+coverage the flag never claimed, and below tier 1 because it is reachable only
+by opting into retention. The fix is not one line: `valid_until` is LWW with a
+lamport/producer pair and a pending delta (`place.rs:124-139`), so a merge that
+sets it has to stamp and push the same way or the value cannot federate — decide
+alongside whether a *shorter* incoming retention may shorten an existing
+deadline, or only extend it.
+
+### 89. Retention exists on two entrances of four, and in no config `[ingest]`
+
+`retention_secs` is on the MCP `ingest` schema and the `kern ingest` flag. It is
+absent from the `.txt` distillation path (`drain_entry`,
+`src/ingest/intake.rs:131` — the per-claim `Config` there sets `valid_from` from
+the distilled claim and nothing else), from the file-watcher sink
+(`src/ingest/file_watcher.rs`), and from `IngestConfig`
+(`src/config/ingest.rs:7`, whose only key is `dedup_threshold`), so a host
+cannot say "everything from this source expires in 30 days" — the exact sentence
+item 22 was named for. The config key is the load-bearing half: per-*source*
+retention is a policy, and a policy expressed only as a per-call argument has to
+be remembered by every caller.
 
 ### 24. RPC socket has no auth `[surface]`
 
@@ -505,7 +531,7 @@ Two leads from `docs/kern/crdts-federation.md`, adopted and never scheduled:
 ### 44. Bi-temporal stamps are never federated `[federation]`
 
 `valid_from` / `valid_to` / `invalidated_at` are `#[serde(skip)]`
-(`src/base/types.rs:274-279`), so each node re-derives its own `as_of` view and
+(`src/base/types.rs:302-307`), so each node re-derives its own `as_of` view and
 two *converged* nodes can answer the same point-in-time query differently
 (`docs/kern/crdts-federation.md:54-62`). The federated twin of item 4.
 
@@ -591,10 +617,23 @@ dropped text containing "last Tuesday" stores unresolved. The eval path got this
 and the product path never did; the eval path is now deleted, so the capability
 exists nowhere.
 
+### 90. `DirectJob` carries `valid_until` but drops `valid_from` `[ingest]`
+
+The durable direct intake serializes one bi-temporal stamp and not the other:
+`DirectJob` (`src/ingest/direct.rs:11-21`) has a `valid_until` and no
+`valid_from`, and `drain_direct_once` overlays only the former onto the drain
+loop's `Config`, so `valid_from` is whatever the loop's shared config says —
+always `None`. **Not a live loss**: the only producer of `valid_from` is the
+distillation path (`intake.rs:191`, from `distill.rs`), which calls the worker
+directly and never goes through `direct/`, and the MCP `ingest` schema has no
+`valid_from` field to lose. It is a hole that opens the moment either of those
+changes — which item 50 and item 89 would both do. Ranks here, next to 50, for
+that reason and not for any damage it does today.
+
 ### 51. Require reason text on supersede `[ingest]`
 
 `ReasonKind::Supersedes` edges are minted at `src/base/accept.rs:438` and `:533`
-with `fallback_label()` text (`src/base/types.rs:75`), never a caller-supplied
+with `fallback_label()` text (`src/base/types.rs:103`), never a caller-supplied
 rationale. The *why* is the thing the graph exists to hold.
 
 ### 52. A single-line graviton seed still truncates at the embed context window `[ingest]`
@@ -662,9 +701,9 @@ incomplete — no item below produces a wrong answer today.
 
 ### 56. An agent cannot register disagreement at all `[ingest]`
 
-There is no `Contradicts` reason kind (`src/base/types.rs:63-72`) and no `stance`
+There is no `Contradicts` reason kind (`src/base/types.rs:77-86`) and no `stance`
 parameter on the ingest schema (`src/mcp/tools_mutate.rs:19-31`);
-`observe_contradict` (`src/base/types.rs:383`) has exactly one caller, GNN
+`observe_contradict` (`src/base/types.rs:411`) has exactly one caller, GNN
 alignment (`src/tick/gnn_propagate.rs:157`). Observer-reputation weighting is
 also unbuilt.
 
@@ -677,7 +716,7 @@ observations to unseat. Tick-based γ damping is an open design
 
 ### 58. Supersede chains are unbounded while contested `[lifecycle]`
 
-No `ReasonKind::Edit` rationale edge (`src/base/types.rs:63-72`) and no producer
+No `ReasonKind::Edit` rationale edge (`src/base/types.rs:77-86`) and no producer
 rate-limit, so an A/B ping-pong on one `external_id` grows without bound
 (`decisions/edit-convergence.mdx:107`). Compounding it: the three trigger
 conditions that would flip kern to full versioning have **no instrumentation**
@@ -735,7 +774,7 @@ via health and `kern://health`
 
 Three that must be judged together, since each moves the others:
 min-max normalize `apply_boosts`, which is purely additive and unnormalized today
-(`score * confidence + boost + fact_bonus`, `src/retrieval/score.rs:82-94`); swap
+(`score * confidence + boost + fact_bonus`, `src/retrieval/score.rs:84-96`); swap
 the hand-rolled stemmer (`src/base/lexical.rs:206`, no stopword list, no
 `rust-stemmers` in `Cargo.toml`) for `rust-stemmers` 1.2.0 + stopwords, which
 needs a BM25 rebuild; and validate-or-remove GNN reranking, whose only expression
@@ -867,14 +906,14 @@ served that way decays, clusters and GCs normally, and simply does not federate.
 - Hand-rolled tool schemas; no batch query
   (`FEATURES.md:566-567`).
 - The LLM client is Ollama-centric with no retry/backoff policy object
-  (`FEATURES.md:778-779`).
+  (`FEATURES.md:806-807`).
 - Watcher `.gitignore` parsing is approximate; no rename tracking
-  (`FEATURES.md:965-966`).
-- `unnamed` lists only; there is no `promote` (`FEATURES.md:692`).
+  (`FEATURES.md:984-985`).
+- `unnamed` lists only; there is no `promote` (`FEATURES.md:711`).
 - GNN has no GPU path, weights are per-kern rather than shared, and the objective
   is link-prediction only (`FEATURES.md:528-530`).
 - Under WSL2 NAT a loopback Ollama URL must be hand-pinned; kern neither rewrites
-  nor warns (`FEATURES.md:981`).
+  nor warns (`FEATURES.md:1000`).
 - RPC socket bind→chmod race — sub-millisecond, umask default — recorded as an
   accepted risk (`concepts/security.mdx:40-43`); revisit only if the umask
   alternative stops being worse.
@@ -1060,6 +1099,20 @@ an overall eval score that makes specialization worth funding.
 
 ## Closed and verified — do not re-open
 
+- **Per-source TTL has a writer** — was item 22, closed 2026-07-21. The reader
+  (`score::drop_expired`) had been waiting for one; `valid_until` is now set at
+  ingest from a `retention_secs` on the MCP `ingest` schema and a
+  `kern ingest --retention-secs N` flag, through the single conversion
+  `ingest::valid_until_from_retention` so the two entrances cannot drift. It
+  reaches the entity on every path that creates one: MCP sync, MCP durable
+  direct intake (`DirectJob` carries the resolved *instant*, since the job may
+  sit a whole poll interval before draining), MCP RAM enqueue, and the CLI —
+  and on the chunk path as well as the document path, which were two separate
+  hardcoded `None`s. `e2e/test_retention.py` proves the round trip against the
+  real binary: recallable before the deadline, gone after, with a control fact
+  that stays. What the item did *not* buy is now items 88, 89 and 90 — the
+  dedup branch swallows a retention, only two of four entrances offer one and
+  no config key does, and `DirectJob` still drops `valid_from`.
 - **The intake is visible and drivable** — was item 8, closed 2026-07-21.
   `kern intake` (alias `kern intake status`) prints pending with age, the last
   error for anything stuck, quarantined `failed/` entries and the `done` count;

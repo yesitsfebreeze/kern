@@ -42,7 +42,7 @@ everywhere, which is what makes conflict-free cross-node merge work.
 
 **How.**
 
-- `Entity` (`src/base/types.rs:246`) — typed (`Fact`/`Claim`/`Document`/
+- `Entity` (`src/base/types.rs:271`) — typed (`Fact`/`Claim`/`Document`/
   `Question`/`Conclusion`, `src/base/types.rs:19`), weighted by
   confidence (a beta distribution stored as `conf_alpha`/`conf_beta`, read via
   the `conf_mean`/`conf_variance` methods, updated via
@@ -52,18 +52,18 @@ everywhere, which is what makes conflict-free cross-node merge work.
   (OR-Set of text lines), two vectors (`vector` content, `gnn_vector` structure),
   and provenance (`Source` with `system`/`object_id`/`section`/`title`/`author`/
   `url`). `kind`/`source` parsed off the source string. Also carries an `acl`
-  (`src/base/types.rs:259`; `Acl { scope, users, groups }` at `:92-96`) — the
+  (`src/base/types.rs:287`; `Acl { scope, users, groups }` at `:120-124`) — the
   field exists and is persisted, but every writer sets `Acl::default()`
   (`src/ingest/place.rs:56`, `src/ingest/file_watcher.rs:136`) and nothing reads
   it, so it is structure without behavior today.
-- `Reason` (`src/base/types.rs:408`) — an edge `from`→`to` with a `kind`
+- `Reason` (`src/base/types.rs:419`) — an edge `from`→`to` with a `kind`
   (`Similarity`/`Provenance`/`Question`/`Spawn`/`Supersedes`/`Ratification`/
-  `Rephrase`, `src/base/types.rs:66`), its own vector (mean of endpoints), a
-  `traversal_count` GCounter (`src/base/types.rs:403`), and a CRDT `score`.
+  `Rephrase`, `src/base/types.rs:77-86`), its own vector (mean of endpoints), a
+  `traversal_count` GCounter (`src/base/types.rs:431`), and a CRDT `score`.
   `is_enriched`/`is_remote` flags. There is no `Contradiction` edge kind —
   `Related` is a `ContradictionClass` verdict, not an edge, and a deferred
   contradiction candidate is carried by a `Rephrase` edge.
-- `Kern` (`src/base/types.rs:434`) — a container node in the kern tree:
+- `Kern` (`src/base/types.rs:462`) — a container node in the kern tree:
   `entities` + `reasons` maps, `children` ids, a `graviton_vec`/`graviton_text` + `mass` (default 1.0),
   radii (`inner_radius`/`outer_radius`) for acceptance gating, and an
   `access_count`. Root, named children, and unnamed (spill) children are all
@@ -184,7 +184,7 @@ profiled via `src/profile.rs`):
 | 9 | **Dedup by section** | `retrieval/diversify.rs:6` | Collapse near-duplicate sections. |
 | 10 | **MMR** | `retrieval/diversify.rs:46` | Maximal-marginal-relevance diversification so the `k` results actually differ. |
 | 11 | **Deliver** | `retrieval/query.rs` | Passages + enriched edges + `format_chains` chain text (`QUERY_MAX_CHAINS=5`), remote entities tagged UNTRUSTED for the synthesizing caller. The whole read path is LLM-free by design (2026-07-21): the calling agent synthesizes; an in-kern small-model answerer set the quality ceiling and made retrieval untunable. |
-| 13 | **Cold backfill** | `src/mcp/tools_query.rs:199` | If hot returns `< k`, cold-tier hits (brute-force `Store::cold_search`, `src/base/store.rs:629`) fill remaining slots, flagged `cold:true`. Skipped on the exact-text fast path, which never embedded a query vector. |
+| 13 | **Cold backfill** | `src/mcp/tools_query.rs:192` | If hot returns `< k`, cold-tier hits (brute-force `Store::cold_search`, `src/base/store.rs:629`) fill remaining slots, flagged `cold:true`. Skipped on the exact-text fast path, which never embedded a query vector. |
 | 14 | **Access stamping** | `retrieval/score.rs` | Heat deposits off the hot path: `score::commit_access` stamps delivered hits; the tick's `CommitAccess` task calls `score::commit_access_ids`. |
 
 **Where.** `src/retrieval/*` (4374 LoC, 12 files). Entry: `retrieval::query`
@@ -344,6 +344,18 @@ Nothing is lost on an LLM outage — the delta stays queued until it succeeds.
   (`build_chunk_entity`, `chunk_source_id`), `split.rs` chunks by free-text hint
   (LLM-assisted when given), `direct.rs` handles `.kern/intake/direct/` synchronous
   ingest (`drain_direct_once`).
+- **Per-source TTL** (`src/ingest/config.rs`) — `ingest::Config` carries a
+  `valid_until`, and `valid_until_from_retention(secs)` is the one conversion
+  from the caller's duration to that absolute instant, so the CLI flag and the
+  MCP field cannot drift. `0` (or absent) means no TTL; a duration that
+  overflows the clock is an error, never a silent no-TTL. `new_statement_entity`
+  stamps it on both the document and the chunk path (`place.rs:113`, `:197`),
+  where the existing `valid_until` LWW lamport/producer stamping and pending
+  delta finally have a writer to fire for. `DirectJob` carries the resolved
+  instant, not the duration, because a durable direct job may sit in the intake
+  for a whole poll interval before it is drained — `drain_direct_once` overlays
+  it onto the drain loop's shared `Config` per job. The reader half is
+  `score::drop_expired`.
 - **File watcher sink** (`src/ingest/file_watcher.rs`) — `KernFileWatcherSink`
   adapts the repo file watcher into ingest jobs.
 - **Outcome** (`src/ingest/outcome.rs`) — `OutcomeStatus` (`Committed`/`Partial`/`Deduped`/`Failed`, `src/ingest/outcome.rs:2`),
@@ -358,11 +370,15 @@ Nothing is lost on an LLM outage — the delta stays queued until it succeeds.
   `intake::drain_now`, sharing `drain_once` with the daemon loop, and flushes
   through the same guarded retry as `cmd_ingest`.
 
-**Where.** `src/ingest/*` (2836 LoC, 12 files). Spawned by `spawn_intake`
+**Where.** `src/ingest/*` (3376 LoC, 13 files). Spawned by `spawn_intake`
 (`src/commands.rs`); driven manually by `src/commands/intake_cmd.rs`.
 
 **Gaps.** Distill prompt is one-shot; long deltas may truncate. No per-kind
-prompt tuning. Dedup threshold is global, not per-kind.
+prompt tuning. Dedup threshold is global, not per-kind. Retention reaches an
+entity only when one is *created*: the `.txt` distillation path and the file
+watcher offer no retention, there is no `kern.toml` default for it, and a
+retention-carrying ingest that lands on `find_duplicate` merges into the
+existing entity without touching its `valid_until` (ROADMAP items 88-90).
 
 ---
 
@@ -542,8 +558,8 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 
 | Tool | File | Purpose |
 | ------ | ------ | --------- |
-| `query` | `tools_query.rs` | Hybrid search, LLM-free; the caller synthesizes. Filters: `mode`/`kind`/`source`/time range/`min_conf`/`as_of`; `include_history` for supersede chain. |
-| `ingest` | `tools_mutate.rs` | Add text. `object_id` update semantics, free-text `hint` chunking context (`descriptor` accepted as serde alias). |
+| `query` | `tools_query.rs` | Hybrid search, LLM-free; the caller synthesizes. Filters: `mode`/`kind`/`source`/time range/`min_conf`/`as_of`; `include_history` for supersede chain. Returns edges **and path chains**, and `id` resolves a prefix and the cold tier (`entity_detail_by_id`) — both widenings exist so a CLI `query`/`get` routed through the daemon answers with what the local path answers. |
+| `ingest` | `tools_mutate.rs` | Add text. `object_id` update semantics, free-text `hint` chunking context (`descriptor` accepted as serde alias), optional `retention_secs` TTL (integer seconds; `0`/absent = never) resolved to an absolute `valid_until` once, before the sync / durable-direct / RAM-queue branch, so all three carry the same deadline. |
 | `link` | `tools_mutate.rs` | Create a reason edge (LLM writes the reason if blank). Edge score is the asserted confidence (agent 0.95; CLI user 1.0), NOT `cosine(from,to)` — a deliberate link connects what similarity cannot, so similarity must not be its strength. |
 | `forget` | `tools_mutate.rs` | Remove a thought + cascade edges (Facts immune). |
 | `degrade` | `tools_mutate.rs` | Down-weight edges along a bad retrieval path (`DEGRADE_*` decay). Returns `decayed_edges` and `removed_edges` — the reap count exists so a CLI `degrade` routed through the daemon can print what the local path prints. |
@@ -615,8 +631,9 @@ reads as zero.
 ## 14. CLI — `active`
 
 **What.** The `kern` binary. Reads the on-disk graph directly (can race a live
-daemon — prefer MCP for live state). `forget` and `degrade` are the exceptions:
-they hand the write to a serving daemon when there is one.
+daemon — prefer MCP for live state). Four commands are the exceptions when a
+daemon serves: `forget` and `degrade` hand it the write, and `get` and `query`
+take their read from it.
 
 **Subcommands** (`Commands` enum, `src/commands.rs`): `ingest`, `query`,
 `search`, `reembed`, `get`, `list`, `forget`, `link`, `intake {status|drain}`,
@@ -651,6 +668,13 @@ Notable:
   `search` and `list` stay local **by decision** — `search` is the raw-ANN
   probe with no matching tool, `list` prints the on-disk kern tree, and both are
   what a developer reaches for to inspect the store itself.
+
+- `ingest --retention-secs N` (`ingest_cmd.rs`) — expires the ingest after `N`
+  seconds by stamping `valid_until`; `0` or the absent flag means never. The
+  deadline is resolved **once, before** the guarded write-retry loop, so a
+  refused-stale flush that reloads and re-runs cannot push the expiry out by
+  however long the retry took. An overflowing `N` is reported and nothing is
+  written.
 
 - **The writer lock** (`src/base/lock.rs`) — one advisory lock per data dir
   (std `File::try_lock`, MSRV 1.89), held for the daemon's whole lifetime and

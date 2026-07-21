@@ -82,6 +82,28 @@ mod tests {
 	}
 
 	#[test]
+	fn ingest_schema_advertises_the_optional_retention() {
+		let defs = tool_definitions();
+		let ingest = defs
+			.iter()
+			.find(|d| d["name"] == "ingest")
+			.expect("ingest tool present");
+		let props = &ingest["inputSchema"]["properties"];
+		assert_eq!(
+			props["retention_secs"]["type"], "integer",
+			"retention_secs must be advertised so a client can set a TTL"
+		);
+		let required: Vec<&str> = ingest["inputSchema"]["required"]
+			.as_array()
+			.map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+			.unwrap_or_default();
+		assert!(
+			!required.contains(&"retention_secs"),
+			"retention is opt-in — the default path sets no valid_until"
+		);
+	}
+
+	#[test]
 	fn mutation_tools_declare_their_required_fields() {
 		let defs = tool_definitions();
 		// `required` must mirror each handler's runtime rejects, so clients fail fast.

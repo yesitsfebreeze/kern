@@ -20,7 +20,7 @@ impl IngestConfig {
 	pub fn validate(&self) -> Result<(), String> {
 		crate::ingest::Config {
 			dedup_threshold: self.dedup_threshold,
-			valid_from: None,
+			..Default::default()
 		}
 		.validate()
 	}
