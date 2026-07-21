@@ -27,7 +27,7 @@ pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 					"url":        {"type": "string", "description": "URL reference"},
 					"conf":       {"type": "number", "description": "confidence weight 0.0-1.0 (default 0.5)"},
 					"hint": {"type": "string", "description": "free-text hint describing the content, folded into the chunking prompt"},
-					"retention_secs": {"type": "integer", "description": "expire this ingest after N seconds — sets valid_until, after which retrieval drops it (0 or absent = never)"},
+					"retention_secs": {"type": "integer", "description": "expire this ingest after N seconds — sets valid_until, after which retrieval drops it (0 or absent = never). On a near-duplicate the shorter of the two deadlines wins, so this can shorten an existing TTL but never extend one"},
 					"sync":       {"type": "boolean", "description": "block until ingest completes (default false)"},
 				},
 			},

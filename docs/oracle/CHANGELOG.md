@@ -2,6 +2,34 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — merging `cycle/1` broke **fifteen** line anchors at once, and the
+  count is the point. Both branches had just re-pointed their anchors and both
+  were right in their own tree; combining them shifted `FEATURES.md` again and
+  eleven `ROADMAP.md` -> `FEATURES.md` citations plus four `src/` ones landed on
+  unrelated content — "no batch query" on the `health` tool row, "clustering is
+  vector-only" on kern idle timeout, `get_or_spawn_unnamed_child` on a blank
+  line 90 lines short. `docs-check` was green at every moment, before, during
+  and after, because all fifteen lines existed the whole time.
+
+  This is the fourth occurrence today and the mechanism is no longer in doubt:
+  **a cross-file line anchor cannot survive a merge that appends to the target
+  file, and appending is the only thing that ever happens to `FEATURES.md`.**
+  Re-pointing them by hand each merge is not a fix, it is a tax that will be
+  paid wrong the first time nobody checks. Filed as item 93 — the anchors want
+  to be symbolic (a heading or a stable phrase), or `docs_check.py` needs to
+  verify content rather than existence. Until one of those lands, every merge
+  touching `FEATURES.md` silently rots its citations.
+
+  Found by an overlap audit rather than by reading: comparing the words of each
+  citing sentence against the words of the line it points at flags a wrong
+  anchor in one pass, where `docs-check` cannot flag any of them. Three of the
+  22 the audit scored "weak" were correct — short targets score low — so the
+  tool nominates and a human adjudicates; it is not a gate.
+
+  Decided by: verify-before-claiming — the anchors were re-read against the
+  merged file rather than trusted from either parent, which is the only step
+  that catches this class at all.
+
 - 2026-07-21 — `test_retention`'s intermittent failure is now ROADMAP item 92
   rather than folklore. Two independent runs saw
   `test_a_retention_expires_the_fact_out_of_query_results` fail, always with
@@ -142,6 +170,76 @@
   Decided by: verify-before-claiming — every re-pointed anchor was read back
   against the merged file rather than trusted from either parent, which is the
   only step that would have caught this.
+
+- 2026-07-21 — item 88 closed: a retention that lands on a duplicate is applied,
+  not dropped. Item 22 shipped `retention_secs` the day before and it reached
+  `valid_until` only where an entity was *created*; a near-duplicate re-ingest
+  reported `deduped` and left an entity that never expires. There were **two**
+  dedup gates swallowing it, not one — `find_duplicate` in `place.rs`, and
+  `accept_with_dedup`'s own wider `find_duplicate_hit`, whose `dup` branch drops
+  the incoming `Entity` whole. Both now carry the deadline through
+  `merge_duplicate` into a single writer, `accept::merge_valid_until`.
+
+  **`min` of the two deadlines, not last-writer-wins, and that was the
+  decision.** LWW is what `valid_until` already uses on the *merge* path
+  (lamport + producer, `base/merge.rs`), so LWW here would have been the
+  consistent-looking choice. It was rejected because a TTL is a **ceiling**, not
+  an opinion about a value. Under LWW a near-duplicate carrying 30 days that
+  happens to arrive after a deliberate 1 hour voids the 1 hour, and federation
+  delivers deltas in arbitrary order, so *which* retention survives would depend
+  on network timing. `min` is commutative, associative and idempotent — every
+  replica converges on the same deadline no matter what order the writes land
+  in. `None` is +∞: `min(∞, t) = t` lets an untimed entity accept a deadline,
+  and `min(t, ∞) = t` means omitting `retention_secs` is *no opinion*, not
+  "make this permanent".
+
+  **Accepted cost, named in the tool schema rather than hidden:** ingest can
+  therefore only ever **shorten** a TTL, never lengthen one. There is no
+  ingest-shaped way to say "actually, keep this longer" — that needs an explicit
+  update path, or `forget` + re-ingest. This is the right trade for a retention
+  feature, where the failure that matters is data outliving its deadline, but it
+  is a real limitation and callers are told about it in the `retention_secs`
+  description.
+
+  **An orphan delta was found and fixed on the way.** `place.rs` stamped the
+  lamport/producer and pushed the `ValidUntil` `PendingDelta` *before* calling
+  `accept_with_dedup` — so on a gate-2 dedup it gossiped a deadline for an id
+  that never entered any kern. The stamp moved *after* accept, onto
+  `result.entity_id`, guarded by `!result.deduped`; the deduped case is handled
+  inside `merge_duplicate` against the survivor. A delta is now queued only when
+  the stored deadline actually moves, or when it was never stamped — which is
+  exactly the freshly placed entity carrying its own deadline in.
+
+  **Decided by:** verify-before-claiming, then fix-the-root. Every claim was
+  tested by breaking it rather than by reading it. Reverting gate 1 alone fails
+  three `place.rs` tests and leaves the gate-2 test **green**; reverting gate 2
+  alone fails **only** the gate-2 test — proof the two tests exercise two paths
+  and neither would pass either way. Deleting the `push_delta` while keeping the
+  stamp initially failed only the two dedup tests, which exposed a real coverage
+  hole: nothing asserted the **non-dedup** delta, the one federation depends on
+  for an ordinary retention-carrying ingest. That assertion was added
+  (`a_configured_retention_stamps_valid_until_on_every_placed_entity` now checks
+  object id, lamport and producer against the entity), and the same mutation now
+  fails all three. Root-cause over patch: the fix is one writer both gates reach,
+  not a second copy of the rule in `update_existing_entity`.
+
+  **The e2e's clock handling is an environment fix, and was confirmed as one
+  independently.** `e2e/test_retention.py` was ~50% flaky before this change.
+  Measured on this box: `CLOCK_REALTIME` is stepped **backwards ~2.80s every
+  ~32s** by WSL2 hv time sync — 60s of monotonic time advanced realtime by only
+  54.4s, and one `sleep(7)` in three advanced it by 4.23s. `valid_until` is an
+  absolute instant compared against `SystemTime::now()`, but `time.sleep` waits
+  on the *monotonic* clock, so a `sleep(RETENTION + 2)` could return with the
+  deadline still in the future. The waits now key on realtime and poll until the
+  fact stops being delivered, bounded by a monotonic cap. This does not soften
+  the test: with `merge_valid_until` neutered,
+  `test_a_deduped_ingest_still_applies_its_retention` fails on the cap with the
+  fact still delivered.
+
+  Left behind as item 91: the second gate still returns `doc_id` rather than the
+  survivor id, so `finalize_doc_identity` reports `committed` on a gate-2 dedup,
+  and both placement paths insert the discarded id into the lexical index. Both
+  predate this work and are on the plain path with no retention involved.
 
 - 2026-07-21 — item 22 closed: per-source TTL has a writer. The reader half
   (`score::drop_expired`) had been enforcing `valid_until` on every retrieve

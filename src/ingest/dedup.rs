@@ -26,6 +26,7 @@ pub fn update_existing_entity(
 	new_text: &str,
 	new_score: f64,
 	incoming_kind: EntityKind,
+	incoming_valid_until: Option<std::time::SystemTime>,
 	on_supersede_candidate: Option<&crate::ingest::worker::DeferContradictionFn>,
 ) {
 	let outcome = merge_duplicate(
@@ -34,6 +35,7 @@ pub fn update_existing_entity(
 		new_text,
 		new_score,
 		incoming_kind,
+		incoming_valid_until,
 	);
 
 	// Only a SAME-KIND near-dup may supersede (a preference must not supersede a fact).
@@ -107,6 +109,7 @@ mod tests {
 			1.0,
 			EntityKind::Claim,
 			None,
+			None,
 		);
 
 		let after = entity(&graph, "e1");
@@ -139,6 +142,7 @@ mod tests {
 			"a reworded version of the claim",
 			1.0,
 			EntityKind::Claim,
+			None,
 			None,
 		);
 
@@ -173,8 +177,24 @@ mod tests {
 	#[test]
 	fn rephrase_edge_is_idempotent_under_repeat() {
 		let graph = graph_with_entity("e1", "the original claim");
-		update_existing_entity(&graph, "e1", "reworded claim", 1.0, EntityKind::Claim, None);
-		update_existing_entity(&graph, "e1", "reworded claim", 1.0, EntityKind::Claim, None);
+		update_existing_entity(
+			&graph,
+			"e1",
+			"reworded claim",
+			1.0,
+			EntityKind::Claim,
+			None,
+			None,
+		);
+		update_existing_entity(
+			&graph,
+			"e1",
+			"reworded claim",
+			1.0,
+			EntityKind::Claim,
+			None,
+			None,
+		);
 
 		let g = graph.read();
 		let kid = g.kern_of_entity("e1").unwrap();
