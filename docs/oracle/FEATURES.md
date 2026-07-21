@@ -329,7 +329,7 @@ and cold tier live together. Readers never block, writers serialize.
 
 **Gaps.** Single-writer is enforced, not assumed — `src/base/lock.rs` is an advisory
 lock `reembed`, `gc` and `compact` claim or refuse — but `cmd_hub_merge`
-(`src/commands/admin.rs:746`) and `maybe_self_heal_store` (`src/commands.rs:437`)
+(`src/commands/admin.rs:748`) and `maybe_self_heal_store` (`src/commands.rs:437`)
 still `save_graph_unguarded` holding none. No WAL but LMDB's; compaction is offline.
 
 ---
@@ -353,8 +353,11 @@ Nothing is lost on an LLM outage — the delta stays queued until it succeeds.
   `Some([])` = nothing worth keeping (archive); `None` = no LLM
   output (transient outage, retry). `parse_claims` is lenient (finds the JSON
   array anywhere in the output).
-- **Worker** (`src/ingest/worker.rs`) — async job queue (`enqueue`/`run`),
-  owns the embed + accept path. Defers question/contradiction follow-ups to
+- **Worker** (`src/ingest/worker.rs`) — async job queue bounded at
+  `QUEUE_CAP` = 64 with no detached send behind it. Three offers: `enqueue`
+  refuses when full (`None`, counted as `ingest_queue_refused`), `submit` awaits
+  capacity for a producer that can be slowed instead (the file watcher), `run`
+  awaits the outcome. Owns the embed + accept path. Defers question/contradiction follow-ups to
   the tick via callback closures (`DeferQuestionsFn`/`DeferContradictionFn`).
 - **Embed** (`src/ingest/embed.rs`) — batches texts to the embedding endpoint.
 - **Dedup** (`src/ingest/dedup.rs`) — `find_duplicate` at the preset's dedup
@@ -610,8 +613,8 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 | `forget` | `tools_mutate.rs` | Remove a thought + cascade edges (Facts immune). |
 | `forget_by_source` | `tools_mutate.rs` | Remove every thought from one `(scheme, object_id)` — **all sections of it**, since `source_id` hashes the section and keying on one would forget a single chunk of a document. Cascades through the same `forget_entity`; refuses local Facts unless `force`, which is the ONLY bypass of the Fact guard and is never implicit. Returns `removed_entities`/`removed_edges`/`kept_facts` — the last so a refused Fact is reported rather than read as "nothing was there". Exists so `kern forget --source` has somewhere to route. |
 | `degrade` | `tools_mutate.rs` | Down-weight edges along a bad retrieval path (`DEGRADE_*` decay). Returns `decayed_edges` and `removed_edges` — the reap count exists so a CLI `degrade` routed through the daemon can print what the local path prints. |
-| `move` | `tools_mutate.rs:440` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
-| `health` | `tools_admin.rs:83` | Graph stats (gravitons/kerns/entities/reasons/unnamed/claim_kinds) **plus the degradation surface**: `queue_depth`, `tasks_done`, `task_avg_ms`, `task_panics`, `last_task_panic`, `task_failures`, `last_task_failure`, `cold_evicted`, `embed_model`, `embed_dim`, `embed_mismatch`, and the six fail-open counters — `query_dim_rejected`, `below_floor_deliveries`, `clock_skew_skips`, `ingest_dropped_chunks`, `remote_cap_dropped`, `unspilled_drops` — each a path that returns something rather than erroring, so the count is the only way to tell a degraded result from a good one (`Server::health_stats`, `src/mcp.rs:116`). |
+| `move` | `tools_mutate.rs:444` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
+| `health` | `tools_admin.rs:83` | Graph stats (gravitons/kerns/entities/reasons/unnamed/claim_kinds) **plus the degradation surface**: `queue_depth`, `tasks_done`, `task_avg_ms`, `task_panics`, `last_task_panic`, `task_failures`, `last_task_failure`, `cold_evicted`, `embed_model`, `embed_dim`, `embed_mismatch`, and the seven fail-open counters — `query_dim_rejected`, `below_floor_deliveries`, `clock_skew_skips`, `ingest_dropped_chunks`, `remote_cap_dropped`, `unspilled_drops`, `ingest_queue_refused` — each a path that returns something rather than erroring, so the count is the only way to tell a degraded result from a good one (`Server::health_stats`, `src/mcp.rs:116`). |
 | `graviton` | `tools_admin.rs` | list/add/remove focus attractors (name + text — phrase or full document — + optional mass). Replaced the single per-kern "purpose". |
 | `claim_kind` | `tools_admin.rs` | register/remove claim kinds; registered kinds extend the built-in distill set. |
 | `pulse` | `tools_admin.rs` | Trigger a clustering pass across the tree. |

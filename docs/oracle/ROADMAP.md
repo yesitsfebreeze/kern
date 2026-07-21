@@ -177,7 +177,7 @@ underneath any of them gets a refused flush and a reload rather than a clobber.
 two unlocked callers".** The unguarded entry point is named
 `save_graph_unguarded` and carries its precondition, and walking its call sites
 turns up **three** classes, not two. The two this item already named stand and
-still do not belong to it: `cmd_hub_merge` (`src/commands/admin.rs:746`) writes
+still do not belong to it: `cmd_hub_merge` (`src/commands/admin.rs:748`) writes
 a destination graph it holds no lock on, and `maybe_self_heal_store`
 (`src/commands.rs:424`) rewrites the store during boot recovery — hub merge
 stops both daemons first, self-heal runs before the daemon serves, and neither
@@ -188,7 +188,7 @@ item 24. `with_graph` (`src/commands.rs:453`) loads the graph, mutates it and
 calls `save_graph_unguarded` (`:456`) holding no lock at all. `cmd_forget` and
 `cmd_degrade` reach it safely, because they `route` first and only fall into it
 on `NoDaemon` (`src/commands/graph_ops.rs:120`, `:285`). **`kern graviton
-add`/`remove` (`src/commands/admin.rs:241`, `:257`) and `kern claim-kind
+add`/`remove` (`src/commands/admin.rs:243`, `:259`) and `kern claim-kind
 add`/`rm` (`:290`, `:296`) do not route at all**, so beside a running daemon
 they load a snapshot, mutate it, and write the *whole graph* back over whatever
 the daemon has committed since — a full-graph clobber, not a lost write, and the
@@ -198,7 +198,7 @@ exact race the writer lock and the route exist to close. Unlike `ingest` and
 widens item 24's hole no more than `intake drain` did, and the tools they would
 route to already exist and already have matching semantics — `graviton`
 (`src/mcp/tools_admin.rs:87`, schema `:39`) and `claim_kind` (`:161`, schema
-`:52`), both dispatched at `src/mcp.rs:182-183`.
+`:52`), both dispatched at `src/mcp.rs:183-184`.
 
 So the item's remainder is two halves, not one: `graviton`/`claim_kind`,
 unblocked and mechanical, and `ingest`/`link`, blocked on item 24. The item does
@@ -284,7 +284,7 @@ larger than the feature. The behaviour is pinned by
 **Still open, deliberately deferred:** does the file watcher give `Document`
 entities a tenant-default ACL, or leave them public? Recommend configurable,
 default public-within-tenant, since the tenant boundary is the process.
-`src/ingest/file_watcher.rs:147` hardcodes `Acl::default()` — which is that
+`src/ingest/file_watcher.rs:150` hardcodes `Acl::default()` — which is that
 recommended default — and `Worker::enqueue`'s public delegation keeps it there
 until the decision is made.
 
@@ -349,7 +349,7 @@ auto-distilled claims out of retrieval until a human curates them. No
 
 ### 24. RPC socket has no auth `[surface]`
 
-`FEATURES.md:671-672`. The missing auth is the same boundary as 18's
+`FEATURES.md:674-675`. The missing auth is the same boundary as 18's
 caller-asserted principals — decide them together or the principal stops at the
 MCP surface only. The item's second half is **retired 2026-07-21 — verified
 false**: `KernRpc` does not mirror MCP 1:1 and never did. The contract is four
@@ -528,14 +528,31 @@ no signal on approach.
 
 ### 30. Ingest queue `enqueue` detaches with no backpressure `[ingest]`
 
-`Worker::enqueue` fires `tokio::spawn(async move { tx.send(job).await })` and
-returns immediately (`src/ingest/worker.rs:98-100`). The channel bound is 64
-(`:48`); the spawn set is unbounded. Distinct from the *tick* queue, which is
-bounded at 512 with real backpressure (`FEATURES.md:431-432`) — the two read as
-one and are not.
+~~`Worker::enqueue` fires `tokio::spawn(async move { tx.send(job).await })` and
+returns immediately. The channel bound is 64; the spawn set is unbounded.~~
+**(closed 2026-07-21.)** What it actually did was measured before it was
+changed: not a silent drop but unbounded growth. `tokio`'s `send` only errors on
+a closed channel, so every detached task *parked* on a full queue holding its
+whole text — 500 offered to a stalled worker, 500 accepted, nothing refused, and
+that is the failure the new test reproduces when the bound is removed. Now
+`QUEUE_CAP` is the whole bound (`src/ingest/worker.rs:61`): `try_send` refuses
+the newest job rather than detaching (`:128`), the refusal is counted
+(`:131`) and reaches every health surface as `ingest_queue_refused`
+(`src/base/health.rs:81`, `src/mcp.rs:145`, `src/commands/admin.rs:85`). The
+one producer that must not be refused waits instead — `submit` awaits capacity
+(`src/ingest/worker.rs:149`) and the file-watcher sink calls it
+(`src/ingest/file_watcher.rs:77`), because a watcher record has no durable
+backstop; the MCP RAM-queue fallback gets a `tool_error`
+(`src/mcp/tools_mutate.rs:331`). Still distinct from the *tick* queue, which is
+bounded at 512 (`FEATURES.md:434-435`).
 
-Beside it: **the distill leg has no timeout budget** (no `timeout` in
-`src/ingest/distill.rs` or `src/ingest/worker.rs`). The queue-depth half is
+Remaining, and the reason this item is narrowed rather than deleted: **the
+distill leg has no timeout budget** (no `timeout` in
+`src/ingest/distill.rs` or `src/ingest/worker.rs`), so a hung LLM still holds
+the one in-flight slot forever and the bound converts that into refusals rather
+than into an unbounded heap. Also unaddressed: the file watcher enqueues into
+RAM directly instead of through the durable direct intake the MCP path prefers.
+The queue-depth half is
 **narrowed 2026-07-21** — closing item 8 gave `kern intake` a
 `pending=/stuck=/failed=/done=` readout (`src/commands/intake_cmd.rs:43-45`),
 so the file-backed queue reports its depth; the in-process `Worker` channel
@@ -743,7 +760,7 @@ fallback and no way to distinguish discovery-failed from no-peers-present
 
 `TcpStream::connect` per call at `src/gossip/transport.rs:37` (`send_msg`) and
 `:45` (`send_and_receive`). No pooling. Separately, the `trnsprt` client has no
-pooling either (`FEATURES.md:958-959`) — that one is not gossip and is not gated
+pooling either (`FEATURES.md:961-962`) — that one is not gossip and is not gated
 on 33.
 
 ### 47. Hub phase 3: gossip moves hub-side `[hub]`
@@ -759,7 +776,7 @@ port-clash validation in `src/config/serve.rs` to collapse. (Corrected again
 item 84 owns.)
 
 Beside it: **hub↔node version skew is unmanaged** beyond same-binary spawning
-(`FEATURES.md:1064-1065`).
+(`FEATURES.md:1067-1068`).
 
 ### Decisions owed before the federation build
 
@@ -796,7 +813,7 @@ retired:** `CHANGELOG.md` 2026-07-20 shipped chunk external ids keyed on the ful
 source identity (`source_id()` + chunk index, not the bare section), and CLI
 `kern ingest` deriving its inline source hash from the text. What remains is the
 *dedup* key, not the external id. Beside it: the dedup threshold is global, not
-per-kind (`FEATURES.md:413`).
+per-kind (`FEATURES.md:416`).
 
 ### 49. The distill prompt is one-shot and global `[ingest]`
 
@@ -855,7 +872,7 @@ newline one, and is still blocked on a real document long enough to truncate.
 
 ### 53. Clustering is vector-only `[lifecycle]`
 
-No semantic or structural features (`FEATURES.md:496`), and naming plus
+No semantic or structural features (`FEATURES.md:499`), and naming plus
 enrich are a cold LLM call per kern. The adopted-but-unbuilt upgrade is
 thought-level PageRank feeding the split heuristic — high-rank nodes become
 gravitons, bridge nodes become sub-kerns
@@ -1037,7 +1054,7 @@ contract nobody enforces is a contract nobody has.
 
 ### 93. Line anchors cannot survive a merge, and `docs-check` cannot see it `[process]`
 
-Every citation of the form `` `FEATURES.md:414-415` `` is a bet that nothing is
+Every citation of the form `` `FEATURES.md:417-418` `` is a bet that nothing is
 ever inserted above line 408. `FEATURES.md` only grows, so the bet loses on
 every merge that appends — and when two branches each append and then combine,
 it loses twice over. Four times on 2026-07-21: four anchors, then four more,
@@ -1072,7 +1089,7 @@ standing. `--strict-anchors` makes them fatal, for a CI that has decided to trus
 them — not yet. A nomination a human has adjudicated is silenced in place with a
 trailing `docs-check: anchor-ok` comment, the same idiom as the historical page
 marker, and the marker counts only outside backticks so a page may quote it. The
-paragraph above is the first user of that escape: its `FEATURES.md:414-415` is an
+paragraph above is the first user of that escape: its `FEATURES.md:417-418` is an
 illustration of the disease, not a citation, so it is acquitted rather than fixed
 — and so is this sentence, which repeats it. <!-- docs-check: anchor-ok -->
 
@@ -1085,7 +1102,7 @@ anchors in one `crdts-federation.md` status block are wrong. The 13 false ones
 share one weakness: the anchor is right but the target's distinguishing word is
 under four characters (`acl`, `rrf`, `run_hub`) or is a stem the prose inflects
 (`fn stem` against "stemmer"). Two more are self-inflicted — this item quoting
-`FEATURES.md:414-415` as an example rather than as a citation — and are acquitted
+`FEATURES.md:417-418` as an example rather than as a citation — and are acquitted
 in place, leaving **38 standing, 12 of them false, 32%**. <!-- docs-check: anchor-ok -->
 
 **One measured non-win, recorded rather than buried.** Splitting the camelCase
@@ -1119,7 +1136,7 @@ set.** Precision 27/38 = **71.1% → 26/29 = 89.7%**. False-positive rate **28.9
 92.9%** — *it went down*. The three-character floor that acquits `acl`, `rrf` and
 `hub` also acquits `gpu`, and `gpu` plus `kern` is enough to reach the two-word
 prose bar and silence a genuinely under-covering anchor (this file citing
-`FEATURES.md:587` for three claims that span 581-582). That is the same trade the
+`FEATURES.md:590` for three claims that span 581-582). That is the same trade the
 camelCase note above records, paid a second time, and it is recorded here for the
 same reason. A prose bar of 1 instead of 2 measures 96.3% precision at unchanged
 recall and was **declined**: the truth set holds only five prose-to-prose anchors,
@@ -1155,27 +1172,52 @@ edit under test.** Observed 2026-07-21: a cycle saw `873 passed` with its own
 three new tests absent from the run, and `touch src/lib.rs` changed the count to
 a self-consistent 867.
 
-What it is NOT, checked rather than assumed: not cross-worktree contamination.
-Each tree gets its own binary hash (four distinct `kern-<hash>` lib tests for
-four trees), and `across 7 binaries` is the normal count for this workspace —
-four packages plus integration tests. The main checkout reports 872 where a
-worktree reports 865, which is different code, not a mixed run.
+**Corrected 2026-07-21, later the same day: it IS cross-worktree contamination,
+and the first version of this item said the opposite.** That earlier paragraph
+argued from the wrong artifact class. Each tree does get its own
+`kern-<hash>` *lib-test binary* — four hashes for four trees — and that was
+checked and is true. But a workspace sub-crate is a different artifact: `trnsprt`
+has the same package name, version and relative path in every tree, so its
+fingerprint matches across them and cargo reuses whichever build got there first.
 
-So the failure mode is narrow and nasty: an aggregate count that looks green
-while the binary is stale. **An aggregate pass count is not evidence that a new
-test ran.** The cheap discipline that catches it, and the one used to verify the
-cycle that found this: after changing code, run the new tests BY NAME
-(`cargo nextest run --workspace -E 'test(<name>)'`) and read them in the output.
-A filter that names ten tests and prints ten results cannot be satisfied by a
-stale binary that contains none of them.
+Two independent observations, both loud:
 
-Two real closures, neither taken yet. Give each worktree its own `target-dir` —
-correct by construction, costs a cold build per tree and roughly 33 GB. Or keep
-the cache and make the discipline mechanical, e.g. a `just` recipe that runs the
-suite and fails if the binary is older than the newest source file. The first is
-simpler; the second keeps the property the shared cache was adopted for. Not
-decided here because the observation is one incident, and flipping the build
-layout under three live cycles would stall all of them.
+- `cycle/3` failed to compile with `struct HealthRes has no field named
+  ingest_queue_refused` — a field that existed **only** in `cycle/2`'s source
+  tree. `cycle/3` was linking a sibling's `trnsprt`.
+- `cycle/2` watched `cargo build` report `Fresh trnsprt` against a stale
+  `libtrnsprt-*.rmeta` with **hard-link count 3** while its own `dto.rs` change
+  sat on disk, in a tree that had just compiled cleanly under `cargo nextest`.
+  Two rmetas carrying the field existed under different hashes (check and test
+  profiles); the dev-profile one kept losing to sibling builds with a newer
+  mtime. `touch src/trnsprt/src/kern_rpc/dto.rs` before each build was the
+  workaround it used for every number it reported.
+
+So there are two failure modes, not one:
+
+1. **Stale lib-test binary** — an aggregate count that looks green while the
+   binary predates the edit. Fails *quietly*. **An aggregate pass count is not
+   evidence that a new test ran.** The discipline that catches it: run the new
+   tests BY NAME (`cargo nextest run --workspace -E 'test(<name>)'`) and read
+   each result. A filter naming ten tests and printing ten results cannot be
+   satisfied by a binary containing none of them.
+2. **Foreign sub-crate rlib/rmeta** — one tree links another's `trnsprt`. Fails
+   *loudly* here, because the two sources disagreed about a struct field. That
+   is luck, not safety: a change that stayed type-compatible would have linked
+   silently and produced a green run against a sibling's code.
+
+**Decided: each worktree gets its own `target-dir`.** Three trees were flipped
+the moment the second observation landed, and both stalled builds recovered
+immediately. It costs a cold build per tree and roughly 33 GB against an 11 GB
+shared cache — a straightforward trade once the alternative is "verification
+results that may describe another branch's code". The staleness-guard
+alternative (a `just` recipe failing when the binary is older than the newest
+source) is now moot for the same reason: it would have caught mode 1 and been
+blind to mode 2.
+
+What survives: the by-name discipline. It is cheap, it catches mode 1
+independently of the build layout, and it is what confirmed both cycles that
+found this.
 
 ### 92. `test_retention` fails under load and nobody had written it down `[eval]`
 
@@ -1269,8 +1311,8 @@ itself is pinned — `content_hash` (`src/base/util.rs:3`) is sha256-to-lowercas
 and `util.rs:155` asserts length, alphabet and determinism. What is unpinned is
 every *composition* feeding it, and each one is a different format string: entity
 ids are `content_hash(text)` bare (`src/ingest/place.rs`,
-`src/ingest/file_watcher.rs:115`, `src/ingest/direct.rs:31`,
-`src/ingest/worker.rs:86`), `Source::source_id` is
+`src/ingest/file_watcher.rs:129`, `src/ingest/direct.rs:31`,
+`src/ingest/worker.rs:125`), `Source::source_id` is
 `scheme \x00 object \x00 section` (`src/base/types.rs:248-260`), child and named
 ids are `parent_id + nonce` and `parent_id + name + nonce`
 (`types.rs:493`, `:498`), and the HNSW canon has its own (`src/base/hnsw.rs:525`).
@@ -1309,7 +1351,7 @@ single local daemon and needs only sign-off.
 (`src/commands/mcp_cmd.rs:290`, `:306`, `:343`) with no `handle_method` override,
 so the trait default returns `None` (`src/trnsprt/src/server.rs:21`). Meanwhile
 `extra_capabilities` advertises `{"resources": {}, "prompts": {}}` (`:346`) to
-match standalone, which *does* serve them (`src/mcp.rs:211-218`, advertised `:157`). Advertised on
+match standalone, which *does* serve them (`src/mcp.rs:212-219`, advertised `:158`). Advertised on
 the normal path, non-functional there. Either forward them or stop advertising.
 
 ### 82. Standalone `kern mcp` runs no gossip `[surface]`
@@ -1351,9 +1393,9 @@ is a real reason nothing is set — eviction drops unpersisted `children` pushes
   requires either promoting them to real per-endpoint config or exposing that
   predicate. Was listed under item 11; it is a different job.
 - Hand-rolled tool schemas; no batch query
-  (`FEATURES.md:630-631`).
+  (`FEATURES.md:633-634`).
 - The LLM client is Ollama-centric with no retry/backoff policy object
-  (`FEATURES.md:904-905`).
+  (`FEATURES.md:907-908`).
 - ~~Watcher `.gitignore` parsing is approximate; no rename tracking~~ **(retired
   2026-07-21 — verified false on both counts).** `IgnoreRules` builds a real
   `Gitignore` through ripgrep's `ignore` crate
@@ -1365,17 +1407,17 @@ is a real reason nothing is set — eviction drops unpersisted `children` pushes
   renamed file lands as a new `Document` and the old one is neither moved nor
   removed. It duplicates only when the rename *also* edits the file — ids are
   `content_hash(text)`, so an untouched move re-resolves to the same id, while
-  `external_id` is the path (`src/ingest/file_watcher.rs:130`), so a
+  `external_id` is the path (`src/ingest/file_watcher.rs:133`), so a
   move-plus-edit gets a new id under a new external id and supersede never
   fires. It sits in this tier and not in tier 1 because the watcher is **off by
   default** — `WatcherConfig::enabled` is `false` unless a `kern.toml` sets it
   (`src/config/watcher.rs:14-16`) — so it is not a default-path defect
-  (`FEATURES.md:1072-1075`).
-- `unnamed` lists only; there is no `promote` (`FEATURES.md:803`).
+  (`FEATURES.md:1075-1078`).
+- `unnamed` lists only; there is no `promote` (`FEATURES.md:806`).
 - GNN has no GPU path, weights are per-kern rather than shared, and the objective
-  is link-prediction only (`FEATURES.md:587-588`).
+  is link-prediction only (`FEATURES.md:590-591`).
 - Under WSL2 NAT a loopback Ollama URL must be hand-pinned; kern neither rewrites
-  nor warns (`FEATURES.md:1112-1114`).
+  nor warns (`FEATURES.md:1115-1117`).
 - RPC socket bind→chmod race — sub-millisecond, umask default — recorded as an
   accepted risk (`concepts/security.mdx:40-43`); revisit only if the umask
   alternative stops being worse.
@@ -1405,7 +1447,7 @@ and item 1's instrument staying the scorer.
   corrected in the same change) the `id` path in `query` bypassed every filter
   (item 18); `howto/mcp.mdx:50` now says every filter applies to an `id` read.
 - (retired 2026-07-21 — the tables were filled in) the `move` MCP tool is listed
-  in `README.md:352` and `FEATURES.md:613`, and the site's count is now thirteen
+  in `README.md:352` and `FEATURES.md:616`, and the site's count is now thirteen
   (`howto/mcp.mdx:5, :75`), so the "Eleven tools" note is retired with it.
   <!-- docs-check: anchor-ok -->
 - `docs/kern/README.md:60` declares the directory holds "never plans"; five of

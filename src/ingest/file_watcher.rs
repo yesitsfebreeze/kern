@@ -72,14 +72,17 @@ impl IngestSink for KernFileWatcherSink {
 
 		let hint = language_hint.unwrap_or_default();
 
-		self.worker.enqueue(
-			content,
-			source,
-			EntityKind::Document,
-			hint,
-			1.0,
-			self.ingest_config(),
-		);
+		self
+			.worker
+			.submit(
+				content,
+				source,
+				EntityKind::Document,
+				hint,
+				1.0,
+				self.ingest_config(),
+			)
+			.await;
 	}
 }
 
@@ -347,6 +350,65 @@ mod tests {
 		);
 
 		server.abort();
+	}
+
+	// The watcher is the fast producer the bound exists for, and its record has no
+	// durable backstop — nothing re-offers a file whose event has been consumed.
+	// So this leg must wait for capacity, never be handed a refusal.
+	#[tokio::test]
+	async fn the_sink_waits_for_queue_capacity_rather_than_losing_the_file() {
+		let (url, _server) =
+			crate::test_support::spawn_http(crate::test_support::hanging_embed_app()).await;
+		let embedder = crate::llm::Client::new_embed_only(&url, "m", "");
+		let worker = Arc::new(crate::ingest::Worker::new(
+			Arc::new(RwLock::new(GraphGnn::new())),
+			embedder,
+			None,
+			None,
+			None,
+		));
+
+		let mut offered = 0;
+		while worker
+			.enqueue(
+				format!("filler {offered}"),
+				Source::Inline {
+					hash: String::new(),
+					section: String::new(),
+				},
+				EntityKind::Document,
+				String::new(),
+				1.0,
+				IngestRunConfig::default(),
+			)
+			.is_some()
+		{
+			offered += 1;
+			tokio::task::yield_now().await;
+			assert!(offered < 10_000, "the queue never filled");
+		}
+
+		let refused_before = crate::ingest::worker::ingest_queue_refused();
+		let sink = KernFileWatcherSink::new(worker, 0);
+		let blocked = timeout(
+			Duration::from_millis(150),
+			sink.ingest(IngestRecord {
+				source_uri: "file:///tmp/backpressure.rs".to_string(),
+				content: "fn waits() {}".to_string(),
+				language_hint: Some("rust".to_string()),
+			}),
+		)
+		.await;
+
+		assert!(
+			blocked.is_err(),
+			"the sink returned while the queue was full — the file was refused, not queued"
+		);
+		assert_eq!(
+			crate::ingest::worker::ingest_queue_refused(),
+			refused_before,
+			"waiting for capacity is not a refusal, and must not be counted as one"
+		);
 	}
 
 	#[tokio::test]

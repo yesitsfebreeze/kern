@@ -2,6 +2,74 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — item 94 corrected: the shared `target-dir` **does** leak between
+  worktrees, and the earlier entry saying it does not was wrong. That entry
+  checked the wrong artifact class. Lib-test binaries really do get one hash per
+  tree — four hashes, four trees, verified. But a workspace sub-crate has the
+  same package name, version and relative path everywhere, so `trnsprt`'s
+  fingerprint matches across trees and cargo reuses whichever build landed first.
+
+  Two independent observations forced it. `cycle/3` failed to compile against a
+  field that existed only in `cycle/2`'s source. `cycle/2` watched cargo report
+  `Fresh trnsprt` against a stale rmeta with hard-link count 3 while its own
+  `dto.rs` edit sat on disk, and had to `touch` that file before every build it
+  measured from.
+
+  The second mode is the dangerous one and it is the one the earlier entry ruled
+  out: a tree linking a sibling's crate. It failed loudly here only because the
+  two sources disagreed about a struct field. A type-compatible divergence would
+  have linked silently and produced a green suite against another branch's code —
+  which is the whole verification story of this loop, wrong.
+
+  All three worktrees now have their own `target-dir`. ~33 GB against an 11 GB
+  shared cache, and both stalled builds recovered on the spot. The
+  staleness-guard alternative is moot: it addressed mode 1 and was blind to
+  mode 2. The by-name test discipline survives, because it catches mode 1
+  independently of the build layout and is what confirmed both cycles.
+
+  Decided by: verify-before-claiming — the first version of item 94 asserted
+  "checked rather than assumed" about a check that examined the wrong artifact,
+  and the correction cost two stalled cycles to surface.
+
+- 2026-07-21 — bounded the ingest queue, and answered the question item 30
+  existed to force: **when the queue is full, refuse the newest job — except on
+  the one leg that can be slowed instead, which waits.**
+
+  First the premise, because the item offered two defects and did not say which:
+  it grew, it never dropped. `tokio`'s `send` errors only on a closed channel,
+  so each detached `tokio::spawn` parked on the full queue still holding its
+  whole text. Measured, not reasoned: 500 jobs offered to a worker stalled on a
+  hanging embedder were all 500 accepted. That number is now the revert-check
+  failure of the test that bounds it.
+
+  Refuse-newest wins because the three alternatives each pay somewhere worse.
+  *Block the producer*: correct, and it welds ingest throughput to the slowest
+  thing in the system — the MCP `ingest` tool would sit on embed latency while an
+  agent waits. *Drop the oldest*: discards work already accepted, and the RAM
+  queue is reached exactly when the durable file intake is unavailable, so the
+  discarded job has no disk copy to recover from. *Drop the newest silently*:
+  same loss, and the caller is told "queued". Refusing keeps the loss where the
+  caller can see and retry it; the cost is honest — `enqueue` now returns
+  `Option<String>` and the MCP tool can fail where it never could.
+
+  The file watcher is the exception and gets the waiting form, `submit`. It is
+  the fast producer the bound exists for, nothing is waiting on its return, and
+  its own backlog is coalesced paths rather than job bodies — so stalling it
+  costs less memory than the pileup it replaces, while a refusal there would
+  lose a file nothing re-offers.
+
+  Refusals are counted and surfaced as `ingest_queue_refused` on all three health
+  surfaces, following `unspilled_drops` rather than inventing a shape, with the
+  warn line throttled and the counter exact. A test walks a real refusal from the
+  worker's counter to the RPC DTO an operator polls; it fails when the RPC leg is
+  hardcoded to zero.
+
+  Recall unmoved at 0.9306 / 0.9722 / 0.9471, as it must be — the CLI and intake
+  legs use `run`, which awaits and never touched this path.
+
+  Decided by: name-the-tradeoff — four defensible policies, so the entry records
+  what each rejected one would have cost rather than letting the code imply it.
+
 - 2026-07-21 — merged item 26's confined PageRank, and resolved the `CHANGELOG`
   collision by rebuilding the union rather than splicing the conflict hunk. Last
   time the splice silently dropped four entries that lived outside the hunk on

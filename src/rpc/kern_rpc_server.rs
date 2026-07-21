@@ -94,6 +94,7 @@ impl KernRpc for KernRpcHandler {
 				ingest_dropped_chunks: u64_at("ingest_dropped_chunks"),
 				remote_cap_dropped: u64_at("remote_cap_dropped"),
 				unspilled_drops: u64_at("unspilled_drops"),
+				ingest_queue_refused: u64_at("ingest_queue_refused"),
 				embed_model: str_at("embed_model"),
 				embed_dim: u64_at("embed_dim"),
 				embed_mismatch: payload
@@ -194,5 +195,41 @@ mod tests {
 		);
 		assert_eq!(res.cold_evicted, 0);
 		assert!(!res.embed_mismatch);
+	}
+
+	// Not "the key is present" — a real refusal, walked from the worker's counter
+	// through the health stats and the MCP payload to the RPC DTO an operator polls.
+	#[tokio::test]
+	async fn a_refused_ingest_reaches_the_rpc_health_surface() {
+		let (url, _server) =
+			crate::test_support::spawn_http(crate::test_support::hanging_embed_app()).await;
+		let srv = crate::test_support::mcp_server_with_embed_url(&url);
+
+		let mut offered = 0;
+		while srv
+			.worker
+			.enqueue(
+				format!("filler {offered}"),
+				crate::base::types::Source::Inline {
+					hash: String::new(),
+					section: String::new(),
+				},
+				crate::base::types::EntityKind::Claim,
+				String::new(),
+				1.0,
+				crate::ingest::Config::default(),
+			)
+			.is_some()
+		{
+			offered += 1;
+			tokio::task::yield_now().await;
+			assert!(offered < 10_000, "the queue never filled");
+		}
+
+		let handler = KernRpcHandler::new(Arc::new(srv), Arc::new(tokio::sync::Notify::new()));
+		assert!(
+			handler.health().await.ingest_queue_refused >= 1,
+			"a refused ingest that no health surface reports is a lost write nobody can see"
+		);
 	}
 }

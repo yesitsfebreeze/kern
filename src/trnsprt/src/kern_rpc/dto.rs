@@ -63,6 +63,8 @@ pub struct HealthRes {
 	pub remote_cap_dropped: u64,
 	#[serde(default)]
 	pub unspilled_drops: u64,
+	#[serde(default)]
+	pub ingest_queue_refused: u64,
 	// Staleness identity. `build_id` fingerprints the running executable,
 	// `config_id` the resolved config, so an edited kern.toml reads as stale
 	// even when the binary did not move. Empty from daemons predating the
@@ -128,6 +130,7 @@ mod dto_serde_tests {
 		assert_eq!(h.ingest_dropped_chunks, 0);
 		assert_eq!(h.remote_cap_dropped, 0);
 		assert_eq!(h.unspilled_drops, 0);
+		assert_eq!(h.ingest_queue_refused, 0);
 		assert!(h.build_id.is_empty(), "unknown build, not a stale one");
 		assert!(h.config_id.is_empty());
 		assert_eq!(h.uptime_ms, 0);
@@ -163,6 +166,7 @@ mod dto_serde_tests {
 			ingest_dropped_chunks: 14,
 			remote_cap_dropped: 15,
 			unspilled_drops: 16,
+			ingest_queue_refused: 17,
 			build_id: "a1b2c3d4e5f60718".into(),
 			config_id: "0f1e2d3c4b5a6978".into(),
 			uptime_ms: 90_000,
@@ -182,6 +186,7 @@ mod dto_serde_tests {
 		assert_eq!(back.ingest_dropped_chunks, 14);
 		assert_eq!(back.remote_cap_dropped, 15);
 		assert_eq!(back.unspilled_drops, 16);
+		assert_eq!(back.ingest_queue_refused, 17);
 		assert_eq!(back.build_id, src.build_id);
 		assert_eq!(back.config_id, src.config_id);
 		assert_eq!(back.uptime_ms, 90_000);
