@@ -14,7 +14,7 @@ use crate::base::heat::HeatConfig;
 use crate::base::math::reason_id;
 use crate::base::reason::{add_reason, remove_reason};
 use crate::base::search::search_all_unlocked;
-use crate::base::types::{Reason, ReasonKind};
+use crate::base::types::{Embedding, Reason, ReasonKind};
 use crate::base::util;
 use crate::config::TickConfig;
 use crate::ingest::place::build_chunk_entity;
@@ -96,7 +96,7 @@ pub fn do_seed_questions(
 				kind: ReasonKind::Question,
 				dirty: false,
 				text: question,
-				vector: Vec::new(),
+				vector: Vec::new().into(),
 				score: 0.5,
 				score_lamport: 0,
 				score_producer: String::new(),
@@ -358,12 +358,12 @@ pub fn do_enrich(
 
 	{
 		let mut graph = g.write();
-		let mut new_vec: Option<(String, Vec<f32>)> = None;
+		let mut new_vec: Option<(String, Embedding)> = None;
 		if let Some(kern) = graph.kerns.get_mut(kern_id) {
 			if let Some(r) = kern.reasons.get_mut(rid) {
 				if !r.is_enriched() {
 					r.text = text;
-					if let Some(v) = vec {
+					if let Some(v) = vec.map(Embedding::from) {
 						r.vector = v.clone();
 						new_vec = Some((rid.to_string(), v));
 					}
@@ -539,12 +539,12 @@ pub fn do_reembed(g: &Arc<RwLock<GraphGnn>>, kern_id: &str, embed: Option<&Embed
 		};
 		for (id, v) in &new_vecs {
 			if let Some(e) = k.entities.get_mut(id) {
-				e.vector = v.clone();
-				e.gnn_vector = v.clone();
+				e.vector = v.clone().into();
+				e.gnn_vector = v.clone().into();
 				e.dirty = false;
 			}
 		}
-		let endpoint = |k: &crate::base::types::Kern, id: &str| -> Option<Vec<f32>> {
+		let endpoint = |k: &crate::base::types::Kern, id: &str| -> Option<Embedding> {
 			k.entities
 				.get(id)
 				.map(|e| e.vector.clone())
@@ -568,7 +568,7 @@ pub fn do_reembed(g: &Arc<RwLock<GraphGnn>>, kern_id: &str, embed: Option<&Embed
 			if let Some(r) = k.reasons.get_mut(&rid) {
 				// endpoint not yet embedded: leave the edge dirty to retry, don't pin a stale vector.
 				if let Some(v) = nv {
-					r.vector = v;
+					r.vector = v.into();
 					r.dirty = false;
 				}
 			}
@@ -642,14 +642,14 @@ mod tests {
 		let mut old = Entity {
 			id: "old".into(),
 			kind: crate::base::types::EntityKind::Claim,
-			vector: vec![1.0, 0.0],
+			vector: vec![1.0, 0.0].into(),
 			..Default::default()
 		};
 		old.set_text(old_text.into());
 		old.dirty = false;
 		g.get_mut(&root).unwrap().entities.insert("old".into(), old);
 		g.index_entity("old", &root);
-		g.entity_idx.insert("old".into(), vec![1.0, 0.0]);
+		g.entity_idx.insert("old".into(), vec![1.0, 0.0].into());
 		let rid = reason_id("old", "", ReasonKind::Rephrase, new_text, "");
 		add_reason(
 			g.get_mut(&root).unwrap(),
@@ -802,7 +802,7 @@ mod tests {
 		let g = g.read();
 		let e = g.kerns.get(&kid).unwrap().entities.get("e1").unwrap();
 		assert!(!e.dirty, "dirty must be cleared after reembed");
-		assert_eq!(e.vector, vec![0.1, 0.2, 0.3]);
+		assert_eq!(e.vector[..], [0.1, 0.2, 0.3]);
 	}
 
 	#[test]
@@ -814,7 +814,7 @@ mod tests {
 			"a".into(),
 			Entity {
 				id: "a".into(),
-				vector: vec![1.0, 0.0],
+				vector: vec![1.0, 0.0].into(),
 				..Default::default()
 			},
 		);
@@ -822,7 +822,7 @@ mod tests {
 			"b".into(),
 			Entity {
 				id: "b".into(),
-				vector: vec![0.0, 1.0],
+				vector: vec![0.0, 1.0].into(),
 				..Default::default()
 			},
 		);
@@ -847,7 +847,7 @@ mod tests {
 		assert!(!r.dirty, "dirty reason cleared once recomputed");
 		assert_eq!(
 			r.vector,
-			vec![0.5, 0.5],
+			vec![0.5, 0.5].into(),
 			"reason vector is the mean of endpoint vectors"
 		);
 	}
@@ -861,7 +861,7 @@ mod tests {
 			"target".into(),
 			Entity {
 				id: "target".into(),
-				vector: vec![1.0, 0.0, 0.0],
+				vector: vec![1.0, 0.0, 0.0].into(),
 				..Default::default()
 			},
 		);
@@ -869,7 +869,7 @@ mod tests {
 			"asker".into(),
 			Entity {
 				id: "asker".into(),
-				vector: vec![0.0, 1.0, 0.0],
+				vector: vec![0.0, 1.0, 0.0].into(),
 				..Default::default()
 			},
 		);
@@ -880,7 +880,7 @@ mod tests {
 				from: "asker".into(),
 				to: String::new(),
 				kind: ReasonKind::Question,
-				vector: vec![1.0, 0.0, 0.0],
+				vector: vec![1.0, 0.0, 0.0].into(),
 				..Default::default()
 			},
 		);
@@ -910,7 +910,7 @@ mod tests {
 			"target".into(),
 			Entity {
 				id: "target".into(),
-				vector: vec![1.0, 0.0],
+				vector: vec![1.0, 0.0].into(),
 				..Default::default()
 			},
 		);
@@ -921,7 +921,7 @@ mod tests {
 				from: "x".into(),
 				to: "y".into(),
 				kind: ReasonKind::Question,
-				vector: vec![1.0, 0.0],
+				vector: vec![1.0, 0.0].into(),
 				..Default::default()
 			},
 		);

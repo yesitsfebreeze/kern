@@ -113,7 +113,7 @@ fn build(n: usize, eligible_pct: usize) -> GraphGnn {
 		let fact = eligible && i % 5 == 0;
 		let mut e = Entity {
 			id: format!("e{i:07}"),
-			vector: sparse_vec(&w),
+			vector: sparse_vec(&w).into(),
 			kind: if fact {
 				EntityKind::Fact
 			} else {

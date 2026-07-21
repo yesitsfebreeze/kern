@@ -774,7 +774,7 @@ mod query_filter_tests {
 				1.0e9,
 				EntityKind::Fact,
 			);
-			e.vector = vec![1.0, 0.0];
+			e.vector = vec![1.0, 0.0].into();
 			e.conf_alpha = 1.0e9;
 			e.score = 1.0e9;
 			e.access_count.increment("attacker", u64::MAX);
@@ -788,7 +788,7 @@ mod query_filter_tests {
 			let kid = g.root.id.clone();
 			for id in local_ids {
 				let mut e = mk_entity(id, "local knowledge", 0.0, EntityKind::Fact);
-				e.vector = vec![1.0, 0.0];
+				e.vector = vec![1.0, 0.0].into();
 				// Same neutral prior a stripped remote lands on, so remoteness is the
 				// ONLY difference between the two candidates.
 				e.conf_alpha = 0.0;
@@ -800,7 +800,7 @@ mod query_filter_tests {
 					.entities
 					.insert((*id).into(), e);
 				g.index_entity(id, &kid);
-				g.entity_idx.insert((*id).into(), vec![1.0, 0.0]);
+				g.entity_idx.insert((*id).into(), vec![1.0, 0.0].into());
 			}
 			g.register(Kern::new(PHANTOM, &g.root.id));
 			g

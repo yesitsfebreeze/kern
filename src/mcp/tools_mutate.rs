@@ -758,7 +758,7 @@ mod tests {
 			"a".into(),
 			Entity {
 				id: "a".into(),
-				vector: vec![1.0, 0.0],
+				vector: vec![1.0, 0.0].into(),
 				..Default::default()
 			},
 		);
@@ -766,7 +766,7 @@ mod tests {
 			"b".into(),
 			Entity {
 				id: "b".into(),
-				vector: vec![0.0, 1.0],
+				vector: vec![0.0, 1.0].into(),
 				..Default::default()
 			},
 		);

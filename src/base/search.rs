@@ -215,7 +215,7 @@ mod tests {
 			let x = (i as f64 * 0.3).sin() as f32;
 			let y = (i as f64 * 0.3).cos() as f32;
 			let z = (i % 5) as f32 * 0.2;
-			g.entity_idx.insert(format!("e{i}"), vec![x, y, z]);
+			g.entity_idx.insert(format!("e{i}"), vec![x, y, z].into());
 		}
 		g
 	}
@@ -235,7 +235,7 @@ mod tests {
 				id.clone(),
 				Entity {
 					id,
-					vector: v,
+					vector: v.into(),
 					..Default::default()
 				},
 			);
@@ -335,8 +335,8 @@ mod tests {
 	#[test]
 	fn search_reasons_ranks_by_proximity_and_guards_empty() {
 		let mut g = GraphGnn::new();
-		g.reason_idx.insert("r_x".into(), vec![1.0, 0.0]);
-		g.reason_idx.insert("r_y".into(), vec![0.0, 1.0]);
+		g.reason_idx.insert("r_x".into(), vec![1.0, 0.0].into());
+		g.reason_idx.insert("r_y".into(), vec![0.0, 1.0].into());
 
 		let hits = search_reasons_all_unlocked(&g, &[1.0, 0.0], 5);
 		assert!(!hits.is_empty(), "reason search returns hits");

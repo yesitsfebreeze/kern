@@ -187,7 +187,7 @@ pub fn merge_duplicate(
 		kind: ReasonKind::Rephrase,
 		dirty: false,
 		text: new_text.to_string(),
-		vector: Vec::new(),
+		vector: Embedding::default(),
 		score: 0.5,
 		score_lamport: 0,
 		score_producer: String::new(),
@@ -346,7 +346,7 @@ fn commit_reason(
 	to: &str,
 	kind: ReasonKind,
 	score: f64,
-	vec: Vec<f32>,
+	vec: Embedding,
 ) -> String {
 	let rid = reason_id(from, to, kind, "", "");
 	let reason = Reason {
@@ -394,9 +394,9 @@ fn add_similarity_reason(
 			.unwrap_or_default();
 
 		let vec = if !thought_vec.is_empty() && !nearest_vec.is_empty() {
-			average_vec(thought_vec, &nearest_vec)
+			Embedding::from(average_vec(thought_vec, &nearest_vec))
 		} else {
-			Vec::new()
+			Embedding::default()
 		};
 
 		let rid = commit_reason(
@@ -430,8 +430,8 @@ fn add_provenance_reason(
 		.map(|t| t.vector.clone());
 
 	let vec = match (&doc_vec, thought_vec.is_empty()) {
-		(Some(dv), false) => average_vec(thought_vec, dv),
-		_ => Vec::new(),
+		(Some(dv), false) => Embedding::from(average_vec(thought_vec, dv)),
+		_ => Embedding::default(),
 	};
 
 	let rid = commit_reason(
@@ -528,9 +528,9 @@ fn supersede(
 	g.gnn_entity_idx.delete(&old_id);
 
 	let vec = if !thought_vec.is_empty() && !old_vec.is_empty() {
-		average_vec(thought_vec, &old_vec)
+		Embedding::from(average_vec(thought_vec, &old_vec))
 	} else {
-		Vec::new()
+		Embedding::default()
 	};
 
 	vec![commit_reason(
@@ -624,9 +624,9 @@ pub fn supersede_by_contradiction(
 	g.gnn_entity_idx.delete(old_id);
 
 	let vec = if !new_vec.is_empty() && !old_vec.is_empty() {
-		average_vec(&new_vec, &old_vec)
+		Embedding::from(average_vec(&new_vec, &old_vec))
 	} else {
-		Vec::new()
+		Embedding::default()
 	};
 	vec![commit_reason(
 		g,
@@ -922,7 +922,7 @@ mod tests {
 	fn ent(id: &str, vector: Vec<f32>) -> Entity {
 		Entity {
 			id: id.into(),
-			vector,
+			vector: vector.into(),
 			statements: vec!["x".into()],
 			..Default::default()
 		}
@@ -1016,11 +1016,11 @@ mod tests {
 		let old = Entity {
 			id: "old".into(),
 			external_id: "ext1".into(),
-			vector: vec![1.0, 0.0],
+			vector: vec![1.0, 0.0].into(),
 			status: EntityStatus::Active,
 			..Default::default()
 		};
-		g.entity_idx.insert("old".into(), vec![1.0, 0.0]);
+		g.entity_idx.insert("old".into(), vec![1.0, 0.0].into());
 		if let Some(k) = g.get_mut(&kid) {
 			k.entities.insert("old".into(), old);
 			k.source_index.insert("ext1".into(), "old".into());
@@ -1093,17 +1093,17 @@ mod tests {
 		let old = Entity {
 			id: "old".into(),
 			external_id: "ext1".into(),
-			vector: vec![1.0, 0.0],
+			vector: vec![1.0, 0.0].into(),
 			status: EntityStatus::Active,
 			created_at: Some(std::time::SystemTime::now()),
 			..Default::default()
 		};
-		g.entity_idx.insert("old".into(), vec![1.0, 0.0]);
+		g.entity_idx.insert("old".into(), vec![1.0, 0.0].into());
 		let new_from = std::time::SystemTime::now();
 		let new = Entity {
 			id: "new".into(),
 			external_id: "ext1".into(),
-			vector: vec![1.0, 0.0],
+			vector: vec![1.0, 0.0].into(),
 			status: EntityStatus::Active,
 			valid_from: Some(new_from),
 			..Default::default()
@@ -1143,12 +1143,12 @@ mod tests {
 		let kid = g.root.id.clone();
 		let old = Entity {
 			id: "old".into(),
-			vector: vec![1.0, 0.0],
+			vector: vec![1.0, 0.0].into(),
 			status: EntityStatus::Active,
 			created_at: Some(std::time::SystemTime::now()),
 			..Default::default()
 		};
-		g.entity_idx.insert("old".into(), vec![1.0, 0.0]);
+		g.entity_idx.insert("old".into(), vec![1.0, 0.0].into());
 		if let Some(k) = g.get_mut(&kid) {
 			k.entities.insert("old".into(), old);
 		}
@@ -1156,7 +1156,7 @@ mod tests {
 
 		let new = Entity {
 			id: "new".into(),
-			vector: vec![0.99, 0.01],
+			vector: vec![0.99, 0.01].into(),
 			status: EntityStatus::Active,
 			created_at: Some(std::time::SystemTime::now()),
 			..Default::default()
@@ -1188,7 +1188,7 @@ mod tests {
 		let kid = g.root.id.clone();
 		let new = Entity {
 			id: "new".into(),
-			vector: vec![1.0, 0.0],
+			vector: vec![1.0, 0.0].into(),
 			..Default::default()
 		};
 		assert!(supersede_by_contradiction(&mut g, &kid, "ghost", new).is_empty());
@@ -1244,6 +1244,28 @@ mod tests {
 		);
 	}
 
+	// The incremental sibling of `rebuild_index_shares_the_map_s_vector_allocation`:
+	// `commit_entity` indexes on insert rather than waiting for a rebuild, and it
+	// has to hand the index the entity's own allocation too or a live graph pays
+	// the second copy back one entity at a time.
+	#[test]
+	fn commit_entity_indexes_the_entity_s_own_vector_allocation() {
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		let r = accept(&mut g, &root, ent("a", vec![1.0, 0.0, 0.0]), "");
+		assert!(
+			!r.deduped,
+			"the fixture only holds while the entity is placed"
+		);
+		let kid = g.kern_of_entity(&r.entity_id).expect("indexed").to_string();
+		let e = &g.loaded(&kid).expect("kern").entities[&r.entity_id];
+		assert_eq!(
+			std::sync::Arc::strong_count(&e.vector),
+			2,
+			"entity_idx must share the committed entity's vector, not copy it"
+		);
+	}
+
 	#[test]
 	fn duplicate_vector_is_deduped() {
 		let mut g = GraphGnn::new();
@@ -1257,7 +1279,7 @@ mod tests {
 	fn ent_text(id: &str, vector: Vec<f32>, text: &str) -> Entity {
 		Entity {
 			id: id.into(),
-			vector,
+			vector: vector.into(),
 			statements: vec![text.into()],
 			chunks: vec![ChunkPart {
 				kind: ChunkPartKind::StatementRef,

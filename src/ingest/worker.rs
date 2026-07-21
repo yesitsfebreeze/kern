@@ -588,7 +588,8 @@ mod tests {
 		{
 			let mut g = graph.write();
 			g.entity_idx.delete(&sid);
-			g.gnn_entity_idx.insert(sid.clone(), STUB_VEC.to_vec());
+			g.gnn_entity_idx
+				.insert(sid.clone(), STUB_VEC.to_vec().into());
 			assert!(
 				g.entity_idx.is_empty(),
 				"fixture is only honest while gate 1 has nothing left to hit"

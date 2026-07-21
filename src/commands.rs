@@ -1165,7 +1165,7 @@ mod entry_point_tests {
 			let root_id = g.root.id.clone();
 			let mut k = Kern::new("k1", &root_id);
 			let mut e = mk_entity("e1", "stamped on save", 1.0, EntityKind::Fact);
-			e.vector = vec![0.25; 4];
+			e.vector = vec![0.25; 4].into();
 			k.entities.insert("e1".into(), e);
 			g.register(k);
 			super::save_graph_unguarded(&g);
@@ -1411,7 +1411,7 @@ mod entry_point_tests {
 			k.graviton_vec = vec![1.0, 0.0];
 			for id in &entity_ids {
 				let mut e = mk_entity(id, id, 1.0, EntityKind::Claim);
-				e.vector = vec![0.0, 1.0];
+				e.vector = vec![0.0, 1.0].into();
 				k.entities.insert(id.clone(), e);
 			}
 			g.write().register(k);
@@ -1460,7 +1460,7 @@ mod entry_point_tests {
 				format!("e{i}"),
 				Entity {
 					id: format!("e{i}"),
-					vector: v,
+					vector: v.into(),
 					status: EntityStatus::Active,
 					..Default::default()
 				},

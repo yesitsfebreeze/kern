@@ -2,6 +2,52 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — item 83's double-storage half: one vector, shared, 185.6 MB off
+  the resident total, paid for with 9% on the index walk.
+
+  Item 29 measured that the kern map was the largest resident holder and said
+  why: every vector was stored twice, once in `Kern::entities`/`reasons` and
+  once in the index pointing at it. The premise was checked before anything was
+  built, because six of nine slices that day ended somewhere other than their
+  title pointed. It held — `index_kern_into` passed `t.vector.clone()` to each
+  index and `HnswNode` kept that clone verbatim under the shipped default
+  `QuantizationMode::None`, so the two really were the same floats rather than a
+  normalised copy and a raw one. Under the opt-in `int8` mode the node's float
+  vector was already empty; this change buys nothing there, which is worth
+  knowing before someone re-measures under `kern compress`.
+
+  `Entity::vector`, `Entity::gnn_vector` and `Reason::vector` are now
+  `Embedding = Arc<[f32]>`. `Arc` beat the alternatives on the risk it does
+  *not* carry: it has no `DerefMut`, so an in-place write through one holder
+  that the other would see is a compile error, and the compiler enumerated the
+  ~20 write sites rather than a human doing it. A slab index would have made the
+  same aliasing bug silently expressible and would additionally be meaningless
+  outside the owning graph, where entities are cloned, merged from peers and
+  spilled cold. Borrowing was never available: one struct owns both the map and
+  the index.
+
+  **The trade, stated rather than buried.** Hot RSS at 50k entities x dim 384
+  plus 25k reasons: 510.2 MB → 324.6 MB, −185.6 MB, −36.4%, ten interleaved
+  before/after process pairs with 0.5 MB of spread. Query cost, same runs:
+  +17 µs median on a ~190 µs index walk, +9%, slower in 11 of 15 pairs. Not the
+  refcount — never read on the hot path — and not the indirection; most likely
+  locality, since the index's vectors were allocated together during its build
+  and now point into the scattered kern map. That mechanism is a hypothesis the
+  measurement cannot settle: the host ran at load average 4-6 and the before-arm
+  spread was the same order as the effect.
+
+  Recall is unchanged to four decimals (0.9306 / 0.9722 / 0.9471), which is the
+  evidence that the two copies were identical and nothing depended on a
+  difference between them.
+
+  Supersedes item 29's "halving that needs shared ownership ... across ~20 write
+  sites" as unfunded. Item 83 stays open on the half that matters most: nothing
+  bounds the resident set, and a smaller O(N) term is a later ceiling, not a
+  ceiling.
+
+  Decided by: name-the-tradeoff — the memory win does not get to be reported
+  without the latency it cost.
+
 - 2026-07-21 — merged item 29, which closed unbuilt and shipped a different fix.
   176 + 1 + this one = 178, by the union rebuild rather than a hand-spliced
   conflict hunk.

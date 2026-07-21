@@ -453,9 +453,9 @@ mod tests {
 		let mut g = GraphGnn::new();
 		let kid = g.root.id.clone();
 		let mut local = mk_entity("eX", "x", 1.0, EntityKind::Fact);
-		local.vector = vec![1.0, 0.0];
+		local.vector = vec![1.0, 0.0].into();
 		local.status = EntityStatus::Active;
-		g.entity_idx.insert("eX".into(), vec![1.0, 0.0]);
+		g.entity_idx.insert("eX".into(), vec![1.0, 0.0].into());
 		g.kerns
 			.get_mut(&kid)
 			.unwrap()
@@ -503,8 +503,8 @@ mod tests {
 		let kid = g.root.id.clone();
 
 		let mut remote = mk_entity("eV", "remote thought", 1.0, EntityKind::Fact);
-		remote.vector = vec![0.0, 1.0];
-		remote.gnn_vector = vec![1.0, 0.0];
+		remote.vector = vec![0.0, 1.0].into();
+		remote.gnn_vector = vec![1.0, 0.0].into();
 		assert!(merge_remote_entity(&mut g, &kid, remote));
 
 		let hits: Vec<String> = crate::base::search::search_all_unlocked(&g, &[0.0, 1.0], 5)
@@ -530,7 +530,7 @@ mod tests {
 		let kid = g.root.id.clone();
 
 		let mut remote = mk_entity("eS", "dead on arrival", 1.0, EntityKind::Fact);
-		remote.vector = vec![0.0, 1.0];
+		remote.vector = vec![0.0, 1.0].into();
 		remote.status = EntityStatus::Superseded;
 		assert!(merge_remote_entity(&mut g, &kid, remote));
 

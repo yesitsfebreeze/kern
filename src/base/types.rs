@@ -277,8 +277,8 @@ pub struct Entity {
 	pub status: EntityStatus,
 	pub statements: Vec<String>,
 	pub chunks: Vec<ChunkPart>,
-	pub vector: Vec<f32>,
-	pub gnn_vector: Vec<f32>,
+	pub vector: Embedding,
+	pub gnn_vector: Embedding,
 	pub score: f64,
 	pub conf_alpha: f32,
 	pub conf_beta: f32,
@@ -424,7 +424,7 @@ pub struct Reason {
 	pub to_net_id: String,
 	pub kind: ReasonKind,
 	pub text: String,
-	pub vector: Vec<f32>,
+	pub vector: Embedding,
 	pub score: f64,
 	pub score_lamport: u64,
 	pub score_producer: String,
@@ -572,6 +572,19 @@ impl Kern {
 	}
 }
 
+/// One allocation per embedding, shared between the kern map and whichever
+/// vector index holds it — the two copies ROADMAP item 83 removed.
+///
+/// Sharing is what makes an aliasing bug conceivable, and the type is what
+/// rules it out: `Arc<[f32]>` has no `DerefMut`, so a holder can only replace
+/// its whole handle. Writing through one is a compile error, not a race:
+///
+/// ```compile_fail
+/// let mut v: kern::base::types::Embedding = vec![1.0f32, 0.0].into();
+/// v[0] = 2.0;
+/// ```
+pub type Embedding = std::sync::Arc<[f32]>;
+
 #[cfg(test)]
 pub(crate) fn mk_entity(id: &str, text: &str, heat: f64, kind: EntityKind) -> Entity {
 	let mut e = Entity {
@@ -587,8 +600,8 @@ pub(crate) fn mk_entity(id: &str, text: &str, heat: f64, kind: EntityKind) -> En
 			text: String::new(),
 			index: 0,
 		}],
-		vector: vec![0.0; 8],
-		gnn_vector: Vec::new(),
+		vector: vec![0.0; 8].into(),
+		gnn_vector: Vec::new().into(),
 		score: 0.0,
 		conf_alpha: 2.0,
 		conf_beta: 1.0,

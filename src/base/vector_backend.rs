@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use super::diskann::DiskIndex;
 use super::hnsw::{HnswHit, HnswIndex};
+use super::types::Embedding;
 use super::util::cmp_rank;
 use crate::quant::QuantizationMode;
 
@@ -65,7 +66,7 @@ impl VectorBackend {
 		}
 	}
 
-	pub fn insert(&mut self, id: String, vec: Vec<f32>) {
+	pub fn insert(&mut self, id: String, vec: Embedding) {
 		match self {
 			Self::Resident(h) => h.insert(id, vec),
 			Self::Disk {
@@ -177,7 +178,7 @@ mod tests {
 	fn disk_backend_finds_an_insert_made_after_the_snapshot() {
 		let (snap, _tmp) = snapshot_over(0..50);
 		let mut be = VectorBackend::disk(snap, QuantizationMode::None);
-		be.insert("e999".into(), vec_of(999));
+		be.insert("e999".into(), vec_of(999).into());
 		let hits = be.search(&vec_of(999), 5, 96);
 		assert_eq!(
 			hits.first().map(|h| h.id.as_str()),
@@ -203,7 +204,7 @@ mod tests {
 		let (snap, _tmp) = snapshot_over(0..40);
 		let mut be = VectorBackend::disk(snap, QuantizationMode::None);
 		for i in 40..80 {
-			be.insert(format!("e{i}"), vec_of(i));
+			be.insert(format!("e{i}"), vec_of(i).into());
 		}
 		assert_eq!(
 			be.search(&vec_of(63), 5, 128).first().map(|h| h.id.clone()),
@@ -221,7 +222,7 @@ mod tests {
 		let mut be = VectorBackend::disk(snap, QuantizationMode::None);
 		assert_eq!(be.len(), 50, "fresh snapshot len");
 		be.delete("e5");
-		be.insert("e500".into(), vec_of(500));
+		be.insert("e500".into(), vec_of(500).into());
 		assert_eq!(be.len(), 50, "49 live snapshot + 1 delta");
 		assert!(!be.is_empty());
 	}
