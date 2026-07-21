@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::base::log_throttle::LogThrottle;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -316,12 +319,18 @@ fn handle_pulse(d: &Deps, msg: GossipMessage) {
 	};
 
 	let mut g = d.graph.write();
-	let kern_id = if g.kerns.contains_key(&pulse.kern_id) {
-		pulse.kern_id.clone()
-	} else {
-		g.root.id.clone()
-	};
-	tick::pulse::pulse(q, &mut g, &kern_id, pulse.strength);
+	// SECURITY: an unknown kern id used to fall back to the LOCAL ROOT, so a peer
+	// sending a garbage id deposited heat straight into it. No design intent
+	// justified that. Reject the id, confine deposits to `remote-*`, and clamp the
+	// strength — the wire carries an arbitrary f64 and nothing else bounded it.
+	if !crate::base::merge::is_remote_kern_id(&pulse.kern_id) {
+		return;
+	}
+	if !g.kerns.contains_key(&pulse.kern_id) {
+		return;
+	}
+	let strength = pulse.strength.clamp(0.0, MAX_REMOTE_PULSE);
+	tick::pulse::pulse(q, &mut g, &pulse.kern_id, strength);
 }
 
 fn handle_peer_exchange(d: &Deps, msg: GossipMessage) {
@@ -404,7 +413,7 @@ fn handle_crdt_delta(d: &Deps, msg: GossipMessage) {
 				let Some(score) = decode_lww::<f64>(&delta.lww_value) else {
 					return;
 				};
-				for kern_id in g.all_ids() {
+				for kern_id in remote_kern_ids(&g) {
 					if let Some(kern) = g.get_mut(&kern_id) {
 						if let Some(r) = kern.reasons.get_mut(&delta.object_id) {
 							if lww_wins(
@@ -425,7 +434,7 @@ fn handle_crdt_delta(d: &Deps, msg: GossipMessage) {
 				let Some(valid) = decode_lww::<Option<SystemTime>>(&delta.lww_value) else {
 					return;
 				};
-				for kern_id in g.all_ids() {
+				for kern_id in remote_kern_ids(&g) {
 					if let Some(kern) = g.get_mut(&kern_id) {
 						if let Some(t) = kern.entities.get_mut(&delta.object_id) {
 							if lww_wins(
@@ -454,13 +463,56 @@ fn handle_crdt_delta(d: &Deps, msg: GossipMessage) {
 	}
 }
 
+const MAX_REMOTE_PULSE: f64 = 1.0;
+const FORGED_WARN_SECS: u64 = 300;
+static FORGED_ID: AtomicU64 = AtomicU64::new(0);
+static FORGED_WARN: LogThrottle = LogThrottle::new(FORGED_WARN_SECS);
+
+// Remote bodies rejected because the text does not hash to the claimed id.
+pub fn forged_id_rejected() -> u64 {
+	FORGED_ID.load(Ordering::Relaxed)
+}
+
+// Every creation path mints `id = content_hash(text)` (`src/ingest/place.rs`,
+// `src/ingest/file_watcher.rs`), and nothing in production ever appends to
+// `statements`, so `text()` reproduces exactly what was hashed. Only ids of that
+// SHAPE are judged: an id that is not a 64-char lowercase hex digest was never a
+// content hash, so failing it would be an assertion about a format we do not
+// define — and dropping legitimate remote knowledge is worse than the exposure.
+fn id_matches_body(e: &crate::base::types::Entity) -> bool {
+	let looks_hashed = e.id.len() == 64
+		&& e
+			.id
+			.bytes()
+			.all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
+	if !looks_hashed {
+		return true;
+	}
+	crate::base::util::content_hash(&e.text()) == e.id
+}
+
+// Only `remote-*` kerns may be reached by an unauthenticated LWW delta. Reaching a
+// LOCAL row is intended for the G-Counters — ids are content hashes, so the same
+// fact is a local row on both nodes and slot-max merging is what makes counts
+// converge — but an LWW write buys federation nothing there and lets any peer
+// overwrite local truth.
+fn remote_kern_ids(g: &GraphGnn) -> Vec<String> {
+	g.all_ids()
+		.into_iter()
+		.filter(|k| crate::base::merge::is_remote_kern_id(k))
+		.collect()
+}
+
 fn decode_lww<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
 	bincode::serde::decode_from_slice(bytes, bincode::config::standard())
 		.ok()
 		.map(|(v, _)| v)
 }
 
-// Content↔id binding is NOT verified — network scoping + GOSSIP_REMOTE_KERN_ENTITY_CAP bound it.
+// Content-addressing is the invariant every other federation guarantee rests on:
+// it is why merge is safe as set-union and why a peer "cannot alter text you hold".
+// A body whose text does not hash to its claimed id breaks all of it, so it is
+// dropped on receipt. Cheap, and needs no authentication.
 fn handle_entity_sync(d: &Deps, msg: GossipMessage) {
 	let payload = match &msg.payload {
 		GossipPayload::EntitySync(p) => p,
@@ -480,6 +532,20 @@ fn handle_entity_sync(d: &Deps, msg: GossipMessage) {
 	}
 	let mut changed = false;
 	for e in &payload.entities {
+		if !id_matches_body(e) {
+			let total = FORGED_ID.fetch_add(1, Ordering::Relaxed) + 1;
+			if FORGED_WARN.allow() {
+				tracing::warn!(
+					target: "kern.gossip",
+					origin = %msg.origin,
+					id = %e.id,
+					total_rejected = total,
+					"remote entity body does not hash to its claimed id; dropped \
+					 (further forgeries counted, not logged)"
+				);
+			}
+			continue;
+		}
 		d.node.ledger.put_thought(&e.id, &msg.origin);
 		changed |= crate::base::merge::merge_remote_entity(&mut g, &phantom, e.clone());
 	}
@@ -899,5 +965,66 @@ mod tests {
 			}),
 		};
 		handle_pulse(&d, msg);
+	}
+	#[test]
+	fn a_real_ingested_entity_satisfies_the_id_body_check() {
+		// The guard's blast radius: if this invariant does not hold on the real
+		// creation path, the check drops legitimate remote knowledge. Build through
+		// the shipped constructor rather than by hand.
+		let text = "Ada keeps her bicycle in the garden shed";
+		let e = crate::base::types::Entity {
+			id: crate::base::util::content_hash(text),
+			statements: vec![text.to_string()],
+			chunks: vec![crate::base::types::ChunkPart {
+				kind: crate::base::types::ChunkPartKind::StatementRef,
+				text: String::new(),
+				index: 0,
+			}],
+			..Default::default()
+		};
+		assert_eq!(e.text(), text, "text() must reproduce what was hashed");
+		assert!(
+			id_matches_body(&e),
+			"a legitimate entity must never be dropped"
+		);
+	}
+
+	#[test]
+	fn a_body_that_does_not_hash_to_its_id_is_rejected() {
+		let mut e = crate::base::types::Entity {
+			id: crate::base::util::content_hash("the original text"),
+			statements: vec!["attacker-substituted text".to_string()],
+			chunks: vec![crate::base::types::ChunkPart {
+				kind: crate::base::types::ChunkPartKind::StatementRef,
+				text: String::new(),
+				index: 0,
+			}],
+			..Default::default()
+		};
+		assert!(
+			!id_matches_body(&e),
+			"filing arbitrary text under a content-addressed id breaks every other guarantee"
+		);
+		// An id that was never a content hash is not judged — we do not define that format.
+		e.id = "not-a-hash".into();
+		assert!(id_matches_body(&e), "a non-hashed id is left alone");
+	}
+
+	#[test]
+	fn remote_kern_ids_excludes_local_kerns() {
+		let mut g = GraphGnn::new();
+		g.register(crate::base::types::Kern::new("remote-netA-k1", &g.root.id));
+		g.register(crate::base::types::Kern::new("local-kern", &g.root.id));
+
+		let ids = remote_kern_ids(&g);
+		assert!(ids.iter().any(|k| k == "remote-netA-k1"));
+		assert!(
+			!ids.iter().any(|k| k == "local-kern"),
+			"an unauthenticated LWW delta must never reach a local row"
+		);
+		assert!(
+			!ids.iter().any(|k| k == &g.root.id),
+			"least of all the root kern"
+		);
 	}
 }
