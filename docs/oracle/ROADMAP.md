@@ -325,38 +325,6 @@ item 22 was named for. The config key is the load-bearing half: per-*source*
 retention is a policy, and a policy expressed only as a per-call argument has to
 be remembered by every caller.
 
-### 91. Retention is enforced on one read surface of two `[retrieval]`
-
-**Found 2026-07-21, walking item 18's "guard the id path" bullet against the
-source.** `drop_expired` has exactly one call site — `src/retrieval/query.rs:196`,
-the ranked path. The id path does not go through it: `tool_query` returns
-`entity_detail_by_id(&g, &p.id)` and returns (`src/mcp/tools_query.rs:129-137`)
-before `build_query_options` is ever built, and neither `entity_detail_by_id`
-(`:306`) nor `find_entity_by_prefix` (`src/base/search.rs:178`) nor the
-`cold_get` fallback consults `valid_until`. So a thought ingested with
-`--retention-secs 60` vanishes from `kern query` after the deadline and is still
-returned, in full, by `kern query --id` / `kern get` and by MCP `query{id}`.
-
-**It does not heal.** GC is heat-based and never reads `valid_until`
-(`is_cold_victim`, `src/tick/stigmergy.rs:35-46`), and its first clause makes
-non-superseded local `Fact`s and `Document`s immune outright. The CLI mints at
-`clamp_confidence(1.0, "user")`, i.e. `Fact` — so a CLI-ingested fact with a
-retention is expired, permanently resident, and permanently readable by id.
-`e2e/test_retention.py` proves the round trip on `kern query` only and never
-asks the id path, which is why item 22 could close green over this.
-
-Ranks here, beside 88 and 89, for the reason 88 gives: it is a correctness gap in
-a shipped flag, reachable only by opting into retention, so it is not tier 1.
-Distinct from 88 — that one is the *write* half (a retention landing on a
-duplicate is dropped), this is the *read* half (a retention that was written is
-ignored). The fix is one filter at one call site, plus one decision: item 17
-skips `drop_expired` "when the query names its own instant so point-in-time
-history stays queryable", and the id path names no instant, so by that rule it
-should filter. The guard must be expiry-only, **not** the full `matches_filter`
-or `filter_delivery` — `kern get` on a superseded thought is a legitimate read
-and `include_history` depends on it. Closing this also gives item 18's fourth
-bullet the filtered id path it needs, without doing item 18.
-
 ### 24. RPC socket has no auth `[surface]`
 
 `FEATURES.md:645-646`. The missing auth is the same boundary as 18's
@@ -1328,6 +1296,35 @@ an overall eval score that makes specialization worth funding.
 
 ## Closed and verified — do not re-open
 
+- **Retention reaches the id read surface** — was item 91 `[retrieval]` (the
+  second item to carry that number; the `[ingest]` one is still open), closed
+  2026-07-21. Every claim in the item was re-verified against source first and
+  all of them held. The item prescribed "one filter at one call site"; that was
+  **not** what shipped, and the reason is the decision the item deferred. An
+  explicit id names one row. The ranked path answers "what is true now", so it
+  drops; `kern get <id>` answers "what is this row", and replying
+  `thought not found` for a row that is on disk — and that GC never collects,
+  since a non-superseded `Fact` is immune (`is_cold_victim`,
+  `src/tick/stigmergy.rs:35-46`) — is a false statement the caller has no way to
+  falsify. So the id path **serves and flags**: `entity_detail`
+  (`src/mcp/tools_query.rs:321`) emits `expired` and `valid_until` whenever a
+  retention is set, and `kern get` prints an `Expired:` line
+  (`src/commands/graph_ops.rs:67`). Filtering lost because the surface item 9
+  deliberately widened — prefix plus cold-tier fallback — would have been
+  silently narrowed by it to nothing a caller could distinguish from a typo.
+  Proven by revert: dropping the two lines in `entity_detail` fails
+  `graph_ops::tests::the_id_path_flags_an_expired_thought_instead_of_hiding_it`
+  on `left: Null, right: Bool(true)` and fails
+  `e2e/test_retention.py::test_an_expired_fact_is_served_by_id_but_flagged` on
+  a real `kern get` printing the expired fact with no marker. The bi-temporal
+  escape is now pinned at the call site too, not only on the predicate:
+  `retrieve_drops_an_expired_claim_from_the_default_path`
+  (`src/retrieval/query.rs:457`) runs the same corpus twice and asserts an
+  `as_of` query still returns the since-expired claim; neutering the early
+  return in `drop_expired` fails that half alone. What this did **not** buy is
+  item 18's fourth bullet — that bullet wants ACL enforcement on the id path,
+  and an ACL denial cannot be expressed as a flag on the row it is denying, so
+  it still needs its own guard.
 - **A deduped ingest carries its retention** — was item 88, closed 2026-07-21.
   There were two dedup gates and both swallowed it; both now funnel through one
   site. `accept::merge_duplicate` takes the incoming `valid_until` and calls
