@@ -154,6 +154,43 @@ safe, and neither belongs to this item.
 
 The item does not close on the read side alone.
 
+### 91. The second dedup gate lies about what it did, twice `[ingest]`
+
+Found 2026-07-21 while closing item 88, which fixed what that gate did to a
+*retention* and deliberately left these two alone — they are older, wider, and
+not what item 88 was scoped to. Both are on the plain ingest path — no flag, no
+retention, no gossip — and both fail without a word.
+
+**It reports `committed` when it deduped.** `place_document` returns
+`Some(existing_id)` only for the *first* gate (`src/ingest/place.rs:101`); every
+other exit returns `Some(doc_id)` (`:137`), including the one where
+`accept_with_dedup` deduped. `finalize_doc_identity` decides dedup by
+`surviving_id != content_id` (`src/ingest/worker.rs:208`), so an id equal to the
+content hash reads as a fresh commit. The caller is told it stored a new
+document when the document was merged into another one, and is handed an id that
+belongs to nothing.
+
+**It puts the discarded id in the lexical index.** `place_document:134` and
+`place_chunks:206` both `lex.insert` unconditionally, after a branch that may
+have dropped the entity whole. `merge` resolves seeds through
+`find_entity_ref_in_graph` (`src/retrieval/merge.rs:24`) and silently drops what
+it cannot find, so this yields no phantom result — it spends a slot of the BM25
+top-k on a ghost, quietly lowering effective lexical recall. That the current
+e2e floors (0.9306 / 0.9722 / 0.9471) did not move is a statement about a
+36-fact corpus, not a bound on the effect.
+
+Ranks below item 9 because item 9 can lose a write and this cannot, and above
+tier 3 because it needs no opting in: the second gate is reached whenever the
+GNN-propagated vector of an existing entity is nearer the incoming raw vector
+than that entity's own raw vector is — `find_duplicate` searches `entity_idx`
+alone (`src/ingest/dedup.rs:14-16`), `find_duplicate_hit` searches
+`entity_idx ∪ gnn_entity_idx` (`src/base/search.rs:97-107`), and
+`tick/gnn_propagate.rs:169` fills the second one on the ordinary tick. The two
+halves are one fix: have `place_document` return the id that actually entered
+the graph, and gate the `lex.insert` on `!result.deduped` — the same `deduped`
+flag item 88 already threads to the line above it. Cheap, but it changes what a
+caller is told, so it wants a test on the reported status, not only on the store.
+
 ---
 
 # Tier 3 — the embeddable-endpoint track
@@ -224,24 +261,6 @@ auto-distilled claims out of retrieval until a human curates them. No
 `ReviewState`, `exclude_pending` or `promote` exists in `src/`. Requires 18's
 `QueryOptions` work first — review filters are more `matches_filter` predicates.
 
-### 88. A retention that lands on a duplicate is silently dropped `[ingest]`
-
-Item 22 gave `retention_secs` a writer, but only where an entity is *created*.
-`place_document` and `place_chunks` both return through `find_duplicate` →
-`update_existing_entity` (`src/ingest/dedup.rs:23`) before they ever reach
-`new_statement_entity`, and that merge touches text, confidence and kind — never
-`valid_until`. So ingesting text you asked to expire in an hour, over text
-already in the graph, reports `deduped` and leaves an entity that never expires.
-The caller is told it deduped; it is not told the TTL went nowhere.
-
-Ranks above 89 because it is a correctness gap in a shipped flag rather than
-coverage the flag never claimed, and below tier 1 because it is reachable only
-by opting into retention. The fix is not one line: `valid_until` is LWW with a
-lamport/producer pair and a pending delta (`place.rs:124-139`), so a merge that
-sets it has to stamp and push the same way or the value cannot federate — decide
-alongside whether a *shorter* incoming retention may shorten an existing
-deadline, or only extend it.
-
 ### 89. Retention exists on two entrances of four, and in no config `[ingest]`
 
 `retention_secs` is on the MCP `ingest` schema and the `kern ingest` flag. It is
@@ -257,7 +276,7 @@ be remembered by every caller.
 
 ### 24. RPC socket has no auth `[surface]`
 
-`FEATURES.md:607-608`. The missing auth is the same boundary as 18's
+`FEATURES.md:639-640`. The missing auth is the same boundary as 18's
 caller-asserted principals — decide them together or the principal stops at the
 MCP surface only. The item's second half is **retired 2026-07-21 — verified
 false**: `KernRpc` does not mirror MCP 1:1 and never did. The contract is four
@@ -343,7 +362,7 @@ no signal on approach.
 `Worker::enqueue` fires `tokio::spawn(async move { tx.send(job).await })` and
 returns immediately (`src/ingest/worker.rs:76-78`). The channel bound is 64
 (`:44`); the spawn set is unbounded. Distinct from the *tick* queue, which is
-bounded at 512 with real backpressure (`FEATURES.md:377`) — the two read as
+bounded at 512 with real backpressure (`FEATURES.md:409`) — the two read as
 one and are not.
 
 Beside it: **the distill leg has no timeout budget** (no `timeout` in
@@ -360,7 +379,7 @@ the distill leg is now the only LLM on any path — no latency work has landed o
 Recorded in `FEATURES.md` gap blocks, planned nowhere:
 
 - Routing does a vector lookup per level, O(depth·log n), and unnamed children
-  are unbounded per parent (`FEATURES.md:120-121`).
+  are unbounded per parent (`FEATURES.md:120-122`).
 - `Entity` is a ~30-field flat struct (serialization cost on every store round
   trip) and `Kern` carries no per-kern stats — mean heat, fill ratio — that
   clustering could reuse (`FEATURES.md:84-86`).
@@ -431,7 +450,7 @@ sorts by heat and truncates to `ENTITY_SYNC_BATCH = 32` per heartbeat
 (`src/gossip/handler.rs:156`, sorted `:181`),
 so cold entities may never propagate and a partitioned node that rejoins never
 catches up. (`Fetch` is live — `wire_fetch` installs the handler at
-`src/commands.rs:1003` and the question path issues it — but it is single-id, not a
+`src/commands.rs:1015` and the question path issues it — but it is single-id, not a
 catch-up mechanism.) Two pieces adopted on paper and unscheduled: **back-off
 pacing** with exponential jitter keyed to a divergence estimate
 (`docs/kern/fl-vs-knids-federation.md:163-168`), and **batch-size / push-vs-pull
@@ -545,7 +564,7 @@ fallback and no way to distinguish discovery-failed from no-peers-present
 
 `TcpStream::connect` per call at `src/gossip/transport.rs:37` (`send_msg`) and
 `:45` (`send_and_receive`). No pooling. Separately, the `trnsprt` client has no
-pooling either (`FEATURES.md:832-833`) — that one is not gossip and is not gated
+pooling either (`FEATURES.md:899-900`) — that one is not gossip and is not gated
 on 33.
 
 ### 47. Hub phase 3: gossip moves hub-side `[hub]`
@@ -561,7 +580,7 @@ port-clash validation in `src/config/serve.rs` to collapse. (Corrected again
 item 84 owns.)
 
 Beside it: **hub↔node version skew is unmanaged** beyond same-binary spawning
-(`FEATURES.md:938-939`).
+(`FEATURES.md:1005-1006`).
 
 ### Decisions owed before the federation build
 
@@ -598,7 +617,7 @@ retired:** `CHANGELOG.md` 2026-07-20 shipped chunk external ids keyed on the ful
 source identity (`source_id()` + chunk index, not the bare section), and CLI
 `kern ingest` deriving its inline source hash from the text. What remains is the
 *dedup* key, not the external id. Beside it: the dedup threshold is global, not
-per-kind (`FEATURES.md:365`).
+per-kind (`FEATURES.md:392`).
 
 ### 49. The distill prompt is one-shot and global `[ingest]`
 
@@ -655,7 +674,7 @@ newline one, and is still blocked on a real document long enough to truncate.
 
 ### 53. Clustering is vector-only `[lifecycle]`
 
-No semantic or structural features (`FEATURES.md:437`), and naming plus
+No semantic or structural features (`FEATURES.md:469`), and naming plus
 enrich are a cold LLM call per kern. The adopted-but-unbuilt upgrade is
 thought-level PageRank feeding the split heuristic — high-rank nodes become
 gravitons, bridge nodes become sub-kerns
@@ -860,7 +879,7 @@ unremarked.
 
 Called **once** (corrected 2026-07-21 — it was twice; the second site left with
 the ingest `kind` arg in `216730d`), with the literal `AGENT_SOURCE`
-(`src/mcp/tools_mutate.rs:115`), and it accepts `USER_SOURCE` / `AGENT_SOURCE`
+(`src/mcp/tools_mutate.rs:118`), and it accepts `USER_SOURCE` / `AGENT_SOURCE`
 (`src/base/validate.rs:22`), so it can never fail. Decision:
 thread a real auth identity (item 18/24), or delete. Delete is correct for a
 single local daemon and needs only sign-off.
@@ -904,16 +923,16 @@ served that way decays, clusters and GCs normally, and simply does not federate.
   requires either promoting them to real per-endpoint config or exposing that
   predicate. Was listed under item 11; it is a different job.
 - Hand-rolled tool schemas; no batch query
-  (`FEATURES.md:566-567`).
+  (`FEATURES.md:598-599`).
 - The LLM client is Ollama-centric with no retry/backoff policy object
-  (`FEATURES.md:806-807`).
+  (`FEATURES.md:845-846`).
 - Watcher `.gitignore` parsing is approximate; no rename tracking
-  (`FEATURES.md:984-985`).
-- `unnamed` lists only; there is no `promote` (`FEATURES.md:711`).
+  (`FEATURES.md:1023-1024`).
+- `unnamed` lists only; there is no `promote` (`FEATURES.md:750`).
 - GNN has no GPU path, weights are per-kern rather than shared, and the objective
-  is link-prediction only (`FEATURES.md:528-530`).
+  is link-prediction only (`FEATURES.md:560-562`).
 - Under WSL2 NAT a loopback Ollama URL must be hand-pinned; kern neither rewrites
-  nor warns (`FEATURES.md:1000`).
+  nor warns (`FEATURES.md:1039-1041`).
 - RPC socket bind→chmod race — sub-millisecond, umask default — recorded as an
   accepted risk (`concepts/security.mdx:40-43`); revisit only if the umask
   alternative stops being worse.
@@ -943,7 +962,7 @@ and item 1's instrument staying the scorer.
   `howto/mcp.mdx:50`, which says only "Needs `text` or `id`" and then lists the
   filters as if they applied to both.
 - (retired 2026-07-21 — the tables were filled in) the `move` MCP tool is listed
-  in `README.md:352` and `FEATURES.md:550`, and the site's count is now twelve
+  in `README.md:352` and `FEATURES.md:582`, and the site's count is now twelve
   (`howto/mcp.mdx:5, :75`), so the "Eleven tools" note is retired with it.
 - `docs/kern/README.md:60` declares the directory holds "never plans"; five of
   its notes contain execution plans, migration stages and phase orderings
@@ -970,13 +989,13 @@ and item 1's instrument staying the scorer.
   earlier.
 - (retired 2026-07-21 — `README.md` and `VISION.md` were corrected) neither
   opens on "takes in durable facts from your sessions" or "learns on its own"
-  any more; `VISION.md:51` now *states* there is no recorded baseline instead of
+  any more; `VISION.md:52` now *states* there is no recorded baseline instead of
   gating claims on one; `README.md:393` says the Question and Pulse senders and
   the fetch RPC are live, and `:398` pins the version at `1.1.0`, matching
   `FEATURES.md`.
 - (retired 2026-07-21 — all three fixed) `FEATURES.md:54` now lists `Entity`'s
   `acl`; the retired query-cache finding is gone from the file entirely; and
-  `:568` marks prompts and resources "served on the standalone path only",
+  `:600` marks prompts and resources "served on the standalone path only",
   which is item 81's note.
 
 Deferred design calls, still owed, no blocker and no urgency: quarantine
@@ -1099,6 +1118,26 @@ an overall eval score that makes specialization worth funding.
 
 ## Closed and verified — do not re-open
 
+- **A deduped ingest carries its retention** — was item 88, closed 2026-07-21.
+  There were two dedup gates and both swallowed it; both now funnel through one
+  site. `accept::merge_duplicate` takes the incoming `valid_until` and calls
+  `accept::merge_valid_until`, so the `find_duplicate` gate in `place.rs` and
+  `commit_entity`'s `dup` branch reach the same rule, and the fresh-placement
+  path calls it directly after accept. The rule is `resolve_valid_until` — `min`
+  with `None` as +∞, decided over LWW because a TTL is a ceiling and `min`
+  converges under the arbitrary replay order federation produces where
+  last-writer does not. Accepted cost, stated in the tool schema: ingest can
+  shorten a deadline and never lengthen one. The orphan delta the item predicted
+  was real and is gone — the pre-accept stamp in `place.rs` minted a
+  `PendingDelta` for an id gate 2 then discarded; the stamp moved *after* accept,
+  onto the id that entered the graph. Proven by reverting each half separately:
+  neutering gate 1 fails three `place.rs` tests and leaves the gate-2 test
+  green, neutering gate 2 fails only the gate-2 test, and removing the
+  `push_delta` fails all three delta assertions including the fresh-placement
+  one. `e2e/test_retention.py::test_a_deduped_ingest_still_applies_its_retention`
+  fails loudly with the merge neutered. What this did *not* buy is item 91: the
+  same gate still reports `committed` on a dedup and still leaves the discarded
+  id in the lexical index.
 - **Per-source TTL has a writer** — was item 22, closed 2026-07-21. The reader
   (`score::drop_expired`) had been waiting for one; `valid_until` is now set at
   ingest from a `retention_secs` on the MCP `ingest` schema and a
@@ -1110,9 +1149,10 @@ an overall eval score that makes specialization worth funding.
   and on the chunk path as well as the document path, which were two separate
   hardcoded `None`s. `e2e/test_retention.py` proves the round trip against the
   real binary: recallable before the deadline, gone after, with a control fact
-  that stays. What the item did *not* buy is now items 88, 89 and 90 — the
-  dedup branch swallows a retention, only two of four entrances offer one and
-  no config key does, and `DirectJob` still drops `valid_from`.
+  that stays. What the item did *not* buy became items 88, 89 and 90; 88 —
+  the dedup branch swallowing a retention — closed the same day, and what is
+  still open is that only two of four entrances offer retention and no config
+  key does (89), and that `DirectJob` still drops `valid_from` (90).
 - **The intake is visible and drivable** — was item 8, closed 2026-07-21.
   `kern intake` (alias `kern intake status`) prints pending with age, the last
   error for anything stuck, quarantined `failed/` entries and the `done` count;
@@ -1233,12 +1273,12 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   scheduled; the three it actually caught were live lies in `FEATURES.md` and
   `SPECIALISTS.md` (CHANGELOG 2026-07-21).
 - **Pulse and Question senders are live.** `broadcast_pulse` / `broadcast_q` built
-  in `start_gossip` (`src/commands.rs:966-1040`), pulse wired into the maintenance
-  tick (`:709`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
+  in `start_gossip` (`src/commands.rs:979-1053`), pulse wired into the maintenance
+  tick (`:721`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
   `broadcast_q` invoked by `do_resolve` (`src/tick/tasks.rs:372`), `handle_question`
   live-dispatched (`src/gossip/handler.rs:44`).
 - **`Fetch` is wired** — `wire_fetch` installs the handler at
-  `src/commands.rs:1003`. Single-id, so it is not anti-entropy (item 36), but it
+  `src/commands.rs:1015`. Single-id, so it is not anti-entropy (item 36), but it
   is not dead.
 - **`union_statements` never existed**; remote heat is no longer pinnable
   (`src/base/merge.rs:20`, applied `:153`).
@@ -1257,9 +1297,9 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   AGENT_SOURCE)` capping at `MAX_AI_CONFIDENCE` 0.95 and `kind` is *derived* from
   confidence, which needs 1.0 for `Fact` (`src/base/math.rs:205-210`,
   `src/base/constants.rs:69`). Only the CLI reaches `Fact`, via
-  `clamp_confidence(1.0, "user")` (`src/commands/ingest_cmd.rs:49`).
+  `clamp_confidence(1.0, "user")` (`src/commands/ingest_cmd.rs:59`).
 - **`conf` is clamped to [0,1]** — `validate_conf` (`src/base/validate.rs:14`)
-  called at `src/mcp/tools_mutate.rs:113`.
+  called at `src/mcp/tools_mutate.rs:116`.
 - **A prose-answering reason model no longer archives deltas having stored
   nothing.** `parse_claims` returns `Option`; a reply with no parseable JSON array
   leaves the delta queued for retry, a well-formed empty array still archives
@@ -1298,5 +1338,6 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   `hub_rpc` (`src/trnsprt/src/lib.rs:20-21`), and `kern_rpc` is
   `health` / `shutdown` / `call_tool` / `list_tools`
   (`src/trnsprt/src/kern_rpc/svc.rs:5-8`) — a generic envelope with no query DTOs
-  to overlap. Nothing to kill. (`KernRpc` mirroring the MCP tool list 1:1 is a
-  real and separate concern — item 24.)
+  to overlap. Nothing to kill. (`KernRpc` mirroring the MCP tool list 1:1 was
+  carried as item 24's second half; that half is retired 2026-07-21 — verified
+  false on this same reading.)

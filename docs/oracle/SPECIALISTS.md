@@ -75,8 +75,9 @@ sets; parallelize only what does not overlap.
 - **Knows:** the one-dispatch-core law (every surface goes through
   `mcp::Server::call_tool`, never a second copy), the twelve MCP tools,
   `KernRpc` over this repo's own `service!` macro (there is no tarpc), the
-  advisory writer lock, and that the CLI still reads off disk and can race a
-  live daemon (prefer MCP for live state) — `forget` and `degrade` are the
-  exceptions, they route to the serving daemon.
+  advisory writer lock, and that `get`, `query`, `forget` and `degrade` route to
+  the serving daemon while `ingest`, `link` and `intake drain` still write off
+  disk and can race a live one (item 9); `search` and `list` read the store by
+  decision.
 - **Delegate when:** tool schemas or CLI subcommands.
 

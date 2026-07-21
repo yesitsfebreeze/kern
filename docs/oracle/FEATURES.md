@@ -370,15 +370,31 @@ Nothing is lost on an LLM outage — the delta stays queued until it succeeds.
   `intake::drain_now`, sharing `drain_once` with the daemon loop, and flushes
   through the same guarded retry as `cmd_ingest`.
 
-**Where.** `src/ingest/*` (3376 LoC, 13 files). Spawned by `spawn_intake`
+**Where.** `src/ingest/*` (3583 LoC, 13 files). Spawned by `spawn_intake`
 (`src/commands.rs`); driven manually by `src/commands/intake_cmd.rs`.
 
+A **deduped** ingest carries its retention too. `accept::merge_valid_until` is
+the one place a `valid_until` decision is written, and all three placement
+outcomes reach it: the `find_duplicate` gate in `place.rs` and `commit_entity`'s
+`dup` branch in `accept.rs` both funnel through `merge_duplicate`, and a fresh
+placement calls it directly *after* accept, on the id that actually entered the
+graph. The rule is `min` with `None` as +∞ (`accept::resolve_valid_until`): a
+TTL bounds a lifetime, so merging two bounds keeps the **lower** one, which is
+commutative and idempotent and therefore converges under any replay order. A
+fresh lamport/producer is stamped and a `ValidUntil` delta queued only when the
+stored deadline actually moves or was never stamped, and always against the
+**survivor's** id — the discarded incoming entity never gossips one. **Known
+cost:** ingest can only ever *shorten* a deadline. There is no way to lengthen
+one through ingest; that needs an explicit update path, or `forget` +
+re-ingest.
+
 **Gaps.** Distill prompt is one-shot; long deltas may truncate. No per-kind
-prompt tuning. Dedup threshold is global, not per-kind. Retention reaches an
-entity only when one is *created*: the `.txt` distillation path and the file
-watcher offer no retention, there is no `kern.toml` default for it, and a
-retention-carrying ingest that lands on `find_duplicate` merges into the
-existing entity without touching its `valid_until` (ROADMAP items 88-90).
+prompt tuning. Dedup threshold is global, not per-kind. Retention still reaches
+only two of four entrances — the `.txt` distillation path and the file watcher
+offer no retention, and there is no `kern.toml` default for it (ROADMAP item
+89) — and `DirectJob` carries `valid_until` but drops `valid_from` (item 90).
+Separately, a dedup caught by the *second* gate is mis-reported as `committed`
+and leaves the discarded id in the lexical index (item 91).
 
 ---
 
@@ -563,12 +579,12 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 | `link` | `tools_mutate.rs` | Create a reason edge (LLM writes the reason if blank). Edge score is the asserted confidence (agent 0.95; CLI user 1.0), NOT `cosine(from,to)` — a deliberate link connects what similarity cannot, so similarity must not be its strength. |
 | `forget` | `tools_mutate.rs` | Remove a thought + cascade edges (Facts immune). |
 | `degrade` | `tools_mutate.rs` | Down-weight edges along a bad retrieval path (`DEGRADE_*` decay). Returns `decayed_edges` and `removed_edges` — the reap count exists so a CLI `degrade` routed through the daemon can print what the local path prints. |
-| `move` | `tools_mutate.rs:377` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
+| `move` | `tools_mutate.rs:389` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
 | `health` | `tools_admin.rs:83` | Graph stats (gravitons/kerns/entities/reasons/unnamed/claim_kinds) **plus the degradation surface**: `queue_depth`, `tasks_done`, `task_avg_ms`, `task_panics`, `last_task_panic`, `task_failures`, `last_task_failure`, `cold_evicted`, `embed_model`, `embed_dim`, `embed_mismatch` (`Server::health_stats`, `src/mcp.rs`). |
 | `graviton` | `tools_admin.rs` | list/add/remove focus attractors (name + text — phrase or full document — + optional mass). Replaced the single per-kern "purpose". |
 | `claim_kind` | `tools_admin.rs` | register/remove claim kinds; registered kinds extend the built-in distill set. |
 | `pulse` | `tools_admin.rs` | Trigger a clustering pass across the tree. |
-| `gc` | `tools_admin.rs:178` | Live reap of empty/orphan kerns (`GraphGnn::gc_empty_kerns_counted`); reports `reaped`/`before`/`after` and the live `data.mdb` size, since LMDB keeps freed pages until a restart or `kern compact`. |
+| `gc` | `tools_admin.rs:190` | Live reap of empty/orphan kerns (`GraphGnn::gc_empty_kerns_counted`); reports `reaped`/`before`/`after` and the live `data.mdb` size, since LMDB keeps freed pages until a restart or `kern compact`. |
 | `setup` | `tools_setup.rs` | Agent-facing installer: returns idempotent wiring instructions (seed gravitons, install the capture rule/hook in the host, verify) plus this project's current [done]/[todo] state. kern never writes host config; the calling agent does the wiring. |
 
 Plus MCP **prompts** (`src/mcp/prompt.rs`) and **resources** (`src/mcp/resources.rs`).
