@@ -69,3 +69,7 @@ NUL
 # live worktree ledger for the 15-minute workflow loop — per-machine runtime
 # state, rewritten every firing; never committed (see the file itself)
 /worktrees.md
+
+# per-worktree pointer at the shared build cache (see worktrees.md) — machine
+# local, never committed; a tracked absolute path would break every other clone
+/.cargo/
