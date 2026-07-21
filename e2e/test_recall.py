@@ -21,9 +21,9 @@ from ranking import hits, ingest_all
 # quality — kern claims no retrieval quality until ROADMAP item 1 is answered.
 # Raising a floor is a deliberate act: do it only when a real improvement has
 # been measured and you intend to defend the new level.
-RECALL_AT_1_FLOOR = 0.90  # measured 0.9583
-RECALL_AT_5_FLOOR = 0.95  # measured 1.0000
-MRR_FLOOR = 0.92  # measured 0.9792
+RECALL_AT_1_FLOOR = 0.90  # measured 0.9306 (2026-07-21, item 86 traversal credit)
+RECALL_AT_5_FLOOR = 0.95  # measured 0.9722
+MRR_FLOOR = 0.92  # measured 0.9471
 
 # (fact, [paraphrase probes]) — several unrelated topics so every probe faces
 # real distractors, not just the one right answer.

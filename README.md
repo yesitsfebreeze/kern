@@ -398,8 +398,8 @@ tuning at scale (batch size, push vs. pull) is open alongside it; see
 **Measurement.** `e2e/test_recall.py` scores recall@1 / recall@5 / MRR over a
 corpus the test itself authors, with no LLM anywhere in the scoring loop — it
 ingests the facts, so it knows the right answer for each probe, and scoring is
-rank arithmetic over the binary's own stdout. Currently 0.9583 / 1.0000 /
-0.9792, reproducible bit-for-bit; CI gates on floors below those. Two limits
+rank arithmetic over the binary's own stdout. Currently 0.9306 / 0.9722 /
+0.9471, reproducible bit-for-bit; CI gates on floors below those. Two limits
 travel with that number and cannot be dropped from it. The floors make it a
 **regression detector, not a quality claim** — it can say kern got worse, never
 that kern is good, and it is comparable to nothing anyone else publishes.

@@ -32,6 +32,12 @@ pub struct RetrievalConfig {
 	pub qbst_cap: f64,
 	pub refine_traversal_weight: f64,
 	pub refine_boost_cap: f64,
+	// Ceiling on the summed source-weighted edge credit an entity can earn from
+	// the walk. 0.0 turns traversal credit off; the cap is what keeps a
+	// well-connected node from outranking a direct match on edge volume.
+	pub traversal_credit_cap: f64,
+	// Multiplier on each edge's credit contribution before the cap.
+	pub traversal_credit_weight: f64,
 	pub fact_score_boost: f64,
 	pub gravity_weight: f64,
 	// Multiplier on the final score of an entity held in a `remote-*` phantom kern.
@@ -73,6 +79,8 @@ impl Default for RetrievalConfig {
 			qbst_cap: constants::QBST_CAP,
 			refine_traversal_weight: constants::REFINE_TRAVERSAL_WEIGHT,
 			refine_boost_cap: constants::REFINE_BOOST_CAP,
+			traversal_credit_cap: constants::TRAVERSAL_CREDIT_CAP,
+			traversal_credit_weight: constants::TRAVERSAL_CREDIT_WEIGHT,
 			fact_score_boost: constants::FACT_SCORE_BOOST,
 			gravity_weight: 0.15,
 			remote_trust_weight: 0.4,
@@ -144,6 +152,18 @@ impl RetrievalConfig {
 			));
 		}
 
+		if self.traversal_credit_cap < 0.0 {
+			errs.push(format!(
+				"traversal_credit_cap ({}) must be >= 0.0",
+				self.traversal_credit_cap
+			));
+		}
+		if self.traversal_credit_weight < 0.0 {
+			errs.push(format!(
+				"traversal_credit_weight ({}) must be >= 0.0",
+				self.traversal_credit_weight
+			));
+		}
 		if self.gravity_weight < 0.0 {
 			errs.push(format!(
 				"gravity_weight ({}) must be >= 0.0",

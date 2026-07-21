@@ -90,24 +90,18 @@ def test_identical_text_ingested_twice_is_one_node(project):
 	assert thoughts[0].split()[1] == "1", f"content addressing broke: {thoughts[0]}"
 
 
-@pytest.mark.xfail(
-	strict=True,
-	reason="ROADMAP item 86. Of the two causes measured 2026-07-21, one is fixed and "
-	"one is open. Fixed: the beam threshold was `best_seed * decay`, comparing a "
-	"seed's pure query cosine (up to 1.0) against a neighbour score whose ceiling is "
-	"w.reason + w.edge = 0.30 — measured 0.2411 against a 0.2500 bar, so the walk was "
-	"structurally dead whenever a seed matched well. `frontier_best` now takes the bar "
-	"from the best score seen among neighbours. Open: `visited` allows one pop per "
-	"entity and `results` keeps the max, so a neighbour that is already a content hit "
-	"keeps its seed score and the edge adds nothing. Net effect today: 1 of 8 pairs "
-	"moves (rank 22 -> 21); the other 7 do not. Pooling the evidence instead moves all "
-	"8 but drops the exact-match probe from rank 1 to rank 3, so it is not the fix. "
-	"Flips to a failure when a walk can pay without outranking a direct match.",
-)
 def test_a_reason_edge_makes_its_neighbour_reachable(project):
 	"""'A graph, not a bag — recall can walk them.' Probing with A's own text puts
 	A at rank 1; B shares no content words with the probe, so the reason edge
-	A->B is the only thing that can surface B. THE priority invariant."""
+	A->B is the only thing that can surface B. THE priority invariant.
+
+	Closed by ROADMAP item 86 (2026-07-21): bounded source-weighted traversal
+	credit — every examined edge credits its far endpoint with
+	source_score * edge_evidence, summed, capped, and clamped below the
+	strongest voucher's own walk score, so a walk pays without ever outranking
+	a direct match. Deliberate links carry asserted confidence as their score
+	(user 1.0 / agent 0.95), not endpoint cosine, which is what gives an edge
+	between dissimilar texts enough evidence to lift its far end."""
 	ingest_all(project, [t for pair in LINKED_PAIRS for t in pair] + PAIR_FILLER)
 	for a, b in LINKED_PAIRS:
 		link(project, a, b, "linked for the multi-hop invariant")
@@ -151,9 +145,9 @@ def test_degrading_an_entity_punishes_its_delivered_score(project):
 	never keeps ranking unpunished.'
 
 	Entity-scoped only. An earlier version linked A->B here and claimed the edge
-	was what put B in the ranking; it was not — the scores are identical with the
-	link removed, which is the multi-hop defect the xfail above records. The link
-	is gone rather than left in as decoration that implies a guarantee."""
+	was what put B in the ranking; it was not — at the time the multi-hop walk
+	changed no outcome (ROADMAP item 86, since closed). The link stays out so
+	this test keeps measuring the entity-scoped half in isolation."""
 	ingest_all(project, CORPUS[:6])
 	a, b = CORPUS[0], CORPUS[1]
 

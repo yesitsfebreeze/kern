@@ -188,6 +188,22 @@ pub fn expand<'a>(
 	let mut visited: HashSet<u32> = HashSet::new();
 	let mut results: HashMap<u32, f64> = HashMap::new();
 	let mut chains: Vec<PathChain> = Vec::new();
+	// Traversal credit, kept OUTSIDE the max-per-entity walk score. `results`
+	// keeps one max per entity, so when a neighbour is already a content hit its
+	// seed score swallows the edge evidence — and pooling the two co-equally is
+	// measured wrong: the best match pops first, is `visited`, and can never
+	// receive hop evidence, so co-equal pooling systematically penalises the
+	// direct answer. Instead every examined edge credits its far endpoint with
+	// `source_score * edge_evidence`, once per (edge, endpoint) — the popping
+	// side is credited by the same edge when the neighbour pops, which is what
+	// lets a seed receive credit at all. Two bounds keep the walk from beating
+	// direct matches: the summed credit is capped, and the credited total may
+	// not reach the strongest crediting source's own walk score — a neighbour
+	// rides up BEHIND what vouched for it, never past it, so a query's direct
+	// answer cannot be outranked by its own neighbourhood.
+	let mut credit: HashMap<u32, f64> = HashMap::new();
+	let mut credit_src: HashMap<u32, f64> = HashMap::new();
+	let mut credited: HashSet<(u32, u32)> = HashSet::new();
 	// Best score SEEN AMONG NEIGHBOURS, never among seeds. Seed scores are a pure
 	// query cosine (up to 1.0); a neighbour's is `w.content*cos + w.reason*cos +
 	// w.edge*edge`, so with the default weights a neighbour the query does not
@@ -217,6 +233,8 @@ pub fn expand<'a>(
 	let decay = cfg.decay;
 	let refine_tw = cfg.refine_traversal_weight;
 	let refine_cap = cfg.refine_boost_cap;
+	let credit_cap = cfg.traversal_credit_cap;
+	let credit_weight = cfg.traversal_credit_weight;
 	let mut expansions = 0;
 
 	while let Some(item) = heap.pop() {
@@ -273,13 +291,34 @@ pub fn expand<'a>(
 				continue;
 			}
 			let nu = interner.intern(neighbor_id);
+			let evidence = edge_evidence(query_vec, reason, w, refine_tw, refine_cap);
+			if evidence > 0.0 {
+				let ru = interner.intern(rid);
+				if credited.insert((ru, nu)) {
+					// Linear source weighting, chosen by sweep 2026-07-21 against
+					// source^2 and edge-reliability^2 variants: it was the only one
+					// that IMPROVED recall@1 over the no-credit baseline (0.9306 vs
+					// 0.9167) with equal multi-hop reach. The ceiling below, not the
+					// weighting, is what protects direct answers.
+					*credit.entry(nu).or_insert(0.0) += credit_weight * item.score * evidence;
+					let src = credit_src.entry(nu).or_insert(0.0);
+					if item.score > *src {
+						*src = item.score;
+					}
+				}
+			}
 			if visited.contains(&nu) {
 				continue;
 			}
 			let Some((neighbor, _)) = find_entity_and_kern(g, neighbor_id) else {
 				continue;
 			};
-			let score = score_neighbor(query_vec, neighbor, reason, w, refine_tw, refine_cap);
+			let content_score = if neighbor.has_vector() {
+				cosine(query_vec, &neighbor.vector)
+			} else {
+				0.0
+			};
+			let score = w.content * content_score + evidence;
 			if score < threshold {
 				continue;
 			}
@@ -305,11 +344,41 @@ pub fn expand<'a>(
 	let scored: Vec<ScoredRef<'a>> = results
 		.into_iter()
 		.filter_map(|(id, score)| {
-			find_entity_and_kern(g, interner.name(id)).map(|(t, _)| ScoredRef { entity: t, score })
+			let bonus = credit.get(&id).map_or(0.0, |c| c.min(credit_cap));
+			let ceiling = credit_src
+				.get(&id)
+				.map_or(f64::INFINITY, |s| s - f64::EPSILON);
+			let lifted = (score + bonus).min(ceiling).max(score);
+			find_entity_and_kern(g, interner.name(id)).map(|(t, _)| ScoredRef {
+				entity: t,
+				score: lifted,
+			})
 		})
 		.collect();
 
 	ExpandResult { scored, chains }
+}
+
+// The query-conditioned evidence the edge itself supplies — everything in a
+// neighbour's score except its own content match.
+pub fn edge_evidence(
+	query_vec: &[f32],
+	reason: &Reason,
+	w: Weights,
+	refine_traversal_weight: f64,
+	refine_boost_cap: f64,
+) -> f64 {
+	let reason_score = if reason.has_vector() {
+		cosine(query_vec, &reason.vector)
+	} else {
+		0.0
+	};
+	let traversal_boost = ((reason.traversal_count.value() as f64 + 1.0).ln()
+		* refine_traversal_weight)
+		.min(refine_boost_cap);
+	let edge_score = (reason.score.clamp(0.0, 1.0) + traversal_boost).min(1.0);
+
+	w.reason * reason_score + w.edge * edge_score
 }
 
 pub fn score_neighbor(
@@ -325,17 +394,14 @@ pub fn score_neighbor(
 	} else {
 		0.0
 	};
-	let reason_score = if reason.has_vector() {
-		cosine(query_vec, &reason.vector)
-	} else {
-		0.0
-	};
-	let traversal_boost = ((reason.traversal_count.value() as f64 + 1.0).ln()
-		* refine_traversal_weight)
-		.min(refine_boost_cap);
-	let edge_score = (reason.score.clamp(0.0, 1.0) + traversal_boost).min(1.0);
-
-	w.content * content_score + w.reason * reason_score + w.edge * edge_score
+	w.content * content_score
+		+ edge_evidence(
+			query_vec,
+			reason,
+			w,
+			refine_traversal_weight,
+			refine_boost_cap,
+		)
 }
 
 // Two-pass: O(1) via the kern_of_entity index, then a full scan fallback for stale/missing index entries.
@@ -468,6 +534,147 @@ mod tests {
 			"a multi-hop chain (entity, reason, entity) is recorded"
 		);
 	}
+	fn linked_pair_graph() -> GraphGnn {
+		// a matches the query [1,0] exactly; b is orthogonal, reachable only
+		// across the edge. Mirrors the ROADMAP item 86 measurement: b is also a
+		// (weak) content hit, so the max-per-entity walk score alone gives the
+		// edge no way to move it.
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("kx", "");
+		k.entities.insert("a".into(), ent("a", vec![1.0, 0.0]));
+		k.entities.insert("b".into(), ent("b", vec![0.0, 1.0]));
+		let mut r = edge("a", "b", 0.9);
+		r.vector = vec![0.7, 0.7];
+		add_reason(&mut k, r);
+		g.kerns.insert("kx".into(), k);
+		g
+	}
+
+	const PAIR_WEIGHTS: Weights = Weights {
+		content: 0.70,
+		reason: 0.15,
+		edge: 0.15,
+	};
+
+	fn pair_seeds() -> [EntityHit; 2] {
+		[
+			EntityHit {
+				entity_id: "a".into(),
+				score: 1.0,
+			},
+			EntityHit {
+				entity_id: "b".into(),
+				score: 0.0,
+			},
+		]
+	}
+
+	fn score_of(res: &ExpandResult, id: &str) -> f64 {
+		res
+			.scored
+			.iter()
+			.find(|s| s.entity.id == id)
+			.unwrap_or_else(|| panic!("{id} missing from scored"))
+			.score
+	}
+
+	#[test]
+	fn an_edge_off_a_strong_seed_lifts_a_neighbour_that_is_already_a_weak_hit() {
+		let g = linked_pair_graph();
+		let cfg = RetrievalConfig::default();
+		let res = expand(&g, &cfg, &[1.0, 0.0], &pair_seeds(), PAIR_WEIGHTS);
+
+		let evidence = 0.15 * (0.7 / (0.7f32 * 0.7 + 0.7 * 0.7).sqrt() as f64) + 0.15 * 0.9;
+		let b = score_of(&res, "b");
+		assert!(
+			b > evidence + 1e-6,
+			"b must carry credit ON TOP of its walk score, got {b} vs evidence {evidence}"
+		);
+		let a = score_of(&res, "a");
+		assert!(
+			a > b,
+			"the direct match still outranks the lifted neighbour"
+		);
+	}
+
+	#[test]
+	fn credit_from_a_weaker_voucher_cannot_lift_past_the_voucher() {
+		// b pops at its edge-derived walk score and credits a back across the
+		// same edge, but a already outranks b — the ceiling annuls the lift, so
+		// the direct answer's score is exactly its walk score, not walk + bonus.
+		let g = linked_pair_graph();
+		let cfg = RetrievalConfig::default();
+		let res = expand(&g, &cfg, &[1.0, 0.0], &pair_seeds(), PAIR_WEIGHTS);
+
+		let a = score_of(&res, "a");
+		assert!(
+			(a - 1.0).abs() < 1e-9,
+			"credit sourced below the seed must not move it, got {a}"
+		);
+	}
+
+	#[test]
+	fn a_lifted_neighbour_saturates_just_below_its_strongest_voucher() {
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("kx", "");
+		k.entities.insert("c".into(), ent("c", vec![1.0, 0.0]));
+		k.entities.insert("n".into(), ent("n", vec![0.6, 0.8]));
+		let mut r = edge("c", "n", 1.0);
+		r.vector = vec![1.0, 0.0];
+		add_reason(&mut k, r);
+		g.kerns.insert("kx".into(), k);
+
+		let cfg = RetrievalConfig {
+			traversal_credit_cap: 1.0,
+			..Default::default()
+		};
+		let seeds = [
+			EntityHit {
+				entity_id: "c".into(),
+				score: 1.0,
+			},
+			EntityHit {
+				entity_id: "n".into(),
+				score: 0.6,
+			},
+		];
+		let res = expand(&g, &cfg, &[1.0, 0.0], &seeds, PAIR_WEIGHTS);
+
+		let (c, n) = (score_of(&res, "c"), score_of(&res, "n"));
+		assert!(
+			n < c,
+			"the lifted neighbour stays behind its voucher: n={n} c={c}"
+		);
+		assert!(
+			n > 0.9,
+			"but the ceiling, not the cap, is what stopped it: n={n}"
+		);
+	}
+
+	#[test]
+	fn traversal_credit_is_capped() {
+		let g = linked_pair_graph();
+		let mut cfg = RetrievalConfig {
+			traversal_credit_cap: 0.0,
+			..Default::default()
+		};
+		let off = score_of(
+			&expand(&g, &cfg, &[1.0, 0.0], &pair_seeds(), PAIR_WEIGHTS),
+			"b",
+		);
+
+		cfg.traversal_credit_cap = 0.01;
+		let capped = score_of(
+			&expand(&g, &cfg, &[1.0, 0.0], &pair_seeds(), PAIR_WEIGHTS),
+			"b",
+		);
+
+		assert!(
+			(capped - (off + 0.01)).abs() < 1e-9,
+			"bonus must saturate at the cap: off={off} capped={capped}"
+		);
+	}
+
 	#[test]
 	fn a_strong_seed_no_longer_prunes_the_walk_off_it() {
 		// The seed scale (pure query cosine, up to 1.0) and the neighbour scale

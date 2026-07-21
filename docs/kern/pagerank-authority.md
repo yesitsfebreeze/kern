@@ -31,7 +31,7 @@ optional additive prior in retrieval scoring, never as the sole rank signal.
 > edge is created and walkable; it still does not meaningfully reach ranking. One reason it cannot reach
 > the *score* is visible in the seed path: RRF settles which entities seed, then
 > every survivor is rescored by plain query cosine before re-entering the pipeline
-> (`src/retrieval/answer.rs:148-152`), so a PageRank list can only change
+> (`fuse_hybrid_seeds`, `src/retrieval/query.rs`; formerly answer.rs, deleted with the answer leg), so a PageRank list can only change
 > membership. Whether it changes membership under a new edge is not established.
 > Read the shipped personalised PageRank as wired and running, not as a retrieval
 > signal with a demonstrated effect — and read §6 below as an unvalidated design.

@@ -2,6 +2,25 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — The walk pays: ROADMAP item 86 closed with bounded
+  source-weighted traversal credit in `expand` — each examined edge credits its
+  far endpoint `source_score × edge_evidence` (once per edge-endpoint, summed,
+  ×`traversal_credit_weight` 2.0, capped at `traversal_credit_cap` 0.5), and
+  the total is clamped just below the strongest voucher's walk score so a
+  neighbour never outranks what vouched for it. Root cause under the max-score
+  symptom: `link_entities` scored deliberate links by `cosine(from, to)`,
+  guaranteeing an edge between dissimilar texts — the one case where the edge
+  is the only evidence — was the weakest edge in the graph. Deliberate links
+  now carry asserted confidence (CLI user 1.0, MCP agent 0.95); auto similarity
+  edges keep measured cosine. Measured on the instrument: all 8 linked pairs
+  reach the top 5 (strict xfail removed), exact-match probe holds rank 1,
+  recall 0.9306 / 0.9722 / 0.9471 against the 0.9167 / 0.9722 / 0.9462 master
+  baseline. Judged against re-measured master, not the item's stale 0.9583 bar,
+  which predated the answer-leg removal. Co-equal pooling stays rejected — the
+  clamp exists because unclamped credit measured 0.7639 on recall@1.
+  Decided by: fix-the-root (the link-score semantics, not another weight on a
+  starved signal) and verify-before-claiming (every variant swept and measured;
+  the stale baseline caught by re-running master before judging).
 - 2026-07-21 — Access stamping obeys `[heat]` config: `commit_access` /
   `commit_access_ids` read `HeatConfig::default()` for half-life AND
   deposit_access, so a configured `[heat]` section (or preset) was silently

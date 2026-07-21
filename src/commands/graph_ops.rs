@@ -1,6 +1,6 @@
 use crate::base::constants::{DEGRADE_DECAY_BASE, DEGRADE_DECAY_POW, DEGRADE_MIN_THRESHOLD};
 use crate::base::graph::GraphGnn;
-use crate::base::math::{average_vec, cosine, reason_id};
+use crate::base::math::{average_vec, reason_id};
 use crate::base::reason::{add_reason, remove_entity, remove_reason};
 use crate::base::search::find_entity;
 use crate::base::types::{Entity, Kern, Reason, ReasonKind};
@@ -177,7 +177,7 @@ pub(super) async fn cmd_link(
 		None
 	};
 
-	match link_entities(&mut g, from, to, reason_text, reason_embed) {
+	match link_entities(&mut g, from, to, reason_text, reason_embed, 1.0) {
 		Ok((rid, score)) => {
 			save_graph(&g);
 			println!(
@@ -192,19 +192,23 @@ pub(super) async fn cmd_link(
 	}
 }
 
+// `score` is the assertion's strength, NOT cosine(from, to): a deliberate link
+// exists precisely to connect what content similarity cannot, so scoring it by
+// endpoint similarity guarantees the edge is weakest exactly where it is the
+// only evidence. Callers pass their source's confidence (user 1.0, agent 0.95).
 pub(crate) fn link_entities(
 	g: &mut GraphGnn,
 	from: &str,
 	to: &str,
 	reason_text: String,
 	reason_embed: Option<Vec<f32>>,
+	score: f64,
 ) -> Result<(String, f64), String> {
 	let (from_t, from_kern_id) =
 		find_entity(g, from).ok_or_else(|| format!("from thought not found: {from}"))?;
 	let (to_t, _) = find_entity(g, to).ok_or_else(|| format!("to thought not found: {to}"))?;
 
 	let vec = link_vector(reason_embed, &from_t.vector, &to_t.vector);
-	let score = cosine(&from_t.vector, &to_t.vector);
 	let rid = reason_id(from, to, ReasonKind::Similarity, &reason_text, "");
 	let r = Reason {
 		id: rid.clone(),

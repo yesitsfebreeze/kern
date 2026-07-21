@@ -313,8 +313,14 @@ impl Server {
 		};
 
 		let mut g = self.graph.write();
-		let res =
-			crate::commands::graph_ops::link_entities(&mut g, &p.from, &p.to, reason_text, reason_embed);
+		let res = crate::commands::graph_ops::link_entities(
+			&mut g,
+			&p.from,
+			&p.to,
+			reason_text,
+			reason_embed,
+			crate::base::constants::MAX_AI_CONFIDENCE,
+		);
 		drop(g);
 
 		match res {

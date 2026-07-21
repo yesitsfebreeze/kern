@@ -176,7 +176,7 @@ profiled via `src/profile.rs`):
 | 2 | **Seed lexical** | `retrieval/seed.rs:86` | BM25 (`LexicalIndex`) candidate list, fused via RRF when `mode==Hybrid`. |
 | 3 | **Fuse (RRF)** | `retrieval/fuse.rs` | Reciprocal-rank fusion of dense + lexical + important lists with mode weights. |
 | 4 | **PageRank** | `retrieval/pagerank.rs` | Centrality weighting of the fused seeds over the reason graph. |
-| 5 | **Expand** | `retrieval/expand.rs:178` | Walk reason edges out from seeds (`PathChain` recording the *why*), scoring neighbors (`score_neighbor`). |
+| 5 | **Expand** | `retrieval/expand.rs:178` | Walk reason edges out from seeds (`PathChain` recording the *why*), scoring neighbors (`score_neighbor`) — plus bounded traversal credit: each examined edge pays its far endpoint `source_score × edge_evidence` (×`traversal_credit_weight`, capped at `traversal_credit_cap`, clamped below the strongest voucher's walk score), which is how a linked neighbour sharing no words with the query reaches the top ranks without ever outranking a direct match. |
 | 6 | **Merge** | `retrieval/merge.rs` | Combine seeds + expanded neighbors into `ScoredEntity` list. |
 | 7 | **Boosts** | `retrieval/score.rs` | `apply_boosts`: confidence × score + **QBST** access/recency boost (`qbst`, capped at 0.1, 24h half-life) + `fact_score_boost` (0.3) for Facts. |
 | 7b | **Gravity** | `retrieval/gravity.rs` | Query-time graviton pull: `score += gravity_weight (0.15) * max_over_gravitons(mass * max(0, cos(entity, graviton_vec)))`. Max, not sum — overlapping gravitons never double-count. `gravity_weight=0` disables (early return, zero cost); no gravitons → no-op. Latency only, from the bench deleted in `8d8b19e` and not reproducible: ~+7% p50 with 5 gravitons. No quality claim accompanies it — the retrieval-quality half of that bench is withdrawn under the claim standard (`ROADMAP.md` — "What measures retrieval quality with no LLM in the scoring loop?"). |
@@ -193,14 +193,6 @@ the graph phase; every LLM call runs unlocked).
 
 **Gaps.**
 
-- **A reason edge changes no ranking.** Measured 2026-07-21 by
-  `e2e/test_invariants.py`: ingest A and B, `kern link` A→B, probe with text
-  matching A only — B's rank and score are identical to four decimals whether or
-  not the edge exists, on all 8 pairs. The edge *is* created and *is* walkable
-  (`kern get` prints it); it does not reach ranking. Recorded as a strict
-  `xfail`, so the day it starts mattering the suite fails loudly
-  (`ROADMAP.md` item 86). Every claim in this repo that multi-hop traversal
-  improves recall is false until that closes.
 - The O(N) importance scan runs every retrieve; at scale it should be indexed.
 - RRF weights and mode blends are config but not auto-tuned.
 
@@ -270,7 +262,7 @@ and cold tier live together. Readers never block, writers serialize.
   live format, `FORMAT_V5`; any other version byte is rejected, never
   mis-decoded and never migrated.
 - **Guarded flush** (`Store::flush_guarded` `src/base/store.rs:594`,
-  `persist::flush_guarded` `src/base/persist.rs:331`) — a snapshot carries an
+  `persist::flush_guarded` `src/base/persist.rs:129`) — a snapshot carries an
   expected `mutation_epoch`; if disk advanced under us (another writer /
   external edit), the flush is *refused*, the disk rows are *absorbed* back
   (`merge::absorb_graph`), and the flush retries. Prevents a stale in-memory
@@ -278,7 +270,7 @@ and cold tier live together. Readers never block, writers serialize.
 - **Embedding stamp.** The store records the model and vector dimension it was
   built with (`EmbedStamp`, its own meta key so an unstamped store reads as
   *unknown*, never as a mismatch). `check_embed_stamp` (`src/base/store.rs:473`)
-  runs at open via `persist::check_graph_stamp` (`src/base/persist.rs:295`),
+  runs at open via `persist::check_graph_stamp` (`src/base/persist.rs:93`),
   wired from `commands::bind_embed_model`: an **unstamped** store adopts the
   configured model and says so once; a **differing** model or dimension sets a
   durable `embed_mismatch` flag, logs through a `LogThrottle`, and leaves the
@@ -306,7 +298,7 @@ and cold tier live together. Readers never block, writers serialize.
 - **Compaction** (`compact_dir`, `src/base/store.rs:790`) — the only way to
   shrink LMDB's high-water mark; writes a fresh env to a tmp file then
   `swap_compacted` renames with retry. Requires exclusive access (run offline).
-- **Snapshots** — `snapshot_for_flush` (`src/base/persist.rs:356`) /
+- **Snapshots** — `snapshot_for_flush` (`src/base/persist.rs:154`) /
   `FlushSnapshot` capture a consistent point-in-time; the maintenance tick runs
   a mutation-epoch-gated snapshot so crash loss is bounded to one tick interval.
 
@@ -541,7 +533,7 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 | ------ | ------ | --------- |
 | `query` | `tools_query.rs` | Hybrid search, LLM-free; the caller synthesizes. Filters: `mode`/`kind`/`source`/time range/`min_conf`/`as_of`; `include_history` for supersede chain. |
 | `ingest` | `tools_mutate.rs` | Add text. `object_id` update semantics, free-text `hint` chunking context (`descriptor` accepted as serde alias). |
-| `link` | `tools_mutate.rs` | Create a reason edge (LLM writes the reason if blank). |
+| `link` | `tools_mutate.rs` | Create a reason edge (LLM writes the reason if blank). Edge score is the asserted confidence (agent 0.95; CLI user 1.0), NOT `cosine(from,to)` — a deliberate link connects what similarity cannot, so similarity must not be its strength. |
 | `forget` | `tools_mutate.rs` | Remove a thought + cascade edges (Facts immune). |
 | `degrade` | `tools_mutate.rs` | Down-weight edges along a bad retrieval path (`DEGRADE_*` decay). |
 | `move` | `tools_mutate.rs:377` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
@@ -1016,8 +1008,9 @@ prompt. `conftest.py` isolates each test in a private project (own
 
 **Measured.** `e2e/test_recall.py` — 36 facts, 72 paraphrase probes, scored
 `recall@1` / `recall@5` / `MRR` against floors, printed on every run (`-s`).
-Current: **0.9583 / 1.0000 / 0.9792**, bit-identical across runs because the fake
-embedder has no RNG and no clock. `e2e/test_invariants.py` asserts the properties
+Current: **0.9306 / 0.9722 / 0.9471** (2026-07-21, after item 86's traversal
+credit; the founding 0.9583 / 1.0000 / 0.9792 predates the answer-leg removal),
+bit-identical across runs because the fake embedder has no RNG and no clock. `e2e/test_invariants.py` asserts the properties
 each `VISION.md` criterion promises — self-recall, content addressing, supersede
 ordering, degrade, Fact durability.
 

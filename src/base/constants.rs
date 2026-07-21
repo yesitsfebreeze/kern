@@ -57,6 +57,8 @@ pub const PULSE_THRESHOLD: f64 = 0.05;
 
 pub const REFINE_TRAVERSAL_WEIGHT: f64 = 0.01;
 pub const REFINE_BOOST_CAP: f64 = 0.1;
+pub const TRAVERSAL_CREDIT_CAP: f64 = 0.5;
+pub const TRAVERSAL_CREDIT_WEIGHT: f64 = 2.0;
 
 pub const IMPORTANT_MIN_COSINE: f64 = 0.20;
 pub const IMPORTANT_ACCESS_THRESHOLD: i32 = 3;
