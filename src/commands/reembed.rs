@@ -1,4 +1,7 @@
-// Daemon must be stopped: this writes the graph directly.
+// Daemon must be stopped: this writes the graph directly. That precondition was
+// unenforceable until the writer lock existed — killing the hub does not keep it
+// dead, since a surviving `kern mcp` proxy respawns it, and the respawned hub
+// then flushed its stale in-memory graph over a completed re-embed.
 
 use std::collections::HashMap;
 
@@ -9,6 +12,14 @@ use super::{load_graph, save_graph, Client};
 const BATCH: usize = 64;
 
 pub(super) async fn cmd_reembed(cfg: &crate::config::Config, embed_url: &str, embed_model: &str) {
+	let _lock = match crate::base::lock::acquire(&cfg.data_dir, "reembed") {
+		Ok(l) => l,
+		Err(e) => {
+			eprintln!("reembed: {e}");
+			eprintln!("  stop it first (`kern hub stop`, or kill the daemon) — a re-embed racing a live writer loses the rewrite");
+			return;
+		}
+	};
 	let mut g = load_graph(cfg);
 	let client = Client::new_embed_only(embed_url, embed_model, &cfg.embed.key);
 

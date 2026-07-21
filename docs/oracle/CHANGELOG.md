@@ -2,6 +2,26 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — A direct-writer admin command can no longer be clobbered:
+  `src/base/lock.rs` is an advisory writer lock over the data dir, held for the
+  daemon's lifetime and taken by `reembed`, `compact` and `gc`, which now
+  refuse while it is held and name the holder. `kern status` reports data dir,
+  socket, daemon, hub and lock. Built on std `File::try_lock` rather than a new
+  dependency (`fs2`/`fs4`), which costs an MSRV bump 1.82 -> 1.89 — the right
+  trade for alpha, where the toolchain is 1.96 and no compatibility is carried.
+  The lock is an OS file lock, so a killed holder releases it and there is no
+  stale-lock cleanup path to get wrong (guarded by
+  `the_lock_file_is_not_the_lock`). The daemon's own acquire is non-fatal: it
+  owns the graph, so it warns rather than refusing to serve, and `kern status`
+  says explicitly when a daemon is serving without the lock. Verified live
+  against the exact failure of 2026-07-21 — with a daemon up, all three admin
+  commands refuse by name; after SIGKILL the lock is free and `reembed`
+  proceeds. Halves item 9: the one-shot write commands still open the store
+  directly and reconcile through the flush guard, deliberately, because
+  refusing them would make the CLI unusable whenever a daemon runs.
+  Decided by: fix-the-root — the "daemon must be stopped" comment on `reembed`
+  was an unenforceable precondition, and a comment is not a guard — and
+  name-the-tradeoff for the MSRV bump and for the one-shots left reconciling.
 - 2026-07-21 — The intake has a surface, and the retry-forever tradeoff is
   finally visible: `kern intake` / `kern intake status` prints pending (age,
   last error), quarantined and done; `kern intake drain` runs one pass

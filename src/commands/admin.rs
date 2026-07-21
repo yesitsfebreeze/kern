@@ -139,6 +139,14 @@ fn tick_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> {
 
 // Daemon must be stopped: a live daemon would race and re-persist the bloated graph.
 pub(super) fn cmd_gc(cfg: &crate::config::Config) {
+	let _lock = match crate::base::lock::acquire(&cfg.data_dir, "gc") {
+		Ok(l) => l,
+		Err(e) => {
+			eprintln!("gc: {e}");
+			eprintln!("  stop it first — a live daemon re-persists the graph this reaped from");
+			return;
+		}
+	};
 	let mut g = load_graph(cfg);
 	let (before, reaped, after) = g.gc_empty_kerns_counted();
 	save_graph(&g);
@@ -162,8 +170,16 @@ pub(super) fn cmd_gc(cfg: &crate::config::Config) {
 	}
 }
 
-// Daemon must be stopped.
+// Daemon must be stopped: compaction swaps data.mdb underneath any open env.
 pub(super) fn cmd_compact(cfg: &crate::config::Config) {
+	let _lock = match crate::base::lock::acquire(&cfg.data_dir, "compact") {
+		Ok(l) => l,
+		Err(e) => {
+			eprintln!("compact: {e}");
+			eprintln!("  stop it first — compaction renames data.mdb under any open environment");
+			return;
+		}
+	};
 	match crate::base::store::compact_dir(&cfg.data_dir) {
 		Ok((old, new)) => println!(
 			"compact: data.mdb {} -> {} ({:.0}% reclaimed)",

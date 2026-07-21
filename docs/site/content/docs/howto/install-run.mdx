@@ -91,9 +91,18 @@ Logs: stderr, default level `warn`. Detached children append to `.kern/data/logs
 RUST_LOG=kern=info kern --daemon
 ```
 
-<Callout type="warn" title="There is no `kern status`">
-Check the socket (`ls $XDG_RUNTIME_DIR/kern-*.sock`) or process (`pgrep -af 'kern --daemon'`). The `kern <subcommand>` CLI opens the graph directly and can race a live daemon — use MCP tools for live state; stop the daemon before offline commands (`kern reembed`, `kern compact`).
-</Callout>
+`kern status` answers who is serving and who is writing:
+
+```
+$ kern status
+data dir     /repo/.kern/data
+kern socket  /run/user/1000/kern-ef39084.sock
+daemon       serving  (4 kerns, 812 entities, idle 12s)
+hub          running   /run/user/1000/kern-hub.sock
+writer lock  held by daemon pid 1626183
+```
+
+The `kern <subcommand>` CLI opens the graph directly, so it can race a live daemon — use MCP tools for live state. The offline admin commands (`kern reembed`, `kern compact`, `kern gc`) now take the writer lock and **refuse** while a daemon holds it, naming the holder, rather than losing a rewrite to whichever process flushes last. The lock is released by the OS when its holder exits, kill included, so a crash never leaves a stale one to clean up.
 
 ## Stopping
 

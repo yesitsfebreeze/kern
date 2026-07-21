@@ -616,21 +616,35 @@ reads as zero.
 daemon — prefer MCP for live state).
 
 **Subcommands** (`Commands` enum, `src/commands.rs`): `ingest`, `query`,
-`search`, `reembed`, `get`, `list`, `forget`, `link`, `health`, `profile`,
-`gc`, `compact`, `graviton {add|list|remove}`, `degrade`, `claim-kind {add|rm}`,
-`peers`, `register`, `unnamed {list}`, `mcp`, `compress`, `daemon`,
-`hub {status|resolve|unload|merge|stop}`.
+`search`, `reembed`, `get`, `list`, `forget`, `link`, `intake {status|drain}`,
+`status`, `health`, `profile`, `gc`, `compact`, `graviton {add|list|remove}`,
+`degrade`, `claim-kind {add|rm}`, `peers`, `register`, `unnamed {list}`, `mcp`,
+`compress`, `daemon`, `hub {status|resolve|unload|merge|stop}`.
 
 **How.** `dispatch` (`src/commands.rs`) routes; per-subcommand handlers in
-`src/commands/{admin,graph_ops,ingest_cmd,mcp_cmd,mcp_restart,profile_cmd,query,reembed}.rs`.
+`src/commands/{admin,graph_ops,ingest_cmd,intake_cmd,mcp_cmd,mcp_restart,profile_cmd,query,reembed,status}.rs`.
 Notable:
+
+- **The writer lock** (`src/base/lock.rs`) — one advisory lock per data dir
+  (std `File::try_lock`, MSRV 1.89), held for the daemon's whole lifetime and
+  taken by every direct-writer admin command. `reembed`, `compact` and `gc`
+  refuse while it is held and name the holder, because "daemon must be stopped"
+  was an unenforceable comment: a killed hub is respawned by any surviving
+  `kern mcp` proxy, and the respawn flushed its stale graph over a completed
+  re-embed. It is an OS file lock, so a killed holder releases it — the file's
+  existence is never the lock, and there is no cleanup path.
+- `status` (`status.rs`) — data dir, socket, whether a daemon serves this
+  directory, whether the hub runs, and who holds the writer lock. Says so
+  explicitly when a daemon serves without holding the lock, since then the
+  admin commands will not be refused.
 
 - `reembed` (`reembed.rs`) — re-embeds every entity with a new model in batches,
   re-seeds `gnn_vector` from the raw embed, recomputes reason-edge vectors
   (endpoint means), rebuilds the index, saves, then re-embeds the cold tier. It
   stamps the store with the model it actually embedded with, only after the
   rewrite succeeded; a cold-tier failure is reported explicitly (hot graph on the
-  new model, cold tier still on the old). Daemon must be stopped.
+  new model, cold tier still on the old). Takes the writer lock and refuses
+  rather than racing a live daemon.
 - `health` (`admin.rs`) — prints the graph counts plus the degradation lines:
   cold rows evicted, an embedding-model mismatch warning, and
   `degraded: N panics | M failures` with the most recent fault of each, printed
@@ -642,10 +656,15 @@ Notable:
   watchdog, LLM keepalive, file watcher, the intake, gossip, maintenance tick,
   MCP (stdio or SSE), and the RPC socket.
 
-**Where.** `src/commands/*` (2459 LoC, 8 files), `src/main.rs`.
+**Where.** `src/commands/*`, `src/base/lock.rs`, `src/main.rs`.
 
-**Gaps.** CLI vs daemon race is a documented footgun. No `kern status` to check
-for a running daemon. `unnamed` lists only — there is no `promote`.
+**Gaps.** The one-shot write commands (`ingest`, `link`, `forget`, `degrade`,
+`intake drain`) still open the store directly while a daemon holds newer state.
+They deliberately reconcile instead of refusing — the flush guard rejects a
+stale write and they reload and retry — because refusing them would make the
+CLI unusable whenever a daemon runs. So a CLI read can still be older than the
+daemon's live state (`ROADMAP.md` item 9). `unnamed` lists only — there is no
+`promote`.
 
 ---
 

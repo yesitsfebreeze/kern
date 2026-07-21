@@ -39,30 +39,31 @@ These need no gossip, no flag and no unusual configuration. Every one produces a
 wrong or missing result with no error, which is why they outrank both the
 security work (armed only with federation on) and every feature.
 
-### 9. Two live writers against one LMDB environment `[surface]`
+### 9. Two live writers: the admin half is closed, the serving half is not `[surface]`
 
-Merged from what were two items, because it is one failure with two entrances.
-The CLI reads the on-disk graph while the daemon holds newer state, and
-`kern mcp`'s standalone fallback opens the same store as a second writer
-(`src/commands/mcp_cmd.rs:241`). Partly mitigated since it was written: both go
-through `save_graph_guarded`, which refuses a stale flush
-(`src/commands.rs:303-306`), so the documented symptom ("tools work but the
-graph never grows", `howto/mcp.mdx:56-61`) is now a refused-flush retry rather
-than a silent clobber. Two live writers still exist. Needs `kern status` +
-advisory locking; no `flock` or `Status` subcommand exists anywhere in `src/`.
+**Half done.** The destructive entrance is shut. `src/base/lock.rs` is an
+advisory writer lock over the data dir (std `File::try_lock`, no dependency;
+MSRV 1.82 -> 1.89), held for the daemon's lifetime and taken by every
+direct-writer admin command — `reembed`, `compact`, `gc` refuse while it is
+held and name the holder. `kern status` reports daemon, hub and lock. The lock
+is an OS file lock, so a kill releases it and no stale-lock cleanup exists to
+get wrong.
 
-`README.md:159-161` still presents the auto-spawn fallback as "all you need to
-bring kern up", with no caveat.
+What is left is the *non-destructive* entrance, which the lock deliberately
+does not close: one-shot write commands (`ingest`, `link`, `forget`, `degrade`,
+`intake drain`) still open the store directly while a daemon holds newer state.
+They reconcile rather than refuse — `save_graph_guarded` refuses a stale flush
+(`src/commands.rs`) and they reload and retry — because refusing them would
+make the CLI unusable whenever a daemon runs, which is always. So the CLI can
+still read a graph older than the daemon's live state and report from it. Two
+candidate closures: route those commands through the daemon's RPC when one is
+serving (correct, and makes `kern mcp`'s standalone fallback the only remaining
+direct writer), or teach them to detect a serving daemon and say so. The first
+is right; it is a bigger change than the lock and wants its own decision.
 
-Observed live 2026-07-21 during the all-granite reembed of this repo's own
-store: `kern reembed` opens the store directly per its "daemon must be
-stopped" comment, but that precondition is unenforceable — killing the hub
-does not keep it dead, because any surviving `kern mcp` proxy auto-respawns
-it (`hub.auto_start` default true), and the respawned hub then flushed its
-stale in-memory graph over the completed re-embed, losing the rewrite and
-one thought. `reembed` (and any direct-writer admin command) needs the same
-advisory lock this item already calls for, or a hub RPC that performs the
-re-embed inside the single writer.
+Also still open: `kern mcp`'s standalone fallback opens the same store as a
+second writer (`src/commands/mcp_cmd.rs`), and it is a long-lived one, unlike
+the one-shots.
 
 ---
 

@@ -7,6 +7,7 @@ mod mcp_restart;
 mod profile_cmd;
 mod query;
 mod reembed;
+mod status;
 
 pub(crate) use mcp_cmd::ensure_mcp_registered;
 
@@ -144,6 +145,8 @@ pub enum Commands {
 		#[command(flatten)]
 		llm: LlmArgs,
 	},
+	/// Who is serving and who is writing this directory.
+	Status,
 	Health,
 	Profile {
 		#[arg(long, default_value = "what is this project about")]
@@ -544,6 +547,7 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 			.await
 		}
 
+		Commands::Status => status::cmd_status(cfg).await,
 		Commands::Health => admin::cmd_health(cfg).await,
 		Commands::Profile { text, no_llm } => profile_cmd::cmd_profile(cfg, &text, no_llm).await,
 		Commands::Gc => admin::cmd_gc(cfg),
@@ -574,6 +578,10 @@ pub(crate) struct EngineHandle {
 	pub task_q: std::sync::Arc<crate::tick::queue::Queue>,
 	// Guarded persist closure: the shutdown flush never overwrites a grown disk.
 	pub save_fn: std::sync::Arc<dyn Fn() + Send + Sync>,
+	// Held for the daemon's lifetime so a direct-writer admin command refuses
+	// instead of racing it. Dropped (and released by the OS) when the daemon
+	// exits, kill included.
+	pub _writer_lock: Option<crate::base::lock::WriterLock>,
 }
 
 pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineHandle {
@@ -587,6 +595,21 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 	if !crate::takeover::is_takeover_boot() {
 		maybe_self_heal_store(cfg);
 	}
+
+	// Advisory, and deliberately non-fatal: the daemon is the graph's owner, so
+	// it claims the dir but never refuses to serve over a lock it cannot take.
+	// A takeover boot expects the predecessor to still hold it for a few ms.
+	let writer_lock = match crate::base::lock::acquire(&cfg.data_dir, "daemon") {
+		Ok(l) => Some(l),
+		Err(e) => {
+			tracing::warn!(
+				target: "kern.startup",
+				error = %e,
+				"could not claim the writer lock; direct-writer admin commands will not be refused while this daemon runs"
+			);
+			None
+		}
+	};
 
 	spawn_watchdog();
 	let reason_url = if cli.reason_url.is_empty() {
@@ -688,6 +711,7 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 		server: mcp_server,
 		task_q: q,
 		save_fn,
+		_writer_lock: writer_lock,
 	}
 }
 

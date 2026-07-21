@@ -7,6 +7,7 @@ pub mod heat;
 pub mod hnsw;
 pub mod identity;
 pub mod lexical;
+pub mod lock;
 pub mod log_throttle;
 pub mod math;
 pub mod merge;
