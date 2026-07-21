@@ -2,6 +2,42 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-21 — `kern link` stops clobbering a concurrent writer, closing the one
+  half of item 9 that needed no auth. `cmd_link` called the unguarded save, which
+  writes the whole kern map with no epoch check, so a daemon commit landing
+  between the command's load and its flush vanished. It now flushes through
+  `save_graph_guarded`, the same refuse-absorb-retry path `cmd_ingest` and
+  `intake drain` already used.
+
+  The root, and why the rename is part of the fix: nothing at the call site said
+  the plain `save_graph` was conditional. It is safe only under the writer lock,
+  which `gc`, `compact` and `reembed` hold and `cmd_link` never did — so the
+  hazard was invisible to anyone adding a fourth caller. It is now
+  `save_graph_unguarded`, with the precondition on the function. Two remaining
+  callers are named by that rename and NOT fixed here, because neither is the
+  claimed item and both want their own decision: `cmd_hub_merge`
+  (`src/commands/admin.rs`) writes a destination graph it does not lock, and
+  `maybe_self_heal_store` (`src/commands.rs`) rewrites during boot recovery.
+
+  **The first regression test for this was worthless and the second one was
+  too.** Version one called `save_graph_guarded` itself and asserted the helper's
+  behaviour — it passed with the fix reverted. Version two drove `cmd_link` end
+  to end, and also passed reverted, for a subtler reason: `cmd_link` loads its
+  graph *inside* itself, so an external commit staged beforehand is simply loaded
+  and written back, and the race never occurs. Only after extracting
+  `link_and_persist`, which takes the already-loaded graph by value, could a
+  genuinely stale graph be handed to the flush. That version fails without the
+  guard on `the concurrent writer's kern survived the link's flush` and passes
+  with it. Both false greens were caught by reverting the fix and re-running —
+  the test that is never seen to fail is not known to test anything.
+
+  Evidence: `just check` clean, 827/827 nextest, e2e recall 0.9306 / 0.9722 /
+  0.9471 unchanged against baseline, docs-check 586.
+
+  Decided by: verify-before-claiming — the fix was three lines and the honest
+  test was the whole job — and fix-the-root, for renaming the unguarded path
+  rather than fixing the one caller that happened to be reported.
+
 - 2026-07-21 — verification pass over the standalone-lock commit (`c375c5e`).
   The code and the tests hold: `just check` clean, 826/826 nextest with the
   three new `standalone_tests` among them, doctests clean, 16 passed / 4 skipped

@@ -7,7 +7,7 @@ use crate::base::types::{Entity, Kern, Reason, ReasonKind};
 use crate::base::util::{explain_relationship_prompt, short_id, truncate};
 
 use super::route::{route, u64_field, Routed};
-use super::{load_graph, save_graph, with_graph, Client, Endpoint};
+use super::{load_graph, with_graph, Client, Endpoint};
 
 fn find_entity_by_prefix(g: &GraphGnn, id: &str) -> Option<(Entity, String)> {
 	if let Some(pair) = find_entity(g, id) {
@@ -152,7 +152,7 @@ pub(super) async fn cmd_link(
 	reason_url: &str,
 	reason_model: &str,
 ) {
-	let mut g = load_graph(cfg);
+	let g = load_graph(cfg);
 	let (from_t, _) = match find_entity(&g, from) {
 		Some(pair) => pair,
 		None => {
@@ -190,19 +190,37 @@ pub(super) async fn cmd_link(
 		None
 	};
 
-	match link_entities(&mut g, from, to, reason_text, reason_embed, 1.0) {
-		Ok((rid, score)) => {
-			save_graph(&g);
-			println!(
-				"linked {} -> {}  edge={}  score={:.4}",
-				short_id(from),
-				short_id(to),
-				short_id(&rid),
-				score,
-			);
-		}
+	match link_and_persist(g, cfg, from, to, reason_text, reason_embed) {
+		Ok((rid, score)) => println!(
+			"linked {} -> {}  edge={}  score={:.4}",
+			short_id(from),
+			short_id(to),
+			short_id(&rid),
+			score,
+		),
 		Err(e) => eprintln!("{e}"),
 	}
+}
+
+// Takes the loaded graph by value so the stale-graph case is reachable from a
+// test: the race this guards against is a commit landing between the load and
+// the flush, which nothing outside `cmd_link` can interleave while the load is
+// buried inside it.
+fn link_and_persist(
+	mut g: GraphGnn,
+	cfg: &crate::config::Config,
+	from: &str,
+	to: &str,
+	reason_text: String,
+	reason_embed: Option<Vec<f32>>,
+) -> Result<(String, f64), String> {
+	let linked = link_entities(&mut g, from, to, reason_text, reason_embed, 1.0)?;
+	// Guarded, not `save_graph_unguarded`: this command holds no writer lock, so
+	// a daemon can commit between our load and our flush. The unguarded path
+	// writes the whole kern map with no epoch check and drops that commit.
+	let g = std::sync::Arc::new(parking_lot::RwLock::new(g));
+	super::save_graph_guarded(&g, cfg);
+	Ok(linked)
 }
 
 // `score` is the assertion's strength, NOT cosine(from, to): a deliberate link
@@ -371,6 +389,57 @@ mod tests {
 		assert!(
 			survivor.score >= DEGRADE_MIN_THRESHOLD,
 			"survivor stays above the floor"
+		);
+	}
+
+	// `kern link` takes no writer lock, so a daemon can commit between its load
+	// and its flush. The unguarded save writes the whole kern map with no epoch
+	// check, so that commit vanishes — the last half of item 9 that needed no
+	// auth to close.
+	#[test]
+	fn a_link_racing_an_external_commit_keeps_both() {
+		use parking_lot::RwLock;
+		use std::sync::Arc;
+
+		use crate::base::types::{mk_entity, EntityKind};
+
+		let dir = tempfile::tempdir().unwrap();
+		let cfg = crate::config::Config {
+			data_dir: dir.path().to_string_lossy().into_owned(),
+			..Default::default()
+		};
+
+		let g = Arc::new(RwLock::new(crate::commands::load_graph(&cfg)));
+		let root_id = g.read().root.id.clone();
+
+		let mut own = Kern::new("link-kern", &root_id);
+		for id in ["a", "b"] {
+			own
+				.entities
+				.insert(id.into(), mk_entity(id, id, 1.0, EntityKind::Claim));
+		}
+		g.write().kerns.insert("link-kern".into(), own);
+		crate::commands::save_graph_guarded(&g, &cfg);
+
+		// What `cmd_link` holds: loaded now, flushed only after the daemon commits.
+		// That staleness is the defect — a graph loaded fresh would already carry
+		// the other writer's kern and write it back by accident.
+		let stale = crate::commands::load_graph(&cfg);
+		crate::test_support::commit_extra_kern_via_store(&g, Kern::new("daemon-kern", &root_id));
+		drop(g);
+
+		let linked = link_and_persist(stale, &cfg, "a", "b", "because".into(), None);
+		assert!(linked.is_ok(), "the link itself applies: {linked:?}");
+
+		let disk = crate::commands::load_graph(&cfg);
+		assert!(
+			disk.loaded("daemon-kern").is_some(),
+			"the concurrent writer's kern survived the link's flush"
+		);
+		let kern = disk.kerns.get("link-kern").expect("our own kern persisted");
+		assert!(
+			kern.reasons.values().any(|r| r.from == "a" && r.to == "b"),
+			"the edge we just wrote is on disk too"
 		);
 	}
 

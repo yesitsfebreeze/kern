@@ -292,7 +292,11 @@ fn bind_embed_model(g: &mut GraphGnn, cfg: &crate::config::Config) {
 	crate::base::persist::check_graph_stamp(g);
 }
 
-pub(crate) fn save_graph(g: &GraphGnn) {
+// Writes the whole kern map with no epoch check, so a commit that landed since
+// this graph was loaded is overwritten unseen. Only safe while the caller holds
+// the writer lock (`gc`, `compact`, `reembed`) or owns the dir outright. Anything
+// else wants `save_graph_guarded`, which refuses a stale flush and absorbs.
+pub(crate) fn save_graph_unguarded(g: &GraphGnn) {
 	if let Err(e) = crate::base::persist::save_all(g) {
 		eprintln!("save: {e}");
 	}
@@ -417,7 +421,7 @@ fn maybe_self_heal_store(cfg: &crate::config::Config) {
 		let mut g = load_graph(cfg);
 		let (before, reaped, after) = g.gc_empty_kerns_counted();
 		if reaped > 0 {
-			save_graph(&g);
+			save_graph_unguarded(&g);
 			eprintln!("kern: self-heal reaped {reaped} empty kerns ({before} -> {after})");
 		}
 	}
@@ -436,7 +440,7 @@ fn maybe_self_heal_store(cfg: &crate::config::Config) {
 pub(crate) fn with_graph<R>(cfg: &crate::config::Config, f: impl FnOnce(&mut GraphGnn) -> R) -> R {
 	let mut g = load_graph(cfg);
 	let out = f(&mut g);
-	save_graph(&g);
+	save_graph_unguarded(&g);
 	out
 }
 
@@ -676,7 +680,7 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 				"reaped empty unnamed kerns"
 			);
 			eprintln!("kern: reaped {reaped} empty kerns ({before} -> {after})");
-			// Persist via the guarded closure (not bare save_graph) so the epoch bump
+			// Persist via the guarded closure (not bare save_graph_unguarded) so the epoch bump
 			// stays tracked — else the next flush refuse-reloads its own reap.
 			save_fn();
 		}
@@ -1129,7 +1133,7 @@ mod entry_point_tests {
 			e.vector = vec![0.25; 4];
 			k.entities.insert("e1".into(), e);
 			g.register(k);
-			super::save_graph(&g);
+			super::save_graph_unguarded(&g);
 
 			assert_eq!(
 				g.store().unwrap().embed_stamp(),
@@ -1166,23 +1170,6 @@ mod entry_point_tests {
 	// LMDB forbids double-opening one env per process, so the "external writer"
 	// commits THROUGH the daemon graph's own store handle — same divergence.
 	#[cfg(test)]
-	fn commit_extra_kern_via_store(
-		g: &std::sync::Arc<parking_lot::RwLock<super::GraphGnn>>,
-		kern: crate::base::types::Kern,
-	) {
-		let gg = g.read();
-		let store = gg.store().expect("graph has a bound store");
-		let mut kerns = std::collections::HashMap::new();
-		for k in gg.all() {
-			kerns.insert(k.id.clone(), k.clone());
-		}
-		kerns.insert(gg.root.id.clone(), gg.root.clone());
-		kerns.insert(kern.id.clone(), kern);
-		store
-			.save_all_kerns(&kerns, &gg.network_id, gg.quant_mode)
-			.expect("external commit through the shared store");
-	}
-
 	#[test]
 	fn save_graph_guarded_absorbs_external_commit_and_keeps_unflushed_rows() {
 		use parking_lot::RwLock;
@@ -1200,7 +1187,7 @@ mod entry_point_tests {
 		assert_eq!(g.read().flushed_epoch(), 0, "fresh load at epoch 0");
 
 		let root_id = g.read().root.id.clone();
-		commit_extra_kern_via_store(&g, Kern::new("cli-kern", &root_id));
+		crate::test_support::commit_extra_kern_via_store(&g, Kern::new("cli-kern", &root_id));
 
 		let mut ram = Kern::new("ram-kern", &root_id);
 		ram.entities.insert(
@@ -1255,7 +1242,7 @@ mod entry_point_tests {
 		);
 
 		let root_id = g.read().root.id.clone();
-		commit_extra_kern_via_store(&g, Kern::new("late", &root_id));
+		crate::test_support::commit_extra_kern_via_store(&g, Kern::new("late", &root_id));
 
 		assert!(
 			super::reconcile_if_stale(&g, &cfg),
@@ -1289,7 +1276,7 @@ mod entry_point_tests {
 			"e".into(),
 			mk_entity("e", "durable fact", 1.0, EntityKind::Claim),
 		);
-		commit_extra_kern_via_store(&g, k);
+		crate::test_support::commit_extra_kern_via_store(&g, k);
 
 		g.write().kerns.insert("k".into(), Kern::new("k", &root_id));
 		crate::tick::tasks::do_persist(&g, "k");

@@ -98,18 +98,23 @@ thing at risk.
 Three things remain, and the title names them. `ingest` and `link` (blocked on
 item 24) and `intake drain` (needs a tool first) still write the store directly.
 They are one-shot, so the exposure is a lost write rather than a lost graph —
-but only two of the three are guarded, and the difference matters. `cmd_ingest`
-(`src/commands/ingest_cmd.rs`) and `intake drain`'s `flush`
-(`src/commands/intake_cmd.rs`) retry through `persist::flush_guarded`, so a
-daemon that committed underneath them gets a refused flush and a reload.
-`cmd_link` does not: it calls the **unguarded** `save_graph`
-(`src/commands/graph_ops.rs:195` -> `persist::save_all`), which writes the whole
-kern map with no epoch check, so a `kern link` racing the daemon still clobbers.
-Giving `cmd_link` the same guarded retry needs no auth and is not blocked on
-item 24 — it is the cheapest thing left in this item. And the read-only commands
-(`get`, `list`, `query`, `search`) still load from disk and can report older
-than live state: the same defect one step further down, a stale read rather than
-a lost write.
+and all three are now guarded. `cmd_ingest` (`src/commands/ingest_cmd.rs`) and
+`intake drain`'s `flush` (`src/commands/intake_cmd.rs`) retry through
+`persist::flush_guarded`; `cmd_link` joined them 2026-07-21 via
+`link_and_persist` (`src/commands/graph_ops.rs`) and `save_graph_guarded`, so a
+daemon committing underneath any of them gets a refused flush and a reload
+rather than a clobber. The unguarded entry point is now named
+`save_graph_unguarded` and carries its precondition, which is what made the
+remaining two unlocked callers visible: `cmd_hub_merge`
+(`src/commands/admin.rs`) writes a destination graph it holds no lock on, and
+`maybe_self_heal_store` (`src/commands.rs`) rewrites the store during boot
+recovery. Both are narrower than the CLI race — hub merge stops both daemons
+first, self-heal runs before the daemon serves — but neither has been proven
+safe, and neither belongs to this item.
+
+What is left here is the read side. `get`, `list`, `query` and `search` still
+load from disk and can report older than live state: the same defect one step
+further down, a stale read rather than a lost write.
 
 ---
 
