@@ -4,7 +4,7 @@ use crate::base::constants::AGENT_SOURCE;
 use crate::base::math::clamp_confidence;
 use crate::base::reason::move_entity;
 use crate::base::search::find_entity;
-use crate::base::types::Source;
+use crate::base::types::{Acl, Source};
 use crate::base::util::explain_relationship_prompt;
 use crate::base::validate::{validate_conf, validate_fact_source};
 use crate::ingest;
@@ -29,6 +29,8 @@ pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 					"hint": {"type": "string", "description": "free-text hint describing the content, folded into the chunking prompt"},
 					"retention_secs": {"type": "integer", "description": "expire this ingest after N seconds — sets valid_until, after which retrieval drops it (0 or absent = never). On a near-duplicate the shorter of the two deadlines wins, so this can shorten an existing TTL but never extend one"},
 					"sync":       {"type": "boolean", "description": "block until ingest completes (default false)"},
+					"scope":      {"type": "string", "description": "ACL scope (e.g. a tenant) this text belongs to. A scoped thought is only returned to a query whose `principals` name the scope"},
+					"principals": {"type": "array", "items": {"type": "string"}, "description": "principal ids (users or groups) permitted to read this text. Naming neither `scope` nor `principals` leaves the thought public, readable by every query"},
 				},
 			},
 		}),
@@ -121,6 +123,23 @@ struct IngestArgs {
 	retention_secs: u64,
 	#[serde(default)]
 	sync: bool,
+	#[serde(default)]
+	scope: String,
+	#[serde(default)]
+	principals: Vec<String>,
+}
+
+// The ACL this ingest stamps on everything it places. Naming neither a scope nor
+// a principal yields `Acl::default()` — public — which is every existing caller.
+fn acl_from_args(p: &IngestArgs) -> Result<Acl, String> {
+	if !p.scope.is_empty() && p.scope.trim().is_empty() {
+		return Err("`scope` must not be blank".to_string());
+	}
+	Ok(Acl {
+		scope: p.scope.trim().to_string(),
+		users: super::parse_principals("principals", &p.principals)?,
+		groups: Vec::new(),
+	})
 }
 
 // Caller boundary: an agent caller can mint neither Fact-kind nor Fact-confidence
@@ -184,6 +203,11 @@ impl Server {
 			Err(e) => return tool_error(&e),
 		};
 
+		let acl = match acl_from_args(&p) {
+			Ok(a) => a,
+			Err(e) => return tool_error(&e),
+		};
+
 		// MCP callers are agents; clamp against AGENT_SOURCE regardless of what
 		// `p.source` claims — the caller's source string cannot escalate to USER_SOURCE trust.
 		let (conf, kind) = clamp_confidence(p.conf, AGENT_SOURCE);
@@ -220,7 +244,7 @@ impl Server {
 		};
 
 		if p.sync {
-			let fut = self.worker.run(
+			let fut = self.worker.run_with_acl(
 				p.text,
 				src,
 				kind,
@@ -231,6 +255,7 @@ impl Server {
 					valid_until,
 					..Default::default()
 				},
+				acl,
 			);
 			let Some(outcome) = crate::llm::block_on_in_place(fut) else {
 				return tool_error("no tokio runtime");
@@ -265,6 +290,7 @@ impl Server {
 				hint: p.hint.clone(),
 				confidence: conf,
 				valid_until,
+				acl: acl.clone(),
 			};
 			match crate::ingest::direct::intake_direct(&direct_dir, &job) {
 				Ok(doc_id) => {
@@ -287,7 +313,7 @@ impl Server {
 			}
 		}
 
-		let doc_id = self.worker.enqueue(
+		let doc_id = self.worker.enqueue_with_acl(
 			p.text,
 			src,
 			kind,
@@ -298,6 +324,7 @@ impl Server {
 				valid_until,
 				..Default::default()
 			},
+			acl,
 		);
 		tool_result_json(&serde_json::json!({
 			"status": "queued",
@@ -831,5 +858,134 @@ mod tests {
 		let out = srv.tool_move(&serde_json::json!({ "id": "a" }));
 		assert!(is_error(&out));
 		assert!(text(&out).contains("invalid arguments"), "{}", text(&out));
+	}
+}
+
+#[cfg(test)]
+mod ingest_acl_tests {
+	use super::{acl_from_args, IngestArgs};
+	use crate::base::types::Acl;
+	use crate::mcp::Server;
+	use crate::test_support::tool_text as text;
+
+	fn is_error(out: &serde_json::Value) -> bool {
+		out
+			.get("isError")
+			.and_then(|x| x.as_bool())
+			.unwrap_or(false)
+	}
+
+	// Every text embeds to the same vector, so the ingest commits without a model.
+	fn fixed_vec_app() -> axum::Router {
+		axum::Router::new().route(
+			"/api/embed",
+			axum::routing::post(|body: axum::Json<serde_json::Value>| async move {
+				let n = body
+					.0
+					.get("input")
+					.and_then(|v| v.as_array())
+					.map(|a| a.len())
+					.unwrap_or(1);
+				let embs: Vec<Vec<f32>> = (0..n).map(|_| vec![1.0, 0.0, 0.0]).collect();
+				axum::Json(serde_json::json!({ "embeddings": embs }))
+			}),
+		)
+	}
+
+	fn placed_acls(srv: &Server) -> Vec<Acl> {
+		let g = srv.graph.read();
+		g.all()
+			.iter()
+			.flat_map(|k| k.entities.values().map(|e| e.acl.clone()))
+			.collect()
+	}
+
+	// The whole chain, not the schema: MCP args -> IngestArgs -> Job -> place ->
+	// the Entity actually in the graph.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn a_scoped_ingest_lands_a_non_default_acl_on_the_placed_entity() {
+		let (url, _server) = crate::test_support::spawn_http(fixed_vec_app()).await;
+		let srv = crate::test_support::mcp_server_with_embed_url(&url);
+
+		let out = srv.tool_ingest(&serde_json::json!({
+			"text": "the quarterly numbers are not public",
+			"sync": true,
+			"scope": "acme",
+			"principals": ["alice", "auditors"],
+		}));
+		assert!(!is_error(&out), "the stub embedder answers: {}", text(&out));
+
+		let acls = placed_acls(&srv);
+		assert!(!acls.is_empty(), "the ingest placed something");
+		for acl in &acls {
+			assert_eq!(acl.scope, "acme", "the caller's scope reached the entity");
+			assert_eq!(
+				acl.users,
+				vec!["alice".to_string(), "auditors".to_string()],
+				"the caller's principals reached the entity"
+			);
+		}
+
+		// And the ACL it landed is the one retrieval enforces.
+		let opts = crate::retrieval::score::QueryOptions {
+			principals: vec!["bob".into()],
+			..Default::default()
+		};
+		let g = srv.graph.read();
+		assert!(
+			g.all()
+				.iter()
+				.flat_map(|k| k.entities.values())
+				.all(|e| !crate::retrieval::score::matches_filter(e, &opts)),
+			"bob is a non-member of everything this ingest placed"
+		);
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn an_unscoped_ingest_stays_public() {
+		let (url, _server) = crate::test_support::spawn_http(fixed_vec_app()).await;
+		let srv = crate::test_support::mcp_server_with_embed_url(&url);
+
+		let out = srv.tool_ingest(&serde_json::json!({
+			"text": "the sky is blue",
+			"sync": true,
+		}));
+		assert!(!is_error(&out), "{}", text(&out));
+
+		let acls = placed_acls(&srv);
+		assert!(!acls.is_empty());
+		for acl in &acls {
+			assert!(
+				acl.scope.is_empty() && acl.users.is_empty() && acl.groups.is_empty(),
+				"naming no scope and no principal leaves the thought public"
+			);
+		}
+	}
+
+	#[test]
+	fn a_blank_scope_or_principal_is_refused_rather_than_trimmed_away() {
+		let blank_principal = IngestArgs {
+			principals: vec!["   ".into()],
+			..Default::default()
+		};
+		let e = acl_from_args(&blank_principal).unwrap_err();
+		assert!(e.contains("principals"), "error names the field: {e}");
+
+		let blank_scope = IngestArgs {
+			scope: "  ".into(),
+			..Default::default()
+		};
+		let e = acl_from_args(&blank_scope).unwrap_err();
+		assert!(e.contains("scope"), "error names the field: {e}");
+
+		// A principal with incidental whitespace is normalized, not rejected.
+		let padded = IngestArgs {
+			scope: " acme ".into(),
+			principals: vec![" alice ".into()],
+			..Default::default()
+		};
+		let acl = acl_from_args(&padded).expect("padding is not malformation");
+		assert_eq!(acl.scope, "acme");
+		assert_eq!(acl.users, vec!["alice".to_string()]);
 	}
 }

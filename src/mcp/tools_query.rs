@@ -33,6 +33,7 @@ pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 				"valid_at":  {"type": "string", "description": "ISO8601 timestamp; only include thoughts whose valid_until (TTL) has not passed at this instant"},
 				"scheme":    {"type": "string", "enum": ["file", "ticket", "session", "agent", "inline"], "description": "filter by source scheme"},
 				"include_history": {"type": "boolean", "description": "also return superseded (invalidated) revisions reachable from the active hits, flagged history:true"},
+				"principals": {"type": "array", "items": {"type": "string"}, "description": "the caller's principal ids (users and groups). A thought carrying an ACL is returned only when one of these names its scope, one of its users or one of its groups. Omitting this filters nothing — an unscoped caller still reads everything, it does not fall back to public-only"},
 			},
 		},
 	})]
@@ -61,6 +62,7 @@ fn build_query_options(p: &QueryArgs) -> Result<retrieval::score::QueryOptions, 
 		valid_at: parse_time_filter("valid_at", &p.valid_at)?,
 		as_of: parse_time_filter("as_of", &p.as_of)?,
 		include_history: p.include_history,
+		principals: super::parse_principals("principals", &p.principals)?,
 		..Default::default()
 	};
 	if let Some(ref s) = p.scheme {
@@ -104,6 +106,8 @@ struct QueryArgs {
 	as_of: String,
 	#[serde(default)]
 	include_history: bool,
+	#[serde(default)]
+	principals: Vec<String>,
 }
 
 // The filter takes the stable lowercase labels (`EntityKind::as_str`), not the
@@ -178,7 +182,7 @@ impl Server {
 			&vec,
 			&p.text,
 			mode,
-			Some(opts),
+			Some(opts.clone()),
 		);
 		// query_locked took only a read lock; access stamps commit off the hot
 		// path via CommitAccess (advisory, skipped without a queue).
@@ -211,6 +215,14 @@ impl Server {
 						if scored.len() >= k {
 							break;
 						}
+						// SECURITY: cold_search is a raw cosine scan of the spill tier — it
+						// answers no filter. Delivering its hits unfiltered made the cold
+						// tier a way around every predicate the hot path enforces, ACL
+						// included: the entity a scope withheld from the graph read arrived
+						// anyway the moment it had been spilled.
+						if !retrieval::score::matches_filter(&entity, &opts) {
+							continue;
+						}
 						if !have.contains(&entity.id) {
 							cold_ids.insert(entity.id.clone());
 							scored.push(retrieval::expand::ScoredEntity { entity, score });
@@ -224,10 +236,10 @@ impl Server {
 		// active hits for history.
 		let mut history_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 		if p.include_history {
-			let opts = match build_query_options(&p) {
-				Ok(o) => o,
-				Err(e) => return tool_error(&e),
-			};
+			// The same `opts` the ranked read and the cold fill used — rebuilding it
+			// here was a second chance for the three paths to disagree about what the
+			// caller asked for, which for the ACL predicate is a second chance to be
+			// the one that forgets.
 			let g = self.graph.read();
 			let heads: Vec<(String, f64)> = scored
 				.iter()
@@ -604,6 +616,158 @@ mod id_filter_tests {
 			"id": "f1", "valid_at": "2026-01-01T00:00:00Z",
 		}));
 		assert!(is_error(&out), "an explicit valid_at does filter: {out}");
+	}
+
+	fn alice_scoped(id: &str) -> Entity {
+		let mut e = fact(id);
+		e.acl = crate::base::types::Acl {
+			scope: "acme".into(),
+			users: vec!["alice".into()],
+			groups: Vec::new(),
+		};
+		e
+	}
+
+	#[tokio::test]
+	async fn id_read_withholds_a_scoped_row_from_a_non_member() {
+		let srv = server_with(alice_scoped("f1"));
+		let out = srv.tool_query(&serde_json::json!({"id": "f1", "principals": ["bob"]}));
+		assert!(
+			is_error(&out),
+			"an alice-scoped Fact must not be served to bob just because he named it by id: {out}"
+		);
+		assert!(text(&out).contains("thought not found"));
+
+		let out = srv.tool_query(&serde_json::json!({"id": "f1", "principals": ["alice"]}));
+		assert!(!is_error(&out), "a member reads it: {out}");
+		assert_eq!(body(&out)["id"], serde_json::json!("f1"));
+	}
+
+	// The load-bearing default: `principals` absent is NO ACL filter, not
+	// public-only. `kern get` and every unscoped read depend on this.
+	#[tokio::test]
+	async fn bare_id_read_still_serves_a_scoped_row() {
+		let srv = server_with(alice_scoped("f1"));
+		let out = srv.tool_query(&serde_json::json!({"id": "f1"}));
+		assert!(
+			!is_error(&out),
+			"naming no principal filters nothing — it must not degrade to public-only: {out}"
+		);
+		assert_eq!(body(&out)["id"], serde_json::json!("f1"));
+	}
+
+	#[tokio::test]
+	async fn a_blank_principal_is_a_loud_error_not_a_silent_skip() {
+		let srv = server_with(alice_scoped("f1"));
+		let out = srv.tool_query(&serde_json::json!({"id": "f1", "principals": ["  "]}));
+		assert!(is_error(&out), "a blank principal is refused: {out}");
+		assert!(
+			text(&out).contains("principals"),
+			"error names the field: {}",
+			text(&out)
+		);
+
+		// Wrong shape entirely is refused by deserialization, not coerced.
+		let out = srv.tool_query(&serde_json::json!({"id": "f1", "principals": "alice"}));
+		assert!(
+			is_error(&out),
+			"a bare string is not a principal list: {out}"
+		);
+	}
+}
+
+#[cfg(test)]
+mod cold_tier_filter_tests {
+	use crate::base::types::{Acl, Entity, EntityKind, Source};
+
+	fn is_error(out: &serde_json::Value) -> bool {
+		out
+			.get("isError")
+			.and_then(|x| x.as_bool())
+			.unwrap_or(false)
+	}
+
+	fn spilled(id: &str, acl: Acl) -> Entity {
+		let mut e = Entity {
+			id: id.into(),
+			kind: EntityKind::Claim,
+			source: Source::Inline {
+				hash: "h".into(),
+				section: String::new(),
+			},
+			statements: vec![format!("cold statement {id}")],
+			acl,
+			..Default::default()
+		};
+		e.vector = vec![1.0, 0.0, 0.0];
+		e
+	}
+
+	// The cold tier is a raw cosine scan that answers no predicate of its own.
+	// Filling the ranked read from it unfiltered made spilling an entity the way
+	// around every filter the hot path enforces — for the ACL, the whole gate.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn a_cold_hit_answers_the_same_filter_the_hot_path_does() {
+		let app = axum::Router::new().route(
+			"/api/embed",
+			axum::routing::post(|| async {
+				axum::Json(serde_json::json!({ "embeddings": [[1.0, 0.0, 0.0]] }))
+			}),
+		);
+		let (url, _server) = crate::test_support::spawn_http(app).await;
+		let mut srv = crate::test_support::mcp_server_with_embed_url(&url);
+		// The ranked path embeds the query itself, so this rig needs the server's
+		// own client, not just the worker's.
+		srv.llm = Some(crate::llm::Client::new_embed_only(&url, "test", ""));
+
+		let dir = tempfile::tempdir().expect("tmpdir");
+		let store = crate::base::store::Store::open(&dir.path().to_string_lossy()).expect("store");
+		store
+			.cold_put_all(&[
+				spilled("cold_open", Acl::default()),
+				spilled(
+					"cold_secret",
+					Acl {
+						scope: "acme".into(),
+						..Default::default()
+					},
+				),
+			])
+			.expect("spill");
+		srv.graph.write().set_store(std::sync::Arc::new(store));
+
+		let ids = |out: &serde_json::Value| -> Vec<String> {
+			let body: serde_json::Value =
+				serde_json::from_str(&crate::test_support::tool_text(out)).expect("json body");
+			body["entities"]
+				.as_array()
+				.cloned()
+				.unwrap_or_default()
+				.iter()
+				.filter_map(|e| e["id"].as_str().map(str::to_string))
+				.collect()
+		};
+
+		// Precondition: naming no principal is no filter, so both cold rows arrive.
+		let out = srv.tool_query(&serde_json::json!({"text": "anything"}));
+		assert!(!is_error(&out), "{out}");
+		let all = ids(&out);
+		assert!(
+			all.contains(&"cold_open".to_string()) && all.contains(&"cold_secret".to_string()),
+			"precondition: the cold fill reaches both rows: {all:?}"
+		);
+
+		let out = srv.tool_query(&serde_json::json!({"text": "anything", "principals": ["bob"]}));
+		assert!(!is_error(&out), "{out}");
+		let got = ids(&out);
+		assert!(
+			got.contains(&"cold_open".to_string()),
+			"the public cold row still arrives: {got:?}"
+		);
+		assert!(
+			!got.contains(&"cold_secret".to_string()),
+			"a scoped cold row must not reach a non-member just because it was spilled: {got:?}"
+		);
 	}
 }
 

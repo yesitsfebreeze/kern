@@ -20,6 +20,9 @@ pub fn find_duplicate(
 		.map(|h| h.id)
 }
 
+// `incoming_acl` is the ingesting caller's ACL — see `merge_duplicate` for why a
+// dedup must not carry it across a boundary.
+#[allow(clippy::too_many_arguments)]
 pub fn update_existing_entity(
 	graph: &Arc<RwLock<GraphGnn>>,
 	entity_id: &str,
@@ -27,6 +30,7 @@ pub fn update_existing_entity(
 	new_score: f64,
 	incoming_kind: EntityKind,
 	incoming_valid_until: Option<std::time::SystemTime>,
+	incoming_acl: &Acl,
 	on_supersede_candidate: Option<&crate::ingest::worker::DeferContradictionFn>,
 ) {
 	let outcome = merge_duplicate(
@@ -36,6 +40,7 @@ pub fn update_existing_entity(
 		new_score,
 		incoming_kind,
 		incoming_valid_until,
+		incoming_acl,
 	);
 
 	// Only a SAME-KIND near-dup may supersede (a preference must not supersede a fact).
@@ -109,6 +114,7 @@ mod tests {
 			1.0,
 			EntityKind::Claim,
 			None,
+			&Acl::default(),
 			None,
 		);
 
@@ -143,6 +149,7 @@ mod tests {
 			1.0,
 			EntityKind::Claim,
 			None,
+			&Acl::default(),
 			None,
 		);
 
@@ -184,6 +191,7 @@ mod tests {
 			1.0,
 			EntityKind::Claim,
 			None,
+			&Acl::default(),
 			None,
 		);
 		update_existing_entity(
@@ -193,6 +201,7 @@ mod tests {
 			1.0,
 			EntityKind::Claim,
 			None,
+			&Acl::default(),
 			None,
 		);
 
@@ -209,6 +218,126 @@ mod tests {
 		assert_eq!(
 			count, 1,
 			"duplicate rephrase observations collapse to one edge"
+		);
+	}
+
+	fn rephrase_texts(graph: &Arc<RwLock<GraphGnn>>, id: &str) -> Vec<String> {
+		let g = graph.read();
+		let kid = g.kern_of_entity(id).unwrap().to_string();
+		g.kerns
+			.get(&kid)
+			.unwrap()
+			.reasons
+			.values()
+			.filter(|r| r.kind == ReasonKind::Rephrase)
+			.map(|r| r.text.clone())
+			.collect()
+	}
+
+	// The dedup ACL rule. A survivor keeps its own ACL — an id IS its content
+	// hash, so one text cannot exist under two audiences. That makes the Rephrase
+	// edge the leak: it stores the incoming text verbatim, a Reason carries no ACL
+	// of its own, and every read surface that renders an entity renders its edges.
+	// A scoped ingest landing within dedup range of a PUBLIC thought would have
+	// published its text to everyone.
+	#[test]
+	fn a_scoped_dedup_does_not_write_its_text_onto_a_public_survivor() {
+		let graph = graph_with_entity("e1", "the original claim");
+		let before = entity(&graph, "e1");
+		let scoped = Acl {
+			scope: "acme".into(),
+			..Default::default()
+		};
+
+		update_existing_entity(
+			&graph,
+			"e1",
+			"the vault code is 4815162342",
+			1.0,
+			EntityKind::Claim,
+			None,
+			&scoped,
+			None,
+		);
+
+		assert!(
+			rephrase_texts(&graph, "e1").is_empty(),
+			"a public survivor must not carry a scoped ingest's wording: {:?}",
+			rephrase_texts(&graph, "e1")
+		);
+		// Corroboration is metadata about a statement, not the statement — it still merges.
+		let after = entity(&graph, "e1");
+		assert!(
+			after.conf_alpha > before.conf_alpha,
+			"support still observed across the boundary"
+		);
+		assert_eq!(after.acl, Acl::default(), "the survivor keeps its own ACL");
+	}
+
+	// Same rule in the other direction, and the reason it is `!=` rather than a
+	// one-way check: a public ingest must not slip its wording onto a scoped
+	// entity either, where a member would read it as scoped content.
+	#[test]
+	fn a_public_dedup_does_not_write_its_text_onto_a_scoped_survivor() {
+		let graph = graph_with_entity("e1", "the original claim");
+		{
+			let mut g = graph.write();
+			let kid = g.kern_of_entity("e1").unwrap().to_string();
+			g.get_mut(&kid).unwrap().entities.get_mut("e1").unwrap().acl = Acl {
+				scope: "acme".into(),
+				..Default::default()
+			};
+		}
+
+		update_existing_entity(
+			&graph,
+			"e1",
+			"a reworded version of the claim",
+			1.0,
+			EntityKind::Claim,
+			None,
+			&Acl::default(),
+			None,
+		);
+
+		assert!(
+			rephrase_texts(&graph, "e1").is_empty(),
+			"the wording does not cross the boundary in either direction"
+		);
+	}
+
+	// And the boundary is the ACL, not the mere presence of one: same ACL still
+	// rephrases, or the guard would have quietly disabled dedup for every scoped
+	// corpus.
+	#[test]
+	fn a_matching_acl_still_records_the_rephrase() {
+		let graph = graph_with_entity("e1", "the original claim");
+		let scoped = Acl {
+			scope: "acme".into(),
+			users: vec!["alice".into()],
+			groups: Vec::new(),
+		};
+		{
+			let mut g = graph.write();
+			let kid = g.kern_of_entity("e1").unwrap().to_string();
+			g.get_mut(&kid).unwrap().entities.get_mut("e1").unwrap().acl = scoped.clone();
+		}
+
+		update_existing_entity(
+			&graph,
+			"e1",
+			"a reworded version of the claim",
+			1.0,
+			EntityKind::Claim,
+			None,
+			&scoped,
+			None,
+		);
+
+		assert_eq!(
+			rephrase_texts(&graph, "e1"),
+			vec!["a reworded version of the claim".to_string()],
+			"inside one audience the rephrase edge works exactly as before"
 		);
 	}
 }

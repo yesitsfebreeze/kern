@@ -47,12 +47,12 @@ Standalone fallback is a second writer against the same LMDB environment — a s
 
 ### Reading
 
-- **`query`** — hybrid vector + lexical retrieval; scored thoughts with edges and path chains, no synthesis. Needs `text` or `id`. Filters: `kind` (`fact` / `document` / `normal`), `source`, `min_conf`; `since` / `before`, `sort` + `ascending`; `as_of` for what was believed at a past instant; `include_history: true` for superseded revisions (flagged `history: true`).
+- **`query`** — hybrid vector + lexical retrieval; scored thoughts with edges and path chains, no synthesis. Needs `text` or `id`. Filters: `kind` (`fact` / `document` / `normal`), `source`, `min_conf`; `since` / `before`, `sort` + `ascending`; `as_of` for what was believed at a past instant; `include_history: true` for superseded revisions (flagged `history: true`); `principals` (array of your user/group ids) to honour ACLs — a thought carrying an `Acl` comes back only when one of these names its scope, user or group. Omitting `principals` filters nothing; it does **not** fall back to public-only. Every filter applies to an `id` read too.
 - **`health`** — counts plus degradation: tick queue and latency, `task_panics` / `task_failures`, `cold_evicted`, `embed_model` / `embed_dim` with `embed_mismatch`. kern fails open — a degraded daemon keeps serving and shows up only here.
 
 ### Writing
 
-- **`ingest`** — put text in. `object_id` = update semantics for revisions; `hint` folded into the chunking prompt; `conf` weights the claim; `sync: true` blocks until complete.
+- **`ingest`** — put text in. `object_id` = update semantics for revisions; `hint` folded into the chunking prompt; `conf` weights the claim; `sync: true` blocks until complete; `scope` + `principals` stamp an ACL on what is placed, so only a `query` naming a matching principal gets it back — name neither and the text is public.
 - **`link`** — reason edge between two thoughts. Empty `reason`: the LLM writes the justification.
 - **`forget`** — remove a thought, cascade-delete its edges. Facts immune; rewrite history via superseding `ingest` with the same `object_id`.
 - **`degrade`** — feedback. Bad result's id as `query_id`: edges along that path lose score.
