@@ -2,6 +2,78 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — the daemon stops standing down for a squatter, and stops
+  unlinking a name it never checked. Item 24 residue 3, the bind half. 972 → 974
+  unit tests; recall floors unmoved (0.9306 / 0.9722 / 0.9471, unretrieved 0).
+
+  **The recorded bug was that `bind_kern_listener` believed whatever answered
+  its `AddrInUse` probe.** A foreign socket accepted the connect, the arm read
+  that as `AlreadyRunning`, and the real daemon exited. That half is closed by
+  running the two checks `connect_kern` already ran — `require_owned_by_caller`
+  on the name, the peer check on whoever answered — and returning a new
+  `BindError::Untrusted` naming the foreign uid instead.
+
+  **The unrecorded half was one line further down and is the wider one.** When
+  the probe *failed*, the arm ran `remove_file` on a path nobody had verified.
+  The sticky bit on `/tmp` makes that safe for a foreign socket, which is
+  presumably why it read as safe — but a sticky bit protects a *target*, never a
+  *link*. A symlink this uid owns pointing at somebody else's file is ours to
+  unlink, so the old arm deleted it and bound a listener on a name a foreign
+  path had been substituted into. Ordering the checks before the unlink closes
+  that by construction: there is one `remove_file` in the function and it is
+  past the `?`, so it cannot be reached on a name that has not been proved ours.
+  The three error shapes were run rather than reasoned about — a dangling
+  symlink refuses and survives, a vanished path refuses, a plain file this uid
+  owns is still reclaimed.
+
+  **The tradeoff, named: fail-closed costs a restart race.** A name that
+  disappears between the `EADDRINUSE` and the stat — a predecessor exiting
+  mid-race, whose `Drop` unlinks — now refuses where it used to rebind. A retry
+  was the alternative and was not taken: in *this* arm the kernel has just said
+  the name is held, so absence is a race, not the ordinary no-daemon case, and
+  guessing wrong here is an unlink. The operator sees why, because the daemon's
+  `Err` arm now `eprintln!`s as well as `tracing::error!`s — it previously only
+  traced, so a refusal at the default level would have exited saying nothing,
+  which is the same silent stand-down the change set out to remove.
+
+  **The peer check in that arm was reported untestable. It was untested.** The
+  claim was that catching it needs a socket bound by a second uid. Three ways
+  around that were tried. A same-uid child with a different exe does not bite —
+  measured, it is *correctly* accepted, because `SO_PEERCRED` proves a uid and
+  not a program. An abstract-namespace socket and a `socketpair` do not bite —
+  neither has a filesystem name, so a path bind never returns `EADDRINUSE` for
+  one and the arm is never entered. Injecting the expected uid does bite, and it
+  is the move this file already made once: `require_peer_uid` exists precisely
+  because `require_peer_is_caller`'s refusal was otherwise unreachable. So the
+  arm moved into `bind_unix(path, expected_peer)` and a test drives the whole
+  arm — real listener, real `SO_PEERCRED` read — against a uid that is
+  deliberately not the server's. Neutering the peer check now fails a test
+  instead of nothing. `connect_kern`'s own call has no such seam and stays
+  code-review-only: one line, not the two previously recorded.
+
+  **Verified, not asserted.** Reverting only the arm's body to its pre-change
+  form fails both new tests and leaves the other four bind tests green, so
+  neither is a tautology. Reclaiming our own stale socket — the thing that would
+  break every restart — was checked against a real second process rather than
+  inferred from the mode tests: a same-uid, different-exe daemon bound the path,
+  read as `AlreadyRunning` while alive, was `SIGKILL`ed, and the next bind
+  reclaimed the leftover socket and hardened it to `0600`.
+
+  Also corrected a live lie the change itself created — `SPECIALISTS.md` said
+  the bind path checked neither credential, in the same commit that made it
+  check both — and repointed the two relative anchors in item 76 that the
+  five-line `commands.rs` edit shifted (`save_fn()` 892→897, `process::exit`
+  954→959). Both are bare `:NNN` refs, which `docs_check.py` does not match, so
+  they went stale silently while the checker stayed green at 823 references and
+  zero nominations. No anchor was silenced; the anchor-ok count is unchanged at
+  eight.
+
+  Decided by: fix-the-root — the reported defect was the stand-down, but the
+  same arm was unlinking an unverified name one line below it, and closing only
+  the reported half would have left the wider hole with a green suite over it.
+  And verify-before-claiming — "untestable without a second uid" was a claim
+  about the world that turned out to be a claim about the code's shape, and the
+  shape was ours to change.
 - 2026-07-22 — merged item 98's pre-auth cap and deadline. 215 + 1 + this one =
   217.
 

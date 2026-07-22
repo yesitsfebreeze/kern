@@ -851,7 +851,12 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 					return;
 				}
 				Err(e) => {
+					// Both, and the `eprintln!` is not redundant: the arm above prints
+					// its stand-down to the terminal, so a refusal that only went to
+					// `tracing` would be invisible at the default level — the daemon
+					// would exit saying nothing, which is the failure this replaced.
 					tracing::error!(target: "kern.kern_rpc", error = %e, "bind failed");
+					eprintln!("kern: {e} — exiting");
 					return;
 				}
 			},

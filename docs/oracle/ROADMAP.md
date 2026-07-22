@@ -526,7 +526,7 @@ another, which is the half items 9 and 18 were waiting on.
 
 **Narrowed 2026-07-22 — "anything that can open the path" was already false on
 Unix when this was written.** `harden_socket`
-(`src/trnsprt/src/typed/local.rs:348`) sets the socket `0600` on both the fresh
+(`src/trnsprt/src/typed/local.rs:355`) sets the socket `0600` on both the fresh
 bind and the stale-rebind path, pinned by `a_bound_socket_is_owner_only` and
 `a_rebound_stale_socket_is_also_owner_only`, so a foreign uid never reaches it
 and the only residue is the sub-ms bind→chmod window item 84 already carries.
@@ -546,8 +546,8 @@ nobody rather than everybody — and `run_server` resolves the token before it
 binds, so that state is unreachable in practice as well as harmless. Windows
 gets the same posture the Unix `0600` states: an owner-only SDDL,
 `D:P(A;;GA;;;<user>)`, built from the process token's own SID
-(`src/trnsprt/src/typed/local.rs:385`) and passed to *every* pipe instance — <!-- docs-check: anchor-ok -->
-the `accept`-created ones too (`:598`), since an instance created without it
+(`src/trnsprt/src/typed/local.rs:392`) and passed to *every* pipe instance — <!-- docs-check: anchor-ok -->
+the `accept`-created ones too (`:641`), since an instance created without it
 would be a hole beside a locked door.
 
 **The tradeoff that was taken, named.** The secret proves *a uid*, not *a
@@ -599,7 +599,7 @@ re-run 2026-07-22). What is left is everything the gate does not cover.
    **Why two checks and not one.** The stat is the cheap one and it is not
    sufficient on its own: it describes a *name* at one instant, and the window
    between it and the `connect` is opened by our own daemon rather than by an
-   attacker — `Drop for LocalListener` (`:611`) unlinks the socket on every
+   attacker — `Drop for LocalListener` (`:654`) unlinks the socket on every
    shutdown and the stale-rebind path unlinks it too, so a name that stats as
    ours can be free a microsecond later and rebound by somebody else before the
    `connect` lands. Waiting for a daemon restart is not a privilege an attacker
@@ -619,17 +619,77 @@ re-run 2026-07-22). What is left is everything the gate does not cover.
    That test injects the expected uid rather than reading `geteuid()`, because
    a socket bound by a second uid is not something a test can create.
 
-   **What is still owed, in order of how much it matters.**
-   - **The daemon-side denial of service is untouched.** A squatter still
-     answers the `AlreadyRunning` probe (`src/trnsprt/src/typed/local.rs:500`),
-     so the real daemon still stands down. The client refuses to talk to the
-     squatter, so nothing leaks — the graph just has no daemon. Fixing it means
-     the bind path deciding what to do about a foreign socket it is forbidden
-     to unlink, which is a different change.
-   - **The wiring of the peer check is not test-covered, only its verdict is.**
-     Deleting the `require_peer_is_caller` call from `connect_kern` is a
-     mutation no test catches, because catching it needs a socket served by a
-     second uid. Code review is the only guard on that one line.
+   **What closed and what is still owed, in order of how much it matters.**
+   - **CLOSED 2026-07-22 — the bind path refuses instead of standing down.**
+     The `AddrInUse` arm (`src/trnsprt/src/typed/local.rs:513-540`) now runs
+     the same two checks `connect_kern` does, in the same order:
+     `require_owned_by_caller` on the name, then `UnixStreamAdapter::connect`
+     and the peer check on whatever answered. Either refusal returns the new
+     `BindError::Untrusted` (`:335-346`) carrying the foreign uid, never
+     `BindOutcome::AlreadyRunning`, and — the half that was not recorded
+     before — never reaching the `remove_file` below it. That unlink was the
+     wider bug: it ran on a path nobody had verified, and while `/tmp`'s
+     sticky bit refuses it for a foreign *socket*, it does not protect a
+     *symlink*, so a link this uid owned pointing at a foreign target was
+     unlinked and rebound.
+
+     **Fail-closed, traced rather than asserted.** There is exactly one
+     `remove_file` in the function (`:536`) and it sits inside the `Err(_)`
+     branch of the connect, past the `?` on `require_owned_by_caller`, so it
+     is unreachable on a name that has not been proved ours. The three error
+     shapes were run: a dangling symlink refuses and the link survives, a
+     vanished path refuses (the `Io(NotFound)` the predicate returns for
+     absence is mapped to `Untrusted` here, because in *this* arm the kernel
+     just said the name was taken), and a plain file this uid owns is still
+     reclaimed. **The tradeoff that buys:** a name that disappears between the
+     `EADDRINUSE` and the stat — a predecessor exiting mid-race, whose `Drop`
+     unlinks — now refuses where it used to rebind. Fail-closed was chosen
+     over a retry, and the operator sees the reason because the refusal
+     prints; a planned handover does not come through here at all, it comes
+     through `adopt_kern_listener`.
+
+     **Reclaiming our own stale socket still works**, and not only per the
+     mode tests: verified against a real second process — a same-uid,
+     different-exe daemon bound the path, read as `AlreadyRunning` while
+     alive (`SO_PEERCRED` proves a uid, not a program), was `SIGKILL`ed, and
+     the next bind reclaimed the leftover socket and hardened it to `0600`.
+     Pinned in-suite by `a_stale_socket_file_is_removed_and_rebound`,
+     `a_bound_socket_is_owner_only` and
+     `a_rebound_stale_socket_is_also_owner_only`.
+
+     **The refusal is visible at both call sites**, which is the point of it:
+     `run_hub` (`src/hub/serve.rs:305`) already `eprintln!`ed its `Err` arm;
+     the daemon's (`src/commands.rs:853`) only `tracing::error!`ed, so a
+     refusal there would have printed nothing at the default level while the
+     `AlreadyRunning` arm beside it printed to the terminal. It now does both.
+
+     **Mutation-tested 2026-07-22, and both checks are caught.** Neutering
+     `require_owned_by_caller` to `let _ =` fails
+     `a_symlink_to_a_foreign_target_refuses_the_bind` — the test built on the
+     `foreign_path()` helper, which lives in `owner_tests_unix` (not
+     `bind_tests_unix`, as an earlier draft of this entry said) and is now
+     `pub(super)` so the bind tests share it rather than growing a second
+     copy. Neutering the peer check fails
+     `a_live_endpoint_served_by_another_uid_refuses_the_bind`. Reverting the
+     whole arm to its pre-change body fails both and leaves the other four
+     bind tests green, so neither test is a tautology.
+   - **The peer check's wiring is covered in the bind arm and not in
+     `connect_kern`.** It was recorded here as untestable on one uid; it was
+     untested. The arm is reached through `bind_unix(path, expected_peer)`
+     (`:507`), split out exactly as `require_peer_uid` is split out of
+     `require_peer_is_caller` and for the same reason, so a test drives the
+     whole arm against a real socket and a real `SO_PEERCRED` read with a uid
+     that is deliberately not the server's. The two alternatives considered do
+     not bite: a same-uid child with a different exe is *correctly* accepted,
+     because the check claims a uid and nothing finer (measured above), and an
+     abstract-namespace socket or a `socketpair` has no filesystem name, so a
+     path bind never returns `EADDRINUSE` for one and the arm is never
+     entered. `connect_kern` has no such seam and its `require_peer_is_caller`
+     call remains code-review-only — one line, not two.
+   - **The live squat end to end is still not executable.** A real foreign
+     daemon holding the real path needs a second uid. What is proven is the
+     symlink shape, the verdict, and the arm's control flow; what is not is a
+     genuine cross-uid squat.
    - **Windows gets no analogue and needs none** — a named pipe has no owning
      uid, and the server side already pins every instance to this process's
      SID, so both checks are `cfg(unix)`.
@@ -639,8 +699,10 @@ re-run 2026-07-22). What is left is everything the gate does not cover.
      has no second uid with which to create a foreign-owned socket. So
      `e2e/test_daemon_reads.py` and `e2e/test_graviton_routing.py` pin exactly
      one thing — that the checks did not break connecting — and the refusal
-     itself is unit-test territory. Do not read a green e2e run as evidence
-     that the squat is covered.
+     itself is unit-test territory. The bind half added 2026-07-22 is covered no
+     better: same `XDG_RUNTIME_DIR`, same single uid, so e2e confirms only that
+     the daemon still binds and serves, never that it refuses. Do not read a
+     green e2e run as evidence that the squat is covered.
 4. ~~**The pre-auth frame is unbounded and untimed.**~~ **Closed 2026-07-22 by
    item 98.** This entry read the defect correctly — per connection rather than
    an accept-loop stall, and a cap belonging in `decode` — and named the one
@@ -1236,7 +1298,7 @@ writes a `DirectJob` through `intake_direct` first
 (`src/ingest/file_watcher.rs:104`, tmp + rename at `src/ingest/direct.rs:42`) and
 falls through to `Worker::submit` (`:129`) only when that write fails — the shape
 `tool_ingest` already had (`src/mcp/tools_mutate.rs:300`). It is gated on
-`intake.enabled` alone (`src/commands.rs:969`), which is exactly the flag
+`intake.enabled` alone (`src/commands.rs:974`), which is exactly the flag
 `spawn_intake` gates on, so the directory is never written unless something
 drains it; `drain_direct_once` needs no reason LLM, so the stricter gate
 `tool_ingest` uses would have parked nothing on a reason-less host that drains
@@ -1263,7 +1325,7 @@ in 60 seconds, largest 1.77 MB, versus 0 on the pre-change build** — each one 
 embed call and a graph write. `IgnoreRules` only ever hardcoded `.git`
 (`src/watcher/src/ignore_rules.rs:60`), so nothing stopped it. Closed by giving
 `IgnoreRules` host-supplied denied prefixes (`:45`, matched `:63`) and passing
-the resolved `intake.dir` and `data_dir` (`src/commands.rs:962`) — named by the
+the resolved `intake.dir` and `data_dir` (`src/commands.rs:967`) — named by the
 host, because that crate must not know what kern is. `effective_roots` now pins a
 relative root to `cwd` (`src/config/watcher.rs:25`) so event paths and denied
 prefixes share one coordinate system. What is *not* closed is that the deny list
@@ -1432,7 +1494,7 @@ sorts by heat and truncates to `ENTITY_SYNC_BATCH = 32` per heartbeat
 (`src/gossip/handler.rs:156`, sorted `:181`),
 so cold entities may never propagate and a partitioned node that rejoins never
 catches up. (`Fetch` is live — `wire_fetch` installs the handler at
-`src/commands.rs:1093` and the question path issues it — but it is single-id, not a
+`src/commands.rs:1098` and the question path issues it — but it is single-id, not a
 catch-up mechanism.) Two pieces adopted on paper and unscheduled: **back-off
 pacing** with exponential jitter keyed to a divergence estimate
 (`docs/kern/fl-vs-knids-federation.md:163-168`), and **batch-size / push-vs-pull
@@ -2236,12 +2298,12 @@ non-goals.
 ### 76. The watchdog force-exit skips the final guarded flush `[store]`
 
 Confirmed against source 2026-07-21, and it is not a doc claim: `spawn_watchdog`
-(`src/commands.rs:924-963`) beats a counter once a second from the async runtime
-and force-exits `std::process::exit(101)` (`:954`) after `STALL_LIMIT * CHECK_SECS`
+(`src/commands.rs:929-968`) beats a counter once a second from the async runtime
+and force-exits `std::process::exit(101)` (`:959`) after `STALL_LIMIT * CHECK_SECS`
 = 30s of no progress. `process::exit` runs no destructor and no `Drop`, so it
 skips the guarded shutdown flush the ordinary path takes — the `shutdown` notify
-at `src/commands.rs:886` unwinds into the guarded persist closure `save_fn`
-(`:632`, called at `:892`),
+at `src/commands.rs:891` unwinds into the guarded persist closure `save_fn`
+(`:632`, called at `:897`),
 which is the thing that "never overwrites a grown disk". Nothing on the watchdog
 path writes anything, and the exit line does not say so.
 
@@ -2417,7 +2479,7 @@ propagation overwrites one — another 76.8 MB at this corpus size.
   nor warns (`FEATURES.md:1125-1127`).
 - RPC socket bind→chmod race — sub-millisecond, umask default — recorded as an
   accepted risk where it happens (`harden_socket`,
-  `src/trnsprt/src/typed/local.rs:341-351`); revisit only if the umask
+  `src/trnsprt/src/typed/local.rs:348-358`); revisit only if the umask
   alternative stops being worse. **Corrected 2026-07-22:** this cited
   `concepts/security.mdx:40-43`, which is the API-key-vs-redirected-endpoint
   rule and says nothing about the socket; that page states the `0600` mode at
@@ -2429,7 +2491,7 @@ Item 30's durable backstop put a kern-written file inside the default watched
 root and the watcher ate it — 283 payloads from one seed edit before the fix. The
 fix works and is measured: `IgnoreRules::with_denied`
 (`src/watcher/src/ignore_rules.rs:45`) takes the resolved `intake.dir` and
-`data_dir` from `spawn_file_watcher` (`src/commands.rs:962`). But it closes that
+`data_dir` from `spawn_file_watcher` (`src/commands.rs:967`). But it closes that
 loop by *enumerating* the two directories that were writing, not by making the
 class impossible. Anything kern writes under a watched root in future is
 ingestible again unless someone remembers to add it, and there is no test that
@@ -2893,12 +2955,12 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   scheduled; the three it actually caught were live lies in `FEATURES.md` and
   `SPECIALISTS.md` (CHANGELOG 2026-07-21).
 - **Pulse and Question senders are live.** `broadcast_pulse` / `broadcast_q` built
-  in `start_gossip` (`src/commands.rs:1041-1122`), pulse wired into the maintenance
+  in `start_gossip` (`src/commands.rs:1046-1127`), pulse wired into the maintenance
   tick (`:721`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
   `broadcast_q` invoked by `do_resolve` (`src/tick/tasks.rs:386`), `handle_question`
   live-dispatched (`src/gossip/handler.rs:44`).
 - **`Fetch` is wired** — `wire_fetch` installs the handler at
-  `src/commands.rs:1093`. Single-id, so it is not anti-entropy (item 36), but it
+  `src/commands.rs:1098`. Single-id, so it is not anti-entropy (item 36), but it
   is not dead.
 - **`union_statements` never existed**; remote heat is no longer pinnable
   (`src/base/merge.rs:20`, applied `:153`).
