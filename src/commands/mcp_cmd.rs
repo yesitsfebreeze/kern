@@ -357,6 +357,31 @@ impl McpServer for ProxyServer {
 		// can't tell the two apart.
 		serde_json::json!({"resources": {}, "prompts": {}})
 	}
+
+	// Answer everything `extra_capabilities` promises. Until 2026-07-22 this
+	// override did not exist, so the trait default returned `None` and `dispatch`
+	// turned every one of the five into `-32601` — on the path an agent actually
+	// gets, since `cmd_mcp` reaches `run_proxy` whenever a daemon exists. Four of
+	// the five answer from `handle_graphless_method`, the same function the
+	// standalone dispatches through; `resources/read` needs the graph this
+	// process does not hold and rides the `call_tool` passthrough.
+	fn handle_method(
+		&self,
+		method: &str,
+		params: serde_json::Value,
+	) -> Option<Result<serde_json::Value, McpError>> {
+		if let Some(r) = crate::mcp::handle_graphless_method(method, &params) {
+			return Some(r);
+		}
+		match method {
+			"resources/read" => Some(
+				self
+					.call_tool(crate::mcp::RESOURCE_READ_TOOL, &params)
+					.and_then(|r| crate::mcp::decode_resource_read(&r)),
+			),
+			_ => None,
+		}
+	}
 }
 
 enum StandaloneEntry {
@@ -703,5 +728,213 @@ mod ensure_mcp_tests {
 		let raw = std::fs::read_to_string(&mcp).unwrap();
 		let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
 		assert_eq!(v["mcpServers"]["kern"]["command"], "custom");
+	}
+}
+
+// Item 81. `extra_capabilities` promises `resources` and `prompts` on the proxy
+// path — which is the path an agent gets, since `cmd_mcp` reaches `run_proxy`
+// whenever a daemon exists or can be spawned. `ProxyServer` had no
+// `handle_method`, so the trait default returned `None` and every advertised
+// method came back `-32601`. These drive the real `serve_rw` loop over a real
+// `ProxyServer` bound to a real daemon on a real socket, because the defect was
+// exactly a missing trait method: a test that called the handler directly would
+// have gone on passing while `dispatch` never reached it.
+#[cfg(all(test, unix))]
+mod proxy_method_tests {
+	use super::*;
+	use serde_json::{json, Value};
+
+	const SEEDED_ID: &str = "e-proxy-read";
+	const SEEDED_TEXT: &str = "only the daemon's graph holds this sentence";
+
+	// A daemon over a scratch socket with one entity in it, and a `ProxyServer`
+	// attached to it. The proxy holds no graph — only an RPC client — so
+	// anything it returns about `SEEDED_ID` provably crossed the socket.
+	async fn proxy_on_a_real_daemon(tag: &str) -> ProxyServer {
+		let srv = crate::test_support::mcp_server();
+		{
+			let mut g = srv.graph.write();
+			let mut k = crate::base::types::Kern::new("kx", "");
+			let mut e = crate::test_support::entity(SEEDED_ID);
+			e.set_text(SEEDED_TEXT.to_string());
+			k.entities.insert(SEEDED_ID.into(), e);
+			g.kerns.insert("kx".into(), k);
+		}
+		let ep = crate::test_support::scratch_endpoint(tag);
+		crate::test_support::serving(srv, &ep).await;
+		let client = KernRpcClient::<JsonEnvelopeCodec>::connect_endpoint(
+			&ep,
+			&crate::test_support::test_caller(),
+		)
+		.await
+		.expect("attach to scratch daemon");
+		ProxyServer {
+			client: Arc::new(TokioMutex::new(client)),
+			auth: crate::test_support::test_caller(),
+		}
+	}
+
+	// The production loop verbatim: `serve_stdio` is `serve_rw` over the process
+	// stdio, and `run_proxy` puts it on a blocking thread because `call_tool`
+	// crosses back with `block_in_place`.
+	async fn drive(proxy: ProxyServer, frames: Vec<Value>) -> Vec<Value> {
+		let mut input = String::new();
+		for f in &frames {
+			input.push_str(&serde_json::to_string(f).unwrap());
+			input.push('\n');
+		}
+		tokio::task::spawn_blocking(move || {
+			let mut reader = std::io::Cursor::new(input.into_bytes());
+			let mut out: Vec<u8> = Vec::new();
+			trnsprt::serve_rw(&mut reader, &mut out, &proxy).expect("stdio loop");
+			String::from_utf8(out)
+				.unwrap()
+			.lines()
+			.map(|l| serde_json::from_str::<Value>(l).expect("one JSON frame per line"))
+			.collect()
+		})
+		.await
+		.expect("blocking loop")
+	}
+
+	fn method_not_found(v: &Value) -> bool {
+		v.pointer("/error/code").and_then(Value::as_i64) == Some(-32601)
+	}
+
+	// The whole defect in one assertion: the advertisement and the answers, from
+	// the same server, in the same session.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn every_capability_the_proxy_advertises_is_answered_over_the_stdio_loop() {
+		let proxy = proxy_on_a_real_daemon("advertised").await;
+		let out = drive(
+			proxy,
+			vec![
+				json!({"id": 1, "method": "initialize", "params": {}}),
+				json!({"id": 2, "method": "resources/list"}),
+				json!({"id": 3, "method": "prompts/list"}),
+				json!({"id": 4, "method": "ping"}),
+				json!({"id": 5, "method": "prompts/get",
+					"params": {"name": "research", "arguments": {"topic": "kern"}}}),
+				json!({"id": 6, "method": "resources/read",
+					"params": {"uri": format!("thought://{SEEDED_ID}")}}),
+			],
+		)
+		.await;
+
+		assert_eq!(out.len(), 6, "one response per request: {out:?}");
+
+		let caps = &out[0]["result"]["capabilities"];
+		assert!(
+			caps.get("resources").is_some() && caps.get("prompts").is_some(),
+			"initialize advertises both: {caps}"
+		);
+
+		assert_eq!(out[1]["result"]["resources"].as_array().unwrap().len(), 4);
+		assert_eq!(out[2]["result"]["prompts"].as_array().unwrap().len(), 1);
+		assert_eq!(out[3]["result"], json!({}), "ping answers with an empty result");
+		assert_eq!(out[4]["result"]["messages"].as_array().unwrap().len(), 1);
+
+		let contents = out[5]["result"]["contents"].as_array().expect("contents");
+		assert_eq!(contents.len(), 1);
+		assert_eq!(contents[0]["uri"], format!("thought://{SEEDED_ID}"));
+		assert!(
+			contents[0]["text"].as_str().unwrap().contains(SEEDED_TEXT),
+			"the daemon's own entity text came back: {}",
+			contents[0]["text"]
+		);
+
+		let refused: Vec<usize> = out
+			.iter()
+			.enumerate()
+			.filter(|(_, v)| method_not_found(v))
+			.map(|(i, _)| i)
+			.collect();
+		assert!(refused.is_empty(), "-32601 on frames {refused:?}: {out:?}");
+	}
+
+	// The negative control: `-32601` is still reachable on this exact server, so
+	// "no frame carried -32601" is a fact about the five methods, not a dead
+	// error channel.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_method_the_proxy_does_not_serve_is_still_method_not_found() {
+		let proxy = proxy_on_a_real_daemon("unserved").await;
+		let out = drive(
+			proxy,
+			vec![json!({"id": 1, "method": "resources/subscribe", "params": {}})],
+		)
+		.await;
+		assert_eq!(out.len(), 1);
+		assert!(method_not_found(&out[0]), "{:?}", out[0]);
+	}
+
+	// The verdict has to survive the `call_tool` hop, which carries only
+	// `content` and `isError`. Encoding the error as `isError` alone would
+	// deliver `-32000` here, so the exact code is the assertion.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn an_unknown_resource_uri_keeps_its_code_across_the_call_tool_hop() {
+		let proxy = proxy_on_a_real_daemon("unknown-uri").await;
+		let out = drive(
+			proxy,
+			vec![json!({"id": 1, "method": "resources/read",
+				"params": {"uri": "kern://local/nope"}})],
+		)
+		.await;
+		assert_eq!(out.len(), 1);
+		assert_eq!(
+			out[0].pointer("/error/code").and_then(Value::as_i64),
+			Some(crate::mcp::ERR_NOT_FOUND as i64),
+			"not a generic -32000: {:?}",
+			out[0]
+		);
+		assert!(out[0]["error"]["message"]
+			.as_str()
+			.unwrap()
+			.contains("unknown resource"));
+	}
+
+	// `resource_read` is transport, not a tool. If it ever reaches a schema an
+	// agent sees two names for one surface.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn the_resource_read_carrier_is_dispatchable_but_not_listed() {
+		let proxy = proxy_on_a_real_daemon("not-listed").await;
+		let listed = proxy.tools_list();
+		assert_eq!(
+			listed.len(),
+			crate::mcp::tools::typed_tool_schemas().len(),
+			"the carrier added no tool"
+		);
+		assert!(
+			!listed.iter().any(|t| t.name == crate::mcp::RESOURCE_READ_TOOL),
+			"`{}` is on the agent tool surface",
+			crate::mcp::RESOURCE_READ_TOOL
+		);
+	}
+
+	// The four graphless methods are not two implementations that agree; they
+	// are one function. This fails the moment either surface grows a private
+	// copy.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn the_graphless_methods_are_the_standalone_servers_own() {
+		use trnsprt::McpServer as _;
+		let standalone = crate::test_support::mcp_server();
+		let cases = [
+			("resources/list", json!({})),
+			("prompts/list", json!({})),
+			("ping", json!({})),
+			(
+				"prompts/get",
+				json!({"name": "research", "arguments": {"topic": "kern"}}),
+			),
+		];
+		for (method, params) in cases {
+			let shared = crate::mcp::handle_graphless_method(method, &params)
+				.unwrap_or_else(|| panic!("{method} unserved"))
+				.expect(method);
+			let direct = standalone
+				.handle_method(method, params.clone())
+				.unwrap_or_else(|| panic!("{method} unserved by the standalone"))
+				.expect(method);
+			assert_eq!(shared, direct, "{method} answers differ");
+		}
 	}
 }

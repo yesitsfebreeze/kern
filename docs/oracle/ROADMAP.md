@@ -1430,7 +1430,7 @@ exactly those cases, but it is consulted only on the *embed* leg
 Six call sites take that closure and none can tell the cases apart:
 `spawn_intake`'s two (`src/commands.rs:681`, `src/commands.rs:693`), the intake
 tool's kinds closure (`src/mcp/tools_intake.rs:22`), the standalone tick
-(`src/commands/mcp_cmd.rs:458`) and `kern profile`
+(`src/commands/mcp_cmd.rs:483`) and `kern profile`
 (`src/commands/profile_cmd.rs:93`).
 
 The downstream handling is correct, and that is precisely what hides it:
@@ -2746,22 +2746,48 @@ the ingest `kind` arg in `216730d`), with the literal `AGENT_SOURCE`
 decision (2026-07-22) — kern carries no caller identity, so this guard can
 never become real. Deletion is a small standalone slice, still owed.
 
-### 81. `resources/list` and `prompts/list` return `-32601` on the proxy path `[surface]`
+### 81. The proxy serves every method its handshake advertises — closed 2026-07-22 `[surface]`
 
-`ProxyServer` implements `tools_list` / `call_tool` / `extra_capabilities` only
-(`src/commands/mcp_cmd.rs:301`, `:317`, `:355`) with no `handle_method` override,
-so the trait default returns `None` (`src/trnsprt/src/server.rs:21`). Meanwhile
-`extra_capabilities` advertises `{"resources": {}, "prompts": {}}`
-(`src/commands/mcp_cmd.rs:358` — spelled in full because the nearest preceding
-path is `server.rs`, and a bare `:NNN` continues the wrong file) to
-match standalone, which *does* serve them (`src/mcp.rs:220-229`, advertised `:167`). Advertised on
-the normal path, non-functional there. Either forward them or stop advertising.
+**Closed 2026-07-22.** `ProxyServer` now implements `handle_method`
+(`src/commands/mcp_cmd.rs:368`), so the five methods `extra_capabilities`
+(`:355`) advertises — `resources/list`, `resources/read`, `prompts/list`,
+`prompts/get`, `ping` — answer instead of falling through the trait default
+(`src/trnsprt/src/server.rs:21`) to `-32601`. `ping` is the one that mattered
+most: clients use it for liveness, so `-32601` there read as a dead server on
+the path an agent actually gets (`cmd_mcp` reaches `run_proxy` whenever a
+daemon exists).
+
+Four of the five — `resources/list`, `prompts/list`, `prompts/get`, `ping` —
+answer from `handle_graphless_method` (`src/mcp.rs:249`), the same function the
+standalone `Server::handle_method` (`:219`) dispatches through, so the two
+surfaces are one implementation, not two that agree. `resources/read` is the
+one advertised method that needs the graph, which the proxy process does not
+hold; it rides the existing `call_tool` passthrough as `RESOURCE_READ_TOOL`
+(`src/mcp.rs:243`) — a synthetic name encoded by `encode_resource_read` (`:277`)
+and decoded by `decode_resource_read` (`:288`), which carries the verdict's
+exact code in the text block because `CallToolRes` carries only `content` and
+`isError` and an error code that does not survive the hop would turn `unknown
+resource` into a generic `-32000`. It is transport, not a tool schema entry:
+`tools/list` is unchanged (`ProxyServer::tools_list`, `src/commands/mcp_cmd.rs:301`), so an agent sees
+no second name on the surface.
+
+Proved by five Rust tests (`src/commands/mcp_cmd.rs:743`, `mod proxy_method_tests`)
+driving the production `serve_rw` loop over a real `ProxyServer` bound to a real
+daemon on a scratch socket: every advertised method answers with a non-error
+result and no frame carries `-32601`; `resources/read` returns the daemon's own
+entity text, proving the round-trip crossed the socket; an unknown URI keeps its
+`ERR_NOT_FOUND` code across the `call_tool` hop; the `resource_read` carrier is
+dispatchable but absent from `tools/list`; and the four graphless methods answer
+identically whether called through the shared function or the standalone server.
+Decided by: fix-the-root (one shared dispatcher, not a second copy that can
+drift), reuse (ride `call_tool` rather than a fifth `KernRpc` wire method).
+Supersedes: nothing — the item's own text described the defect, now removed.
 
 ### 82. Standalone `kern mcp` runs no gossip `[surface]`
 
 **Corrected:** the previous version said "no maintenance tick and no gossip". The
-tick *is* started (`src/commands/mcp_cmd.rs:473-484`); only gossip is absent
-(`broadcast_q: None` at `:479`, `broadcast_pulse: None` at `:493`). A graph
+tick *is* started (`src/commands/mcp_cmd.rs:498-509`); only gossip is absent
+(`broadcast_q: None` at `:504`, `broadcast_pulse: None` at `:518`). A graph
 served that way decays, clusters and GCs normally, and simply does not federate.
 
 ### 83. Nothing bounds memory deterministically: eviction and spill are both disarmed `[lifecycle]`

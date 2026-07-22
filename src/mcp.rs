@@ -195,6 +195,14 @@ impl trnsprt::McpServer for Server {
 			"gc" => self.tool_gc(),
 			"intake_drain" => self.tool_intake_drain(),
 			"setup" => self.tool_setup(),
+			// ponytail: transport for the proxy's `resources/read`, not an agent
+			// tool. Absent from `tool_definitions()` on purpose so `tools/list`
+			// is unchanged; a schema entry would put a second name on the surface.
+			RESOURCE_READ_TOOL => encode_resource_read(resources::handle_resource_read(
+				self,
+				None,
+				params_to_raw(args),
+			)),
 			_ => {
 				return Ok(trnsprt::ToolResult {
 					content: vec![
@@ -213,25 +221,93 @@ impl trnsprt::McpServer for Server {
 		method: &str,
 		params: serde_json::Value,
 	) -> Option<Result<serde_json::Value, trnsprt::McpError>> {
-		let raw = serde_json::value::RawValue::from_string(
-			serde_json::to_string(&params).unwrap_or_else(|_| "null".to_string()),
-		)
-		.ok();
+		if let Some(r) = handle_graphless_method(method, &params) {
+			return Some(r);
+		}
 		match method {
-			"resources/list" => Some(Ok(
-				serde_json::json!({"resources": resources::resource_definitions()}),
-			)),
+			// The one advertised method that needs the graph, which is why the
+			// proxy cannot answer it from `handle_graphless_method` and routes
+			// this process through `resource_read` instead.
 			"resources/read" => Some(response_to_result(resources::handle_resource_read(
-				self, None, raw,
+				self,
+				None,
+				params_to_raw(&params),
 			))),
-			"prompts/list" => Some(Ok(
-				serde_json::json!({"prompts": prompt::prompt_definitions()}),
-			)),
-			"prompts/get" => Some(response_to_result(prompt::handle_prompt_get(None, raw))),
-			"ping" => Some(Ok(serde_json::json!({}))),
 			_ => None,
 		}
 	}
+}
+
+/// The `call_tool` name that carries `resources/read` from the proxy to the
+/// daemon. Deliberately not a tool schema; see [`encode_resource_read`].
+pub(crate) const RESOURCE_READ_TOOL: &str = "resource_read";
+
+/// Every advertised MCP method that answers without touching the graph.
+/// The standalone server and the `kern mcp` proxy both dispatch through this,
+/// so the two surfaces cannot drift: they are not two implementations that
+/// agree, they are one.
+pub(crate) fn handle_graphless_method(
+	method: &str,
+	params: &serde_json::Value,
+) -> Option<Result<serde_json::Value, trnsprt::McpError>> {
+	match method {
+		"resources/list" => Some(Ok(
+			serde_json::json!({"resources": resources::resource_definitions()}),
+		)),
+		"prompts/list" => Some(Ok(
+			serde_json::json!({"prompts": prompt::prompt_definitions()}),
+		)),
+		"prompts/get" => Some(response_to_result(prompt::handle_prompt_get(
+			None,
+			params_to_raw(params),
+		))),
+		"ping" => Some(Ok(serde_json::json!({}))),
+		_ => None,
+	}
+}
+
+fn params_to_raw(params: &serde_json::Value) -> Option<Box<RawValue>> {
+	RawValue::from_string(serde_json::to_string(params).unwrap_or_else(|_| "null".to_string())).ok()
+}
+
+/// `resources/read`, carried over the `call_tool` passthrough for the proxy.
+/// The verdict rides the text block rather than `isError` alone, because
+/// `CallToolRes` carries only `content` and `isError` and an error code that
+/// does not survive the hop turns `unknown resource` into a generic failure.
+pub(crate) fn encode_resource_read(resp: Response) -> serde_json::Value {
+	match (resp.result, resp.error) {
+		(Some(v), _) => tool_result_json(&v),
+		(None, Some(e)) => {
+			tool_error(&serde_json::json!({"error": {"code": e.code, "message": e.message}}).to_string())
+		}
+		(None, None) => tool_result_json(&serde_json::Value::Null),
+	}
+}
+
+/// The inverse of [`encode_resource_read`], run by the proxy.
+pub(crate) fn decode_resource_read(
+	result: &trnsprt::ToolResult,
+) -> Result<serde_json::Value, trnsprt::McpError> {
+	let text = result
+		.content
+		.first()
+		.and_then(|c| c.get("text"))
+		.and_then(serde_json::Value::as_str)
+		.unwrap_or_default();
+	let parsed: serde_json::Value = serde_json::from_str(text).unwrap_or(serde_json::Value::Null);
+	if result.is_error {
+		let code = parsed
+			.pointer("/error/code")
+			.and_then(serde_json::Value::as_i64)
+			.unwrap_or(-32000);
+		let message = parsed
+			.pointer("/error/message")
+			.and_then(serde_json::Value::as_str)
+			.unwrap_or(text)
+			.to_string();
+		return Err(trnsprt::McpError::Rpc { code, message });
+	}
+	Ok(parsed)
 }
 
 pub(crate) fn value_to_tool_result(v: &serde_json::Value) -> trnsprt::ToolResult {
