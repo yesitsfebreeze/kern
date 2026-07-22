@@ -2,6 +2,24 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 104 (provenance half): the intake distill path records
+  turn-level claim provenance, the blocker the full-pipeline LoCoMo bench
+  needed. `distill` (`src/ingest/distill.rs`) splits the transcript into 1-based
+  turns (blank-line boundaries, the same unit `paragraph_split` and the LoCoMo
+  harness use), marks them `[i]` inline in the prompt, and parses an optional
+  `"turns": [<1-based numbers>]` array per claim (non-integer/<1 dropped,
+  malformed degraded to empty — never a panic). `drain_entry`
+  (`src/ingest/intake.rs`) comma-joins the cited turns into `Source::Session.section`
+  — the existing empty carrier, so no bincode schema change (repo law 1,
+  append-only, held); uncited claims keep `section` empty = byte-identical
+  pre-provenance baseline. Proved by `parse_claims_records_turn_provenance`,
+  `turns_absent_or_malformed_leaves_empty`, `split_turns_breaks_on_blank_lines`.
+  Decided by: avoided-question-first (reuse the empty `section` carrier, no new field —
+  schema stays append-only), name-the-tradeoff (1-based cite-by-position; a
+  re-edited transcript shifts them — accepted, distill runs once per archive).
+  Does NOT close item 104: the bench that scores it (full-pipeline recall@k vs
+  the 0.7129 direct-path baseline) is still owed.
+
 - 2026-07-22 — item 79 closed: `validate_fact_source` deleted — dead code that
   could never fail. It was called once (`src/mcp/tools_mutate.rs` `validate_ingest`)
   with the constant `AGENT_SOURCE`, which it always accepted, so the `Err` path

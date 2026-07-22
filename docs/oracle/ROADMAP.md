@@ -2064,16 +2064,29 @@ category is open-domain (0.3696 any@5) — a finding for Tier 8, not a claim.
 
 ### 104. Benchmark the full pipeline, which needs turn-level claim provenance `[ingest]`
 
-Item 103 measures the direct path: verbatim turns in, retrieval out. It says
-nothing about distillation — the path real sessions take through intake, where
-claims are extracted by an LLM and provenance is recorded at session
-granularity only (the blocker the 2026-07-20 deletion entry actually named).
-To score the full pipeline against LoCoMo's per-turn `evidence` labels, a
-distilled claim must carry which turns it came from — `Source::Session`'s
-`section` field (`src/base/types.rs:167-171`) is the natural carrier and is
-empty on that path today. Blocked on designing that provenance without
-violating repo law 1 (append-only bincode). Not scheduled until item 103's
-numbers exist to compare against.
+**Provenance landed 2026-07-22 (`fd914a9`).** The blocker this item named is
+gone: `distill` (`src/ingest/distill.rs`) splits the transcript into 1-based
+turns (blank-line boundaries, the same unit `paragraph_split` and the LoCoMo
+harness use), marks them `[i]` inline in the prompt, and parses an optional
+`"turns": [<1-based numbers>]` array per claim (non-integer/<1 dropped, malformed
+degraded to empty — never a panic). `drain_entry` (`src/ingest/intake.rs`)
+comma-joins the cited turns into `Source::Session.section` — the existing empty
+carrier, so no bincode schema change (repo law 1, append-only, held); uncited
+claims keep `section` empty = byte-identical pre-provenance baseline. Proved by
+`parse_claims_records_turn_provenance`, `turns_absent_or_malformed_leaves_empty`,
+`split_turns_breaks_on_blank_lines`. Decided by: avoided-question (reuse the
+empty `section` carrier, no new field — schema stays append-only),
+name-the-tradeoff (1-based cite-by-position; a re-edited transcript shifts them
+— accepted, distill runs once per archived transcript).
+
+**Still open — the bench.** The provenance field is populated but nothing scores
+it yet. To close: an eval mode that ingests via the daemon (so the tick pipeline
+runs — distill claims, reasons/edges, GNN) and scores recall@k against LoCoMo's
+per-turn evidence labels, then compares to the 0.7129 direct-path baseline
+(item 103). This is the number that measures the real graph (kern's job, decoupled
+from the synthesis LLM) and the path to a Zep/Mem0-comparable result: kern
+retrieves top-k, an external LLM synthesizes, recall@k is what the synthesis can
+reach. The harness today measures only the verbatim floor.
 
 ### 94. A near-duplicate's alternate wording is indexed and findable — closed 2026-07-22 `[retrieval]`
 
