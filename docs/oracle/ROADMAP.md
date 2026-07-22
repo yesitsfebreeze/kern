@@ -580,6 +580,7 @@ as identity and was not.
 The gate holds: making verification always succeed fails the no-token and the
 wrong-token tests, and gutting the byte compare fails them too (both mutations
 re-run 2026-07-22). What is left is everything the gate does not cover.
+
 1. **Windows is unexecuted.** The descriptor typechecks — `cargo check --target
    x86_64-pc-windows-msvc -p trnsprt` is clean, and a deliberate type error
    inside the `cfg(windows)` module does fail it, so that is not a vacuous
@@ -725,7 +726,7 @@ re-run 2026-07-22). What is left is everything the gate does not cover.
      better: same `XDG_RUNTIME_DIR`, same single uid, so e2e confirms only that
      the daemon still binds and serves, never that it refuses. Do not read a
      green e2e run as evidence that the squat is covered.
-4. ~~**The pre-auth frame is unbounded and untimed.**~~ **Closed 2026-07-22 by
+3. ~~**The pre-auth frame is unbounded and untimed.**~~ **Closed 2026-07-22 by
    item 98.** This entry read the defect correctly — per connection rather than
    an accept-loop stall, and a cap belonging in `decode` — and named the one
    thing it could not settle: the number. `verify_auth`
@@ -773,7 +774,7 @@ than a flat ~20 ms, so the scan is the larger cost everywhere above 1%
 eligibility:
 
 | N=100k | scan | PageRank | scan ÷ PageRank | scan as share of retrieve |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | 1% eligible | 2.37 ms | 2.46 ms | 1.0× | 39.7% |
 | 10% eligible | 6.74 ms | 2.93 ms | 2.3× | 60.1% |
 | 50% eligible | 18.82 ms | 2.08 ms | 9.0× | 72.1% |
@@ -793,7 +794,7 @@ that matters. The inner walk now splits too
 (`src/retrieval/seed.rs:177`), on 8 cores:
 
 | N=100k | before | after | |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 1% eligible | 2.37 ms | 1.24 ms | 1.9× |
 | 10% eligible | 6.74 ms | 1.73 ms | 3.9× |
 | 50% eligible | 18.82 ms | 8.19 ms | 2.3× |
@@ -908,7 +909,7 @@ this a ±20% floor, which is wide enough to hide the whole effect on any single
 row — the shape across rows is the finding, not any one of them):
 
 | reached | out-degree 4 | out-degree 8 | out-degree 16 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | ~58–60% | 0.90 | 0.82 | 0.88 |
 | ~78–80% | 1.08 | 1.03 | 0.92 |
 | ~88–90% | 1.13 | 1.06 | 1.06 |
@@ -957,7 +958,7 @@ witness this — 2.5 MB of `calloc` is under the noise of a box with two sibling
 worktrees on it — so the gate is the byte count.
 
 | | per-call bytes | largest single block |
-|---|---|---|
+| --- | --- | --- |
 | before, N=100k @ 1.0% reach | 2,540,344 | 800,000 |
 | after, same | 40,344 | 16,384 |
 
@@ -1012,7 +1013,7 @@ empty, so a sweep over a kern with zero victims *is* the selection scan and
 nothing else:
 
 | N entities | victims | whole sweep | selection scan | selection's share |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | 10k | 0 | 0.70 ms | 0.70 ms | 100% |
 | 10k | 800 | 4 370 ms | 0.70 ms | 0.02% |
 | 100k | 0 | 3.82 ms | 3.82 ms | 100% |
@@ -1045,7 +1046,7 @@ nothing else:
   vectors, tier under its cap so no trim pass fires in either column):
 
   | victims | one commit each | one commit total | per row |
-  |---|---|---|---|
+  | --- | --- | --- | --- |
   | 100 | 918 ms | 20.5 ms | 9.18 ms → 0.21 ms |
   | 800 | 7 728 ms | 70.2 ms | 9.66 ms → 0.09 ms |
   | 5 000 | 38 053 ms | 284 ms | 7.61 ms → 0.06 ms |
@@ -1057,7 +1058,7 @@ nothing else:
   the 2026-07-21 table's, which is a different host):
 
   | N | victims | before | after |
-  |---|---|---|---|
+  | --- | --- | --- | --- |
   | 10k | 80 | 496 ms | 9.4 ms |
   | 10k | 800 | 4 660 ms | 28.1 ms |
   | 10k | 8 000 | 67 811 ms | 250 ms |
@@ -2755,7 +2756,7 @@ redaction, no allowlist, no warning at config load, no egress log. For a project
 whose first claim is "local-first, zero egress", the one setting that voids it is
 unremarked.
 
-### 79. `validate_fact_source` is dead code `[surface]`
+### 79. `validate_fact_source` is dead code — closed 2026-07-22 `[surface]`
 
 Called **once** (corrected 2026-07-21 — it was twice; the second site left with
 the ingest `kind` arg in `216730d`), with the literal `AGENT_SOURCE`
@@ -2764,6 +2765,15 @@ the ingest `kind` arg in `216730d`), with the literal `AGENT_SOURCE`
 "thread a real auth identity" alternative died with the item 18 removal
 decision (2026-07-22) — kern carries no caller identity, so this guard can
 never become real. Deletion is a small standalone slice, still owed.
+
+**Closed 2026-07-22 by deletion.** `validate_fact_source`, the
+`FactFromUntrustedSource` variant, the constants import, and the two dead tests
+are gone. Called once with `AGENT_SOURCE` (always `Ok`), so the `Err` path was
+unreachable; `clamp_confidence` already caps agent confidence at
+`MAX_AI_CONFIDENCE`, so the trust boundary holds and runtime behavior is
+unchanged. `cargo test --workspace` green (895 passed), zero grep hits.
+Decided by: name-the-tradeoff (delete the unenforceable guard; a future real
+principal would need a new check, but item 18 retired that path).
 
 ### 81. The proxy serves every method its handshake advertises — closed 2026-07-22 `[surface]`
 
@@ -3128,7 +3138,7 @@ LoCoMo-10 run recorded the same day at any@5 0.5983 against YourMemory's
 vendor-run 0.59. Parity with one unverified peer number, not supersession.
 
 | property | kern | Zep/Graphiti | Mem0 | Letta | Qdrant |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | Per-project self-maintaining graph (per-cwd) | ✅ | ❌ hosted | ❌ | ❌ | ❌ |
 | Default recall touches no LLM (sub-ms) | ✅ | ❌ | ❌ | ❌ | n/a |
 | Local-first, single binary, no network hop | ✅ | ❌ | ❌ | partial | ❌ |

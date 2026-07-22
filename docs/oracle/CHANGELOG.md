@@ -2,6 +2,21 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 79 closed: `validate_fact_source` deleted — dead code that
+  could never fail. It was called once (`src/mcp/tools_mutate.rs` `validate_ingest`)
+  with the constant `AGENT_SOURCE`, which it always accepted, so the `Err` path
+  (`FactFromUntrustedSource`) was structurally unreachable. The "thread a real
+  auth identity" alternative died with the item 18 removal (kern carries no
+  caller identity). `clamp_confidence` already enforces the trust boundary by
+  capping agent confidence at `MAX_AI_CONFIDENCE`, so runtime behavior is
+  unchanged. Removed: the function, the `FactFromUntrustedSource` variant, the
+  constants import, and two dead tests (`fact_source_rejects_untrusted`,
+  `fact_source_allows_trusted`). `AGENT_SOURCE` import kept (other call sites).
+  Proved by `cargo test --workspace` green (895 passed) and zero grep hits for
+  `validate_fact_source`/`FactFromUntrustedSource` in `src/`.
+  Decided by: name-the-tradeoff (delete the unenforceable guard; cost: a future
+  real principal would need a new check, but item 18 retired that path).
+
 - 2026-07-22 — item 76 closed: the watchdog force-exit attempts a bounded guarded
   flush before `process::exit(101)` and logs which of the two happened.
   `spawn_watchdog` (`src/commands.rs:969`) now takes `save_fn` and is spawned after
