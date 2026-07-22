@@ -1049,10 +1049,20 @@ async fn cmd_hub_merge(src: &str, dst: &str) {
 	// Fallback must stay pinned to the root: a bare `Config::default()` carries a
 	// cwd-relative data_dir and would read (and write!) whatever store the
 	// caller happens to stand in.
-	let src_cfg = crate::config::Config::load(&src_root)
-		.unwrap_or_else(|_| crate::config::Config::default_in(&src_root));
-	let dst_cfg = crate::config::Config::load(&dst_root)
-		.unwrap_or_else(|_| crate::config::Config::default_in(&dst_root));
+	let src_cfg = match crate::config::Config::load(&src_root) {
+		Ok(c) => c,
+		Err(e) => {
+			eprintln!("merge: src config error: {e}");
+			return;
+		}
+	};
+	let dst_cfg = match crate::config::Config::load(&dst_root) {
+		Ok(c) => c,
+		Err(e) => {
+			eprintln!("merge: dst config error: {e}");
+			return;
+		}
+	};
 	let src_g = load_graph(&src_cfg);
 	let mut dst_g = load_graph(&dst_cfg);
 

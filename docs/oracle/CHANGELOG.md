@@ -2,6 +2,9 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 84 sub-fix: `serve.mcp_addr` config field now read as fallback when CLI `--mcp-addr` absent. CLI flag still wins; config field was silently ignored since item 11.
+  Decided by: fix-the-root.
+
 - 2026-07-22 — item 90 closed: `DirectJob` now carries `valid_from: Option<SystemTime>` with `#[serde(default)]` for backward compat, so the durable intake path preserves the distiller's per-claim bi-temporal lower bound. `drain_direct_once` copies both stamps from the job to `job_cfg`; callers that don't produce `valid_from` set `None`. Two new tests pin round-trip and backward-compat deserialization. 912 passed, full workspace green.
   Decided by: fix-the-root.
 
