@@ -144,6 +144,9 @@ impl Server {
 			"remote_cap_dropped": h.remote_cap_dropped,
 			"unspilled_drops": h.unspilled_drops,
 			"ingest_queue_refused": h.ingest_queue_refused,
+			// This server's own worker, read directly: a gauge on the live channel,
+			// not a process static like the counters `h` carries.
+			"ingest_queue_depth": self.worker.queue_depth(),
 			"gnn_train_refused": crate::tick::trainer::gnn_train_refused(),
 			// Read straight from the client, like `gnn_train_refused` above: it is a
 			// property of this process's LLM leg, not of the graph `h` describes.
@@ -409,6 +412,7 @@ mod tests {
 			"remote_cap_dropped",
 			"unspilled_drops",
 			"ingest_queue_refused",
+			"ingest_queue_depth",
 			"gnn_train_refused",
 			"llm_complete_failed",
 			"last_llm_complete_failure",

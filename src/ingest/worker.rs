@@ -174,6 +174,14 @@ impl Worker {
 		Some(doc_id)
 	}
 
+	// Jobs parked in the channel right now — the fill of the bound above. The
+	// gauge beside `ingest_queue_refused`'s counter: the refusals say the bound
+	// was hit, the depth says how close it is. A job the run loop has taken in
+	// flight releases its slot and is not counted.
+	pub fn queue_depth(&self) -> u64 {
+		(self.tx.max_capacity() - self.tx.capacity()) as u64
+	}
+
 	// The waiting form of `enqueue`, for a producer that can be slowed instead of
 	// refused. The file watcher is one: nothing is waiting on it, and its backlog
 	// is coalesced paths rather than job bodies, so stalling it is cheaper than
@@ -545,6 +553,93 @@ mod tests {
 			ingest_queue_refused() - before,
 			(OFFERED - accepted) as u64,
 			"every refusal is counted, or a full queue is a degradation nobody can see"
+		);
+	}
+
+	// An embed endpoint gated on a semaphore: with no permits it stalls the
+	// worker on its first job, and opening it drains everything.
+	fn gated_embed_app(gate: Arc<tokio::sync::Semaphore>) -> axum::Router {
+		axum::Router::new().route(
+			"/api/embed",
+			axum::routing::post(move |body: axum::Json<serde_json::Value>| {
+				let gate = gate.clone();
+				async move {
+					gate.acquire().await.unwrap().forget();
+					let n = body
+						.0
+						.get("input")
+						.and_then(|v| v.as_array())
+						.map(|a| a.len())
+						.unwrap_or(1);
+					let embs: Vec<Vec<f32>> = (0..n).map(|_| STUB_VEC.to_vec()).collect();
+					axum::Json(serde_json::json!({ "embeddings": embs }))
+				}
+			}),
+		)
+	}
+
+	async fn depth_settles_to_zero(worker: &Worker) -> bool {
+		let cap = std::time::Instant::now() + std::time::Duration::from_secs(10);
+		while worker.queue_depth() > 0 {
+			if std::time::Instant::now() >= cap {
+				return false;
+			}
+			tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+		}
+		true
+	}
+
+	#[tokio::test]
+	async fn queue_depth_reads_the_parked_jobs_and_falls_after_drain() {
+		const PARKED: usize = 5;
+		let gate = Arc::new(tokio::sync::Semaphore::new(0));
+		let (url, _server) = crate::test_support::spawn_http(gated_embed_app(gate.clone())).await;
+		let worker = Worker::new(
+			Arc::new(RwLock::new(GraphGnn::new())),
+			LlmClient::new_embed_only(&url, "m", ""),
+			None,
+			None,
+			None,
+		);
+		assert_eq!(worker.queue_depth(), 0, "an idle worker parks nothing");
+
+		// One job into flight, so the loop is parked on the gate rather than on
+		// recv — from here nothing leaves the channel until the gate opens.
+		worker.enqueue(
+			"job 0".into(),
+			session_source(),
+			EntityKind::Claim,
+			String::new(),
+			1.0,
+			"session",
+			Config::default(),
+		);
+		assert!(
+			depth_settles_to_zero(&worker).await,
+			"the in-flight job must release its slot, or the gauge overcounts by one"
+		);
+
+		for i in 1..=PARKED {
+			worker.enqueue(
+				format!("job {i}"),
+				session_source(),
+				EntityKind::Claim,
+				String::new(),
+				1.0,
+				"session",
+				Config::default(),
+			);
+		}
+		assert_eq!(
+			worker.queue_depth(),
+			PARKED as u64,
+			"every parked job is counted, exactly"
+		);
+
+		gate.add_permits(10_000);
+		assert!(
+			depth_settles_to_zero(&worker).await,
+			"the gauge must fall as the drain takes the parked jobs"
 		);
 	}
 

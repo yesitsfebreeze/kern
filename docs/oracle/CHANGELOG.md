@@ -2,6 +2,34 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 30 closed, last half: the in-process ingest RAM queue
+  reports its depth. `Worker::queue_depth` (`src/ingest/worker.rs:181`) is
+  derived, not maintained — `max_capacity - capacity` off the mpsc channel
+  itself, so the gauge cannot drift from the queue it describes and a job the
+  run loop holds in flight is not counted. Surfaced beside the existing
+  `ingest_queue_refused` counter on all three surfaces: MCP health JSON reads
+  the serving worker's channel live (`src/mcp.rs:149`), `trnsprt::HealthRes`
+  carries it `#[serde(default)]` (`src/trnsprt/src/kern_rpc/dto.rs:70`) so an
+  old daemon's payload reads 0 rather than erroring, and `kern health` prints
+  `ingest: queue N` daemon-sourced only (`src/commands/admin.rs:201`) — no
+  daemon, no line, because the CLI's own worker is idle by construction and a
+  local read is structurally zero (item 100's rule, applied unchanged).
+  Proved at both ends: a unit test parks five jobs behind an embed gated on a
+  closed semaphore, reads exactly five, and watches the gauge fall when the
+  gate opens (`src/ingest/worker.rs:593`); the RPC test asserts a full queue
+  reports depth >= 1 where a hardcoded 0 would still compile
+  (`src/rpc/kern_rpc_server.rs:291`); and
+  `tests/e2e/test_health_surface.py` parks watcher jobs behind a stalled
+  fake-LLM embed and reads the nonzero line over the socket from a live
+  daemon, after asserting idle reads 0 and no daemon prints no line.
+  Tradeoff, named: the depth is sampled at answer time, not streamed — a queue
+  that fills and drains between two `kern health` calls shows nothing, and the
+  refusal counter remains the durable trace of a bound actually hit.
+  Decided by: fix-the-root (a gauge derived from the channel cannot go stale;
+  a maintained counter can), verify-before-claiming (both ends tested against
+  a stalled worker, not asserted). Supersedes: nothing — completes the item
+  the 2026-07-21 bound and the 2026-07-22 durability/LLM entries narrowed.
+
 - 2026-07-22 — The retrieval-only public-benchmark harness ships: LoCoMo-10 and
   LongMemEval-S scored as recall@k / MRR / NDCG against the datasets' own
   evidence labels, no LLM in ingest, retrieval, or scoring — the replacement
