@@ -326,10 +326,22 @@ def check_page(page: Path, failures: list[str], nominations: list[str] | None = 
 
     # The file a bare `:NNN` belongs to: the last one cited, reset at every heading.
     cur: Path | None = None
+    # A fenced code block is prose-as-code, not a citation: a port `` `:8080` ``
+    # or a `sed` address `` `graph.rs:9999` `` inside one is not a reference. The
+    # fence toggles on a line starting with ``` (optionally a language tag) and
+    # skips every anchor form inside it — the named blind spot from item 93's
+    # third pass. No real doc carries a line-number-like token in a fence today,
+    # so this is a no-op on the tree; the guard is the selftest.
+    in_fence = False
     for lineno, text in enumerate(lines, 1):
+        if text.startswith("```"):
+            in_fence = not in_fence
+            continue
         if HEADING.match(text):
             cur = None
         if GONE.search(text):
+            continue
+        if in_fence:
             continue
         # Offsets survive the blanking, so the sort below still reads left to right.
         quoted = ILLUSTRATION.sub(lambda m: " " * len(m.group(0)), text)
@@ -688,6 +700,29 @@ def anchor_selftest() -> None:
             ROOT / "src" / "base" / "types.rs"
         ), "an antecedent of the same name settles it"
         assert ILLUSTRATION.sub("", "quoting `` `:7` `` here") == "quoting  here"
+
+        # The residual item 93's third pass named: both new anchor forms are
+        # matched inside fenced code blocks, where a port or a `sed` address is
+        # prose-as-code, not a citation. The fence skip is the fix. A real
+        # citation before the fence still resolves; the fenced `` `:8080` ``
+        # (continuation past store.rs) and `` `graph.rs:9999` `` (bare name past
+        # graph.rs) are silent with the skip and dead without it.
+        fence = d / "FENCE.md"
+        fence.write_text(
+            "# Section\n"
+            "\n"
+            "Real citation (`src/base/store.rs:624`) before the fence.\n"
+            "\n"
+            "```rust\n"
+            "listen on `:8080` and probe `graph.rs:9999` — not citations.\n"
+            "```\n",
+            encoding="utf-8",
+        )
+        failures = []
+        nominations = []
+        total = check_page(fence, failures, nominations)
+        assert failures == [], f"fenced anchors must be skipped: {failures}"
+        assert total == 1, f"only the pre-fence citation counts: {total}"
 
         line_counts.clear()
         file_lines.clear()
