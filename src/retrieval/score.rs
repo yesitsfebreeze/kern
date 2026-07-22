@@ -6,6 +6,7 @@ use crate::base::lexical::LexicalIndex;
 use crate::base::log_throttle::LogThrottle;
 use crate::base::types::{Entity, EntityKind, EntityStatus, ReviewState};
 use crate::base::util::cmp_partial;
+use crate::base::constants::CONFIDENCE_BOUND_K;
 use crate::config::RetrievalConfig;
 use crate::retrieval::expand::{Scored, ScoredEntity};
 use std::collections::HashMap;
@@ -124,7 +125,10 @@ pub fn apply_lexical_boost<T: Scored>(
 pub fn apply_boosts<T: Scored>(g: &GraphGnn, cfg: &RetrievalConfig, results: &mut [T]) {
 	for r in results.iter_mut() {
 		let e = r.entity();
-		let confidence = e.score;
+		// Lower confidence bound, not the mean: a well-evidenced claim outranks a
+		// single-observation one at equal mean (ROADMAP item 65). Clamped >= 0 so
+		// a high-variance claim never inverts the boost.
+		let confidence = (e.conf_mean() - CONFIDENCE_BOUND_K * e.conf_variance().sqrt()).max(0.0);
 		let boost = qbst(cfg, e.access_count.value_i32(), e.accessed_at);
 		let fact_bonus = if e.kind == EntityKind::Fact && !is_remote_entity(g, &e.id) {
 			cfg.fact_score_boost
@@ -883,13 +887,17 @@ mod query_filter_tests {
 			let mut results = vec![mk("local"), mk("evil")];
 			apply_boosts(&g, &cfg, &mut results);
 
+			// mk_entity gives Beta(2,1): mean 2/3, var 2/36 — apply_boosts now ranks
+			// on the lower confidence bound, not e.score.
+			let lb = |e: &Entity| (e.conf_mean() - CONFIDENCE_BOUND_K * e.conf_variance().sqrt()).max(0.0);
+			let local_lb = lb(&results[0].entity);
 			assert!(
-				(results[0].score - 1.5).abs() < 1e-9,
+				(results[0].score - (local_lb + cfg.fact_score_boost)).abs() < 1e-9,
 				"a LOCAL Fact still earns the bonus: {}",
 				results[0].score
 			);
 			assert!(
-				(results[1].score - 1.0).abs() < 1e-9,
+				(results[1].score - (lb(&results[1].entity) * 1.0)).abs() < 1e-9,
 				"a REMOTE Fact earns no bonus: {}",
 				results[1].score
 			);
@@ -938,6 +946,42 @@ mod query_filter_tests {
 		);
 	}
 
+	// A single-observation claim must not outrank a well-evidenced one at equal
+	// mean: the lower confidence bound subtracts K standard deviations, so the
+	// tighter posterior wins. Negative control: with K=0 the two tie.
+	#[test]
+	fn lower_confidence_bound_ranks_well_evidenced_above_single_observation() {
+		let cfg = RetrievalConfig {
+			qbst_access_weight: 0.0,
+			qbst_recency_weight: 0.0,
+			fact_score_boost: 0.0,
+			..Default::default()
+		};
+		// Both Beta priors share mean 2/3; the (20,10) one has ~3x tighter std.
+		let mut single = ent("single", EntityKind::Claim, file_src("/s"));
+		single.score = 1.0;
+		single.entity.conf_alpha = 2.0;
+		single.entity.conf_beta = 1.0;
+		single.entity.refresh_score();
+		let mut many = ent("many", EntityKind::Claim, file_src("/m"));
+		many.score = 1.0;
+		many.entity.conf_alpha = 20.0;
+		many.entity.conf_beta = 10.0;
+		many.entity.refresh_score();
+		assert!(
+			(single.entity.conf_mean() - many.entity.conf_mean()).abs() < 1e-9,
+			"fixture must share a mean"
+		);
+		let mut results = vec![single, many];
+		apply_boosts(&GraphGnn::new(), &cfg, &mut results);
+		assert!(
+			results[1].score > results[0].score,
+			"well-evidenced should outrank single-observation: many={} single={}",
+			results[1].score,
+			results[0].score
+		);
+	}
+
 	// Bits, not a tolerance: the whole safety claim for source trust is that an
 	// unconfigured kern ranks EXACTLY as it did before the knob existed.
 	#[test]
@@ -965,7 +1009,11 @@ mod query_filter_tests {
 				} else {
 					0.0
 				};
-				(r.score * r.entity.score + fact_bonus).to_bits()
+				// apply_boosts ranks on the lower confidence bound, not e.score.
+				let confidence =
+					(r.entity.conf_mean() - CONFIDENCE_BOUND_K * r.entity.conf_variance().sqrt())
+						.max(0.0);
+				(r.score * confidence + fact_bonus).to_bits()
 			})
 			.collect();
 

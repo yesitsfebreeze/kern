@@ -2539,6 +2539,20 @@ What survives: the by-name discipline. It is cheap, it catches mode 1
 independently of the build layout, and it is what confirmed both cycles that
 found this.
 
+**Closed 2026-07-22 — the defect was already absent in this checkout, and now
+that is recorded rather than inferred.** No `.cargo/config.toml` exists (verified:
+`cat .cargo/config.toml` → none), `git worktree list` shows only the main
+checkout (no cycle worktrees present), and cargo's default `target-dir` is
+already `<worktree-root>/target` — which is the "do nothing" isolation the item's
+ruling named as the correct fix. The cycle launch step that wrote the shared
+`.cargo/config.toml` is gone alongside `~/.pi/agent/bin/` (the bin restructure
+that dropped `cycle.sh`), so nothing currently re-introduces a shared target
+dir. Negative control: `cargo build` in a fresh worktree with no `.cargo/`
+resolves to its own `target/` unprompted (the property the item verified on a
+tree with no `.cargo/` at all). The by-name discipline is the surviving residue;
+it is process, not code, and stands as the item itself says — the catch that
+works independently of layout.
+
 ### 97. The e2e harness runs the GNN and gates on it — closed 2026-07-22 `[eval]`
 
 **Closed. The premise was right and understated: there were two independent

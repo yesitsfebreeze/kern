@@ -2,6 +2,17 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 96 closed: the shared-`target-dir` defect it names is absent
+  in this checkout, and that is now recorded rather than left as a live open item.
+  No `.cargo/config.toml` exists; `git worktree list` shows only the main checkout;
+  cargo's default `target-dir` is already per-worktree (`<worktree-root>/target`),
+  which is the "do nothing" isolation the item's own ruling named as the correct
+  fix. The cycle launch step that wrote the shared config is gone with
+  `~/.pi/agent/bin/` (the bin restructure that dropped `cycle.sh`). Nothing here
+  reintroduces a shared target dir; the surviving by-name test discipline is
+  process, not code.
+  Decided by: fix-the-root, verify-before-claiming. Supersedes: nothing.
+
 - 2026-07-22 — item 85 three doc debts retired: `docs/site/content/docs/howto/hub.mdx`
   documents `kern hub` for the first time (resolve / status / unload / merge / stop,
   the 1800s idle-unload default, the `[hub]` `auto_start` / `auto_restart` keys);
