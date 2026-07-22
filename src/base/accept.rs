@@ -883,6 +883,33 @@ pub(crate) fn add_graviton_with_mass(g: &mut GraphGnn, name: &str, vec: Vec<f32>
 	}
 }
 
+/// Promote an existing unnamed kern to named by giving it a graviton in place
+/// — no move, no id change, no re-register. The kern keeps its entities, children
+/// and parent; it just becomes `is_named` (and so is kept by gc, not reaped as a
+/// transient spill child). ROADMAP item 84: `kern unnamed` used to list only.
+pub fn promote_unnamed(
+	g: &mut GraphGnn,
+	kern_id: &str,
+	name: &str,
+	vec: Vec<f32>,
+	mass: f64,
+) -> Result<(), String> {
+	let parent = g.loaded(kern_id).map(|k| k.parent.clone());
+	let is_unnamed = g.loaded(kern_id).map(|k| k.is_unnamed()).unwrap_or(false);
+	if parent.is_none() || !is_unnamed {
+		return Err(format!("no unnamed kern with id {kern_id}"));
+	}
+	if !vec.is_empty() {
+		if let Some(k) = g.get_mut(kern_id) {
+			k.graviton_text = name.to_string();
+			k.graviton_vec = vec.into();
+			k.mass = mass;
+		}
+		return Ok(());
+	}
+	Err("empty graviton vector".into())
+}
+
 fn find_graviton_by_name(g: &GraphGnn, name: &str) -> Option<String> {
 	let needle = name.trim().to_lowercase();
 	root_graviton_ids(g).into_iter().find(|cid| {
@@ -1834,6 +1861,47 @@ mod tests {
 		assert!(
 			mean_pool(&[vec![1.0, 0.0], vec![-1.0, 0.0]]).is_none(),
 			"opposite examples cancel to zero — refuse rather than emit garbage"
+		);
+	}
+
+	// ROADMAP item 84: `promote_unnamed` gives an existing unnamed kern a
+	// graviton in place — no move, no id change, no re-register — so it becomes
+	// `is_named` and gc keeps it.
+	#[test]
+	fn promote_unnamed_adds_a_graviton_in_place() {
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		let root_net = g.root.root_id.clone();
+		let child = Kern::new_unnamed(&root, &root_net);
+		let cid = child.id.clone();
+		g.register(child);
+		assert!(
+			g.loaded(&cid).unwrap().is_unnamed(),
+			"precondition: unnamed"
+		);
+
+		promote_unnamed(&mut g, &cid, "pinned", vec![1.0, 0.0], 2.0).unwrap();
+
+		let k = g.loaded(&cid).unwrap();
+		assert!(k.is_named(), "now named (has a graviton)");
+		assert!(k.has_graviton(), "text + vec set");
+		assert_eq!(k.graviton_text, "pinned");
+		assert_eq!(k.mass, 2.0);
+		assert_eq!(k.id, cid, "no id change");
+		assert_eq!(k.parent, root, "no move");
+	}
+
+	#[test]
+	fn promote_unnamed_rejects_a_named_or_missing_kern() {
+		let mut g = GraphGnn::new();
+		// missing
+		assert!(promote_unnamed(&mut g, "ghost", "x", vec![1.0, 0.0], 1.0).is_err());
+		// already named
+		add_graviton_with_mass(&mut g, "docs", vec![1.0, 0.0, 0.0], 1.0);
+		let id = find_graviton_by_name(&g, "docs").unwrap();
+		assert!(
+			promote_unnamed(&mut g, &id, "dup", vec![1.0, 0.0], 1.0).is_err(),
+			"a named kern is not a promote target"
 		);
 	}
 

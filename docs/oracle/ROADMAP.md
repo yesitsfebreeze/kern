@@ -3324,7 +3324,16 @@ propagation overwrites one — another 76.8 MB at this corpus size.
   (rename stays in the same kern — a cross-kern move is `move_entity` / item 60,
   not this), verify-before-claiming (negative control). See the 2026-07-22
   CHANGELOG entry.
-- `unnamed` lists only; there is no `promote` (`FEATURES.md:813`).
+- ~~`unnamed` lists only; there is no `promote`~~ — **Closed 2026-07-22.**
+  `kern unnamed promote <id> <name> <seed> [--mass N]` gives an existing unnamed
+  kern a graviton in place: no move, no id change, no re-register — the kern
+  keeps its entities, children and parent, and becomes `is_named` so gc keeps it
+  (a transient spill child pinned into permanence). `accept::promote_unnamed`
+  (`src/base/accept.rs`) sets `graviton_text`/`graviton_vec`/`mass` on the
+  existing `Kern`, embedding the seed via `seed_examples`+`mean_pool` the way
+  `graviton add` does. The CLI is async + local (`with_graph`, guarded flush —
+  the `kern graviton` route's no-daemon fallback shape), and resolves the short
+  id `kern unnamed` prints. Two new tests pin promote + reject-named/missing.
 - GNN has no GPU path, weights are per-kern rather than shared, and the objective
   is link-prediction only (`FEATURES.md:595-596`).
 - ~~Under WSL2 NAT a loopback Ollama URL must be hand-pinned; kern neither

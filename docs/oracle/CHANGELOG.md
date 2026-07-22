@@ -2,6 +2,14 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 84 sub-fix closed: `kern unnamed promote <id> <name>
+  <seed> [--mass N]` promotes an existing unnamed kern to named by giving it a
+  graviton in place (no move, no id change — keeps entities/children/parent,
+  becomes is_named so gc keeps it). `accept::promote_unnamed` sets
+  graviton_text/vec/mass on the existing Kern; CLI embeds seed via
+  seed_examples+mean_pool, resolves the short id `kern unnamed` prints, async +
+  local (with_graph, guarded flush). 1033 pass, 2 new tests. Decided by: fix-the-root, the-oracle. Supersedes: nothing.
+
 - 2026-07-22 — item 47 (c)/(d) closed: TLS = TOFU pin, network_id =
   config-owned. kern is local-first, zero-config and coordinator-free
   (`VISION.md`); operator PKI needs a CA the operator runs — a coordinator the

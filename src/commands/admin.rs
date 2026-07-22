@@ -891,7 +891,7 @@ pub(super) fn cmd_register(cfg: &crate::config::Config, path: &str) {
 	}
 }
 
-pub(super) fn cmd_unnamed(cfg: &crate::config::Config, action: UnnamedAction) {
+pub(super) async fn cmd_unnamed(cfg: &crate::config::Config, action: UnnamedAction) {
 	match action {
 		UnnamedAction::List => {
 			let g = load_graph(cfg);
@@ -909,6 +909,49 @@ pub(super) fn cmd_unnamed(cfg: &crate::config::Config, action: UnnamedAction) {
 			if !found {
 				println!("no unnamed kerns");
 			}
+		}
+		UnnamedAction::Promote {
+			id,
+			name,
+			text,
+			mass,
+			embed,
+		} => {
+			let mass = mass.unwrap_or(1.0);
+			let (url, model) = embed.resolve(cfg);
+			let llm_client = Client::new_embed_only(url, model, &cfg.embed.key);
+			let mut vecs = Vec::new();
+			for ex in crate::base::accept::seed_examples(&text) {
+				match llm_client.embed(&ex).await {
+					Ok(v) => vecs.push(v),
+					Err(e) => {
+						eprintln!("embed: {e}");
+						return;
+					}
+				}
+			}
+			let Some(vec) = crate::base::accept::mean_pool(&vecs) else {
+				eprintln!("embed: empty or mismatched embeddings");
+				return;
+			};
+			// Resolve a short id to the full kern id the way `kern unnamed` prints it.
+			let full = {
+				let g = load_graph(cfg);
+				g.all()
+					.into_iter()
+					.map(|k| k.id.clone())
+					.find(|kid| short_id(kid) == id || kid == &id)
+			};
+			let Some(full) = full else {
+				eprintln!("no unnamed kern matching id {id}");
+				return;
+			};
+			with_graph(cfg, |g| {
+				if let Err(e) = crate::base::accept::promote_unnamed(g, &full, &name, vec.clone(), mass) {
+					eprintln!("{e}");
+				}
+			});
+			println!("promoted unnamed {id} -> graviton {name} (mass {mass})");
 		}
 	}
 }

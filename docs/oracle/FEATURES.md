@@ -827,7 +827,10 @@ accept the agent clamp, or stay local behind the flush guard — is owed in
 `ROADMAP.md` item 9. `get` and `query` no longer read stale:
 both route to a serving daemon over the `query` tool and fall back to the disk
 load only when nothing answers. `search` and `list` stay local by decision
-(`ROADMAP.md` item 9). `unnamed` lists only — no kern promotion.
+(`ROADMAP.md` item 9). `kern unnamed promote <id> <name> <seed> [--mass N]`
+  promotes an existing unnamed kern to named by giving it a graviton in place
+  (no move, no id change — it keeps entities/children/parent and becomes
+  `is_named`, so gc keeps it); `accept::promote_unnamed` (`src/base/accept.rs`).
 
 ---
 

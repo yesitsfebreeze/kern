@@ -268,6 +268,17 @@ pub enum ClaimKindAction {
 #[derive(Subcommand)]
 pub enum UnnamedAction {
 	List,
+	/// Promote an existing unnamed kern to named by giving it a graviton in place.
+	Promote {
+		/// The unnamed kern id (the short form `kern unnamed` prints).
+		id: String,
+		name: String,
+		text: String,
+		#[arg(long)]
+		mass: Option<f64>,
+		#[command(flatten)]
+		embed: EmbedArgs,
+	},
 }
 
 pub(crate) fn apply_graph_config(g: &mut GraphGnn, cfg: &crate::config::GraphConfig) {
@@ -616,7 +627,7 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 		Commands::ClaimKind { action } => admin::cmd_claim_kind(cfg, action).await,
 		Commands::Peers => admin::cmd_peers(cfg),
 		Commands::Register { path } => admin::cmd_register(cfg, &path),
-		Commands::Unnamed { action } => admin::cmd_unnamed(cfg, action),
+		Commands::Unnamed { action } => admin::cmd_unnamed(cfg, action).await,
 		Commands::Mcp => mcp_cmd::cmd_mcp(cfg).await,
 		Commands::Compress { src, mode, out } => admin::cmd_compress(&src, &mode, out.as_deref()),
 		Commands::Daemon => {
