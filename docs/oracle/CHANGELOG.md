@@ -2,6 +2,70 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — merged item 18's close, and filed item 101 for what the merge
+  exposed. 229 + 1 + this one = 231.
+
+  **A second empty merge, same cause as the first.** The reap left `MERGE_HEAD`
+  set with a staged diff identical to HEAD — `git show :src/ingest/file_watcher.rs`
+  had none of the branch's work while the branch had all of it — and a stale
+  `.git/index.lock` sat beside it with no process holding it. Committing would
+  have recorded item 18 as merged while discarding it. Caught by the same check
+  as last time: the branch's test name was absent from the index.
+
+  That check is now worth stating as a rule rather than a habit. **After any
+  merge, confirm one symbol from the branch is present in the index.** A clean
+  `git status`, a plausible `MERGE_HEAD` and an empty conflict list are all
+  consistent with a merge that did nothing.
+
+  **The widened `docs-check` immediately nominated 18 anchors** — it learned to
+  resolve bare continuation refs, and every one of those was wrong before and
+  invisible. Filed as item 101 rather than fixed inline: two different faults are
+  mixed in (ordinary stale numbers, and item 52's bare-ref-continues-the-wrong-file
+  hazard), and several need a judgement about which file a bare ref was meant to
+  continue. Eighteen repoints at the tail of a merge is how one lands on a
+  plausible wrong line and goes quiet again.
+
+  The uncomfortable corollary: every "no anchors nominated" this run meant "none
+  among the 63% the regex could parse". The checker's own improvement is what
+  falsified its previous coverage claim — which is the same lesson as the four
+  false-green gates, arriving from the opposite direction.
+
+  Decided by: verify-before-claiming — a green checker measures what it looks at.
+
+- 2026-07-22 — item 18 closed by deciding: **a watched file is public.**
+  `Acl::default()` names nothing, `Acl::is_public` is exactly that emptiness, and
+  both watcher legs pass it while `drain_direct_once` carries the payload's own
+  ACL rather than stamping one.
+
+  Tenant-default lost on the same ground item 20's `source_trust_user` did. There
+  is no tenant identity on the wire — item 24's principal is declared, not
+  proven, and its residue says same-uid callers are indistinguishable. Stamping
+  `scope: "tenant"` names a boundary nothing can verify, which reads as
+  enforcement and is not. Configurable lost because it ships a knob plus a
+  default and asks the same question at the default.
+
+  **The slice's own test was a false green, and the sixth of this run.** Its
+  agent died mid-falsification — its last words were "now the drain-carrier
+  mutation" — leaving a mutation in `Worker::submit` still applied in the tree.
+  Committing that would have shipped the exact design the decision rejects: a
+  watcher stamping `scope: "tenant"`. Restored, then falsified properly, and the
+  test passed *with the mutation in place*: it drains only the durable leg, while
+  `submit`'s job waits in a channel for a worker loop the fixture never spawns.
+  Renamed to `a_watched_file_is_public_once_the_durable_leg_commits` and the gap
+  written into the item.
+
+  Two things worth keeping. **A stalled revert-check leaves the tree mutated**,
+  and a mutation that compiles and passes is indistinguishable from intent —
+  three agents have now died mid-verification, and this is the first where the
+  leftover would have inverted the decision being made. And the false green was
+  the trap this brief named in advance ("a test where no entity is scoped passes
+  whatever the default is"); naming it did not prevent it, catching it required
+  running the mutation.
+
+  Decided by: name-the-tradeoff — public is the honest default when the system
+  cannot verify the alternative, and the cost is that a watched file is readable
+  by every caller.
+
 - 2026-07-22 — item 93: the anchor checker had been reading 63% of the anchors
   and reporting on all of them. 223 + this one = 224.
 
@@ -73,6 +137,7 @@
   Decided by: verify-before-claiming — the precision number, the reference
   count, the refactor's neutrality and the exit codes were each re-derived
   rather than read off the commit message.
+
 - 2026-07-22 — merged item 26, which closes it, and with it the last of the
   retrieval performance items. 225 + 1 + this one = 227.
 
@@ -99,7 +164,6 @@
 
   Decided by: verify-before-claiming — four passes, four corrections, and the
   file was the thing being corrected each time.
-
 
 - 2026-07-22 — item 26 closed: PageRank's four N-wide buffers are lent by the
   thread instead of built per query. **2,540,344 B → 40,344 B per call** at
