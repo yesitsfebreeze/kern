@@ -1,12 +1,12 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::base::constants::CONFIDENCE_BOUND_K;
 use crate::base::graph::GraphGnn;
 use crate::base::heat::{self, HeatConfig};
 use crate::base::lexical::LexicalIndex;
 use crate::base::log_throttle::LogThrottle;
 use crate::base::types::{Entity, EntityKind, EntityStatus, ReviewState};
 use crate::base::util::cmp_partial;
-use crate::base::constants::CONFIDENCE_BOUND_K;
 use crate::config::RetrievalConfig;
 use crate::retrieval::expand::{Scored, ScoredEntity};
 use std::collections::HashMap;
@@ -889,7 +889,8 @@ mod query_filter_tests {
 
 			// mk_entity gives Beta(2,1): mean 2/3, var 2/36 — apply_boosts now ranks
 			// on the lower confidence bound, not e.score.
-			let lb = |e: &Entity| (e.conf_mean() - CONFIDENCE_BOUND_K * e.conf_variance().sqrt()).max(0.0);
+			let lb =
+				|e: &Entity| (e.conf_mean() - CONFIDENCE_BOUND_K * e.conf_variance().sqrt()).max(0.0);
 			let local_lb = lb(&results[0].entity);
 			assert!(
 				(results[0].score - (local_lb + cfg.fact_score_boost)).abs() < 1e-9,
@@ -1011,8 +1012,7 @@ mod query_filter_tests {
 				};
 				// apply_boosts ranks on the lower confidence bound, not e.score.
 				let confidence =
-					(r.entity.conf_mean() - CONFIDENCE_BOUND_K * r.entity.conf_variance().sqrt())
-						.max(0.0);
+					(r.entity.conf_mean() - CONFIDENCE_BOUND_K * r.entity.conf_variance().sqrt()).max(0.0);
 				(r.score * confidence + fact_bonus).to_bits()
 			})
 			.collect();
