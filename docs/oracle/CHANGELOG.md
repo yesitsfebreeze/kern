@@ -2,6 +2,23 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 84 pure-rename half closed (rename re-keying complete):
+  `supersede_renamed` (`src/base/accept.rs:578`) gains `new_external_id: &str`
+  and on `old_id == new_id` (content-unchanged rename) re-keys the survivor —
+  `entity.external_id = new_external_id`, `clear_source_entry(old)`,
+  `set_source_entry(new)`, then `return None` (no supersede edge — same entity).
+  The `file_watcher.rs` caller passes `source.object_id()` (the new path). The
+  rename+edit half (`old_id != new_id`) closed earlier in `789968a`; together a
+  renamed file stops leaving the `Document` under its stale old path whether or
+  not it was edited. Proved by `a_pure_rename_re_keys_the_survivor_external_id`
+  (survivor `external_id` == new path, old source-index cleared, new set,
+  survivor active); negative control (revert to bare `return None` →
+  `external_id` stays old path) reds, green on revert.
+  `a_rename_plus_edit_supersedes_the_old_path_document` and
+  `a_rename_with_no_old_entity_is_a_noop` green unedited. `cargo test -p kern
+  --lib` 937 passed, 0 failed, 4 ignored.
+  Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming.
+
 - 2026-07-22 — item 60 re-classification wiring closed: when an entity
   carrying a deferred Rephrase candidate is superseded by a different update,
   stamp_superseded now re-points the candidate's from to the new active entity

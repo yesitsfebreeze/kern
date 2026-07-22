@@ -3264,10 +3264,28 @@ propagation overwrites one — another 76.8 MB at this corpus size.
   `content_hash(text)`, so an untouched move re-resolves to the same id, while
   `external_id` is the path (`src/ingest/file_watcher.rs:185`), so a
   move-plus-edit gets a new id under a new external id and supersede never
-  fires. It sits in this tier and not in tier 1 because the watcher is **off by
+  fires. ~~It sits in this tier and not in tier 1 because the watcher is **off by
   default** — `WatcherConfig::enabled` is `false` unless a `kern.toml` sets it
   (`src/config/watcher.rs:14-16`) — so it is not a default-path defect
-  (`FEATURES.md:1085-1088`).
+  (`FEATURES.md:1085-1088`).~~ **Closed 2026-07-22 (both halves).** The
+  rename+edit half (`old_id != new_id`) closed in `789968a` — `supersede_renamed`
+  supersedes the old-path `Document`. The **pure-rename half** (`old_id ==
+  new_id`, content unchanged) closed now: `supersede_renamed`
+  (`src/base/accept.rs:578`) gains `new_external_id: &str` and on `old_id ==
+  new_id` re-keys the survivor — `entity.external_id = new_external_id`,
+  `clear_source_entry(old)`, `set_source_entry(new)`, then `return None` (no
+  supersede edge — same entity). The `file_watcher.rs` caller passes
+  `source.object_id()`. Proved by `a_pure_rename_re_keys_the_survivor_external_id`
+  (survivor `external_id` == new path, old source-index cleared, new set,
+  survivor active); negative control (revert to bare `return None` → `external_id`
+  stays old path) reds, green on revert.
+  `a_rename_plus_edit_supersedes_the_old_path_document` and
+  `a_rename_with_no_old_entity_is_a_noop` green unedited. `cargo test -p kern
+  --lib` 937 passed, 0 failed, 4 ignored. Decided by fix-the-root (re-key the
+  survivor, do not mint a new entity on a pure move), name-the-tradeoff
+  (rename stays in the same kern — a cross-kern move is `move_entity` / item 60,
+  not this), verify-before-claiming (negative control). See the 2026-07-22
+  CHANGELOG entry.
 - `unnamed` lists only; there is no `promote` (`FEATURES.md:813`).
 - GNN has no GPU path, weights are per-kern rather than shared, and the objective
   is link-prediction only (`FEATURES.md:595-596`).
