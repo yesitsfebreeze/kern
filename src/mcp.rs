@@ -1,3 +1,4 @@
+pub(crate) mod acl;
 pub mod prompt;
 pub mod resources;
 pub mod sse;

@@ -230,7 +230,17 @@ are GC-immune, not ACL-immune** — a Fact the requester cannot see must still n
 be returned. Default semantics: empty `principals` means *no filter*, not
 *public only*, or every single-agent caller goes blind.
 
-### 18. ACL is written and enforced; a bare `query {id}` still filters nothing `[surface]`
+### 18. Every read surface enforces the ACL; the file watcher's default is the last decision owed `[surface]`
+
+**Title narrowed 2026-07-22.** It read "a bare `query {id}` still filters
+nothing" for a day after that stopped being a defect. The id path runs
+`matches_filter` (`src/mcp/tools_query.rs:151-152`), so `query {id, principals:
+["bob"]}` on an alice-scoped row answers `thought not found`
+(`id_read_withholds_a_scoped_row_from_a_non_member`); a *bare* `query {id}`
+filtering nothing is the **decided** empty-principals default, pinned by
+`bare_id_read_still_serves_a_scoped_row`, not a gap. What the old title hid is
+below: the row was gated and its **edges were not**, on both the id read and the
+ranked read.
 
 **Four bullets done 2026-07-21; the item stays open.** `Entity` carries `Acl`
 (struct `{scope, users, groups}`, `src/base/types.rs:133-137`) and it is now
@@ -312,6 +322,41 @@ handled: `src/tick/tasks.rs` carries the old entity's `Acl` into
 `build_chunk_entity`, so a rephrase cannot launder a scoped thought into a public
 one.
 
+**The `query` tool gated the row and published its neighbours — closed
+2026-07-22.** The 2026-07-21 bullet above guarded *the row* an id names and
+stopped there, and the same paragraph that enumerated the four surfaces which
+render an entity's edges (`entity_detail` untruncated, the ranked `edges` array,
+`resource_thought`, `format_chains`) fixed the last two and left the first two.
+A `Reason` carries no ACL, but `link` writes its body from
+`explain_relationship_prompt` — up to 500 chars of **both** endpoint texts — so
+an edge is its endpoints' text under an id that is neither one's. The row
+clearing `matches_filter` says nothing about its neighbour, so
+`query {id: <public row>, principals: ["bob"]}` served an alice-scoped Fact's
+text verbatim through any public neighbour, and the ranked read did the same at
+120 chars. Both are the *reads item 9 routes `kern get` to*, which is what made
+this an ACL bypass rather than a cosmetic gap.
+
+Fixed at the root rather than in the two branches: the endpoint verdict left
+`src/mcp/resources.rs` and became `src/mcp/acl.rs`, one `Endpoint` +
+`incident_edge` all four renderings call. It takes the *admission rule* as a
+parameter rather than the principals, because the two surfaces disagree about
+what "allowed" means and must keep disagreeing — resources can name no principal
+so its rule is `Acl::is_public`, while `query` takes the caller's `principals`.
+Variants renamed `Public`/`Scoped` → `Admitted`/`Withheld` for the same reason;
+`Unresolved` is unchanged and still redacts rather than drops. The `query` side
+of the rule is `retrieval::score::acl_admits_entity`, the ACL half of
+`matches_filter` lifted out so the edge gate cannot re-derive the
+empty-principals default and get it wrong — an edge answers its far endpoint's
+**ACL and nothing else**, since `kind` or `since` on the row a caller asked for
+says nothing about whether a neighbour's quoted text may be read.
+`entity_detail_by_id` — the local `kern get` fallback, which has no principal to
+name — passes `QueryOptions::default()` and so renders exactly as before. Pinned
+by `edge_acl_tests` (`src/mcp/tools_query.rs`): id read and ranked read each
+withhold a scoped **Fact**'s edge text from a non-member and each fails alone
+when its own gate is reverted, a member still reads the edge whole, and
+`a_bare_id_read_still_renders_the_whole_edge` pins the inert default on the edge
+rendering too.
+
 **Two reads returned entity text without passing the predicate**, found by
 enumerating the read surfaces rather than trusting the single gate — both now
 run `matches_filter`. *Cold-tier backfill* (`src/mcp/tools_query.rs`) pushed
@@ -355,8 +400,9 @@ a kern hosts a reason iff it hosts its `from` (`src/base/reason.rs:78`), so
 `move_entity` leaves an incoming edge behind in the *source* kern and
 `remove_entity` cascades only within one kern. Treating that as "allowed" is a
 fail-open read of scoped text, with no race in it — it is the stable committed
-state. So the endpoint verdict has three outcomes (`Endpoint`), not two: **Scoped**
-drops the edge, **Public** serves it whole, and **Unresolved** serves the edge
+state. So the endpoint verdict has three outcomes (`Endpoint`, now
+`src/mcp/acl.rs`), not two: **Withheld** drops the edge, **Admitted** serves it
+whole, and **Unresolved** serves the edge
 with its `text` withheld. Redaction rather than a drop, because a dangling
 endpoint is ordinary here (`Reason::to` is optional in `add_reason`) and dropping
 every edge with one would hide a public entity's own structure — that is the line
@@ -395,8 +441,11 @@ local one, so neither side can widen the other's, but shipping the row at all is
 a trust decision nobody has made. And **`Reason` still has no ACL of its own**:
 `link`'s `explain_relationship_prompt` writes a scoped entity's text into an edge
 hanging off a public one, and every reader has to re-derive the verdict from the
-endpoints. The resources surface now does. Storing the verdict on the edge at
-write time is the real fix and is not this item.
+endpoints. All four renderings now do, through the one `src/mcp/acl.rs` verdict —
+which is the cheap fix, not the right one: re-deriving it per read costs a
+`find_entity` per edge and fails open on a non-resident endpoint by design.
+Storing the verdict on the edge at write time is the real fix and is not this
+item.
 
 ### 20. Source-trust weighting `[retrieval]`
 
@@ -797,9 +846,9 @@ changes an input to the importance gate (`has_vector`, kind, `access_count`)
 while leaving the epoch untouched.
 
 Worse, the one mutation that *creates* importance is epoch-silent on purpose:
-`commit_access_ids` (`src/retrieval/score.rs:346`) stamps access on every
+`commit_access_ids` (`src/retrieval/score.rs:354`) stamps access on every
 delivered result and deliberately bypasses `get_mut` so it will not invalidate
-the semantic query cache (`src/retrieval/score.rs:312`). An eligible-set index
+the semantic query cache (`src/retrieval/score.rs:320`). An eligible-set index
 keyed on the epoch would never see a Claim cross
 `important_access_threshold` — stale forever, in the direction that silently
 drops seeds and moves recall with no error anywhere.
@@ -2783,7 +2832,7 @@ an overall eval score that makes specialization worth funding.
   since a non-superseded `Fact` is immune (`is_cold_victim`,
   `src/tick/stigmergy.rs:35-46`) — is a false statement the caller has no way to
   falsify. So the id path **serves and flags**: `entity_detail`
-  (`src/mcp/tools_query.rs:371`) emits `expired` and `valid_until` whenever a
+  (`src/mcp/tools_query.rs:382`) emits `expired` and `valid_until` whenever a
   retention is set, and `kern get` prints an `Expired:` line
   (`src/commands/graph_ops.rs:67`). Filtering lost because the surface item 9
   deliberately widened — prefix plus cold-tier fallback — would have been
