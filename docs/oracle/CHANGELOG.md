@@ -2,6 +2,35 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 47 (c)/(d) closed: TLS = TOFU pin, network_id =
+  config-owned. kern is local-first, zero-config and coordinator-free
+  (`VISION.md`); operator PKI needs a CA the operator runs — a coordinator the
+  federation refuses to need. TOFU pins the first-seen peer key and warns on
+  change (SSH known_hosts shape); trade: a first-contact MITM is undetected,
+  mitigated by out-of-band pin verification. Under TOFU there is no cert at
+  first contact, so `network_id` stays the operator's `[gossip] network_id`
+  (the existing `effective_network_id` guard, not a new one). All 7 item-47
+  decisions now recorded; the federation build unblocks on the item 33 transport
+  move. No code change. Decided by: name-the-tradeoff, the-oracle, fix-the-root.
+  Supersedes: nothing.
+
+- 2026-07-22 — item 47: 5 of 7 federation decisions recorded (the build
+  stays blocked on the security pair (c)/(d)). (a) Reason.score LWW — already
+  settled by item 13. (b) anti-entropy watermark = content-hash bloom (ids are
+  content hashes; a vector clock adds a per-replica counter with no other use; a
+  bloom over the live content-hash set is the shape anti-entropy needs anyway).
+  (e) graviton mass = per-node, does not federate (mass is local routing tuning;
+  federating it lets a peer shift another's acceptance routing silently; the
+  graviton's existence federates as content, its mass stays the operator's knob).
+  (f) superseded_by conflict = lamport-then-id, not lex-greater-id (lex-greater
+  agrees on the wrong successor; lamport-then-id is still deterministic via the
+  existing lww_wins tiebreak and picks the later claim). (g) cross-model
+  federation = refuse on embed-model mismatch (vectors from two models are
+  noise; the store already refuses a mismatched embedder at open, the wire
+  extends the same guard — only vector-free CRDT deltas federate across models).
+  (c) TLS CA (operator PKI vs TOFU) and (d) network_id source owed — security
+  model, user's call; (d) depends on (c). No code change. Decided by: name-the-tradeoff, verify-before-claiming, fix-the-root. Supersedes: nothing.
+
 - 2026-07-22 — item 84 pure-rename half closed (rename re-keying complete):
   `supersede_renamed` (`src/base/accept.rs:578`) gains `new_external_id: &str`
   and on `old_id == new_id` (content-unchanged rename) re-keys the survivor —

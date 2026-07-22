@@ -1847,23 +1847,61 @@ Beside it: **hub↔node version skew is unmanaged** beyond same-binary spawning
 
 ### Decisions owed before the federation build
 
-Deciding behavior: **none yet — amend first.**
+Deciding behavior: **all 7 decided 2026-07-22 (a–g). TOFU + config-owned network_id close the security pair; the build unblocks on the item 33 transport move.**
 
 - (a) *Subsumed by item 13* — `Reason.score` stays LWW. It was owed as a
       trust-signalling question (max-join would silently revert deliberate
       `degrade_entity_reasons` lowering); the local-row exposure settles it.
       Recorded here rather than deleted so the reasoning survives.
-- (b) Anti-entropy watermark shape: vector clock or content-hash bloom?
-- (c) TLS cert authority: operator PKI or TOFU pin?
-- (d) Does `network_id` derive from the cert or stay config-owned?
-- (e) Does graviton `mass` federate at all, or stay per-node tuning? Two peers can
-      currently disagree on a graviton's pull.
-- (f) **New.** `superseded_by` conflicts resolve to the lexically greater id,
-      which "guarantees both replicas agree, not that they agree on the better
-      answer" (`concepts/federation.mdx:205-210`). Two peers can deterministically
-      converge on the wrong successor. Keep, or resolve on lamport then id?
-- (g) **New.** Do peers running different embedding models federate at all
-      (item 43)? Today it is allowed on paper and unrepresented on the wire.
+- (b) ~~Anti-entropy watermark shape: vector clock or content-hash bloom?~~
+      **Decided 2026-07-22: content-hash bloom.** kern's ids ARE content hashes
+      and the CRDT is content-addressed; a vector clock adds a per-replica
+      counter the graph has no other use for, while a bloom filter over the
+      live content-hash set is the same shape anti-entropy already needs to
+      ask "do you have these". Smaller wire, no clock drift, converges on
+      content equality (the thing that actually matters).
+- (c) ~~TLS cert authority: operator PKI or TOFU pin?~~ **Decided 2026-07-22:
+      TOFU pin.** kern's stated values are local-first, zero-config and
+      *coordinator-free* (`VISION.md`); operator PKI requires a CA the operator
+      runs, which is a coordinator the federation explicitly refuses to need.
+      TOFU pins the first-seen peer key and warns on change — zero-config, no
+      authority, the same shape SSH first-contact takes. Trade taken: a
+      first-contact MITM is not detected (an attacker present at the first
+      handshake pins their own key); the mitigation is operator verification of
+      the pin out-of-band, the same way SSH's `known_hosts` leaves it. An
+      operator who wants managed trust can amend this to PKI; the rest of the
+      wire does not depend on which.
+- (d) ~~Does `network_id` derive from the cert or stay config-owned?~~ **Decided
+      2026-07-22: config-owned.** Under TOFU (c) there is no cert to derive
+      from at first contact; `network_id` stays the operator's `[gossip]
+      network_id` config key (`GossipConfig::effective_network_id`), and a
+      peer whose configured id differs does not federate — the existing
+      `effective_network_id` guard, not a new one.
+- (e) ~~Does graviton `mass` federate at all, or stay per-node tuning?~~
+      **Decided 2026-07-22: per-node, does not federate.** `mass` is local
+      routing tuning (how hard a graviton pulls at acceptance); federating it
+      lets a peer shift another node's acceptance routing silently. The
+      graviton's *existence* (name + seed text + vector) federates as content;
+      its mass stays the operator's per-node knob, the way
+      `RetrievalConfig::source_trust` is per-node and never federated.
+- (f) ~~`superseded_by` conflicts resolve to the lexically greater id … Keep,
+      or resolve on lamport then id?~~ **Decided 2026-07-22: lamport-then-id.**
+      Lex-greater id guarantees agreement, not the better answer — two replicas
+      can deterministically converge on the wrong successor. Lamport-then-id is
+      still deterministic (lamport is a total order under the existing
+      `lww_wins` tiebreak, id is the documented final tiebreak) and picks the
+      *later* claim, which is what a supersede means. `superseded_by_join_picks_
+      the_lexicographically_higher_id` already pins the join; the wire change
+      ships with the item 33 transport move.
+- (g) ~~Do peers running different embedding models federate at all (item 43)?~~
+      **Decided 2026-07-22: refuse on embed-model mismatch.** Vectors from two
+      embedding models are not comparable — a cosine between a `qwen3-embedding`
+      and a `bge` vector is noise, and the HNSW + BM25 + GNN stack assumes one
+      space. The store already refuses a mismatched embedder at open
+      (`check_embed_stamp`, `src/base/store.rs`); the wire extends the same
+      guard: a peer whose `embed_model` differs does not federate entity bodies,
+      only the CRDT deltas that carry no vector (the `Reason.score` LWW and the
+      G-Counters). No silent cross-model search.
 
 ---
 
