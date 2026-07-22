@@ -1912,20 +1912,9 @@ dropped text containing "last Tuesday" stores unresolved. The eval path got this
 and the product path never did; the eval path is now deleted, so the capability
 exists nowhere.~~
 
-### 90. `DirectJob` carries `valid_until` but drops `valid_from` `[ingest]`
+### 90. `DirectJob` carries `valid_until` but drops `valid_from` `[ingest]` — closed 2026-07-22
 
-The durable direct intake serializes one bi-temporal stamp and not the other:
-`DirectJob` (`src/ingest/direct.rs:11-36`) has a `valid_until` and no
-`valid_from`, and `drain_direct_once` overlays only the former onto the drain
-loop's `Config`, so `valid_from` is whatever the loop's shared config says —
-always `None`. **Not a live loss**: the only producer of `valid_from` is the
-distillation path (`src/ingest/intake.rs:193`, from `distill.rs`), which calls the worker
-directly and never goes through `direct/`, and the MCP `ingest` schema has no
-`valid_from` field to lose. It is a hole that opens the moment either of those
-changes — which item 50 would do. (The retired item 89 did not: it gave the
-drain loop's shared `Config` a standing `valid_until` and left `valid_from`
-alone.) Ranks here, next to 50, for that reason and not for any damage it does
-today.
+**Closed 2026-07-22.** `DirectJob` (`src/ingest/direct.rs`) now carries `valid_from: Option<SystemTime>` with `#[serde(default)]` for backward compat with old payloads on disk. `drain_direct_once` copies both `valid_until` and `valid_from` from the job to `job_cfg`, so the durable intake path preserves the distiller's per-claim lower bound. Callers that don't produce `valid_from` (MCP `tool_ingest`, file watcher) set `None`. Two new tests pin the round-trip and backward-compat deserialization. 912 passed, full workspace green. Decided by: fix-the-root (thread the field, don't re-derive at drain).
 
 ### 51. Require reason text on supersede `[ingest]`
 
