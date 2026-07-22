@@ -2845,6 +2845,25 @@ is silent staleness, not a crash. Wanted: one rename that publishes all three
 (a versioned directory, or a manifest naming the build the three files belong
 to), and an fsync before it.
 
+**Cross-segment atomicity closed 2026-07-22; fsync closed with it.**
+`build_and_save` now builds into a staging dir (`<dir>.staging`), `atomic_write`
+fsyncs each segment file (`sync_all`) before its rename, the staging dir itself
+is fsync'd, and the publish is **one rename** of the staging dir over the live
+dir (`std::fs::rename` after `remove_dir_all`). A crash before the swap leaves
+the old build intact; a crash in the sub-microsecond window between
+`remove_dir_all` and `rename` leaves no index, and `DiskIndex::open` failing is
+non-fatal — `build_entity_disk_snapshot` logs and falls back to the in-RAM
+index — so the worst case is silent staleness until the next rebuild, never a
+mixed-build read. `rebuild_over_an_existing_index_swaps_and_leaves_no_staging`
+pins two consecutive builds over one dir: the second is whole (its ids, not a
+mix) and no staging dir lingers. POSIX-only safety is the tradeoff stated
+here: `remove_dir_all` on a dir a reader has open mmaps of unlinks the inodes
+but the reader's fd keeps them valid until close, so a search mid-rebuild
+finishes on the old build; Windows cannot delete an open file, so a concurrent
+reader would make the swap fail — DiskANN is off by default and Linux-first,
+and the Windows mmap/lock semantics the item names separately stay open. The
+PQ-codebook-drift and Windows-file-locking doc-only notes are unchanged.
+
 Beside it, both unverified against source and still doc-only: mmap file-locking
 and flush semantics differ on Windows
 (`docs/kern/diskann-disk-index.md:149-150`), and PQ codebook training/drift has

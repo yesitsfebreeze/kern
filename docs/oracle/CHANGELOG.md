@@ -2,6 +2,21 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 75 cross-segment-atomicity half closed: `build_and_save`
+  now builds into a staging dir, `atomic_write` fsyncs each segment, the staging
+  dir is fsync'd, and the publish is ONE rename of the staging dir over the live
+  dir. Three independent renames used to leave meta from build N+1 beside vectors
+  from build N if a crash hit between them — and `open`'s shape checks pass
+  whenever the two builds share count/dim/r, the common case. Now a crash before
+  the swap leaves the old build intact; a crash in the remove→rename window
+  leaves no index, which is non-fatal (`build_entity_disk_snapshot` falls back to
+  the in-RAM index) — silent staleness until next rebuild, never a mixed-build
+  read. New test pins two consecutive builds over one dir (second is whole, no
+  staging lingers). POSIX-only: Windows cannot delete an open file so a
+  concurrent reader would fail the swap; DiskANN is off-by-default, Linux-first.
+  1025 pass. Decided by: fix-the-root, verify-before-claiming, name-the-tradeoff.
+  Supersedes: nothing.
+
 - 2026-07-22 — item 83 resident-cap half closed: `GraphConfig::default().
   max_kerns` is now 128 (was `KERN_CAP_DISABLED`/`usize::MAX`). The old
   "currently unsafe — eviction drops unpersisted children pushes" comment was

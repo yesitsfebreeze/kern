@@ -1,7 +1,7 @@
 // Not yet wired into the live search path.
 
 use std::collections::{BTreeSet, HashSet};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use memmap2::Mmap;
@@ -160,6 +160,18 @@ pub fn build_and_save(
 	params: Params,
 ) -> io::Result<usize> {
 	std::fs::create_dir_all(dir)?;
+	// Cross-segment atomicity (ROADMAP item 75): three independent renames used
+	// to leave meta from build N+1 beside vectors from build N if a crash hit
+	// between them — and the shape checks in `open` pass whenever the two builds
+	// share count/dim/r, the common case. Build into a staging dir, fsync every
+	// segment, then swap the staging dir over the live one in one rename. A crash
+	// before the swap leaves the old build intact; a crash in the (sub-microsecond)
+	// window between `remove_dir_all` and `rename` leaves no index, and `open`
+	// falls back to the in-RAM index (`build_entity_disk_snapshot`), so the worst
+	// case is silent staleness until the next rebuild, never a mixed-build read.
+	let staging = dir.with_extension("staging");
+	let _ = std::fs::remove_dir_all(&staging);
+	std::fs::create_dir_all(&staging)?;
 	let count = items.len();
 	let dim = items.first().map(|(_, v)| v.len()).unwrap_or(0);
 	let ids: Vec<String> = items.iter().map(|(id, _)| id.clone()).collect();
@@ -217,7 +229,14 @@ pub fn build_and_save(
 		}
 	}
 
-	write_files(dir, dim, count, params.r, entry, &ids, &vectors, &adj)?;
+	write_files(&staging, dim, count, params.r, entry, &ids, &vectors, &adj)?;
+	// fsync the staging dir so the new file entries are durable before the swap.
+	{
+		let d = std::fs::File::open(&staging)?;
+		let _ = d.sync_all();
+	}
+	let _ = std::fs::remove_dir_all(dir);
+	std::fs::rename(&staging, dir)?;
 	Ok(count)
 }
 
@@ -292,7 +311,11 @@ fn write_files(
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 	let tmp = path.with_extension("tmp");
-	std::fs::write(&tmp, bytes)?;
+	{
+		let mut f = std::fs::File::create(&tmp)?;
+		f.write_all(bytes)?;
+		f.sync_all()?;
+	}
 	std::fs::rename(&tmp, path)
 }
 
@@ -528,6 +551,37 @@ mod tests {
 			"two builds of one corpus produced different adjacency ({differing} of {} bytes differ)",
 			graphs[0].len()
 		);
+	}
+
+	// ROADMAP item 75: a rebuild over an existing index must swap atomically —
+	// the staging dir is published in one rename, and no `.staging` dir lingers
+	// to collide with the next build. Two consecutive builds over the same dir
+	// both open and search correctly.
+	#[test]
+	fn rebuild_over_an_existing_index_swaps_and_leaves_no_staging() {
+		let dir = tempfile::tempdir().unwrap();
+		let a = rand_items(40, 16, 1);
+		build_and_save(dir.path(), &a, Params::default()).unwrap();
+		let idx_a = DiskIndex::open(dir.path()).unwrap();
+		assert_eq!(idx_a.len(), 40);
+		assert!(
+			!dir.path().with_extension("staging").exists(),
+			"no staging lingers"
+		);
+
+		// a different corpus, same shape — the swap must replace, not mix.
+		let b = rand_items(40, 16, 2);
+		build_and_save(dir.path(), &b, Params::default()).unwrap();
+		assert!(
+			!dir.path().with_extension("staging").exists(),
+			"staging cleaned after second build"
+		);
+		let idx_b = DiskIndex::open(dir.path()).unwrap();
+		assert_eq!(idx_b.len(), 40);
+		// the second build's ids are the second corpus's, not a mix
+		let want: std::collections::HashSet<String> = b.iter().map(|(id, _)| id.clone()).collect();
+		let got: std::collections::HashSet<String> = idx_b.ids().iter().cloned().collect();
+		assert_eq!(got, want, "second build is whole, not a mixed-build read");
 	}
 
 	#[test]
