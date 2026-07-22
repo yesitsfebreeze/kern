@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::base::graph::GraphGnn;
 use crate::base::heat::{self, HeatConfig};
 use crate::base::log_throttle::LogThrottle;
-use crate::base::types::{Acl, Entity, EntityKind, EntityStatus};
+use crate::base::types::{Acl, Entity, EntityKind, EntityStatus, ReviewState};
 use crate::base::util::cmp_partial;
 use crate::config::RetrievalConfig;
 use crate::retrieval::expand::{Scored, ScoredEntity};
@@ -49,6 +49,9 @@ pub struct QueryOptions {
 	// reads everything, which is what keeps `kern get` and every unscoped read
 	// working exactly as before.
 	pub principals: Vec<String>,
+	// Drop entities still awaiting curation. OPT-IN: false is every caller that
+	// names no review policy, so an uncurated graph reads exactly as before.
+	pub exclude_pending: bool,
 	// Appended to the synthesis prompt only — never a retrieval filter, so is_active() ignores it.
 }
 
@@ -63,6 +66,7 @@ impl QueryOptions {
 			|| self.valid_at.is_some()
 			|| self.as_of.is_some()
 			|| !self.principals.is_empty()
+			|| self.exclude_pending
 	}
 }
 
@@ -233,6 +237,9 @@ pub fn matches_filter(entity: &Entity, opts: &QueryOptions) -> bool {
 	// ALLOWED to see rather than what they asked for. Empty `principals` is "no
 	// principal was named", which is no filter — never "public only".
 	if !opts.principals.is_empty() && !acl_admits(&entity.acl, &opts.principals) {
+		return false;
+	}
+	if opts.exclude_pending && entity.review == ReviewState::Pending {
 		return false;
 	}
 	if !opts.source.is_empty() && entity.source.system() != opts.source {
@@ -589,6 +596,40 @@ mod query_filter_tests {
 			..Default::default()
 		}
 		.is_active());
+	}
+
+	// Both halves matter. A pending entity that is never in the set proves nothing:
+	// the same assertions pass against a predicate that was never written.
+	#[test]
+	fn exclude_pending_drops_only_the_uncurated_and_only_when_asked() {
+		let active = ent("a", EntityKind::Claim, file_src("/a")).entity;
+		let mut pending = ent("p", EntityKind::Claim, file_src("/p")).entity;
+		pending.review = ReviewState::Pending;
+
+		let on = QueryOptions {
+			exclude_pending: true,
+			..Default::default()
+		};
+		assert!(
+			matches_filter(&active, &on),
+			"a curated entity survives the filter"
+		);
+		assert!(
+			!matches_filter(&pending, &on),
+			"a pending entity is withheld once the caller asks to exclude it"
+		);
+
+		let off = QueryOptions::default();
+		assert!(
+			matches_filter(&pending, &off),
+			"the same pending entity is returned when nobody asked — the filter is opt-in"
+		);
+
+		assert!(!off.is_active());
+		assert!(
+			on.is_active(),
+			"an exclude_pending-only query must take the pre-filtered ANN path, not the unfiltered seed path"
+		);
 	}
 
 	#[test]

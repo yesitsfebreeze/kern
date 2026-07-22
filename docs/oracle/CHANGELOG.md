@@ -2,6 +2,65 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — merged item 21's review lifecycle. 203 + 1 + this one = 205. The
+  merge broke **thirteen** citations, the worst single hit yet, and every one was
+  a second-order effect: adding `ReviewState` to `Entity` shifted `types.rs`,
+  which shifted every anchor below it, in four documents that never mentioned
+  review at all.
+
+  Fixed by locating each cited symbol and repointing — `Entity` 280→293, `Reason`
+  428→442, `Kern` 471→485, `ReasonKind` 77-86→90-99, `matches_filter` 216→235,
+  `job()` 38→40, and so on. Mechanical, but thirteen of them, and `docs-check`
+  cannot do it: it nominates a mismatch, it cannot find the new line.
+
+  This is the clearest argument yet for item 93's unbuilt half. The nominator
+  works — it caught all thirteen and stayed silent about the ~750 anchors that
+  were fine — but it converts a silent corruption into a manual chore that scales
+  with how much a struct moves. **A symbolic anchor
+  (`` `src/base/types.rs#struct Entity` ``) would have needed zero of these
+  edits.** The tax is now measurable: one field added to one hot struct cost
+  thirteen repoints across four files.
+
+  Worth noting what this does NOT argue for: leaving the anchors as line numbers
+  and lowering the bar. Every one of the thirteen was genuinely wrong and would
+  have sent a reader to unrelated code — `Entity` cited at `self.section()`,
+  `Reason` at `observe_support`. The chore is real because the breakage is real.
+
+  Decided by: name-the-tradeoff — the nominator buys correctness at the price of
+  manual repointing, and the price is now large enough to fund the fix.
+
+- 2026-07-22 — item 21's review lifecycle lands three parts of four, and the
+  missing fourth is the one that makes the feature safe to turn on.
+
+  Shipped: `ReviewState` on `Entity` behind a `FORMAT_V7` bump with old stores
+  rejected rather than defaulted; `exclude_pending` as a `QueryOptions`
+  predicate; and source-scheme review policy in `IngestConfig`, with unknown
+  schemes rejected at load.
+
+  **The default is `Active` and that was the whole risk.** Pending-by-default
+  would have made every existing ingest path silently non-retrievable — a
+  behaviour change wearing a schema addition's clothes, which craters recall
+  instead of failing loudly. Active-by-default means the feature is inert until a
+  host opts in. Recall is unmoved at 0.9306 / 0.9722 / 0.9471, which is the
+  evidence that inertness is real rather than intended.
+
+  **Not shipped: `promote`.** No such arm exists in the MCP dispatch. A host can
+  therefore configure a scheme to arrive held, and can filter held rows out of
+  retrieval, but has no supported way to release one. Shipping the hold without
+  the release is worse than shipping neither, so item 21 is retitled to say so
+  and carries a do-not-enable warning rather than a completion note.
+
+  The docs are written by me rather than the slice: its agent stalled twice, the
+  second time after fixing the compile error that blocked verification but before
+  touching `ROADMAP.md` or this file. Code and tests were verified green
+  independently — 927 tests, `exclude_pending` pinned in both directions, the
+  format rejection pinned by the same test that pinned `FORMAT_V6`. What was
+  missing was only the record, and a slice that stalls before recording leaves
+  work that looks finished to `git status` and unfinished to everyone else.
+
+  Decided by: name-the-tradeoff — an inert default is the safe half of a feature
+  that can hide data, and the half that can un-hide it is not there yet.
+
 - 2026-07-22 — merged item 94's lexical indexing of dedup alternate wordings.
   201 + 1 + this one = 203.
 

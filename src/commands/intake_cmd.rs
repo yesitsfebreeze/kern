@@ -165,6 +165,7 @@ async fn drain_locally(
 		&extra_kinds,
 		cfg.ingest.dedup_threshold,
 		cfg.intake.retention_secs,
+		cfg.ingest.review_policy.clone(),
 		Duration::from_secs(cfg.intake.done_retention_secs),
 		SystemTime::now(),
 	)

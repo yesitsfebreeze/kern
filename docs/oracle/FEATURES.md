@@ -42,7 +42,7 @@ everywhere, which is what makes conflict-free cross-node merge work.
 
 **How.**
 
-- `Entity` (`src/base/types.rs:280`) — typed (`Fact`/`Claim`/`Document`/
+- `Entity` (`src/base/types.rs:293`) — typed (`Fact`/`Claim`/`Document`/
   `Question`/`Conclusion`, `src/base/types.rs:19`), weighted by
   confidence (a beta distribution stored as `conf_alpha`/`conf_beta`, read via
   the `conf_mean`/`conf_variance` methods, updated via
@@ -57,19 +57,19 @@ everywhere, which is what makes conflict-free cross-node merge work.
   `principals` build it (`acl_from_args`, `src/mcp/tools_mutate.rs`) and it rides
   `ingest::Job::acl` into `new_statement_entity` (`src/ingest/place.rs:57`);
   `query`'s `principals` enforce it in `matches_filter` via `acl_admits`
-  (`src/retrieval/score.rs:216`). Two rules: a scoped `Fact` is withheld from a
+  (`src/retrieval/score.rs:235`). Two rules: a scoped `Fact` is withheld from a
   non-member (GC-immunity is not ACL-immunity), and an empty `principals` is *no
   filter*, not public-only. A dedup keeps the survivor's ACL and drops the
   `Rephrase` edge across a boundary — a `Reason` has no ACL. The file watcher
   still writes `Acl::default()`; `ROADMAP.md` item 18 lists what is still ungated.
-- `Reason` (`src/base/types.rs:428`) — an edge `from`→`to` with a `kind`
+- `Reason` (`src/base/types.rs:442`) — an edge `from`→`to` with a `kind`
   (`Similarity`/`Provenance`/`Question`/`Spawn`/`Supersedes`/`Ratification`/
-  `Rephrase`, `src/base/types.rs:77-86`), its own vector (mean of endpoints), a
-  `traversal_count` GCounter (`src/base/types.rs:440`), and a CRDT `score`.
+  `Rephrase`, `src/base/types.rs:90-99`), its own vector (mean of endpoints), a
+  `traversal_count` GCounter (`src/base/types.rs:454`), and a CRDT `score`.
   `is_enriched`/`is_remote` flags. There is no `Contradiction` edge kind —
   `Related` is a `ContradictionClass` verdict, not an edge, and a deferred
   contradiction candidate is carried by a `Rephrase` edge.
-- `Kern` (`src/base/types.rs:471`) — a container node in the kern tree:
+- `Kern` (`src/base/types.rs:485`) — a container node in the kern tree:
   `entities` + `reasons` maps, `children` ids, a `graviton_vec`/`graviton_text` + `mass` (default 1.0),
   radii (`inner_radius`/`outer_radius`) for acceptance gating, and an
   `access_count`. Root, named children, and unnamed (spill) children are all

@@ -147,6 +147,7 @@ fn ingest_config(
 	crate::ingest::Config {
 		dedup_threshold: cfg.ingest.dedup_threshold,
 		valid_until,
+		review_policy: cfg.ingest.review_policy.clone(),
 		..Default::default()
 	}
 }

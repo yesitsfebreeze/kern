@@ -254,6 +254,7 @@ impl Server {
 				ingest::Config {
 					dedup_threshold: self.cfg.ingest.dedup_threshold,
 					valid_until,
+					review_policy: self.cfg.ingest.review_policy.clone(),
 					..Default::default()
 				},
 				acl,
@@ -324,6 +325,7 @@ impl Server {
 			ingest::Config {
 				dedup_threshold: self.cfg.ingest.dedup_threshold,
 				valid_until,
+				review_policy: self.cfg.ingest.review_policy.clone(),
 				..Default::default()
 			},
 			acl,

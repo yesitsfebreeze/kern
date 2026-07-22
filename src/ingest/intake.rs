@@ -257,11 +257,13 @@ pub async fn drain_now(
 	extra_kinds: &[String],
 	dedup_threshold: f64,
 	retention_secs: u64,
+	review_policy: crate::ingest::ReviewPolicy,
 	done_retention: Duration,
 	now: SystemTime,
 ) -> usize {
 	let cfg = crate::ingest::Config {
 		dedup_threshold,
+		review_policy,
 		..Default::default()
 	}
 	.with_retention(retention_secs);
@@ -317,6 +319,7 @@ pub async fn run(
 	claim_kinds: Option<ClaimKindsFn>,
 	dedup_threshold: f64,
 	retention_secs: u64,
+	review_policy: crate::ingest::ReviewPolicy,
 	interval: Duration,
 	done_retention: Duration,
 ) {
@@ -328,6 +331,7 @@ pub async fn run(
 		// from now a TTL that already expired.
 		let cfg = crate::ingest::Config {
 			dedup_threshold,
+			review_policy: review_policy.clone(),
 			..Default::default()
 		}
 		.with_retention(retention_secs);
@@ -710,6 +714,7 @@ mod tests {
 			None,
 			0.9,
 			3600,
+			Default::default(),
 			Duration::from_millis(50),
 			Duration::from_secs(3600),
 		));

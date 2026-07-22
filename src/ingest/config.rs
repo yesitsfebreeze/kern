@@ -1,12 +1,28 @@
 use crate::base::constants::INGEST_DEDUP_THRESHOLD;
+use crate::base::types::{ReviewState, Source};
 
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
+
+/// Source scheme → the curation state a claim arriving on it is placed in. An
+/// absent key is `Active`, so an empty policy is today's behaviour exactly.
+pub type ReviewPolicy = BTreeMap<String, ReviewState>;
+
+/// The one resolution, so no producer can key on something other than the
+/// scheme `IngestConfig::validate` checks against.
+pub fn review_for(policy: &ReviewPolicy, source: &Source) -> ReviewState {
+	policy.get(source.scheme()).copied().unwrap_or_default()
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {
 	pub dedup_threshold: f64,
 	pub valid_from: Option<std::time::SystemTime>,
 	pub valid_until: Option<std::time::SystemTime>,
+	// The POLICY, not a resolved state: the intake drain hands one `Config` to a
+	// whole pass of records whose sources differ, so the scheme is only known
+	// per job. `job()` resolves it — the single gate every producer passes.
+	pub review_policy: ReviewPolicy,
 }
 
 impl Default for Config {
@@ -15,6 +31,7 @@ impl Default for Config {
 			dedup_threshold: INGEST_DEDUP_THRESHOLD,
 			valid_from: None,
 			valid_until: None,
+			review_policy: ReviewPolicy::new(),
 		}
 	}
 }
@@ -68,6 +85,38 @@ mod tests {
 		let serde = crate::config::IngestConfig::default();
 		assert_eq!(rt.dedup_threshold, serde.dedup_threshold);
 		assert_eq!(rt.dedup_threshold, INGEST_DEDUP_THRESHOLD);
+		assert_eq!(rt.review_policy, serde.review_policy);
+		assert!(
+			rt.review_policy.is_empty(),
+			"nothing is held for review until a host asks"
+		);
+	}
+
+	#[test]
+	fn review_for_keys_on_the_scheme_and_defaults_to_active() {
+		let file = Source::File {
+			path: "/a".into(),
+			section: String::new(),
+			title: String::new(),
+			author: String::new(),
+			url: String::new(),
+		};
+		let inline = Source::Inline {
+			hash: "h".into(),
+			section: String::new(),
+		};
+		let policy = ReviewPolicy::from([("file".to_string(), ReviewState::Pending)]);
+		assert_eq!(review_for(&policy, &file), ReviewState::Pending);
+		assert_eq!(
+			review_for(&policy, &inline),
+			ReviewState::Active,
+			"an unlisted scheme is active — the policy holds back only what it names"
+		);
+		assert_eq!(
+			review_for(&ReviewPolicy::new(), &file),
+			ReviewState::Active,
+			"an empty policy holds nothing back"
+		);
 	}
 
 	#[test]

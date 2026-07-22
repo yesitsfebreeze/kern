@@ -229,7 +229,7 @@ be returned. Default semantics: empty `principals` means *no filter*, not
 ### 18. ACL + request principal — gates everything else in this tier `[surface]`
 
 **Four bullets done 2026-07-21; the item stays open.** `Entity` carries `Acl`
-(struct `{scope, users, groups}`, `src/base/types.rs:120-124`) and it is now
+(struct `{scope, users, groups}`, `src/base/types.rs:133-137`) and it is now
 written from the caller, not hardcoded — but "enforced in `matches_filter`" is
 only worth what the read surfaces that *run* `matches_filter` are worth, and two
 of them did not. Both are fixed below; the ones that still do not are listed at
@@ -288,7 +288,7 @@ larger than the feature. The behaviour is pinned by
 **Still open, deliberately deferred:** does the file watcher give `Document`
 entities a tenant-default ACL, or leave them public? Recommend configurable,
 default public-within-tenant, since the tenant boundary is the process.
-`src/ingest/file_watcher.rs:158` hardcodes `Acl::default()` — which is that
+`src/ingest/file_watcher.rs:169` hardcodes `Acl::default()` — which is that
 recommended default — and `Worker::enqueue`'s public delegation keeps it there
 until the decision is made.
 
@@ -394,7 +394,7 @@ write time is the real fix and is not this item.
 ### 20. Source-trust weighting `[retrieval]`
 
 - ~~**A trust prior in the boost step.**~~ **Done 2026-07-21.** `apply_boosts`
-  (`src/retrieval/score.rs:90`) now multiplies the composite by
+  (`src/retrieval/score.rs:94`) now multiplies the composite by
   `RetrievalConfig::source_trust` (`src/config/retrieval.rs:55`), a map keyed on
   `Source::scheme()`. Empty by default, and an absent key is exactly `1.0`, so an
   unconfigured kern scores bit-identically. Post-fusion, as required — RRF is
@@ -426,7 +426,32 @@ new field, so a store format bump, and it belongs with whoever holds
 `src/base/types.rs`. Deciding behavior: fix-the-root. Until then, do not add
 `_user` / `_agent` knobs; they would read as working and weight nothing.
 
-### 21. Review / draft lifecycle `[surface]`
+### 21. Review lifecycle lands except `promote` — nothing can un-hold a held claim `[surface]`
+
+**Three of four parts landed 2026-07-22; the fourth is the one that matters for
+usability.** `ReviewState` is on `Entity` (`src/base/types.rs:300`) behind a
+`FORMAT_V7` bump — old stores are rejected rather than defaulted, per the
+`FORMAT_V6` precedent, pinned by `decode_rejects_older_version_bytes`.
+`exclude_pending` is a `QueryOptions` predicate (`src/retrieval/score.rs:54`,
+applied at `:242`), and source-level policy is `IngestConfig::review_policy`
+keyed on source scheme with unknown schemes rejected at config load.
+
+**The default is `Active`, deliberately.** Pending-by-default would have made
+every existing ingest path silently non-retrievable — a behaviour change
+disguised as a schema addition, and one that craters recall rather than failing
+loudly. Active-by-default means the feature does nothing until a host opts in,
+which is the correct direction for a filter that can hide data.
+
+**What remains: the `promote` tool.** No `"promote"` arm exists in the MCP
+dispatch. So a host can configure a scheme to arrive `Pending` and can filter
+those rows out of retrieval, but has **no supported way to mark one reviewed** —
+the state is writable only by ingest. Shipping the hold without the release is
+worse than shipping neither, because a host that enables the policy today
+strands every claim it holds. Do not enable `review_policy` until this lands.
+
+When it does: item 9 established that a mutating CLI path must route through the
+daemon when one is serving, so `promote` needs the `route()` treatment rather
+than a local write.
 
 `ReviewState` on `Entity` (added with a store format-version bump — alpha
 rejects old stores rather than defaulting them) + source-level review policy in
@@ -525,7 +550,7 @@ while leaving the epoch untouched.
 Worse, the one mutation that *creates* importance is epoch-silent on purpose:
 `commit_access_ids` (`src/retrieval/score.rs:346`) stamps access on every
 delivered result and deliberately bypasses `get_mut` so it will not invalidate
-the semantic query cache (`src/retrieval/score.rs:345`). An eligible-set index
+the semantic query cache (`src/retrieval/score.rs:312`). An eligible-set index
 keyed on the epoch would never see a Claim cross
 `important_access_threshold` — stale forever, in the direction that silently
 drops seeds and moves recall with no error anywhere.
@@ -886,7 +911,7 @@ free-direction reading inside one process is a lie), RSS from
 `/proc/self/statm`, and **two readings: cold, and hot after 200 searches.** The
 hot one is the honest one, because mmap pages are only resident once touched.
 50k entities at dim 384, each with `vector` AND `gnn_vector`
-(`src/base/types.rs:280-281`), plus 25k reasons with vectors (`:427`):
+(`src/base/types.rs:303-304`), plus 25k reasons with vectors (`:427`):
 
 | configuration | cold MB | **hot MB** |
 | --- | --- | --- |
@@ -953,7 +978,7 @@ would have closed one of two live holes and left the other, which is the same
 "a convention each caller remembers" failure one method further down.
 
 So the guard went one level lower: `Worker`'s private `job()`
-(`src/ingest/worker.rs:38`) is now the ONLY place a `Job` is built — `run_with_acl`
+(`src/ingest/worker.rs:40`) is now the ONLY place a `Job` is built — `run_with_acl`
 no longer assembles one by hand — and it clamps. Every entrance
 (`enqueue`, `enqueue_with_acl`, `submit`, `run`, `run_with_acl`) takes a
 `source_tag` it cannot omit, so a future producer is asked "who is asserting
@@ -997,10 +1022,10 @@ the newest job rather than detaching (`:128`), the refusal is counted
 (`:131`) and reaches every health surface as `ingest_queue_refused`
 (`src/base/health.rs:81`, `src/mcp.rs:145`, `src/commands/admin.rs:85`). The
 one producer that must not be refused waits instead — `submit` awaits capacity
-(`src/ingest/worker.rs:175`) and the file-watcher sink calls it
-(`src/ingest/file_watcher.rs:84`), because a watcher record has no durable
+(`src/ingest/worker.rs:182`) and the file-watcher sink calls it
+(`src/ingest/file_watcher.rs:94`), because a watcher record has no durable
 backstop; the MCP RAM-queue fallback gets a `tool_error`
-(`src/mcp/tools_mutate.rs:331`). Still distinct from the *tick* queue, which is
+(`src/mcp/tools_mutate.rs:335`). Still distinct from the *tick* queue, which is
 bounded at 512 (`FEATURES.md:437-438`).
 
 Remaining, and the reason this item is narrowed rather than deleted: **the
@@ -1374,7 +1399,7 @@ today.
 ### 51. Require reason text on supersede `[ingest]`
 
 `ReasonKind::Supersedes` edges are minted at `src/base/accept.rs:543` and `:638`
-with `fallback_label()` text (`src/base/types.rs:103`), never a caller-supplied
+with `fallback_label()` text (`src/base/types.rs:116`), never a caller-supplied
 rationale. The *why* is the thing the graph exists to hold.
 
 ### 52. A single-line graviton seed still truncates at the embed context window `[ingest]`
@@ -1442,9 +1467,9 @@ incomplete — no item below produces a wrong answer today.
 
 ### 56. An agent cannot register disagreement at all `[ingest]`
 
-There is no `Contradicts` reason kind (`src/base/types.rs:77-86`) and no `stance`
+There is no `Contradicts` reason kind (`src/base/types.rs:90-99`) and no `stance`
 parameter on the ingest schema (`src/mcp/tools_mutate.rs:19-33`);
-`observe_contradict` (`src/base/types.rs:420`) has exactly one caller, GNN
+`observe_contradict` (`src/base/types.rs:434`) has exactly one caller, GNN
 alignment (`src/tick/gnn_propagate.rs:163`). Observer-reputation weighting is
 also unbuilt.
 
@@ -1457,7 +1482,7 @@ observations to unseat. Tick-based γ damping is an open design
 
 ### 58. Supersede chains are unbounded while contested `[lifecycle]`
 
-No `ReasonKind::Edit` rationale edge (`src/base/types.rs:77-86`) and no producer
+No `ReasonKind::Edit` rationale edge (`src/base/types.rs:90-99`) and no producer
 rate-limit, so an A/B ping-pong on one `external_id` grows without bound
 (`decisions/edit-convergence.mdx:107`). Compounding it: the three trigger
 conditions that would flip kern to full versioning have **no instrumentation**
@@ -1953,7 +1978,7 @@ every *composition* feeding it, and each one is a different format string: entit
 ids are `content_hash(text)` bare (`src/ingest/place.rs`,
 `src/ingest/file_watcher.rs:137`, `src/ingest/direct.rs:32`,
 `src/ingest/worker.rs:148`), `Source::source_id` is
-`scheme \x00 object \x00 section` (`src/base/types.rs:257-269`), child and named
+`scheme \x00 object \x00 section` (`src/base/types.rs:270-282`), child and named
 ids are `parent_id + nonce` and `parent_id + name + nonce`
 (`types.rs:502`, `:507`), and the HNSW canon has its own (`src/base/hnsw.rs:525`).
 
@@ -2026,7 +2051,7 @@ buys nothing there). The two copies were the same floats, not a normalised one
 and a raw one — recall is unmoved to four decimals across the change, which is
 the check that would have caught it had they differed. `Entity::vector`,
 `Entity::gnn_vector` and `Reason::vector` are now `Embedding`
-(`src/base/types.rs:595`) and every index holds the map's own allocation.
+(`src/base/types.rs:609`) and every index holds the map's own allocation.
 
 Measured with `tests/spill_memory.rs` in `resident` mode — 50k entities at dim
 384 each carrying `vector` AND `gnn_vector`, plus 25k reasons, one process per
