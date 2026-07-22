@@ -230,7 +230,10 @@ mod tests {
 			.is_empty());
 		// floats accepted, zeros/negatives dropped — degrades to empty, never panics
 		let messy = stub(r#"[{"text":"y","kind":"fact","turns":[2.0,0,"oops"]}]"#);
-		assert_eq!(distill("c", &[], &messy, now()).expect("some")[0].turns, vec![2]);
+		assert_eq!(
+			distill("c", &[], &messy, now()).expect("some")[0].turns,
+			vec![2]
+		);
 	}
 
 	#[test]
@@ -292,7 +295,9 @@ mod tests {
 	#[test]
 	fn empty_conversation_skips_llm() {
 		let llm = stub(r#"[{"text":"should not appear","kind":"fact"}]"#);
-		assert!(distill("   \n  ", &[], &llm, now()).expect("some").is_empty());
+		assert!(distill("   \n  ", &[], &llm, now())
+			.expect("some")
+			.is_empty());
 	}
 
 	#[test]
@@ -310,7 +315,10 @@ mod tests {
 	#[test]
 	fn genuine_empty_array_is_some_empty() {
 		let llm = stub("[]");
-		assert_eq!(distill("a real conversation", &[], &llm, now()), Some(Vec::new()));
+		assert_eq!(
+			distill("a real conversation", &[], &llm, now()),
+			Some(Vec::new())
+		);
 	}
 
 	#[test]
@@ -407,5 +415,4 @@ mod tests {
 			"prompt must name today for relative-date resolution: {prompt}"
 		);
 	}
-
 }

@@ -227,7 +227,10 @@ impl Config {
 	/// `embed.url` and a warning for that would double-count the one provider.
 	pub fn egress_warnings(&self) -> Vec<String> {
 		let mut out = Vec::new();
-		for (label, url) in [("embed.url", &self.embed.url), ("reason.url", &self.reason.url)] {
+		for (label, url) in [
+			("embed.url", &self.embed.url),
+			("reason.url", &self.reason.url),
+		] {
 			if !url.is_empty() && !crate::llm::is_local_url(url) {
 				out.push(format!(
 					"{label} ({url}) is non-local — all text sent to it egresses this machine"
@@ -306,6 +309,8 @@ mod tests {
 	fn resolve_root_returns_start_when_no_kern_ancestor() {
 		let dir = tempfile::tempdir().unwrap();
 		let start = dir.path().canonicalize().unwrap();
+		// Shield from stray .kern dirs in parent directories (e.g. /tmp/.kern from a running daemon)
+		std::fs::create_dir_all(start.join(".kern")).unwrap();
 		assert_eq!(Config::resolve_root(&start), start);
 	}
 
