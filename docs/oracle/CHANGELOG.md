@@ -2,6 +2,27 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 49 chunking half-closed: `distill` (`src/ingest/distill.rs`)
+  now batches a long conversation into turn-groups of `DISTILL_CHUNK_TURNS`
+  (new, `src/base/constants.rs`, default `48`), calls `llm` + `parse_claims`
+  per batch, and concats the claims — so a long delta stops truncating past the
+  model's context window with no signal. The common case (`turns.len() <=
+  batch`) stays one call, bit-identical to today. Turn-batched (not char-batched)
+  preserves the 1-based turn markers `split_turns` produces, so
+  `Source::Session.section` turn-citations stay well-formed per chunk. A batch
+  returning no parseable array (prose / empty) is a format failure for the
+  **whole delta** → `None` (retry), so a partially-distilled conversation never
+  archives having silently dropped every later batch. Proved by
+  `distill_short_conversation_is_one_call`,
+  `distill_chunks_long_conversation_turn_batched`,
+  `distill_chunk_markers_carry_global_turn_index`,
+  `distill_batch_format_failure_retries_whole_delta`. Existing distill tests
+  green unedited. `cargo test -p kern --lib` 932 passed, 0 failed, 4 ignored.
+  Negative control: `DISTILL_CHUNK_TURNS=usize::MAX` reds the chunk test, green
+  on revert. Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming.
+  Still open: per-kind branch / label-accuracy half (the ~33% figure is
+  unreproducible, a lead not a number).
+
 - 2026-07-22 — item 75 cross-segment-atomicity half closed: `build_and_save`
   now builds into a staging dir, `atomic_write` fsyncs each segment, the staging
   dir is fsync'd, and the publish is ONE rename of the staging dir over the live

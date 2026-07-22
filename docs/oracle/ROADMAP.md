@@ -1882,14 +1882,44 @@ source identity (`source_id()` + chunk index, not the bare section), and CLI
 *dedup* key, not the external id. Beside it: the dedup threshold is global, not
 per-kind (`FEATURES.md:413`).
 
-### 49. The distill prompt is one-shot and global `[ingest]`
+### 49. The distill prompt is one-shot and global — chunking half-closed 2026-07-22 `[ingest]`
 
-One `format!` over the whole conversation, no per-kind branch, no chunking
+**Chunking half-closed 2026-07-22; per-kind branch / label-accuracy half still
+open.** `distill` (`src/ingest/distill.rs`) now batches a long conversation into
+turn-groups of `DISTILL_CHUNK_TURNS` (new, `src/base/constants.rs`, default
+`48`), builds the marked prompt per batch, calls `llm` per batch, `parse_claims`
+per batch, and concats the `Claim` vecs — so a long delta stops truncating past
+the model's context window with no signal. The common case (`turns.len() <=
+DISTILL_CHUNK_TURNS`) stays one call, bit-identical to today. Turn-batched (not
+char-batched) preserves the 1-based turn markers `split_turns` produces, so
+`Source::Session.section` turn-citations stay well-formed per chunk. The `now`
+date injection and `kind_list` are per-batch (each prompt self-contained). A
+batch that returns no parseable array (prose / empty) is a format failure for
+the **whole delta** → `None` (retry), so a partially-distilled conversation
+never archives having silently dropped every later batch. Proved by
+`distill_short_conversation_is_one_call`, `distill_chunks_long_conversation_
+turn_batched` (N=batch+5 → ceil calls, one claim per batch, none dropped),
+`distill_chunk_markers_carry_global_turn_index` (batch 2's first marker is
+`[DISTILL_CHUNK_TURNS]` not `[0]`), `distill_batch_format_failure_retries_
+whole_delta` (one prose batch → `None` even if an earlier batch parsed).
+Existing distill tests green unedited. `cargo test -p kern --lib` 932 passed, 0
+failed, 4 ignored. Negative control: `DISTILL_CHUNK_TURNS=usize::MAX` reds the
+chunk test (the batch loop collapses to one call), green on revert. Decided by
+fix-the-root (chunk the one-shot prompt, do not add a per-kind branch yet),
+name-the-tradeoff (turn-batched to preserve citations; cross-chunk context
+loses a batch-2 claim referencing a batch-1 turn — chunking > truncating, which
+loses everything past the cut; a running summary is YAGNI now), verify-before-
+claiming (negative control). See the 2026-07-22 CHANGELOG entry.
+
+**Still open:** per-kind prompt branch / label accuracy — the other half; the
+~33% figure is unreproducible (deleted harness), a lead not a number.
+
+~~One `format!` over the whole conversation, no per-kind branch, no chunking
 (`src/ingest/distill.rs:34-53`). The `kind` taxonomy has overlapping categories
 (decision/project, fact/code-fact) and label accuracy was measured at ~33% even
 at 7B — **that figure came from the deleted harness and is unreproducible; treat
 it as a lead, not a number** (item 1's claim standard). Long deltas are not
-chunked at all.
+chunked at all.~~
 
 ### 50. Intake distillation lacks relative-date resolution — closed 2026-07-22 `[ingest]`
 
