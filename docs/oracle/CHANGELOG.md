@@ -2,6 +2,20 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 84 sub-fix closed: a renamed-and-edited file now supersedes
+  the old-path `Document` instead of leaving it dangling. `build_record`
+  carries the old file URI on a `Renamed` event; the sink resolves it to the
+  old `source_id()` and threads it through `Worker::submit` -> `Job.replaces`
+  -> `place_document`, which calls a new `accept::supersede_renamed` after
+  placing the new entity. `supersede_renamed` scans for the old external-id
+  owner (`source_index` is not populated at plain ingest), stamps it
+  `Superseded`, evicts it from the ANN indices, drops the old source-keyed
+  entry, and adds a `Supersedes` reason edge — reusing `stamp_superseded`
+  extracted from the same-external-id `supersede`. Pure rename (same content)
+  and rename-with-no-old-entity are noops. Watcher is off by default; the rare
+  dedup-survivor edge is noted in `place_document`. 1015 pass, 2 new tests pin
+  both directions. Decided by: fix-the-root, the-oracle. Supersedes: nothing.
+
 - 2026-07-22 — item 62 half-closed (Gini-over-access): the convergence metric
   now exists and is surfaced in health, so "the corpus converges on efficient
   paths" is measurable. `gini_over_access(counts: &[u64]) -> f64` (new pure fn,
