@@ -2,6 +2,9 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 51 closed: Supersedes reason text stored on Reason.text. supersede() pulls new entity statement text; supersede_by_contradiction() takes caller-supplied rationale. `fallback_label()` no longer sole owner of the text field.
+  Decided by: fix-the-root.
+
 - 2026-07-22 — item 84 sub-fix: `kern merge` refuses broken config instead of silently defaulting. Both src and dst configs fail loud on load error.
   Decided by: fix-the-root.
 

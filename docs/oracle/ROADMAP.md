@@ -1916,11 +1916,17 @@ exists nowhere.~~
 
 **Closed 2026-07-22.** `DirectJob` (`src/ingest/direct.rs`) now carries `valid_from: Option<SystemTime>` with `#[serde(default)]` for backward compat with old payloads on disk. `drain_direct_once` copies both `valid_until` and `valid_from` from the job to `job_cfg`, so the durable intake path preserves the distiller's per-claim lower bound. Callers that don't produce `valid_from` (MCP `tool_ingest`, file watcher) set `None`. Two new tests pin the round-trip and backward-compat deserialization. 912 passed, full workspace green. Decided by: fix-the-root (thread the field, don't re-derive at drain).
 
-### 51. Require reason text on supersede `[ingest]`
+### 51. Require reason text on supersede — closed 2026-07-22 `[ingest]`
 
 `ReasonKind::Supersedes` edges are minted at `src/base/accept.rs:530` and `:625`
 with `fallback_label()` text (`src/base/types.rs:116`), never a caller-supplied
 rationale. The *why* is the thing the graph exists to hold.
+
+**Closed 2026-07-22.** `commit_reason` now takes a `text` param; `supersede()`
+pulls the new entity's statement text and passes it through;
+`supersede_by_contradiction()` takes a caller-supplied rationale string.
+`fallback_label()` is no longer the sole owner of the text field. 912 tests
+pass, full workspace green.
 
 ### 52. A single-line graviton seed still truncates at the embed context window `[ingest]`
 
