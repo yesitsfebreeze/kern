@@ -827,12 +827,12 @@ freshness signal is lost. An index that slows ingest to speed up query is the
 trade, and it only pays where eligibility is low — a corpus where everything is
 eligible cannot be helped by an index at all.
 
-### 26. PageRank allocates four N-sized buffers on every query `[retrieval]`
+### 26. PageRank allocates four N-sized buffers on every query — closed 2026-07-22 `[retrieval]`
 
-**Narrowed 2026-07-21, narrowed again 2026-07-22.** The flat per-query cost is
-gone and so is the full-reach regression that replaced it; what is left is the
-per-call allocation, stated below so the closed parts are not re-opened and the
-open one is not mistaken for either of them.
+**Narrowed 2026-07-21, narrowed again 2026-07-22, closed 2026-07-22.** The flat
+per-query cost went first, then the full-reach regression that replaced it, and
+last the allocation the title names. Each stage is kept below so the closed parts
+are not re-opened and the numbers that are now stale are marked as such.
 
 **Measured before, `tests/seed_scale.rs` in release, default minus
 `pagerank_enabled: false`.** At N=100k it cost a flat **~18 ms per query** —
@@ -915,14 +915,62 @@ matrix three times — never switch, switch at 90, switch the moment the set clo
 reach so the threshold is crossed inside the comparison, and it fails if the
 matrix walked only one of the two bodies.
 
-**What is left is the allocation, not the walk.** Four N-sized buffers are still
-built per call — `tele`, `rank` and `next` at 8 bytes a node, `in_reached` at one
-— which is the residual ~2 ms that is flat in N and indifferent to reach. It is
-2.5 MB at N=100k and it is `calloc`, so the floor measured here is 0.18 ms at
-1.1% reach where nothing else runs. Removing it means a sparse rank
-representation, which is a different change from this one and would have to be
-re-argued against bit-identity: a hash map's iteration order is not the ascending
-index order that makes the `+0.0` argument work.
+**The allocation closed 2026-07-22, and the sparse rank vector was never needed.**
+The item said removing the buffers means a sparse representation, and that a hash
+map's iteration order would put the `+0.0` argument back in play. That reasoning
+had the wrong target. What the buffers cost is the *allocation*, not the *width* —
+so the width can stay, dense and ascending and bit-identical, and only the
+allocation goes. The four vectors are now lent by the calling thread and handed
+back zeroed over the reached set alone, which is the same set the walk already
+pays for. No arithmetic moved and no index order moved, so nothing had to be
+re-argued: `confined_iteration_equals_the_full_width_one_bit_for_bit` passes
+unchanged, and it is a *stronger* test than it was, because its 540 comparisons
+now run through one thread's reused buffers — a value left behind by any of them
+would surface as a wrong score in the next.
+
+**Measured with an allocator, not a clock** (`floor_by_graph_width_at_fixed_reach`
+and `allocation_and_floor_by_reach` in `src/retrieval/pagerank.rs`, both ignored
+by default; the counting allocator is `test_support::alloc_probe`). Timing cannot
+witness this — 2.5 MB of `calloc` is under the noise of a box with two sibling
+worktrees on it — so the gate is the byte count.
+
+| | per-call bytes | largest single block |
+|---|---|---|
+| before, N=100k @ 1.0% reach | 2,540,344 | 800,000 |
+| after, same | 40,344 | 16,384 |
+
+25.40 B/node before, which is exactly the four: 8 + 8 + 8 for `tele`, `rank`,
+`next` and 1 for `in_reached`. The largest block before is one N-wide `f64`
+vector; after, nothing near it exists. Holding the walk fixed at 976 reached
+nodes and moving N alone — 10k, 50k, 200k — the allocation was 300,552 /
+1,300,552 / 5,050,552 B before and **50,552 B at all three** after, with the
+largest block 80,000 / 400,000 / 1,600,000 B before and 16,384 B throughout.
+
+**What the clock says, which is less than the item claimed.** N=100k at 1.0%
+reach, min of 7, four runs a side: **0.310–0.420 ms before, 0.244–0.249 ms
+after**. So ~0.065 ms, not the 0.18 ms the item recorded — that 0.18 was the
+whole per-query cost at low reach, and the allocation was about a third of it.
+At 10% reach it is 5.04–7.66 ms against 4.49–4.64 ms. The direction is
+consistent across every paired run; the magnitude is small and should not be
+quoted as a headline. The 50 / 90 / 100% rows swing 19–186 ms on this box either
+side of the change and decide nothing at all.
+
+**Named tradeoff: the buffers are now resident per thread, not transient per
+call.** A thread that has ranked an N=100k graph keeps 2.5 MB until it dies, and
+retrievals run under a read lock so concurrent readers each hold a set. Peak RSS
+is not worse than before — the old path allocated the same 2.5 MB per concurrent
+call — but the steady state is, by thread count. The first call on each thread
+still pays the full 2.5 MB, which the bench reports as its `first=` column.
+
+**What this leaves, which is not this item.** The remaining per-call allocation
+is proportional to *reach*, not to N: `reached`, `fresh`, `merged` and `scored`
+still churn, and at 100% reach a query allocates 4,869,552 B (down from
+7,369,552). That is cost proportional to work actually done, which is a different
+claim from the one this item made, and it is recorded here rather than opened.
+Separately, time at fixed reach still rises with N — 0.19–0.28 / 0.20 / 0.29–0.35
+ms at 10k / 50k / 200k after the change, against 0.21–0.30 / 0.25–0.32 /
+0.36–0.43 before — so something in the call still tracks graph width. It is not
+these buffers; the byte counts above are flat across all three. Not chased.
 
 Item 25's "PageRank ÷ scan" table above is now stale in one direction only: it
 is a correct record of what was measured before this change, and the ratios in

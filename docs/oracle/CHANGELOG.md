@@ -2,6 +2,45 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 26 closed: PageRank's four N-wide buffers are lent by the
+  thread instead of built per query. **2,540,344 B → 40,344 B per call** at
+  N=100k and 1.0% reach; largest single block 800,000 B → 16,384 B; flat in N at
+  fixed reach where it used to be 25.40 B/node. Ranking is bit-identical and the
+  existing gate proves it unchanged.
+
+  **The item's own stated blocker was aimed at the wrong thing, and that is the
+  finding.** It recorded that closing this needed a sparse rank vector, and that
+  a `HashMap`'s iteration order would put the `+0.0` bit-identity argument back
+  in play — a real cost, correctly feared, which is why the work sat. But the
+  buffers do not cost anything for being *wide*; they cost for being *allocated*.
+  Separate the two and the dense ascending vector — the thing the whole exactness
+  argument rests on — survives untouched, and only the `calloc` goes. Nothing had
+  to be re-argued because nothing arithmetic moved.
+
+  Two things this cost, both said plainly rather than buried:
+
+  - **The clock is smaller than the item promised.** 0.310–0.420 ms → 0.244–0.249
+    ms at N=100k and 1.0% reach, four paired runs a side. The item's 0.18 ms
+    "floor" was the whole per-query cost at that reach, not the allocation's
+    share of it, and the share is ~0.065 ms. Direction consistent everywhere,
+    magnitude small.
+  - **The memory is resident now, not transient.** Each thread keeps 2.5 MB at
+    N=100k for its lifetime, and readers run concurrently under the graph lock.
+    Peak RSS is unchanged — the old path allocated the same per concurrent call —
+    but the steady state grows with thread count.
+
+  The gate is an allocator, not a stopwatch: `test_support::alloc_probe` counts
+  bytes on the calling thread, and `a_narrow_query_allocates_nothing_sized_by_the_graph`
+  runs one identical narrow walk against two graphs 4x apart in N and asserts the
+  byte counts are *equal*, with no tolerance and no constant to tune. Reverted to
+  per-call allocation it reports `413596 B against 113596 B for the same 244-node
+  walk` — the 300,000 B being exactly 25 B × the 12,000 nodes of difference.
+  Timing could not have carried this assertion: 2.5 MB of `calloc` is under the
+  noise of this box.
+
+  Decided by: fix-the-root — the root was the allocation, not the representation,
+  and the representation was what the item had queued up to change.
+
 - 2026-07-22 — merged item 97, and with it the last of the four verification
   gaps this run found in its own instruments. 218 + 1 + this one = 220.
 
