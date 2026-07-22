@@ -148,6 +148,9 @@ impl Server {
 			"gini_access": h.gini_access,
 			// The resident-kern cap: u64::MAX = uncapped (KERN_CAP_DISABLED).
 			"max_kerns": h.max_kerns as u64,
+			// Supersede chains past `SUPERSEDE_CHAIN_HOP_THRESHOLD` on one
+			// `external_id` (ROADMAP item 58 trigger #1).
+			"supersede_chain_depth_exceeded": h.supersede_chain_depth_exceeded,
 			// This server's own worker, read directly: a gauge on the live channel,
 			// not a process static like the counters `h` carries.
 			"ingest_queue_depth": self.worker.queue_depth(),

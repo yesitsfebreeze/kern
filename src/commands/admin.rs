@@ -193,8 +193,8 @@ fn tick_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> {
 			h.queue_depth, h.tasks_done, h.task_avg_ms
 		),
 		format!(
-			"degraded:    {} panics | {} failures | {} refused GNN trainings",
-			h.task_panics, h.task_failures, h.gnn_train_refused
+			"degraded:    {} panics | {} failures | {} refused GNN trainings | {} supersede chains past hop budget",
+			h.task_panics, h.task_failures, h.gnn_train_refused, h.supersede_chain_depth_exceeded
 		),
 	];
 	if !h.last_task_panic.is_empty() {
