@@ -648,15 +648,15 @@ re-run 2026-07-22). What is left is everything the gate does not cover.
    **Why two checks and not one.** The stat is the cheap one and it is not
    sufficient on its own: it describes a *name* at one instant, and the window
    between it and the `connect` is opened by our own daemon rather than by an
-   attacker — `Drop for LocalListener` (`:654`) unlinks the socket on every
-   shutdown and the stale-rebind path unlinks it too, so a name that stats as
-   ours can be free a microsecond later and rebound by somebody else before the
-   `connect` lands. Waiting for a daemon restart is not a privilege an attacker
-   has to earn. `SO_PEERCRED` is the fact the kernel recorded when the peer
-   called `listen`, so no rename can move it; the stat is kept in front of it
-   only because refusing before opening a connection gives a message that names
-   the squatter's uid. **Do not describe the stat alone as sufficient** — an
-   earlier draft of this entry did, and it was wrong.
+   attacker — `Drop for LocalListener` (`src/trnsprt/src/typed/local.rs:654`)
+   unlinks the socket on every shutdown and the stale-rebind path unlinks it
+   too, so a name that stats as ours can be free a microsecond later and rebound
+   by somebody else before the `connect` lands. Waiting for a daemon restart is
+   not a privilege an attacker has to earn. `SO_PEERCRED` is the fact the kernel
+   recorded when the peer called `listen`, so no rename can move it; the stat is
+   kept in front of it only because refusing before opening a connection gives a
+   message that names the squatter's uid. **Do not describe the stat alone as
+   sufficient** — an earlier draft of this entry did, and it was wrong.
 
    **Both checks are mutation-tested (re-run 2026-07-22).** Neutering
    `require_owned_by_caller` to `Ok(())` fails 6 of 6 targeted tests, including
@@ -2195,6 +2195,108 @@ zero**: adopting it in CI buys a gate that will demand a human acquittal on abou
 one nomination in ten and will still go quiet on an off-by-a-range anchor.
 Symbolic anchors remain the better and larger answer, and nothing here replaces
 them.
+
+**Third pass, 2026-07-22 — the checker was measuring 63% of the anchors and
+reporting on all of them.** Both earlier passes tuned the *content* rule and
+neither asked what the scanner could see. `REF` demands a literal `src/` prefix,
+so two forms were invisible to it: a bare `` `:NNN` `` continuation, and a bare
+`` `place.rs:112` ``. The docs use both constantly — a bullet names
+`` `src/base/store.rs:624` `` once and then cites `` `:636` ``, `` `:649` `` and
+`` `:684` `` rather than repeating the path — and across the scanned pages they
+were **245 of 664 line anchors, 37%**, carrying no existence check and no
+content check at all. The `store.rs` anchor there is an illustration of the
+form, not a citation of the function, so it is acquitted in place rather than
+re-pointed — the same verdict the `FEATURES.md` example above carries, and the
+reason the doubly-backticked escape covers only the two forms added here.
+<!-- docs-check: anchor-ok -->
+The second pass felt this without naming it: it re-pointed "29 anchors in
+all, counting the two bare `` `:533` ``/`` `:398` `` continuations the regex never
+sees", by hand, because the tool could not.
+
+Both now resolve against the last file cited before them, which is how a reader
+resolves them, and the scope resets at every heading — a section is where a
+reader stops carrying context forward. A bare name with no antecedent falls back
+to a unique match under `src/`; `types.rs` is four files and `graph.rs` is three,
+so an ambiguous one resolves to nothing and is reported rather than guessed. A
+doubly-backticked span is a quotation of the form, not a use of it, so the
+paragraph above displays `` `:533` `` without citing it. References checked, on
+the tree as this pass found it: **834 -> 1008**; it reads higher now only
+because this entry cites five things of its own. The remainder of the 245 live
+in `CHANGELOG.md`, which carries the historical marker and is skipped whole.
+
+**It found a dead reference on its first run, and the shape of it is the
+argument.** This file cited `Drop for LocalListener` at `` `:654` `` under a
+paragraph whose last named file was `client_local.rs` — 146 lines long. The
+line number was right and the *file* was wrong: `Drop for LocalListener` is
+`src/trnsprt/src/typed/local.rs:654`. That is a failure mode a spelled-out path
+does not have, and it is the one a continuation adds: existence stops being a
+property of the anchor and becomes a property of the anchor plus everything
+above it, so an edit that inserts an unrelated citation silently re-points every
+continuation under it. Fixed here by spelling the path out, which is the only
+fix that survives the next insertion.
+
+**18 nominations, adjudicated one at a time against the real tree: 15 true, 3
+false — 83.3% precision on a population that had never been checked.** Five of
+the 15 are the wrong-file class the dead reference belongs to
+(`` `:507` `` reaching `src/commands.rs` for a `bind_unix` that lives in
+`src/trnsprt/`, `` `:129` `` reaching `direct.rs` for a `Worker::submit` in
+`file_watcher.rs`, and the two Windows/PQ notes at `` `:136-137` `` and
+`` `:132-134` `` that say "doc-only" while landing in `src/base/graph.rs`);
+the other ten are ordinary rot, including
+`FEATURES.md:55` citing `Acl { scope, users, groups }` at a `_ => None,` thirteen
+lines above the struct. The three false ones are the known weaknesses, not new
+ones: `gc` is two characters and falls under the token floor, so the `gc` row
+citing `fn tool_gc` shares nothing; and two are historical quotations of an
+anchor being *discussed*. **They are reported, not fixed** — every one is a
+`[surface]`, `[retrieval]`, `[lifecycle]` or `[federation]` claim, and this pass
+owns `[process]`.
+
+The remaining blind spot is unchanged in kind and now smaller in reach: symbolic
+anchors are still the answer, and a continuation is the strongest argument yet
+for them, because it is a line number that does not even name its own file.
+
+**Verified independently 2026-07-22, against the commit rather than a working
+tree.** The third pass reconciled, implemented and recorded in one go, so no
+adversary had read it. Re-run: `just docs-check` green with its selftest,
+`just check` green, `just test` 39 passed and 4 skipped with both recall floors
+printed and unmoved. The 834 -> 1008 comparison reproduces — the prior script
+over the prior tree reports 834 and nominates nothing, this one reports 1008 and
+the single dead reference. The four-loops-into-one-sweep refactor is
+verdict-identical: with the two new patterns neutered, the sweep prints
+byte-for-byte what the prior build printed, so it moved no failure and no
+nomination.
+
+Two corrections to the paragraphs above. **The wrong-file class is four, not
+five** — the two anchors reaching the wrong `src/` file and the two doc-only
+notes; the fifth candidate is the retired `` `:189-192` `` note, counted among
+the false ones above, which is the same class seen from the other side. And
+**`--strict-anchors` no longer exits 0 on this tree**: 18 nominations stand, so
+it exits 1. The second-pass sentence saying otherwise was true when written and
+is superseded now.
+
+**Re-adjudication does not reproduce 83.3%, and the gap is a definition rather
+than a mistake.** Twelve of the 18 are rot by any reading. The three in dispute
+are the wrong-file class, and for those the anchor a human resolves is
+*correct*: `` `:507` ``, under a paragraph about `bind_unix`, means
+`src/trnsprt/src/typed/local.rs`, which is where `bind_unix` is, and `` `:129` ``,
+under one about `Worker::submit`, means `src/ingest/file_watcher.rs`, which is
+where the `submit` call is. Both hit the named symbol exactly. So the count is
+15 if the question is "is this anchor under-specified" and 12 — 66.7% — if it is
+"is the docs' information wrong". Either is defensible; the record should not
+read as though only one measurement exists.
+
+The distinction is load-bearing because the wrong-file class is the only one
+that can turn the run *red*. It did exactly that once already, on this file's
+own `Drop for LocalListener` note, and the fix was to edit the doc. Whenever an
+inherited file is shorter than its inherited line, a page no human considers
+wrong fails the check.
+
+**One residual this pass opens and does not close.** Both new forms are matched
+inside fenced code blocks, and inside any backticked span that merely looks like
+a line number — a port, a ratio, a `sed` address. Either is a failure and not a
+nomination once the number runs past the inherited file. There are none in the
+tree today. The doubly-backticked escape covers prose and not fences; skipping
+fenced blocks is the fix when one appears.
 
 Neither is a defect in a running kern, which is why this sits in tier 9 — but it
 is the reason every reconcile pass so far has spent most of its effort
