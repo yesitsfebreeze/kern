@@ -794,7 +794,12 @@ Notable:
   `degraded: N panics | M failures | K refused GNN trainings`, faults named
   below, plus `ingest: queue N` — the RAM queue's live depth
   (`ingest_health_lines`, `src/commands/admin.rs:201`), daemon-sourced only
-  because the CLI's own worker is idle by construction (item 30).
+  because the CLI's own worker is idle by construction (item 30). From a daemon
+  it also prints `convergence: gini 0.NN` — the Gini coefficient over entity
+  access counts (`gini_over_access`, `src/base/health.rs`, item 62 half),
+  `0.0` = uniform access (converged), → `1.0` asymptotically (finite-n max
+  `(n−1)/n`); daemon-sourced only because a CLI's fresh-open graph has no
+  query history.
 - `profile` (`profile_cmd.rs`) — runs a query with a `Profiler` timeline.
 - `compress` (`admin.rs`) — compresses vectors with a chosen `QuantizationMode`.
 - `daemon` / `run_server` (`src/commands.rs`) — boots the full runtime: loads

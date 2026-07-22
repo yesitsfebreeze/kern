@@ -2162,15 +2162,47 @@ the seed layer (`src/retrieval/query.rs`, `fuse_hybrid_seeds`) and never reaches
 overwhelmingly better than rank 2 gets no credit for the margin
 (`concepts/retrieval.mdx:88`). This is a trade, not a strict win.
 
-### 62. The self-organisation claim is unmeasured `[retrieval]`
+### 62. The self-organisation claim is unmeasured — half-closed 2026-07-22 `[retrieval]`
 
-The convergence metrics — Gini over access, top-10 stability — were never built
+**Half-closed 2026-07-22 (Gini-over-access half; top-10 stability still open).**
+The Gini-over-access convergence metric now exists and is surfaced in health,
+so the central claim "the corpus converges on efficient paths" is measurable.
+`gini_over_access(counts: &[u64]) -> f64` (new pure fn, `src/base/health.rs`)
+is the standard Gini coefficient over entity `access_count.value()`: `0.0` =
+uniform access (converged), → `1.0` asymptotically as one entity holds all
+access (**for finite n the max is (n−1)/n**, so `[10,0,0]` → `2/3`, `[100,0]`
+→ `1/2` — the asymptote is the direction, not a value any real corpus hits).
+`HealthStats.gini_access: f64` (new, computed in `graph_health_stats` over
+resident entities; empty graph → `0.0`; `HealthStats` dropped `Eq` since `f64`
+is not `Eq`, no caller used it). MCP `health` JSON carries `gini_access`;
+`trnsprt::HealthRes` gains `#[serde(default)] gini_access` so an old daemon's
+payload reads `0.0` (same shape as `ingest_queue_depth`, item 30). `kern health`
+prints `convergence: gini 0.NN` **daemon-sourced only** — the CLI's own graph is
+a fresh open with no query history, so its access distribution is structurally
+uniform and a local read carries no signal (item 30/100 precedent). Proved by
+`gini_over_access_pins_known_distributions` (`[]`/`[5,5,5]`/`[1,1,1,1]`/`[0,0,0]`
+→ `0.0`, `[10,0,0]` → `2/3`, `[100,0]` → `1/2`),
+`graph_health_stats_empty_graph_gini_is_zero`,
+`graph_health_stats_skewed_access_gini_above_half` (one hot + five cold → `5/6`
+> `0.5`), and the trnsprt round-trip with `gini_access: 0.42`. `cargo test -p
+kern --lib` 920 passed, 0 failed, 4 ignored; `cargo test -p trnsprt` 60 passed.
+Negative control: `gini_over_access → 0.0` always reds the skewed test, green on
+revert. Decided by fix-the-root (compute, do not act — item 54's gate is a
+separate decision), name-the-tradeoff (finite-n Gini maxes at (n−1)/n, stated
+not hidden), verify-before-claiming (negative control). See the 2026-07-22
+CHANGELOG entry.
+
+**Still open:** top-10 stability (needs two temporal query-ranking snapshots —
+stateful, separate slice); `kern://health` resource surfacing; item 54 GC
+convergence gate (depends on this + stability).
+
+~~The convergence metrics — Gini over access, top-10 stability — were never built
 (no `gini` anywhere in `src/`), so "the corpus converges on efficient paths", a
 central product claim, is a design intention
 (`decisions/stigmergy-over-gardening.mdx:128`). Belongs with item 1's
 replacement. Its surfacing half is separate and also unbuilt: export `HeatStats`
 via health and `kern://health`
-(`docs/kern/stigmergy-self-improving.md:271`). Item 54 depends on this.
+(`docs/kern/stigmergy-self-improving.md:271`). Item 54 depends on this.~~
 
 ### 64. Normalize and re-found the scoring stack `[retrieval]`
 

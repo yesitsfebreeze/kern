@@ -2,6 +2,27 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 62 half-closed (Gini-over-access): the convergence metric
+  now exists and is surfaced in health, so "the corpus converges on efficient
+  paths" is measurable. `gini_over_access(counts: &[u64]) -> f64` (new pure fn,
+  `src/base/health.rs`) is the standard Gini over entity `access_count.value()`:
+  `0.0` = uniform (converged), → `1.0` asymptotically — **for finite n the max
+  is (n−1)/n**, so `[10,0,0]` → `2/3`, `[100,0]` → `1/2`. `HealthStats.gini_access`
+  (new field, computed in `graph_health_stats`; `HealthStats` dropped `Eq`, no
+  caller used it). MCP `health` JSON carries `gini_access`; `trnsprt::HealthRes`
+  gains `#[serde(default)]` so an old daemon reads `0.0`. `kern health` prints
+  `convergence: gini 0.NN` **daemon-sourced only** — a CLI's fresh-open graph
+  has no query history, so its access distribution is structurally uniform
+  (item 30/100 precedent). Proved by `gini_over_access_pins_known_distributions`,
+  `graph_health_stats_empty_graph_gini_is_zero`,
+  `graph_health_stats_skewed_access_gini_above_half` (one hot + five cold →
+  `5/6` > `0.5`), trnsprt round-trip `gini_access: 0.42`. `cargo test -p kern
+  --lib` 920 passed, 0 failed, 4 ignored; `cargo test -p trnsprt` 60 passed.
+  Negative control: `gini_over_access → 0.0` reds the skewed test, green on
+  revert. Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming.
+  Still open: top-10 stability (temporal snapshots), `kern://health` resource,
+  item 54 GC gate.
+
 - 2026-07-22 — item 84 sub-fix closed: `num_ctx` and `keep_alive` promoted from
   constants in `src/llm.rs` to real per-endpoint config keys on `[embed]` and
   `[reason]` (defaults = the former constants, now `pub`), so a model with a
