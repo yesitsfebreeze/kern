@@ -31,6 +31,7 @@ impl Server {
 			&extra_kinds,
 			self.cfg.ingest.dedup_threshold,
 			self.cfg.intake.retention_secs,
+			self.cfg.ingest.review_policy.clone(),
 			Duration::from_secs(self.cfg.intake.done_retention_secs),
 			SystemTime::now(),
 		));

@@ -195,6 +195,8 @@ pub fn merge_duplicate(
 		producer_id: String::new(),
 	};
 	add_reason(kern, reason);
+	// The wording is stored now; without this it is stored and searchable nowhere.
+	crate::base::lexical::reindex_entity(g, &kern_id, entity_id);
 
 	Some(MergeOutcome {
 		kern_id,

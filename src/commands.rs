@@ -971,6 +971,7 @@ fn spawn_file_watcher(cfg: &crate::config::Config, worker: &Arc<crate::ingest::W
 	let sink = Arc::new(KernFileWatcherSink::new(
 		worker.clone(),
 		cfg.watcher.retention_secs,
+		cfg.ingest.review_policy.clone(),
 	));
 	tokio::spawn(async move {
 		if let Err(e) = run_file_watcher(roots, ignore, sink).await {
@@ -1011,6 +1012,7 @@ fn spawn_intake(
 		Some(claim_kinds),
 		dedup,
 		cfg.intake.retention_secs,
+		cfg.ingest.review_policy.clone(),
 		poll,
 		done_retention,
 	));

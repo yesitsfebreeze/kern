@@ -1,6 +1,44 @@
 use super::graph::GraphGnn;
+use super::types::{Entity, Kern, ReasonKind};
 use std::collections::HashMap;
 use std::sync::RwLock;
+
+// An entity's lexical document: its own statements, then every alternate wording
+// a dedup merged onto it and parked on a `Rephrase` reason.
+//
+// ONE document per entity id, not one per wording. The index is keyed by entity
+// id and `inner_insert` replaces, so a second `insert` under the same id would
+// drop the primary wording; a second insert under the REASON's id would put the
+// same entity in the BM25 result twice. Appending keeps the entity single, at
+// the cost of a longer `doc_len` — BM25 length normalization dilutes the primary
+// wording's own terms a little in exchange for the alternate being reachable.
+pub fn entity_document(kern: &Kern, entity: &Entity) -> String {
+	let mut doc = entity.statements.join(" ");
+	for rid in kern.by_from.get(&entity.id).into_iter().flatten() {
+		match kern.reasons.get(rid) {
+			Some(r) if r.kind == ReasonKind::Rephrase && !r.text.is_empty() => {
+				if !doc.is_empty() {
+					doc.push(' ');
+				}
+				doc.push_str(&r.text);
+			}
+			_ => {}
+		}
+	}
+	doc
+}
+
+// Re-derives one entity's lexical document from the graph. Every site that mints
+// or drops a `Rephrase` calls this, so an alternate wording never outlives the
+// reason that carries it.
+pub fn reindex_entity(g: &GraphGnn, kern_id: &str, entity_id: &str) {
+	let (Some(lex), Some(kern)) = (g.lexical(), g.loaded(kern_id)) else {
+		return;
+	};
+	if let Some(e) = kern.entities.get(entity_id) {
+		lex.insert(entity_id, &entity_document(kern, e));
+	}
+}
 
 #[derive(Debug, Clone)]
 pub struct LexicalHit {
@@ -123,7 +161,7 @@ impl LexicalIndex {
 		inner.total_len = 0;
 		for kern in g.all() {
 			for t in kern.entities.values() {
-				let joined = t.statements.join(" ");
+				let joined = entity_document(kern, t);
 				if !joined.is_empty() {
 					inner_insert(&mut inner, &t.id, &joined);
 				}
@@ -407,5 +445,53 @@ mod tests {
 		let hits = idx.search("fox", 10);
 		assert_eq!(hits.len(), 1);
 		assert_eq!(hits[0].entity_id, "e1");
+	}
+
+	// A rebuild is what every restart and every `kern compact` runs. If it dropped
+	// back to `statements` alone, the alternate wording indexed at dedup time would
+	// survive exactly until the next reload and nothing would say so.
+	#[test]
+	fn a_rebuild_keeps_the_alternate_wording_a_dedup_merged_on() {
+		use crate::base::reason::add_reason;
+		use crate::base::types::Reason;
+
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("k", "");
+		k.entities.insert(
+			"e1".into(),
+			Entity {
+				id: "e1".into(),
+				statements: vec!["quick brown fox".into()],
+				..Default::default()
+			},
+		);
+		add_reason(
+			&mut k,
+			Reason {
+				id: "r1".into(),
+				from: "e1".into(),
+				kind: ReasonKind::Rephrase,
+				text: "a swift auburn vulpine".into(),
+				..Default::default()
+			},
+		);
+		g.kerns.insert("k".into(), k);
+
+		let idx = LexicalIndex::new_in_ram(1.2, 0.75);
+		idx.rebuild_from_graph(&g);
+
+		assert_eq!(idx.doc_count(), 1, "still one document for one entity");
+		let hits = idx.search("vulpine", 10);
+		assert_eq!(
+			hits.len(),
+			1,
+			"the merged-away wording survives the rebuild: {hits:?}"
+		);
+		assert_eq!(hits[0].entity_id, "e1");
+		assert_eq!(
+			idx.search("fox", 10).len(),
+			1,
+			"and the primary wording is not displaced by it"
+		);
 	}
 }

@@ -42,7 +42,7 @@ everywhere, which is what makes conflict-free cross-node merge work.
 
 **How.**
 
-- `Entity` (`src/base/types.rs:280`) — typed (`Fact`/`Claim`/`Document`/
+- `Entity` (`src/base/types.rs:293`) — typed (`Fact`/`Claim`/`Document`/
   `Question`/`Conclusion`, `src/base/types.rs:19`), weighted by
   confidence (a beta distribution stored as `conf_alpha`/`conf_beta`, read via
   the `conf_mean`/`conf_variance` methods, updated via
@@ -57,19 +57,19 @@ everywhere, which is what makes conflict-free cross-node merge work.
   `principals` build it (`acl_from_args`, `src/mcp/tools_mutate.rs`) and it rides
   `ingest::Job::acl` into `new_statement_entity` (`src/ingest/place.rs:57`);
   `query`'s `principals` enforce it in `matches_filter` via `acl_admits`
-  (`src/retrieval/score.rs:216`). Two rules: a scoped `Fact` is withheld from a
+  (`src/retrieval/score.rs:235`). Two rules: a scoped `Fact` is withheld from a
   non-member (GC-immunity is not ACL-immunity), and an empty `principals` is *no
   filter*, not public-only. A dedup keeps the survivor's ACL and drops the
   `Rephrase` edge across a boundary — a `Reason` has no ACL. The file watcher
   still writes `Acl::default()`; `ROADMAP.md` item 18 lists what is still ungated.
-- `Reason` (`src/base/types.rs:428`) — an edge `from`→`to` with a `kind`
+- `Reason` (`src/base/types.rs:442`) — an edge `from`→`to` with a `kind`
   (`Similarity`/`Provenance`/`Question`/`Spawn`/`Supersedes`/`Ratification`/
-  `Rephrase`, `src/base/types.rs:77-86`), its own vector (mean of endpoints), a
-  `traversal_count` GCounter (`src/base/types.rs:440`), and a CRDT `score`.
+  `Rephrase`, `src/base/types.rs:90-99`), its own vector (mean of endpoints), a
+  `traversal_count` GCounter (`src/base/types.rs:454`), and a CRDT `score`.
   `is_enriched`/`is_remote` flags. There is no `Contradiction` edge kind —
   `Related` is a `ContradictionClass` verdict, not an edge, and a deferred
   contradiction candidate is carried by a `Rephrase` edge.
-- `Kern` (`src/base/types.rs:471`) — a container node in the kern tree:
+- `Kern` (`src/base/types.rs:485`) — a container node in the kern tree:
   `entities` + `reasons` maps, `children` ids, a `graviton_vec`/`graviton_text` + `mass` (default 1.0),
   radii (`inner_radius`/`outer_radius`) for acceptance gating, and an
   `access_count`. Root, named children, and unnamed (spill) children are all
@@ -113,7 +113,7 @@ supersedes an existing one. The core write path every ingestion funnels through.
      `generic` catch-all child (empty graviton vec, never matches on similarity) —
      the root never commits entities itself.
    - At a **named** kern with a graviton: compute `acceptance_probability`
-     (`src/base/accept.rs:906`, softmax over cosine distance vs `inner`/`outer`
+     (`src/base/accept.rs:908`, softmax over cosine distance vs `inner`/`outer`
      radii); below `ACCEPT_FLOOR` (0.5) → spawn an unnamed child and descend.
    - `MAX_ACCEPT_DEPTH = 64` (`src/base/accept.rs:17`) bounds a runaway descent.
 3. **Commit** (`commit_entity`, `src/base/accept.rs:179`) — stamp `root_id`,
@@ -125,7 +125,7 @@ supersedes an existing one. The core write path every ingestion funnels through.
 
 **Gaps.** *Both halves of this block were wrong and are corrected 2026-07-21.*
 Routing does **no** index lookup per level: `route_to_child_id`
-(`src/base/accept.rs:880`) is a linear scan over the parent's loaded, named
+(`src/base/accept.rs:882`) is a linear scan over the parent's loaded, named
 children, taking `cosine_distance` against each child's stored `graviton_vec`
 directly. The cost is O(depth · children), not O(depth · log n), and the "cached
 per-kern centroid" the old wording wanted is what `graviton_vec` already is —
@@ -133,9 +133,9 @@ root fan-out is already O(gravitons). The remaining scaling question is the
 per-parent fan-out itself, not an index.
 
 Unnamed children are **not** unbounded on the routing path: `route_entity` goes
-through `get_or_spawn_unnamed_child` (`src/base/accept.rs:642`), which reuses the
+through `get_or_spawn_unnamed_child` (`src/base/accept.rs:644`), which reuses the
 single holding-pen child and auto-loads an evicted one rather than respawning it
-(three tests hold the line, `src/base/accept.rs:932`, `:907`). Growth comes only
+(three tests hold the line, `src/base/accept.rs:934`, `:909`). Growth comes only
 from tick clustering, which deliberately spawns one *distinct* child per
 spawnable cluster (`spawn_child_clusters`, `src/tick.rs:196`) — bounded per pass
 by the cluster count, not by anything per parent.
@@ -150,14 +150,14 @@ stays as history with a stamped `valid_to`; `query` can recover the past via
 
 **How.**
 
-- `supersede_by_contradiction` (`src/base/accept.rs:573`) — inserts the new
+- `supersede_by_contradiction` (`src/base/accept.rs:575`) — inserts the new
   thought, sets the old `status=Superseded`, `superseded_by=new_id`, and
   `stamp_invalidated(now, new_valid_from)` so the window closes exactly when
   the new claim became true. Removes the old id from both vector indexes (so it
   stops seeding) but keeps it in the kern for history. Adds a `Supersedes`
   reason edge with the averaged vector.
-- Classification is LLM-driven (`classify_prompt` `src/base/accept.rs:553` /
-  `parse_contradiction` `src/base/accept.rs:563`) and **fails open to `Related`**
+- Classification is LLM-driven (`classify_prompt` `src/base/accept.rs:555` /
+  `parse_contradiction` `src/base/accept.rs:565`) and **fails open to `Related`**
   (co-exist) — the conservative choice that never loses data. Driven from the
   tick's `do_classify_contradiction` task (`src/tick/tasks.rs:114`) so recall
   stays LLM-free at query time.
@@ -233,9 +233,12 @@ cold backfill.
   `build_and_save` (Params `r=32, build_l=64, alpha=1.2`) writes
   `meta.bin`/`vectors.bin`/`graph.bin`; `DiskIndex::open`/`search` (`:385`) /
   `search_hits_filtered` (`:400`). Selected when a kern exceeds `disk_threshold`.
-- **BM25 LexicalIndex** (`src/base/lexical.rs:24`) — in-RAM inverted index,
-  `k1`/`b` tunable (`set_bm25_params`), `rebuild_from_graph` (`:117`),
-  `search`/`search_filtered` (`:62`/`:67`).
+- **BM25 LexicalIndex** (`src/base/lexical.rs:62`) — in-RAM inverted index,
+  `k1`/`b` tunable (`set_bm25_params`), `rebuild_from_graph` (`:155`),
+  `search`/`search_filtered` (`:100`/`:105`). One document per entity id, built
+  by `entity_document` (`:15`) from the entity's statements plus every alternate
+  wording a dedup merged onto it, so either wording matches and the entity still
+  returns once.
 - **VectorBackend** (`src/base/vector_backend.rs`) — enum switch
   (`Resident(HnswIndex)` | `Disk(DiskIndex)`) unifying the search API so the
   retrieval layer is backend-agnostic.
@@ -466,25 +469,25 @@ maintains itself.
   and not a core cluster spawns a distinct unnamed child and migrates its
   members. Unnamed kerns never spawn (bounds descent). Empty unnamed children
   are evicted back to the parent each pass.
-- **Name** (`do_name`, `src/tick/tasks.rs:236`) — LLM names an unnamed kern from
+- **Name** (`do_name`, `src/tick/tasks.rs:239`) — LLM names an unnamed kern from
   its centroid (`cluster::graviton_prompt`) once it crosses the naming
   thresholds (`KERN_NAMING_COHESION_THRESHOLD=0.50`,
   `KERN_NAMING_MIN_CLUSTER_SIZE=5`).
-- **Enrich** (`do_enrich`, `src/tick/tasks.rs:315`) — LLM writes the explanatory
+- **Enrich** (`do_enrich`, `src/tick/tasks.rs:318`) — LLM writes the explanatory
   text for an un-enriched reason edge.
-- **Resolve question** (`do_resolve`, `src/tick/tasks.rs:383`) — open `Question`
+- **Resolve question** (`do_resolve`, `src/tick/tasks.rs:386`) — open `Question`
   edges (`to` empty) get answered by retrieval; if a hit scores above
   `QUESTION_RESOLVE_THRESHOLD=0.80` the edge is closed.
 - **Seed questions** (`do_seed_questions`, `src/tick/tasks.rs:42`) — broadcasts
   open questions to peers (federation).
-- **Commit access** (`do_commit_access`, `src/tick/tasks.rs:455`) — flushes
+- **Commit access** (`do_commit_access`, `src/tick/tasks.rs:458`) — flushes
   queued access-count/heat updates.
 - **Idle sweep** (`src/tick/idle.rs`) — graph-global; unloads kerns idle past
   `tick.kern_idle_timeout_secs`. Residency, not forgetting: an unloaded kern is
   persisted first and reloads on next access.
 - **Persist / reembed / disk consolidate** — `do_persist`
-  (`src/tick/tasks.rs:467`), `do_reembed` (`src/tick/tasks.rs:498`),
-  `do_disk_consolidate` (`src/tick/tasks.rs:451`).
+  (`src/tick/tasks.rs:470`), `do_reembed` (`src/tick/tasks.rs:501`),
+  `do_disk_consolidate` (`src/tick/tasks.rs:454`).
 
 **Where.** `src/tick/*` (2912 LoC, 7 files) + `src/tick.rs` (893 LoC).
 

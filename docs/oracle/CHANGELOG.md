@@ -50,6 +50,121 @@
   repointing the test would have hidden it; name-the-tradeoff — reusing the HTTP
   `mcp-token` means a socket-side disclosure is an HTTP-side compromise, which
   is why item 24 stays open.
+- 2026-07-22 — merged item 21's review lifecycle. 203 + 1 + this one = 205. The
+  merge broke **thirteen** citations, the worst single hit yet, and every one was
+  a second-order effect: adding `ReviewState` to `Entity` shifted `types.rs`,
+  which shifted every anchor below it, in four documents that never mentioned
+  review at all.
+
+  Fixed by locating each cited symbol and repointing — `Entity` 280→293, `Reason`
+  428→442, `Kern` 471→485, `ReasonKind` 77-86→90-99, `matches_filter` 216→235,
+  `job()` 38→40, and so on. Mechanical, but thirteen of them, and `docs-check`
+  cannot do it: it nominates a mismatch, it cannot find the new line.
+
+  This is the clearest argument yet for item 93's unbuilt half. The nominator
+  works — it caught all thirteen and stayed silent about the ~750 anchors that
+  were fine — but it converts a silent corruption into a manual chore that scales
+  with how much a struct moves. **A symbolic anchor
+  (`` `src/base/types.rs#struct Entity` ``) would have needed zero of these
+  edits.** The tax is now measurable: one field added to one hot struct cost
+  thirteen repoints across four files.
+
+  Worth noting what this does NOT argue for: leaving the anchors as line numbers
+  and lowering the bar. Every one of the thirteen was genuinely wrong and would
+  have sent a reader to unrelated code — `Entity` cited at `self.section()`,
+  `Reason` at `observe_support`. The chore is real because the breakage is real.
+
+  Decided by: name-the-tradeoff — the nominator buys correctness at the price of
+  manual repointing, and the price is now large enough to fund the fix.
+
+- 2026-07-22 — item 21's review lifecycle lands three parts of four, and the
+  missing fourth is the one that makes the feature safe to turn on.
+
+  Shipped: `ReviewState` on `Entity` behind a `FORMAT_V7` bump with old stores
+  rejected rather than defaulted; `exclude_pending` as a `QueryOptions`
+  predicate; and source-scheme review policy in `IngestConfig`, with unknown
+  schemes rejected at load.
+
+  **The default is `Active` and that was the whole risk.** Pending-by-default
+  would have made every existing ingest path silently non-retrievable — a
+  behaviour change wearing a schema addition's clothes, which craters recall
+  instead of failing loudly. Active-by-default means the feature is inert until a
+  host opts in. Recall is unmoved at 0.9306 / 0.9722 / 0.9471, which is the
+  evidence that inertness is real rather than intended.
+
+  **Not shipped: `promote`.** No such arm exists in the MCP dispatch. A host can
+  therefore configure a scheme to arrive held, and can filter held rows out of
+  retrieval, but has no supported way to release one. Shipping the hold without
+  the release is worse than shipping neither, so item 21 is retitled to say so
+  and carries a do-not-enable warning rather than a completion note.
+
+  The docs are written by me rather than the slice: its agent stalled twice, the
+  second time after fixing the compile error that blocked verification but before
+  touching `ROADMAP.md` or this file. Code and tests were verified green
+  independently — 927 tests, `exclude_pending` pinned in both directions, the
+  format rejection pinned by the same test that pinned `FORMAT_V6`. What was
+  missing was only the record, and a slice that stalls before recording leaves
+  work that looks finished to `git status` and unfinished to everyone else.
+
+  Decided by: name-the-tradeoff — an inert default is the safe half of a feature
+  that can hide data, and the half that can un-hide it is not there yet.
+
+- 2026-07-22 — merged item 94's lexical indexing of dedup alternate wordings.
+  201 + 1 + this one = 203.
+
+  The ROADMAP conflict is worth a sentence because it is the first one where
+  both sides were *correct when written*. `cycle/1` branched before item 28's
+  sparse adjacency landed and carried the accurate-at-the-time text "a
+  propagation still takes 79.7s at N=4096"; master carried the closure that
+  replaced it. Nothing was wrong on either side — the branch was simply older
+  than the fact. Took master's.
+
+  That is the ordinary cost of three parallel cycles against one file, and it is
+  cheap: git flagged it, both versions were legible, and picking took one read.
+  The expensive failures this run were the ones git could NOT flag — a stale
+  `index.lock` that produced an empty staged merge with a clean `git status`, and
+  a hand-spliced conflict that dropped four entries. Textual conflicts are the
+  visible tax; the invisible ones needed a counting rule to catch.
+
+  Decided by: verify-before-claiming — "both sides look right" is resolvable by
+  asking which is newer than the code.
+
+- 2026-07-22 — item 94 closed: a deduped near-duplicate's alternate wording now
+  reaches the lexical index, as part of the survivor's one document.
+
+  The item was real — the first of this run's slices where the premise survived
+  contact. Measured before touching anything: the wording sits on a `Rephrase`
+  reason with `vector.len() == 0`, `reason_idx` empty, and the lexical index
+  answering nothing for a term only the merged document used. The query that
+  proves it: over a corpus where twenty fillers sit nearer the query vector,
+  `velocipede outbuilding` returned twenty fillers and never the survivor that
+  had swallowed those exact words.
+
+  **The remedy the item named would have made it worse.** It asked for "one
+  `lex.insert` of the rephrase text against the survivor's id". The index is
+  keyed by entity id and replaces on insert, so that would have swapped the
+  survivor's own wording out for the alternate's — a lateral move, not an
+  addition. Shipped instead: one document per entity, statements plus every
+  `Rephrase` text, which also settles "does it appear twice" structurally rather
+  than by a dedup rule.
+
+  Lexical only, no vector for the alternate: both dedup gates reach
+  `merge_duplicate` without an embedder, and `Mode::Hybrid` never reads
+  `reason_idx` anyway. The dense gap was the small one — two texts merge only
+  when their vectors are already within threshold.
+
+  **What did not move, and the honest reason.** Recall is unchanged at
+  0.9306 / 0.9722 / 0.9471: the e2e corpus has no near-duplicate pair, so no
+  `Rephrase` is minted and every document is byte-identical. Two probes were
+  written and thrown away for testing nothing — `kern search` turns out to be
+  pure vector and never reads the lexical index, and an "appears once" assertion
+  passed while reverted because the shared words carried it. Both were caught by
+  the revert step, not by reading. The residual is named in the item: the fix
+  makes the wording a *candidate*, and `fuse_hybrid_seeds` then re-ranks every
+  seed by the query cosine that failed to find it, which is item 61's question.
+
+  Decided by: verify-before-claiming — the item's own proposed fix was a claim
+  about code, and reading the index it named is what showed it backwards.
 
 - 2026-07-22 — merged item 28's sparse adjacency, but only after catching a
   merge that would have thrown it away. 198 + 2 + this one = 201.

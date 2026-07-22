@@ -41,6 +41,7 @@ fn new_statement_entity(
 		superseded_by: String::new(),
 		kind,
 		status: EntityStatus::Active,
+		review: ReviewState::default(),
 		statements: vec![text.to_string()],
 		chunks: vec![ChunkPart {
 			kind: ChunkPartKind::StatementRef,
@@ -118,6 +119,7 @@ pub(crate) async fn place_document(
 		job.acl.clone(),
 	);
 	thought.valid_from = job.config.valid_from;
+	thought.review = job.review;
 
 	let root_id = graph.read().root.id.clone();
 
@@ -202,6 +204,7 @@ pub(crate) fn place_chunks(
 			job.acl.clone(),
 		);
 		thought.valid_from = job.config.valid_from;
+		thought.review = job.review;
 		let tid = thought.id.clone();
 		let joined = thought.statements.join(" ");
 
@@ -289,6 +292,7 @@ mod tests {
 			confidence,
 			config: Config::default(),
 			acl: Acl::default(),
+			review: ReviewState::default(),
 			result_tx: None,
 		}
 	}

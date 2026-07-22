@@ -306,6 +306,147 @@ mod tests {
 	use crate::base::reason::add_reason;
 	use crate::base::types::{mk_entity, EntityKind, Kern, Reason, ReasonKind};
 
+	// ROADMAP item 94. A dedup keeps the incoming wording on a `Rephrase` reason
+	// and nothing else, so the exact phrasing a user might search for sat in the
+	// store and in neither index. The corpus is sized past `seed_k * 2` on purpose:
+	// with a handful of entities the dense seed returns everything and the gap is
+	// invisible, which is why the probe has to make the survivor un-seedable by
+	// vector before it can prove anything about the lexical one.
+	fn deduped_corpus() -> GraphGnn {
+		use crate::base::types::Acl;
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		{
+			let k = g.kerns.get_mut(&root).expect("root kern");
+			let mut s = mk_entity(
+				"survivor",
+				"ada keeps her bicycle in the shed",
+				1.0,
+				EntityKind::Claim,
+			);
+			// Related to the query but not near it: 20 fillers sit closer, so the
+			// survivor is never a dense seed. This is the shape item 94 is about —
+			// the entity only an exact rare term can reach.
+			s.vector = vec![1.0, 0.45].into();
+			s.gnn_vector = vec![1.0, 0.45].into();
+			k.entities.insert("survivor".into(), s);
+			for i in 0..20 {
+				let id = format!("decoy{i}");
+				let mut d = mk_entity(
+					&id,
+					&format!("unrelated filler statement number {i}"),
+					1.0,
+					EntityKind::Claim,
+				);
+				let t = 0.001 * i as f32;
+				d.vector = vec![t, 1.0].into();
+				d.gnn_vector = vec![t, 1.0].into();
+				k.entities.insert(id, d);
+			}
+		}
+		g.index_entity("survivor", &root);
+		for i in 0..20 {
+			g.index_entity(&format!("decoy{i}"), &root);
+		}
+		g.rebuild_index();
+		g.lexical()
+			.expect("in-ram lexical index")
+			.rebuild_from_graph(&g);
+
+		crate::base::accept::merge_duplicate(
+			&mut g,
+			"survivor",
+			"ada stores her velocipede in the outbuilding",
+			1.0,
+			EntityKind::Claim,
+			None,
+			&Acl::default(),
+		)
+		.expect("the near-duplicate merges onto the survivor");
+		g
+	}
+
+	fn retrieved_ids(g: &GraphGnn, query_text: &str) -> Vec<String> {
+		let cfg = crate::config::RetrievalConfig {
+			// The fixture has no edges, so PageRank's dangling mass spreads evenly over
+			// the whole corpus and seeds the survivor for ANY query — it would hide the
+			// one seed source this test is about.
+			pagerank_enabled: false,
+			..Default::default()
+		};
+		let w = Weights {
+			content: 0.70,
+			reason: 0.15,
+			edge: 0.15,
+		};
+		// A short query does not embed onto the document it is about; the vector
+		// here points at the filler field, so the survivor can only arrive lexically.
+		retrieve(g, &cfg, &[0.0, 1.0], query_text, Mode::Hybrid, None, w)
+			.results
+			.into_iter()
+			.map(|r| r.entity.id)
+			.collect()
+	}
+
+	#[test]
+	fn a_query_in_the_merged_away_wording_finds_the_survivor() {
+		let g = deduped_corpus();
+		let kid = g.kern_of_entity("survivor").unwrap().to_string();
+		assert!(
+			g.loaded(&kid)
+				.unwrap()
+				.reasons
+				.values()
+				.any(|r| r.kind == ReasonKind::Rephrase && r.text.contains("velocipede")),
+			"precondition: the merged-away wording is stored on the survivor"
+		);
+		assert!(
+			!retrieved_ids(&g, "zzznolexicalmatch").contains(&"survivor".to_string()),
+			"precondition: 20 fillers sit nearer this query vector, so the survivor is \
+			 no dense seed — anything that finds it now arrived through the lexical index"
+		);
+
+		let ids = retrieved_ids(&g, "velocipede outbuilding");
+		assert!(
+			ids.contains(&"survivor".to_string()),
+			"a query phrased in the merged document's own words must reach the \
+			 survivor that swallowed it: {ids:?}"
+		);
+	}
+
+	#[test]
+	fn an_entity_matching_both_wordings_is_delivered_once() {
+		let g = deduped_corpus();
+		let lex = g.lexical().unwrap();
+
+		// The alternate wording is a posting on the SURVIVOR's document, not a
+		// document of its own — so it answers under the survivor's id.
+		let alt = lex.search("velocipede outbuilding", 10);
+		assert_eq!(
+			alt.iter().map(|h| h.entity_id.as_str()).collect::<Vec<_>>(),
+			vec!["survivor"],
+			"the alternate wording answers as the survivor, exactly once"
+		);
+
+		// The case a second document per wording would double.
+		let both = lex.search("bicycle shed velocipede outbuilding", 10);
+		assert_eq!(
+			both
+				.iter()
+				.map(|h| h.entity_id.as_str())
+				.collect::<Vec<_>>(),
+			vec!["survivor"],
+			"and a query hitting BOTH wordings still returns one row, not two"
+		);
+
+		let ids = retrieved_ids(&g, "bicycle shed velocipede outbuilding");
+		assert_eq!(
+			ids.iter().filter(|id| *id == "survivor").count(),
+			1,
+			"delivery carries it once, not once per matching wording: {ids:?}"
+		);
+	}
+
 	#[test]
 	fn format_chains_renders_entities_and_reason_labels() {
 		let mut g = GraphGnn::new();

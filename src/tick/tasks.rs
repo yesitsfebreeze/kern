@@ -204,6 +204,9 @@ pub fn do_classify_contradiction(
 			if let Some(k) = graph.get_mut(kern_id) {
 				remove_reason(k, rid);
 			}
+			// The wording just became the revision's own text — drop it from the
+			// superseded entity's document, which no longer carries that Rephrase.
+			crate::base::lexical::reindex_entity(&graph, kern_id, &old_id);
 			if let Some(lex) = graph.lexical() {
 				lex.insert(&new_id, &new_text);
 			}
