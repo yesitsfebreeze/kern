@@ -33,6 +33,7 @@ pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 				"valid_at":  {"type": "string", "description": "ISO8601 timestamp; only include thoughts whose valid_until (TTL) has not passed at this instant"},
 				"scheme":    {"type": "string", "enum": ["file", "ticket", "session", "agent", "inline"], "description": "filter by source scheme"},
 				"include_history": {"type": "boolean", "description": "also return superseded (invalidated) revisions reachable from the active hits, flagged history:true"},
+				"exclude_pending": {"type": "boolean", "description": "drop thoughts a review policy is still holding for curation (`review: pending`, set by `[ingest] review_policy`) — the `promote` tool releases one. Opt-in: omitting it filters nothing, so an uncurated graph reads exactly as before"},
 				"principals": {"type": "array", "items": {"type": "string"}, "description": "the caller's principal ids (users and groups). A thought carrying an ACL is returned only when one of these names its scope, one of its users or one of its groups. Omitting this filters nothing — an unscoped caller still reads everything, it does not fall back to public-only"},
 			},
 		},
@@ -62,6 +63,7 @@ fn build_query_options(p: &QueryArgs) -> Result<retrieval::score::QueryOptions, 
 		valid_at: parse_time_filter("valid_at", &p.valid_at)?,
 		as_of: parse_time_filter("as_of", &p.as_of)?,
 		include_history: p.include_history,
+		exclude_pending: p.exclude_pending,
 		principals: super::parse_principals("principals", &p.principals)?,
 		..Default::default()
 	};
@@ -106,6 +108,8 @@ struct QueryArgs {
 	as_of: String,
 	#[serde(default)]
 	include_history: bool,
+	#[serde(default)]
+	exclude_pending: bool,
 	#[serde(default)]
 	principals: Vec<String>,
 }
@@ -656,6 +660,30 @@ mod id_filter_tests {
 		assert_eq!(body(&out)["id"], serde_json::json!("f1"));
 	}
 
+	// Item 21's hold half, through the surface rather than the engine. Both
+	// directions, for the reason `exclude_pending_drops_only_the_uncurated_and_
+	// only_when_asked` gives: a held row that is never in the set proves nothing.
+	#[tokio::test]
+	async fn id_read_withholds_a_held_row_only_when_exclude_pending_is_asked() {
+		let mut e = fact("f1");
+		e.review = crate::base::types::ReviewState::Pending;
+		let srv = server_with(e);
+
+		let out = srv.tool_query(&serde_json::json!({"id": "f1"}));
+		assert!(
+			!is_error(&out),
+			"opt-in: nobody asked, so the held row still arrives: {out}"
+		);
+		assert_eq!(body(&out)["id"], serde_json::json!("f1"));
+
+		let out = srv.tool_query(&serde_json::json!({"id": "f1", "exclude_pending": true}));
+		assert!(
+			is_error(&out),
+			"a caller that asked to exclude pending must not be served one: {out}"
+		);
+		assert!(text(&out).contains("thought not found"));
+	}
+
 	#[tokio::test]
 	async fn a_blank_principal_is_a_loud_error_not_a_silent_skip() {
 		let srv = server_with(alice_scoped("f1"));
@@ -791,5 +819,53 @@ mod time_filter_tests {
 	fn nonempty_malformed_is_hard_error() {
 		let e = parse_time_filter("valid_at", "20XX-06-05T09:00:00Z").unwrap_err();
 		assert!(e.contains("valid_at"), "error names the field: {e}");
+	}
+}
+
+// The three links item 21 was missing between a caller and the engine's
+// `exclude_pending`: the schema has to advertise it, `QueryArgs` has to accept
+// it, and `build_query_options` has to carry it through. A predicate the engine
+// honours and no caller can set is the same as no predicate at all.
+#[cfg(test)]
+mod exclude_pending_surface_tests {
+	use super::{build_query_options, tool_schemas, QueryArgs};
+
+	fn args(v: serde_json::Value) -> QueryArgs {
+		serde_json::from_value(v).expect("arguments deserialize")
+	}
+
+	#[test]
+	fn the_query_schema_advertises_exclude_pending() {
+		let props = &tool_schemas()[0]["inputSchema"]["properties"];
+		assert_eq!(
+			props["exclude_pending"]["type"], "boolean",
+			"an undeclared filter is one no MCP host can discover: {props}"
+		);
+	}
+
+	#[test]
+	fn exclude_pending_reaches_query_options_only_when_asked() {
+		let opts = build_query_options(&args(serde_json::json!({"text": "x"}))).expect("options");
+		assert!(
+			!opts.exclude_pending,
+			"opt-in: absent means no filter, so an uncurated graph reads as before"
+		);
+		assert!(
+			!opts.is_active(),
+			"and nothing forces the pre-filtered path"
+		);
+
+		let opts = build_query_options(&args(
+			serde_json::json!({"text": "x", "exclude_pending": true}),
+		))
+		.expect("options");
+		assert!(
+			opts.exclude_pending,
+			"the schema field has to land on the engine flag"
+		);
+		assert!(
+			opts.is_active(),
+			"an exclude_pending-only query takes the pre-filtered ANN path"
+		);
 	}
 }

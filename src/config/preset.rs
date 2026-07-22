@@ -4,7 +4,9 @@ use super::Config;
 
 // The whole tuning surface: heat, dedup, and retrieval breadth belong to the
 // preset, not to individual keys. `Config::load` refuses the [heat]/[ingest]/
-// [retrieval] sections, so `apply` is the only writer of these knobs.
+// [retrieval] sections — `[ingest] review_policy` is the one key it lets
+// through, and it is curation, not tuning — and `apply` runs AFTER the file is
+// deserialized, so it is the only effective writer of these knobs regardless.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Preset {

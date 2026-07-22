@@ -86,7 +86,7 @@ and now that its gate is built, what remains of it is smaller than this half is.
 
 **Closed 2026-07-21: `graviton add`/`remove` and `claim-kind add`/`rm`.** These
 were the four shipped subcommands that reached `with_graph`
-(`src/commands.rs:453` — load, mutate, `save_graph_unguarded`) with no routing at
+(`src/commands.rs:462` — load, mutate, `save_graph_unguarded`) with no routing at
 all, so beside a running daemon each one wrote the WHOLE kern map back over
 everything that daemon had committed since the CLI loaded. They needed no new
 tool: the daemon already exposes `graviton` and `claim_kind`
@@ -183,15 +183,15 @@ two unlocked callers".** The unguarded entry point is named
 turns up **three** classes, not two. The two this item already named stand and
 still do not belong to it: `cmd_hub_merge` (`src/commands/admin.rs:785`) writes
 a destination graph it holds no lock on, and `maybe_self_heal_store`
-(`src/commands.rs:424`) rewrites the store during boot recovery — hub merge
+(`src/commands.rs:433`) rewrites the store during boot recovery — hub merge
 stops both daemons first, self-heal runs before the daemon serves, and neither
 has been proven safe.
 
 The third class *was* this item's unblocked half, and it is the one the closure
-above discharged. `with_graph` (`src/commands.rs:453`) loads the graph, mutates
-it and calls `save_graph_unguarded` (`:456`) holding no lock at all. `cmd_forget`
+above discharged. `with_graph` (`src/commands.rs:462`) loads the graph, mutates
+it and calls `save_graph_unguarded` (`:465`) holding no lock at all. `cmd_forget`
 and `cmd_degrade` reach it safely, because they `route` first and only fall into
-it on `NoDaemon` (`src/commands/graph_ops.rs:120`, `:389`). `kern graviton
+it on `NoDaemon` (`src/commands/graph_ops.rs:120`, `:443`). `kern graviton
 add`/`remove` and `kern claim-kind add`/`rm` did not route at all, so beside a
 running daemon they loaded a snapshot, mutated it, and wrote the *whole graph*
 back over whatever the daemon had committed since — a full-graph clobber, not a
@@ -265,7 +265,7 @@ the end, and they are what keeps this item open. What shipped:
   all**, not public-only. `principals` also makes `QueryOptions::is_active()`
   true, so an ACL-only query takes the pre-filtered ANN path rather than the
   unfiltered seed path — the same predicate either way.
-- ~~**Guard the id path.**~~ **Done 2026-07-21.** `src/mcp/tools_query.rs:133-153`
+- ~~**Guard the id path.**~~ **Done 2026-07-21.** `src/mcp/tools_query.rs:137-157`
   now builds `QueryOptions` first and runs the resolved row through
   `retrieval::score::matches_filter` (`src/retrieval/score.rs:231`) before it
   renders, so the id read honours every filter the ranked read honours —
@@ -412,7 +412,7 @@ write time is the real fix and is not this item.
 `{File, Ticket, Session, Agent, Inline}` — a URI scheme. `kern ingest`, the
 human path, writes `Source::Inline` (`src/commands/ingest_cmd.rs:62`), and the
 MCP `ingest` tool's default writes `Source::Inline` too
-(`src/mcp/tools_mutate.rs:215`). One tag, two trust principals: no weighting
+(`src/mcp/tools_mutate.rs:231`). One tag, two trust principals: no weighting
 keyed on scheme can separate a person from an agent, so `source_trust_user` and
 `source_trust_agent` were not built — they would have been labels for a
 distinction nothing records.
@@ -433,15 +433,29 @@ new field, so a store format bump, and it belongs with whoever holds
 `src/base/types.rs`. Deciding behavior: fix-the-root. Until then, do not add
 `_user` / `_agent` knobs; they would read as working and weight nothing.
 
-### 21. Review lifecycle lands except `promote` — nothing can un-hold a held claim `[surface]`
+### 21. The review lifecycle has no caller-facing surface — no `promote`, and no way to ASK for `exclude_pending` `[surface]` — CLOSED 2026-07-22
 
-**Three of four parts landed 2026-07-22; the fourth is the one that matters for
-usability.** `ReviewState` is on `Entity` (`src/base/types.rs:300`) behind a
-`FORMAT_V7` bump — old stores are rejected rather than defaulted, per the
-`FORMAT_V6` precedent, pinned by `decode_rejects_older_version_bytes`.
-`exclude_pending` is a `QueryOptions` predicate (`src/retrieval/score.rs:54`,
-applied at `:242`), and source-level policy is `IngestConfig::review_policy`
-keyed on source scheme with unknown schemes rejected at config load.
+**Corrected 2026-07-22 — "three of four parts landed" counted a part no caller
+can reach.** Two parts landed and are reachable. `ReviewState` is on `Entity`
+(`src/base/types.rs:300`) behind a `FORMAT_V7` bump — old stores are rejected
+rather than defaulted, per the `FORMAT_V6` precedent, pinned by
+`decode_rejects_older_version_bytes`. Source-level policy is
+`IngestConfig::review_policy` (`src/config/ingest.rs:17`), keyed on source scheme
+with unknown schemes rejected at config load (`:33`), resolved once at the ingest
+gate by `review_for` (`src/ingest/worker.rs:57`). Both work.
+
+**The third part was engine-only, and re-verified as such before any code was
+written.** `exclude_pending` was already a real `QueryOptions` field
+(`src/retrieval/score.rs:54`) and a real predicate (`:242`) that also makes
+`is_active()` true (`:69`) so the filter takes the pre-filtered ANN path — but
+**nothing outside `src/` could set it to `true`.** It was absent from `QueryArgs`
+and from the `query` tool's schema `properties` (both `src/mcp/tools_query.rs`),
+and there was no CLI flag; walking every `exclude_pending` in the tree found
+exactly one write, in its own unit test (`src/retrieval/score.rs:610`). So the
+hold half was as unusable as the release half, for the same reason — the state
+was decided entirely inside the process. That is why this was one slice:
+`promote` alone would not have made the feature usable, because a host that
+promoted a row could still never have filtered it.
 
 **The default is `Active`, deliberately.** Pending-by-default would have made
 every existing ingest path silently non-retrievable — a behaviour change
@@ -449,24 +463,59 @@ disguised as a schema addition, and one that craters recall rather than failing
 loudly. Active-by-default means the feature does nothing until a host opts in,
 which is the correct direction for a filter that can hide data.
 
-**What remains: the `promote` tool.** No `"promote"` arm exists in the MCP
-dispatch. So a host can configure a scheme to arrive `Pending` and can filter
-those rows out of retrieval, but has **no supported way to mark one reviewed** —
-the state is writable only by ingest. Shipping the hold without the release is
-worse than shipping neither, because a host that enables the policy today
-strands every claim it holds. Do not enable `review_policy` until this lands.
+**Both halves shipped 2026-07-22, as one slice.** The release half is a
+`promote` tool (`src/mcp/tools_mutate.rs`) with a dispatch arm in the single
+`match name` and a `kern promote <id>` subcommand routing through `route()`,
+which is generic on the tool name (`src/commands/route.rs:10`) — so this cost a
+dispatch arm and a subcommand, not a new route, exactly as predicted. Both the
+tool and the CLI's no-daemon fallback go through one `graph_ops::promote_entity`,
+so the routed and local writes cannot disagree about what "reviewed" means. It is
+idempotent (`promoted: false` on an already-active row) and loud on an id nothing
+resolves — a silent success there would tell a curator a claim was released while
+it is still held. The hold half is `exclude_pending` on the `query` schema
+(`properties`), on `QueryArgs`, carried by `build_query_options`, and behind a
+`kern query --exclude-pending` flag.
 
-When it does: item 9 established that a mutating CLI path must route through the
-daemon when one is serving, so `promote` needs the `route()` treatment rather
-than a local write.
+**A third unreachability was found while building, one layer below the two this
+item recorded.** `[ingest] review_policy` could not be set from a `kern.toml` at
+all: `Config::load_with_user` refused the whole `[heat]`/`[ingest]`/`[retrieval]`
+tables as preset-managed, so the policy that decides what is held was settable
+only from inside the process — the same defect as `exclude_pending`, one level
+down, and it made the e2e impossible. Fixed at the root rather than worked
+around: what a preset owns is TUNING, and `Preset::apply` writes exactly one key
+in that table (`ingest.dedup_threshold`). `[ingest]` now accepts `review_policy`
+and nothing else; `[heat]` and `[retrieval]` are untouched, and a tuning knob
+smuggled in beside `review_policy` is still refused. Both directions are pinned
+by `a_real_kern_toml_can_set_review_policy_and_nothing_else_in_ingest`.
 
-`ReviewState` on `Entity` (added with a store format-version bump — alpha
-rejects old stores rather than defaulting them) + source-level review policy in
-config + an
-`exclude_pending` query filter and a `promote` tool. Lets a host hold
-auto-distilled claims out of retrieval until a human curates them. No
-`ReviewState`, `exclude_pending` or `promote` exists in `src/`. Requires 18's
-`QueryOptions` work first — review filters are more `matches_filter` predicates.
+**The tradeoff, taken deliberately rather than sequenced behind 24.** `promote`
+lands on the same socket `intake drain` widened — which now authenticates the
+connection but still cannot tell one same-uid caller from another — but it is a
+wider claim than `drain`: draining asserts no authority, and releasing a held
+claim IS a curation-authority decision — anything that can open the path can
+release one. Item 24 is in flight and will gate this; **promote's authority rides
+on whatever 24 lands**, and that is said on the tool description, on
+`cmd_promote`, in `FEATURES.md`'s tool table and in the user-facing
+`configure.mdx`. Taken now because the alternative was shipping neither half, and
+a host that enabled `review_policy` today would strand every claim it held.
+
+**Coverage.** Unlike item 18's `principals`, this is e2e-measurable, and it is
+measured: `e2e/test_review_lifecycle.py` runs the whole loop — policy holds an
+`inline` ingest, `query --exclude-pending` misses it, `kern promote` releases it,
+the same query returns it — twice, once against a serving daemon blinded the way
+`test_graviton_routing` blinds it (so the release provably landed in the daemon's
+live graph and survived its persist) and once with nothing serving, for the
+`NoDaemon` fallback. `e2e/conftest.py`'s `write_config` grew one `review_policy`
+kwarg, emitted only when set so every other test's config text is byte-identical.
+
+Original text, kept for the record: `ReviewState` on `Entity` (added with a store
+format-version bump — alpha rejects old stores rather than defaulting them) +
+source-level review policy in config + an `exclude_pending` query filter and a
+`promote` tool. Lets a host hold auto-distilled claims out of retrieval until a
+human curates them. Requires 18's `QueryOptions` work first — review filters are
+more `matches_filter` predicates. *(The sentence "No `ReviewState`,
+`exclude_pending` or `promote` exists in `src/`" was true when filed and is now
+wrong about the first two.)*
 
 ### 24. RPC socket authenticates the connection but not the caller — same-uid callers are indistinguishable `[surface]`
 
@@ -860,7 +909,7 @@ nothing else:
   bincode-decoding a whole `Entity` per row to reach its vector. Vectors moved to
   their own LMDB table, so the scan scores off raw floats (`src/base/store.rs:692`)
   and decodes only the k winners (`:709-711`). At the 50k cap, 470 ms → 28 ms per
-  call. No index was added: this is on the *recall* path (`src/mcp/tools_query.rs:210`,
+  call. No index was added: this is on the *recall* path (`src/mcp/tools_query.rs:214`,
   on hot-tier underfill), and an ANN over the cold tier would put a resident index
   back on the tier that exists to not be resident.
 
@@ -955,7 +1004,7 @@ at 1024, 21.6s at 2048 and 79.7s at 4096. Every other tick task at the same
 sizes was sub-millisecond: `stigmergy_gc` 0.151ms, `commit_access` 0.002ms,
 `idle_sweep` 0.000ms at N=4096. On the real loop (`tick::start`) the recall
 path's own heat write-back — `CommitAccess`, enqueued at
-`src/mcp/tools_query.rs:196` — landed in 2.2ms with nothing ahead of it and in
+`src/mcp/tools_query.rs:200` — landed in 2.2ms with nothing ahead of it and in
 **56,787ms** with one propagation ahead of it at N=2048. The premise held.
 
 Training now runs on a dedicated thread (`src/tick/trainer.rs`), and the tick
@@ -1172,7 +1221,7 @@ one producer that must not be refused waits instead — `submit` awaits capacity
 (`src/ingest/worker.rs:182`) and the file-watcher sink calls it
 (`src/ingest/file_watcher.rs:94`), because a watcher record has no durable
 backstop; the MCP RAM-queue fallback gets a `tool_error`
-(`src/mcp/tools_mutate.rs:335`). Still distinct from the *tick* queue, which is
+(`src/mcp/tools_mutate.rs:351`). Still distinct from the *tick* queue, which is
 bounded at 512 (`FEATURES.md:437-438`).
 
 Remaining, and the reason this item is narrowed rather than deleted: **the
@@ -1342,7 +1391,7 @@ sorts by heat and truncates to `ENTITY_SYNC_BATCH = 32` per heartbeat
 (`src/gossip/handler.rs:156`, sorted `:181`),
 so cold entities may never propagate and a partitioned node that rejoins never
 catches up. (`Fetch` is live — `wire_fetch` installs the handler at
-`src/commands.rs:1059` and the question path issues it — but it is single-id, not a
+`src/commands.rs:1075` and the question path issues it — but it is single-id, not a
 catch-up mechanism.) Two pieces adopted on paper and unscheduled: **back-off
 pacing** with exponential jitter keyed to a divergence estimate
 (`docs/kern/fl-vs-knids-federation.md:163-168`), and **batch-size / push-vs-pull
@@ -1595,7 +1644,7 @@ NDCG sweep meant to tune either was never run
 **Restated 2026-07-21 — the old "7-day retention" wording was stale.** The 7 days
 at `src/base/heat.rs:17` is the struct default and is never what runs:
 `Config::load` applies the preset unconditionally (`src/config/mod.rs:104`,
-`:132`) and `Preset::apply` is the only writer of `heat.half_life_secs`
+`:151`) and `Preset::apply` is the only writer of `heat.half_life_secs`
 (`src/config/preset.rs`). The shipped default is `relaxed` = **30 days**; medium
 is 7, tight is 3. So the two signals are 24h vs 30d by default, and the gap to
 the derived 1–2 days is a factor of 15–30, not 3.5. The knobs also stopped being
@@ -1699,7 +1748,7 @@ Lifecycle, so the wording cannot outlive its survivor: `reindex_entity`
 at every site that mints or drops a `Rephrase` — `merge_duplicate`
 (`src/base/accept.rs:199`), the supersede path that consumes one
 (`src/tick/tasks.rs:209`), and `degrade_entity_reasons`
-(`src/commands/graph_ops.rs:437`). GC needed nothing: `remove_entity` already
+(`src/commands/graph_ops.rs:491`). GC needed nothing: `remove_entity` already
 calls `lex.remove(id)`, and the wording lives in the survivor's own document.
 `rebuild_from_graph` uses the same builder, or the posting would survive exactly
 until the next reload.
@@ -1713,7 +1762,7 @@ unchanged at 0.9306 / 0.9722 / 0.9471 because the e2e corpus has no
 near-duplicate pair, so no `Rephrase` is ever minted and every lexical document
 is byte-identical to what it was. The corpus was deliberately left alone so the
 baseline stays comparable. More importantly, a CLI-level probe cannot show this
-today: `cmd_search` (`src/commands/query.rs:90`) is pure vector and never reads
+today: `cmd_search` (`src/commands/query.rs:101`) is pure vector and never reads
 the lexical index at all, and `kern query` runs `fuse_hybrid_seeds`, which
 rescores every fused seed by `cosine(qvec, entity.vector)` — so a lexical-only
 hit is re-ranked by exactly the signal that failed to find it and is cut
@@ -2124,11 +2173,12 @@ non-goals.
 ### 76. The watchdog force-exit skips the final guarded flush `[store]`
 
 Confirmed against source 2026-07-21, and it is not a doc claim: `spawn_watchdog`
-(`src/commands.rs:885-924`) beats a counter once a second from the async runtime
-and force-exits `std::process::exit(101)` (`:900`) after `STALL_LIMIT * CHECK_SECS`
+(`src/commands.rs:924-963`) beats a counter once a second from the async runtime
+and force-exits `std::process::exit(101)` (`:954`) after `STALL_LIMIT * CHECK_SECS`
 = 30s of no progress. `process::exit` runs no destructor and no `Drop`, so it
 skips the guarded shutdown flush the ordinary path takes — the `shutdown` notify
-at `src/commands.rs:847` unwinds into the guarded persist closure at `:592`,
+at `src/commands.rs:886` unwinds into the guarded persist closure `save_fn`
+(`:632`, called at `:892`),
 which is the thing that "never overwrites a grown disk". Nothing on the watchdog
 path writes anything, and the exit line does not say so.
 
@@ -2177,7 +2227,7 @@ unremarked.
 
 Called **once** (corrected 2026-07-21 — it was twice; the second site left with
 the ingest `kind` arg in `216730d`), with the literal `AGENT_SOURCE`
-(`src/mcp/tools_mutate.rs:150`), and it accepts `USER_SOURCE` / `AGENT_SOURCE`
+(`src/mcp/tools_mutate.rs:161`), and it accepts `USER_SOURCE` / `AGENT_SOURCE`
 (`src/base/validate.rs:21`), so it can never fail. Decision:
 thread a real auth identity (item 18/24), or delete. Delete is correct for a
 single local daemon and needs only sign-off.
@@ -2187,8 +2237,10 @@ single local daemon and needs only sign-off.
 `ProxyServer` implements `tools_list` / `call_tool` / `extra_capabilities` only
 (`src/commands/mcp_cmd.rs:301`, `:317`, `:355`) with no `handle_method` override,
 so the trait default returns `None` (`src/trnsprt/src/server.rs:21`). Meanwhile
-`extra_capabilities` advertises `{"resources": {}, "prompts": {}}` (`:346`) to
-match standalone, which *does* serve them (`src/mcp.rs:212-221`, advertised `:160`). Advertised on
+`extra_capabilities` advertises `{"resources": {}, "prompts": {}}`
+(`src/commands/mcp_cmd.rs:358` — spelled in full because the nearest preceding
+path is `server.rs`, and a bare `:NNN` continues the wrong file) to
+match standalone, which *does* serve them (`src/mcp.rs:213-222`, advertised `:160`). Advertised on
 the normal path, non-functional there. Either forward them or stop advertising.
 
 ### 82. Standalone `kern mcp` runs no gossip `[surface]`
@@ -2547,7 +2599,7 @@ an overall eval score that makes specialization worth funding.
   since a non-superseded `Fact` is immune (`is_cold_victim`,
   `src/tick/stigmergy.rs:35-46`) — is a false statement the caller has no way to
   falsify. So the id path **serves and flags**: `entity_detail`
-  (`src/mcp/tools_query.rs:367`) emits `expired` and `valid_until` whenever a
+  (`src/mcp/tools_query.rs:371`) emits `expired` and `valid_until` whenever a
   retention is set, and `kern get` prints an `Expired:` line
   (`src/commands/graph_ops.rs:67`). Filtering lost because the surface item 9
   deliberately widened — prefix plus cold-tier fallback — would have been
@@ -2747,12 +2799,12 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   scheduled; the three it actually caught were live lies in `FEATURES.md` and
   `SPECIALISTS.md` (CHANGELOG 2026-07-21).
 - **Pulse and Question senders are live.** `broadcast_pulse` / `broadcast_q` built
-  in `start_gossip` (`src/commands.rs:994-1068`), pulse wired into the maintenance
-  tick (`:721`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
+  in `start_gossip` (`src/commands.rs:1039-1113`), pulse wired into the maintenance
+  tick (`:760`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
   `broadcast_q` invoked by `do_resolve` (`src/tick/tasks.rs:386`), `handle_question`
   live-dispatched (`src/gossip/handler.rs:44`).
 - **`Fetch` is wired** — `wire_fetch` installs the handler at
-  `src/commands.rs:1059`. Single-id, so it is not anti-entropy (item 36), but it
+  `src/commands.rs:1075`. Single-id, so it is not anti-entropy (item 36), but it
   is not dead.
 - **`union_statements` never existed**; remote heat is no longer pinnable
   (`src/base/merge.rs:20`, applied `:153`).
@@ -2773,7 +2825,7 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   `src/base/constants.rs:69`). Only the CLI reaches `Fact`, via
   `clamp_confidence(1.0, "user")` (`src/commands/ingest_cmd.rs:59`).
 - **`conf` is clamped to [0,1]** — `validate_conf` (`src/base/validate.rs:14`)
-  called at `src/mcp/tools_mutate.rs:148`.
+  called at `src/mcp/tools_mutate.rs:159`.
 - **A prose-answering reason model no longer archives deltas having stored
   nothing.** `parse_claims` returns `Option`; a reply with no parseable JSON array
   leaves the delta queued for retry, a well-formed empty array still archives

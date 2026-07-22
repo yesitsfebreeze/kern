@@ -17,7 +17,7 @@ A config file only overrides; omitted sections keep their defaults.
 
 ## Presets — the whole tuning surface is one line
 
-The preset owns every heat, dedup, and retrieval-breadth setting. `[heat]`, `[ingest]`, `[retrieval]` sections are not accepted — a config that sets them refuses to load. Unknown preset name: refuses to load.
+The preset owns every heat, dedup, and retrieval-breadth setting. `[heat]`, `[ingest]`, `[retrieval]` sections are not accepted — a config that sets them refuses to load. The one exception is `[ingest] review_policy` below, which is curation rather than tuning. Unknown preset name: refuses to load.
 
 ```toml
 preset = "tight"
@@ -30,6 +30,28 @@ preset = "tight"
 | `tight` | Lean graph, sharp recall | 3-day half-life, aggressive dedup (0.90), narrow search (`seed_k` 10, 250 expansions), 12 results |
 
 `relaxed` when losing a stray fact hurts more than noise; `tight` for high-churn codebases where stale memory misleads.
+
+## Hold auto-distilled claims until someone reviews them
+
+`review_policy` keys a curation state on the source scheme — `file`, `ticket`, `session`, `agent`, `inline`. A scheme set to `pending` arrives held; a scheme you do not name arrives `active`, which is every ingest path today.
+
+```toml
+[ingest]
+review_policy = { file = "pending" }
+```
+
+Holding a claim does not hide it. `kern query` still returns it, because a filter that can hide data must be asked for:
+
+```bash
+kern query "how do we deploy" --exclude-pending   # skip anything still held
+kern promote <id>                                 # release one, then it comes back
+```
+
+A misspelled scheme refuses to load rather than holding nothing and reading as a working knob. `kern promote` is idempotent — releasing an already-active thought reports it and changes nothing.
+
+<Callout type="warn" title="`promote` is not authenticated yet">
+`kern promote` routes to a running daemon over its local socket, and that socket has no auth. Anything that can open it can release a held claim, which — unlike `kern intake drain` — is a curation-authority decision. The gate it will ride on is whatever the RPC-auth work lands.
+</Callout>
 
 ## The two model roles
 

@@ -14,8 +14,9 @@ pub struct IntakeConfig {
 	// from `done_retention_secs`, which prunes the archived *files*: this one is
 	// `valid_until` on the entity. 0 = no TTL, matching `--retention-secs`.
 	// It lives here rather than in `[ingest]` because `Config::load_with_user`
-	// refuses a user-written `[ingest]` section outright — that one is
-	// preset-owned, and a key no `kern.toml` can set is a key that ships dead.
+	// refuses every tuning key in a user-written `[ingest]` — that table is
+	// preset-owned, and its one exception is `review_policy`, which is curation
+	// rather than tuning. A key no `kern.toml` can set is a key that ships dead.
 	pub retention_secs: u64,
 }
 

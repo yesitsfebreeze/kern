@@ -8,6 +8,7 @@ use super::{load_graph, Client};
 pub(super) struct QueryParams<'a> {
 	pub(super) text: &'a str,
 	pub(super) mode: &'a str,
+	pub(super) exclude_pending: bool,
 	pub(super) embed_url: &'a str,
 	pub(super) embed_model: &'a str,
 }
@@ -42,6 +43,7 @@ pub(super) async fn cmd_query(cfg: &crate::config::Config, params: QueryParams<'
 	let QueryParams {
 		text,
 		mode,
+		exclude_pending,
 		embed_url,
 		embed_model,
 	} = params;
@@ -51,7 +53,9 @@ pub(super) async fn cmd_query(cfg: &crate::config::Config, params: QueryParams<'
 	let k = crate::retrieval::score::delivery_cap(&cfg.retrieval);
 	match route(
 		"query",
-		serde_json::json!({"text": text, "mode": mode, "k": k}),
+		serde_json::json!({
+			"text": text, "mode": mode, "k": k, "exclude_pending": exclude_pending,
+		}),
 	)
 	.await
 	{
@@ -73,8 +77,15 @@ pub(super) async fn cmd_query(cfg: &crate::config::Config, params: QueryParams<'
 
 	let mode = crate::retrieval::seed::Mode::parse(mode);
 
+	// `None` unless the caller asked, so the unfiltered read stays byte-for-byte
+	// the path it has always taken; `exclude_pending` alone makes `is_active()`
+	// true, which is what puts this on the pre-filtered ANN path.
+	let opts = exclude_pending.then(|| crate::retrieval::score::QueryOptions {
+		exclude_pending: true,
+		..Default::default()
+	});
 	let result =
-		crate::retrieval::query::query(&g, &cfg.retrieval, &cfg.heat, &vec, text, mode, None);
+		crate::retrieval::query::query(&g, &cfg.retrieval, &cfg.heat, &vec, text, mode, opts);
 	// No save: read-only — access/heat bumps land on cloned result entities, and
 	// persisting would risk clobbering a daemon's newer on-disk state.
 

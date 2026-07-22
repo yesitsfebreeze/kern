@@ -3,7 +3,7 @@ use crate::base::graph::GraphGnn;
 use crate::base::math::{average_vec, reason_id};
 use crate::base::reason::{add_reason, remove_entity, remove_reason};
 use crate::base::search::find_entity;
-use crate::base::types::{EntityKind, Kern, Reason, ReasonKind, Source};
+use crate::base::types::{EntityKind, Kern, Reason, ReasonKind, ReviewState, Source};
 use crate::base::util::{explain_relationship_prompt, short_id, truncate};
 use crate::mcp::tools_query::entity_detail_by_id;
 
@@ -146,6 +146,60 @@ pub(crate) fn forget_entity(
 	let edges_after = g.kerns.get(&kern_id).map(|k| k.reasons.len()).unwrap_or(0);
 	// saturating: remove_entity only drops edges, never adds — guard against underflow.
 	Ok(edges_before.saturating_sub(edges_after))
+}
+
+fn print_promote(id: &str, promoted: bool) {
+	if promoted {
+		println!("promoted {}", short_id(id));
+	} else {
+		println!("promoted {}  (already active)", short_id(id));
+	}
+}
+
+// Routed first for the same reason as `cmd_forget`: a serving daemon's graph is
+// the live one, so a local promote would release the row in a stale copy that
+// the daemon's next persist overwrites — the row stays held and nothing says so.
+//
+// AUTHORITY: releasing a held claim is a curation decision, and unlike `intake
+// drain` it asserts authority over what the graph is willing to answer with. The
+// socket it routes over is still unauthenticated (ROADMAP item 24); whatever gate
+// 24 lands is the gate this verb rides on.
+pub(super) async fn cmd_promote(cfg: &crate::config::Config, id: &str) {
+	match route("promote", serde_json::json!({"id": id})).await {
+		Routed::Done(v) => {
+			let promoted = v
+				.get("promoted")
+				.and_then(serde_json::Value::as_bool)
+				.unwrap_or(false);
+			return print_promote(id, promoted);
+		}
+		Routed::Refused(e) => return eprintln!("{e}"),
+		Routed::NoDaemon => {}
+	}
+	with_graph(cfg, |g| match promote_entity(g, id) {
+		Ok(promoted) => print_promote(id, promoted),
+		Err(e) => eprintln!("{e}: {id}"),
+	});
+}
+
+// The one release path, shared by the `promote` tool and the no-daemon CLI
+// fallback. Idempotent on purpose: a row that was already `Active` answers
+// `false` rather than erroring, so a retried promote is not a failure — but an
+// id that resolves to nothing IS one, because silently succeeding on a typo
+// tells a curator the claim was released when it is still held.
+pub(crate) fn promote_entity(g: &mut GraphGnn, id: &str) -> Result<bool, &'static str> {
+	let (thought, kern_id) = find_entity(g, id).ok_or("thought not found")?;
+	// Checked on the clone, before `get_mut`: that call bumps the mutation epoch
+	// and invalidates the query cache, which a no-op promote has no business doing.
+	if thought.review == ReviewState::Active {
+		return Ok(false);
+	}
+	let entity = g
+		.get_mut(&kern_id)
+		.and_then(|k| k.entities.get_mut(id))
+		.ok_or("thought not found")?;
+	entity.review = ReviewState::Active;
+	Ok(true)
 }
 
 #[derive(Default)]

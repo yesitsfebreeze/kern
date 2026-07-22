@@ -205,7 +205,7 @@ Recall needs no wiring — it is the `query` MCP tool.
 (embedding, reasoning, intake, tick) works out of the box against a local
 Ollama. The daemon pins itself to the nearest ancestor holding `.git`, else the
 nearest holding `.kern/`, else the launch directory
-(`src/config/mod.rs:153-164`), and creates `.kern/data/` there on open
+(`src/config/mod.rs:172-183`), and creates `.kern/data/` there on open
 (`src/base/store.rs:314-315`) plus `.kern/intake/` for the drop dir. `mkdir .kern`
 in a directory that has neither marker if you want the graph somewhere the walk
 would not have chosen. (A `<cwd>/.kern/kern.toml` is only for overriding
@@ -309,7 +309,7 @@ things any client can already do — write a file, call an MCP tool.
 
 Neither is gated on a pre-existing `.kern/`. A daemon pins itself to the nearest
 ancestor holding `.git`, else the nearest holding `.kern/`, else the launch
-directory (`src/config/mod.rs:153-164`), and then creates the store and intake dirs
+directory (`src/config/mod.rs:172-183`), and then creates the store and intake dirs
 it needs. So a single global registration does reach every project you open
 `kern mcp` in, and every one of them gets a `.kern/` — that is the cost of the
 registration being global, not something kern avoids.
@@ -348,7 +348,7 @@ hook — the write is always a caller's call.
 | `ingest` | Add text. Supports `object_id` update semantics and a free-text `hint` for chunking context. |
 | `link` | Create a reason edge between two thoughts (LLM writes the reason if blank). The edge is stored and walkable and shows up in a result's chain; it does not change ranking today. |
 | `forget` | Remove a thought and cascade its edges. Facts are immune. |
-| `degrade` | Name the thought at the end of a bad result and every edge incident on it decays, hardest first; an edge that falls below threshold is removed (`degrade_entity_reasons`, `src/commands/graph_ops.rs:285`). Entity-scoped — there is no way to name one path among several. |
+| `degrade` | Name the thought at the end of a bad result and every edge incident on it decays, hardest first; an edge that falls below threshold is removed (`degrade_entity_reasons`, `src/commands/graph_ops.rs:468`). Entity-scoped — there is no way to name one path among several. |
 | `move` | Relocate a thought to another kern by `id` and `to_kern`, carrying its outgoing edges and restamping cross-kern references. |
 | `graviton` | Manage gravitons (named focus attractors; replaced the single per-kern "purpose"): `list` (default), `add` (name + text — phrase or full document — + optional mass), `remove` (name). |
 | `claim_kind` | Register/remove a claim kind; registered kinds extend the built-in set distillation may emit. |

@@ -180,6 +180,7 @@ impl trnsprt::McpServer for Server {
 			"forget_by_source" => self.tool_forget_by_source(args),
 			"degrade" => self.tool_degrade(args),
 			"move" => self.tool_move(args),
+			"promote" => self.tool_promote(args),
 			"health" => self.tool_health(),
 			"graviton" => self.tool_graviton(args),
 			"claim_kind" => self.tool_claim_kind(args),
