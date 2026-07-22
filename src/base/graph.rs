@@ -67,6 +67,10 @@ pub struct GraphGnn {
 	pub data_dir: String,
 	lamport: std::sync::atomic::AtomicU64,
 	pending_deltas: parking_lot::Mutex<HashMap<(String, u8), PendingDelta>>,
+	// Rephrase edges re-pointed at a supersede (the carrying entity was
+	// superseded by a different update than the deferred candidate) awaiting
+	// re-classification on the tick loop (ROADMAP item 60). (kern_id, reason_id).
+	pending_reclass: parking_lot::Mutex<Vec<(String, String)>>,
 	// LMDB forbids opening one env twice in a process; opened once and shared.
 	store: Option<Arc<Store>>,
 	pub quant_mode: QuantizationMode,
@@ -159,6 +163,7 @@ impl GraphGnn {
 			data_dir: String::new(),
 			lamport: std::sync::atomic::AtomicU64::new(0),
 			pending_deltas: parking_lot::Mutex::new(HashMap::new()),
+			pending_reclass: parking_lot::Mutex::new(Vec::new()),
 			store: None,
 			quant_mode,
 			entity_idx: VectorBackend::resident(16, 200, quant_mode),
@@ -377,6 +382,19 @@ impl GraphGnn {
 			Some(snapshot) => self.entity_idx = VectorBackend::disk(snapshot, self.quant_mode),
 			None => self.rebuild_index(),
 		}
+	}
+
+	/// Take the Rephrase edges re-pointed at a supersede, for the tick loop to
+	/// re-enqueue as `ClassifyContradiction` (ROADMAP item 60).
+	pub fn drain_pending_reclass(&self) -> Vec<(String, String)> {
+		std::mem::take(&mut *self.pending_reclass.lock())
+	}
+
+	pub fn push_reclass(&self, kern_id: &str, reason_id: &str) {
+		self
+			.pending_reclass
+			.lock()
+			.push((kern_id.to_string(), reason_id.to_string()));
 	}
 
 	pub fn pending_disk_delta_len(&self) -> usize {
@@ -683,6 +701,7 @@ impl GraphGnn {
 			data_dir,
 			lamport: std::sync::atomic::AtomicU64::new(0),
 			pending_deltas: parking_lot::Mutex::new(HashMap::new()),
+			pending_reclass: parking_lot::Mutex::new(Vec::new()),
 			store: None,
 			quant_mode,
 			entity_idx: VectorBackend::resident(16, 200, quant_mode),

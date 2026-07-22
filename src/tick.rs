@@ -46,6 +46,11 @@ pub fn start(
 		// the trainer thread rather than leaving it holding this store's graph.
 		let trainer = gnn_trainer(&q, &g, &ctx);
 		while let Some(t) = rx.recv().await {
+			// Drain Rephrase edges re-pointed at a supersede and re-enqueue their
+			// classification against the new active entity (ROADMAP item 60).
+			for (kern_id, rid) in g.read().drain_pending_reclass() {
+				q.enqueue(task_extra(TaskKind::ClassifyContradiction, &kern_id, &rid));
+			}
 			q.dequeued(&t);
 			run_guarded(&q, &t, || process_task(&q, &g, &t, &ctx, Some(&trainer)));
 		}

@@ -552,6 +552,24 @@ fn stamp_superseded(
 	g.entity_idx.delete(old_id);
 	g.gnn_entity_idx.delete(old_id);
 
+	// ROADMAP item 60: a deferred contradiction candidate (Rephrase edge on the
+	// old entity, `to` empty) is orphaned when the old entity is superseded by a
+	// different update than the candidate — `do_classify_contradiction` returns
+	// early on `old.is_superseded()`. Re-point the candidate's `from` to the new
+	// active entity and queue it for re-classification on the tick loop.
+	let mut reclass: Vec<String> = Vec::new();
+	if let Some(kern) = g.get_mut(old_kern_id) {
+		for r in kern.reasons.values_mut() {
+			if r.kind == ReasonKind::Rephrase && r.from == old_id && r.to.is_empty() {
+				r.from = entity_id.to_string();
+				reclass.push(r.id.clone());
+			}
+		}
+	}
+	for rid in reclass {
+		g.push_reclass(old_kern_id, &rid);
+	}
+
 	let vec = if !thought_vec.is_empty() && !old_vec.is_empty() {
 		Embedding::from(average_vec(thought_vec, old_vec))
 	} else {
@@ -1132,6 +1150,58 @@ mod tests {
 			g.count(),
 			3,
 			"root + parent + one child, no re-spawn runaway"
+		);
+	}
+
+	// ROADMAP item 60: superseding an entity that carries a deferred Rephrase
+	// candidate re-points the candidate to the new active entity and queues it
+	// for re-classification, so it is not orphaned by `do_classify_contradiction`'s
+	// `old.is_superseded()` early return.
+	#[test]
+	fn supersede_repoints_a_deferred_rephrase_to_the_new_entity() {
+		use crate::base::reason::add_reason;
+		let mut g = GraphGnn::new();
+		let kid = g.root.id.clone();
+		let mut old = Entity {
+			id: "old".into(),
+			external_id: "ext1".into(),
+			vector: vec![1.0, 0.0].into(),
+			status: EntityStatus::Active,
+			..Default::default()
+		};
+		old.statements = vec!["old claim".into()];
+		g.get_mut(&kid).unwrap().entities.insert("old".into(), old);
+		g.get_mut(&kid)
+			.unwrap()
+			.source_index
+			.insert("ext1".into(), "old".into());
+		g.index_entity("old", &kid);
+		// a deferred contradiction candidate: Rephrase on `old`, `to` empty
+		let rid = reason_id("old", "", ReasonKind::Rephrase, "rephrased wording", "");
+		add_reason(
+			g.get_mut(&kid).unwrap(),
+			Reason {
+				id: rid.clone(),
+				from: "old".into(),
+				to: String::new(),
+				kind: ReasonKind::Rephrase,
+				text: "rephrased wording".into(),
+				..Default::default()
+			},
+		);
+		g.set_source_entry("ext1".into(), kid.clone());
+
+		supersede(&mut g, &kid, "new", &[1.0, 0.0], "ext1", "replaced");
+
+		// the candidate is re-pointed to `new` and queued for re-classification
+		let kern = g.loaded(&kid).unwrap();
+		let r = kern.reasons.get(&rid).expect("rephrase edge kept");
+		assert_eq!(r.from, "new", "re-pointed to the new active entity");
+		assert!(r.to.is_empty(), "still a deferred candidate");
+		let queued = g.drain_pending_reclass();
+		assert!(
+			queued.iter().any(|(k, r)| k == &kid && r == &rid),
+			"queued for re-classification: {queued:?}"
 		);
 	}
 

@@ -508,7 +508,10 @@ mod tests {
 		let _ = distill(&conv, &[], &llm, now());
 		let prompt = captured.into_inner().unwrap();
 		assert!(
-			prompt.contains(&format!("[{}] turn {}", DISTILL_CHUNK_TURNS, DISTILL_CHUNK_TURNS)),
+			prompt.contains(&format!(
+				"[{}] turn {}",
+				DISTILL_CHUNK_TURNS, DISTILL_CHUNK_TURNS
+			)),
 			"batch 2's first marker is the global turn index, not 0: {prompt}"
 		);
 	}
