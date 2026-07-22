@@ -327,6 +327,32 @@ pub async fn connect_kern(endpoint: &Endpoint) -> Result<LocalAdapter, AdapterEr
 	}
 }
 
+// Test-only seam mirroring `bind_unix(path, expected_peer)`: the client-side
+// peer-uid check is otherwise untestable on one uid — `connect_kern` hardcodes
+// `geteuid()` through `require_peer_is_caller`, and no test can bind a socket
+// as a second uid. Passing a uid that is deliberately not the server's drives
+// the same real `SO_PEERCRED` read down the same branch, leaving only
+// `geteuid()` uncovered — the same stance the bind arm's seam takes.
+#[cfg(unix)]
+#[cfg(test)]
+async fn connect_kern_with_peer(
+	endpoint: &Endpoint,
+	expected_uid: u32,
+) -> Result<LocalAdapter, AdapterError> {
+	match endpoint {
+		Endpoint::Unix(path) => {
+			require_owned_by_caller(path)?;
+			let adapter = UnixStreamAdapter::connect(path).await?;
+			require_peer_uid(&adapter, path, expected_uid)?;
+			Ok(LocalAdapter::Unix(adapter))
+		}
+		#[cfg(windows)]
+		Endpoint::NamedPipe(name) => Ok(LocalAdapter::NamedPipe(
+			NamedPipeAdapter::connect(name).await?,
+		)),
+	}
+}
+
 pub enum BindOutcome {
 	Bound(LocalListener),
 	AlreadyRunning,
@@ -982,6 +1008,34 @@ mod owner_tests_unix {
 		assert!(
 			matches!(err, AdapterError::UntrustedEndpoint(_)),
 			"refused by the owner check, not by the connect: {err}"
+		);
+	}
+
+	// The peer-uid check on the client path — the one residue item 24 names.
+	// `connect_kern_refuses_a_foreign_endpoint_before_it_connects` above covers
+	// the *owner* check via a root-owned `foreign_path()`; this covers the
+	// *peer-uid* check via the `connect_kern_with_peer` seam, the client-side
+	// twin of `bind_unix`'s injected-uid test. A socket this uid serves, reached
+	// with an expected uid that is deliberately not ours, must be refused — and
+	// the refusal is `UntrustedEndpoint`, not `Io`, so it came from the check.
+	#[tokio::test]
+	async fn connect_kern_refuses_when_the_peer_uid_differs() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("kern.sock");
+		let _listener = tokio::net::UnixListener::bind(&path).unwrap();
+		// SAFETY: `geteuid` cannot fail and touches no memory the caller owns.
+		let euid = unsafe { libc::geteuid() };
+		let err = connect_kern_with_peer(&Endpoint::Unix(path), euid.wrapping_add(1))
+			.await
+			.err()
+			.expect("a peer uid that is not the server's is refused");
+		assert!(
+			matches!(err, AdapterError::UntrustedEndpoint(_)),
+			"the peer verdict is untrust, not i/o: {err}"
+		);
+		assert!(
+			err.to_string().contains(&format!("served by uid {euid}")),
+			"the refusal names who is actually serving: {err}"
 		);
 	}
 }
