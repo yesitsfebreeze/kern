@@ -2,6 +2,37 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 24's title said "RPC socket has no auth" while its body said
+  "mostly closed 2026-07-22". Retitled to what is actually true: the connection
+  authenticates, the caller does not — same-uid callers remain
+  indistinguishable, which is the half items 9 and 18 were waiting on. Fourth
+  time a heading has outlived the defect it names, and slice selection reads
+  headings.
+
+  Also filed item 98, which `FEATURES.md` §13 stated and no item carried: **the
+  pre-auth frame is unbounded and untimed.** The one thing reachable before the
+  token is checked is the one thing with no cap on it. A frame declaring a huge
+  length makes the daemon allocate for a peer that has proven nothing; a
+  connection that opens and sends nothing holds its slot forever, and item 24
+  deliberately places the auth check before the handler exists, so that stall
+  costs a session that will never be authorised.
+
+  Not escalated, because `harden_socket` sets the socket `0600` and the peer is
+  therefore already a same-uid process. But that is exactly the attacker item
+  24's own residue says it cannot police — so "only a same-uid caller can do it"
+  is not mitigation here, it is a restatement of the open gap.
+
+  The pattern worth naming: **`FEATURES.md` described this correctly the whole
+  time.** The gap was not knowledge, it was that a limitation living only in a
+  present-tense description is not scheduled work. `ROADMAP.md` is the only file
+  that says what is left, so a real defect stated anywhere else is a defect
+  nobody will action. That is the third time this run — item 95 out of item 20's
+  prose, item 97 out of item 28's — and all three were found by reading the
+  neighbouring file rather than by anything automated.
+
+  Decided by: fix-the-root — the recurring failure is stating a defect somewhere
+  that is not the list of what is left.
+
 - 2026-07-22 — **`kern.sock` authenticates.** One `AuthReq` frame carrying the
   graph's `mcp-token` is compared in constant time before any `KernRpc` method
   dispatches, and the Windows named pipe is created with an owner-only SDDL

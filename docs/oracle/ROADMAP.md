@@ -468,7 +468,7 @@ auto-distilled claims out of retrieval until a human curates them. No
 `ReviewState`, `exclude_pending` or `promote` exists in `src/`. Requires 18's
 `QueryOptions` work first — review filters are more `matches_filter` predicates.
 
-### 24. RPC socket has no auth `[surface]`
+### 24. RPC socket authenticates the connection but not the caller — same-uid callers are indistinguishable `[surface]`
 
 `FEATURES.md:677-681`. **Mostly closed 2026-07-22, and deliberately left open —
 read the residue at the bottom before citing this as a blocker.** The socket
@@ -1815,6 +1815,31 @@ them.
 Neither is a defect in a running kern, which is why this sits in tier 9 — but it
 is the reason every reconcile pass so far has spent most of its effort
 re-pointing citations instead of checking claims.
+
+### 98. The pre-auth frame is unbounded and untimed `[surface]`
+
+`FEATURES.md` §13 states it plainly and no item carried it until now: the
+`AuthReq` frame is read from an **unauthenticated** peer with no size cap and no
+deadline. So the one thing reachable before the token is checked is also the one
+thing with no limit on it.
+
+Two shapes, both cheap for the attacker. A frame declaring a huge length makes
+the daemon allocate for a peer that has proven nothing. A connection that opens
+and then sends nothing occupies its accept slot indefinitely, and item 24 put
+the auth check *before* the handler exists, so a stalled pre-auth connection is
+holding resources for a session that will never be authorised.
+
+Neither is remote — `harden_socket` sets the socket `0600`, so the peer is
+already a same-uid process on this machine, which is why this is filed rather
+than escalated. But "same uid" is precisely the boundary item 24's residue says
+it cannot police, and a same-uid process is exactly the attacker item 24 left in
+scope. A limit that only holds against attackers who could already do worse is
+not a limit.
+
+Wanted: a maximum frame length and a read deadline, both applied before the
+first byte of `AuthReq` is trusted, and both smaller than anything the
+authenticated path uses. The numbers are a decision — a token frame is tens of
+bytes, so the cap can be brutal.
 
 ### 96. A shared `target-dir` can report green on stale code `[process]`
 
