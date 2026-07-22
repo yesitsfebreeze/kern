@@ -24,7 +24,8 @@ import sys
 
 import pytest
 
-from fake_llm import FAIL_MARKER
+from conftest import wait_until
+from fake_llm import FAIL_MARKER, STALL_MARKER
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="unix sockets only")
 
@@ -70,6 +71,46 @@ def test_health_reports_the_serving_daemons_degradation_counts(project):
 	assert int(m.group(1)) == UNEMBEDDABLE_CLAIMS, (
 		f"not the count the daemon holds: {stdout}"
 	)
+
+
+_QUEUE = re.compile(r"^ingest: +queue (\d+)$", re.M)
+
+
+def test_health_reads_the_ingest_queue_depth_from_the_live_daemon(project):
+	"""ROADMAP item 30's gauge: the daemon's in-RAM ingest queue reports its fill.
+
+	The depth is a property of the serving daemon's worker — a CLI-local read of
+	its own idle worker is structurally zero — so the line exists only when a
+	daemon answered over the socket, and the nonzero case is driven by parking
+	watcher jobs behind an embed the fake LLM stalls.
+	"""
+	project.write_config(watcher_enabled=True, intake_enabled=False)
+
+	# No daemon: no line. A gauge nobody holds must not print as a local 0.
+	stdout, stderr = project.run("health")
+	assert not _QUEUE.search(stdout), f"a depth with nothing serving: {stdout}"
+
+	project.start_daemon()
+	stdout, stderr = project.run("health")
+	m = _QUEUE.search(stdout)
+	assert m, f"no ingest queue line from a live daemon: out={stdout} err={stderr}"
+	assert int(m.group(1)) == 0, f"an idle daemon parks nothing: {stdout}"
+
+	# Intake is disabled, so the watcher's durable detour is off and each file
+	# goes straight to the RAM queue; the first job hangs in the fake LLM for
+	# STALL_SECS and the rest sit in the channel where the gauge counts them.
+	# The writes repeat inside the poll because the bound socket does not say
+	# `notify` has installed its watch yet (same idiom as the durability test).
+	def parked():
+		for i in range(3):
+			(project.cwd / f"note-{i}.md").write_text(
+				f"Ada keeps her bicycle number {i} in the garden shed {STALL_MARKER}"
+			)
+		out, _ = project.run("health")
+		seen = _QUEUE.search(out)
+		return seen and int(seen.group(1)) > 0
+
+	wait_until(parked, 60, "the daemon never reported a parked job over the socket")
 
 
 def test_health_with_no_daemon_still_reports_this_processs_own_counts(project):

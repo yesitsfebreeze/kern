@@ -65,6 +65,9 @@ pub struct HealthRes {
 	pub unspilled_drops: u64,
 	#[serde(default)]
 	pub ingest_queue_refused: u64,
+	// Jobs parked in the ingest RAM queue right now — a gauge, not a counter.
+	#[serde(default)]
+	pub ingest_queue_depth: u64,
 	// Propagations the trainer refused past its queue cap. Those kerns keep the
 	// `gnn_vector` they already had, so the count is the only trace.
 	#[serde(default)]
@@ -143,6 +146,7 @@ mod dto_serde_tests {
 		assert_eq!(h.remote_cap_dropped, 0);
 		assert_eq!(h.unspilled_drops, 0);
 		assert_eq!(h.ingest_queue_refused, 0);
+		assert_eq!(h.ingest_queue_depth, 0);
 		assert_eq!(h.gnn_train_refused, 0);
 		assert_eq!(h.llm_complete_failed, 0);
 		assert!(h.last_llm_complete_failure.is_empty());
@@ -182,6 +186,7 @@ mod dto_serde_tests {
 			remote_cap_dropped: 15,
 			unspilled_drops: 16,
 			ingest_queue_refused: 17,
+			ingest_queue_depth: 21,
 			gnn_train_refused: 18,
 			llm_complete_failed: 19,
 			last_llm_complete_failure: "transient: HTTP error: operation timed out".into(),
@@ -205,6 +210,7 @@ mod dto_serde_tests {
 		assert_eq!(back.remote_cap_dropped, 15);
 		assert_eq!(back.unspilled_drops, 16);
 		assert_eq!(back.ingest_queue_refused, 17);
+		assert_eq!(back.ingest_queue_depth, 21);
 		assert_eq!(back.gnn_train_refused, 18);
 		assert_eq!(back.llm_complete_failed, 19);
 		assert_eq!(

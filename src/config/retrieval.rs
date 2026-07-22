@@ -123,7 +123,7 @@ impl Default for RetrievalConfig {
 			lexical_enabled: true,
 			bm25_k1: 1.2,
 			bm25_b: 0.75,
-			lexical_top_boost: 0.0,
+			lexical_top_boost: 1.0,
 			pagerank_enabled: true,
 			pagerank_damping: 0.85,
 			pagerank_iters: 25,

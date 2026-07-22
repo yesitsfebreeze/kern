@@ -72,6 +72,9 @@ pub(super) async fn cmd_health(cfg: &crate::config::Config) {
 	for line in tick_health_lines(d.as_ref()) {
 		println!("{line}");
 	}
+	for line in ingest_health_lines(d.as_ref()) {
+		println!("{line}");
+	}
 	for line in llm_health_lines(d.as_ref()) {
 		println!("{line}");
 	}
@@ -190,6 +193,16 @@ fn tick_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> {
 		lines.push(format!("  last failure: {}", h.last_task_failure));
 	}
 	lines
+}
+
+// The ingest RAM queue's fill. Daemon-sourced like the tick lines, and for the
+// same reason: the CLI's own worker is idle by construction, so a local read is
+// structurally zero. No daemon, no line — a gauge nobody holds is not 0.
+fn ingest_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> {
+	match h {
+		Some(h) => vec![format!("ingest:      queue {}", h.ingest_queue_depth)],
+		None => Vec::new(),
+	}
 }
 
 // The completion leg's failures (ROADMAP item 30). Daemon-sourced for the same
@@ -796,6 +809,20 @@ mod cmd_tests {
 		}));
 		assert_eq!(lines.len(), 2, "counts only, no fault lines: {lines:?}");
 		assert!(lines[1].contains("4 refused GNN trainings"), "{lines:?}");
+	}
+
+	#[test]
+	fn the_ingest_line_prints_the_daemons_depth_and_nothing_without_one() {
+		assert!(
+			ingest_health_lines(None).is_empty(),
+			"no daemon -> no invented numbers"
+		);
+		let lines = ingest_health_lines(Some(&trnsprt::kern_rpc::HealthRes {
+			ok: true,
+			ingest_queue_depth: 5,
+			..Default::default()
+		}));
+		assert_eq!(lines, vec!["ingest:      queue 5".to_string()]);
 	}
 
 	// The three outcomes item 30 says were one empty string. Each drives the same

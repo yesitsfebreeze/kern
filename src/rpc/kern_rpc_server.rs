@@ -99,6 +99,7 @@ impl KernRpc for KernRpcHandler {
 				remote_cap_dropped: u64_at("remote_cap_dropped"),
 				unspilled_drops: u64_at("unspilled_drops"),
 				ingest_queue_refused: u64_at("ingest_queue_refused"),
+				ingest_queue_depth: u64_at("ingest_queue_depth"),
 				gnn_train_refused: u64_at("gnn_train_refused"),
 				llm_complete_failed: u64_at("llm_complete_failed"),
 				last_llm_complete_failure: str_at("last_llm_complete_failure"),
@@ -269,9 +270,16 @@ mod tests {
 		}
 
 		let handler = KernRpcHandler::new(Arc::new(srv), Arc::new(tokio::sync::Notify::new()));
+		let h = handler.health().await;
 		assert!(
-			handler.health().await.ingest_queue_refused >= 1,
+			h.ingest_queue_refused >= 1,
 			"a refused ingest that no health surface reports is a lost write nobody can see"
+		);
+		// The queue that just refused is full, and the gauge is what says so: a
+		// handler hardcoding the field to 0 still compiles and still reports healthy.
+		assert!(
+			h.ingest_queue_depth >= 1,
+			"a full queue that reports depth 0 hides the backlog behind the refusals"
 		);
 	}
 
