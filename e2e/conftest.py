@@ -55,7 +55,15 @@ class KernProject:
 		}
 		self._children = []
 
-	def write_config(self, data_dir=None, intake_enabled=True, intake_retention_secs=0, review_policy=None):
+	def write_config(
+		self,
+		data_dir=None,
+		intake_enabled=True,
+		intake_retention_secs=0,
+		review_policy=None,
+		watcher_enabled=False,
+		watcher_roots=None,
+	):
 		"""(Re)write the project kern.toml. `data_dir` is cwd-relative.
 
 		Config is read once per process, at startup — so rewriting this while a
@@ -74,6 +82,11 @@ class KernProject:
 		ingest on that scheme out of a `query --exclude-pending` until `kern
 		promote` releases it. Omitted when None, for the same byte-identity
 		reason as the TTL above.
+
+		`watcher_enabled` / `watcher_roots` turn on the file watcher, whose
+		`roots` are cwd-relative and default to the whole cwd. The section is
+		emitted only when enabled, for the same reason: every other test's
+		config text stays byte-identical.
 		"""
 		head = f'data_dir = "{data_dir}"\n\n' if data_dir else ""
 		ttl = (
@@ -83,12 +96,18 @@ class KernProject:
 		if review_policy:
 			pairs = ", ".join(f'{k} = "{v}"' for k, v in review_policy.items())
 			review = f"[ingest]\nreview_policy = {{ {pairs} }}\n\n"
+
+		watcher = ""
+		if watcher_enabled:
+			roots = f"roots = {json.dumps(list(watcher_roots))}\n" if watcher_roots else ""
+			watcher = f"\n[watcher]\nenabled = true\n{roots}"
 		(self.cwd / ".kern" / "kern.toml").write_text(
 			f"{head}"
 			f'[embed]\nurl = "{self.llm_url}"\nmodel = "fake-embed"\n\n'
 			f'[reason]\nurl = "{self.llm_url}"\nmodel = "fake-reason"\n\n'
 			f"{review}"
-			f"[intake]\nenabled = {str(intake_enabled).lower()}\n{ttl}\n"
+			f"[intake]\nenabled = {str(intake_enabled).lower()}\n{ttl}"
+			f"{watcher}\n"
 		)
 
 	def run(self, *args, timeout=120):

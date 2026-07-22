@@ -4,6 +4,11 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 pub struct IgnoreRules {
 	per_root: Vec<RootRules>,
+	// Directory prefixes the host declares off-limits whatever any ignore file
+	// says. This crate must not know what they are — the host passes them, so a
+	// daemon that writes state inside a watched root can name its own state
+	// without this crate depending on it.
+	denied: Vec<PathBuf>,
 }
 
 struct RootRules {
@@ -27,12 +32,25 @@ impl IgnoreRules {
 				}
 			})
 			.collect();
-		Self { per_root }
+		Self {
+			per_root,
+			denied: Vec::new(),
+		}
+	}
+
+	// Off-limits prefixes, absolute and in the same coordinate system as the
+	// roots. Not an ignore *pattern*: a `.gitignore` is the user's opinion about
+	// their own files and can be edited away, while these are directories the
+	// host writes into and must never read back.
+	pub fn with_denied(mut self, denied: Vec<PathBuf>) -> Self {
+		self.denied = denied;
+		self
 	}
 
 	pub fn empty() -> Self {
 		Self {
 			per_root: Vec::new(),
+			denied: Vec::new(),
 		}
 	}
 
@@ -40,6 +58,9 @@ impl IgnoreRules {
 	pub fn is_ignored(&self, path: &Path) -> bool {
 		// `.git` always skipped — bursty internal churn, never removed even if unignored.
 		if path.components().any(|c| c.as_os_str() == ".git") {
+			return true;
+		}
+		if self.denied.iter().any(|d| path.starts_with(d)) {
 			return true;
 		}
 		for rules in &self.per_root {
@@ -116,6 +137,35 @@ mod tests {
 			".kernignore pattern matches"
 		);
 		assert!(!rules.is_ignored(&dir.path().join("public.txt")));
+	}
+
+	// The self-referential edge: kern parks a watcher record inside its own
+	// intake, which lives under the default watched root. Without this the
+	// watcher ingests what it just wrote, parks a payload wrapping that payload,
+	// and does it again — measured at 283 files from one seed edit in 60s.
+	#[test]
+	fn denied_prefixes_are_ignored_even_with_no_ignore_file() {
+		let dir = tempdir().unwrap();
+		let state = dir.path().join(".kern");
+		let rules = IgnoreRules::from_roots(&[dir.path().to_path_buf()])
+			.with_denied(vec![state.join("intake"), state.join("data")]);
+		assert!(rules.is_ignored(&state.join("intake/direct/abc.json")));
+		assert!(rules.is_ignored(&state.join("data/data.mdb")));
+		assert!(
+			!rules.is_ignored(&state.join("kern.toml")),
+			"only the named prefixes, not the whole state dir"
+		);
+		assert!(!rules.is_ignored(&dir.path().join("src/main.rs")));
+	}
+
+	#[test]
+	fn a_denied_prefix_matches_on_whole_components_not_string_prefix() {
+		let dir = tempdir().unwrap();
+		let rules = IgnoreRules::empty().with_denied(vec![dir.path().join(".kern").join("intake")]);
+		assert!(
+			!rules.is_ignored(&dir.path().join(".kern").join("intake-notes.md")),
+			"`intake-notes.md` is a sibling of the denied dir, not inside it"
+		);
 	}
 
 	#[test]

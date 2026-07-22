@@ -292,7 +292,7 @@ larger than the feature. The behaviour is pinned by
 **Still open, deliberately deferred:** does the file watcher give `Document`
 entities a tenant-default ACL, or leave them public? Recommend configurable,
 default public-within-tenant, since the tenant boundary is the process.
-`src/ingest/file_watcher.rs:169` hardcodes `Acl::default()` — which is that
+`src/ingest/file_watcher.rs:113` hardcodes `Acl::default()` — which is that
 recommended default — and `Worker::enqueue`'s public delegation keeps it there
 until the decision is made.
 
@@ -422,7 +422,7 @@ Nor does confidence stand in for it. `clamp_confidence`
 which after `beta_params_from_confidence` (`src/ingest/place.rs:16`) is a 0.667
 against 0.650 posterior — a 2.6% edge over an MCP agent, and since item 95 the
 same 2.6% over the file watcher, whose `tag` is now its `source` `scheme`
-(`src/ingest/file_watcher.rs:80`) instead of a raw `1.0`. So the item's
+(`src/ingest/file_watcher.rs:85`) instead of a raw `1.0`. So the item's
 own headline — a user-authored claim outranking an auto-ingested one at equal
 heat — is true by default at last, but only by 2.6%, which is a rounding error
 rather than a trust model. `source_trust = { file = 0.8 }` is how to make it
@@ -1183,7 +1183,7 @@ confidence only; `kind` stays the producer's, or a watched file would be
 reclassified from `Document` to `Claim`.
 
 **The `tag` is the channel, `source.scheme()`** — `"file"` for the watcher
-(`src/ingest/file_watcher.rs:80`) and for the intake drain. Not `USER_SOURCE`:
+(`src/ingest/file_watcher.rs:95`) and for the intake drain. Not `USER_SOURCE`:
 no human asserted it. Not `AGENT_SOURCE`: an agent's ceiling belongs to a
 deliberate assertion by a non-human principal, and a file changing on disk is
 not an assertion at all. No new `"watcher"` constant either — `clamp_confidence`
@@ -1204,7 +1204,7 @@ that corpus is ingested through `kern ingest` — the one path that still mints
 
 Deciding behavior: fix-the-root.
 
-### 30. Ingest queue `enqueue` detaches with no backpressure `[ingest]`
+### 30. The durable backstop landed; what is left is a distill ceiling nobody chose and a queue that does not report its depth `[ingest]`
 
 ~~`Worker::enqueue` fires `tokio::spawn(async move { tx.send(job).await })` and
 returns immediately. The channel bound is 64; the spawn set is unbounded.~~
@@ -1213,30 +1213,80 @@ changed: not a silent drop but unbounded growth. `tokio`'s `send` only errors on
 a closed channel, so every detached task *parked* on a full queue holding its
 whole text — 500 offered to a stalled worker, 500 accepted, nothing refused, and
 that is the failure the new test reproduces when the bound is removed. Now
-`QUEUE_CAP` is the whole bound (`src/ingest/worker.rs:72`): `try_send` refuses
-the newest job rather than detaching (`:128`), the refusal is counted
-(`:131`) and reaches every health surface as `ingest_queue_refused`
+`QUEUE_CAP` is the whole bound (`src/ingest/worker.rs:79`): `try_send` refuses
+the newest job rather than detaching (`:158`), the refusal is counted
+(`:163`) and reaches every health surface as `ingest_queue_refused`
 (`src/base/health.rs:81`, `src/mcp.rs:145`, `src/commands/admin.rs:86`). The
 one producer that must not be refused waits instead — `submit` awaits capacity
-(`src/ingest/worker.rs:182`) and the file-watcher sink calls it
-(`src/ingest/file_watcher.rs:94`), because a watcher record has no durable
-backstop; the MCP RAM-queue fallback gets a `tool_error`
-(`src/mcp/tools_mutate.rs:351`). Still distinct from the *tick* queue, which is
-bounded at 512 (`FEATURES.md:437-438`).
+(`src/ingest/worker.rs:182`) and the file-watcher sink still calls it
+(`src/ingest/file_watcher.rs:129`) — now as the fail-open fallback behind item
+30's durable backstop rather than as the only path it has; the MCP RAM-queue
+fallback gets a `tool_error` (`src/mcp/tools_mutate.rs:338`). Still distinct
+from the *tick* queue, which is bounded at 512 (`FEATURES.md:437-438`).
 
-Remaining, and the reason this item is narrowed rather than deleted: **the
-distill leg has no timeout budget** (no `timeout` in
-`src/ingest/distill.rs` or `src/ingest/worker.rs`), so a hung LLM still holds
-the one in-flight slot forever and the bound converts that into refusals rather
-than into an unbounded heap. Also unaddressed: the file watcher enqueues into
-RAM directly instead of through the durable direct intake the MCP path prefers.
+**Corrected 2026-07-22 — the "no timeout budget" half was never true, and the
+grep that established it looked in the wrong files.** The claim was "no
+`timeout` in `src/ingest/distill.rs` or `src/ingest/worker.rs`", and there is
+none in either — because the bound lives at the client, not at the caller.
+`distill` takes an opaque `llm: &dyn Fn(&str) -> String`
+(`src/ingest/distill.rs:37`) which is always `Client::complete_func`
+(`src/llm.rs:300`), and `complete` posts under `LLM_TIMEOUT` = 600s
+(`src/llm.rs:396`, applied at `:267` and `:289` — both the native and the
+OpenAI-compat branch), over a client-wide 120s default and a 3s
+`connect_timeout` (`:96`, `:99`). So a hung LLM does **not** hold the one
+in-flight slot forever; it holds it for at most ten minutes. What is actually
+open is that 600s is a ceiling nobody chose for *this* leg and nothing exposes
+it: it is a `const`, not config, and a stall that long is indistinguishable at
+every health surface from a slow model. Narrower than stated, and a tuning
+question rather than a liveness defect.
+
+**The durability half is closed 2026-07-22.** `KernFileWatcherSink::ingest` now
+writes a `DirectJob` through `intake_direct` first
+(`src/ingest/file_watcher.rs:104`, tmp + rename at `src/ingest/direct.rs:42`) and
+falls through to `Worker::submit` (`:129`) only when that write fails — the shape
+`tool_ingest` already had (`src/mcp/tools_mutate.rs:300`). It is gated on
+`intake.enabled` alone (`src/commands.rs:969`), which is exactly the flag
+`spawn_intake` gates on, so the directory is never written unless something
+drains it; `drain_direct_once` needs no reason LLM, so the stricter gate
+`tool_ingest` uses would have parked nothing on a reason-less host that drains
+fine. `notify` installs its watches and reports nothing that happened before
+(`FileWatcher::new`, `src/watcher/src/watcher.rs:36`) and there is no startup
+scan, so before this a watcher record still in the channel when the daemon died
+was lost with nothing to re-offer it.
+
+`DirectJob` grew a `source_tag` (`src/ingest/direct.rs:35`) to make that hop
+safe: `drain_direct_once` used to name `AGENT_SOURCE` for every payload it read
+(now `:106`), because every payload there was minted by the MCP tool — routing
+the watcher through it unchanged would have relabelled `"file"` as `"agent"` and
+undone item 95's "the tag is the channel". Old payloads keep the old behaviour
+through `#[serde(default)]` (`:38`). The relabel is numerically invisible —
+`clamp_confidence` separates `USER_SOURCE` and nothing else — but it is the key
+`source_trust` weights on (item 20).
+
+**The fix had a self-referential edge, found and closed in the same change.**
+The default watched root is the cwd and the default intake is `.kern/intake`
+under it, so parking a record durably wrote a file into the tree that produced
+it: the watcher read it back, parked a payload wrapping that payload, and
+repeated. Measured against the default config from one seed edit: **283 payloads
+in 60 seconds, largest 1.77 MB, versus 0 on the pre-change build** — each one an
+embed call and a graph write. `IgnoreRules` only ever hardcoded `.git`
+(`src/watcher/src/ignore_rules.rs:60`), so nothing stopped it. Closed by giving
+`IgnoreRules` host-supplied denied prefixes (`:45`, matched `:63`) and passing
+the resolved `intake.dir` and `data_dir` (`src/commands.rs:962`) — named by the
+host, because that crate must not know what kern is. `effective_roots` now pins a
+relative root to `cwd` (`src/config/watcher.rs:25`) so event paths and denied
+prefixes share one coordinate system. What is *not* closed is that the deny list
+is by name rather than by construction — item 99.
+
 The queue-depth half is
 **narrowed 2026-07-21** — closing item 8 gave `kern intake` a
 `pending=/stuck=/failed=/done=` readout (`src/commands/intake_cmd.rs:43-45`),
 so the file-backed queue reports its depth; the in-process `Worker` channel
-still does not. "The LLM call is the only unbounded step on the path"
-(`concepts/acceptance.mdx:189-192`), and with the answer leg removed (2026-07-21)
-the distill leg is now the only LLM on any path — no latency work has landed on it.
+still does not. "The only LLM call on the path"
+(`concepts/acceptance.mdx:7` — the old citation `:189-192` was past the end of
+an 86-line page and quoted a sentence that is nowhere in the tree), and with the
+answer leg removed (2026-07-21) the distill leg is still the only LLM on any
+path — no latency work has landed on it.
 
 ### 31. Structural debt in the hot types `[retrieval]`
 
@@ -1391,7 +1441,7 @@ sorts by heat and truncates to `ENTITY_SYNC_BATCH = 32` per heartbeat
 (`src/gossip/handler.rs:156`, sorted `:181`),
 so cold entities may never propagate and a partitioned node that rejoins never
 catches up. (`Fetch` is live — `wire_fetch` installs the handler at
-`src/commands.rs:1075` and the question path issues it — but it is single-id, not a
+`src/commands.rs:1093` and the question path issues it — but it is single-id, not a
 catch-up mechanism.) Two pieces adopted on paper and unscheduled: **back-off
 pacing** with exponential jitter keyed to a divergence estimate
 (`docs/kern/fl-vs-knids-federation.md:163-168`), and **batch-size / push-vs-pull
@@ -1580,11 +1630,11 @@ exists nowhere.
 ### 90. `DirectJob` carries `valid_until` but drops `valid_from` `[ingest]`
 
 The durable direct intake serializes one bi-temporal stamp and not the other:
-`DirectJob` (`src/ingest/direct.rs:11-27`) has a `valid_until` and no
+`DirectJob` (`src/ingest/direct.rs:11-36`) has a `valid_until` and no
 `valid_from`, and `drain_direct_once` overlays only the former onto the drain
 loop's `Config`, so `valid_from` is whatever the loop's shared config says —
 always `None`. **Not a live loss**: the only producer of `valid_from` is the
-distillation path (`intake.rs:191`, from `distill.rs`), which calls the worker
+distillation path (`src/ingest/intake.rs:193`, from `distill.rs`), which calls the worker
 directly and never goes through `direct/`, and the MCP `ingest` schema has no
 `valid_from` field to lose. It is a hole that opens the moment either of those
 changes — which item 50 would do. (The retired item 89 did not: it gave the
@@ -1605,12 +1655,14 @@ source at `src/mcp/tools_admin.rs:116`" with "chunk + mean-pool" as the unbuilt
 upgrade path. Both halves moved in `08c9971`: the acknowledgement comment was
 deleted, and chunk + mean-pool **shipped** for the multi-line case —
 `seed_examples` (`src/base/accept.rs:717-729`) splits a seed on newlines and
-`mean_pool` (`:720`) averages the per-line embeddings, wired at
+`mean_pool` (`:733`) averages the per-line embeddings, wired at
 `src/mcp/tools_admin.rs:119-136`. Line 116 now carries the mean-pool rationale,
 i.e. the opposite of what it was cited for.
 
 What is left is the case `seed_examples` deliberately does not split: a seed
-with fewer than two non-empty lines is embedded whole (`:709-711`), so one long
+whose `lines` len is under 2 is embedded whole (`src/base/accept.rs:724-726` —
+spelled in full because the nearest preceding path is `tools_admin.rs`, which is
+455 lines long, and a bare `:NNN` continues the wrong file), so one long
 paragraph still goes to the model as a single call and truncates past its
 context window with no signal. Chunking *that* wants a length-based split, not a
 newline one, and is still blocked on a real document long enough to truncate.
@@ -2198,7 +2250,7 @@ itself is pinned — `content_hash` (`src/base/util.rs:3`) is sha256-to-lowercas
 and `util.rs:155` asserts length, alphabet and determinism. What is unpinned is
 every *composition* feeding it, and each one is a different format string: entity
 ids are `content_hash(text)` bare (`src/ingest/place.rs`,
-`src/ingest/file_watcher.rs:137`, `src/ingest/direct.rs:32`,
+`src/ingest/file_watcher.rs:182`, `src/ingest/direct.rs:44`,
 `src/ingest/worker.rs:148`), `Source::source_id` is
 `scheme \x00 object \x00 section` (`src/base/types.rs:270-282`), child and named
 ids are `parent_id + nonce` and `parent_id + name + nonce`
@@ -2341,7 +2393,7 @@ propagation overwrites one — another 76.8 MB at this corpus size.
   renamed file lands as a new `Document` and the old one is neither moved nor
   removed. It duplicates only when the rename *also* edits the file — ids are
   `content_hash(text)`, so an untouched move re-resolves to the same id, while
-  `external_id` is the path (`src/ingest/file_watcher.rs:141`), so a
+  `external_id` is the path (`src/ingest/file_watcher.rs:186`), so a
   move-plus-edit gets a new id under a new external id and supersede never
   fires. It sits in this tier and not in tier 1 because the watcher is **off by
   default** — `WatcherConfig::enabled` is `false` unless a `kern.toml` sets it
@@ -2359,6 +2411,37 @@ propagation overwrites one — another 76.8 MB at this corpus size.
   `concepts/security.mdx:40-43`, which is the API-key-vs-redirected-endpoint
   rule and says nothing about the socket; that page states the `0600` mode at
   `concepts/security.mdx:16` and does not record the race at all.
+
+### 99. The watcher's off-limits set is a list of names, not an invariant `[ingest]`
+
+Item 30's durable backstop put a kern-written file inside the default watched
+root and the watcher ate it — 283 payloads from one seed edit before the fix. The
+fix works and is measured: `IgnoreRules::with_denied`
+(`src/watcher/src/ignore_rules.rs:45`) takes the resolved `intake.dir` and
+`data_dir` from `spawn_file_watcher` (`src/commands.rs:962`). But it closes that
+loop by *enumerating* the two directories that were writing, not by making the
+class impossible. Anything kern writes under a watched root in future is
+ingestible again unless someone remembers to add it, and there is no test that
+fails when they forget — the regression e2e
+(`e2e/test_file_watcher_durability.py`) pins the two dirs that exist today.
+
+Two shapes worth weighing, and neither is obviously right. **One state root**:
+declare that everything kern writes lives under a single prefix and deny that
+prefix, which is nearly true already (`.kern/` holds config, intake and data) but
+false the moment `data_dir` is pointed outside it — which is a supported config
+and the reason the deny list is computed rather than hardcoded. **Deny at the
+writer**: have the code that opens a path for writing register it, so the deny
+list is derived from what the process actually holds rather than from a list
+maintained by hand. The second is correct and costs a registry the daemon does
+not have.
+
+Ranks here and not in tier 1: the two paths that matter today *are* denied, the
+failure mode is amplification rather than a wrong answer, and the whole watcher
+is off unless a `kern.toml` enables it (`src/config/watcher.rs:8`). <!-- docs-check: anchor-ok -->
+It is a latent correctness hole, not a live one.
+
+Deciding behavior: fix-the-root — the enumeration is the symptom-level fix, kept
+because the root fix is a registry and the loop was live.
 
 ### 87. Do the preset tiers earn their numbers, now that `relaxed` is the default? `[eval]`
 
@@ -2799,12 +2882,12 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   scheduled; the three it actually caught were live lies in `FEATURES.md` and
   `SPECIALISTS.md` (CHANGELOG 2026-07-21).
 - **Pulse and Question senders are live.** `broadcast_pulse` / `broadcast_q` built
-  in `start_gossip` (`src/commands.rs:1039-1113`), pulse wired into the maintenance
-  tick (`:760`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
+  in `start_gossip` (`src/commands.rs:1041-1122`), pulse wired into the maintenance
+  tick (`:721`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
   `broadcast_q` invoked by `do_resolve` (`src/tick/tasks.rs:386`), `handle_question`
   live-dispatched (`src/gossip/handler.rs:44`).
 - **`Fetch` is wired** — `wire_fetch` installs the handler at
-  `src/commands.rs:1075`. Single-id, so it is not anti-entropy (item 36), but it
+  `src/commands.rs:1093`. Single-id, so it is not anti-entropy (item 36), but it
   is not dead.
 - **`union_statements` never existed**; remote heat is no longer pinnable
   (`src/base/merge.rs:20`, applied `:153`).

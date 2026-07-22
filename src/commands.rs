@@ -983,11 +983,29 @@ fn spawn_file_watcher(cfg: &crate::config::Config, worker: &Arc<crate::ingest::W
 	use watcher::IgnoreRules;
 	let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 	let roots = cfg.watcher.effective_roots(&cwd);
-	let ignore = IgnoreRules::from_roots(&roots);
+	// kern's own state is never content. The default root is the cwd and the
+	// default intake is `.kern/intake` under it, so parking a watcher record
+	// durably puts a file inside the tree that produced it: the watcher reads it
+	// back, parks a payload wrapping that payload, and repeats. Measured at 283
+	// files and 1.7 MB payloads from a single seed edit in 60 seconds. Named here
+	// rather than hardcoded in the watcher crate — both dirs are configurable,
+	// and that crate must not know what kern is.
+	let ignore = IgnoreRules::from_roots(&roots).with_denied(vec![
+		cwd.join(&cfg.intake.dir),
+		std::path::PathBuf::from(&cfg.data_dir),
+	]);
+	// The backstop only where something drains it — `spawn_intake` below gates on
+	// exactly this flag, so it is the whole condition. Without a drain the durable
+	// write would be a directory nobody reads, which is worse than the RAM queue.
+	let direct_dir = cfg
+		.intake
+		.enabled
+		.then(|| cwd.join(&cfg.intake.dir).join("direct"));
 	let sink = Arc::new(KernFileWatcherSink::new(
 		worker.clone(),
 		cfg.watcher.retention_secs,
 		cfg.ingest.review_policy.clone(),
+		direct_dir,
 	));
 	tokio::spawn(async move {
 		if let Err(e) = run_file_watcher(roots, ignore, sink).await {
