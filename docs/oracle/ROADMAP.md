@@ -3297,6 +3297,23 @@ one. Also deliberately unclaimed, so that the number above measures one change:
 (`src/tick/tasks.rs:541-542`) and they could share a third allocation until GNN
 propagation overwrites one — another 76.8 MB at this corpus size.
 
+**Reembed double-alloc half closed 2026-07-22.** At reembed `vector` and
+`gnn_vector` now share the `Arc` — `e.vector = v.clone().into();
+e.gnn_vector = e.vector.clone();` (`src/tick/tasks.rs`, `src/commands/reembed.rs`)
+— one alloc + one `Arc::clone` (refcount bump, zero alloc) instead of two
+`Arc::from(Vec)`, saving ~76.8 MB at 50k/dim384. No COW, no behavior change: the
+shared `Arc` drops one refcount the moment GNN propagation replaces `gnn_vector`
+(`gnn_propagate.rs` Arc-swap, never in-place), and no path mutates either in
+place. Proved by `do_reembed_shares_vector_allocation_with_gnn_vector`
+(`Arc::ptr_eq(&e.vector, &e.gnn_vector)` after `do_reembed`); negative control
+(revert to `v.clone().into()` → not ptr-equal) reds, green on revert. Existing
+`do_reembed_*` and `a_completed_reembed_restamps_the_store_with_the_new_model`
+green unedited. `cargo test -p kern --lib` 945 passed, 0 failed, 4 ignored.
+Decided by fix-the-root (share the `Arc` the values already are, not a COW
+layer), name-the-tradeoff (the saving is per-reembed, not steady-state — GNN
+propagation breaks the share after the first tick), verify-before-claiming
+(negative control). See the 2026-07-22 CHANGELOG entry.
+
 ### 84. Remaining operational odds and ends `[surface]`
 
 - **`serve.mcp_addr` is a config field with no reader.** ~~Added when item 11 landed~~ **Closed 2026-07-22.** `run_server` now resolves CLI flag first, falls back to `cfg.serve.mcp_addr`.
@@ -3332,7 +3349,7 @@ propagation overwrites one — another 76.8 MB at this corpus size.
   gateway blip no longer re-queues a whole distill transcript. `complete_func`
   still records the *final* failure once (a recovered completion is not a
   failure). The `Ollama-centric` half stays: the client speaks Ollama-native
-  + OpenAI-compat and no other provider, by design (local-first). New test
+  - OpenAI-compat and no other provider, by design (local-first). New test
   `complete_retries_a_transient_5xx_then_succeeds`. 1038 pass.
 - ~~Watcher `.gitignore` parsing is approximate; no rename tracking~~ **(retired
   2026-07-21 — verified false on both counts).** `IgnoreRules` builds a real

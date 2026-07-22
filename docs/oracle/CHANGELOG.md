@@ -2,6 +2,17 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 83 reembed double-alloc half closed: at reembed `vector`
+  and `gnn_vector` now share the `Arc` — `e.vector = v.clone().into();
+  e.gnn_vector = e.vector.clone();` (`src/tick/tasks.rs`,
+  `src/commands/reembed.rs`) — one alloc + one `Arc::clone` instead of two
+  `Arc::from(Vec)`, saving ~76.8 MB at 50k/dim384. No COW, no behavior change:
+  GNN propagation Arc-swaps `gnn_vector` (never in-place), dropping the shared
+  refcount. Proved by `do_reembed_shares_vector_allocation_with_gnn_vector`
+  (`Arc::ptr_eq` after `do_reembed`); negative control (revert → not ptr-equal)
+  reds, green on revert. `cargo test -p kern --lib` 945 passed, 0 failed, 4
+  ignored. Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming.
+
 - 2026-07-22 — item 84 last sub retired: hand-written MCP tool schemas
   accepted as style debt, not a correctness gap. The schemas are hand-written
   JSON in `tools.rs`, correct, unit-tested, and stable; deriving from types
