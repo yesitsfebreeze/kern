@@ -182,9 +182,17 @@ async fn drain_entry(
 	};
 	let mut results = Vec::with_capacity(claims.len());
 	for c in claims {
+		// Turn-level provenance: which 1-based turns the distiller drew the claim
+		// from, comma-joined into Source::Session.section. Empty when uncited,
+		// matching the pre-provenance baseline.
+		let section = if c.turns.is_empty() {
+			String::new()
+		} else {
+			c.turns.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(",")
+		};
 		let src = Source::Session {
 			session_id: format!("session:{stem}"),
-			section: String::new(),
+			section,
 			title: format!("session://{}", c.kind),
 		};
 		// The clone carries the queue's standing `valid_until`; only the lower
