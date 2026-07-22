@@ -143,6 +143,9 @@ impl Server {
 			"remote_cap_dropped": h.remote_cap_dropped,
 			"unspilled_drops": h.unspilled_drops,
 			"ingest_queue_refused": h.ingest_queue_refused,
+			// 0.0 = uniform access (converged); →1.0 = one entity holds all
+			// access. Resident entities only (ROADMAP item 62).
+			"gini_access": h.gini_access,
 			// This server's own worker, read directly: a gauge on the live channel,
 			// not a process static like the counters `h` carries.
 			"ingest_queue_depth": self.worker.queue_depth(),

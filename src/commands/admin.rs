@@ -75,6 +75,9 @@ pub(super) async fn cmd_health(cfg: &crate::config::Config) {
 	for line in ingest_health_lines(d.as_ref()) {
 		println!("{line}");
 	}
+	for line in convergence_health_lines(d.as_ref()) {
+		println!("{line}");
+	}
 	for line in llm_health_lines(d.as_ref()) {
 		println!("{line}");
 	}
@@ -201,6 +204,17 @@ fn tick_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> {
 fn ingest_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> {
 	match h {
 		Some(h) => vec![format!("ingest:      queue {}", h.ingest_queue_depth)],
+		None => Vec::new(),
+	}
+}
+
+// The Gini-over-access convergence metric (ROADMAP item 62). Daemon-sourced
+// like the ingest queue line: the CLI's own graph is a fresh open with no query
+// history, so its access distribution is structurally uniform (gini 0.0) and a
+// local read carries no signal. No daemon, no line.
+fn convergence_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> {
+	match h {
+		Some(h) => vec![format!("convergence: gini {:.2}", h.gini_access)],
 		None => Vec::new(),
 	}
 }

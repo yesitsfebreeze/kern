@@ -97,6 +97,10 @@ impl KernRpc for KernRpcHandler {
 				unspilled_drops: u64_at("unspilled_drops"),
 				ingest_queue_refused: u64_at("ingest_queue_refused"),
 				ingest_queue_depth: u64_at("ingest_queue_depth"),
+				gini_access: payload
+					.get("gini_access")
+					.and_then(|v| v.as_f64())
+					.unwrap_or(0.0),
 				gnn_train_refused: u64_at("gnn_train_refused"),
 				llm_complete_failed: u64_at("llm_complete_failed"),
 				last_llm_complete_failure: str_at("last_llm_complete_failure"),
