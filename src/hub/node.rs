@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use trnsprt::kern_rpc::KernRpcClient;
+use trnsprt::kern_rpc::{KernRpcClient, PRINCIPAL_HUB};
 use trnsprt::typed::{Endpoint, JsonEnvelopeCodec};
 
 // Bootstrap loads the whole graph before binding kern.sock, so a big store
@@ -30,11 +30,20 @@ impl NodeHandle {
 	}
 }
 
+// Both of these take the *root*, not the endpoint. `Endpoint::kern_for` is an
+// FNV hash of the path, so the socket name cannot produce the node's token —
+// only the root can, via the config that names its data_dir. The endpoint is
+// derived here from the same root, so the two can never drift apart.
+fn node_caller(root: &Path) -> trnsprt::kern_rpc::AuthReq {
+	crate::rpc::caller_at(root, PRINCIPAL_HUB)
+}
+
 // None = unreachable; Some(0) also means "treat as active" — daemons predating
 // the field report 0 and must never be idle-unloaded on a lie.
-pub async fn idle_ms(endpoint: &Endpoint) -> Option<u64> {
+pub async fn idle_ms(root: &Path) -> Option<u64> {
 	let client = KernRpcClient::<JsonEnvelopeCodec>::connect_endpoint_with_retry(
-		endpoint,
+		&Endpoint::kern_for(root),
+		&node_caller(root),
 		1,
 		Duration::from_millis(0),
 	)
@@ -44,9 +53,10 @@ pub async fn idle_ms(endpoint: &Endpoint) -> Option<u64> {
 	Some(res.idle_ms)
 }
 
-pub async fn probe(endpoint: &Endpoint) -> bool {
+pub async fn probe(root: &Path) -> bool {
 	KernRpcClient::<JsonEnvelopeCodec>::connect_endpoint_with_retry(
-		endpoint,
+		&Endpoint::kern_for(root),
+		&node_caller(root),
 		1,
 		Duration::from_millis(0),
 	)
@@ -80,7 +90,7 @@ fn node_log_dir(root: &Path) -> PathBuf {
 
 pub async fn spawn(root: &Path) -> Result<NodeHandle, String> {
 	let endpoint = Endpoint::kern_for(root);
-	if probe(&endpoint).await {
+	if probe(root).await {
 		return Ok(NodeHandle {
 			root: root.to_path_buf(),
 			endpoint,
@@ -101,7 +111,7 @@ pub async fn spawn(root: &Path) -> Result<NodeHandle, String> {
 		.spawn()
 		.map_err(|e| format!("spawn node for {}: {e}", root.display()))?;
 	for _ in 0..READY_RETRIES {
-		if probe(&endpoint).await {
+		if probe(root).await {
 			return Ok(NodeHandle {
 				root: root.to_path_buf(),
 				endpoint,
@@ -120,6 +130,7 @@ pub async fn spawn(root: &Path) -> Result<NodeHandle, String> {
 pub async fn shutdown(handle: &mut NodeHandle) -> Result<(), String> {
 	if let Ok(client) = KernRpcClient::<JsonEnvelopeCodec>::connect_endpoint_with_retry(
 		&handle.endpoint,
+		&node_caller(&handle.root),
 		1,
 		Duration::from_millis(0),
 	)

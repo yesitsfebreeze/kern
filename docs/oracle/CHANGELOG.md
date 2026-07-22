@@ -2,6 +2,54 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — **`kern.sock` authenticates.** One `AuthReq` frame carrying the
+  graph's `mcp-token` is compared in constant time before any `KernRpc` method
+  dispatches, and the Windows named pipe is created with an owner-only SDDL
+  instead of the default descriptor. Item 24 is narrowed to a residue, not
+  closed.
+
+  **The defect the e2e corpus caught, and nothing else would have.** The socket
+  is keyed by the **root** (`Endpoint::kern_for` hashes the path) while the
+  token was keyed by the **data_dir**. Those are the same directory right up
+  until `kern.toml` is repointed under a live daemon — which is exactly the
+  blinding technique `e2e/` uses — and then the daemon keeps serving out of the
+  store it opened at boot while a later CLI, reading the new config, hunts for
+  the secret in a directory that daemon never wrote to. Every unit test passed:
+  they all built root and data_dir together, so the two keyings were
+  indistinguishable. `rpc::token_for` now searches the configured store first
+  and the root's conventional `.kern/data` second. The fallback is safe in the
+  only direction that matters: it changes what a *client presents*, never what
+  the *server accepts*, so a bad guess produces a refusal and can never produce
+  an admission.
+
+  **Why `principal` is recorded and not enforced.** The frame declares `cli`,
+  `mcp` or `hub`, and nothing consults it. A shared secret proves a **uid**; the
+  CLI, the `kern mcp` proxy an agent drives, and the hub all run as the same uid
+  and can all read the same file. There is no fact on that connection that can
+  separate them, so enforcing a self-asserted principal would be a permission
+  check a caller writes for itself. Recording it puts the field where items 9
+  and 18 need it without pretending it carries weight it does not.
+
+  **The gate was mutation-tested, and the first round of tests was decoration.**
+  Making verification always succeed did not fail the no-token test: an open
+  gate still *eats* the first frame, so one tool call cannot tell "consumed as a
+  handshake" from "consumed and refused". Offering the call twice distinguishes
+  them — past an open gate the second one lands — and re-running the mutation
+  confirms the two-attempt shape is what kills it. A second mutation found a
+  second decoration: every wrong token in the suite differed in *length* from
+  the right one, so `ct_eq`'s length short-circuit refused them all and gutting
+  the byte compare killed nothing at the gate. Both suites now offer a
+  same-length token differing in the final byte, and a negative case runs over a
+  real Unix socket rather than an in-process pipe.
+
+  Windows is typechecked (`cargo check --target x86_64-pc-windows-msvc -p
+  trnsprt`, with a deliberate type error proving the check is not vacuous) and
+  has never executed. Said plainly in `ROADMAP.md` item 24 rather than implied.
+
+  Decided by: fix-the-root — the root-vs-data_dir keying was the defect, and
+  repointing the test would have hidden it; name-the-tradeoff — reusing the HTTP
+  `mcp-token` means a socket-side disclosure is an HTTP-side compromise, which
+  is why item 24 stays open.
 - 2026-07-22 — merged item 21's review lifecycle. 203 + 1 + this one = 205. The
   merge broke **thirteen** citations, the worst single hit yet, and every one was
   a second-order effect: adding `ReviewState` to `Entity` shifted `types.rs`,

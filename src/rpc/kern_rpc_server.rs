@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use trnsprt::kern_rpc::{
-	CallToolReq, CallToolRes, HealthRes, KernRpc, ListToolsReq, ListToolsRes, ShutdownRes,
+	serve_kern_rpc, verify_auth, CallToolReq, CallToolRes, HealthRes, KernRpc, ListToolsReq,
+	ListToolsRes, ShutdownRes,
 };
-use trnsprt::typed::{Channel, JsonEnvelopeCodec, LocalListener};
+use trnsprt::typed::{AdapterError, Channel, JsonEnvelopeCodec, LocalListener};
 use trnsprt::McpServer;
 
 #[derive(Clone)]
@@ -12,11 +13,24 @@ pub struct KernRpcHandler {
 	pub kern: Arc<crate::mcp::Server>,
 	// Fires the daemon's graceful-exit path (save then exit) — the hub's unload.
 	pub shutdown: Arc<tokio::sync::Notify>,
+	// Who the connection declared itself to be, proven only as far as "it holds
+	// this graph's secret". Empty for the in-process handler that never crossed
+	// a socket. Nothing consults it yet; items 9 and 18 are what will.
+	pub principal: String,
 }
 
 impl KernRpcHandler {
 	pub fn new(kern: Arc<crate::mcp::Server>, shutdown: Arc<tokio::sync::Notify>) -> Self {
-		Self { kern, shutdown }
+		Self {
+			kern,
+			shutdown,
+			principal: String::new(),
+		}
+	}
+
+	pub fn with_principal(mut self, principal: String) -> Self {
+		self.principal = principal;
+		self
 	}
 }
 
@@ -150,7 +164,35 @@ impl KernRpc for KernRpcHandler {
 	}
 }
 
-pub async fn serve_kern_rpc_loop(mut listener: LocalListener, handler: KernRpcHandler) {
+/// Gate first, dispatch second.
+///
+/// `make_handler` runs only after the token verifies, so the ordering is
+/// structural rather than a convention someone has to remember: on an
+/// unauthenticated connection there is no handler in existence for a `KernRpc`
+/// method to be dispatched to.
+pub(crate) async fn serve_authenticated<H, F>(
+	mut channel: Channel<JsonEnvelopeCodec>,
+	token: &str,
+	make_handler: F,
+) -> Result<(), AdapterError>
+where
+	H: KernRpc,
+	F: FnOnce(String) -> H,
+{
+	let principal = verify_auth(&mut channel, token).await?;
+	serve_kern_rpc(channel, make_handler(principal)).await
+}
+
+/// `token` is the graph's `mcp-token` (`ServeConfig::resolve_mcp_token`). It is
+/// taken by value because every connection needs it for the life of the loop —
+/// and if it ever arrives empty, `verify_auth` serves nobody rather than
+/// everybody.
+pub async fn serve_kern_rpc_loop(
+	mut listener: LocalListener,
+	handler: KernRpcHandler,
+	token: String,
+) {
+	let token = Arc::new(token);
 	loop {
 		let adapter = match listener.accept().await {
 			Ok(a) => a,
@@ -160,9 +202,15 @@ pub async fn serve_kern_rpc_loop(mut listener: LocalListener, handler: KernRpcHa
 			}
 		};
 		let handler = handler.clone();
+		let token = token.clone();
 		tokio::spawn(async move {
 			let channel = Channel::new(adapter, JsonEnvelopeCodec::new());
-			if let Err(e) = trnsprt::kern_rpc::serve_kern_rpc(channel, handler).await {
+			let served = serve_authenticated(channel, &token, |principal| {
+				tracing::debug!(target: "kern.kern_rpc", principal = %principal, "authenticated");
+				handler.with_principal(principal)
+			})
+			.await;
+			if let Err(e) = served {
 				tracing::warn!(target: "kern.kern_rpc", error = %e, "serve loop");
 			}
 		});
@@ -231,6 +279,195 @@ mod tests {
 		assert!(
 			handler.health().await.ingest_queue_refused >= 1,
 			"a refused ingest that no health surface reports is a lost write nobody can see"
+		);
+	}
+}
+
+// The gate itself. Not "the handshake round-trips" — that lives in trnsprt —
+// but the thing an unauthenticated caller is trying to reach: `call_tool`.
+#[cfg(test)]
+mod auth_gate_tests {
+	use super::*;
+	use std::sync::atomic::{AtomicUsize, Ordering};
+	use trnsprt::kern_rpc::{AuthReq, PRINCIPAL_CLI};
+	use trnsprt::typed::InprocAdapter;
+
+	const TOKEN: &str = "the-real-token";
+
+	// Counts what got through. `call_tool` incrementing at all on a refused
+	// connection is the failure — a gate that runs the tool and then complains
+	// has already done the damage.
+	#[derive(Clone, Default)]
+	struct Spy {
+		calls: Arc<AtomicUsize>,
+		principal: String,
+	}
+
+	impl KernRpc for Spy {
+		async fn shutdown(&self) -> ShutdownRes {
+			ShutdownRes { ok: true }
+		}
+		async fn health(&self) -> HealthRes {
+			HealthRes {
+				ok: true,
+				..Default::default()
+			}
+		}
+		fn call_tool(
+			&self,
+			_req: CallToolReq,
+		) -> impl ::core::future::Future<Output = CallToolRes> + Send {
+			let calls = self.calls.clone();
+			let principal = self.principal.clone();
+			async move {
+				calls.fetch_add(1, Ordering::SeqCst);
+				CallToolRes {
+					envelope: serde_json::json!({ "principal": principal }),
+				}
+			}
+		}
+		async fn list_tools(&self, _req: ListToolsReq) -> ListToolsRes {
+			ListToolsRes { tools: vec![] }
+		}
+	}
+
+	fn call_tool_frame() -> Value {
+		serde_json::json!({
+			"id": 1,
+			"method": "call_tool",
+			"params": { "req": { "name": "health", "args": {} } },
+		})
+	}
+
+	/// Drive one connection through the real gate. `auth` is what the client
+	/// sends first — `None` means it sends nothing and goes straight for the
+	/// tool, which is exactly what an unauthenticated caller would do.
+	///
+	/// The tool call is offered *twice*, and that is deliberate. A gate that
+	/// consumes the first frame as a handshake would swallow a single attempt
+	/// whether it verified anything or not, so one attempt cannot tell an open
+	/// gate from a closed one. Two can: past an open gate the second lands.
+	async fn attempt(auth: Option<AuthReq>) -> (usize, Option<Value>) {
+		let (server_side, client_side) = InprocAdapter::pair();
+		let calls = Arc::new(AtomicUsize::new(0));
+		let spy_calls = calls.clone();
+		let server = tokio::spawn(async move {
+			let channel = Channel::new(server_side, JsonEnvelopeCodec::new());
+			let _ = serve_authenticated(channel, TOKEN, move |principal| Spy {
+				calls: spy_calls,
+				principal,
+			})
+			.await;
+		});
+
+		let mut client = Channel::new(client_side, JsonEnvelopeCodec::new());
+		if let Some(auth) = auth {
+			let _ = client.send(serde_json::json!({ "auth": auth })).await;
+			let _ = client.recv().await; // the verdict frame
+		}
+		let mut result = None;
+		for _ in 0..2 {
+			if client.send(call_tool_frame()).await.is_err() {
+				break;
+			}
+			match client.recv().await {
+				Ok(Some(frame)) => {
+					if let Some(r) = frame.get("result") {
+						result = Some(r.clone());
+						break;
+					}
+				}
+				_ => break,
+			}
+		}
+		drop(client);
+		let _ = server.await;
+		(calls.load(Ordering::SeqCst), result)
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_connection_with_no_token_never_reaches_call_tool() {
+		let (calls, result) = attempt(None).await;
+		assert_eq!(
+			calls, 0,
+			"an unauthenticated caller ran a tool — the gate is decoration"
+		);
+		assert!(result.is_none(), "and it must get no result back either");
+	}
+
+	// Two wrong tokens, and the second is the one with teeth. `not-the-token` is
+	// a byte shorter than `TOKEN`, so the length check inside `ct_eq` refuses it
+	// without ever comparing a byte — on its own it leaves the compare untested,
+	// and gutting the compare's body kills nothing here. `the-real-tokex` is the
+	// same length and differs only in the final byte: only a compare that runs
+	// to the end refuses it.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_connection_with_the_wrong_token_never_reaches_call_tool() {
+		for offered in ["not-the-token", "the-real-tokex"] {
+			let (calls, result) = attempt(Some(AuthReq::new(offered, PRINCIPAL_CLI))).await;
+			assert_eq!(
+				calls, 0,
+				"a wrong token got a tool call through: {offered:?}"
+			);
+			assert!(result.is_none(), "offered {offered:?}");
+		}
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn the_right_token_gets_through_and_carries_its_principal() {
+		let (calls, result) = attempt(Some(AuthReq::new(TOKEN, PRINCIPAL_CLI))).await;
+		assert_eq!(calls, 1, "the daemon's own clients must still be served");
+		let res = result.expect("an authenticated call_tool answers");
+		assert_eq!(
+			res.pointer("/envelope/principal").and_then(Value::as_str),
+			Some(PRINCIPAL_CLI),
+			"the declared principal reaches the handler — the field items 9/18 ride"
+		);
+	}
+
+	// The compatibility half: past the gate, the wire is byte-for-byte what it
+	// was. Compared against the same handler called in-process, so a drift in
+	// the envelope shows up here rather than in an agent's tool output.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn an_authenticated_call_answers_exactly_what_the_handler_answers_directly() {
+		let handler = KernRpcHandler::new(
+			Arc::new(crate::test_support::mcp_server()),
+			Arc::new(tokio::sync::Notify::new()),
+		);
+		let direct = handler
+			.call_tool(CallToolReq {
+				name: "health".into(),
+				args: serde_json::json!({}),
+			})
+			.await
+			.envelope;
+
+		let (server_side, client_side) = InprocAdapter::pair();
+		let gated = handler.clone();
+		let server = tokio::spawn(async move {
+			let channel = Channel::new(server_side, JsonEnvelopeCodec::new());
+			let _ = serve_authenticated(channel, TOKEN, |p| gated.with_principal(p)).await;
+		});
+
+		let mut client = Channel::new(client_side, JsonEnvelopeCodec::new());
+		client
+			.send(serde_json::json!({ "auth": AuthReq::new(TOKEN, PRINCIPAL_CLI) }))
+			.await
+			.unwrap();
+		client.recv().await.unwrap().expect("a verdict frame");
+		client.send(call_tool_frame()).await.unwrap();
+		let frame = client.recv().await.unwrap().expect("a reply frame");
+		drop(client);
+		let _ = server.await;
+
+		let over_the_wire = frame
+			.pointer("/result/envelope")
+			.cloned()
+			.expect("call_tool result");
+		assert_eq!(
+			serde_json::to_string(&over_the_wire).unwrap(),
+			serde_json::to_string(&direct).unwrap(),
+			"the gate must add nothing to and take nothing from the answer"
 		);
 	}
 }
