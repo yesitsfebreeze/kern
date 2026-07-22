@@ -2,6 +2,33 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — swept every `**Gaps.**` block in `FEATURES.md` against
+  `ROADMAP.md` looking for more defects of item 98's kind — real, stated in a
+  description, carried by no item. **Found none.** Recording the negative result
+  with its method, so the next pass does not re-raise the same alarm.
+
+  The alarming-looking number is a false signal: **16 of 24 gap blocks cite no
+  ROADMAP item.** Spot-checking the two most concrete showed both are carried
+  anyway — "an entity dropped past the cap is gone" is closed item 5 (intended,
+  and counted by `unspilled_drops` on three health surfaces), and
+  `cmd_hub_merge`'s unguarded write is carried in item 9's section. Citation
+  style is not coverage, and counting citations measures the wrong thing.
+
+  So item 98 was a genuine one-off rather than the tip of a pattern, and it was
+  found by reading a neighbouring file rather than by any rule. Two heuristics
+  were tried and both came up empty: word-overlap between gap sentences and the
+  roadmap, and absence of an explicit item reference. The first is too loose to
+  discriminate, the second measures formatting.
+
+  Worth keeping the shape of the question even though the answer was "nothing
+  here": **a defect stated only in a present-tense description is not scheduled
+  work**, and that failure mode has produced three real items this run (95 out of
+  item 20's prose, 97 out of item 28's, 98 out of FEATURES §13). The sweep says
+  the backlog is currently clean of it, not that the failure mode is gone.
+
+  Decided by: verify-before-claiming — "16 of 24 uncited" looked like a finding
+  until two of them were opened, and neither was.
+
 - 2026-07-22 — item 24's title said "RPC socket has no auth" while its body said
   "mostly closed 2026-07-22". Retitled to what is actually true: the connection
   authenticates, the caller does not — same-uid callers remain
