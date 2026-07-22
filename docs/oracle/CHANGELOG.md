@@ -2,6 +2,29 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 57 mechanism half-closed (default-off): `decay_evidence`
+  (new, `src/tick/stigmergy.rs`) γ-damps `conf_alpha`/`conf_beta` toward the
+  Jeffreys prior `(1,1)` by a half-life, gated by `EVIDENCE_HALF_LIFE_SECS`
+  (new, `src/base/constants.rs`, default `0` = disabled = bit-identical today).
+  For each non-superseded resident entity:
+  `conf_alpha = 1.0 + heat::decayed(conf_alpha - 1.0, updated_at, now, half_life)`,
+  likewise `conf_beta`, then `refresh_score()`. Decaying `(α-1)`/`(β-1)` toward 0
+  keeps `(1,1)` as the floor; `heat::decayed` reused. `run_gc` calls it gated `>
+  0` (hourly cadence). `observe_support`/`observe_contradict` now stamp
+  `updated_at` so every conf change tracks a timestamp (previously only the
+  dedup caller did — a decay using `updated_at` would mis-read GNN-updated conf
+  as stale); redundant `accept.rs:153` stamp removed. `updated_at` is existing
+  federated state — **no schema/wire change**; broadened "text changed" →
+  "mutated". Local-only mutable state, no gossip/wire. Proved by
+  `evidence_decay_damps_alpha_beta_toward_prior_by_half_life` (α=11 β=3,
+  `now-7d`, half-life 7d → α≈6.0 β≈2.0), `evidence_decay_half_life_zero_is_a_noop`,
+  `evidence_decay_skips_superseded_entities`,
+  `observe_support_and_observe_contradict_stamp_updated_at`; `dedup.rs:121`
+  green unedited. `cargo test -p kern --lib` 942 passed, 0 failed, 4 ignored.
+  Negative control: early-return reds, green on revert.
+  Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming.
+  Still open: the policy decision (enable-by-default + rate).
+
 - 2026-07-22 — item 84 sub-fix closed: `kern unnamed promote <id> <name>
   <seed> [--mass N]` promotes an existing unnamed kern to named by giving it a
   graviton in place (no move, no id change — keeps entities/children/parent,

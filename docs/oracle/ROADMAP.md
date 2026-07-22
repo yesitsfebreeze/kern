@@ -2069,12 +2069,45 @@ parameter on the ingest schema (`src/mcp/tools_mutate.rs:19-33`);
 alignment (`src/tick/gnn_propagate.rs:233`). Observer-reputation weighting is
 also unbuilt.
 
-### 57. No evidence decay `[lifecycle]`
+### 57. No evidence decay — mechanism half-closed 2026-07-22 (default-off) `[lifecycle]`
 
-`conf_alpha` and `conf_beta` only grow — the sole zeroing is the remote strip
+**Mechanism half-closed 2026-07-22, default-off; policy decision still open.**
+`decay_evidence` (new pub fn, `src/tick/stigmergy.rs`) γ-damps
+`conf_alpha`/`conf_beta` toward the Jeffreys prior `(1,1)` by a half-life, gated
+by `EVIDENCE_HALF_LIFE_SECS` (new, `src/base/constants.rs`, default `0` =
+disabled = bit-identical today). For each non-superseded resident entity:
+`conf_alpha = 1.0 + heat::decayed(conf_alpha - 1.0, updated_at, now, half_life)`,
+likewise `conf_beta`, then `refresh_score()`. Decaying `(α-1)`/`(β-1)` toward 0
+keeps `(1,1)` as the floor and never crosses it; `heat::decayed` is the existing
+exponential. `run_gc` calls it gated by `EVIDENCE_HALF_LIFE_SECS > 0` (GC
+cadence, hourly). `observe_support`/`observe_contradict` (`src/base/types.rs`)
+now stamp `self.updated_at = Some(SystemTime::now())` so **every** conf change
+tracks a timestamp (previously only the dedup caller did, so a decay using
+`updated_at` would mis-read GNN-updated conf as stale); the redundant
+`accept.rs:153` stamp removed. `updated_at` is existing federated state
+(`merge.rs` `join_max_time`) — **no schema/wire change**; the stamp broadens its
+meaning from "text changed" to "mutated", which decay needs. Local-only mutable
+state (`merge_entity_never_imports_replica_local_mutable_state`), no
+gossip/wire. Proved by `evidence_decay_damps_alpha_beta_toward_prior_by_half_life`
+(α=11 β=3, `updated_at = now-7d`, half-life 7d → α≈6.0 β≈2.0, score refreshed),
+`evidence_decay_half_life_zero_is_a_noop`, `evidence_decay_skips_superseded_entities`,
+`observe_support_and_observe_contradict_stamp_updated_at`; existing
+`dedup.rs:121` assert green unedited. `cargo test -p kern --lib` 942 passed, 0
+failed, 4 ignored. Negative control: `decay_evidence` early-return reds the
+damps test, green on revert. Decided by fix-the-root (ship the mechanism, not
+the policy), name-the-tradeoff (default-off — today unchanged; the rate question
+`bayesian-belief.md:161` is the operator's; a future on-by-default must
+re-measure recall since `conf_variance` shrinks under decay and item 65's
+lower-bound ranking moves), verify-before-claiming (negative control). See the
+2026-07-22 CHANGELOG entry.
+
+**Still open:** the policy decision — enable-by-default and the rate (per-tick /
+per-day / access-tied).
+
+~~`conf_alpha` and `conf_beta` only grow — the sole zeroing is the remote strip
 (`src/base/merge.rs:28-29`) — so stale consensus takes proportionally many new
 observations to unseat. Tick-based γ damping is an open design
-(`decisions/bayesian-confidence.mdx:137`).
+(`decisions/bayesian-confidence.mdx:137`).~~
 
 ### 58. Supersede chains are unbounded while contested `[lifecycle]`
 
