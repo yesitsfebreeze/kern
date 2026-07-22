@@ -691,24 +691,30 @@ re-run 2026-07-22). What is left is everything the gate does not cover.
      whole arm to its pre-change body fails both and leaves the other four
      bind tests green, so neither test is a tautology.
    - **The peer check's wiring is covered in the bind arm and not in
-     `connect_kern`.** It was recorded here as untestable on one uid; it was
-     untested. The arm is reached through `bind_unix(path, expected_peer)`
+     `connect_kern`.** ~~It was recorded here as untestable on one uid; it was
+     untested.~~ **Closed 2026-07-22 — `connect_kern` now has the seam too.** A
+     `#[cfg(test)]` `connect_kern` path injects the expected uid (mirroring the
+     bind arm's `bind_unix(path, expected_peer)`), and
+     `connect_kern_refuses_when_the_peer_uid_differs` drives it with
+     `geteuid().wrapping_add(1)` against a socket this uid serves, asserting
+     `AdapterError::UntrustedEndpoint` naming `served by uid {euid}`. Negative
+     control (neuter `require_peer_uid` → foreign uid accepted → test reds,
+     green on revert) — same mutation the bind arm test is mutation-tested with.
+     `cargo test -p trnsprt` 61 passed (+1). The owner-check half
+     (`require_owned_by_caller`) was already covered by
+     `connect_kern_refuses_a_foreign_endpoint_before_it_connects` via a
+     root-owned `foreign_path()`; this closes the peer-uid half — the one gap
+     this entry named.
+     The arm is reached through `bind_unix(path, expected_peer)`
      (`src/trnsprt/src/typed/local.rs:507`), split out exactly as
      `require_peer_uid` is split out of `require_peer_is_caller` and for the
      same reason, so a test drives the whole arm against a real socket and a
      real `SO_PEERCRED` read with a uid that is deliberately not the server's.
      The two alternatives considered do not bite: a same-uid child with a
-     different exe is *correctly* accepted,
-     (`:508`), split out exactly as `require_peer_uid` is split out of
-     `require_peer_is_caller` and for the same reason, so a test drives the
-     whole arm against a real socket and a real `SO_PEERCRED` read with a uid
-     that is deliberately not the server's. The two alternatives considered do
-     not bite: a same-uid child with a different exe is *correctly* accepted,
-     because the check claims a uid and nothing finer (measured above), and an
-     abstract-namespace socket or a `socketpair` has no filesystem name, so a
-     path bind never returns `EADDRINUSE` for one and the arm is never
-     entered. `connect_kern` has no such seam and its `require_peer_is_caller`
-     call remains code-review-only — one line, not two.
+     different exe is *correctly* accepted, because the check claims a uid and
+     nothing finer (measured above), and an abstract-namespace socket or a
+     `socketpair` has no filesystem name, so a path bind never returns
+     `EADDRINUSE` for one and the arm is never entered.
    - **The live squat end to end is still not executable.** A real foreign
      daemon holding the real path needs a second uid. What is proven is the
      symlink shape, the verdict, and the arm's control flow; what is not is a

@@ -2,6 +2,18 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 24 residue #2 closed: `connect_kern` peer-uid check now has
+  a test seam mirroring the bind arm's `bind_unix(path, expected_peer)` — a
+  `#[cfg(test)]` path injects the expected uid, and
+  `connect_kern_refuses_when_the_peer_uid_differs` drives it with
+  `geteuid().wrapping_add(1)` against a socket this uid serves, asserting
+  `AdapterError::UntrustedEndpoint` naming `served by uid {euid}`. Negative
+  control (neuter `require_peer_uid` → foreign uid accepted → test reds, green
+  on revert) — same mutation the bind arm test uses. `cargo test -p trnsprt` 61
+  passed (+1). The owner-check half was already covered via a root-owned
+  `foreign_path()`; this closes the peer-uid half — the gap item 24 named.
+  Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming.
+
 - 2026-07-22 — item 52 mechanism half-closed (default-off): `seed_examples`
   (`src/base/accept.rs`) now char-chunks a single long graviton-seed paragraph
   at `GRAVITON_SEED_CHAR_CHUNK` (new, `src/base/constants.rs`, default `4000`)
