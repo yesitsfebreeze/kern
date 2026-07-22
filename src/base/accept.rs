@@ -599,6 +599,7 @@ pub fn supersede_renamed(
 	new_id: &str,
 	new_vec: &[f32],
 	old_external_id: &str,
+	new_external_id: &str,
 	reason_text: &str,
 ) -> Option<String> {
 	let mut hit = None;
@@ -618,6 +619,18 @@ pub fn supersede_renamed(
 		None => return None,
 	};
 	if old_id == new_id {
+		// Pure rename: content unchanged, same id. Re-key the survivor's
+		// external_id and source-index from the old path to the new path so
+		// a `forget --source file://new` resolves and `file://old` does not.
+		if let Some(kern) = g.get_mut(&old_kern_id) {
+			if let Some(entity) = kern.entities.get_mut(new_id) {
+				entity.external_id = new_external_id.to_string();
+			}
+		}
+		if g.kern_of_source(old_external_id).is_some() {
+			g.clear_source_entry(old_external_id);
+		}
+		g.set_source_entry(new_external_id.to_string(), old_kern_id.clone());
 		return None;
 	}
 	// The old path no longer exists; drop its source-keyed entries if any.

@@ -102,6 +102,7 @@ pub(crate) async fn place_document(
 	}
 
 	let external_id = job.source.source_id().unwrap_or_default();
+	let new_external_id = external_id.clone();
 
 	// A rename carries the old path's external_id so the stale `Document` it
 	// names can be superseded. The new entity's vector is needed for the
@@ -151,7 +152,7 @@ pub(crate) async fn place_document(
 		let renamed_old_id = if !r.deduped {
 			job.replaces.as_deref().and_then(|old_external| {
 				rename_vec.as_deref().and_then(|nv| {
-					accept::supersede_renamed(&mut g, &root_id, &r.entity_id, nv, old_external, "renamed")
+					accept::supersede_renamed(&mut g, &root_id, &r.entity_id, nv, old_external, &new_external_id, "renamed")
 				})
 			})
 		} else {
