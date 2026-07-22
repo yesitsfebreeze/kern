@@ -2,6 +2,33 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 78 half-closed (the "no warning at config load" half): a
+  non-fatal warning now fires at config load when a configured `embed.url` or
+  `reason.url` points at a non-local host, so the one setting that voids
+  "local-first, zero egress" is legible the moment it is loaded. `is_local_url`
+  (new, `src/llm.rs`, pub) is the detector: loopback (`127/8`, `::1`,
+  `localhost`), RFC1918 (`10/8`, `172.16-31/12`, `192.168/16`), link-local
+  (`169.254/16`), the `ollama` host, or the existing `is_local_ollama`
+  heuristic (`:11434` / `//localhost` / `//127.0.0.1`) — reused, not duplicated.
+  No URL-parser dep: `host_of` extracts the span between `//` and the first
+  `:`/`/`/`?` (with a bracketed-IPv6 branch so `[::1]:port` resolves). The
+  WSL2-gateway the LoCoMo run used (`172.27.176.1:11434`) is RFC1918
+  `172.16/12`, so no false alarm. `Config::egress_warnings` (new, pure, no I/O)
+  returns one warning string per rejected URL — checks `reason.url` raw, not
+  via `reason_url()` fallback, so a silently-inherited `embed.url` does not
+  double-count. `boot_config` (`src/main.rs`) emits each via `tracing::warn!`
+  after `validate`, non-fatal. Tests pin both directions (loopback/RFC1918 incl.
+  `172.27.176.1`/link-local/ollama/`:11434` local; rejects `api.openai.com`,
+  `example.com`, `203.0.113.5`, `8.8.8.8`, `172.32.0.1` outside `/12`) and
+  `egress_warnings` (loopback → none, public `embed.url` → one naming
+  field+host, both public → two, empty `reason.url` inherits without
+  double-count). 909 passed (+4), 1 pre-existing env flake
+  (`config::tests::resolve_root_returns_start_when_no_kern_ancestor`, stray
+  `/tmp/.kern`, fails identically on the clean baseline).
+  Decided by: verify-before-claiming, name-the-tradeoff, fix-the-root.
+  Still open: egress redaction, allowlist, egress log — the item names them;
+  this slice closed only the warning half.
+
 - 2026-07-22 — item 77 closed: golden-vector tests pin the exact pre-hash
   composed string at each load-bearing identity-hash site, so a future
   composition change breaks a test the same way a bincode schema change would.
