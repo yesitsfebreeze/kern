@@ -259,6 +259,128 @@ item 24. `graviton`/`claim_kind` were the unblocked half and are closed. The ite
 does not close on the read side alone, and it cannot close at all until item 24
 decides how trust crosses the socket.
 
+### 102. The GNN re-embeds the same corpus differently in every process `[retrieval]`
+
+**Filed 2026-07-22.** It sits below item 9 because item 9 is the more severe
+defect, and above everything after it because item 9 is blocked on item 24's
+principal and this is blocked on nothing. It is the first Tier-1 item that can
+be started.
+
+**The symptom that found it.** `kern-gnn recall@1` measured 0.9028 and then
+0.8611 across two runs of the *unchanged* suite, against a 0.8500 floor — 0.0111
+of headroom, with nothing in flight touching retrieval.
+`e2e/test_gnn_recall.py` records its sample as "8 runs, 2026-07-22:
+0.8889 - 0.9306" and sets the floor below the worst of it. 0.8611 is under that
+recorded minimum, so the distribution the floor was drawn from is already
+falsified by observation; the floor is not conservative, it is uncalibrated.
+
+**Four sources, all read in source, three of them measured.**
+
+1. **Weight init.** `GCNLayer::new` (`src/gnn/gcn.rs:20`) draws an unseeded
+   `rand::rng()`, and `run_learned_propagation` builds both layers through it.
+   Every seedable variant already exists and is used only by tests —
+   `GCNLayer::with_rng` (`src/gnn/gcn.rs:24`), `LinearLayer::with_rng`
+   (`src/gnn/layer.rs:31`), `Tensor::rand_with` (`src/gnn/tensor.rs:80`).
+2. **Negative-edge sampling.** `sample_negative_edges`
+   (`src/gnn/propagate.rs:147`) drew the same unseeded `rand::rng()`, so the
+   link-prediction gradient trained against a
+   different negative set every run.
+3. **Snapshot node order.** `build_gnn_snapshot` iterates `kern.entities`
+   (`src/tick/gnn_propagate.rs:71`), a `HashMap`, so `ids`, the feature-matrix
+   rows and every index in `pos_edges` are per-process hash order;
+   `kern.reasons` (`src/tick/gnn_propagate.rs:118`) orders `pos_edges` the same
+   way.
+4. **Index write-back order.** `apply_gnn_updates` iterates the `updates`
+   `HashMap` (`src/tick/gnn_propagate.rs:212`) and inserts into `gnn_entity_idx`
+   in exactly that order (`src/tick/gnn_propagate.rs:245`). HNSW links each new
+   node to what is already present and takes its entry point from the first
+   insert (`src/base/hnsw.rs:166`), so the GNN index's *topology* is per-process
+   random even where the embeddings are not.
+
+**Measured, not argued.** Two `run_learned_propagation` calls in ONE process over
+one identical `GnnSnapshot` return different embeddings — `n0`'s first component
+0.4227 against 0.2562, not a last-bit difference — and different marshalled
+weights. Across three processes the `updates` iteration head is
+`["n1","n23",…]`, `["n18","n17",…]`, `["n2","n12",…]`.
+
+Sources 3 and 4 are item 29's defect exactly — "two hashed containers reached the
+adjacency … Same corpus, different index, every process" — in a second place that
+sweep did not reach. The remedy there was `BTreeSet` (`src/base/diskann.rs:123`).
+
+**What it costs is not a wrong answer, it is an unfalsifiable one.** Every recall
+number in this file measured through the GNN path is one draw from an unstated
+distribution — item 28's, item 97's, and the floors inside
+`e2e/test_gnn_recall.py` itself. A gate under a nondeterministic measurement
+reddens on the schedule of a coin rather than of a regression, and a green one
+certifies nothing either.
+
+**The fix, and the one part of it that is a decision.** Thread a seed: give
+`GnnSnapshot` one, build the layers through the `with_rng` constructors that
+already exist, hand `sample_negative_edges` an `&mut R`, and make both `HashMap`
+walks sort by id. What is NOT decided here is where the seed comes from. A
+constant makes two same-shaped kerns train identically; deriving it from the kern
+id keeps kerns independent *and* keeps a rerun reproducible, which is the
+recommendation and not yet a ruling.
+
+**Success is a delta with a negative control.** `two_propagations_of_one_snapshot_are_bit_identical`
+comparing `to_bits()`, and it must be shown FAILING with the seed reverted, or it
+is asserting on a constant. These are pure functions over local state with no
+process global, so `cargo nextest` and CI's `cargo test --workspace --locked`
+cannot disagree about them. **e2e cannot be the gate here** — a nondeterministic
+test that happens to pass proves nothing — but it is the confirmation
+afterwards: once seeded, `e2e/test_gnn_recall.py` must print the *same*
+recall@1 on three consecutive runs, and only then can the floor be set to that
+number instead of under a sample.
+
+Deciding behavior: verify-before-claiming — a measurement that moves on its own
+cannot certify anything, including that it is broken.
+
+**Closed 2026-07-22 — and the ruling is neither of the two options above.**
+`GnnSnapshot` carries a `seed` (`src/gnn/propagate.rs:59`); one `StdRng`
+(`src/gnn/propagate.rs:80`) feeds `sample_negative_edges` and both
+`GCNLayer::with_rng` calls, and all three `HashMap` walks are sorted
+(`src/tick/gnn_propagate.rs:71`, `:115`, `:212`). The seed is derived from the
+CORPUS — the sorted node ids, which are content hashes, streamed through SHA-256
+(`gnn_seed`, `src/tick/gnn_propagate.rs:182`).
+
+Why not the recommendation: a kern-id seed does not satisfy this item's own
+title. `Kern::new_unnamed` / `new_named_child` fold `now_nanos` into the id
+(`src/base/types.rs:513`), so the same corpus re-ingested into a fresh project is
+a new kern, a new seed and a different embedding — measured, four e2e runs under
+a kern-id seed printed recall@1 0.9306 / 0.8889 / 0.9167 / 0.9306. A constant
+held three runs identical but hands every kern in the fleet the same initial
+weights, so an initialisation that is bad for some graph shape is bad for all of
+them at once with no diversity left to expose it. The corpus is the input the
+title names and the only one with both properties.
+
+That experiment also settled that there was no fifth source: under a constant the
+whole suite — ingest, seed-index build, fusion, query — reproduced exactly, so
+the kern id was the entire residual.
+
+Both negative controls were run against the shipped tree, not asserted.
+Restoring `rand::rng()` fails
+`two_propagations_of_one_snapshot_are_bit_identical` on `n0` at 0.2173 against
+-0.1046 — a sign flip, not a last-bit difference. Removing the two sorts fails
+`two_identical_kerns_snapshot_in_the_same_order`, which builds two kerns the same
+way in one process and gets two unrelated node orders (the specific permutation
+differs per run, which is the point). `cargo nextest run --workspace` (994
+passed) and `cargo test --workspace --locked` agree, as predicted.
+
+The e2e confirmation ran and held: three consecutive runs printed recall@1
+0.9028, recall@5 0.9583, MRR 0.9315, identically. `e2e/test_gnn_recall.py` now
+carries those values as the counts they are — `65 / 72` and `69 / 72`, because
+the printed `0.9028` is a rounded-UP display of 65/72 and a floor pasted from it
+fails against the run it was read from. The old floors and the "8 runs:
+0.8889 - 0.9306"
+sample are deleted rather than kept for comparison — they described a
+distribution nothing draws from now, and one run of the unchanged suite had
+already fallen through the bottom of it at 0.8611.
+
+Note the 0.9028 is *below* several draws the old stochastic path produced. That
+is not a regression: the old numbers were draws, this one is the value. Item 28's
+and item 97's recall figures were measured through the unseeded path and remain
+uncomparable to it.
+
 ---
 
 # Tier 3 — the embeddable-endpoint track
@@ -857,7 +979,7 @@ half the harness can already claim.
 
 ### 25. O(N) importance scan per retrieve `[retrieval]`
 
-`seed_important` (`src/retrieval/seed.rs:127`) iterates `g.all()` ×
+`seed_important` (`src/retrieval/seed.rs:131`) iterates `g.all()` ×
 `kern.entities`, called unconditionally once per retrieve
 (`src/retrieval/query.rs`, in `retrieve_profiled`).
 
@@ -891,7 +1013,7 @@ kern's entities on a single thread, so a one-kern graph — what `e2e/` builds a
 what a fresh install is — scanned the whole corpus serially however many cores
 were free. This item's own "Rayon-parallel" claim was wrong in exactly the case
 that matters. The inner walk now splits too
-(`src/retrieval/seed.rs:149`), on 8 cores:
+(`src/retrieval/seed.rs:177`), on 8 cores:
 
 | N=100k | before | after | |
 |---|---|---|---|
@@ -920,9 +1042,9 @@ changes an input to the importance gate (`has_vector`, kind, `access_count`)
 while leaving the epoch untouched.
 
 Worse, the one mutation that *creates* importance is epoch-silent on purpose:
-`commit_access_ids` (`src/retrieval/score.rs:354`) stamps access on every
+`commit_access_ids` (`src/retrieval/score.rs:361`) stamps access on every
 delivered result and deliberately bypasses `get_mut` so it will not invalidate
-the semantic query cache (`src/retrieval/score.rs:320`). An eligible-set index
+the semantic query cache (`src/retrieval/score.rs:360`). An eligible-set index
 keyed on the epoch would never see a Claim cross
 `important_access_threshold` — stale forever, in the direction that silently
 drops seeds and moves recall with no error anywhere.
@@ -1222,7 +1344,7 @@ on the single tick loop, stalling large kerns.~~ **(closed 2026-07-21.)** The
 stall was measured before it was changed, by a new instrument in the shape of
 `tests/gc_scale.rs` — `tests/gnn_scale.rs`, `#[ignore]`d, release-only. At the
 shipped defaults — `min_thoughts` 128 and `train_epochs` 24
-(`src/gnn/propagate.rs:16-17`) — over 384-dim vectors, one propagation cost
+(`src/gnn/propagate.rs:18-19`) — over 384-dim vectors, one propagation cost
 0.64s at 128 entities, 6.4s
 at 1024, 21.6s at 2048 and 79.7s at 4096. Every other tick task at the same
 sizes was sub-millisecond: `stigmergy_gc` 0.151ms, `commit_access` 0.002ms,
@@ -1257,7 +1379,7 @@ Moving training off the loop also opened a write-back race the inline version
 could not have: an entity superseded *during* training would have been
 re-inserted into `gnn_entity_idx` by the apply step, undoing the supersede
 removal. `apply_gnn_updates` now re-checks status at write time
-(`src/tick/gnn_propagate.rs:166`).
+(`src/tick/gnn_propagate.rs:225`).
 
 ~~Remaining: **the cost itself is untouched.** A propagation still takes 79.7s at
 N=4096.~~ **(closed 2026-07-22.)** The adjacency is now stored as its nonzeros
@@ -2002,7 +2124,7 @@ incomplete — no item below produces a wrong answer today.
 There is no `Contradicts` reason kind (`src/base/types.rs:90-99`) and no `stance`
 parameter on the ingest schema (`src/mcp/tools_mutate.rs:19-33`);
 `observe_contradict` (`src/base/types.rs:434`) has exactly one caller, GNN
-alignment (`src/tick/gnn_propagate.rs:163`). Observer-reputation weighting is
+alignment (`src/tick/gnn_propagate.rs:233`). Observer-reputation weighting is
 also unbuilt.
 
 ### 57. No evidence decay `[lifecycle]`
@@ -2129,7 +2251,7 @@ via health and `kern://health`
 
 Three that must be judged together, since each moves the others:
 min-max normalize `apply_boosts`, which is purely additive and unnormalized today
-(`score * confidence + boost + fact_bonus`, `src/retrieval/score.rs:90-102`); swap
+(`score * confidence + boost + fact_bonus`, `src/retrieval/score.rs:94-109`); swap
 the hand-rolled stemmer (`src/base/lexical.rs:244`, no stopword list, no
 `rust-stemmers` in `Cargo.toml`) for `rust-stemmers` 1.2.0 + stopwords, which
 needs a BM25 rebuild; and validate-or-remove GNN reranking, whose only expression
@@ -2496,7 +2618,7 @@ found this.
 
 **Closed. The premise was right and understated: there were two independent
 reasons no propagation ran, and only one of them was the corpus.**
-`DEFAULT_MIN_THOUGHTS` is 128 (`src/gnn/propagate.rs:16`) and the recall corpus
+`DEFAULT_MIN_THOUGHTS` is 128 (`src/gnn/propagate.rs:18`) and the recall corpus
 is 36 facts (`e2e/test_recall.py:199`) — but `test_recall.py` drives the CLI,
 and **the CLI has no tick loop at all**. `do_gnn_propagate` is reachable only
 from `tick::start` (spawned by `store::Registry::open`, i.e. a daemon or `kern

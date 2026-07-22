@@ -18,7 +18,7 @@ new observers arrive.
 > ever supports (`src/base/accept.rs:162`). What moves `β` is GNN propagation —
 > each refreshed embedding is compared against the entity's own vector and scores
 > `observe_support` at cosine alignment ≥ 0.5, `observe_contradict` below it
-> (`src/tick/gnn_propagate.rs:153-158`). So the "observer" that can contradict is
+> (`src/tick/gnn_propagate.rs:229-233`). So the "observer" that can contradict is
 > the graph's own learned view, not a second agent. Since the propagation chain
 > became fallible end to end (`src/gnn/model.rs:19`, `src/gnn/model.rs:30`) a
 > failed forward or backward applies no updates at all, so belief moves only on a
