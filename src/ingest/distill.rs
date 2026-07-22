@@ -3,6 +3,23 @@ pub struct Claim {
 	pub text: String,
 	pub kind: String,
 	pub valid_from: Option<std::time::SystemTime>,
+	// 1-based turn numbers in the transcript the claim was drawn from, when the
+	// distill LLM cited them. Empty = uncited (the graph still carries the claim;
+	// the section carrier stays empty, matching the pre-provenance baseline).
+	pub turns: Vec<usize>,
+}
+
+// Split a transcript into turns on blank-line boundaries — the same unit the
+// direct path (paragraph_split) and the LoCoMo harness (turns joined by "\n\n")
+// use, so a 1-based turn number here maps to the same turn the caller indexed.
+fn split_turns(conversation: &str) -> Vec<String> {
+	conversation
+		.replace("\r\n", "\n")
+		.split("\n\n")
+		.map(str::trim)
+		.filter(|t| !t.is_empty())
+		.map(str::to_string)
+		.collect()
 }
 
 // The built-in claim kinds; registered kinds (root.claim_kinds) extend this set.
@@ -40,12 +57,25 @@ pub fn distill(
 		return Some(Vec::new());
 	}
 	let kinds = kind_list(extra_kinds);
+	// Inline 1-based turn markers so the model can cite which turns a claim is
+	// drawn from; the citation populates Source::Session.section at ingest.
+	let turns = split_turns(conversation);
+	let marked: String = turns
+		.iter()
+		.enumerate()
+		.map(|(i, t)| format!("[{i}] {t}"))
+		.collect::<Vec<_>>()
+		.join("\n\n");
 	let prompt = format!(
 		"Extract durable, reusable knowledge from this conversation between a \
-user and an AI coding assistant. Output ONLY a JSON array. Each element must be \
+user and an AI coding assistant. The transcript below is marked with 1-based \
+turn numbers in [brackets]. Output ONLY a JSON array. Each element must be \
 {{\"text\": \"<one self-contained statement>\", \"kind\": \"<one of: {kinds}>\"}}. Optionally add \
 \"valid_from\": \"<ISO8601 date>\" ONLY when the statement itself says when it \
 became true (e.g. \"since March 2026\", \"as of v2\"); omit it otherwise. \
+Optionally add \"turns\": [<1-based turn numbers the claim is drawn from, as marked>] \
+when the claim is grounded in specific turns; omit it when it spans the whole \
+transcript or is uncertain. \
 Include only knowledge worth \
 remembering across future sessions: user preferences, decisions and their \
 rationale, ongoing project state, durable facts, structural code facts, \
@@ -58,7 +88,7 @@ the fact in full. Prefer the single most complete phrasing over several \
 partial ones. \
 Skip greetings, acknowledgements, one-off task mechanics, and anything \
 ephemeral. If nothing is worth keeping, output []. Do not wrap the array in \
-markdown.\n\nCONVERSATION:\n{conversation}\n"
+markdown.\n\nCONVERSATION:\n{marked}\n"
 	);
 	let raw = llm(&prompt);
 	if raw.trim().is_empty() {
@@ -116,10 +146,25 @@ pub(crate) fn parse_claims(raw: &str, extra_kinds: &[String]) -> Option<Vec<Clai
 			.map(str::trim)
 			.filter(|s| !s.is_empty())
 			.and_then(|s| crate::base::time::parse_rfc3339(s).ok());
+		// 1-based turn citations from the marked transcript; non-integer or < 1
+		// entries are dropped, so a malformed `turns` degrades to empty (uncited),
+		// never to a panic or a wrong turn.
+		let turns: Vec<usize> = it
+			.get("turns")
+			.and_then(|v| v.as_array())
+			.map(|a| {
+				a.iter()
+					.filter_map(|x| x.as_u64().or_else(|| x.as_f64().map(|f| f as u64)))
+					.filter(|n| *n >= 1)
+					.map(|n| n as usize)
+					.collect()
+			})
+			.unwrap_or_default();
 		out.push(Claim {
 			text,
 			kind,
 			valid_from,
+			turns,
 		});
 	}
 	Some(out)
@@ -159,6 +204,37 @@ mod tests {
 		let llm = stub(r#"[{"text":"x","kind":"banana"}]"#);
 		let claims = distill("c", &[], &llm).expect("some");
 		assert_eq!(claims[0].kind, "fact");
+	}
+
+	#[test]
+	fn parse_claims_records_turn_provenance() {
+		let llm = stub(r#"[{"text":"the key is in vault X","kind":"fact","turns":[1,3]}]"#);
+		let claims = distill("turn one\n\nturn two\n\nturn three", &[], &llm).expect("some");
+		assert_eq!(claims.len(), 1);
+		assert_eq!(claims[0].turns, vec![1, 3], "cited turn numbers round-trip");
+	}
+
+	#[test]
+	fn turns_absent_or_malformed_leaves_empty() {
+		let no_turns = stub(r#"[{"text":"x","kind":"fact"}]"#);
+		assert!(distill("c", &[], &no_turns).expect("some")[0]
+			.turns
+			.is_empty());
+		// floats accepted, zeros/negatives dropped — degrades to empty, never panics
+		let messy = stub(r#"[{"text":"y","kind":"fact","turns":[2.0,0,"oops"]}]"#);
+		assert_eq!(distill("c", &[], &messy).expect("some")[0].turns, vec![2]);
+	}
+
+	#[test]
+	fn split_turns_breaks_on_blank_lines() {
+		assert_eq!(split_turns("a\n\nb\n\nc"), vec!["a", "b", "c"]);
+		assert_eq!(split_turns("one block"), vec!["one block"]);
+		assert_eq!(
+			split_turns("\r\na\r\n\r\nb"),
+			vec!["a", "b"],
+			"CRLF normalized"
+		);
+		assert!(split_turns("\n\n\n").is_empty());
 	}
 
 	#[test]
