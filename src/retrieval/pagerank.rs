@@ -1,15 +1,59 @@
 use crate::base::graph::GraphGnn;
 use crate::base::search::EntityHit;
+use std::cell::Cell;
 use std::collections::HashMap;
 
-// Returns the teleport vector and its support, ascending. The support is what
-// bounds the iteration: personalized mass starts there and reaches nowhere else.
+// The four vectors the walk needs are the width of the graph while a query
+// touches a slice of it, so building them per call charges every query 25 bytes
+// a node for pages it will not read. Lent by the thread instead of allocated,
+// and handed back zeroed over the reached set alone — which is the only region
+// that can hold a non-zero, by the same argument that makes the confined walk
+// exact. No arithmetic and no iteration order changes, so unlike a sparse rank
+// vector this does not put bit-identity in play.
+#[derive(Default)]
+struct Buffers {
+	tele: Vec<f64>,
+	rank: Vec<f64>,
+	next: Vec<f64>,
+	in_reached: Vec<bool>,
+}
+
+impl Buffers {
+	const fn new() -> Self {
+		Self {
+			tele: Vec::new(),
+			rank: Vec::new(),
+			next: Vec::new(),
+			in_reached: Vec::new(),
+		}
+	}
+
+	// Grow only: a shorter graph leaves the tail allocated and zeroed, and every
+	// element below the high-water mark is zero between calls.
+	fn grow(&mut self, n: usize) {
+		if self.tele.len() < n {
+			self.tele.resize(n, 0.0);
+			self.rank.resize(n, 0.0);
+			self.next.resize(n, 0.0);
+			self.in_reached.resize(n, false);
+		}
+	}
+}
+
+thread_local! {
+	// Taken for the duration of a call, so a panic mid-walk leaves the thread with
+	// empty vectors and the next call re-allocates rather than reading dirt.
+	static BUFFERS: Cell<Buffers> = const { Cell::new(Buffers::new()) };
+}
+
+// Fills `tele` and returns its support, ascending. The support is what bounds the
+// iteration: personalized mass starts there and reaches nowhere else.
 fn teleport_vector(
 	seeds: &[EntityHit],
 	id_to_idx: &HashMap<String, usize>,
-	n: usize,
-) -> (Vec<f64>, Vec<usize>) {
-	let mut tele = vec![0.0f64; n];
+	tele: &mut [f64],
+) -> Vec<usize> {
+	let n = tele.len();
 	let mut support: Vec<usize> = Vec::with_capacity(seeds.len());
 	let mut seed_sum = 0.0;
 	for s in seeds {
@@ -28,13 +72,13 @@ fn teleport_vector(
 		for &i in &support {
 			tele[i] /= seed_sum;
 		}
-		(tele, support)
+		support
 	} else {
 		let u = 1.0 / (n as f64);
 		for t in tele.iter_mut() {
 			*t = u;
 		}
-		(tele, (0..n).collect())
+		(0..n).collect()
 	}
 }
 
@@ -135,13 +179,24 @@ fn pagerank_at(
 	}
 	let out = &adj.out;
 	let d = damping.clamp(0.0, 1.0);
-	let (tele, support) = teleport_vector(seeds, &adj.id_to_idx, n);
 
-	let mut rank = vec![0.0f64; n];
+	let mut buffers = BUFFERS.with(|b| b.take());
+	buffers.grow(n);
+	let Buffers {
+		tele,
+		rank,
+		next,
+		in_reached,
+	} = &mut buffers;
+	let tele = &mut tele[..n];
+	let mut rank = &mut rank[..n];
+	let mut next = &mut next[..n];
+	let in_reached = &mut in_reached[..n];
+
+	let support = teleport_vector(seeds, &adj.id_to_idx, tele);
 	for &i in &support {
 		rank[i] = tele[i];
 	}
-	let mut next = vec![0.0f64; n];
 
 	// The iteration is confined to `reached` — the teleport support plus everything
 	// downstream of it — because every node outside it holds an exact 0.0 in both
@@ -149,7 +204,6 @@ fn pagerank_at(
 	// `reached` ascending leaves the surviving terms in the full-width loop's order,
 	// which is what makes this identical to it rather than merely close.
 	let mut reached = support;
-	let mut in_reached = vec![false; n];
 	for &i in &reached {
 		in_reached[i] = true;
 	}
@@ -164,7 +218,7 @@ fn pagerank_at(
 	for _ in 0..iters.max(1) {
 		if closed && reached.len() * 100 >= n * full_width_reach_pct {
 			steps.full_width += 1;
-			let delta = full_width_step(out, &tele, &rank, &mut next, d);
+			let delta = full_width_step(out, tele, rank, next, d);
 			std::mem::swap(&mut rank, &mut next);
 			if delta < CONVERGENCE_EPS {
 				break;
@@ -220,36 +274,46 @@ fn pagerank_at(
 	}
 
 	let take = top_k.min(n);
-	if take == 0 {
-		return (Vec::new(), steps);
-	}
-	// Unique ids make this a STRICT total order, so the top-k partition + sorting only the survivors equals a full sort + take.
-	let cmp = |a: &(usize, f64), b: &(usize, f64)| {
-		crate::base::util::cmp_rank(a.1, &ids[a.0], b.1, &ids[b.0])
-	};
-	// A zero-rank node loses to every positive one, so once the reached set alone
-	// can fill top_k the untouched majority cannot enter it and never gets scanned.
-	let mut scored: Vec<(usize, f64)> = reached
-		.iter()
-		.filter(|&&i| rank[i] > 0.0)
-		.map(|&i| (i, rank[i]))
-		.collect();
-	if scored.len() < take {
-		scored = rank.iter().copied().enumerate().collect();
-	}
-	if take < scored.len() {
-		scored.select_nth_unstable_by(take - 1, &cmp);
-		scored.truncate(take);
-	}
-	scored.sort_by(&cmp);
-
 	let mut out_list: Vec<EntityHit> = Vec::with_capacity(take);
-	for (idx, score) in scored {
-		out_list.push(EntityHit {
-			entity_id: ids[idx].clone(),
-			score,
-		});
+	if take > 0 {
+		// Unique ids make this a STRICT total order, so the top-k partition + sorting only the survivors equals a full sort + take.
+		let cmp = |a: &(usize, f64), b: &(usize, f64)| {
+			crate::base::util::cmp_rank(a.1, &ids[a.0], b.1, &ids[b.0])
+		};
+		// A zero-rank node loses to every positive one, so once the reached set alone
+		// can fill top_k the untouched majority cannot enter it and never gets scanned.
+		let mut scored: Vec<(usize, f64)> = reached
+			.iter()
+			.filter(|&&i| rank[i] > 0.0)
+			.map(|&i| (i, rank[i]))
+			.collect();
+		if scored.len() < take {
+			scored = rank.iter().copied().enumerate().collect();
+		}
+		if take < scored.len() {
+			scored.select_nth_unstable_by(take - 1, &cmp);
+			scored.truncate(take);
+		}
+		scored.sort_by(&cmp);
+		for (idx, score) in scored {
+			out_list.push(EntityHit {
+				entity_id: ids[idx].clone(),
+				score,
+			});
+		}
 	}
+
+	// Hand the buffers back as they were lent: zero everywhere. `reached` is the
+	// whole of what could hold a non-zero — `tele` is written only on its support,
+	// and every rank term written outside it is a literal +0.0 — so undoing it is
+	// proportional to the walk and not to the graph.
+	for &i in &reached {
+		tele[i] = 0.0;
+		rank[i] = 0.0;
+		next[i] = 0.0;
+		in_reached[i] = false;
+	}
+	BUFFERS.with(|b| b.set(buffers));
 	(out_list, steps)
 }
 
@@ -434,6 +498,79 @@ mod tests {
 		seen.iter().filter(|s| **s).count()
 	}
 
+	// What a query costs in bytes and in milliseconds at each reach, on the graph
+	// shape that isolates reach from edge count. The per-call buffers are flat in N,
+	// so the 1%-reach row is the floor a query pays before any walking happens.
+	//
+	//   cargo test --release --lib -- --ignored --nocapture pagerank::tests::allocation
+	#[test]
+	#[ignore = "measurement, not an assertion; run explicitly in release"]
+	fn allocation_and_floor_by_reach() {
+		use crate::test_support::alloc_probe;
+		use std::time::Instant;
+		const N: usize = 100_000;
+		for pct in [1usize, 10, 50, 90, 100] {
+			let block = (N * pct / 100).max(1);
+			let g = synth_blocks(N, 8, 16, block);
+			let seeds: Vec<EntityHit> = (0..75)
+				.map(|i| hit(&format!("e{:05}", (i * (block / 75).max(1)) | 1), 1.0))
+				.collect();
+			let reached = reach_of(&g, &seeds);
+			let _ = g.entity_adjacency();
+			let run = || pagerank_at(&g, &seeds, 0.85, 25, 100, FULL_WIDTH_REACH_PCT);
+			let (_, first) = alloc_probe::measure(run);
+			let (_, steady) = alloc_probe::measure(run);
+			let mut ms = f64::MAX;
+			for _ in 0..7 {
+				let t = Instant::now();
+				std::hint::black_box(run());
+				ms = ms.min(t.elapsed().as_secs_f64() * 1000.0);
+			}
+			println!(
+				"N={N} block={pct:>3}% reached={reached:<7} ({:5.1}%) first={:>9}B steady={:>9}B peak={:>9}B ({:6.2} B/node) min={ms:7.3}ms",
+				100.0 * reached as f64 / N as f64,
+				first.total,
+				steady.total,
+				steady.peak,
+				steady.total as f64 / N as f64,
+			);
+		}
+	}
+
+	// The reach sweep above cannot see the buffers, because reach and N move
+	// together in it. This holds the walk fixed at ~1000 reached nodes and moves N
+	// alone, which is the only shape in which a cost flat in N is legible at all.
+	//
+	//   cargo test --release --lib -- --ignored --nocapture pagerank::tests::floor_by
+	#[test]
+	#[ignore = "measurement, not an assertion; run explicitly in release"]
+	fn floor_by_graph_width_at_fixed_reach() {
+		use crate::test_support::alloc_probe;
+		use std::time::Instant;
+		const BLOCK: usize = 1_000;
+		let seeds: Vec<EntityHit> = (0..75)
+			.map(|i| hit(&format!("e{:05}", (i * 13) | 1), 1.0))
+			.collect();
+		for n in [10_000usize, 50_000, 200_000] {
+			let g = synth_blocks(n, 4, 16, BLOCK);
+			let reached = reach_of(&g, &seeds);
+			let _ = g.entity_adjacency();
+			let run = || pagerank_at(&g, &seeds, 0.85, 25, 100, FULL_WIDTH_REACH_PCT);
+			std::hint::black_box(run());
+			let (_, a) = alloc_probe::measure(run);
+			let mut ms = f64::MAX;
+			for _ in 0..25 {
+				let t = Instant::now();
+				std::hint::black_box(run());
+				ms = ms.min(t.elapsed().as_secs_f64() * 1000.0);
+			}
+			println!(
+				"N={n:<8} reached={reached:<6} steady={:>9}B peak={:>9}B min={ms:7.3}ms",
+				a.total, a.peak
+			);
+		}
+	}
+
 	#[test]
 	#[ignore = "measurement, not an assertion; run explicitly in release"]
 	fn cost_against_full_width_by_reach() {
@@ -507,6 +644,49 @@ mod tests {
 				a.1
 			);
 		}
+	}
+
+	// The one thing that can witness the buffers is the allocator. The ranking is
+	// identical whether they are lent or built — that is the point of the change —
+	// and the clock on a shared box cannot resolve 2 MB of `calloc`.
+	//
+	// Both graphs are generated with the same seed stream and the same block size,
+	// so block 0 holds byte-identical edges in both and the query walks the same
+	// nodes in the same order. Every allocation the walk makes is therefore a
+	// function of the reached set, which is equal — except for anything sized by
+	// the graph, which is 4x larger on the right and must not exist.
+	#[test]
+	fn a_narrow_query_allocates_nothing_sized_by_the_graph() {
+		use crate::test_support::alloc_probe;
+		const BLOCK: usize = 250;
+		let small = synth_blocks(4_000, 4, 16, BLOCK);
+		let big = synth_blocks(16_000, 4, 16, BLOCK);
+		let seeds: Vec<EntityHit> = (0..20)
+			.map(|i| hit(&format!("e{:05}", (i * 11) | 1), 1.0))
+			.collect();
+		let (rs, rb) = (reach_of(&small, &seeds), reach_of(&big, &seeds));
+		assert_eq!(rs, rb, "the two graphs must present the same walk");
+		assert!(
+			(50..=BLOCK).contains(&rs),
+			"the query must stay inside its block and still fill top-k: reached {rs}"
+		);
+
+		let run = |g: &GraphGnn| pagerank_at(g, &seeds, 0.85, 25, 50, FULL_WIDTH_REACH_PCT);
+		// Warm both first: the adjacency is built on demand, and a pool grown to the
+		// larger graph would otherwise charge that one growth to the measurement.
+		std::hint::black_box((run(&small), run(&big)));
+		let (_, a) = alloc_probe::measure(|| run(&small));
+		let (_, b) = alloc_probe::measure(|| run(&big));
+		assert_eq!(
+			b.total, a.total,
+			"a 4x larger graph cost {} B against {} B for the same {rs}-node walk",
+			b.total, a.total
+		);
+		assert_eq!(
+			b.peak, a.peak,
+			"largest single block was {} B on the 4x larger graph against {} B on the small one",
+			b.peak, a.peak
+		);
 	}
 
 	#[test]

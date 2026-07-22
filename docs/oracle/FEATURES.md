@@ -332,7 +332,7 @@ and cold tier live together. Readers never block, writers serialize.
 
 **Gaps.** Single-writer is enforced, not assumed — `src/base/lock.rs` is an advisory
 lock `reembed`, `gc` and `compact` claim or refuse — but `cmd_hub_merge`
-(`src/commands/admin.rs:785`) and `maybe_self_heal_store` (`src/commands.rs:446`)
+(`src/commands/admin.rs:799`) and `maybe_self_heal_store` (`src/commands.rs:446`)
 still `save_graph_unguarded` holding none. No WAL but LMDB's; compaction is offline.
 
 ---
@@ -489,7 +489,7 @@ maintains itself.
   (`src/tick/tasks.rs:470`), `do_reembed` (`src/tick/tasks.rs:501`),
   `do_disk_consolidate` (`src/tick/tasks.rs:454`).
 
-**Where.** `src/tick/*` (2912 LoC, 7 files) + `src/tick.rs` (893 LoC).
+**Where.** `src/tick/*` (3589 LoC, 8 files) + `src/tick.rs` (1070 LoC) — remeasured 2026-07-22, the old 2912/893 had drifted ~660 and ~177 lines behind the tree. `trainer.rs` is the one that is not a queue task: GNN training runs on its own thread.
 
 **Gaps.** `KERN_CAP_DISABLED` (`src/base/constants.rs:30`) is a **kern-eviction**
 sentinel, not an entity cap — corrected 2026-07-21, the old wording named the
@@ -541,7 +541,7 @@ counter records that it happened, nothing recovers it.
 
 **What.** A from-scratch graph neural network that re-embeds each thought from
 *graph structure* (not just content), so the dense seed blends content + structure.
-Trained per-kern on the tick.
+Trained per-kern, off the tick loop on a dedicated thread (`src/tick/trainer.rs`).
 
 **How.**
 
@@ -622,7 +622,7 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 | `degrade` | `tools_mutate.rs` | Down-weight edges along a bad retrieval path (`DEGRADE_*` decay). Returns `decayed_edges` and `removed_edges` — the reap count exists so a CLI `degrade` routed through the daemon can print what the local path prints. |
 | `move` | `tools_mutate.rs:491` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
 | `promote` | `tools_mutate.rs` | Release a thought a review policy is holding: flips `ReviewState::Pending` to `Active`, so a `query {exclude_pending: true}` returns it again. The release half of the lifecycle `[ingest] review_policy` opens; idempotent, returning `promoted: false` on an already-active row rather than failing, and a hard `thought not found` on an id nothing resolves — a silent success would tell a curator a claim was released while it is still held. Shares `graph_ops::promote_entity` with the CLI's no-daemon fallback so the routed and local writes cannot disagree. **Authority: this is a curation decision made on a declared principal** — a wider claim than `intake drain`, which asserts none — and since 2026-07-22 the socket authenticates the *connection*, proving a uid rather than which of that uid's programs asked, so the gate it rides on is still whatever `ROADMAP.md` item 24 lands. |
-| `health` | `tools_admin.rs:83` | Graph stats (gravitons/kerns/entities/reasons/unnamed/claim_kinds) **plus the degradation surface**: `queue_depth`, `tasks_done`, `task_avg_ms`, `task_panics`, `last_task_panic`, `task_failures`, `last_task_failure`, `cold_evicted`, `embed_model`, `embed_dim`, `embed_mismatch`, and the seven fail-open counters — `query_dim_rejected`, `below_floor_deliveries`, `clock_skew_skips`, `ingest_dropped_chunks`, `remote_cap_dropped`, `unspilled_drops`, `ingest_queue_refused` — each a path that returns something rather than erroring, so the count is the only way to tell a degraded result from a good one (`Server::health_stats`, `src/mcp.rs:117`). |
+| `health` | `tools_admin.rs:83` | Graph stats (gravitons/kerns/entities/reasons/unnamed/claim_kinds) **plus the degradation surface**: `queue_depth`, `tasks_done`, `task_avg_ms`, `task_panics`, `last_task_panic`, `task_failures`, `last_task_failure`, `cold_evicted`, `embed_model`, `embed_dim`, `embed_mismatch`, and the eight fail-open counters — `query_dim_rejected`, `below_floor_deliveries`, `clock_skew_skips`, `ingest_dropped_chunks`, `remote_cap_dropped`, `unspilled_drops`, `ingest_queue_refused`, `gnn_train_refused` — each a path that returns something rather than erroring, so the count is the only way to tell a degraded result from a good one (`Server::health_stats`, `src/mcp.rs:117`). The first seven come off `HealthStats` (`src/base/health.rs:36`); `gnn_train_refused` is read straight from the trainer's own global (`src/mcp.rs:147`), which is why only a daemon's answer carries it. |
 | `graviton` | `tools_admin.rs` | list/add/remove focus attractors (name + text — phrase or full document — + optional mass). Replaced the single per-kern "purpose". |
 | `claim_kind` | `tools_admin.rs` | register/remove claim kinds; registered kinds extend the built-in distill set. |
 | `pulse` | `tools_admin.rs` | Trigger a clustering pass across the tree. |
@@ -790,9 +790,9 @@ Notable:
   new model, cold tier still on the old). Takes the writer lock and refuses
   rather than racing a live daemon.
 - `health` (`admin.rs`) — prints the graph counts plus the degradation lines:
-  cold rows evicted, an embedding-model mismatch warning, and
-  `degraded: N panics | M failures` with the most recent fault of each, printed
-  only when nonzero.
+  cold rows evicted, an embedding-model mismatch warning, the local fail-open
+  counters only when one is nonzero, and — whenever a daemon answers — always
+  `degraded: N panics | M failures | K refused GNN trainings`, faults named below.
 - `profile` (`profile_cmd.rs`) — runs a query with a `Profiler` timeline.
 - `compress` (`admin.rs`) — compresses vectors with a chosen `QuantizationMode`.
 - `daemon` / `run_server` (`src/commands.rs`) — boots the full runtime: loads
@@ -1402,8 +1402,8 @@ Ranked by leverage:
    trust, so that half waits on a principal item 24 can *prove* — the socket got
    auth 2026-07-22 and the block did not lift. `intake drain` got its tool
    2026-07-21 and routes. Open as `ROADMAP.md` item 9 on `ingest`/`link` alone.
-6. **GNN training is quadratic in entities** — 79.7s at 4096; off the tick
-   since 2026-07-21 (item 28), but the dense N x N adjacency is untouched.
+6. **GNN training has no GPU path** — linear in edges and off the tick since
+   item 28 (11.6s at 4096, was 79.7s); `gnn_train_refused` now reaches `kern health`.
 7. **Distill prompt** is one-shot and global — per-kind prompts +
    chunking for long deltas would raise claim quality.
 8. (retired 2026-07-21 — one scrub pass per sweep, not one per victim)

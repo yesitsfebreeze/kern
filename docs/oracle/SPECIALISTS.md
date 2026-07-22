@@ -45,7 +45,10 @@ sets; parallelize only what does not overlap.
 - **Knows:** heat deposit/pulse, half-life lazy decay, stigmergy GC and its
   Fact immunity, cold-tier spill, clustering into child kerns, graviton
   auto-promotion, the bi-temporal supersede classification that runs off the
-  recall path.
+  recall path, and that GNN training is the one thing here that is *not* a queue
+  task — `src/tick/trainer.rs` owns a dedicated thread, coalesces a second
+  request for a kern already waiting, catches per job, and counts what it
+  refuses past `TRAIN_QUEUE_CAP` as `gnn_train_refused`.
 - **Delegate when:** decay/eviction tuning, tick cadence, or anything that
   decides what the graph forgets.
 

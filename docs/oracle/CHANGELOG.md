@@ -73,6 +73,121 @@
   Decided by: verify-before-claiming — the precision number, the reference
   count, the refactor's neutrality and the exit codes were each re-derived
   rather than read off the commit message.
+- 2026-07-22 — merged item 26, which closes it, and with it the last of the
+  retrieval performance items. 225 + 1 + this one = 227.
+
+  Item 26 took four passes and each one corrected the previous one's framing.
+  Pass 1 was told the scores were graph-dependent and cacheable; they are
+  query-personalised, so the item's prescription was a design the repo had
+  already rejected. Pass 2 confined the iteration to the reached set and
+  recorded a 1.4x regression at full reach. Pass 3 found the instrument that
+  produced 1.4x was unfair to its own reference — 1.19x measured honestly — and
+  added the near-N switch. Pass 4 found the remaining blocker was aimed at the
+  wrong thing: the buffers cost for being *allocated*, not for being wide, so
+  the sparse-vector-versus-bit-identity argument that had kept the item open was
+  never load-bearing.
+
+  Every correction came from measuring rather than from reading, and three of
+  the four overturned something written down by the previous pass. That is the
+  shape of an item that was hard because nobody had instrumented it, not because
+  the work was hard: the final change is a thread-local and a zeroing loop.
+
+  Worth recording against the temptation to treat a long-lived item as
+  well-understood. Item 26 accumulated four passes of prose, and the prose got
+  *more* confident while staying wrong about which term dominated. The
+  measurements disagreed with the file every single time.
+
+  Decided by: verify-before-claiming — four passes, four corrections, and the
+  file was the thing being corrected each time.
+
+
+- 2026-07-22 — item 26 closed: PageRank's four N-wide buffers are lent by the
+  thread instead of built per query. **2,540,344 B → 40,344 B per call** at
+  N=100k and 1.0% reach; largest single block 800,000 B → 16,384 B; flat in N at
+  fixed reach where it used to be 25.40 B/node. Ranking is bit-identical and the
+  existing gate proves it unchanged.
+
+  **The item's own stated blocker was aimed at the wrong thing, and that is the
+  finding.** It recorded that closing this needed a sparse rank vector, and that
+  a `HashMap`'s iteration order would put the `+0.0` bit-identity argument back
+  in play — a real cost, correctly feared, which is why the work sat. But the
+  buffers do not cost anything for being *wide*; they cost for being *allocated*.
+  Separate the two and the dense ascending vector — the thing the whole exactness
+  argument rests on — survives untouched, and only the `calloc` goes. Nothing had
+  to be re-argued because nothing arithmetic moved.
+
+  Two things this cost, both said plainly rather than buried:
+
+  - **The clock is smaller than the item promised.** 0.310–0.420 ms → 0.244–0.249
+    ms at N=100k and 1.0% reach, four paired runs a side. The item's 0.18 ms
+    "floor" was the whole per-query cost at that reach, not the allocation's
+    share of it, and the share is ~0.065 ms. Direction consistent everywhere,
+    magnitude small.
+  - **The memory is resident now, not transient.** Each thread keeps 2.5 MB at
+    N=100k for its lifetime, and readers run concurrently under the graph lock.
+    Peak RSS is unchanged — the old path allocated the same per concurrent call —
+    but the steady state grows with thread count.
+
+  The gate is an allocator, not a stopwatch: `test_support::alloc_probe` counts
+  bytes on the calling thread, and `a_narrow_query_allocates_nothing_sized_by_the_graph`
+  runs one identical narrow walk against two graphs 4x apart in N and asserts the
+  byte counts are *equal*, with no tolerance and no constant to tune. Reverted to
+  per-call allocation it reports `413596 B against 113596 B for the same 244-node
+  walk` — the 300,000 B being exactly 25 B × the 12,000 nodes of difference.
+  Timing could not have carried this assertion: 2.5 MB of `calloc` is under the
+  noise of this box.
+
+  Decided by: fix-the-root — the root was the allocation, not the representation,
+  and the representation was what the item had queued up to change.
+
+- 2026-07-22 — item 28 closed: `gnn_train_refused` crosses the RPC and reaches
+  `kern health`. Three edits — the field on `HealthRes`, the handler filling it
+  from the same `tool_health` payload every other counter reads, and
+  `tick_health_lines` folding it into the `degraded:` line. 980 → 982 tests.
+
+  **Decided by: it folds into the existing `degraded:` line because it cannot
+  join the other one.** `cmd_health` already prints a `degraded:` line for the
+  seven fail-open counters, and an eighth fail-open counter obviously belongs
+  there — except that line is built from `graph_health_stats`, which the CLI
+  computes *in its own process*, and `TRAIN_REFUSED` is a global only the daemon
+  ever moves. A CLI reading it locally sees 0 forever. The only counters a CLI
+  can see at all are the ones that crossed the RPC inside `HealthRes`, and the
+  tick line is the only `HealthRes`-derived degradation line there is. So the
+  choice was never "new line or existing line" — it was "the line fed by the
+  wrong process, or the one fed by the right one". Folding rather than adding
+  also keeps `a_clean_daemon_prints_no_last_fault_lines` green unedited: a
+  healthy tick still prints exactly two lines, so a quiet kern does not grow a
+  third that always reads zero. That test staying green *unedited* is the
+  signal — an edit to it would have meant the output shape changed rather than
+  extended.
+
+  **The verification found a real flake, and `just test` could not have.** The
+  new RPC test spawns a real `Trainer` and blocks its runner, because
+  `tool_health` reads the trainer's global directly and there is no seam to
+  inject a payload through — a real refusal is the only way to make the counter
+  nonzero. But `TRAIN_REFUSED` is one global per process, and CI runs `cargo
+  test --workspace` where `just test` runs `cargo nextest`: one process for the
+  whole suite versus one process per test. The new test refuses a full cap's
+  worth of submissions; the trainer's own cap test asserts its delta is exactly
+  1. **Measured: 5 red runs in 30 under `cargo test`, 0 in 40 under nextest.**
+  Both tests now serialise on a test-only `REFUSAL_COUNTER`; 40 of 40 green
+  after.
+
+  The rule that leaves, and it generalises past this counter: **a test that
+  moves a process-global must serialise against every test that measures one**,
+  because a measurement is two reads and the gap between them belongs to
+  whoever else is running. And the corollary about instruments — a green
+  `just test` is not evidence about a global, because the runner that makes it
+  green is the one that hides the defect. Two runners, two answers; the one CI
+  uses is the one that counts.
+
+  Also corrected in passing: `FEATURES.md` described the MCP `health` tool as
+  carrying "the seven fail-open counters" and omitted this one, and its
+  `src/tick/*` line-count had drifted ~660 lines behind the tree.
+
+  Decided by: verify-before-claiming — the mutations were re-run, and the flake
+  turned up only because the test was run under the runner CI actually uses
+  rather than the one the justfile offers.
 
 - 2026-07-22 — merged item 18's edge-ACL fix. 221 + 1 + this one = 223.
 
