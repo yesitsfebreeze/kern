@@ -14,12 +14,26 @@ pub trait Codec: Send + 'static {
 // grief — each concrete codec carries delegating `Encoder`/`Decoder` impls.
 
 // Wire framing: each frame is one Value's JSON text + '\n'.
+//
+// There is no length prefix, so nothing on the wire announces how big a frame
+// will be: `FramedRead` simply keeps reading and doubling its buffer until a
+// newline shows up. `max_frame_len` is the only thing that can stop that, and it
+// stops it on the *buffer* rather than on a finished line — an endless line is
+// refused at the cap instead of accreted. Off by default; `verify_auth` is the
+// one caller that sets it, because it is the one read from a peer that has
+// proven nothing.
 #[derive(Default)]
-pub struct JsonEnvelopeCodec;
+pub struct JsonEnvelopeCodec {
+	max_frame_len: Option<usize>,
+}
 
 impl JsonEnvelopeCodec {
 	pub fn new() -> Self {
-		Self
+		Self::default()
+	}
+
+	pub fn set_max_frame_len(&mut self, max: Option<usize>) {
+		self.max_frame_len = max;
 	}
 }
 
@@ -40,7 +54,16 @@ impl Codec for JsonEnvelopeCodec {
 		// Loop, NOT recursion, over leading blank lines — N consecutive newlines
 		// once recursed N deep (see json_many_consecutive_newlines_do_not_overflow).
 		loop {
-			let Some(pos) = src.iter().position(|&b| b == b'\n') else {
+			let nl = src.iter().position(|&b| b == b'\n');
+			if let Some(max) = self.max_frame_len {
+				// `nl.unwrap_or(src.len())`, not `src.len()`: a peer may pipeline
+				// several frames into one read, and the cap is about the line being
+				// decoded, not about how much arrived behind it.
+				if nl.unwrap_or(src.len()) > max {
+					return Err(CodecError::Decode(format!("frame exceeds {max} bytes")));
+				}
+			}
+			let Some(pos) = nl else {
 				return Ok(None);
 			};
 			let line = src.split_to(pos + 1);
@@ -124,6 +147,29 @@ mod tests {
 		bytes.extend_from_slice(b"{\"v\":42}\n");
 		let mut buf = BytesMut::from(&bytes[..]);
 		assert_eq!(dec(&mut c, &mut buf).unwrap().unwrap(), json!({"v": 42}));
+	}
+
+	// The cap has to bite on an *incomplete* line, because that is the only shape
+	// an endless frame ever has: a decoder that only measures finished lines
+	// never gets a finished line to measure.
+	#[test]
+	fn a_capped_codec_refuses_before_the_line_is_even_complete() {
+		let mut c = JsonEnvelopeCodec::new();
+		c.set_max_frame_len(Some(16));
+		let mut buf = BytesMut::from(&b"{\"token\":\"aaaaaaaaaaaaaaaaaaaa"[..]);
+		let err = dec(&mut c, &mut buf).expect_err("30 bytes with no newline is over 16");
+		assert!(err.to_string().contains("exceeds 16 bytes"), "{err}");
+	}
+
+	// And it must measure the line being decoded, not the buffer: a client is
+	// free to write its auth frame and its first call in one go, and a cap that
+	// counted what arrived behind the frame would refuse that client.
+	#[test]
+	fn a_capped_codec_measures_the_line_not_what_is_queued_behind_it() {
+		let mut c = JsonEnvelopeCodec::new();
+		c.set_max_frame_len(Some(16));
+		let mut buf = BytesMut::from(&b"{\"a\":1}\n{\"b\":\"pipelined and long\"}\n"[..]);
+		assert_eq!(dec(&mut c, &mut buf).unwrap().unwrap(), json!({"a": 1}));
 	}
 
 	#[test]

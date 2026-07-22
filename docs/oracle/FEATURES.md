@@ -674,15 +674,15 @@ the MCP JSON does — `task_panics`/`last_task_panic`,
 **Where.** `src/rpc/*` (613 LoC, 281 before the tests), `src/trnsprt/src/kern_rpc/`
 (`svc.rs` contract, `dto.rs` types, `auth.rs` gate, `client_local.rs` connect).
 
-**Gaps.** The socket has auth now: one token frame carrying the graph's `mcp-token`
-(`src/trnsprt/src/kern_rpc/auth.rs`), verified before any method dispatches; the
-named pipe carries an owner-only SDDL that typechecks for Windows and has never
-run on one. Authentication runs both ways as of 2026-07-22 —
-`require_owned_by_caller` checks the endpoint's owner before the connect and
-`require_peer_is_caller` checks the serving uid after it, both ahead of the
-token frame (`src/trnsprt/src/typed/local.rs:237`, `:283`). `principal` is
-declared, not proven, and the pre-auth frame is unbounded and untimed
-(`ROADMAP.md` — item 24). `HealthRes` stays a flat DTO.
+**Gaps.** The socket has auth now: one token frame carrying the graph's `mcp-token`,
+verified before dispatch and, since 2026-07-22, bounded by `AUTH_FRAME_MAX` =
+1 KiB (`src/trnsprt/src/kern_rpc/auth.rs:40`) and `AUTH_DEADLINE` = 5 s (`:48`),
+both lifted once the token verifies. The named pipe carries an owner-only SDDL
+that typechecks for Windows and has never run on one. Authentication runs both
+ways as of 2026-07-22 — `require_owned_by_caller` checks the endpoint's owner
+before the connect and `require_peer_is_caller` checks the serving uid after it,
+both ahead of the token frame (`src/trnsprt/src/typed/local.rs:237`, `:283`).
+`principal` is declared, not proven (item 24). `HealthRes` stays a flat DTO.
 
 ---
 
