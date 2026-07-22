@@ -2,6 +2,15 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 84 sub-fix closed: the `query` MCP tool now takes an
+  `ids` array for batch direct lookup, returning `{results, missing}` — a
+  caller can tell a filter-drop (in `results`, flagged) from a non-existent id
+  (in `missing`). Each id resolves a prefix and the cold tier and honours the
+  same filters the single-`id` path honours (the per-row predicate, not a
+  silent skip). 1021 pass, 2 new tests. The hand-rolled-schemas half stays
+  (style debt, not correctness). Decided by: fix-the-root, the-oracle.
+  Supersedes: nothing.
+
 - 2026-07-22 — item 84 sub-fix closed: kern now warns at boot when running
   under WSL and a configured `embed.url` / `reason.url` is loopback
   (`127.0.0.0/8`, `::1`, `localhost`) — a Linux loopback does not reach a

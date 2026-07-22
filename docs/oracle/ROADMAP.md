@@ -3078,8 +3078,14 @@ propagation overwrites one — another 76.8 MB at this corpus size.
   `tracing::warn!` at boot per knob a config sets on a `/v1` endpoint — default
   knobs on `/v1` are silent, a default is not "trying to tune". `num_gpu` was
   never a knob kern sends, so it is not a config key; nothing ignores it.
-- Hand-rolled tool schemas; no batch query
-  (`FEATURES.md:635-636`).
+- ~~Hand-rolled tool schemas; no batch query~~ — **the batch-query half
+  closed 2026-07-22.** The `query` MCP tool now takes an `ids` array for batch
+  direct lookup, returning `{results, missing}` so a caller can tell a
+  filter-drop (in `results`, flagged) from a non-existent id (in `missing`).
+  Each id resolves a prefix and the cold tier and honours the same filters the
+  single-`id` path honours — the per-row predicate, not a silent skip. The
+  hand-rolled-schemas half stays: the tool schemas are still hand-written JSON
+  (not derived from types), which is a style debt, not a correctness gap.
 - The LLM client is Ollama-centric with no retry/backoff policy object
   (`FEATURES.md:914-915`).
 - ~~Watcher `.gitignore` parsing is approximate; no rename tracking~~ **(retired

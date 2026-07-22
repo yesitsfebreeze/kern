@@ -9,17 +9,19 @@ use crate::retrieval;
 pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 	vec![serde_json::json!({
 		"name": "query",
-		"description": "Search the knowledge graph. Returns scored thoughts with edges and path chains — no synthesis: the calling agent reads the passages and synthesizes. Requires at least one of `text` (semantic/lexical search) or `id` (direct lookup).",
+		"description": "Search the knowledge graph. Returns scored thoughts with edges and path chains — no synthesis: the calling agent reads the passages and synthesizes. Requires at least one of `text` (semantic/lexical search), `id` (direct lookup) or `ids` (batch direct lookup).",
 		"inputSchema": {
 			"type": "object",
 			// Mirrors tool_query's runtime "either text or id is required" guard.
 			"anyOf": [
 				{"required": ["text"]},
 				{"required": ["id"]},
+				{"required": ["ids"]},
 			],
 			"properties": {
 				"text":      {"type": "string", "description": "search query text"},
 				"id":        {"type": "string", "description": "thought ID for direct lookup"},
+				"ids":       {"type": "array", "items": {"type": "string"}, "description": "batch direct lookup — returns {results:[...], missing:[...]}; each id resolves a prefix and the cold tier and honours the same filters as `id`"},
 				"k":         {"type": "integer", "description": "number of results (default 5)"},
 				"mode":      {"type": "string", "enum": ["content", "reason", "hybrid"], "description": "retrieval mode (default hybrid)"},
 				"sort":      {"type": "string", "enum": ["", "date", "access", "confidence"], "description": "sort key"},
@@ -81,6 +83,8 @@ struct QueryArgs {
 	#[serde(default)]
 	id: String,
 	#[serde(default)]
+	ids: Vec<String>,
+	#[serde(default)]
 	k: usize,
 	#[serde(default)]
 	mode: String,
@@ -130,6 +134,29 @@ impl Server {
 			Err(e) => return tool_error(&format!("invalid arguments: {e}")),
 		};
 
+		if !p.ids.is_empty() {
+			// Batch direct lookup: same filters as `id`, applied per row. Returns
+			// `{results, missing}` so a caller can tell a filter-drop (in results,
+			// flagged) from a non-existent id (in missing). Prefix and cold tier
+			// both resolve, matching the single-id path.
+			let opts = match build_query_options(&p) {
+				Ok(o) => o,
+				Err(e) => return tool_error(&e),
+			};
+			let g = self.graph.read();
+			let mut results = Vec::new();
+			let mut missing = Vec::new();
+			for id in &p.ids {
+				match resolve_by_id(&g, id)
+					.filter(|hit| retrieval::score::matches_filter(&hit.thought, &opts))
+				{
+					Some(hit) => results.push(hit.detail(&g)),
+					None => missing.push(id.clone()),
+				}
+			}
+			return tool_result_json(&serde_json::json!({"results": results, "missing": missing}));
+		}
+
 		if !p.id.is_empty() {
 			// The same filters the ranked read honours, applied to the one row an
 			// id names: `query {id, kind: "claim"}` that answered with a Fact would
@@ -153,7 +180,7 @@ impl Server {
 		}
 
 		if p.text.is_empty() {
-			return tool_error("either text or id is required");
+			return tool_error("either text, id or ids is required");
 		}
 
 		let llm = match &self.llm {
@@ -589,6 +616,61 @@ mod id_filter_tests {
 	// not hide. Filtering the id read must not smuggle `drop_expired` in behind it
 	// — an unfiltered `QueryOptions` leaves `valid_at`/`as_of` off, so the expired
 	// row still arrives, flagged.
+	// Batch direct lookup: `ids` returns one detail per found id and lists the
+	// rest under `missing`. Each id honours the same filters `id` does.
+	#[tokio::test]
+	async fn batch_ids_returns_found_and_missing() {
+		let mut k = Kern::new("kx", "");
+		k.entities.insert("f1".into(), fact("f1"));
+		k.entities.insert("f2".into(), fact("f2"));
+		let srv = crate::test_support::mcp_server();
+		srv.graph.write().kerns.insert("kx".into(), k);
+
+		let out = srv.tool_query(&serde_json::json!({"ids": ["f1", "f2", "ghost"]}));
+		assert!(!is_error(&out), "batch is not an error: {out}");
+		let v = body(&out);
+		let results = v["results"].as_array().expect("results array");
+		let missing = v["missing"].as_array().expect("missing array");
+		assert_eq!(results.len(), 2, "two found: {v}");
+		assert_eq!(missing.len(), 1, "only ghost is missing: {v}");
+		assert_eq!(
+			missing[0],
+			serde_json::json!("ghost"),
+			"ghost is missing: {v}"
+		);
+		let ids: Vec<&str> = results.iter().map(|r| r["id"].as_str().unwrap()).collect();
+		assert!(
+			ids.contains(&"f1") && ids.contains(&"f2"),
+			"both ids in results: {ids:?}"
+		);
+	}
+
+	// A filter on a batch id read drops the non-matching row into `missing` —
+	// the same per-row predicate the single-id path uses, not a silent skip.
+	#[tokio::test]
+	async fn batch_ids_filter_drops_non_matching_into_missing() {
+		let mut k = Kern::new("kx", "");
+		k.entities.insert("f1".into(), fact("f1"));
+		let mut claim = fact("c1");
+		claim.kind = EntityKind::Claim;
+		k.entities.insert("c1".into(), claim);
+		let srv = crate::test_support::mcp_server();
+		srv.graph.write().kerns.insert("kx".into(), k);
+
+		let out = srv.tool_query(&serde_json::json!({"ids": ["f1", "c1"], "kind": "fact"}));
+		let v = body(&out);
+		let results = v["results"].as_array().expect("results");
+		let missing = v["missing"].as_array().expect("missing");
+		assert_eq!(results.len(), 1, "only the fact passes the filter: {v}");
+		assert_eq!(results[0]["id"], serde_json::json!("f1"));
+		assert_eq!(missing.len(), 1, "only the claim is missing: {v}");
+		assert_eq!(
+			missing[0],
+			serde_json::json!("c1"),
+			"the claim is filtered out: {v}"
+		);
+	}
+
 	#[tokio::test]
 	async fn bare_id_read_still_serves_an_expired_row_flagged() {
 		let mut e = fact("f1");
