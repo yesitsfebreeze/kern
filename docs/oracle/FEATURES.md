@@ -345,7 +345,7 @@ Nothing is lost on an LLM outage — the delta stays queued until it succeeds.
 
 **How.**
 
-- **Intake** (`src/ingest/intake.rs`) — `run()` (`:303`) polls `.kern/intake/`,
+- **Intake** (`src/ingest/intake.rs`) — `run()` (`:315`) polls `.kern/intake/`,
   `extract_claims` (`:13`) distills, `archive`/`finalize` (`:55`/`:90`) move
   processed deltas to a `done/` dir, `prune_done` (`:99`) ages them out.
 - **Distill** (`src/ingest/distill.rs`) — a structured prompt asks the LLM for
@@ -374,7 +374,7 @@ Nothing is lost on an LLM outage — the delta stays queued until it succeeds.
   the caller's duration to that absolute instant, so the four entrances cannot
   drift. `0`/absent = no TTL; an overflowing duration errors, never a silent
   no-TTL. `new_statement_entity` stamps it on both the document and the chunk
-  path (`place.rs:106`, `:239`), where the existing LWW lamport/producer
+  path (`place.rs:112`, `:239`), where the existing LWW lamport/producer
   stamping and pending delta finally have a writer; the reader half is
   `score::drop_expired`. `DirectJob` carries the resolved instant, which
   `drain_direct_once` overlays per job. The two entrances with no caller to pass
@@ -382,7 +382,7 @@ Nothing is lost on an LLM outage — the delta stays queued until it succeeds.
   via `Config::with_retention`, per drain pass and per record so no deadline
   dates to daemon boot, validated at load, never the preset-owned `[ingest]`.
 - **File watcher sink** (`src/ingest/file_watcher.rs`) — `KernFileWatcherSink`
-  adapts the watcher into ingest jobs, stamping `[watcher] retention_secs`.
+  adapts the watcher into ingest jobs, stamping `[watcher] retention_secs`. Since item 30 it parks each record as a durable `DirectJob` first (`:104`, gated on `intake.enabled` — the same flag that spawns the drain) and falls through to `Worker::submit` (`:129`) only when that write fails, so a record still in flight when the daemon dies is re-offered by the next drain instead of lost.
 - **Outcome** (`src/ingest/outcome.rs`) — `OutcomeStatus` (`Committed`/`Partial`/`Deduped`/`Failed`, `src/ingest/outcome.rs:2`),
   `FailureReport::document_permanent` for non-retryable errors.
 - **Status & sidecars** (`src/ingest/intake_status.rs`) — every path that leaves
@@ -898,11 +898,11 @@ receipt (`id_matches_body`, `src/gossip/handler.rs`).
 **What.** One client wrapping two endpoints (reason / embed) against
 Ollama by default; fail-open everywhere.
 
-**How.** `Client` (`src/llm.rs:57`) — `embed` (`:143`) / `embed_batch` (`:187`)
-against the embedding endpoint, `complete` (`:243`, reason / distillation),
-`complete_func` (`:296`, sync closure for the tick/ingest blocking bridges).
-`is_transient` (`:19`) classifies retryable errors. `Endpoint` (`:40`) holds
-url/model/key; `new_embed_only` (`:136`) builds a client for `reembed`.
+**How.** `Client` (`src/llm.rs:57`) — `embed` (`:147`) / `embed_batch` (`:191`)
+against the embedding endpoint, `complete` (`:247`, reason / distillation),
+`complete_func` (`:300`, sync closure for the tick/ingest blocking bridges).
+`is_transient` (`:19`) classifies retryable errors. **Every request is bounded** — `LLM_TIMEOUT` = 600s on `complete`, `EMBED_TIMEOUT` = 120s on the embed calls (`:396`, `:398`), applied per request by `post_checked` (`:170`) over a client-wide 120s default and a 3s `connect_timeout` (`:96`, `:99`) so a dead endpoint fails fast instead of hanging. `Endpoint` (`:40`) holds
+url/model/key; `new_embed_only` (`:140`) builds a client for `reembed`.
 `for_eval(seed)` (`:120`) makes it deterministic.
 
 **Where.** `src/llm.rs` (585 LoC).
@@ -1078,14 +1078,15 @@ hub↔node unmanaged beyond same-binary spawning.
 **Opt-in** (recorded 2026-07-21 — this section was marked plain `active` and
 never said so): `WatcherConfig::enabled` is a `bool` behind `#[derive(Default)]`,
 so it is `false` unless a `kern.toml` sets it, and `effective_roots` returns an
-empty list while it is (`src/config/watcher.rs:14-16`). Everything below runs
+empty list while it is (`src/config/watcher.rs:8`, returned `:24-26`). Everything below runs
 only in a deployment that turned it on — which is what ranks its gaps, the same
 way `Federation` says "off by default" rather than leaving it to be inferred.
 
 **How.** `FileWatcher` (`src/watcher/src/watcher.rs`) wraps `notify`, emits
 `WatchEvent`s (`event.rs`: `Created`/`Modified`/`Deleted`/`Renamed {from, to}`).
 `IgnoreRules` (`ignore_rules.rs:5`, built `from_roots` over ripgrep's `ignore`
-crate — a real `Gitignore` per root for `.gitignore` and `.kernignore`)
+crate — a real `Gitignore` per root for `.gitignore` and `.kernignore`, plus
+host-supplied `with_denied` prefixes (`:45`) that no ignore file can unset)
 filters noise. `IngestPipeline` (`pipeline.rs:24`) debounces, caps at
 `MAX_INGEST_BYTES=1MB` (`pipeline.rs:7`), and pushes `IngestRecord`s to an
 `IngestSink` (kern's is `KernFileWatcherSink`).
@@ -1094,10 +1095,9 @@ filters noise. `IngestPipeline` (`pipeline.rs:24`) debounces, caps at
 
 **Gaps.** *Both claims here were stale and are corrected 2026-07-21.* `.gitignore`
 parsing is **not** approximate — `IgnoreRules` builds a real `Gitignore` through
-ripgrep's `ignore` crate (`src/watcher/src/ignore_rules.rs:3`, matched `:49`), so
-it is the full spec; the only deliberate deviation is the unconditional `.git`
-skip (`:40`). Renames **are** tracked at the event layer —
-`WatchKind::Renamed {from, to}` (`src/watcher/src/event.rs:9`) carries both
+ripgrep's `ignore` crate (`src/watcher/src/ignore_rules.rs:3`, matched `:71`), so
+it is the full spec; the deliberate deviations are the unconditional `.git` skip
+(`:60`) and the host's denied prefixes (`:63`), which no ignore file can unset. Renames **are** tracked at the event layer — `WatchKind::Renamed {from, to}` (`src/watcher/src/event.rs:9`) carries both
 endpoints. What is actually missing is graph-level re-keying: `build_record`
 ingests `to` and discards `from` (`src/watcher/src/pipeline.rs:48`), so a rename
 lands as a new `Document` and the old one is neither moved nor removed.

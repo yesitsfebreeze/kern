@@ -25,6 +25,18 @@ pub struct DirectJob {
 	// here would silently republish a scoped ingest as public.
 	#[serde(default)]
 	pub acl: Acl,
+	// The channel this payload arrived on — what `clamp_confidence` reads and
+	// what `RetrievalConfig::source_trust` weights on. Carried rather than
+	// re-derived at the drain: every payload here used to be minted by the MCP
+	// tool, and a drain that renamed the principal would relabel a watched file
+	// as an agent assertion. Payloads written before this field existed were
+	// exactly that MCP mint, so the serde default is the agent it named inline.
+	#[serde(default = "default_source_tag")]
+	pub source_tag: String,
+}
+
+fn default_source_tag() -> String {
+	AGENT_SOURCE.to_string()
 }
 
 pub fn intake_direct(direct_dir: &Path, job: &DirectJob) -> std::io::Result<String> {
@@ -88,9 +100,10 @@ pub async fn drain_direct_once(
 				job.kind,
 				job.hint,
 				job.confidence,
-				// The payload was minted by the MCP tool and already clamped there;
-				// naming the same principal across the durable hop keeps it clamped.
-				AGENT_SOURCE,
+				// The producer's own tag, not this drain's: the durable hop is a
+				// carrier, and naming a principal here would relabel every channel
+				// that ever routes through the intake as an agent assertion.
+				&job.source_tag,
 				job_cfg,
 				job.acl,
 			)
@@ -131,6 +144,7 @@ mod tests {
 			confidence: 0.7,
 			valid_until: None,
 			acl: Acl::default(),
+			source_tag: AGENT_SOURCE.to_string(),
 		}
 	}
 
@@ -210,6 +224,55 @@ mod tests {
 		);
 
 		server.abort();
+	}
+
+	// The tag is the channel (ROADMAP item 95), and this hop is where it could be
+	// lost: the drain used to name AGENT_SOURCE for every payload, because every
+	// payload was an MCP mint. A relabel is numerically invisible for any tag but
+	// one — `clamp_confidence` only separates USER_SOURCE — so the guard is a
+	// user-tagged payload, whose 1.0 survives only if its own tag reached the clamp.
+	#[tokio::test]
+	async fn drain_direct_once_clamps_against_the_payloads_tag_not_a_fixed_principal() {
+		let (url, _server) =
+			crate::test_support::spawn_http(crate::test_support::fixed_vec_embed_app()).await;
+		let graph = Arc::new(RwLock::new(GraphGnn::new()));
+		let embedder = crate::llm::Client::new_embed_only(&url, "m", "");
+		let worker = Worker::new(graph.clone(), embedder, None, None, None);
+
+		let dir = tempdir().unwrap();
+		let direct = dir.path().join("direct");
+		let mut j = job("a human said so");
+		j.confidence = 1.0;
+		j.source_tag = crate::base::constants::USER_SOURCE.to_string();
+		intake_direct(&direct, &j).expect("accepted");
+
+		let cfg = crate::ingest::Config {
+			dedup_threshold: 0.95,
+			..Default::default()
+		};
+		assert_eq!(
+			drain_direct_once(&direct, &worker, &cfg).await,
+			1,
+			"the job committed"
+		);
+
+		// `conf_beta`, not `conf_mean`: only alpha accrues evidence after the mint,
+		// so beta is the field that still reports what was MINTED —
+		// beta_params_from_confidence(c) gives beta = 2 - c.
+		let betas: Vec<f32> = graph
+			.read()
+			.kerns
+			.values()
+			.flat_map(|k| k.entities.values().map(|e| e.conf_beta))
+			.collect();
+		assert!(!betas.is_empty(), "the payload reached the graph");
+		for got in &betas {
+			assert!(
+				(got - 1.0).abs() < 1e-6,
+				"the payload's own tag reached the clamp: conf_beta want 1.0000, got {got:.4} \
+				 (1.0500 is the drain renaming it to agent)"
+			);
+		}
 	}
 
 	#[tokio::test]

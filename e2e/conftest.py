@@ -55,7 +55,14 @@ class KernProject:
 		}
 		self._children = []
 
-	def write_config(self, data_dir=None, intake_enabled=True, intake_retention_secs=0):
+	def write_config(
+		self,
+		data_dir=None,
+		intake_enabled=True,
+		intake_retention_secs=0,
+		watcher_enabled=False,
+		watcher_roots=None,
+	):
 		"""(Re)write the project kern.toml. `data_dir` is cwd-relative.
 
 		Config is read once per process, at startup — so rewriting this while a
@@ -68,16 +75,26 @@ class KernProject:
 		`intake_retention_secs` is the standing per-source TTL for everything
 		that queue ingests. It is omitted when 0 so the default config text —
 		what every other test loads — stays exactly what it was.
+
+		`watcher_enabled` / `watcher_roots` turn on the file watcher, whose
+		`roots` are cwd-relative and default to the whole cwd. The section is
+		emitted only when enabled, for the same reason: every other test's
+		config text stays byte-identical.
 		"""
 		head = f'data_dir = "{data_dir}"\n\n' if data_dir else ""
 		ttl = (
 			f"retention_secs = {intake_retention_secs}\n" if intake_retention_secs else ""
 		)
+		watcher = ""
+		if watcher_enabled:
+			roots = f"roots = {json.dumps(list(watcher_roots))}\n" if watcher_roots else ""
+			watcher = f"\n[watcher]\nenabled = true\n{roots}"
 		(self.cwd / ".kern" / "kern.toml").write_text(
 			f"{head}"
 			f'[embed]\nurl = "{self.llm_url}"\nmodel = "fake-embed"\n\n'
 			f'[reason]\nurl = "{self.llm_url}"\nmodel = "fake-reason"\n\n'
-			f"[intake]\nenabled = {str(intake_enabled).lower()}\n{ttl}\n"
+			f"[intake]\nenabled = {str(intake_enabled).lower()}\n{ttl}"
+			f"{watcher}\n"
 		)
 
 	def run(self, *args, timeout=120):

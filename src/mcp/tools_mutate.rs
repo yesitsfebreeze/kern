@@ -293,6 +293,9 @@ impl Server {
 				confidence: conf,
 				valid_until,
 				acl: acl.clone(),
+				// Same principal the sync leg above clamps against: an MCP caller is
+				// an agent whatever `p.source` claims.
+				source_tag: AGENT_SOURCE.to_string(),
 			};
 			match crate::ingest::direct::intake_direct(&direct_dir, &job) {
 				Ok(doc_id) => {

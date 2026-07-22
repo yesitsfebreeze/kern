@@ -28,7 +28,22 @@ impl WatcherConfig {
 		if self.roots.is_empty() {
 			vec![cwd.to_path_buf()]
 		} else {
-			self.roots.iter().map(PathBuf::from).collect()
+			// Pinned to `cwd`, not handed to `notify` as written: a relative root
+			// makes every event path relative too, and the daemon's off-limits
+			// prefixes (`data_dir`, `intake.dir`) are absolute. Two coordinate
+			// systems is how the watcher ends up re-ingesting kern's own state.
+			self
+				.roots
+				.iter()
+				.map(|r| {
+					let p = Path::new(r);
+					if p.is_absolute() {
+						p.to_path_buf()
+					} else {
+						cwd.join(p)
+					}
+				})
+				.collect()
 		}
 	}
 }
@@ -53,13 +68,14 @@ mod tests {
 	fn effective_roots_uses_configured_roots_when_present() {
 		let cfg = WatcherConfig {
 			enabled: true,
-			roots: vec!["a".into(), "b".into()],
+			roots: vec!["a".into(), "/elsewhere/b".into()],
 			..Default::default()
 		};
 		assert_eq!(
 			cfg.effective_roots(Path::new("/proj")),
-			vec![PathBuf::from("a"), PathBuf::from("b")],
-			"configured roots win; cwd fallback is not applied"
+			vec![PathBuf::from("/proj/a"), PathBuf::from("/elsewhere/b")],
+			"configured roots win over the cwd fallback, and a relative one is \
+			 pinned to cwd so event paths and the denied prefixes share a frame"
 		);
 	}
 

@@ -2,6 +2,63 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 30's durable backstop for the file watcher, and the
+  self-referential edge it opened. 934 → 939 unit tests, 34 → 36 e2e; recall
+  floors unmoved (0.9306 / 0.9722 / 0.9471).
+
+  **`DirectJob` gained a `source_tag`, and this is the load-bearing part of the
+  change.** Routing the watcher through the durable intake means its records now
+  travel a hop that was built for one producer: `drain_direct_once` named
+  `AGENT_SOURCE` for everything it read, correctly, because everything there was
+  minted by the MCP tool. Sent through unchanged, a watched file would come back
+  labelled an agent assertion — undoing item 95's "the tag is the channel" and
+  mislabelling the key `source_trust` weights on. The field carries the
+  producer's own tag across; `#[serde(default)]` gives payloads written before
+  it existed exactly the behaviour they had.
+
+  **The obvious assertion cannot prove it.** A `"file"` tag and an `"agent"` tag
+  both clamp to `MAX_AI_CONFIDENCE` — `clamp_confidence` separates `USER_SOURCE`
+  and nothing else — so a confidence check on the watcher's own payload is green
+  whether the tag survived or was overwritten. The guard is a `USER_SOURCE`
+  payload at 1.0, the one tag the clamp distinguishes, and it was
+  mutation-verified: restoring `AGENT_SOURCE` in the drain fails with
+  `conf_beta want 1.0000, got 1.0500`. A test that cannot fail on the bug it
+  names is decoration, and this one would have been.
+
+  **The backstop's first version fed itself.** The default watched root is the
+  cwd; the default intake is `.kern/intake` under it. So the durable write put a
+  file in the tree that produced it — the watcher read it back, parked a payload
+  wrapping that payload, and repeated. Measured against the default config from
+  one seed edit: **283 payloads in 60 seconds, largest 1.77 MB, against 0 on the
+  pre-change build.** `IgnoreRules` hardcoded `.git` and nothing else. Closed by
+  giving it host-supplied denied prefixes and passing the resolved `intake.dir`
+  and `data_dir` — named by the host, since that crate must not know what kern
+  is. `effective_roots` now pins a relative root to `cwd`, because a relative
+  root makes event paths relative while the denied prefixes are absolute, and
+  two coordinate systems is how the check silently matches nothing. Filed as
+  item 98: the loop is closed by enumerating two directories, not by an
+  invariant.
+
+  **The e2e's `STALL_MARKER` is load-bearing and that was measured, not
+  asserted.** The worker persists the graph after every committed job, so
+  against an instant fake LLM the "killed mid-distill" window is microseconds.
+  Half (b) run alone against a pre-change build **passes** with `STALL_SECS = 0`
+  (4.6s, 3.8s, twice) and **fails** with the stall (90s of retries). Without the
+  stall the file would be green on the bug it was written for.
+
+  Also confirmed rather than assumed: the fail-open path is genuinely reached
+  and cannot double-ingest — `intake_direct` is tmp-then-rename and the drain
+  reads only `*.json`, so no half-success both parks and re-submits; a new test
+  drives it with a regular file where the intake wants a directory. And the
+  `intake.enabled` gate is the right one: `drain_direct_once` needs no reason
+  LLM, so `tool_ingest`'s stricter `enabled && !reason_url.is_empty()` would
+  have refused to park on a reason-less host whose drain works fine.
+
+  Decided by: verify-before-claiming — every number here is from a run against
+  two built binaries, and the three claims that survived (`source_tag` is
+  unprovable by confidence, the stall is load-bearing, the fail-open path is
+  live) are the ones that were re-measured rather than re-read.
+
 - 2026-07-22 — merged item 21's review lifecycle. 203 + 1 + this one = 205. The
   merge broke **thirteen** citations, the worst single hit yet, and every one was
   a second-order effect: adding `ReviewState` to `Entity` shifted `types.rs`,

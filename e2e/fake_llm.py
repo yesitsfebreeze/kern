@@ -14,9 +14,18 @@ import json
 import math
 import re
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DIM = 384
+
+# The one slow path. Any embed input containing this marker sleeps STALL_SECS
+# before answering, which holds whatever carries it inside kern's distill/embed
+# leg. A test that has to kill a daemon *while a record is in flight* needs that
+# leg to be wide enough to aim at; against an instant fake it is microseconds.
+# ThreadingHTTPServer answers every other request meanwhile.
+STALL_MARKER = "kern-e2e-stall-embed"
+STALL_SECS = 5
 
 
 def embed(text):
@@ -69,6 +78,8 @@ class _Handler(BaseHTTPRequestHandler):
 		if self.path == "/api/embed":
 			inp = req.get("input", "")
 			texts = inp if isinstance(inp, list) else [inp]
+			if any(STALL_MARKER in t for t in texts):
+				time.sleep(STALL_SECS)
 			self._reply({"embeddings": [embed(t) for t in texts]})
 		elif self.path == "/api/chat":
 			last = ""
