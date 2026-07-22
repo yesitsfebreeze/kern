@@ -231,12 +231,20 @@ fn acl_admits(acl: &Acl, principals: &[String]) -> bool {
 		.any(|p| *p == acl.scope || acl.users.contains(p) || acl.groups.contains(p))
 }
 
+// The ACL half of `matches_filter`, callable alone because an EDGE is gated on
+// its far endpoint's ACL and on nothing else: `kind` or `since` on the row a
+// caller asked for says nothing about whether a neighbour's quoted text may be
+// read. Holds the "empty `principals` is no filter" rule so no caller re-derives it.
+pub fn acl_admits_entity(entity: &Entity, opts: &QueryOptions) -> bool {
+	opts.principals.is_empty() || acl_admits(&entity.acl, &opts.principals)
+}
+
 // Single filter predicate shared by post-filtering and pre-filtered ANN search (`search_all_filtered`) — the two must never diverge.
 pub fn matches_filter(entity: &Entity, opts: &QueryOptions) -> bool {
 	// First, because it is the only predicate here that decides what a caller is
 	// ALLOWED to see rather than what they asked for. Empty `principals` is "no
 	// principal was named", which is no filter — never "public only".
-	if !opts.principals.is_empty() && !acl_admits(&entity.acl, &opts.principals) {
+	if !acl_admits_entity(entity, opts) {
 		return false;
 	}
 	if opts.exclude_pending && entity.review == ReviewState::Pending {

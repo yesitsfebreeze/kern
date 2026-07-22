@@ -50,6 +50,97 @@
   Decided by: verify-before-claiming — the mutations were re-run, and the flake
   turned up only because the test was run under the runner CI actually uses
   rather than the one the justfile offers.
+- 2026-07-22 — merged item 18's edge-ACL fix. 221 + 1 + this one = 223.
+
+  The finding is worth separating from the fix. Item 18's *title* named a defect
+  that did not exist — a bare `query {id}` does run `matches_filter`, and the
+  existing withhold test proved it. The *body* enumerated four rendering surfaces
+  and fixed two, leaving the other two named in a paragraph. **The real bypass
+  was in the two it listed and skipped**, and a scoped Fact's text was reaching
+  non-members through a public neighbour's edge for as long as that paragraph
+  had been sitting there.
+
+  So the item was simultaneously wrong at the top and right in the middle, and
+  only reading the whole thing found the live leak. That is the third time this
+  run a heading has pointed away from the actual defect — but the first where
+  following the heading would have produced a *correct* conclusion ("already
+  enforced") and closed the item over a real hole.
+
+  The structural cause is in the fix: one endpoint verdict existed in
+  `resources.rs` and the other three surfaces open-coded their own rendering.
+  Four copies of one rule is why two were wrong, and neutering the now-shared
+  `incident_edge` fails all three withhold tests together — including the
+  pre-existing resources one, which is the evidence they share a verdict rather
+  than agree by coincidence.
+
+  Decided by: fix-the-root — an ACL enforced per surface is enforced wherever
+  someone remembered, which is a different property from enforced.
+
+- 2026-07-22 — item 18: the `query` tool gated the row and published its
+  neighbours. Its title said "a bare `query {id}` still filters nothing", which
+  had been a decision rather than a defect since 2026-07-21 — the id path runs
+  `matches_filter`, and a bare read filtering nothing is the empty-principals
+  default every single-agent caller depends on. Both are already pinned. Going
+  looking for the defect the title no longer named found a real one: a `Reason`
+  carries no ACL, `link` writes its body from up to 500 chars of **both**
+  endpoint texts, and the row clearing `matches_filter` says nothing about its
+  neighbour. `query {id: <public row>, principals: ["bob"]}` served an
+  alice-scoped Fact's text verbatim through any public neighbour's edge; the
+  ranked read did the same at 120 chars. `kern get` routes to the first of those.
+
+  The gap was **written down and skipped**. The 2026-07-21 entry enumerated the
+  four surfaces that render an entity's edges — `entity_detail`, the ranked
+  `edges` array, `resource_thought`, `format_chains` — fixed the last two, and
+  left the first two named in its own prose. A list of surfaces is not a fix for
+  the ones on it.
+
+  Fixed at the root: the endpoint verdict left `src/mcp/resources.rs` and became
+  `src/mcp/acl.rs`, one `Endpoint` + `incident_edge` that all four renderings
+  call. It takes the **admission rule** as a parameter rather than the
+  principals, because the two surfaces disagree about what "allowed" means and
+  have to keep disagreeing — resources can name no principal so its rule is
+  `Acl::is_public`, while `query` takes the caller's. The `query` half is
+  `acl_admits_entity`, the ACL predicate of `matches_filter` lifted out so the
+  edge gate cannot re-derive the empty-principals default and get it wrong.
+  Recall unmoved at 0.9306 / 0.9722 / 0.9471 — an ACL that changed an unscoped
+  read would be the bug, not the feature.
+
+  Title narrowed with it: the one decision still owed here is whether the file
+  watcher gives `Document` entities a tenant-default ACL. Everything else the
+  item still lists is item 24's residue, federation's, or a named later fix
+  (storing the verdict on the edge at write time, which is what would make this
+  gate cheap and fail-closed instead of per-read and fail-open).
+
+  Decided by: fix-the-root — four copies of one verdict is why two of them were
+  wrong, so the fix was to leave one.
+
+- 2026-07-22 — the stale-heading defect has a second form, and three closed items
+  were in it. Items 21, 94 and 97 led with the defect and appended "CLOSED":
+  *"The e2e harness cannot exercise the GNN at all — closed"*, *"A near-duplicate's
+  alternate wording is stored but indexed nowhere — CLOSED"*. Every word before
+  the dash is false, and slice selection reads `^### ` — a scan sees a live
+  defect unless it reaches the end of a 120-character line.
+
+  Aligned to the convention items 27, 95, 98 and 32 already use: **state the
+  resolved condition, then the closure.** "A GC sweep pays one LMDB commit, not
+  one per victim — closed". "The pre-auth frame is capped and deadlined —
+  closed". The title reads true on its own, and the date is a footnote rather
+  than the correction.
+
+  This is the same failure as the seven titles retitled earlier this run, but it
+  survived those passes because the earlier heuristic asked "does the title
+  contain a closure marker" — and these do. The marker was present; the sentence
+  was still false. A rule that checks for the presence of a word cannot see word
+  order, which is the third heuristic this run to founder on the difference
+  between form and meaning.
+
+  Worth stating as a convention rather than three fixes, because the next closure
+  will be written by whoever closes it: **an item's title is a claim about the
+  repo, and it is read alone.** If it is only true when read to the end, it is
+  not true.
+
+  Decided by: fix-the-root — the recurring defect is titles written as edits to
+  the old title rather than as fresh statements of the current truth.
 
 - 2026-07-22 — merged item 97, and with it the last of the four verification
   gaps this run found in its own instruments. 218 + 1 + this one = 220.
