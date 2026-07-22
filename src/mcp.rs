@@ -405,6 +405,7 @@ mod tests {
 			"remote_cap_dropped",
 			"unspilled_drops",
 			"ingest_queue_refused",
+			"gnn_train_refused",
 		] {
 			assert!(!h[key].is_null(), "{key} must reach the MCP surface");
 		}

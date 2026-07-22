@@ -132,8 +132,8 @@ fn tick_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> {
 			h.queue_depth, h.tasks_done, h.task_avg_ms
 		),
 		format!(
-			"degraded:    {} panics | {} failures",
-			h.task_panics, h.task_failures
+			"degraded:    {} panics | {} failures | {} refused GNN trainings",
+			h.task_panics, h.task_failures, h.gnn_train_refused
 		),
 	];
 	if !h.last_task_panic.is_empty() {
@@ -641,6 +641,20 @@ mod cmd_tests {
 			live.contains("last failure: GnnPropagate[k]: train epoch 0 forward"),
 			"{live}"
 		);
+	}
+
+	// This counter alone, every other one zero — which is the only state it is
+	// ever seen in, since the trainer refusing has nothing to do with a task
+	// panicking. A line gated on some other counter reports nothing here.
+	#[test]
+	fn a_refused_gnn_training_shows_with_no_other_counter_moving() {
+		let lines = tick_health_lines(Some(&trnsprt::kern_rpc::HealthRes {
+			ok: true,
+			gnn_train_refused: 4,
+			..Default::default()
+		}));
+		assert_eq!(lines.len(), 2, "counts only, no fault lines: {lines:?}");
+		assert!(lines[1].contains("4 refused GNN trainings"), "{lines:?}");
 	}
 
 	#[test]

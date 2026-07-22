@@ -2,6 +2,54 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 28 closed: `gnn_train_refused` crosses the RPC and reaches
+  `kern health`. Three edits — the field on `HealthRes`, the handler filling it
+  from the same `tool_health` payload every other counter reads, and
+  `tick_health_lines` folding it into the `degraded:` line. 980 → 982 tests.
+
+  **Decided by: it folds into the existing `degraded:` line because it cannot
+  join the other one.** `cmd_health` already prints a `degraded:` line for the
+  seven fail-open counters, and an eighth fail-open counter obviously belongs
+  there — except that line is built from `graph_health_stats`, which the CLI
+  computes *in its own process*, and `TRAIN_REFUSED` is a global only the daemon
+  ever moves. A CLI reading it locally sees 0 forever. The only counters a CLI
+  can see at all are the ones that crossed the RPC inside `HealthRes`, and the
+  tick line is the only `HealthRes`-derived degradation line there is. So the
+  choice was never "new line or existing line" — it was "the line fed by the
+  wrong process, or the one fed by the right one". Folding rather than adding
+  also keeps `a_clean_daemon_prints_no_last_fault_lines` green unedited: a
+  healthy tick still prints exactly two lines, so a quiet kern does not grow a
+  third that always reads zero. That test staying green *unedited* is the
+  signal — an edit to it would have meant the output shape changed rather than
+  extended.
+
+  **The verification found a real flake, and `just test` could not have.** The
+  new RPC test spawns a real `Trainer` and blocks its runner, because
+  `tool_health` reads the trainer's global directly and there is no seam to
+  inject a payload through — a real refusal is the only way to make the counter
+  nonzero. But `TRAIN_REFUSED` is one global per process, and CI runs `cargo
+  test --workspace` where `just test` runs `cargo nextest`: one process for the
+  whole suite versus one process per test. The new test refuses a full cap's
+  worth of submissions; the trainer's own cap test asserts its delta is exactly
+  1. **Measured: 5 red runs in 30 under `cargo test`, 0 in 40 under nextest.**
+  Both tests now serialise on a test-only `REFUSAL_COUNTER`; 40 of 40 green
+  after.
+
+  The rule that leaves, and it generalises past this counter: **a test that
+  moves a process-global must serialise against every test that measures one**,
+  because a measurement is two reads and the gap between them belongs to
+  whoever else is running. And the corollary about instruments — a green
+  `just test` is not evidence about a global, because the runner that makes it
+  green is the one that hides the defect. Two runners, two answers; the one CI
+  uses is the one that counts.
+
+  Also corrected in passing: `FEATURES.md` described the MCP `health` tool as
+  carrying "the seven fail-open counters" and omitted this one, and its
+  `src/tick/*` line-count had drifted ~660 lines behind the tree.
+
+  Decided by: verify-before-claiming — the mutations were re-run, and the flake
+  turned up only because the test was run under the runner CI actually uses
+  rather than the one the justfile offers.
 - 2026-07-22 — merged item 18's edge-ACL fix. 221 + 1 + this one = 223.
 
   The finding is worth separating from the fix. Item 18's *title* named a defect
