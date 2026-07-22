@@ -2,6 +2,63 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — merged item 94's lexical indexing of dedup alternate wordings.
+  201 + 1 + this one = 203.
+
+  The ROADMAP conflict is worth a sentence because it is the first one where
+  both sides were *correct when written*. `cycle/1` branched before item 28's
+  sparse adjacency landed and carried the accurate-at-the-time text "a
+  propagation still takes 79.7s at N=4096"; master carried the closure that
+  replaced it. Nothing was wrong on either side — the branch was simply older
+  than the fact. Took master's.
+
+  That is the ordinary cost of three parallel cycles against one file, and it is
+  cheap: git flagged it, both versions were legible, and picking took one read.
+  The expensive failures this run were the ones git could NOT flag — a stale
+  `index.lock` that produced an empty staged merge with a clean `git status`, and
+  a hand-spliced conflict that dropped four entries. Textual conflicts are the
+  visible tax; the invisible ones needed a counting rule to catch.
+
+  Decided by: verify-before-claiming — "both sides look right" is resolvable by
+  asking which is newer than the code.
+
+- 2026-07-22 — item 94 closed: a deduped near-duplicate's alternate wording now
+  reaches the lexical index, as part of the survivor's one document.
+
+  The item was real — the first of this run's slices where the premise survived
+  contact. Measured before touching anything: the wording sits on a `Rephrase`
+  reason with `vector.len() == 0`, `reason_idx` empty, and the lexical index
+  answering nothing for a term only the merged document used. The query that
+  proves it: over a corpus where twenty fillers sit nearer the query vector,
+  `velocipede outbuilding` returned twenty fillers and never the survivor that
+  had swallowed those exact words.
+
+  **The remedy the item named would have made it worse.** It asked for "one
+  `lex.insert` of the rephrase text against the survivor's id". The index is
+  keyed by entity id and replaces on insert, so that would have swapped the
+  survivor's own wording out for the alternate's — a lateral move, not an
+  addition. Shipped instead: one document per entity, statements plus every
+  `Rephrase` text, which also settles "does it appear twice" structurally rather
+  than by a dedup rule.
+
+  Lexical only, no vector for the alternate: both dedup gates reach
+  `merge_duplicate` without an embedder, and `Mode::Hybrid` never reads
+  `reason_idx` anyway. The dense gap was the small one — two texts merge only
+  when their vectors are already within threshold.
+
+  **What did not move, and the honest reason.** Recall is unchanged at
+  0.9306 / 0.9722 / 0.9471: the e2e corpus has no near-duplicate pair, so no
+  `Rephrase` is minted and every document is byte-identical. Two probes were
+  written and thrown away for testing nothing — `kern search` turns out to be
+  pure vector and never reads the lexical index, and an "appears once" assertion
+  passed while reverted because the shared words carried it. Both were caught by
+  the revert step, not by reading. The residual is named in the item: the fix
+  makes the wording a *candidate*, and `fuse_hybrid_seeds` then re-ranks every
+  seed by the query cosine that failed to find it, which is item 61's question.
+
+  Decided by: verify-before-claiming — the item's own proposed fix was a claim
+  about code, and reading the index it named is what showed it backwards.
+
 - 2026-07-22 — merged item 28's sparse adjacency, but only after catching a
   merge that would have thrown it away. 198 + 2 + this one = 201.
 
