@@ -1891,13 +1891,26 @@ at 7B — **that figure came from the deleted harness and is unreproducible; tre
 it as a lead, not a number** (item 1's claim standard). Long deltas are not
 chunked at all.
 
-### 50. Intake distillation lacks relative-date resolution `[ingest]`
+### 50. Intake distillation lacks relative-date resolution — closed 2026-07-22 `[ingest]`
 
-The prompt injects no current date (`src/ingest/distill.rs:43-48`), and
+**Closed 2026-07-22.** The distill prompt now injects today's date so a
+relative-date phrase ("last Tuesday", "yesterday") resolves to the absolute
+ISO8601 `valid_from` `parse_claims` already parses; the capability the deleted
+eval path had returned to the product path. `distill` gained a `now:
+SystemTime` param (callers pass `SystemTime::now()`, tests pin it) and a new
+`date_string` (`src/base/time.rs`, Howard Hinnant `civil_from_days`, no new
+dep) renders it UTC `YYYY-MM-DD` — day resolution, no zone the prompt cannot
+name. Direct path unchanged; uncited/undated claims behave as before. Proved by
+`distill_prompt_injects_current_date_for_relative_resolution` and `base::time`
+round-trips; distill suite 22 green, `cargo test -p kern --lib` 901 passed. See
+the 2026-07-22 CHANGELOG entry. Decided by fix-the-root (inject the date, not a
+post-hoc parser) and name-the-tradeoff (UTC day, not timezone-aware).
+
+~~The prompt injects no current date (`src/ingest/distill.rs:43-48`), and
 `valid_from` is only requested when the statement states an absolute date — so
 dropped text containing "last Tuesday" stores unresolved. The eval path got this
 and the product path never did; the eval path is now deleted, so the capability
-exists nowhere.
+exists nowhere.~~
 
 ### 90. `DirectJob` carries `valid_until` but drops `valid_from` `[ingest]`
 

@@ -346,7 +346,11 @@ Nothing is lost on an LLM outage — the delta stays queued until it succeeds.
   a JSON array of `{text, kind, valid_from?}` where `kind` is one of the 7
   built-in claim kinds (`DEFAULT_KINDS`, `src/ingest/distill.rs:9`) or a
   registered one (`root.claim_kinds`, offered to the LLM by `spawn_intake`'s
-  kinds closure).
+  kinds closure). The prompt names today's date (UTC `YYYY-MM-DD` via
+  `date_string` in `src/base/time.rs`, from a `now: SystemTime` param callers
+  pass as `SystemTime::now()`), so a relative-date phrase ("last Tuesday") in
+  the delta resolves to an absolute ISO8601 `valid_from` rather than storing
+  unresolved (item 50, 2026-07-22).
   `Some([])` = nothing worth keeping (archive); `None` = no LLM
   output (transient outage, retry). `parse_claims` is lenient (finds the JSON
   array anywhere in the output).

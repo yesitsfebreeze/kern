@@ -2,6 +2,27 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 50 closed: the distill prompt now names today's date, so a
+  relative-date phrase ("last Tuesday", "yesterday", "two weeks ago") resolves
+  to the absolute ISO8601 `valid_from` `parse_claims` already parses — previously
+  it stored unresolved because the prompt injected no date and requested
+  `valid_from` only for absolute dates. The eval path had this; the eval path is
+  deleted, so the capability existed nowhere. `distill` (`src/ingest/distill.rs`)
+  gains a `now: SystemTime` param (callers pass `SystemTime::now()`, tests pin
+  it), and `date_string` (new in `src/base/time.rs`, Howard Hinnant
+  `civil_from_days`, no new dep) renders it as UTC `YYYY-MM-DD` — day resolution
+  is what `valid_from` carries, and UTC avoids a local zone the prompt cannot
+  name. Direct path (`direct.rs`) unchanged: only the distill leg gains the date,
+  so uncited/undated claims behave exactly as before. Proved by
+  `distill_prompt_injects_current_date_for_relative_resolution` (pinned
+  `now` 2026-07-22, captured prompt asserts the date is present) and
+  `civil_from_days`/`date_string` round-trips in `base::time`; distill suite 22
+  green, `cargo test -p kern --lib` 901 passed. Decided by: fix-the-root (inject
+  the date the model needs to resolve, not a post-hoc date parser), name-the-
+  tradeoff (UTC day resolution, not timezone-aware — the prompt has no zone to
+  name and `valid_from` is date-grain). Unblocks the relative-date slice of
+  item 104's full-pipeline temporal bench.
+
 - 2026-07-22 — item 104 (provenance half): the intake distill path records
   turn-level claim provenance, the blocker the full-pipeline LoCoMo bench
   needed. `distill` (`src/ingest/distill.rs`) splits the transcript into 1-based
