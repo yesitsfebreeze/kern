@@ -2,6 +2,58 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 93: the anchor checker had been reading 63% of the anchors
+  and reporting on all of them. 223 + this one = 224.
+
+  `scripts/docs_check.py` verifies that every line citation points at a line
+  that exists, and since 2026-07-21 that the line still reads like the sentence
+  citing it. Both of the previous passes on this item tuned the *content* rule —
+  tokenising, stemming, a three-character floor, a precision/recall trade
+  recorded twice — and neither asked the prior question: what does the scanner
+  see at all? `REF` demands a literal `src/` prefix, so two forms it never
+  matched were invisible. A bare continuation, where a bullet names
+  `src/base/store.rs:624` once and then cites the next eight functions by line
+  alone. And a bare `place.rs:112`. Together, **245 of 664 line anchors — 37% —
+  had no existence check and no content check on them.**
+
+  That is the loop's own instrument, and the blind spot sat exactly where the
+  cost is: the second pass re-pointed 29 anchors and had to count two of them by
+  hand, "the continuations the regex never sees", in its own words. It named the
+  gap and did not read it as a gap.
+
+  Both forms now resolve against the last file cited before them and the scope
+  resets at each heading, because that is how a human resolves them. A bare name
+  with no antecedent falls back to a unique match under `src/`; `types.rs` is
+  four files, so an ambiguous one is reported rather than guessed — a checker
+  that picks one at random is worse than one that says it cannot tell. A
+  doubly-backticked span is a quotation of the form rather than a use of it, so
+  an item discussing anchors can display one without citing it. References
+  checked: **834 -> 1008.**
+
+  **It found a dead reference on the first run, and its shape is the argument
+  for the whole change.** `ROADMAP.md` cited `Drop for LocalListener` by line
+  alone under a paragraph whose last named file was `client_local.rs`, which is
+  146 lines long; the symbol is at `src/trnsprt/src/typed/local.rs:654`. The
+  line number was right and the file was wrong. A continuation's existence is
+  not a property of the anchor — it is a property of the anchor plus every
+  citation above it, so inserting one unrelated reference silently re-points
+  every continuation beneath it. Spelling the path out is the only fix that
+  survives the next insertion, and that is what landed.
+
+  18 nominations followed, adjudicated one at a time against the tree: **15
+  true, 3 false — 83.3% precision on a population that had never been checked
+  once.** Five are the same wrong-file class as the dead reference. They are
+  reported and not fixed: every one is a `[surface]`, `[retrieval]`,
+  `[lifecycle]` or `[federation]` claim and this pass owns `[process]`.
+
+  The guard is a fixture page run through `check_page`, not an assertion about
+  the regexes, and it was checked against the previous build rather than assumed
+  to bite: there the page yields one visible citation and an empty failure list,
+  here it yields five and fails the continuation that points past EOF.
+
+  Decided by: fix-the-root — two passes had tuned the judgement of anchors the
+  scanner could see, while a third of them were never handed to it.
+
 - 2026-07-22 — merged item 18's edge-ACL fix. 221 + 1 + this one = 223.
 
   The finding is worth separating from the fix. Item 18's *title* named a defect
