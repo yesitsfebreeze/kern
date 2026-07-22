@@ -230,7 +230,7 @@ are GC-immune, not ACL-immune** — a Fact the requester cannot see must still n
 be returned. Default semantics: empty `principals` means *no filter*, not
 *public only*, or every single-agent caller goes blind.
 
-### 18. ACL + request principal — gates everything else in this tier `[surface]`
+### 18. ACL is written and enforced; a bare `query {id}` still filters nothing `[surface]`
 
 **Four bullets done 2026-07-21; the item stays open.** `Entity` carries `Acl`
 (struct `{scope, users, groups}`, `src/base/types.rs:133-137`) and it is now
@@ -1352,7 +1352,7 @@ Recorded in `FEATURES.md` gap blocks, planned nowhere:
 - LMDB compaction is manual and offline-only, and is the only way to shrink the
   high-water mark (`FEATURES.md:322-324`).
 
-### 32. Tree depth is an unlisted eviction bias `[lifecycle]`
+### 32. Tree depth was an eviction bias in the opposite direction — closed 2026-07-21 `[lifecycle]`
 
 **Closed 2026-07-21. The bias was real; its direction and its severity were
 both stated backwards, and the fix the title implies would have made it worse.**

@@ -2,6 +2,31 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — scanned every ROADMAP item for the recurring stale-heading defect
+  and retitled two more: item 32 (body: "Closed 2026-07-21", title still naming
+  the bias — and its own body says the fix the title implies would have made
+  things worse) and item 18 (four bullets done, title still claiming it "gates
+  everything else in this tier" when what is left is that a bare `query {id}`
+  filters nothing). Sixth and seventh this run.
+
+  The scan flagged twelve and I kept two. That ratio is the useful part: ten of
+  the twelve already named their *remainder* correctly — item 26 "allocates four
+  N-sized buffers", item 29 "was measured and refused", item 52 "a single-line
+  seed still truncates". A crude "body says closed, title does not" rule cannot
+  tell a stale title from a correctly-narrowed one, because both mention a defect
+  that exists; only the body says which defect.
+
+  So this stays a read, not a check. That is worth writing down after three
+  attempts at automating docs reconciliation this run — the anchor nominator
+  works because "does this line say what cites it" is decidable from two strings;
+  gap-block coverage and stale headings are not, and both heuristics I tried
+  produced mostly false positives. The lesson is not that automation failed, it
+  is which questions are mechanisable: **content equality is; editorial accuracy
+  is not.**
+
+  Decided by: verify-before-claiming — twelve flags, two real, and the difference
+  was only visible by opening each one.
+
 - 2026-07-22 — merged item 30's durable watcher path. The interesting conflict
   was in `e2e/conftest.py`, and it is the first this run that needed a **code**
   merge rather than a pick: item 21 added `review_policy` to `write_config`,
