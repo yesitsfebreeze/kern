@@ -185,11 +185,6 @@ pub fn retrieve_profiled(
 	prof.checkpoint("merge");
 
 	score::apply_boosts(g, cfg, &mut results);
-	if cfg.lexical_top_boost > 0.0 {
-		if let Some(lex) = lex_ref {
-			score::apply_lexical_boost(lex, cfg, query_text, &mut results);
-		}
-	}
 	gravity::apply_gravity(g, cfg, &mut results);
 	score::apply_remote_trust(g, cfg, &mut results);
 	// An active filter must run BEFORE filter_delivery's pool truncation, or expansion's non-matching neighbours crowd matching entities out of the cap.
@@ -219,6 +214,19 @@ pub fn retrieve_profiled(
 	prof.checkpoint("boosts+filter");
 	diversify::mmr(cfg, qvec, &mut results);
 	prof.checkpoint("mmr");
+
+	// Late-fusion lexical boost applied AFTER MMR: MMR's relevance term is raw
+	// query-cosine, so any score bonus added before it is invisible whenever the
+	// pool exceeds `max_deliver_results`. Pinning exact-lexical matches to the
+	// top of the delivered list must re-sort the final order, post-diversity.
+	if cfg.lexical_top_boost > 0.0 {
+		if let Some(lex) = lex_ref {
+			score::apply_lexical_boost(lex, cfg, query_text, &mut results);
+			results.sort_by(|a, b| {
+				crate::base::util::cmp_rank(a.score, &a.entity.id, b.score, &b.entity.id)
+			});
+		}
+	}
 
 	let results: Vec<ScoredEntity> = results.into_iter().map(ScoredRef::to_owned).collect();
 	prof.checkpoint("materialize");
@@ -447,7 +455,56 @@ mod tests {
 			1,
 			"delivery carries it once, not once per matching wording: {ids:?}"
 		);
-	}
+		}
+
+		#[test]
+		fn lexical_top_boost_pins_a_verbatim_match_to_the_top_past_higher_cosine_decoys() {
+			// The query vector points at the filler field, so the 20 decoys outrank the
+			// survivor by content score alone. With `lexical_top_boost` on, the
+			// survivor's verbatim BM25 overlap must lift it to #1 of the delivered list
+			// — the post-MMR re-sort is what makes the bonus visible past diversity.
+			let g = deduped_corpus();
+			let cfg = crate::config::RetrievalConfig {
+						pagerank_enabled: false,
+						lexical_top_boost: 1.0,
+						..Default::default()
+			};
+			let w = Weights { content: 0.70, reason: 0.15, edge: 0.15 };
+			let ids = retrieve(&g, &cfg, &[0.0, 1.0], "bicycle shed", Mode::Hybrid, None, w)
+						.results
+						.into_iter()
+						.map(|r| r.entity.id)
+						.collect::<Vec<_>>();
+			assert!(
+						!ids.is_empty(),
+						"precondition: the query delivered something: {ids:?}"
+			);
+			assert_eq!(
+						ids.first(),
+						Some(&"survivor".to_string()),
+						"the verbatim-lexical match wins the top over higher-cosine decoys: {ids:?}"
+			);
+
+			// And the same query without the boost leaves the survivor buried — the
+			// decoys' content score wins. This is the counterfactual that proves the
+			// boost is doing the work, not the seed.
+			let cfg_off = crate::config::RetrievalConfig {
+						pagerank_enabled: false,
+						lexical_top_boost: 0.0,
+						..Default::default()
+			};
+			let ids_off =
+						retrieve(&g, &cfg_off, &[0.0, 1.0], "bicycle shed", Mode::Hybrid, None, w)
+								.results
+								.into_iter()
+						.map(|r| r.entity.id)
+								.collect::<Vec<_>>();
+			assert_ne!(
+						ids_off.first(),
+						Some(&"survivor".to_string()),
+						"without the boost the cosine-dominant decoys keep the top: {ids_off:?}"
+			);
+		}
 
 	#[test]
 	fn format_chains_renders_entities_and_reason_labels() {

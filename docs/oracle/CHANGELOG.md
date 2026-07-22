@@ -2,6 +2,21 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — `lexical_top_boost` now re-sorts after MMR, not before. The
+  bonus was applied before `diversify::mmr` and `filter_delivery`, so it was
+  invisible whenever the candidate pool exceeded `max_deliver_results`: MMR's
+  relevance term is raw query-cosine, so it re-ranked on the un-boosted score
+  and the verbatim pin was discarded before delivery. Moved to after MMR with a
+  final `cmp_rank` re-sort of the delivered list, so an exact-lexical match
+  floats to the top of what the caller actually receives. Default 0.0 stays a
+  bit-identical no-op. Proved by
+  `lexical_top_boost_pins_a_verbatim_match_to_the_top_past_higher_cosine_decoys`
+  (boost on → verbatim match #1 past higher-cosine decoys; boost off → decoys
+  keep the top). Decided by: fix-the-root (the bonus belongs on the delivered
+  order, not the pre-diversity pool), name-the-tradeoff (the re-sort is a second
+  pass over the delivered list, bounded by `max_deliver_results`). Supersedes:
+  the 2026-07-22 `lexical_top_boost` entry's placement claim, narrowed.
+
 - 2026-07-22 — eval data dir moved from repo-root `/eval/` to `/tests/eval/`, so
   all benchmark artifacts (datasets, reports, cache) live under `tests/` beside
   the harness scripts in `tests/e2e/eval/`. `.gitignore` `/eval/` →
