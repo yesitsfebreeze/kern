@@ -2748,9 +2748,33 @@ name-the-tradeoff (the deadline is best-effort — a flush that cannot finish in
 on a dead runtime is hopeless, and the detached thread is reaped by the exit).
 Supersedes: nothing — the item described the defect, now removed.
 
-### 77. Hash composition is an unguarded breaking change `[store]`
+### 77. Hash composition is an unguarded breaking change — closed 2026-07-22 `[store]`
 
-"Changing how a hash input is composed is a breaking change to every existing
+**Closed 2026-07-22.** Golden-vector tests now pin the exact pre-hash composed
+string at each load-bearing identity-hash site, so a future composition change
+breaks a test the same way a bincode schema change would. Four tests pin the
+*shape* of what is hashed (not the digest of a value):
+`source_id_pins_null_delimited_composition` (`Source::source_id`,
+`ticket\x0042\x00disc`), `unnamed_kern_id_pins_parent_then_nonce_composition`
+(`content_hash("p42")`), `named_child_kern_id_pins_parent_name_nonce_composition`
+(`content_hash("pcode9")`), and
+`structure_digest_pins_canon_layout_for_a_single_node`
+(`content_hash("ep=a;max=0\na|\n")`, `HnswIndex::structure_digest` canon —
+`=`, `;`, `|`, `\n` delimiters, empty-layer handling). The bare-text
+composition (`content_hash(text)`) was already implicitly golden-pinned by
+existing tests asserting an entity id equals `content_hash("hello world")`
+exactly — not re-pinned. Negative control run per site (not shipped): reverting
+one delimiter in each format string flipped the relevant test red, green on
+revert. `cargo test -p kern --lib` 905 passed, 1 pre-existing env flake
+(`config::tests::resolve_root_returns_start_when_no_kern_ancestor`, stray
+`/tmp/.kern`). Decided by verify-before-claiming, name-the-tradeoff (pin the
+pre-hash string, not the digest), fix-the-root (the determinism tests asserted
+the property never at risk; the exact-string shape was the unguarded one).
+Out of scope: a `HASH_VERSION` constant that versions the compositions — this
+slice only adds the guard that makes a future bump loud. See the 2026-07-22
+CHANGELOG entry.
+
+~~"Changing how a hash input is composed is a breaking change to every existing
 graph" (`concepts/graph.mdx:86-88`), and source confirms the exposure. The hash
 itself is pinned — `content_hash` (`src/base/util.rs:3`) is sha256-to-lowercase-hex
 and `util.rs:155` asserts length, alphabet and determinism. What is unpinned is
@@ -2772,7 +2796,7 @@ it makes every existing remote statement fail its receipt.
 Repo law 1 guards bincode schema round trips; nothing guards or versions any of
 these, and there is no migration path. Wanted: golden-vector tests pinning each
 composed input string — not the digest of a value, the *shape* of what is hashed —
-same standing as the bincode guard.
+same standing as the bincode guard.~~
 
 ### 78. A non-local LLM URL egresses everything, silently `[surface]`
 

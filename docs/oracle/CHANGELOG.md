@@ -2,6 +2,39 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 77 closed: golden-vector tests pin the exact pre-hash
+  composed string at each load-bearing identity-hash site, so a future
+  composition change breaks a test the same way a bincode schema change would.
+  Repo law 1 guards the bincode schema; nothing guarded or versioned the format
+  strings composed into `content_hash`, and each one is a different format
+  string — yet a composition change orphans every existing id AND breaks the
+  gossip import guard (`content_hash(&e.text()) == e.id`,
+  `src/gossip/handler.rs:536`), so every existing remote statement fails its
+  receipt. Four tests pin the *shape* of what is hashed, not the digest of a
+  value (a digest pins the value, not the composition a future change touches):
+  `source_id_pins_null_delimited_composition` (`ticket\x0042\x00disc`,
+  `Source::source_id`), `unnamed_kern_id_pins_parent_then_nonce_composition`
+  (`content_hash("p42")`, `unnamed_kern_id`),
+  `named_child_kern_id_pins_parent_name_nonce_composition`
+  (`content_hash("pcode9")`, `named_child_kern_id`), and
+  `structure_digest_pins_canon_layout_for_a_single_node`
+  (`content_hash("ep=a;max=0\na|\n")`, `HnswIndex::structure_digest` canon —
+  `=`, `;`, `|`, `\n` delimiters and empty-layer handling). The bare-text
+  composition (`content_hash(text)`) was already implicitly golden-pinned —
+  existing tests assert an entity id equals `content_hash("hello world")`
+  exactly — not re-pinned. Negative control run for every site during
+  implementation (not shipped): reverting one delimiter in each format string
+  flipped the relevant test red (`\x00`→`\x01`, insert `\x00`, `ep=`→`ep_`),
+  back green on revert. `cargo test -p kern --lib` 905 passed, 1 pre-existing
+  environmental flake (`config::tests::resolve_root_returns_start_when_no_kern_ancestor`,
+  stray `/tmp/.kern`, fails identically on the clean baseline).
+  Decided by: verify-before-claiming (negative control per site),
+  name-the-tradeoff (pin the pre-hash string, not the digest), fix-the-root
+  (the existing determinism tests assert the property never at risk; the
+  exact-string shape is the unguarded one). Out of scope: a `HASH_VERSION`
+  constant that versions the compositions — this slice only adds the guard
+  that makes a future bump loud.
+
 - 2026-07-22 — item 50 closed: the distill prompt now names today's date, so a
   relative-date phrase ("last Tuesday", "yesterday", "two weeks ago") resolves
   to the absolute ISO8601 `valid_from` `parse_claims` already parses — previously
