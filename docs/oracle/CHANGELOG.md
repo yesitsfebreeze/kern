@@ -2,6 +2,54 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — **The client authenticates the server, before it says anything.**
+  A `kern.sock` client used to present the graph's `mcp-token` to whatever was
+  bound at the path. With no `XDG_RUNTIME_DIR` that path is
+  `/tmp/kern-<tag>-<user>.sock`, which any local user can bind first, and the
+  socket token is the HTTP token — so the squat was an HTTP-side compromise.
+  `connect_kern` now refuses an endpoint this euid does not own, and refuses it
+  before `present_auth` writes frame 1. Item 24 residue 3 is closed on the
+  disclosure axis; the daemon-side denial of service is not, and stays filed.
+
+  **Two checks, because one is not enough.** `require_owned_by_caller` stats the
+  endpoint — both the name and what it resolves to must be ours. That is the
+  cheap half and it is racy on its own, and the race is not exotic: the window
+  is opened by *our own daemon*, since `Drop for LocalListener` unlinks the
+  socket on every shutdown and the stale-rebind path unlinks it too. A name that
+  stats as ours can be free a microsecond later and rebound by somebody else
+  before the `connect` lands, and an attacker only has to wait for a restart.
+  So `require_peer_is_caller` reads `SO_PEERCRED` off the connected socket
+  afterwards — the uid the kernel recorded when the peer called `listen`, which
+  no rename can move — still ahead of the token frame. The stat stays in front
+  because refusing without opening a connection yields a message naming the
+  squatter's uid.
+
+  **The `NotFound` carve-out, and why it is not a bypass.** A missing path
+  returns `Io`, not `UntrustedEndpoint`, so `route()` still reads it as
+  `NoDaemon` and every daemonless CLI invocation behaves as before. It cannot be
+  turned into a hole because the carve-out only changes the *variant* of an
+  error that is returned either way: `require_owned_by_caller(path)?` propagates
+  on `NotFound` exactly as it does on a refusal, so the connect never happens
+  and `present_auth` is never reached. Verified against a live binary — with no
+  socket, `kern claim-kind add` still writes locally; with the path pointing at
+  a root-owned file it prints `refusing endpoint`.
+
+  **Two defects found reviewing the first cut.** The refusal message printed the
+  *link's* uid on a target mismatch, so a symlink we own aimed at root's socket
+  read `owned by uid 1000, not 1000` — the two cases are reported separately
+  now. And the reported mutation score was wrong: neutering the stat check fails
+  **6** of 6 targeted tests, not 4 of 10; the earlier count was nextest's
+  fail-fast truncating the run, not four survivors.
+
+  Decided by: name-the-tradeoff — the `NotFound` carve-out trades a precise
+  error for the ordinary no-daemon path staying quiet, and it is safe only
+  because the connect is skipped either way; fix-the-root — the stat-vs-connect
+  TOCTOU was named and left in the first cut, and a check whose own daemon opens
+  the race window is false confidence, so `SO_PEERCRED` was built rather than
+  filed. What remains genuinely unclosed: the squatter still wins the
+  `AlreadyRunning` probe and the real daemon still stands down, and deleting the
+  peer-check *call* is a mutation no test catches, because catching it needs a
+  socket served by a second uid.
 - 2026-07-22 — swept every `**Gaps.**` block in `FEATURES.md` against
   `ROADMAP.md` looking for more defects of item 98's kind — real, stated in a
   description, carried by no item. **Found none.** Recording the negative result

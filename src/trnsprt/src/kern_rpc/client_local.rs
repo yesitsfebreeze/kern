@@ -44,6 +44,12 @@ impl KernRpcClient<JsonEnvelopeCodec> {
 					present_auth(&mut channel, auth).await?;
 					return Ok(KernRpcClient::new(channel));
 				}
+				// Also propagated, never retried, and for the same reason from the
+				// other side: the endpoint is bound by something this user does not
+				// own. Waiting cannot make it ours, and the retry loop exists for a
+				// daemon that has not finished starting, not for one that is not
+				// there at all.
+				Err(e @ AdapterError::UntrustedEndpoint(_)) => return Err(e),
 				Err(e) => last_err = Some(e),
 			}
 			tokio::time::sleep(jittered(base_delay)).await;
@@ -106,6 +112,35 @@ mod tests {
 		assert!(
 			res.is_err(),
 			"no server at the endpoint -> Err after retries"
+		);
+	}
+
+	// The token is frame 1. This pins that it is never frame 1 to a socket
+	// somebody else owns: `/etc/hosts` is root's, and a client that reached
+	// `connect` would fail with `Io` (ENOTSOCK) instead. `UntrustedEndpoint`
+	// can only come from the owner check, which sits ahead of `connect` and so
+	// ahead of `present_auth` — the whole point, since a check after the frame
+	// has gone out is decoration. Skipped under an euid of 0, where nothing on
+	// the filesystem is foreign and the case cannot fail.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn a_foreign_owned_endpoint_is_refused_before_the_token_is_presented() {
+		// SAFETY: `geteuid` cannot fail and touches no memory the caller owns.
+		if unsafe { libc::geteuid() } == 0 || !std::path::Path::new("/etc/hosts").exists() {
+			return;
+		}
+		let err = KernRpcClient::connect_endpoint_with_retry(
+			&Endpoint::Unix(std::path::PathBuf::from("/etc/hosts")),
+			&AuthReq::new("t", super::super::auth::PRINCIPAL_CLI),
+			3,
+			Duration::from_millis(1),
+		)
+		.await
+		.err()
+		.expect("a foreign endpoint never yields a client");
+		assert!(
+			matches!(err, AdapterError::UntrustedEndpoint(_)),
+			"refused by the owner check, before any frame: {err}"
 		);
 	}
 }

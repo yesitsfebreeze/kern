@@ -22,6 +22,11 @@ async-stream = "0.3"
 bincode = { workspace = true }
 trnsprt-macros = { workspace = true }
 
+# Only for `geteuid`: a client must know whose socket it is about to talk to,
+# and std exposes the owner of a *file* but never the identity of this process.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Only to spell the Unix `0600` on kern.sock the way Windows spells it: a
 # named pipe has no mode bits, so owner-only is a security descriptor.
 [target.'cfg(windows)'.dependencies]
