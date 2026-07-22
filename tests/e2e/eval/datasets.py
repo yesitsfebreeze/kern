@@ -1,4 +1,4 @@
-"""Fetch the benchmark datasets into /eval/ (gitignored, never committed).
+"""Fetch the benchmark datasets into tests/eval/ (gitignored, never committed).
 
 LoCoMo is CC BY-NC 4.0 and LongMemEval is research data — both are downloaded
 to the user's machine on demand and stay out of the repo.
@@ -16,15 +16,16 @@ LOCOMO_URL = (
 )
 LOCOMO_PATH = DATA_DIR / "locomo10.json"
 
+# The HF repo ships the files with no .json extension; the content is JSON.
 LONGMEMEVAL_REPO = "xiaowu0162/longmemeval"
-LONGMEMEVAL_FILE = "longmemeval_s.json"
+LONGMEMEVAL_FILE = "longmemeval_s"
 LONGMEMEVAL_PATH = DATA_DIR / LONGMEMEVAL_FILE
 
 NOTICE = """\
 Datasets are for local evaluation only:
 - LoCoMo (snap-research/locomo): CC BY-NC 4.0 — non-commercial, no redistribution.
 - LongMemEval (xiaowu0162/longmemeval): research benchmark, see its license.
-Both live under /eval/, which is gitignored; do not commit them."""
+Both live under tests/eval/, which is gitignored; do not commit them."""
 
 
 def fetch_locomo():

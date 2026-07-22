@@ -85,7 +85,9 @@ def run_conversation(kern_bin, sample, args, embed, llm_url, counts, latencies):
 			if not gold:
 				counts["excluded_no_evidence"] += 1
 				continue
-			ranked, secs = ranked_keys(project, qa["question"], labels)
+			ranked, secs = ranked_keys(
+				project, qa["question"], labels, retrieval=args.retrieval, k=args.k
+			)
 			latencies.append(secs)
 			result = score.question_result(gold, ranked)
 			result["category"] = cat
@@ -99,6 +101,12 @@ def main():
 	parser.add_argument("--data", type=Path, default=DATA_DIR / "locomo10.json")
 	parser.add_argument(
 		"--conversations", type=int, default=0, help="first N only (0 = all 10)"
+	)
+	parser.add_argument(
+		"--retrieval",
+		choices=["query", "search"],
+		default="query",
+		help="query = full stack; search = pure-ANN ablation control",
 	)
 	args = parse_args(parser)
 	if not args.data.exists():
@@ -124,6 +132,7 @@ def main():
 		closer()
 
 	report = base_report(args, f"LoCoMo-10 ({args.data.name})")
+	report["retrieval"] = args.retrieval
 	report["counts"] = dict(counts)
 	report["overall"] = score.metrics(scored, args.k)
 	report["by_category"] = {
@@ -138,7 +147,8 @@ def main():
 		"p95": score.percentile(latencies, 95),
 	}
 
-	path = write_report(args.report_dir, "locomo", report)
+	name = "locomo" if args.retrieval == "query" else f"locomo-{args.retrieval}"
+	path = write_report(args.report_dir, name, report)
 	print(json.dumps(report["overall"], indent=1))
 	for name, m in report["by_category"].items():
 		print(f"{name}: any@5 {m['recall_any@5']:.4f}  mrr {m['mrr']:.4f}  n={m['questions']}")

@@ -69,6 +69,12 @@ pub struct RetrievalConfig {
 	pub lexical_enabled: bool,
 	pub bm25_k1: f64,
 	pub bm25_b: f64,
+	// Late-fusion BM25 bonus added to a delivered result's score after the
+	// content/edge boosts and before MMR, so an entity whose text shares exact
+	// query terms floats to the top of the list. 0.0 disables it and leaves
+	// every score bit-identical to the pre-knob baseline. Scaled by the query's
+	// max BM25 score so the bonus is magnitude-comparable across corpora.
+	pub lexical_top_boost: f64,
 	pub pagerank_enabled: bool,
 	pub pagerank_damping: f64,
 	pub pagerank_iters: usize,
@@ -117,6 +123,7 @@ impl Default for RetrievalConfig {
 			lexical_enabled: true,
 			bm25_k1: 1.2,
 			bm25_b: 0.75,
+			lexical_top_boost: 0.0,
 			pagerank_enabled: true,
 			pagerank_damping: 0.85,
 			pagerank_iters: 25,
@@ -165,6 +172,12 @@ impl RetrievalConfig {
 
 		if self.bm25_k1 < 0.0 {
 			errs.push(format!("bm25_k1 ({}) must be >= 0.0", self.bm25_k1));
+		}
+		if !self.lexical_top_boost.is_finite() || self.lexical_top_boost < 0.0 {
+			errs.push(format!(
+				"lexical_top_boost ({}) must be finite and >= 0.0",
+				self.lexical_top_boost
+			));
 		}
 
 		if !(0.0..1.0).contains(&self.pagerank_damping) {
@@ -336,6 +349,18 @@ mod tests {
 		assert!(
 			!zero_rrf.validate().iter().any(|e| e.contains("rrf_k")),
 			"rrf_k 0 is valid, must not flag"
+		);
+
+		let neg_boost = RetrievalConfig {
+			lexical_top_boost: -0.1,
+			..Default::default()
+		};
+		assert!(
+			neg_boost
+				.validate()
+				.iter()
+				.any(|e| e.contains("lexical_top_boost")),
+			"negative lexical_top_boost"
 		);
 	}
 }

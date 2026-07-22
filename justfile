@@ -89,7 +89,7 @@ docs:
 docs-build:
     cd docs/site && npm run build
 
-# download the retrieval benchmark datasets into /eval/ (gitignored, CC BY-NC)
+# download the retrieval benchmark datasets into tests/eval/ (gitignored, CC BY-NC)
 eval-fetch:
     python3 tests/e2e/eval/datasets.py
 

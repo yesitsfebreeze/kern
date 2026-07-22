@@ -111,11 +111,18 @@ class KernProject:
 			f"timeout_secs = {reason_timeout_secs}\n" if reason_timeout_secs else ""
 		)
 		embed_url, embed_model = embed if embed else (self.llm_url, "fake-embed")
-		retrieval = (
-			f"\n[retrieval]\nmax_deliver_results = {max_deliver_results}\n"
-			if max_deliver_results is not None
-			else ""
-		)
+		# KERN_EVAL_RETRIEVAL_TOML injects extra `[retrieval]` keys (e.g.
+		# `lexical_top_boost = 1.0`) for ablation runs. Unset => empty, so every
+		# other test's config text stays byte-identical.
+		retrieval_extra = os.environ.get("KERN_EVAL_RETRIEVAL_TOML", "")
+		if max_deliver_results is not None or retrieval_extra:
+			retrieval = f"\n[retrieval]\n"
+			if max_deliver_results is not None:
+				retrieval += f"max_deliver_results = {max_deliver_results}\n"
+			if retrieval_extra:
+				retrieval += retrieval_extra.strip() + "\n"
+		else:
+			retrieval = ""
 		(self.cwd / ".kern" / "kern.toml").write_text(
 			f"{head}"
 			f'[embed]\nurl = "{embed_url}"\nmodel = "{embed_model}"\n\n'

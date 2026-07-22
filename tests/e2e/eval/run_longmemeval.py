@@ -69,7 +69,7 @@ def run_question(kern_bin, item, args, embed, llm_url, counts, latencies):
 
 def main():
 	parser = argparser(__doc__)
-	parser.add_argument("--data", type=Path, default=DATA_DIR / "longmemeval_s.json")
+	parser.add_argument("--data", type=Path, default=DATA_DIR / "longmemeval_s")
 	parser.add_argument("--limit", type=int, default=100)
 	parser.add_argument("--full", action="store_true")
 	args = parse_args(parser)

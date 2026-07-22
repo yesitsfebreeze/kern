@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from harness import KernProject  # noqa: E402
 from ranking import hits  # noqa: E402
 
-DATA_DIR = REPO / "eval"
+DATA_DIR = REPO / "tests" / "eval"
 REPORT_DIR = DATA_DIR / "reports"
 
 # kern's own default embedder (src/config/embed.rs) — the pinned model every
@@ -128,16 +128,21 @@ def resolve_full_text(project, short_id):
 	return m.group(1) if m else None
 
 
-def ranked_keys(project, question, label_map):
+def ranked_keys(project, question, label_map, retrieval="query", k=10):
 	"""Query once; map printed hits back to provenance keys.
 
 	Returns (ordered list of key-sets, query wall seconds). Each element is
 	the set of provenance keys the hit's label could name; ambiguous labels
 	(two different full texts sharing a 120-char prefix) are resolved through
 	`kern get`, which prints the full text.
+
+	`retrieval="search"` swaps the full stack (`kern query`: seed + graph
+	expansion + fusion + ranking) for pure ANN (`kern search`) — the ablation
+	control that says whether the machinery beats its own vector seed.
 	"""
+	cmd = ("query", question) if retrieval == "query" else ("search", question, "--k", str(k))
 	t0 = time.monotonic()
-	stdout, _ = project.run("query", question)
+	stdout, _ = project.run(*cmd)
 	secs = time.monotonic() - t0
 	out = []
 	for hit in hits(stdout):

@@ -2,11 +2,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::base::graph::GraphGnn;
 use crate::base::heat::{self, HeatConfig};
+use crate::base::lexical::LexicalIndex;
 use crate::base::log_throttle::LogThrottle;
 use crate::base::types::{Entity, EntityKind, EntityStatus, ReviewState};
 use crate::base::util::cmp_partial;
 use crate::config::RetrievalConfig;
 use crate::retrieval::expand::{Scored, ScoredEntity};
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -85,6 +87,33 @@ pub fn qbst(cfg: &RetrievalConfig, access_count: i32, accessed_at: Option<System
 // SECURITY: the fact bonus is withheld from remote entities. The kind is PRESERVED —
 // a remote Fact still reports and renders as a Fact — but a peer picks its own kind,
 // so it must not buy rank the local node cannot verify.
+/// Late-fusion BM25 bonus: add `cfg.lexical_top_boost * (bm25 / max_bm25)` to
+/// each delivered result's score, using the query's own BM25 ranking over the
+/// corpus. Normalized by the top BM25 score so the bonus is 0..1 * weight and
+/// comparable across corpora of different sizes. A no-op when the weight is 0
+/// or no result has a BM25 score (verbatim query terms absent from the corpus).
+/// Runs before gravity/filter/MMR, so an exact-lexical match wins the top.
+pub fn apply_lexical_boost<T: Scored>(
+	lex: &LexicalIndex,
+	cfg: &RetrievalConfig,
+	query_text: &str,
+	results: &mut [T],
+) {
+	if cfg.lexical_top_boost <= 0.0 || results.is_empty() {
+		return;
+	}
+	let hits = lex.search(query_text, results.len());
+	if hits.is_empty() {
+		return;
+	}
+	let max = hits.iter().map(|h| h.score).fold(0.0f32, f32::max).max(1e-9);
+	let bm25: HashMap<&str, f32> = hits.iter().map(|h| (h.entity_id.as_str(), h.score)).collect();
+	for r in results.iter_mut() {
+		let norm = (*bm25.get(r.entity().id.as_str()).unwrap_or(&0.0) / max) as f64;
+		r.set_score(r.score() + cfg.lexical_top_boost * norm);
+	}
+}
+
 pub fn apply_boosts<T: Scored>(g: &GraphGnn, cfg: &RetrievalConfig, results: &mut [T]) {
 	for r in results.iter_mut() {
 		let e = r.entity();
@@ -1162,5 +1191,67 @@ mod query_filter_tests {
 			SystemTime::now(),
 			&HeatConfig::default()
 		));
+	}
+}
+
+#[cfg(test)]
+mod lexical_boost_tests {
+	use super::*;
+
+	fn scored(id: &str, score: f64) -> ScoredEntity {
+		ScoredEntity {
+			entity: Entity {
+				id: id.into(),
+				..Default::default()
+			},
+			score,
+		}
+	}
+
+	#[test]
+	fn zero_weight_is_a_noop() {
+		let lex = LexicalIndex::new_in_ram(1.2, 0.75);
+		lex.insert("a", "the quick brown fox");
+		lex.insert("b", "lazy dog sleeps");
+		let mut results = vec![scored("a", 0.9), scored("b", 0.8)];
+		let cfg = RetrievalConfig {
+			lexical_top_boost: 0.0,
+			..Default::default()
+		};
+		apply_lexical_boost(&lex, &cfg, "quick fox", &mut results);
+		assert_eq!(results[0].score, 0.9);
+		assert_eq!(results[1].score, 0.8);
+	}
+
+	#[test]
+	fn no_query_terms_in_corpus_is_a_noop() {
+		let lex = LexicalIndex::new_in_ram(1.2, 0.75);
+		lex.insert("a", "the quick brown fox");
+		let mut results = vec![scored("a", 0.9)];
+		let cfg = RetrievalConfig {
+			lexical_top_boost: 1.0,
+			..Default::default()
+		};
+		apply_lexical_boost(&lex, &cfg, "zzz nonexistent", &mut results);
+		assert_eq!(results[0].score, 0.9, "no BM25 hit => no bonus");
+	}
+
+	#[test]
+	fn exact_match_gets_the_full_bonus_others_get_less() {
+		let lex = LexicalIndex::new_in_ram(1.2, 0.75);
+		lex.insert("match", "alice bought a red car in paris");
+		lex.insert("partial", "alice visited paris once");
+		lex.insert("none", "bob likes hiking");
+		// Start them equal; the BM25 bonus alone must order them.
+		let mut results = vec![scored("none", 0.5), scored("partial", 0.5), scored("match", 0.5)];
+		let cfg = RetrievalConfig {
+			lexical_top_boost: 1.0,
+			..Default::default()
+		};
+		apply_lexical_boost(&lex, &cfg, "alice red car paris", &mut results);
+		results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+		assert_eq!(results[0].entity.id, "match", "the verbatim-overlap doc wins the top");
+		assert_eq!(results.last().unwrap().entity.id, "none", "the no-overlap doc stays last");
+		assert!(results[0].score > results.last().unwrap().score);
 	}
 }

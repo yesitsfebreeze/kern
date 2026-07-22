@@ -185,6 +185,11 @@ pub fn retrieve_profiled(
 	prof.checkpoint("merge");
 
 	score::apply_boosts(g, cfg, &mut results);
+	if cfg.lexical_top_boost > 0.0 {
+		if let Some(lex) = lex_ref {
+			score::apply_lexical_boost(lex, cfg, query_text, &mut results);
+		}
+	}
 	gravity::apply_gravity(g, cfg, &mut results);
 	score::apply_remote_trust(g, cfg, &mut results);
 	// An active filter must run BEFORE filter_delivery's pool truncation, or expansion's non-matching neighbours crowd matching entities out of the cap.

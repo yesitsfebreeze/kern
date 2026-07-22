@@ -2,6 +2,13 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — eval data dir moved from repo-root `/eval/` to `/tests/eval/`, so
+  all benchmark artifacts (datasets, reports, cache) live under `tests/` beside
+  the harness scripts in `tests/e2e/eval/`. `.gitignore` `/eval/` →
+  `/tests/eval/`; `common.py` `DATA_DIR = REPO / "tests" / "eval"`; `datasets.py`
+  and `justfile` doc text repointed. Datasets stay gitignored (CC BY-NC, never
+  committed). No script-path change — the runners stay at `tests/e2e/eval/`.
+
 - 2026-07-22 — ACL and user identity removed wholesale, user-directed. kern is
   a single-trust-domain store: the process boundary (socket `0600` +
   `mcp-token` + anti-squat checks) is the whole access model, and multi-caller
@@ -559,7 +566,7 @@
   were in it. Items 21, 94 and 97 led with the defect and appended "CLOSED":
   *"The e2e harness cannot exercise the GNN at all — closed"*, *"A near-duplicate's
   alternate wording is stored but indexed nowhere — CLOSED"*. Every word before
-  the dash is false, and slice selection reads `^### ` — a scan sees a live
+  the dash is false, and slice selection reads `^###` — a scan sees a live
   defect unless it reaches the end of a 120-character line.
 
   Aligned to the convention items 27, 95, 98 and 32 already use: **state the
