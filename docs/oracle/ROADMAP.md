@@ -2149,6 +2149,49 @@ The remaining blind spot is unchanged in kind and now smaller in reach: symbolic
 anchors are still the answer, and a continuation is the strongest argument yet
 for them, because it is a line number that does not even name its own file.
 
+**Verified independently 2026-07-22, against the commit rather than a working
+tree.** The third pass reconciled, implemented and recorded in one go, so no
+adversary had read it. Re-run: `just docs-check` green with its selftest,
+`just check` green, `just test` 39 passed and 4 skipped with both recall floors
+printed and unmoved. The 834 -> 1008 comparison reproduces — the prior script
+over the prior tree reports 834 and nominates nothing, this one reports 1008 and
+the single dead reference. The four-loops-into-one-sweep refactor is
+verdict-identical: with the two new patterns neutered, the sweep prints
+byte-for-byte what the prior build printed, so it moved no failure and no
+nomination.
+
+Two corrections to the paragraphs above. **The wrong-file class is four, not
+five** — the two anchors reaching the wrong `src/` file and the two doc-only
+notes; the fifth candidate is the retired `` `:189-192` `` note, counted among
+the false ones above, which is the same class seen from the other side. And
+**`--strict-anchors` no longer exits 0 on this tree**: 18 nominations stand, so
+it exits 1. The second-pass sentence saying otherwise was true when written and
+is superseded now.
+
+**Re-adjudication does not reproduce 83.3%, and the gap is a definition rather
+than a mistake.** Twelve of the 18 are rot by any reading. The three in dispute
+are the wrong-file class, and for those the anchor a human resolves is
+*correct*: `` `:507` ``, under a paragraph about `bind_unix`, means
+`src/trnsprt/src/typed/local.rs`, which is where `bind_unix` is, and `` `:129` ``,
+under one about `Worker::submit`, means `src/ingest/file_watcher.rs`, which is
+where the `submit` call is. Both hit the named symbol exactly. So the count is
+15 if the question is "is this anchor under-specified" and 12 — 66.7% — if it is
+"is the docs' information wrong". Either is defensible; the record should not
+read as though only one measurement exists.
+
+The distinction is load-bearing because the wrong-file class is the only one
+that can turn the run *red*. It did exactly that once already, on this file's
+own `Drop for LocalListener` note, and the fix was to edit the doc. Whenever an
+inherited file is shorter than its inherited line, a page no human considers
+wrong fails the check.
+
+**One residual this pass opens and does not close.** Both new forms are matched
+inside fenced code blocks, and inside any backticked span that merely looks like
+a line number — a port, a ratio, a `sed` address. Either is a failure and not a
+nomination once the number runs past the inherited file. There are none in the
+tree today. The doubly-backticked escape covers prose and not fences; skipping
+fenced blocks is the fix when one appears.
+
 Neither is a defect in a running kern, which is why this sits in tier 9 — but it
 is the reason every reconcile pass so far has spent most of its effort
 re-pointing citations instead of checking claims.

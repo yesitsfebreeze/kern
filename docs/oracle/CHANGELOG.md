@@ -51,8 +51,28 @@
   to bite: there the page yields one visible citation and an empty failure list,
   here it yields five and fails the continuation that points past EOF.
 
+  **Verified independently the same day, against the commit.** This item was
+  reconciled, implemented and recorded in one pass, so the verify stage ran
+  afterwards rather than alongside. `just docs-check`, `just check` and
+  `just test` are green with both recall floors unmoved; the 834 -> 1008
+  comparison reproduces against the prior script over the prior tree; and the
+  four-loop collapse is verdict-identical — with the two new patterns neutered
+  the sweep prints byte-for-byte what the prior build printed. Two corrections
+  landed in the ROADMAP entry: the wrong-file class is four and not five, and
+  `--strict-anchors` now exits 1 rather than 0, because the 18 nominations
+  stand. Re-adjudicating them gives 12 true rather than 15 — the three in
+  dispute are anchors a human resolves correctly and the checker does not, which
+  is under-specification rather than rot, and that class is also the only one
+  that can turn the run red. The open residual is that both new forms are read
+  inside fenced code blocks, where a number that merely looks like a line can
+  fail the run; none exist in the tree today.
+
   Decided by: fix-the-root — two passes had tuned the judgement of anchors the
   scanner could see, while a third of them were never handed to it.
+
+  Decided by: verify-before-claiming — the precision number, the reference
+  count, the refactor's neutrality and the exit codes were each re-derived
+  rather than read off the commit message.
 
 - 2026-07-22 — merged item 18's edge-ACL fix. 221 + 1 + this one = 223.
 
