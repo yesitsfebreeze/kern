@@ -1039,4 +1039,18 @@ mod tests {
 			}
 		}
 	}
+
+	#[test]
+	fn structure_digest_pins_canon_layout_for_a_single_node() {
+		// `structure_digest` feeds `content_hash`; the canon string is
+		// `ep={id};max={layer}\n{id}|\n` for one level-0 node. A delimiter or
+		// layout change in the canon moves the digest and with it every gossip
+		// import guard that checks it (ROADMAP item 77). The level of "a" under
+		// `new(16, 128)` is 0 (FNV level_for, pinned by this test's expected
+		// string), so the canon is exactly the single-line form below.
+		let mut idx = HnswIndex::new(16, 128);
+		idx.insert("a".to_string(), vec![0.0_f32].into());
+		let canon = "ep=a;max=0\na|\n";
+		assert_eq!(idx.structure_digest(), content_hash(canon));
+	}
 }
