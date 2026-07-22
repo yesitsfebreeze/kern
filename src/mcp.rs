@@ -146,6 +146,8 @@ impl Server {
 			// 0.0 = uniform access (converged); →1.0 = one entity holds all
 			// access. Resident entities only (ROADMAP item 62).
 			"gini_access": h.gini_access,
+			// The resident-kern cap: u64::MAX = uncapped (KERN_CAP_DISABLED).
+			"max_kerns": h.max_kerns as u64,
 			// This server's own worker, read directly: a gauge on the live channel,
 			// not a process static like the counters `h` carries.
 			"ingest_queue_depth": self.worker.queue_depth(),

@@ -44,6 +44,10 @@ pub struct HealthStats {
 	// entity holds all access (not converged). Empty graph → 0.0. Makes the
 	// "corpus converges on efficient paths" claim measurable (ROADMAP item 62).
 	pub gini_access: f64,
+	// The resident-kern cap (`KERN_CAP_DISABLED` = uncapped). Armed via
+	// `apply_graph_config`; surfaced so an operator sees the bound and a warn
+	// when resident kerns approach it (ROADMAP item 83).
+	pub max_kerns: usize,
 }
 
 /// Gini coefficient over the access-count distribution. 0.0 when all counts are
@@ -120,6 +124,7 @@ pub fn graph_health_stats(g: &GraphGnn) -> HealthStats {
 		unspilled_drops: crate::tick::stigmergy::unspilled_drops(),
 		ingest_queue_refused: crate::ingest::worker::ingest_queue_refused(),
 		gini_access,
+		max_kerns: g.max_loaded_kerns(),
 	}
 }
 
@@ -242,5 +247,23 @@ mod tests {
 			"one entity holds all access -> gini > 0.5, got {}",
 			h.gini_access
 		);
+	}
+
+	#[test]
+	fn graph_health_stats_reports_max_kerns() {
+		use crate::base::constants::KERN_CAP_DISABLED;
+
+		// Default graph: uncapped.
+		let h = graph_health_stats(&GraphGnn::new());
+		assert_eq!(
+			h.max_kerns, KERN_CAP_DISABLED,
+			"fresh graph carries the disabled sentinel"
+		);
+
+		// An armed cap is surfaced.
+		let mut g = GraphGnn::new();
+		g.set_max_loaded_kerns(8);
+		let h = graph_health_stats(&g);
+		assert_eq!(h.max_kerns, 8, "armed cap reaches HealthStats");
 	}
 }

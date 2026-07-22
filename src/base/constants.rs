@@ -29,6 +29,10 @@ pub const TICK_INTERVAL_SECS: u64 = 60;
 // "no kern-eviction cap" sentinel. A finite cap is currently unsafe.
 pub const KERN_CAP_DISABLED: usize = usize::MAX;
 
+// Fraction of `max_loaded_kerns` at which `kern health` warns the operator the
+// resident set is approaching the cap (ROADMAP item 83). A knob, not a policy.
+pub const KERN_CAP_APPROACH_FRAC: f64 = 0.9;
+
 // Measured 2026-07-21 against qwen3-embedding:0.6b on a 40-claim labelled
 // corpus: intended claim-to-graviton cosine distances run 0.29-0.69 (median
 // ~0.55 for description seeds, ~0.39 for mean-pooled example seeds), while

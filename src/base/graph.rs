@@ -198,6 +198,12 @@ impl GraphGnn {
 		self.max_loaded_kerns = cap.max(1);
 	}
 
+	/// The resident-kern cap (`KERN_CAP_DISABLED` = uncapped). Armed via
+	/// `set_max_loaded_kerns` / `apply_graph_config`; surfaced in health (item 83).
+	pub fn max_loaded_kerns(&self) -> usize {
+		self.max_loaded_kerns
+	}
+
 	pub fn set_disk_threshold(&mut self, threshold: usize) {
 		self.disk_threshold = threshold;
 	}

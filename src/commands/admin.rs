@@ -48,7 +48,12 @@ pub(super) async fn cmd_health(cfg: &crate::config::Config) {
 	} else {
 		println!("gravitons:     {}", h.gravitons.join(", "));
 	}
-	println!("kerns:       {}", h.kerns);
+	let kerns_cap = if h.max_kerns == crate::base::constants::KERN_CAP_DISABLED {
+		"off".to_string()
+	} else {
+		h.max_kerns.to_string()
+	};
+	println!("kerns:       {} (cap {})", h.kerns, kerns_cap);
 	println!("thoughts:    {} (unnamed: {})", h.entities, h.unnamed);
 	println!("reasons:     {}", h.reasons);
 	println!("claim kinds: {}", g.root.claim_kinds.len());
@@ -76,6 +81,9 @@ pub(super) async fn cmd_health(cfg: &crate::config::Config) {
 		println!("{line}");
 	}
 	for line in convergence_health_lines(d.as_ref()) {
+		println!("{line}");
+	}
+	for line in kern_cap_health_lines(d.as_ref()) {
 		println!("{line}");
 	}
 	for line in llm_health_lines(d.as_ref()) {
@@ -219,6 +227,27 @@ fn convergence_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<Str
 	}
 }
 
+// The resident-kern cap approach warn (ROADMAP item 83). Daemon-sourced like
+// the convergence line: the CLI's own graph is a fresh open with one kern, so
+// its resident count is structurally small and a local read carries no signal.
+// No daemon, no warn. `KERN_CAP_DISABLED` (u64::MAX) and 0 (old daemon / unset)
+// both read as "cap off" — an opt-out or an absent field is not a bound.
+fn kern_cap_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> {
+	let Some(h) = h else {
+		return Vec::new();
+	};
+	let cap = h.max_kerns;
+	if cap == 0 || cap == u64::MAX {
+		return Vec::new();
+	}
+	let resident = h.kerns;
+	if (resident as f64) >= crate::base::constants::KERN_CAP_APPROACH_FRAC * (cap as f64) {
+		vec![format!("kerns near cap: {}/{}", resident, cap)]
+	} else {
+		Vec::new()
+	}
+}
+
 // The completion leg's failures (ROADMAP item 30). Daemon-sourced for the same
 // reason as the tick lines: the counter is a process static and nothing on the
 // `kern health` path completes anything, so a local read could only be zero.
@@ -310,6 +339,58 @@ mod degradation_lines_tests {
 			..Default::default()
 		};
 		assert_eq!(degradation_lines(&blind_cli(), Some(&healthy)).len(), 1);
+	}
+
+	#[test]
+	fn kern_health_warns_when_resident_kerns_approach_cap() {
+		// 116/128 >= 0.9*128 (115.2) -> warn line present.
+		let near = HealthRes {
+			ok: true,
+			kerns: 116,
+			max_kerns: 128,
+			..Default::default()
+		};
+		let lines = kern_cap_health_lines(Some(&near));
+		assert_eq!(lines, vec!["kerns near cap: 116/128"]);
+
+		// 10/128 -> no warn.
+		let fine = HealthRes {
+			ok: true,
+			kerns: 10,
+			max_kerns: 128,
+			..Default::default()
+		};
+		assert!(
+			kern_cap_health_lines(Some(&fine)).is_empty(),
+			"under the approach fraction -> no warn"
+		);
+
+		// KERN_CAP_DISABLED (u64::MAX) -> cap off, no warn.
+		let uncapped = HealthRes {
+			ok: true,
+			kerns: 1000,
+			max_kerns: u64::MAX,
+			..Default::default()
+		};
+		assert!(
+			kern_cap_health_lines(Some(&uncapped)).is_empty(),
+			"uncapped -> no warn"
+		);
+
+		// 0 (old daemon / unset) -> no warn.
+		let old = HealthRes {
+			ok: true,
+			kerns: 1000,
+			max_kerns: 0,
+			..Default::default()
+		};
+		assert!(
+			kern_cap_health_lines(Some(&old)).is_empty(),
+			"absent cap field -> no warn"
+		);
+
+		// No daemon -> no warn.
+		assert!(kern_cap_health_lines(None).is_empty());
 	}
 }
 

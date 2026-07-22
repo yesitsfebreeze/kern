@@ -101,6 +101,7 @@ impl KernRpc for KernRpcHandler {
 					.get("gini_access")
 					.and_then(|v| v.as_f64())
 					.unwrap_or(0.0),
+				max_kerns: u64_at("max_kerns"),
 				gnn_train_refused: u64_at("gnn_train_refused"),
 				llm_complete_failed: u64_at("llm_complete_failed"),
 				last_llm_complete_failure: str_at("last_llm_complete_failure"),
