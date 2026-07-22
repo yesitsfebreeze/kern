@@ -2,6 +2,44 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 18: the `query` tool gated the row and published its
+  neighbours. Its title said "a bare `query {id}` still filters nothing", which
+  had been a decision rather than a defect since 2026-07-21 — the id path runs
+  `matches_filter`, and a bare read filtering nothing is the empty-principals
+  default every single-agent caller depends on. Both are already pinned. Going
+  looking for the defect the title no longer named found a real one: a `Reason`
+  carries no ACL, `link` writes its body from up to 500 chars of **both**
+  endpoint texts, and the row clearing `matches_filter` says nothing about its
+  neighbour. `query {id: <public row>, principals: ["bob"]}` served an
+  alice-scoped Fact's text verbatim through any public neighbour's edge; the
+  ranked read did the same at 120 chars. `kern get` routes to the first of those.
+
+  The gap was **written down and skipped**. The 2026-07-21 entry enumerated the
+  four surfaces that render an entity's edges — `entity_detail`, the ranked
+  `edges` array, `resource_thought`, `format_chains` — fixed the last two, and
+  left the first two named in its own prose. A list of surfaces is not a fix for
+  the ones on it.
+
+  Fixed at the root: the endpoint verdict left `src/mcp/resources.rs` and became
+  `src/mcp/acl.rs`, one `Endpoint` + `incident_edge` that all four renderings
+  call. It takes the **admission rule** as a parameter rather than the
+  principals, because the two surfaces disagree about what "allowed" means and
+  have to keep disagreeing — resources can name no principal so its rule is
+  `Acl::is_public`, while `query` takes the caller's. The `query` half is
+  `acl_admits_entity`, the ACL predicate of `matches_filter` lifted out so the
+  edge gate cannot re-derive the empty-principals default and get it wrong.
+  Recall unmoved at 0.9306 / 0.9722 / 0.9471 — an ACL that changed an unscoped
+  read would be the bug, not the feature.
+
+  Title narrowed with it: the one decision still owed here is whether the file
+  watcher gives `Document` entities a tenant-default ACL. Everything else the
+  item still lists is item 24's residue, federation's, or a named later fix
+  (storing the verdict on the edge at write time, which is what would make this
+  gate cheap and fail-closed instead of per-read and fail-open).
+
+  Decided by: fix-the-root — four copies of one verdict is why two of them were
+  wrong, so the fix was to leave one.
+
 - 2026-07-22 — merged item 97, and with it the last of the four verification
   gaps this run found in its own instruments. 218 + 1 + this one = 220.
 

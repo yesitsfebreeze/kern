@@ -3,6 +3,7 @@ use serde_json::value::RawValue;
 use crate::base::search::{find_entity, find_reason};
 use crate::base::util::truncate;
 
+use super::acl::{self, Endpoint};
 use super::{err_resp, ok, Response, Server, ERR_INVALID_REQ, ERR_NOT_FOUND};
 
 pub fn resource_definitions() -> Vec<serde_json::Value> {
@@ -145,46 +146,13 @@ fn resource_claim_kinds(server: &Server) -> String {
 	serde_json::to_string(&g.root.claim_kinds).unwrap_or_default()
 }
 
-/// What an edge endpoint's ACL says about serving the edge that quotes it.
-///
-/// Three outcomes and not two, because `find_entity` (`src/base/search.rs:148`)
-/// searches only the **resident** kern map — `loaded` is `kerns.get` and `all()`
-/// is `kerns.values()`, neither of which sees `unloaded` or the cold tier. So
-/// "did not resolve" is emphatically not "does not exist", and treating the two
-/// alike is the fail-open case: a scoped row that a GC cold-spill
-/// (`src/tick/stigmergy.rs`) or a kern-cap unload (`GraphGnn::unload`) made
-/// non-resident is *still alive in the store with its ACL intact* and reads back
-/// here as absent. The edge quoting it survives because a kern hosts a reason iff
-/// it hosts its `from` (`src/base/reason.rs:78`) — `move_entity` leaves an
-/// incoming edge in the *source* kern, and `remove_entity` cascades only within
-/// one kern, so nothing ever sweeps it.
-enum Endpoint {
-	/// Resolved, and carries no ACL.
-	Public,
-	/// Resolved, and names a scope, user or group.
-	Scoped,
-	/// Did not resolve. Could be a genuinely dangling id — ordinary here, `to` is
-	/// optional in `add_reason` — or a scoped row we simply cannot see.
-	Unresolved,
+/// This surface can name no principal (item 24), so admission here is simply
+/// "carries no ACL" — the same emptiness test `acl_admits` runs, so it and
+/// `matches_filter` cannot drift apart on what public means.
+fn public_only(t: &crate::base::types::Entity) -> bool {
+	t.acl.is_public()
 }
 
-fn endpoint(g: &crate::base::graph::GraphGnn, id: &str) -> Endpoint {
-	match find_entity(g, id) {
-		Some((t, _)) if t.acl.is_public() => Endpoint::Public,
-		Some(_) => Endpoint::Scoped,
-		None => Endpoint::Unresolved,
-	}
-}
-
-/// The edge body, with `text` withheld when an endpoint would not clear it.
-///
-/// `explain_relationship_prompt` (`src/base/util.rs:87`) hands the LLM up to 500
-/// chars of BOTH endpoint texts and the reply becomes `reason.text`, so the text
-/// belongs to the endpoints, not the edge. Redaction rather than a drop is what
-/// keeps default-deny from becoming deny-all: a dangling endpoint is ordinary,
-/// and dropping every edge with one would hide a public entity's own structure.
-/// The residual is that an unresolved endpoint id is still named — a content
-/// hash, so at worst it confirms a guessed text, never discloses one.
 fn edge_json(re: &crate::base::types::Reason, text_cleared: bool) -> serde_json::Value {
 	serde_json::json!({
 		"id": re.id,
@@ -207,19 +175,8 @@ fn resource_thought(server: &Server, id: &str) -> String {
 				let rids = crate::base::reason::collect_reason_ids(kern, &thought.id);
 				for rid in &rids {
 					if let Some(re) = kern.reasons.get(rid) {
-						// `link` writes edge text by quoting both endpoints, so an edge
-						// into a scoped entity is that entity's text under another id.
-						// `collect_reason_ids` returns only incident edges, so the far
-						// end is `to` when this entity is the `from` and `from` otherwise.
-						let other = if re.from == thought.id {
-							&re.to
-						} else {
-							&re.from
-						};
-						match endpoint(&g, other) {
-							Endpoint::Scoped => continue,
-							Endpoint::Unresolved => edges.push(edge_json(re, false)),
-							Endpoint::Public => edges.push(edge_json(re, true)),
+						if let Some(whole) = acl::incident_edge(&g, &thought.id, re, &public_only) {
+							edges.push(edge_json(re, whole));
 						}
 					}
 				}
@@ -251,14 +208,22 @@ fn resource_reason(server: &Server, id: &str) -> String {
 		// `from` is the entity this edge hangs off. It fails closed on both
 		// non-public outcomes: one that did not resolve is not one that said the
 		// read was allowed, and it is exactly the endpoint a cold-spill hides.
-		matches!(endpoint(&g, &reason.from), Endpoint::Public)
-			&& !matches!(endpoint(&g, &reason.to), Endpoint::Scoped)
+		matches!(
+			acl::endpoint(&g, &reason.from, &public_only),
+			Endpoint::Admitted
+		) && !matches!(
+			acl::endpoint(&g, &reason.to, &public_only),
+			Endpoint::Withheld
+		)
 	});
 	match found {
 		Some((reason, _)) => {
 			// A `to` that did not resolve leaves the text uncleared — same rule as
 			// the incident-edge list, and for the same reason.
-			let text_cleared = matches!(endpoint(&g, &reason.to), Endpoint::Public);
+			let text_cleared = matches!(
+				acl::endpoint(&g, &reason.to, &public_only),
+				Endpoint::Admitted
+			);
 			serde_json::to_string(&serde_json::json!({
 				"id": reason.id,
 				"from": reason.from,
