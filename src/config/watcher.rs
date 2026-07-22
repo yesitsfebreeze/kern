@@ -10,7 +10,8 @@ pub struct WatcherConfig {
 	// The TTL stamped on every document this watcher sinks — the watched roots
 	// are one source, so their retention is one policy. Same reason as
 	// `intake.retention_secs` for living here and not in the preset-owned
-	// `[ingest]`: that section refuses to load from a user's `kern.toml`.
+	// `[ingest]`: a user's `kern.toml` may set nothing in that table but
+	// `review_policy`, and a tuning key there refuses to load.
 	// 0 = no TTL. Derived `Default` gives 0, which is the shipped behaviour.
 	pub retention_secs: u64,
 }

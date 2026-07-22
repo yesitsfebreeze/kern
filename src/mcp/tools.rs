@@ -34,6 +34,7 @@ mod tests {
 			"forget_by_source",
 			"degrade",
 			"move",
+			"promote",
 			"health",
 			"graviton",
 			"claim_kind",
@@ -74,6 +75,26 @@ mod tests {
 		let dispatch = include_str!("../mcp.rs");
 		assert_eq!(
 			dispatch.matches("\"intake_drain\" =>").count(),
+			1,
+			"exactly one arm in the single `match name`"
+		);
+	}
+
+	// Same contract for `kern promote`, and the stakes are higher: a missing arm
+	// sends the CLI down the NoDaemon fallback, which releases the claim in a
+	// stale local copy the serving daemon then overwrites — the row reads as
+	// promoted and stays held.
+	#[test]
+	fn promote_is_declared_once_and_dispatched_once() {
+		let defs = tool_definitions();
+		assert_eq!(
+			defs.iter().filter(|d| d["name"] == "promote").count(),
+			1,
+			"promote must appear in tool_schemas() exactly once"
+		);
+		let dispatch = include_str!("../mcp.rs");
+		assert_eq!(
+			dispatch.matches("\"promote\" =>").count(),
 			1,
 			"exactly one arm in the single `match name`"
 		);

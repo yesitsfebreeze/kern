@@ -112,6 +112,10 @@ pub enum Commands {
 		text: String,
 		#[arg(long, default_value = "hybrid")]
 		mode: String,
+		/// Drop thoughts a review policy is still holding for curation. Opt-in:
+		/// without it an uncurated graph reads exactly as before.
+		#[arg(long)]
+		exclude_pending: bool,
 		#[command(flatten)]
 		llm: LlmArgs,
 	},
@@ -175,6 +179,11 @@ pub enum Commands {
 		action: GravitonAction,
 	},
 	Degrade {
+		id: String,
+	},
+	/// Mark a thought reviewed: release it from `pending` so a
+	/// `query --exclude-pending` returns it again.
+	Promote {
 		id: String,
 	},
 	ClaimKind {
@@ -510,13 +519,19 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 			.await
 		}
 
-		Commands::Query { text, mode, llm } => {
+		Commands::Query {
+			text,
+			mode,
+			exclude_pending,
+			llm,
+		} => {
 			let (embed_url, embed_model, _reason_url, _reason_model) = llm.resolve(cfg);
 			query::cmd_query(
 				cfg,
 				query::QueryParams {
 					text: &text,
 					mode: &mode,
+					exclude_pending,
 					embed_url,
 					embed_model,
 				},
@@ -592,6 +607,7 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 		Commands::Graviton { action } => admin::cmd_graviton(cfg, action).await,
 
 		Commands::Degrade { id } => graph_ops::cmd_degrade(cfg, &id).await,
+		Commands::Promote { id } => graph_ops::cmd_promote(cfg, &id).await,
 		Commands::ClaimKind { action } => admin::cmd_claim_kind(cfg, action).await,
 		Commands::Peers => admin::cmd_peers(cfg),
 		Commands::Register { path } => admin::cmd_register(cfg, &path),

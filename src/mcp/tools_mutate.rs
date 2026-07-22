@@ -94,6 +94,17 @@ pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 				},
 			},
 		}),
+		serde_json::json!({
+			"name": "promote",
+			"description": "Mark a thought reviewed: release it from `pending` back to `active`, so a `query` asking for `exclude_pending` returns it again. The release half of the review lifecycle a host opens with `[ingest] review_policy`. Idempotent — promoting an already-active thought reports `promoted: false` rather than failing. AUTHORITY: this is a curation decision on a socket that is not yet authenticated; the gate it rides on is whatever ROADMAP item 24 lands.",
+			"inputSchema": {
+				"type": "object",
+				"required": ["id"],
+				"properties": {
+					"id": {"type": "string", "description": "thought ID to mark reviewed"},
+				},
+			},
+		}),
 	]
 }
 
@@ -182,6 +193,11 @@ struct DegradeArgs {
 struct MoveArgs {
 	id: String,
 	to_kern: String,
+}
+
+#[derive(Deserialize)]
+struct PromoteArgs {
+	id: String,
 }
 
 impl Server {
@@ -496,6 +512,34 @@ impl Server {
 			"id": p.id,
 			"from_kern": from_kern_id,
 			"to_kern": p.to_kern,
+		}))
+	}
+
+	// The release half of the review lifecycle. Shares `promote_entity` with the
+	// CLI's no-daemon fallback so the routed and local writes cannot disagree
+	// about what "reviewed" means.
+	pub(crate) fn tool_promote(&self, args: &serde_json::Value) -> serde_json::Value {
+		let p: PromoteArgs = match serde_json::from_value(args.clone()) {
+			Ok(v) => v,
+			Err(e) => return tool_error(&format!("invalid arguments: {e}")),
+		};
+
+		let mut g = self.graph.write();
+		// An id nothing resolves is an error, never a quiet success: a caller
+		// curating a typo would otherwise be told the row was released.
+		let promoted = match crate::commands::graph_ops::promote_entity(&mut g, &p.id) {
+			Ok(v) => v,
+			Err(e) => return tool_error(&format!("{e}: {}", p.id)),
+		};
+		drop(g);
+		// Nothing changed on a re-promote, so nothing to persist.
+		if promoted {
+			(self.save_fn)();
+		}
+
+		tool_result_json(&serde_json::json!({
+			"id": p.id,
+			"promoted": promoted,
 		}))
 	}
 }
@@ -866,6 +910,66 @@ mod tests {
 		let out = srv.tool_move(&serde_json::json!({ "id": "a" }));
 		assert!(is_error(&out));
 		assert!(text(&out).contains("invalid arguments"), "{}", text(&out));
+	}
+
+	// The release half of item 21. Reading the row back matters: a `promote` that
+	// answered `promoted: true` without touching the entity would satisfy every
+	// assertion that only inspects the envelope.
+	#[tokio::test]
+	async fn tool_promote_releases_a_held_row_and_is_idempotent() {
+		use crate::base::types::{ReviewState, Source};
+
+		let srv = make_server();
+		let mut k = Kern::new("kx", "");
+		k.entities.insert(
+			"held".into(),
+			Entity {
+				id: "held".into(),
+				kind: EntityKind::Claim,
+				review: ReviewState::Pending,
+				source: Source::Inline {
+					hash: "h".into(),
+					section: String::new(),
+				},
+				statements: vec!["an uncurated claim".into()],
+				..Default::default()
+			},
+		);
+		insert_kern(&srv, k);
+
+		let review = || srv.graph.read().kerns["kx"].entities["held"].review;
+		assert_eq!(review(), ReviewState::Pending, "precondition: it is held");
+
+		let out = srv.tool_promote(&serde_json::json!({"id": "held"}));
+		assert!(!is_error(&out), "{}", text(&out));
+		assert_eq!(body(&out)["promoted"], serde_json::json!(true));
+		assert_eq!(
+			review(),
+			ReviewState::Active,
+			"the row itself moved, not just the answer"
+		);
+
+		// Again: a success that changed nothing, never an error — a curator who
+		// retries must not be told the release failed.
+		let out = srv.tool_promote(&serde_json::json!({"id": "held"}));
+		assert!(!is_error(&out), "{}", text(&out));
+		assert_eq!(body(&out)["promoted"], serde_json::json!(false));
+		assert_eq!(review(), ReviewState::Active);
+	}
+
+	#[tokio::test]
+	async fn tool_promote_refuses_an_unknown_id_rather_than_reporting_success() {
+		let srv = make_server();
+		let out = srv.tool_promote(&serde_json::json!({"id": "ghost"}));
+		assert!(
+			is_error(&out),
+			"a mistyped id must not read back as a released claim: {out}"
+		);
+		assert!(
+			text(&out).contains("thought not found"),
+			"names what failed: {}",
+			text(&out)
+		);
 	}
 }
 

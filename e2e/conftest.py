@@ -55,7 +55,7 @@ class KernProject:
 		}
 		self._children = []
 
-	def write_config(self, data_dir=None, intake_enabled=True, intake_retention_secs=0):
+	def write_config(self, data_dir=None, intake_enabled=True, intake_retention_secs=0, review_policy=None):
 		"""(Re)write the project kern.toml. `data_dir` is cwd-relative.
 
 		Config is read once per process, at startup — so rewriting this while a
@@ -68,15 +68,26 @@ class KernProject:
 		`intake_retention_secs` is the standing per-source TTL for everything
 		that queue ingests. It is omitted when 0 so the default config text —
 		what every other test loads — stays exactly what it was.
+
+		`review_policy` is a `{scheme: state}` mapping — e.g.
+		`{"inline": "pending"}` — written into `[ingest]`, which holds every
+		ingest on that scheme out of a `query --exclude-pending` until `kern
+		promote` releases it. Omitted when None, for the same byte-identity
+		reason as the TTL above.
 		"""
 		head = f'data_dir = "{data_dir}"\n\n' if data_dir else ""
 		ttl = (
 			f"retention_secs = {intake_retention_secs}\n" if intake_retention_secs else ""
 		)
+		review = ""
+		if review_policy:
+			pairs = ", ".join(f'{k} = "{v}"' for k, v in review_policy.items())
+			review = f"[ingest]\nreview_policy = {{ {pairs} }}\n\n"
 		(self.cwd / ".kern" / "kern.toml").write_text(
 			f"{head}"
 			f'[embed]\nurl = "{self.llm_url}"\nmodel = "fake-embed"\n\n'
 			f'[reason]\nurl = "{self.llm_url}"\nmodel = "fake-reason"\n\n'
+			f"{review}"
 			f"[intake]\nenabled = {str(intake_enabled).lower()}\n{ttl}\n"
 		)
 

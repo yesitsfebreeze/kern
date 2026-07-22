@@ -119,9 +119,28 @@ impl Config {
 		let project = cwd.join(".kern").join("kern.toml");
 		let merged = io::merged_value(user, &project)?;
 		for section in ["heat", "ingest", "retrieval"] {
-			if merged.get(section).is_some() {
+			let Some(table) = merged.get(section) else {
+				continue;
+			};
+			// `[ingest] review_policy` is the one exception, and it is not a
+			// loosening of the rule: what a preset owns is TUNING, and in this table
+			// `Preset::apply` writes exactly one key, `dedup_threshold`. Curation
+			// policy is not tuning, and refusing the whole table left `review_policy`
+			// settable from nowhere outside the process — the same unreachability
+			// ROADMAP item 21 records for `exclude_pending`, one layer down. Any
+			// other key here is still refused, so the tuning surface is unchanged.
+			let only_review_policy = section == "ingest"
+				&& table
+					.as_table()
+					.is_some_and(|t| t.keys().all(|k| k == "review_policy"));
+			if !only_review_policy {
+				let escape = if section == "ingest" {
+					" (the one key it does accept is `review_policy`, which is curation, not tuning)"
+				} else {
+					""
+				};
 				return Err(io::Error::Parse(format!(
-					"[{section}] is preset-managed — set preset = \"relaxed\" | \"medium\" | \"tight\" at the top level instead"
+					"[{section}] is preset-managed — set preset = \"relaxed\" | \"medium\" | \"tight\" at the top level instead{escape}"
 				)));
 			}
 		}
@@ -399,10 +418,39 @@ mod tests {
 		}
 	}
 
+	// The same load-bearing point for the review lifecycle: a `review_policy` a
+	// `kern.toml` cannot express is a policy nobody has, and the hold half of
+	// ROADMAP item 21 is then unreachable no matter what the query surface
+	// accepts. Both directions, because the exception must stay an exception.
+	#[test]
+	fn a_real_kern_toml_can_set_review_policy_and_nothing_else_in_ingest() {
+		let dir = root_with("[ingest]\nreview_policy = { inline = \"pending\" }\n");
+		let root = dir.path().canonicalize().unwrap();
+		let cfg = Config::load_with_user(&root.join("no-such-user.toml"), &root)
+			.expect("review_policy is not preset-managed");
+		assert_eq!(
+			cfg.ingest.review_policy.get("inline"),
+			Some(&crate::base::types::ReviewState::Pending),
+			"the policy a real file set has to reach the struct the ingest gate reads"
+		);
+
+		// The tuning key in the same table is still refused, so the preset stays
+		// the only writer of what a preset owns.
+		let dir =
+			root_with("[ingest]\nreview_policy = { inline = \"pending\" }\ndedup_threshold = 0.5\n");
+		let root = dir.path().canonicalize().unwrap();
+		let err = Config::load_with_user(&root.join("no-such-user.toml"), &root).unwrap_err();
+		assert!(
+			err.to_string().contains("preset"),
+			"a tuning knob smuggled in beside review_policy must still be refused: {err}"
+		);
+	}
+
 	// The load-bearing half of per-source retention: a policy a `kern.toml`
-	// cannot express is a policy nobody has. `[ingest]` is refused outright by
-	// the guard above, so the key lives in the two sections that describe the
-	// sources themselves — and this proves a real file reaches the struct.
+	// cannot express is a policy nobody has. `[ingest]` accepts nothing but
+	// `review_policy`, so the retention key lives in the two sections that
+	// describe the sources themselves — and this proves a real file reaches the
+	// struct.
 	#[test]
 	fn a_real_kern_toml_can_set_per_source_retention() {
 		let dir = root_with(

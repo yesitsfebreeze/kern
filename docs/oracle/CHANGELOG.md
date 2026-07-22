@@ -2,6 +2,60 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 21's review lifecycle got the caller-facing surface it was
+  missing, and the item closed. `promote` (MCP tool + `kern promote <id>` routed
+  through `route()`) and `exclude_pending` (query schema + `QueryArgs` + `kern
+  query --exclude-pending`) shipped as one slice, because neither half is usable
+  alone: the state was writable only by ingest and readable only by a filter no
+  caller could set.
+
+  **Three decisions worth recording.**
+
+  *The unreachability was one layer deeper than the item said.* Item 21 recorded
+  that `exclude_pending` had no surface. It also turned out that `[ingest]
+  review_policy` — the knob that decides what is held in the first place — could
+  not be set from a `kern.toml` at all: `Config::load_with_user` refused the whole
+  `[heat]`/`[ingest]`/`[retrieval]` tables as preset-managed. So the hold half was
+  unreachable twice over, and no e2e was possible. Fixed at the root rather than
+  worked around: what a preset owns is *tuning*, and `Preset::apply` writes exactly
+  one key in that table. `[ingest]` now accepts `review_policy` and nothing else.
+  Decided by: fix-the-root.
+
+  *`promote` ships on an unauthenticated socket, deliberately.* It is a wider
+  claim than `intake drain` — draining asserts no authority, releasing a held
+  claim is a curation-authority decision. Taken now because the alternative was
+  shipping neither half, and a host that enabled `review_policy` today would
+  strand every claim it held. The dependence is stated on the tool description,
+  on `cmd_promote`, in `FEATURES.md` and in the user-facing `configure.mdx`:
+  promote's authority rides on whatever item 24 lands. Decided by:
+  name-the-tradeoff.
+
+  *`promote` matches ids exactly, like `forget` and `degrade`.* The CLI prints
+  12-char short ids, so a curator must round-trip through `kern get` — the same
+  friction every other mutation has. Consistency beat convenience; making one
+  verb resolve prefixes would have made the id rule mean two things.
+
+  Coverage: `e2e/test_review_lifecycle.py` walks the whole loop twice, once
+  against a blinded serving daemon and once with nothing serving. Unlike item
+  18's `principals`, this needed no JSON-RPC client — the policy is ordinary
+  config and both verbs are subprocess-visible.
+
+  The config loosening was then attacked rather than trusted, because it is a
+  guard relaxed mid-slice to make its own test pass. Against a real binary:
+  `[ingest] dedup_threshold`, `review_policy` beside a tuning key, an unknown
+  key, `[heat]` and `[retrieval]` are each still refused by name. Widening the
+  allowlist to admit the whole table kills two tests
+  (`preset_managed_sections_refuse_to_load` and
+  `a_real_kern_toml_can_set_review_policy_and_nothing_else_in_ingest`), so the
+  exception is pinned in both directions. And the guard was never what made the
+  preset win: `Preset::apply` runs *after* the file deserializes, so with the
+  allowlist forced wide open a file-set `dedup_threshold = 0.5` still loads as
+  the preset's `0.98`. The guard is a refusal to let a `kern.toml` read as
+  though it tunes; it is not the mechanism. `IngestConfig` has exactly two
+  fields, so the allowlist admits precisely the one the preset does not own.
+  934 tests before, 941 after; recall@1 0.9306 / recall@5 0.9722 / MRR 0.9471,
+  unmoved.
+
 - 2026-07-22 — merged item 21's review lifecycle. 203 + 1 + this one = 205. The
   merge broke **thirteen** citations, the worst single hit yet, and every one was
   a second-order effect: adding `ReviewState` to `Entity` shifted `types.rs`,
