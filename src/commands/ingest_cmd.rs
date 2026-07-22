@@ -54,7 +54,11 @@ pub(super) async fn cmd_ingest(
 		Endpoint::new(reason_url, reason_model, reason_key),
 		Endpoint::new(embed_url, embed_model, embed_key),
 	)
-	.with_timeout_secs(cfg.reason.timeout_secs);
+	.with_timeout_secs(cfg.reason.timeout_secs)
+	.with_num_ctx(cfg.reason.num_ctx)
+	.with_reason_keep_alive(&cfg.reason.keep_alive)
+	.with_embed_num_ctx(cfg.embed.num_ctx)
+	.with_embed_keep_alive(&cfg.embed.keep_alive);
 	let worker = crate::ingest::Worker::new(g.clone(), llm_client, None, None, None);
 
 	let (conf, kind) = clamp_confidence(1.0, "user");

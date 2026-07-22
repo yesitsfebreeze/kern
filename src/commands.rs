@@ -496,6 +496,10 @@ pub(crate) fn server_llm_client(
 		Endpoint::new(&cfg.embed.url, &cfg.embed.model, &cfg.embed.key),
 	)
 	.with_timeout_secs(cfg.reason.timeout_secs)
+	.with_num_ctx(cfg.reason.num_ctx)
+	.with_reason_keep_alive(&cfg.reason.keep_alive)
+	.with_embed_num_ctx(cfg.embed.num_ctx)
+	.with_embed_keep_alive(&cfg.embed.keep_alive)
 }
 
 pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {

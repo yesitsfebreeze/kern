@@ -132,6 +132,9 @@ struct Inner {
 	seed: Option<i64>,
 	temperature: Option<f64>,
 	num_ctx: Option<u64>,
+	embed_num_ctx: u64,
+	embed_keep_alive: String,
+	reason_keep_alive: String,
 	// Per-request ceiling on `complete`. `LLM_TIMEOUT` until `[reason]
 	// timeout_secs` says otherwise, and that key defaults to the same number.
 	reason_timeout: Duration,
@@ -176,6 +179,9 @@ impl Client {
 				seed: None,
 				temperature: None,
 				num_ctx: None,
+				embed_num_ctx: EMBED_NUM_CTX,
+				embed_keep_alive: EMBED_KEEP_ALIVE.to_string(),
+				reason_keep_alive: REASON_KEEP_ALIVE.to_string(),
 				reason_timeout: LLM_TIMEOUT,
 			}),
 		}
@@ -201,8 +207,36 @@ impl Client {
 	}
 
 	// Ollama-native `complete` only; the OpenAI-compat path has no client-side window.
+	// 0 keeps the default — the same convention as `[reason] timeout_secs`.
 	pub fn with_num_ctx(mut self, n: u64) -> Self {
-		Arc::make_mut(&mut self.inner).num_ctx = Some(n);
+		if n > 0 {
+			Arc::make_mut(&mut self.inner).num_ctx = Some(n);
+		}
+		self
+	}
+
+	/// `[embed] num_ctx`. 0 keeps the default — the same convention as
+	/// `[reason] timeout_secs`. Ollama-native only; ignored on `/v1` (warned at boot).
+	pub fn with_embed_num_ctx(mut self, n: u64) -> Self {
+		if n > 0 {
+			Arc::make_mut(&mut self.inner).embed_num_ctx = n;
+		}
+		self
+	}
+
+	/// `[embed] keep_alive`. Empty keeps the default.
+	pub fn with_embed_keep_alive(mut self, ka: &str) -> Self {
+		if !ka.is_empty() {
+			Arc::make_mut(&mut self.inner).embed_keep_alive = ka.to_string();
+		}
+		self
+	}
+
+	/// `[reason] keep_alive`. Empty keeps the default.
+	pub fn with_reason_keep_alive(mut self, ka: &str) -> Self {
+		if !ka.is_empty() {
+			Arc::make_mut(&mut self.inner).reason_keep_alive = ka.to_string();
+		}
 		self
 	}
 
@@ -235,8 +269,8 @@ impl Client {
 			"model": self.inner.embed_model,
 			"input": input,
 			"truncate": true,
-			"keep_alive": EMBED_KEEP_ALIVE,
-			"options": { "num_ctx": EMBED_NUM_CTX },
+			"keep_alive": self.inner.embed_keep_alive,
+			"options": { "num_ctx": self.inner.embed_num_ctx },
 		})
 	}
 
@@ -333,7 +367,7 @@ impl Client {
 				"messages": [{"role": "user", "content": prompt}],
 				"stream": false,
 				"think": false,
-				"keep_alive": REASON_KEEP_ALIVE,
+				"keep_alive": self.inner.reason_keep_alive,
 				"options": options,
 			});
 			let resp = self
@@ -478,14 +512,14 @@ struct ChatChoiceMessage {
 }
 
 // Without a cap Ollama's default-context KV cache can't share a small GPU with the reason model.
-const EMBED_NUM_CTX: u64 = 2048;
+pub const EMBED_NUM_CTX: u64 = 2048;
 
 // Keep the embedder resident (`/v1` ignores `keep_alive`); avoids cold reloads between calls.
-const EMBED_KEEP_ALIVE: &str = "10m";
+pub const EMBED_KEEP_ALIVE: &str = "10m";
 
-const REASON_NUM_CTX: u64 = 8192;
+pub const REASON_NUM_CTX: u64 = 8192;
 
-const REASON_KEEP_ALIVE: &str = "2m";
+pub const REASON_KEEP_ALIVE: &str = "2m";
 
 // Overrides the client's 120 s default: slow CPU inference / large RAG prompts / long streams run past it.
 // The floor `with_timeout_secs` starts from, and the same number `[reason] timeout_secs` defaults to.
@@ -533,9 +567,7 @@ fn host_of(url: &str) -> Option<&str> {
 	let end = if after.starts_with('[') {
 		after.find(']').unwrap_or(after.len()) + 1
 	} else {
-		after
-			.find(|c: char| c == '/' || c == ':' || c == '?')
-			.unwrap_or(after.len())
+		after.find(['/', ':', '?']).unwrap_or(after.len())
 	};
 	let h = &after[..end];
 	if h.is_empty() {
@@ -567,6 +599,13 @@ fn is_local_ipv4(o: &[u8; 4]) -> bool {
 
 fn wants_native(url: &str) -> bool {
 	!url.trim_end_matches('/').ends_with("/v1") && is_local_ollama(url)
+}
+
+/// An OpenAI-compatible `/v1` endpoint. Ollama-native knobs (`num_ctx`,
+/// `keep_alive`) are not sent on this path — a boot warning uses this to name
+/// the knobs a `/v1` config silently ignores.
+pub fn is_openai_compat(url: &str) -> bool {
+	!wants_native(url) && !url.is_empty()
 }
 
 // Terminal chunk may carry both content and `done:true` — emit content before acting on `done`.

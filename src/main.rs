@@ -22,6 +22,9 @@ fn boot_config(loaded: Result<Config, kern::config::io::Error>) -> Result<Config
 	for w in cfg.egress_warnings() {
 		tracing::warn!(target: "kern", "{w}");
 	}
+	for w in cfg.native_knob_warnings() {
+		tracing::warn!(target: "kern", "{w}");
+	}
 	Ok(cfg)
 }
 

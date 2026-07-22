@@ -239,6 +239,49 @@ impl Config {
 		}
 		out
 	}
+
+	/// Ollama-native knobs (`num_ctx`, `keep_alive`) a `/v1` (OpenAI-compat)
+	/// endpoint silently ignores. One warning per knob a config sets on a `/v1`
+	/// endpoint; default values are silent — a default `/v1` config is not
+	/// "trying to tune" anything, so there is nothing to warn about. `reason.url`
+	/// is checked raw for the same reason `egress_warnings` checks it raw: an
+	/// empty `reason.url` inherits `embed.url`, and warning on the inherited
+	/// value would double-count the one provider.
+	pub fn native_knob_warnings(&self) -> Vec<String> {
+		let mut out = Vec::new();
+		if crate::llm::is_openai_compat(&self.embed.url) {
+			if self.embed.num_ctx != 0 && self.embed.num_ctx != crate::llm::EMBED_NUM_CTX {
+				out.push(format!(
+					"embed.num_ctx = {} is ignored — embed.url ({}) is an OpenAI-compatible /v1 endpoint with no client-side context window",
+					self.embed.num_ctx, self.embed.url
+				));
+			}
+			if !self.embed.keep_alive.is_empty() && self.embed.keep_alive != crate::llm::EMBED_KEEP_ALIVE
+			{
+				out.push(format!(
+					"embed.keep_alive = \"{}\" is ignored — embed.url ({}) is an OpenAI-compatible /v1 endpoint with no keep-alive option",
+					self.embed.keep_alive, self.embed.url
+				));
+			}
+		}
+		if crate::llm::is_openai_compat(&self.reason.url) {
+			if self.reason.num_ctx != 0 && self.reason.num_ctx != crate::llm::REASON_NUM_CTX {
+				out.push(format!(
+					"reason.num_ctx = {} is ignored — reason.url ({}) is an OpenAI-compatible /v1 endpoint with no client-side context window",
+					self.reason.num_ctx, self.reason.url
+				));
+			}
+			if !self.reason.keep_alive.is_empty()
+				&& self.reason.keep_alive != crate::llm::REASON_KEEP_ALIVE
+			{
+				out.push(format!(
+					"reason.keep_alive = \"{}\" is ignored — reason.url ({}) is an OpenAI-compatible /v1 endpoint with no keep-alive option",
+					self.reason.keep_alive, self.reason.url
+				));
+			}
+		}
+		out
+	}
 }
 
 #[cfg(test)]
@@ -537,5 +580,56 @@ mod tests {
 		// empty reason.url inherits embed.url silently — must not double-count
 		cfg.reason.url = String::new();
 		assert_eq!(cfg.egress_warnings().len(), 1);
+	}
+
+	#[test]
+	fn native_knob_warnings_silent_on_default_loopback() {
+		let cfg = Config::default_in(Path::new("x"));
+		// default is loopback Ollama, native, default knobs — nothing to warn
+		assert!(
+			cfg.native_knob_warnings().is_empty(),
+			"{:?}",
+			cfg.native_knob_warnings()
+		);
+	}
+
+	#[test]
+	fn native_knob_warnings_silent_on_a_v1_endpoint_with_default_knobs() {
+		let mut cfg = Config::default_in(Path::new("x"));
+		cfg.embed.url = "http://localhost:8000/v1".into();
+		// /v1 endpoint, but knobs still at default — not "trying to tune", silent
+		assert!(
+			cfg.native_knob_warnings().is_empty(),
+			"{:?}",
+			cfg.native_knob_warnings()
+		);
+	}
+
+	#[test]
+	fn native_knob_warnings_names_a_tuned_knob_on_a_v1_endpoint() {
+		let mut cfg = Config::default_in(Path::new("x"));
+		cfg.embed.url = "http://localhost:8000/v1".into();
+		cfg.embed.num_ctx = 8192; // non-default, ignored on /v1
+		cfg.embed.keep_alive = "30m".into();
+		let w = cfg.native_knob_warnings();
+		assert_eq!(w.len(), 2, "one per tuned knob: {w:?}");
+		assert!(w[0].contains("embed.num_ctx"), "names the knob: {w:?}");
+		assert!(w[0].contains("8192"), "names the value: {w:?}");
+		assert!(w[1].contains("embed.keep_alive"), "names the knob: {w:?}");
+		assert!(w[1].contains("30m"), "names the value: {w:?}");
+		// native (non-/v1) Ollama endpoint with the same tuned knobs — silent,
+		// because there the knobs ARE sent
+		cfg.embed.url = "http://localhost:11434".into();
+		assert!(
+			cfg.native_knob_warnings().is_empty(),
+			"native endpoint honours the knobs"
+		);
+	}
+
+	#[test]
+	fn embed_config_default_carries_the_native_knob_constants() {
+		let c = crate::config::embed::EmbedConfig::default();
+		assert_eq!(c.num_ctx, crate::llm::EMBED_NUM_CTX);
+		assert_eq!(c.keep_alive, crate::llm::EMBED_KEEP_ALIVE);
 	}
 }

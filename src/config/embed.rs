@@ -11,6 +11,10 @@ pub struct EmbedConfig {
 	pub url: String,
 	pub model: String,
 	pub key: String,
+	// Ollama-native only; ignored on `/v1` (warned at boot). 0 keeps the default.
+	pub num_ctx: u64,
+	// Ollama-native only; ignored on `/v1` (warned at boot). Empty keeps the default.
+	pub keep_alive: String,
 }
 
 impl Default for EmbedConfig {
@@ -19,6 +23,8 @@ impl Default for EmbedConfig {
 			url: DEFAULT_EMBED_URL.into(),
 			model: DEFAULT_EMBED_MODEL.into(),
 			key: String::new(),
+			num_ctx: crate::llm::EMBED_NUM_CTX,
+			keep_alive: crate::llm::EMBED_KEEP_ALIVE.into(),
 		}
 	}
 }
