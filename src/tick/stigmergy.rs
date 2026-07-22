@@ -6,7 +6,7 @@ use crate::base::log_throttle::LogThrottle;
 
 use parking_lot::RwLock;
 
-use crate::base::constants::{COLD_GC_AGE, COLD_HEAT_THRESHOLD};
+use crate::base::constants::{COLD_GC_AGE, COLD_HEAT_THRESHOLD, EVIDENCE_HALF_LIFE_SECS};
 use crate::base::graph::GraphGnn;
 use crate::base::heat::{self, HeatConfig};
 use crate::base::reason::remove_entity;
@@ -75,15 +75,46 @@ fn is_cold_victim(
 	}
 }
 
+// Evidence decay — γ damping of conf_alpha/conf_beta toward the Jeffreys prior
+// (1,1). `half_life_secs == 0` is a noop (default-off). Decaying (α-1)/(β-1)
+// toward 0 by the heat half-life keeps (1,1) as the floor and never crosses it.
+// Local-only mutable state (item 57); superseded entities are skipped.
+pub fn decay_evidence(kern: &mut crate::base::types::Kern, now: SystemTime, half_life_secs: u64) {
+	if half_life_secs == 0 {
+		return;
+	}
+	for t in kern.entities.values_mut() {
+		if t.is_superseded() {
+			continue;
+		}
+		t.conf_alpha = 1.0 + heat::decayed(t.conf_alpha - 1.0, t.updated_at, now, half_life_secs);
+		t.conf_beta = 1.0 + heat::decayed(t.conf_beta - 1.0, t.updated_at, now, half_life_secs);
+		t.refresh_score();
+	}
+}
+
 pub fn run_gc(graph: &Arc<RwLock<GraphGnn>>, kern_id: &str, heat_cfg: &HeatConfig) {
 	let mut g = graph.write();
+
+	let now = SystemTime::now();
+	let kern_is_remote = crate::base::merge::is_remote_kern_id(kern_id);
+
+	// Evidence decay — tick-based γ damping of conf_alpha/conf_beta toward the
+	// Jeffreys prior (1,1). Default-off (EVIDENCE_HALF_LIFE_SECS = 0 → noop,
+	// bit-identical to today). Runs on the GC cadence (hourly) per resident
+	// non-superseded entity; local-only mutable state, no gossip/wire change
+	// (item 57). Decaying (α-1)/(β-1) toward 0 keeps (1,1) as the floor.
+	if EVIDENCE_HALF_LIFE_SECS > 0 {
+		if let Some(kern) = g.kerns.get_mut(kern_id) {
+			decay_evidence(kern, now, EVIDENCE_HALF_LIFE_SECS);
+		}
+	}
+
 	let kern = match g.kerns.get(kern_id) {
 		Some(k) => k,
 		None => return,
 	};
 
-	let now = SystemTime::now();
-	let kern_is_remote = crate::base::merge::is_remote_kern_id(kern_id);
 	let victims: Vec<String> = kern
 		.entities
 		.values()
@@ -750,5 +781,63 @@ mod tests {
 			before + 1,
 			"an unrecoverable drop must be countable, or in-memory reads as durable"
 		);
+	}
+
+	#[test]
+	fn evidence_decay_damps_alpha_beta_toward_prior_by_half_life() {
+		use crate::base::types::{EntityStatus, Kern};
+		let now = SystemTime::now();
+		let seven_d = 7 * 24 * 60 * 60;
+		let mut k = Kern::new("k", "");
+		let mut e = ent(EntityKind::Fact, 0.0, Some(now));
+		e.conf_alpha = 11.0;
+		e.conf_beta = 3.0;
+		e.updated_at = Some(now - Duration::from_secs(seven_d));
+		e.status = EntityStatus::Active;
+		k.entities.insert("e".into(), e);
+
+		decay_evidence(&mut k, now, seven_d);
+		let t = k.entities.get("e").unwrap();
+		// (α-1)=10 halved → 5, so α ≈ 6.0; (β-1)=2 halved → 1, so β ≈ 2.0.
+		assert!((t.conf_alpha - 6.0).abs() < 1e-4, "alpha {}", t.conf_alpha);
+		assert!((t.conf_beta - 2.0).abs() < 1e-4, "beta {}", t.conf_beta);
+		assert!((t.score - t.conf_mean()).abs() < 1e-9, "score refreshed");
+	}
+
+	#[test]
+	fn evidence_decay_half_life_zero_is_a_noop() {
+		use crate::base::types::Kern;
+		let now = SystemTime::now();
+		let mut k = Kern::new("k", "");
+		let mut e = ent(EntityKind::Fact, 0.0, Some(now));
+		e.conf_alpha = 11.0;
+		e.conf_beta = 3.0;
+		e.updated_at = Some(now - Duration::from_secs(7 * 24 * 60 * 60));
+		k.entities.insert("e".into(), e);
+		let before = k.entities.get("e").unwrap().clone();
+		decay_evidence(&mut k, now, 0);
+		let t = k.entities.get("e").unwrap();
+		assert_eq!(t.conf_alpha, before.conf_alpha);
+		assert_eq!(t.conf_beta, before.conf_beta);
+		assert_eq!(t.score, before.score);
+	}
+
+	#[test]
+	fn evidence_decay_skips_superseded_entities() {
+		use crate::base::types::{EntityStatus, Kern};
+		let now = SystemTime::now();
+		let seven_d = 7 * 24 * 60 * 60;
+		let mut k = Kern::new("k", "");
+		let mut e = ent(EntityKind::Fact, 0.0, Some(now));
+		e.conf_alpha = 11.0;
+		e.conf_beta = 3.0;
+		e.updated_at = Some(now - Duration::from_secs(seven_d));
+		e.status = EntityStatus::Superseded;
+		k.entities.insert("e".into(), e);
+		let before = k.entities.get("e").unwrap().clone();
+		decay_evidence(&mut k, now, seven_d);
+		let t = k.entities.get("e").unwrap();
+		assert_eq!(t.conf_alpha, before.conf_alpha, "superseded not decayed");
+		assert_eq!(t.conf_beta, before.conf_beta);
 	}
 }

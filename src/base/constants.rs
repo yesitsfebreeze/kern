@@ -86,6 +86,12 @@ pub const DEGRADE_MIN_THRESHOLD: f64 = 0.05;
 /// relevance weight, so repeated degrades never push it negative (item 59 floor).
 pub const DEGRADE_FLOOR: f64 = 0.0;
 
+/// Half-life in seconds for evidence decay — tick-based γ damping of
+/// `conf_alpha`/`conf_beta` toward the Jeffreys prior (1,1). `0` = disabled
+/// (the decay pass is a noop, bit-identical today); the operator opts in. The
+/// policy (enable-by-default + the rate) is a separate decision (item 57).
+pub const EVIDENCE_HALF_LIFE_SECS: u64 = 0;
+
 /// Max turns per distill prompt — a turn is a blank-line-delimited block. A
 /// conversation longer than this is chunked turn-batched so a long delta stops
 /// truncating past the model context window with no signal (item 49 chunking
