@@ -218,6 +218,24 @@ impl Config {
 			&self.reason.key
 		}
 	}
+
+	/// One warning per configured LLM/embed URL whose host is not local to this
+	/// machine. Empty when every configured URL is local (or empty). Pure — no
+	/// I/O, no logging — so the caller (`boot_config`) owns the emit surface and
+	/// the test owns the assertion. `reason.url` is checked raw, not via the
+	/// `reason_url()` fallback, because an empty `reason.url` silently inherits
+	/// `embed.url` and a warning for that would double-count the one provider.
+	pub fn egress_warnings(&self) -> Vec<String> {
+		let mut out = Vec::new();
+		for (label, url) in [("embed.url", &self.embed.url), ("reason.url", &self.reason.url)] {
+			if !url.is_empty() && !crate::llm::is_local_url(url) {
+				out.push(format!(
+					"{label} ({url}) is non-local — all text sent to it egresses this machine"
+				));
+			}
+		}
+		out
+	}
 }
 
 #[cfg(test)]
@@ -487,5 +505,32 @@ mod tests {
 			err.to_string().contains("relaxed"),
 			"the error names the valid tiers: {err}"
 		);
+	}
+
+	#[test]
+	fn egress_warnings_flags_a_public_embed_url_and_silences_loopback() {
+		let mut cfg = Config::default_in(Path::new("x"));
+		// loopback embed url — no warning
+		cfg.embed.url = "http://127.0.0.1:11434".into();
+		assert!(cfg.egress_warnings().is_empty(), "loopback is local");
+
+		// public embed url — one warning, naming embed.url
+		cfg.embed.url = "https://api.openai.com".into();
+		let w = cfg.egress_warnings();
+		assert_eq!(w.len(), 1);
+		assert!(w[0].contains("embed.url"), "names the field: {w:?}");
+		assert!(w[0].contains("api.openai.com"), "names the host: {w:?}");
+	}
+
+	#[test]
+	fn egress_warnings_reports_one_per_non_local_url() {
+		let mut cfg = Config::default_in(Path::new("x"));
+		cfg.embed.url = "https://api.openai.com".into();
+		cfg.reason.url = "http://203.0.113.5".into();
+		let w = cfg.egress_warnings();
+		assert_eq!(w.len(), 2, "one per non-local url: {w:?}");
+		// empty reason.url inherits embed.url silently — must not double-count
+		cfg.reason.url = String::new();
+		assert_eq!(cfg.egress_warnings().len(), 1);
 	}
 }
