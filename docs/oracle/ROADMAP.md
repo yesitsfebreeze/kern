@@ -2013,7 +2013,28 @@ spelled in full because the nearest preceding path is `tools_admin.rs`, which is
 455 lines long, and a bare `:NNN` continues the wrong file), so one long
 paragraph still goes to the model as a single call and truncates past its
 context window with no signal. Chunking *that* wants a length-based split, not a
-newline one, and is still blocked on a real document long enough to truncate.
+newline one.
+
+**Mechanism half-closed 2026-07-22 (default-off).** `seed_examples`
+(`src/base/accept.rs`) now char-chunks a single long paragraph at
+`GRAVITON_SEED_CHAR_CHUNK` (new, `src/base/constants.rs`, default `4000` ≈ 1000
+tokens, well under a 4–8k prompt budget) — when a single-line seed exceeds the
+threshold it is split on a code-point boundary into `ceil(len/chunk)` chunks
+and returned to the existing caller which embeds each + `mean_pool`s them (no
+caller change). Under threshold: `vec![text.trim()]` — bit-identical today (no
+real seed is that long). Same default-off shape as item 49 chunking
+(`DISTILL_CHUNK_TURNS`) and item 57 (`EVIDENCE_HALF_LIFE_SECS=0`). Proved by
+`seed_examples_char_chunks_a_long_single_paragraph` (chunk+5 → 2 chunks, each
+`<=` threshold, concat == original; exactly-chunk → 1) and
+`seed_examples_char_chunks_split_on_a_code_point_boundary` (multibyte `ß`
+straddling the boundary is not split mid-`char`);
+`seed_examples_splits_lines_and_keeps_single_text_whole` green unedited.
+`cargo test -p kern --lib` 948 passed, 0 failed, 4 ignored. Negative control
+(force the single-chunk path → one chunk not two) reds, green on revert.
+Decided by fix-the-root (reuse the existing mean-pool caller, return chunks not
+a new pipeline), name-the-tradeoff (default-off — the threshold is a knob; a
+real truncating-document validation is the operator's, same stance as item 57),
+verify-before-claiming (negative control). See the 2026-07-22 CHANGELOG entry.
 
 ### 53. Clustering is vector-only `[lifecycle]`
 

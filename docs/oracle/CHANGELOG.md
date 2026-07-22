@@ -2,6 +2,22 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 52 mechanism half-closed (default-off): `seed_examples`
+  (`src/base/accept.rs`) now char-chunks a single long graviton-seed paragraph
+  at `GRAVITON_SEED_CHAR_CHUNK` (new, `src/base/constants.rs`, default `4000`)
+  — when a single-line seed exceeds the threshold it splits on a code-point
+  boundary into `ceil(len/chunk)` chunks returned to the existing caller which
+  embeds each + `mean_pool`s (no caller change). Under threshold:
+  `vec![text.trim()]` — bit-identical today. Same default-off shape as item 49
+  (`DISTILL_CHUNK_TURNS`) and item 57 (`EVIDENCE_HALF_LIFE_SECS=0`). Proved by
+  `seed_examples_char_chunks_a_long_single_paragraph` (chunk+5 → 2, each `<=`
+  threshold, concat == original) and
+  `seed_examples_char_chunks_split_on_a_code_point_boundary` (multibyte `ß` not
+  split mid-`char`); `seed_examples_splits_lines_and_keeps_single_text_whole`
+  green unedited. `cargo test -p kern --lib` 948 passed, 0 failed, 4 ignored.
+  Negative control (force single-chunk path) reds, green on revert.
+  Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming.
+
 - 2026-07-22 — item 83 reembed double-alloc half closed: at reembed `vector`
   and `gnn_vector` now share the `Arc` — `e.vector = v.clone().into();
   e.gnn_vector = e.vector.clone();` (`src/tick/tasks.rs`,
