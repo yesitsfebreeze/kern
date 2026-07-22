@@ -74,6 +74,101 @@
   And verify-before-claiming — "untestable without a second uid" was a claim
   about the world that turned out to be a claim about the code's shape, and the
   shape was ours to change.
+- 2026-07-22 — merged item 98's pre-auth cap and deadline. 215 + 1 + this one =
+  217.
+
+  Worth recording what closing it revealed about the item I wrote. I filed 98
+  from `FEATURES.md` §13's own words plus a read of the auth path, and explicitly
+  told the slice I had tested neither half — the "huge allocation" shape might
+  already be bounded by the transport codec. It was not, and the proof is that
+  reverting the cap to 64 MiB fails the new test with *"the daemon buffered
+  16777216 bytes from a peer that has proven nothing"*. So the item was right,
+  but it was right on an untested reading, and the difference only became
+  knowable when someone wrote the test that could have falsified it.
+
+  The test's shape is the transferable part: it asserts on **bytes buffered**,
+  not on the connection being refused. A refusal test passes while the daemon
+  allocates a gigabyte first, which is precisely the defect. Three items this run
+  shipped a gate that measured the wrong quantity and had to be rewritten — 25's
+  eligibility, 28's recall, 31's fan-out — and each time the tell was the same:
+  the assertion named the *outcome* rather than the *cost*.
+
+  Also: the refusal path deliberately gives a timed-out peer nothing at all,
+  while every other refusal answers. A reply to a silent peer is a free liveness
+  probe that names the deadline, and all refusals share one message so the
+  response cannot tell a caller how far it got. Neither was in my brief.
+
+  Decided by: verify-before-claiming — an item written from a document is a
+  hypothesis about code, even when it turns out to be true.
+
+- 2026-07-22 — item 98: the pre-auth frame on kern.sock is bounded, 1 KiB and
+  five seconds. Both halves were real; one was real by a mechanism the item did
+  not name, and that difference decided the whole fix.
+
+  **The item said "a frame declaring a huge length". There is no declared
+  length.** `JsonEnvelopeCodec` is newline-delimited, so nothing on this wire
+  announces a size — `FramedRead` reserves, reads and doubles its `BytesMut` for
+  as long as `decode` returns `Ok(None)`, which is until a `\n` arrives. The
+  allocation is not requested, it is accreted. That is worse in one specific way:
+  a cap applied around `channel.recv()` would never fire, because on this input
+  `recv()` does not return. The cap had to go into the decoder, where the buffer
+  is, and had to measure an **incomplete** line — the only shape an endless frame
+  ever has.
+
+  **Measured before it was fixed, because the refusal was already there.** A peer
+  writing 16 MiB with no newline was refused — at EOF, after the daemon had taken
+  all 16777216 bytes into its buffer. Every "is it refused?" assertion was green
+  through the entire defect. So the test asserts on bytes the daemon took, which
+  is the buffer's size exactly, since nothing is consumed while `decode` returns
+  `Ok(None)`.
+
+  **The silent half was real as written**, but "occupies its accept slot" is not
+  what happens — `serve_kern_rpc_loop` spawns per connection and keeps accepting.
+  What is held is a task, an fd and a growing buffer, for a session item 24
+  guarantees will never be authorised.
+
+  **On timeout the connection closes without a word**, and this is the one place
+  the path departs from "one message for every refusal". A peer that ran out the
+  clock never spoke: there is no misconfigured client to inform, and a reply
+  would be a free liveness probe that also names the deadline. An oversized frame
+  gets the standard refusal instead, deliberately — it did speak, and a distinct
+  answer would tell a caller which limit it hit. Tradeoff named: an operator
+  whose client wedges mid-handshake sees a bare disconnect and must reach for
+  logs. Worth it; a refusal frame is worth less to the honest case than it is to
+  the dishonest one.
+
+  Both limits are lifted the instant the frame is in hand, so `call_tool`'s whole
+  documents keep the unbounded framing they need, and both are therefore strictly
+  tighter than anything past the gate. Six new tests, workspace 978 passed / 16
+  skipped; `e2e` recall unmoved at 0.9306 / 0.9722 / 0.9471.
+
+  Decided by: verify-before-claiming — the item's stated mechanism did not exist,
+  and the obvious assertion was green against the defect it was written for.
+
+- 2026-07-22 — scanned every ROADMAP item for the recurring stale-heading defect
+  and retitled two more: item 32 (body: "Closed 2026-07-21", title still naming
+  the bias — and its own body says the fix the title implies would have made
+  things worse) and item 18 (four bullets done, title still claiming it "gates
+  everything else in this tier" when what is left is that a bare `query {id}`
+  filters nothing). Sixth and seventh this run.
+
+  The scan flagged twelve and I kept two. That ratio is the useful part: ten of
+  the twelve already named their *remainder* correctly — item 26 "allocates four
+  N-sized buffers", item 29 "was measured and refused", item 52 "a single-line
+  seed still truncates". A crude "body says closed, title does not" rule cannot
+  tell a stale title from a correctly-narrowed one, because both mention a defect
+  that exists; only the body says which defect.
+
+  So this stays a read, not a check. That is worth writing down after three
+  attempts at automating docs reconciliation this run — the anchor nominator
+  works because "does this line say what cites it" is decidable from two strings;
+  gap-block coverage and stale headings are not, and both heuristics I tried
+  produced mostly false positives. The lesson is not that automation failed, it
+  is which questions are mechanisable: **content equality is; editorial accuracy
+  is not.**
+
+  Decided by: verify-before-claiming — twelve flags, two real, and the difference
+  was only visible by opening each one.
 
 - 2026-07-22 — merged item 30's durable watcher path. The interesting conflict
   was in `e2e/conftest.py`, and it is the first this run that needed a **code**
@@ -201,6 +296,7 @@
   `AlreadyRunning` probe and the real daemon still stands down, and deleting the
   peer-check *call* is a mutation no test catches, because catching it needs a
   socket served by a second uid.
+
 - 2026-07-22 — merged item 21's `promote`, and corrected two claims that went
   stale between the branch starting and the merge landing. The branch opened at
   00:17Z with item 24 open, so it wrote "`promote` ships on an unauthenticated

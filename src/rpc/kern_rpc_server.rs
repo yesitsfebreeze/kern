@@ -425,6 +425,40 @@ mod auth_gate_tests {
 		);
 	}
 
+	// The gate holds resources, not just decisions: item 24 puts `verify_auth`
+	// ahead of `make_handler`, so a connection parked in the handshake is a
+	// spawned task and an fd held for a session that will never be authorised.
+	// The assertion is that the serve future *finishes* — a deadline that
+	// refuses but leaves the task alive has reclaimed nothing.
+	#[tokio::test(flavor = "current_thread", start_paused = true)]
+	async fn a_connection_that_opens_and_says_nothing_releases_its_slot() {
+		let (server_side, client_side) = InprocAdapter::pair();
+		let calls = Arc::new(AtomicUsize::new(0));
+		let spy_calls = calls.clone();
+		let mut client = Channel::new(client_side, JsonEnvelopeCodec::new());
+
+		let served = tokio::time::timeout(std::time::Duration::from_secs(60), async move {
+			let channel = Channel::new(server_side, JsonEnvelopeCodec::new());
+			serve_authenticated(channel, TOKEN, move |principal| Spy {
+				calls: spy_calls,
+				principal,
+			})
+			.await
+		})
+		.await
+		.expect("a silent connection kept the serve loop alive with no deadline to end it");
+
+		assert!(served.is_err(), "and it is refused, not served");
+		assert_eq!(calls.load(Ordering::SeqCst), 0);
+		// The far end is gone: the handshake dropped the channel rather than
+		// parking on it, so the client's next frame has nowhere to land.
+		let _ = client.send(call_tool_frame()).await;
+		assert!(
+			client.recv().await.unwrap_or(None).is_none(),
+			"the daemon side must be closed, not idling"
+		);
+	}
+
 	// The compatibility half: past the gate, the wire is byte-for-byte what it
 	// was. Compared against the same handler called in-process, so a drift in
 	// the envelope shows up here rather than in an agent's tool output.

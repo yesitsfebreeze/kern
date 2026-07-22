@@ -30,6 +30,14 @@ where
 		Self { reader, writer }
 	}
 
+	/// The read half's codec, so framing can be tightened for one phase of a
+	/// conversation and loosened again — `verify_auth` caps the pre-auth frame
+	/// through here. The write half is deliberately not exposed: what we send is
+	/// ours already.
+	pub fn decoder_mut(&mut self) -> &mut C {
+		self.reader.decoder_mut()
+	}
+
 	pub async fn send(&mut self, frame: <C as Codec>::Frame) -> Result<(), AdapterError> {
 		self
 			.writer
