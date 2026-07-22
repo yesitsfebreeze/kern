@@ -616,7 +616,7 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 | `forget_by_source` | `tools_mutate.rs` | Remove every thought from one `(scheme, object_id)` — **all sections of it**, since `source_id` hashes the section and keying on one would forget a single chunk of a document. Cascades through the same `forget_entity`; refuses local Facts unless `force`, which is the ONLY bypass of the Fact guard and is never implicit. Returns `removed_entities`/`removed_edges`/`kept_facts` — the last so a refused Fact is reported rather than read as "nothing was there". Exists so `kern forget --source` has somewhere to route. |
 | `degrade` | `tools_mutate.rs` | Down-weight edges along a bad retrieval path (`DEGRADE_*` decay). Returns `decayed_edges` and `removed_edges` — the reap count exists so a CLI `degrade` routed through the daemon can print what the local path prints. |
 | `move` | `tools_mutate.rs:491` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
-| `promote` | `tools_mutate.rs` | Release a thought a review policy is holding: flips `ReviewState::Pending` to `Active`, so a `query {exclude_pending: true}` returns it again. The release half of the lifecycle `[ingest] review_policy` opens; idempotent, returning `promoted: false` on an already-active row rather than failing, and a hard `thought not found` on an id nothing resolves — a silent success would tell a curator a claim was released while it is still held. Shares `graph_ops::promote_entity` with the CLI's no-daemon fallback so the routed and local writes cannot disagree. **Authority: this is a curation decision on an unauthenticated socket** — a wider claim than `intake drain`, which asserts none — and the gate it rides on is whatever `ROADMAP.md` item 24 lands. |
+| `promote` | `tools_mutate.rs` | Release a thought a review policy is holding: flips `ReviewState::Pending` to `Active`, so a `query {exclude_pending: true}` returns it again. The release half of the lifecycle `[ingest] review_policy` opens; idempotent, returning `promoted: false` on an already-active row rather than failing, and a hard `thought not found` on an id nothing resolves — a silent success would tell a curator a claim was released while it is still held. Shares `graph_ops::promote_entity` with the CLI's no-daemon fallback so the routed and local writes cannot disagree. **Authority: this is a curation decision made on a declared principal** — a wider claim than `intake drain`, which asserts none — and since 2026-07-22 the socket authenticates the *connection*, proving a uid rather than which of that uid's programs asked, so the gate it rides on is still whatever `ROADMAP.md` item 24 lands. |
 | `health` | `tools_admin.rs:83` | Graph stats (gravitons/kerns/entities/reasons/unnamed/claim_kinds) **plus the degradation surface**: `queue_depth`, `tasks_done`, `task_avg_ms`, `task_panics`, `last_task_panic`, `task_failures`, `last_task_failure`, `cold_evicted`, `embed_model`, `embed_dim`, `embed_mismatch`, and the seven fail-open counters — `query_dim_rejected`, `below_floor_deliveries`, `clock_skew_skips`, `ingest_dropped_chunks`, `remote_cap_dropped`, `unspilled_drops`, `ingest_queue_refused` — each a path that returns something rather than erroring, so the count is the only way to tell a degraded result from a good one (`Server::health_stats`, `src/mcp.rs:116`). |
 | `graviton` | `tools_admin.rs` | list/add/remove focus attractors (name + text — phrase or full document — + optional mass). Replaced the single per-kern "purpose". |
 | `claim_kind` | `tools_admin.rs` | register/remove claim kinds; registered kinds extend the built-in distill set. |
@@ -677,20 +677,20 @@ the MCP JSON does — `task_panics`/`last_task_panic`,
 **Gaps.** The socket has auth now: one token frame carrying the graph's `mcp-token`
 (`src/trnsprt/src/kern_rpc/auth.rs`), verified before any method dispatches; the
 named pipe carries an owner-only SDDL that typechecks for Windows and has never
-run on one. Authentication runs both ways as of 2026-07-22 —
-`require_owned_by_caller` checks the endpoint's owner before the connect and
-`require_peer_is_caller` checks the serving uid after it, both ahead of the
-token frame (`src/trnsprt/src/typed/local.rs:237`, `:283`). `principal` is
-declared, not proven, and the pre-auth frame is unbounded and untimed
-(`ROADMAP.md` — item 24). `HealthRes` stays a flat DTO.
+run on one. Both directions authenticate as of 2026-07-22: `require_owned_by_caller`
+(`src/trnsprt/src/typed/local.rs:237`) and `require_peer_is_caller` (`:283`) run
+in `connect_kern` ahead of the token frame *and* in the bind's `AddrInUse` arm,
+which refuses a foreign-owned name by uid rather than standing the daemon down —
+both halves pinned, the peer one only by an injected uid (item 24). `principal`
+is declared, not proven (item 24); pre-auth frame is item 98. Flat `HealthRes`.
 
 ---
 
 ## 14. CLI — `active`
 
 **What.** The `kern` binary. Reads the on-disk graph directly (can race a live
-daemon — prefer MCP for live state). Nine commands are the exceptions when a
-daemon serves: `forget`, `degrade`, `intake drain`, `graviton add`,
+daemon — prefer MCP for live state). Ten commands are the exceptions when a
+daemon serves: `forget`, `degrade`, `promote`, `intake drain`, `graviton add`,
 `graviton remove`, `claim-kind add` and `claim-kind rm` hand it the write, and
 `get` and `query` take their read from it.
 
@@ -698,8 +698,8 @@ daemon serves: `forget`, `degrade`, `intake drain`, `graviton add`,
 `search`, `reembed`, `get`, `list`, `forget [ID | --source <scheme>://<object_id>
 [--force]]`, `link`, `intake {status|drain}`,
 `status`, `health`, `profile`, `gc`, `compact`, `graviton {add|list|remove}`,
-`degrade`, `claim-kind {add|rm}`, `peers`, `register`, `unnamed {list}`, `mcp`,
-`compress`, `daemon`, `hub {status|resolve|unload|merge|stop}`.
+`degrade`, `promote`, `claim-kind {add|rm}`, `peers`, `register`,
+`unnamed {list}`, `mcp`, `compress`, `daemon`, `hub {status|resolve|unload|merge|stop}`.
 
 **How.** `dispatch` (`src/commands.rs`) routes; per-subcommand handlers in
 `src/commands/{admin,graph_ops,ingest_cmd,intake_cmd,mcp_cmd,mcp_restart,profile_cmd,query,reembed,route,status}.rs`.
@@ -707,8 +707,8 @@ Notable:
 
 - **Daemon-first writes** (`src/commands/route.rs`) — `route(name, args)` probes
   `Endpoint::kern()` once, never spawns, and answers `Done` / `Refused` /
-  `NoDaemon`. `forget`, `degrade`, `graviton add`/`remove` and `claim-kind
-  add`/`rm` take it (the last four via `graviton_at`/`claim_kind_at`,
+  `NoDaemon`. `forget`, `degrade`, `promote`, `graviton add`/`remove` and
+  `claim-kind add`/`rm` take it (the last four via `graviton_at`/`claim_kind_at`,
   `src/commands/admin.rs`, which take the endpoint the way `route_to` does so
   the routed path is reachable from a test): while a daemon serves, the
   mutation lands in its live in-memory graph over `call_tool` instead of in a
@@ -806,11 +806,11 @@ because the RPC's only mutation surface is `call_tool`, the agent boundary:
 `tool_ingest` clamps to `AGENT_SOURCE` and `tool_link` writes
 `MAX_AI_CONFIDENCE`, while the CLI mints at user trust 1.0, so routing them
 unchanged would demote every CLI Fact to an agent Claim, and routing them with
-trust intact needs auth on the socket first. `get` and `query` no longer read
-stale: both route to a serving daemon over the `query` tool and fall back to the
-disk load only when nothing answers. `search` and `list` still read disk by
-decision — they are the store-inspection commands (`ROADMAP.md` item 9).
-`unnamed` lists only — there is no `promote`.
+trust intact needs a principal the socket can *prove*, not the one it has
+declared since 2026-07-22 (item 24). `get` and `query` no longer read stale:
+both route to a serving daemon over the `query` tool and fall back to the disk
+load only when nothing answers. `search` and `list` stay local by decision
+(`ROADMAP.md` item 9). `unnamed` lists only — no kern promotion.
 
 ---
 
@@ -954,12 +954,12 @@ re-exports: `McpError`, `serve_http`, `serve_rw`, `serve_stdio`, `McpServer`,
   `Codec`/`JsonEnvelopeCodec` (`src/trnsprt/src/typed/codec.rs:7`/`:18`),
   `Channel` (`src/trnsprt/src/typed/channel.rs:8`), and
   `src/trnsprt/src/typed/local.rs` — `Endpoint`
-  (`kern()`/`kern_for(root)`/`hub()`), `bind_kern_listener` (`:490`) /
-  `connect_kern` (`:314`), `LocalListener` (`:559`), and the two platform
-  adapters (`UnixStreamAdapter`, `NamedPipeAdapter`). `connect_kern` refuses an
-  endpoint this euid does not own, by `require_owned_by_caller` (`:237`) before
-  the connect and `require_peer_is_caller` (`:283`) after it, so no client
-  presents a token to a socket somebody else bound.
+  (`kern()`/`kern_for(root)`/`hub()`), `bind_kern_listener` (`:549`) /
+  `connect_kern` (`:314`), `LocalListener` (`:602`), and the two platform
+  adapters (`UnixStreamAdapter`, `NamedPipeAdapter`). `require_owned_by_caller`
+  (`:237`) and `require_peer_is_caller` (`:283`) guard both ends — `connect_kern`
+  and `bind_unix`'s `AddrInUse` arm (`:513-540`), which returns
+  `BindError::Untrusted` naming the foreign uid, and unlinks nothing it refused.
 - **Service macro** (`src/trnsprt/macros/`) — `service!` turns a trait of
   `async fn`s into client + server + dispatch code. Both RPC contracts are one
   short file each: `kern_rpc/svc.rs`, `hub_rpc/svc.rs`, with their DTOs beside
@@ -1384,9 +1384,9 @@ Ranked by leverage:
    `kern link` no longer clobbers a racing commit — it flushes through
    `save_graph_guarded` (`src/commands/graph_ops.rs`) — but it still does not
    route, and neither does `ingest`: over `call_tool` they would land at agent
-   trust, so that half waits on socket auth (item 24). `intake drain` got its
-   `intake_drain` tool 2026-07-21 and routes. Open as `ROADMAP.md` item 9 on
-   `ingest`/`link` routing alone.
+   trust, so that half waits on a principal item 24 can *prove* — the socket got
+   auth 2026-07-22 and the block did not lift. `intake drain` got its tool
+   2026-07-21 and routes. Open as `ROADMAP.md` item 9 on `ingest`/`link` alone.
 6. **GNN training is quadratic in entities** — 79.7s at 4096; off the tick
    since 2026-07-21 (item 28), but the dense N x N adjacency is untouched.
 7. **Distill prompt** is one-shot and global — per-kind prompts +

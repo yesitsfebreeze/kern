@@ -336,6 +336,13 @@ pub enum BindOutcome {
 pub enum BindError {
 	#[error("bind: {0}")]
 	Io(#[from] std::io::Error),
+	// Something this euid does not own holds the name. Deliberately *not*
+	// `AlreadyRunning`: standing down for a squatter is the bug, and a daemon
+	// that exits quietly leaves an operator with no daemon and no reason. The
+	// string carries the refusal `require_owned_by_caller`/`require_peer_is_caller`
+	// wrote, so the foreign uid survives to whatever prints this.
+	#[error("bind refused: {0}")]
+	Untrusted(String),
 }
 
 // The socket carries graph reads AND mutations behind one shared secret that
@@ -487,28 +494,64 @@ fn create_pipe_instance(
 	}
 }
 
+// Split out of `bind_kern_listener` with the expected peer uid as an argument,
+// for exactly the reason `require_peer_uid` is split out of
+// `require_peer_is_caller`: the second check in the `AddrInUse` arm is otherwise
+// unreachable from a test. A live foreign socket needs a second uid to bind it,
+// which no test can create — but the arm's *decision* does not care where the
+// mismatch comes from, so handing it a uid that is deliberately not the
+// server's drives the same real `SO_PEERCRED` read down the same branch and
+// leaves only `geteuid()` uncovered. Without this the peer check in this arm
+// could be deleted outright and the whole suite would stay green.
+#[cfg(unix)]
+async fn bind_unix(path: &Path, expected_peer: u32) -> Result<BindOutcome, BindError> {
+	let listener = match tokio::net::UnixListener::bind(path) {
+		Ok(listener) => listener,
+		Err(e) if e.kind() != std::io::ErrorKind::AddrInUse => {
+			return Err(e.into());
+		}
+		Err(_) => {
+			// `AddrInUse` means *something* holds the name; it does not mean a
+			// daemon of ours does. Deciding that takes the same two checks
+			// `connect_kern` runs, and the server ran neither: a squatter simply
+			// accepted the probe and the real daemon stood down, and when the
+			// probe failed the unlink below ran on a path nobody had verified.
+			// `/tmp`'s sticky bit covers a foreign *socket* there — it does not
+			// cover a symlink this uid owns pointing at somebody else's file, so
+			// that one was unlinked and rebound. Both halves refuse here now.
+			//
+			// Fails closed by construction: every error from either check —
+			// including the `Io` ones, a path that vanished under the stat or a
+			// dangling link — becomes a refusal, because the only thing after
+			// this arm is `remove_file`, and unlinking on a maybe is the harm.
+			require_owned_by_caller(path).map_err(|e| BindError::Untrusted(e.to_string()))?;
+			match UnixStreamAdapter::connect(path).await {
+				Ok(adapter) => {
+					require_peer_uid(&adapter, path, expected_peer)
+						.map_err(|e| BindError::Untrusted(e.to_string()))?;
+					return Ok(BindOutcome::AlreadyRunning);
+				}
+				// Nothing answers a name we own: our own stale socket, ours to reclaim.
+				Err(_) => {
+					let _ = std::fs::remove_file(path);
+					tokio::net::UnixListener::bind(path)?
+				}
+			}
+		}
+	};
+	harden_socket(path)?;
+	Ok(BindOutcome::Bound(LocalListener {
+		inner: listener,
+		socket_path: path.to_path_buf(),
+	}))
+}
+
 pub async fn bind_kern_listener(endpoint: &Endpoint) -> Result<BindOutcome, BindError> {
 	match endpoint {
 		#[cfg(unix)]
 		Endpoint::Unix(path) => {
-			let listener = match tokio::net::UnixListener::bind(path) {
-				Ok(listener) => listener,
-				Err(e) if e.kind() != std::io::ErrorKind::AddrInUse => {
-					return Err(e.into());
-				}
-				Err(_) => {
-					if tokio::net::UnixStream::connect(path).await.is_ok() {
-						return Ok(BindOutcome::AlreadyRunning);
-					}
-					let _ = std::fs::remove_file(path);
-					tokio::net::UnixListener::bind(path)?
-				}
-			};
-			harden_socket(path)?;
-			Ok(BindOutcome::Bound(LocalListener {
-				inner: listener,
-				socket_path: path.clone(),
-			}))
+			// SAFETY: `geteuid` cannot fail and touches no memory the caller owns.
+			bind_unix(path, unsafe { libc::geteuid() }).await
 		}
 		#[cfg(windows)]
 		Endpoint::NamedPipe(name) => {
@@ -687,6 +730,81 @@ mod bind_tests_unix {
 		);
 	}
 
+	// The first of the arm's two checks, and the one shape of foreign endpoint a
+	// single uid can really build: a symlink we own whose target is root's. `bind`
+	// returns `EADDRINUSE` on it (the name exists), which is the arm under test.
+	// Before the checks moved into that arm the probe failed — `/etc/hosts` is
+	// not a socket — the `remove_file` unlinked *our own link* (the sticky bit
+	// protects the target, never the link) and the bind then succeeded on a name
+	// a foreign path had been substituted into.
+	#[tokio::test]
+	async fn a_symlink_to_a_foreign_target_refuses_the_bind() {
+		let Some(foreign) = super::owner_tests_unix::foreign_path() else {
+			return; // running as root: nothing here is foreign
+		};
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("kern.sock");
+		std::os::unix::fs::symlink(&foreign, &path).unwrap();
+		let ep = Endpoint::Unix(path.clone());
+		// Not `expect_err`: `BindOutcome` holds a `LocalListener` and is not `Debug`,
+		// and deriving it on a live listener to word one assertion is the tail
+		// wagging the dog.
+		let Err(err) = bind_kern_listener(&ep).await else {
+			panic!("a foreign-owned endpoint must refuse the bind, not bind over it")
+		};
+		assert!(
+			matches!(err, BindError::Untrusted(_)),
+			"a squat is not i/o and is not AlreadyRunning: {err}"
+		);
+		assert!(
+			err.to_string().contains("owned by uid 0"),
+			"the refusal names the foreign uid: {err}"
+		);
+		assert!(
+			path.symlink_metadata().is_ok(),
+			"a path we refused is a path we must not have unlinked"
+		);
+	}
+
+	// The arm's *second* check, which the symlink above cannot reach: a live
+	// socket that answers, served by somebody who is not us. Binding one takes a
+	// second uid, so the uid is injected instead — the same move
+	// `the_peer_check_reads_the_server_uid_and_decides_both_ways` makes, against
+	// the same real `SO_PEERCRED` read on a real connected socket, but driven
+	// through the whole arm rather than through the predicate alone. What this
+	// pins is the wiring, which was code-review-only before it existed: that the
+	// arm calls the peer check at all, that its verdict becomes `Untrusted`
+	// rather than `AlreadyRunning`, and that a refusal does not fall through to
+	// the unlink. Delete the call and every other bind test still passes.
+	//
+	// What stays out of reach is the live squat end to end — a real foreign
+	// daemon holding the real path. That is a second uid and nothing less.
+	#[tokio::test]
+	async fn a_live_endpoint_served_by_another_uid_refuses_the_bind() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("kern.sock");
+		// Bound, listening and answering — the shape a squatter presents. Only the
+		// uid the arm compares against is a fiction.
+		let _squatter = tokio::net::UnixListener::bind(&path).unwrap();
+		// SAFETY: `geteuid` cannot fail and touches no memory the caller owns.
+		let euid = unsafe { libc::geteuid() };
+		let Err(err) = bind_unix(&path, euid.wrapping_add(1)).await else {
+			panic!("a live endpoint served by a foreign uid must refuse the bind, not stand down for it")
+		};
+		assert!(
+			matches!(err, BindError::Untrusted(_)),
+			"a squat is not i/o and is not AlreadyRunning: {err}"
+		);
+		assert!(
+			err.to_string().contains(&format!("served by uid {euid}")),
+			"the refusal names who is actually serving: {err}"
+		);
+		assert!(
+			path.symlink_metadata().is_ok(),
+			"a name we refused is a name we must not have unlinked"
+		);
+	}
+
 	#[tokio::test]
 	async fn a_stale_socket_file_is_removed_and_rebound() {
 		let dir = tempfile::tempdir().unwrap();
@@ -715,7 +833,7 @@ mod owner_tests_unix {
 	// `/etc/hosts` is root's on every Unix a developer runs this on; under an
 	// euid of 0 it is *ours*, and there is then nothing on the filesystem this
 	// process could fail to own, so the case is skipped rather than faked.
-	fn foreign_path() -> Option<PathBuf> {
+	pub(super) fn foreign_path() -> Option<PathBuf> {
 		// SAFETY: `geteuid` cannot fail and touches no memory the caller owns.
 		if unsafe { libc::geteuid() } == 0 {
 			return None;
