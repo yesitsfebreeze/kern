@@ -34,13 +34,13 @@ daemon:
 test:
     cargo nextest run --workspace
     cargo test --doc --workspace
-    pytest -q -s e2e
+    pytest -q -s tests/e2e
 
 # E2E harness alone: real binary against a deterministic fake LLM.
 # -s so the recall metric prints on a GREEN run too — a number only visible when
 # it trips is a number nobody watches drift toward the floor.
 e2e:
-    pytest -q -s e2e
+    pytest -q -s tests/e2e
 
 # apply formatting
 fmt:
@@ -89,11 +89,25 @@ docs:
 docs-build:
     cd docs/site && npm run build
 
+# download the retrieval benchmark datasets into /eval/ (gitignored, CC BY-NC)
+eval-fetch:
+    python3 tests/e2e/eval/datasets.py
+
+# LoCoMo-10 retrieval-only benchmark against a local real embedder (Ollama).
+# Slow and user-run by design — CI only runs the scorer unit tests.
+eval-locomo *args:
+    python3 tests/e2e/eval/run_locomo.py {{args}}
+
+# LongMemEval-S retrieval-only benchmark; seeded 100-question sample by
+# default, `--full` for all 500 (hours of embedding).
+eval-longmemeval *args:
+    python3 tests/e2e/eval/run_longmemeval.py {{args}}
+
 # install e2e harness dependencies. Plain install first: --break-system-packages
 # is unknown to pip < 23 and would turn a working environment into a hard error,
 # so it is the fallback for a PEP 668 distro python, not the default.
 e2e-install:
-    pip install -r e2e/requirements.txt || pip install --break-system-packages -r e2e/requirements.txt
+    pip install -r tests/e2e/requirements.txt || pip install --break-system-packages -r tests/e2e/requirements.txt
 
 # install docs site dependencies
 docs-install:
@@ -101,8 +115,8 @@ docs-install:
 
 # verify every src/...:line citation and page link in the docs site is alive
 docs-check:
-    python3 scripts/docs_check.py --selftest
-    python3 scripts/docs_check.py
+    python3 tests/docs_check.py --selftest
+    python3 tests/docs_check.py
 
 # build the shared rustest image (clone the sibling repo if missing)
 [unix]

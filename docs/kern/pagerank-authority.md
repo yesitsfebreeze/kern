@@ -27,7 +27,7 @@ optional additive prior in retrieval scoring, never as the sole rank signal.
 > and after it 1 of the 8 pairs moves, by one rank. The other 7 are the open cause:
 > a neighbour that is already a content hit keeps its seed score, because expansion
 > takes the max per entity rather than combining the two pieces of evidence. Recorded
-> as a strict xfail (`e2e/test_invariants.py`) and as item 86 in `ROADMAP.md`. The
+> as a strict xfail (`tests/e2e/test_invariants.py`) and as item 86 in `ROADMAP.md`. The
 > edge is created and walkable; it still does not meaningfully reach ranking. One reason it cannot reach
 > the *score* is visible in the seed path: RRF settles which entities seed, then
 > every survivor is rescored by plain query cosine before re-entering the pipeline

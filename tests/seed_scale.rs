@@ -76,7 +76,7 @@ fn hash_tok(tok: &str) -> (usize, bool) {
 	((h % DIM as u64) as usize, h & 0x100 != 0)
 }
 
-// Same shape as e2e/fake_llm.py: feature-hashed bag of words, L2-normalised.
+// Same shape as tests/e2e/fake_llm.py: feature-hashed bag of words, L2-normalised.
 fn sparse_vec(words: &[&str]) -> Vec<f32> {
 	let mut v = vec![0.0f32; DIM];
 	for w in words {

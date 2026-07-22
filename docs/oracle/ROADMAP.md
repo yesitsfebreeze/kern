@@ -19,7 +19,7 @@ free number wherever it ranks.
 
 Stamped 2026-07-21, re-verified against source rather than against documents.
 Tier 0 is gone: "what measures retrieval quality with no LLM in the scoring loop"
-is answered, and `e2e/` is the answer. That closure releases everything it gated
+is answered, and `tests/e2e/` is the answer. That closure releases everything it gated
 — items 32, 54, 55 and the whole of tier 8 are now judgeable the way item 86's two
 candidate fixes were: apply, measure, keep only if `recall@1` holds.
 
@@ -82,7 +82,7 @@ statics nor the store, only its two arguments, and its tests
 (`src/commands/admin.rs:218`) construct both. The one that carries the decision
 is `a_local_count_is_not_printed_over_a_serving_daemons` (`:246`) — local
 counters nonzero, daemon healthy — which a `max()` or any additive merge fails.
-End to end, `e2e/test_health_surface.py` blinds the CLI's `data_dir` after the
+End to end, `tests/e2e/test_health_surface.py` blinds the CLI's `data_dir` after the
 daemon has opened its own, drains three claims the fake LLM refuses to embed
 with a 400, and asserts `kern health` prints exactly 3: a count a blinded
 process cannot hold and a constant cannot match.
@@ -144,7 +144,7 @@ paths cannot drift. The graviton add routes *before* it embeds — the daemon ow
 the vector it stores, so embedding locally would be a second call to the same
 model for nothing. Not blocked on item 24: neither command asserts trust or mints
 a Fact, unlike `ingest`/`link`. Guarded by
-`e2e/test_graviton_routing.py`, which blinds the CLI's `data_dir` after the
+`tests/e2e/test_graviton_routing.py`, which blinds the CLI's `data_dir` after the
 daemon has opened its store and then makes the daemon flush again — the exact
 sequence in which the graviton used to disappear.
 
@@ -200,7 +200,7 @@ deferred work: `search` is the raw-ANN probe with no matching tool behind it,
 and `list` prints the on-disk kern tree. Both are what a developer reaches for
 to inspect *the store*, and routing them would remove the only way to see what
 is actually on disk while a daemon is up — which is also what makes them the
-control in `e2e/test_daemon_reads.py`.
+control in `tests/e2e/test_daemon_reads.py`.
 
 **Neither read was a copy of the `forget` route, and the reason is the
 constraint this item had been missing:** the daemon's tool surface is narrower
@@ -268,7 +268,7 @@ be started.
 **The symptom that found it.** `kern-gnn recall@1` measured 0.9028 and then
 0.8611 across two runs of the *unchanged* suite, against a 0.8500 floor — 0.0111
 of headroom, with nothing in flight touching retrieval.
-`e2e/test_gnn_recall.py` records its sample as "8 runs, 2026-07-22:
+`tests/e2e/test_gnn_recall.py` records its sample as "8 runs, 2026-07-22:
 0.8889 - 0.9306" and sets the floor below the worst of it. 0.8611 is under that
 recorded minimum, so the distribution the floor was drawn from is already
 falsified by observation; the floor is not conservative, it is uncalibrated.
@@ -309,7 +309,7 @@ sweep did not reach. The remedy there was `BTreeSet` (`src/base/diskann.rs:123`)
 **What it costs is not a wrong answer, it is an unfalsifiable one.** Every recall
 number in this file measured through the GNN path is one draw from an unstated
 distribution — item 28's, item 97's, and the floors inside
-`e2e/test_gnn_recall.py` itself. A gate under a nondeterministic measurement
+`tests/e2e/test_gnn_recall.py` itself. A gate under a nondeterministic measurement
 reddens on the schedule of a coin rather than of a regression, and a green one
 certifies nothing either.
 
@@ -327,7 +327,7 @@ is asserting on a constant. These are pure functions over local state with no
 process global, so `cargo nextest` and CI's `cargo test --workspace --locked`
 cannot disagree about them. **e2e cannot be the gate here** — a nondeterministic
 test that happens to pass proves nothing — but it is the confirmation
-afterwards: once seeded, `e2e/test_gnn_recall.py` must print the *same*
+afterwards: once seeded, `tests/e2e/test_gnn_recall.py` must print the *same*
 recall@1 on three consecutive runs, and only then can the floor be set to that
 number instead of under a sample.
 
@@ -366,7 +366,7 @@ differs per run, which is the point). `cargo nextest run --workspace` (994
 passed) and `cargo test --workspace --locked` agree, as predicted.
 
 The e2e confirmation ran and held: three consecutive runs printed recall@1
-0.9028, recall@5 0.9583, MRR 0.9315, identically. `e2e/test_gnn_recall.py` now
+0.9028, recall@5 0.9583, MRR 0.9315, identically. `tests/e2e/test_gnn_recall.py` now
 carries those values as the counts they are — `65 / 72` and `69 / 72`, because
 the printed `0.9028` is a rounded-UP display of 65/72 and a floor pasted from it
 fails against the run it was read from. The old floors and the "8 runs:
@@ -484,8 +484,8 @@ the end, and they are what keeps this item open. What shipped:
   path and the ranked path at once, because both go through `matches_filter`.
 
 **Coverage is unit tests only, and cannot be more.** `principals` is MCP-only —
-there is no CLI flag — and `e2e/conftest.py` drives the `kern` binary over
-subprocess with no MCP JSON-RPC client, so nothing in `e2e/` can reach this
+there is no CLI flag — and `tests/e2e/conftest.py` drives the `kern` binary over
+subprocess with no MCP JSON-RPC client, so nothing in `tests/e2e/` can reach this
 surface. Reaching it would mean building an MCP stdio driver fixture, which is
 larger than the feature. The behaviour is pinned by
 `matches_filter_is_the_per_entity_predicate` (`src/retrieval/score.rs`),
@@ -743,12 +743,12 @@ on whatever 24 lands**, and that is said on the tool description, on
 a host that enabled `review_policy` today would strand every claim it held.
 
 **Coverage.** Unlike item 18's `principals`, this is e2e-measurable, and it is
-measured: `e2e/test_review_lifecycle.py` runs the whole loop — policy holds an
+measured: `tests/e2e/test_review_lifecycle.py` runs the whole loop — policy holds an
 `inline` ingest, `query --exclude-pending` misses it, `kern promote` releases it,
 the same query returns it — twice, once against a serving daemon blinded the way
 `test_graviton_routing` blinds it (so the release provably landed in the daemon's
 live graph and survived its persist) and once with nothing serving, for the
-`NoDaemon` fallback. `e2e/conftest.py`'s `write_config` grew one `review_policy`
+`NoDaemon` fallback. `tests/e2e/conftest.py`'s `write_config` grew one `review_policy`
 kwarg, emitted only when set so every other test's config text is byte-identical.
 
 Original text, kept for the record: `ReviewState` on `Entity` (added with a store
@@ -943,10 +943,10 @@ re-run 2026-07-22). What is left is everything the gate does not cover.
      uid, and the server side already pins every instance to this process's
      SID, so both checks are `cfg(unix)`.
    - **e2e measures only half of this, and cannot measure the other half.**
-     `e2e/conftest.py` sets `XDG_RUNTIME_DIR` per test, so e2e always takes the
+     `tests/e2e/conftest.py` sets `XDG_RUNTIME_DIR` per test, so e2e always takes the
      XDG path and never the `/tmp` fallback that is the vulnerable one, and it
      has no second uid with which to create a foreign-owned socket. So
-     `e2e/test_daemon_reads.py` and `e2e/test_graviton_routing.py` pin exactly
+     `tests/e2e/test_daemon_reads.py` and `tests/e2e/test_graviton_routing.py` pin exactly
      one thing — that the checks did not break connecting — and the refusal
      itself is unit-test territory. The bind half added 2026-07-22 is covered no
      better: same `XDG_RUNTIME_DIR`, same single uid, so e2e confirms only that
@@ -977,7 +977,7 @@ the opposite.
 
 None of these is wrong today. Each converts "works on my corpus" into "does not
 work at 10×". Item 1's instrument now exists, so a fix here is judgeable the way
-tier 8 is — but only at the corpus size `e2e/` builds, which is small: the cliff
+tier 8 is — but only at the corpus size `tests/e2e/` builds, which is small: the cliff
 itself stays unmeasured until something generates a large one. Latency is the
 half the harness can already claim.
 
@@ -1013,7 +1013,7 @@ the ordering; they have.
 
 **Fixed here: the scan was never actually parallel on the ordinary corpus.**
 `kerns.par_iter().flat_map_iter(...)` parallelised over *kerns* and walked each
-kern's entities on a single thread, so a one-kern graph — what `e2e/` builds and
+kern's entities on a single thread, so a one-kern graph — what `tests/e2e/` builds and
 what a fresh install is — scanned the whole corpus serially however many cores
 were free. This item's own "Rayon-parallel" claim was wrong in exactly the case
 that matters. The inner walk now splits too
@@ -1430,7 +1430,7 @@ and after) but is **not** evidence here: `test_recall.py` drives the CLI, its
 corpus is 36 facts and `min_thoughts` is 128, so no propagation runs in it at
 all. *Restated 2026-07-22:* the sentence here used to end "the recall gate the
 previous author asked for does not exist at that corpus size", and item 97 built
-it — `e2e/test_gnn_recall.py` lowers `min_thoughts` to 4, waits for the daemon's
+it — `tests/e2e/test_gnn_recall.py` lowers `min_thoughts` to 4, waits for the daemon's
 own `learned propagation applied` line, and scores recall only after one
 arrives. So a GNN recall gate now exists and would have covered this change; it
 still measures a 36-node graph, so it is a wiring gate, not a scale gate.
@@ -1766,7 +1766,7 @@ reads `before = ingest_queue_refused()` and asserts the difference, because
 `cargo test` runs the whole crate in one process and an absolute count is green
 under `nextest` and red under it; a control test proves a working model moves
 nothing; and
-`e2e/test_llm_failure_channel.py` drives hang / 500 / empty-body through a live
+`tests/e2e/test_llm_failure_channel.py` drives hang / 500 / empty-body through a live
 daemon's intake poll and reads the line back over the socket. **Unchanged when
 unconfigured, measured not claimed:** the default `timeout_secs` is asserted
 equal to the `const` it replaced and applying it is asserted a no-op
@@ -2187,7 +2187,7 @@ is 7, tight is 3. So the two signals are 24h vs 30d by default, and the gap to
 the derived 1–2 days is a factor of 15–30, not 3.5. The knobs also stopped being
 config edits — a retention retune is now a commit against `preset.rs`, which is
 item 87's surface, and the two should be swept together. Now measurable:
-`e2e/test_recall.py` scores a half-life change directly
+`tests/e2e/test_recall.py` scores a half-life change directly
 (`recall@1`/`recall@5`/`MRR`), which is the sweep that was never run.
 
 ---
@@ -2241,7 +2241,7 @@ belief?
 # Tier 8 — retrieval quality, now measurable
 
 These were unacceptable-in-principle until an instrument existed. It does now
-(`e2e/test_recall.py`, and the invariants beside it), so each of these can be
+(`tests/e2e/test_recall.py`, and the invariants beside it), so each of these can be
 judged the way item 86's two candidate fixes were: apply it, measure, keep it only
 if `recall@1` holds and the exact-match probe stays at rank 1. They are ranked
 among themselves by expected effect, not by confidence.
@@ -2249,6 +2249,36 @@ among themselves by expected effect, not by confidence.
 What the instrument still cannot judge, and what that costs: the fake embedder is
 bag-of-words, so a change that only a real embedding model would reward looks
 neutral here. Item 64's stemmer swap is the clearest case.
+
+### 103. Run the public retrieval benchmarks and record the first numbers `[bench]`
+
+The harness exists (`tests/e2e/eval/`, CHANGELOG 2026-07-22): LoCoMo-10 and
+LongMemEval-S scored retrieval-only — recall@k / MRR / NDCG against the
+datasets' own evidence labels, no LLM anywhere in ingest, retrieval, or
+scoring — exactly the replacement the 2026-07-20 deletion entry promised. What
+has NOT happened is a real run: every number so far came from `--fake-llm`
+plumbing smoke, which the report itself marks MEANINGLESS. Wanted: `just
+eval-fetch`, then `just eval-locomo` and `just eval-longmemeval` against local
+Ollama with the pinned default (`qwen3-embedding:0.6b`), numbers recorded here
+and in the CHANGELOG with the protocol named. The only published peer numbers
+in the same protocol family are YourMemory's (LoCoMo-10 Recall@5 0.59,
+LongMemEval-S Recall@5 0.894, vendor-run); Zep's 75.14 and Mem0's 92.5 are
+LLM-judged end-to-end scores and are not comparable — any quote of our numbers
+next to theirs must say so. Until this runs, the claim standard in the North
+star stands unchanged: no quality claim of any kind.
+
+### 104. Benchmark the full pipeline, which needs turn-level claim provenance `[ingest]`
+
+Item 103 measures the direct path: verbatim turns in, retrieval out. It says
+nothing about distillation — the path real sessions take through intake, where
+claims are extracted by an LLM and provenance is recorded at session
+granularity only (the blocker the 2026-07-20 deletion entry actually named).
+To score the full pipeline against LoCoMo's per-turn `evidence` labels, a
+distilled claim must carry which turns it came from — `Source::Session`'s
+`section` field (`src/base/types.rs:167-171`) is the natural carrier and is
+empty on that path today. Blocked on designing that provenance without
+violating repo law 1 (append-only bincode). Not scheduled until item 103's
+numbers exist to compare against.
 
 ### 94. A near-duplicate's alternate wording is indexed and findable — closed 2026-07-22 `[retrieval]`
 
@@ -2374,7 +2404,7 @@ Every citation of the form `` `FEATURES.md:420-421` `` is a bet that nothing is
 ever inserted above line 408. `FEATURES.md` only grows, so the bet loses on
 every merge that appends — and when two branches each append and then combine,
 it loses twice over. Four times on 2026-07-21: four anchors, then four more,
-then twenty-seven, then fifteen. `scripts/docs_check.py` was green through all
+then twenty-seven, then fifteen. `tests/docs_check.py` was green through all
 of it, correctly — it verifies the line *exists*, and it always does. <!-- docs-check: anchor-ok -->
 
 The repeated hand re-pointing is not the fix. It is a tax paid on every merge,
@@ -2388,7 +2418,7 @@ lying again. Two candidate closures:
 - **Content-checked anchors.** ~~Keep line numbers but have `docs_check.py`
   verify the target still relates to the citing sentence.~~ **Landed 2026-07-21.**
 
-**What landed.** `scripts/docs_check.py` now compares the content words of the
+**What landed.** `tests/docs_check.py` now compares the content words of the
 citing block — the whole bullet or paragraph, since the docs wrap at eighty
 columns — against the content words of the cited line(s), and nominates an anchor
 whose target shares too few. Tokens are lowercased, split on `_` and on the
@@ -2400,7 +2430,7 @@ implements. On the tree as it stands a two-word bar everywhere nominates 117 of
 654 anchors and is unusable; the split bar nominates 39.
 
 **It nominates, it does not gate.** Nominations print under their own heading and
-leave the exit code alone; `python3 scripts/docs_check.py` still exits 0 with 38
+leave the exit code alone; `python3 tests/docs_check.py` still exits 0 with 38
 standing. `--strict-anchors` makes them fatal, for a CI that has decided to trust
 them — not yet. A nomination a human has adjudicated is silenced in place with a
 trailing `docs-check: anchor-ok` comment, the same idiom as the historical page
@@ -2698,7 +2728,7 @@ found this.
 **Closed. The premise was right and understated: there were two independent
 reasons no propagation ran, and only one of them was the corpus.**
 `DEFAULT_MIN_THOUGHTS` is 128 (`src/gnn/propagate.rs:18`) and the recall corpus
-is 36 facts (`e2e/test_recall.py:199`) — but `test_recall.py` drives the CLI,
+is 36 facts (`tests/e2e/test_recall.py:199`) — but `test_recall.py` drives the CLI,
 and **the CLI has no tick loop at all**. `do_gnn_propagate` is reachable only
 from `tick::start` (spawned by `store::Registry::open`, i.e. a daemon or `kern
 mcp`) and from `tick_sync`, whose one caller is a unit test. So the propagation
@@ -2721,7 +2751,7 @@ nobody has pinned — a gate that silently stops running the day that behaviour
 shifts, which is the failure being fixed here, not a fix for it.
 
 **What shipped is the other closure, plus the liveness assertion that makes it
-worth having.** `e2e/test_gnn_recall.py` writes an e2e-only `[gnn]
+worth having.** `tests/e2e/test_gnn_recall.py` writes an e2e-only `[gnn]
 min_thoughts = 4` and `[tick] interval_secs = 0` (boot pass only, so the
 embeddings are not still moving under the probes), starts a daemon with
 `RUST_LOG=kern.gnn=info`, and **waits for the propagation to report itself**
@@ -2733,7 +2763,7 @@ if it covered fewer than 30 nodes, and only then scores recall.
 
 Proof it is not another vacuous gate. With entity `i`'s propagated embedding
 deliberately written to entity `i+1`: **`cargo nextest run --workspace` 972
-passed, `e2e/test_recall.py` passed printing its usual 0.9306 / 0.9722 / 0.9471,
+passed, `tests/e2e/test_recall.py` passed printing its usual 0.9306 / 0.9722 / 0.9471,
 and the new test failed 3 of 3 runs** (recall@1 0.7917 / 0.7222 / 0.7361 against
 a 0.85 floor). Every existing gate was blind to a GNN wiring bug; this one is
 not.
@@ -2787,7 +2817,7 @@ file included.
 
 **Both fixes are in and verified.** `src/ingest/intake.rs` waits on the wall
 clock, restarts its marker on a backward step, and caps on the monotonic clock.
-`e2e/test_retention.py` waits to an *absolute* realtime target — which needs no
+`tests/e2e/test_retention.py` waits to an *absolute* realtime target — which needs no
 restart, since only realtime reaching the target can end the wait — and then
 polls for the drop, because a step landing between the wait and the query can
 put a passed deadline back in the future. It has done both since 2026-07-21
@@ -2807,7 +2837,7 @@ mockable one is no fix for a flake that never lived on the real path.
 
 Nothing else here shares the defect. The only other test that sleeps and reads a
 clock is `tick_head_of_line_delay` (`tests/gnn_scale.rs`), which measures with
-`Instant`, and `e2e/conftest.py`'s `wait_until` is monotonic on both sides.
+`Instant`, and `tests/e2e/conftest.py`'s `wait_until` is monotonic on both sides.
 
 What stands is why this was written down at all: **the next person to see it red
 will assume it is this flake and wave a real regression through.** An
@@ -2822,7 +2852,8 @@ reads as adjudicated.
 `install.sh` step, no `.pi/update.sh` line. A fresh clone has **zero enforcement
 of the ruling every commit is supposed to answer to**, and nothing announces it.
 The hook itself calls this out as a "per-clone install product"; the install half
-does not exist. Wanted: track it under `scripts/` and install it via
+does not exist. Wanted: track it in the repo (`scripts/` was dissolved
+2026-07-22; `.pi/` or a tracked hooks dir) and install it via
 `core.hooksPath` or a `just` recipe run by `.pi/update.sh`.
 
 ### 75. Crash consistency on the DiskANN path `[store]`
@@ -3119,7 +3150,7 @@ loop by *enumerating* the two directories that were writing, not by making the
 class impossible. Anything kern writes under a watched root in future is
 ingestible again unless someone remembers to add it, and there is no test that
 fails when they forget — the regression e2e
-(`e2e/test_file_watcher_durability.py`) pins the two dirs that exist today.
+(`tests/e2e/test_file_watcher_durability.py`) pins the two dirs that exist today.
 
 Two shapes worth weighing, and neither is obviously right. **One state root**:
 declare that everything kern writes lives under a single prefix and deny that
@@ -3238,15 +3269,18 @@ therefore **withdrawn, not superseded** — no current number replaces them.
 Claim standard, unchanged by item 1's closure: **no quality claim of any kind.**
 Not SOTA, not parity, not regression, not improvement. Latency claims remain
 permitted from the e2e harness. What item 1 delivered is a *scorer*
-(`e2e/test_recall.py`) — it steers work and catches regressions against a
+(`tests/e2e/test_recall.py`) — it steers work and catches regressions against a
 bag-of-words embedder, and it certifies nothing. The standard stands until
 something can.
 
 ## How we supersede Zep / Mem0 / Letta / Qdrant
 
 Not by matching feature lists. By owning a combination none of them hold, then
-proving it — on a *comparable* measurement, which still does not exist. Item 1
-shipped a scorer that measures kern against its own past, not against them.
+proving it — on a *comparable* measurement. Item 1 shipped a scorer that
+measures kern against its own past, not against them; item 103's harness
+(2026-07-22) scores the public datasets retrieval-only, comparable to the one
+rival that publishes in the same protocol family (YourMemory) — and has not
+had a real run yet, so the numbers column below is still honest.
 
 | property | kern | Zep/Graphiti | Mem0 | Letta | Qdrant |
 |---|---|---|---|---|---|
@@ -3257,7 +3291,7 @@ shipped a scorer that measures kern against its own past, not against them.
 | Graph + dense ANN + BM25 + GNN in one process | ✅ | partial | ❌ | ❌ | ❌ |
 | Bi-temporal supersede off the recall path | ✅ local / 🟡 item 44 federated | ✅ | ❌ | ❌ | ❌ |
 | Coordinator-free CRDT federation | 🟡 building | ❌ | ❌ | ❌ | ❌ |
-| Published eval numbers | ❌ withdrawn | ✅ | ✅ | ✅ | n/a |
+| Published eval numbers | ❌ withdrawn; harness ready, item 103 | ✅ | ✅ | ✅ | n/a |
 
 Two rows carried an unqualified ✅ in an earlier version while this same file
 funded the defects that break them. They are 🟡 with the items named — a
@@ -3282,10 +3316,12 @@ qualified only where the stamps stop, at the wire.
    superset, not supersession, and forfeits the only structural advantage kern
    has. Repo law forbids a pluggable backend.
 
-Closest rivals per axis: **YourMemory** (decay + published LoCoMo, claims +16pp
-over Mem0 — read before quoting ourselves), **Graphiti** (temporal semantics),
-**mnemo** / **AgentDB** (Rust + embedded + MCP stack), **Cognee** (self-hosted
-KG). Full survey: `docs/kern/`.
+Closest rivals per axis: **YourMemory** (decay + published pure-retrieval
+LoCoMo/LongMemEval numbers — the one peer in item 103's protocol family; read
+before quoting ourselves), **Graphiti** (temporal semantics), **mnemo** /
+**AgentDB** (Rust + embedded + MCP stack), **Cognee** (self-hosted KG). The
+written survey was deleted with the LoCoMo purge (`8d8b19e`); the 2026-07-22
+re-survey lives in the CHANGELOG entry that shipped item 103's harness.
 
 ## Non-goals
 
@@ -3386,7 +3422,7 @@ an overall eval score that makes specialization worth funding.
   Proven by revert: dropping the two lines in `entity_detail` fails
   `graph_ops::tests::the_id_path_flags_an_expired_thought_instead_of_hiding_it`
   on `left: Null, right: Bool(true)` and fails
-  `e2e/test_retention.py::test_an_expired_fact_is_served_by_id_but_flagged` on
+  `tests/e2e/test_retention.py::test_an_expired_fact_is_served_by_id_but_flagged` on
   a real `kern get` printing the expired fact with no marker. The bi-temporal
   escape is now pinned at the call site too, not only on the predicate:
   `retrieve_drops_an_expired_claim_from_the_default_path`
@@ -3412,7 +3448,7 @@ an overall eval score that makes specialization worth funding.
   neutering gate 1 fails three `place.rs` tests and leaves the gate-2 test
   green, neutering gate 2 fails only the gate-2 test, and removing the
   `push_delta` fails all three delta assertions including the fresh-placement
-  one. `e2e/test_retention.py::test_a_deduped_ingest_still_applies_its_retention`
+  one. `tests/e2e/test_retention.py::test_a_deduped_ingest_still_applies_its_retention`
   fails loudly with the merge neutered. What this did *not* buy was item 91
   `[ingest]` — not the `[retrieval]` 91 listed above: the same gate still
   reported `committed` on a dedup and still left the discarded id in the
@@ -3426,7 +3462,7 @@ an overall eval score that makes specialization worth funding.
   direct intake (`DirectJob` carries the resolved *instant*, since the job may
   sit a whole poll interval before draining), MCP RAM enqueue, and the CLI —
   and on the chunk path as well as the document path, which were two separate
-  hardcoded `None`s. `e2e/test_retention.py` proves the round trip against the
+  hardcoded `None`s. `tests/e2e/test_retention.py` proves the round trip against the
   real binary: recallable before the deadline, gone after, with a control fact
   that stays. What the item did *not* buy became items 88, 89 and 90; 88 — the
   dedup branch swallowing a retention — and 89 — the other two entrances, and
@@ -3450,7 +3486,7 @@ an overall eval score that makes specialization worth funding.
   transcripts queued two seconds apart onto one deadline and fails
   `the_poll_loop_resolves_its_deadline_per_pass_not_once_at_startup`. **Two
   things this did not buy.** The file-watcher half is unit-covered only —
-  `WatcherConfig::enabled` is `false` by default and nothing in `e2e/` starts a
+  `WatcherConfig::enabled` is `false` by default and nothing in `tests/e2e/` starts a
   watcher, so `the_sink_stamps_the_configured_retention_on_what_it_ingests` is
   the whole proof for that entrance. And a durable `direct/` job still cannot
   inherit a standing policy: `drain_direct_once` overlays `job.valid_until` over
@@ -3535,7 +3571,7 @@ number ("blocked on item 13") and renumbering would silently repoint them.
 - **`valid_until` is enforced on the default recall path** — was item 17.
   `drop_expired` runs on every retrieve, skipped when the query names its own
   instant so point-in-time history stays queryable. Unblocks item 22.
-- **The retrieval instrument exists** — was item 1. `e2e/` scored by
+- **The retrieval instrument exists** — was item 1. `tests/e2e/` scored by
   `recall@1`/`recall@5`/`MRR` over a test-authored corpus with no LLM in the
   scoring loop: 0.9583 / 1.0000 / 0.9792, reproducible bit-for-bit. Floors make it
   a regression detector, not a quality claim; the bag-of-words fake embedder means

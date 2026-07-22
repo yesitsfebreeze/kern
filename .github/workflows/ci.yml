@@ -33,9 +33,9 @@ jobs:
       - name: Static checks (just check)
         run: just check
 
-  # e2e/ is the only cover for the hub lifecycle and the instrument retrieval
+  # tests/e2e/ is the only cover for the hub lifecycle and the instrument retrieval
   # quality is measured with, so it gates merges like the unit tests do.
-  # Linux only: e2e/test_hub.py:13 skips the whole hub module on win32 (unix
+  # Linux only: tests/e2e/test_hub.py:13 skips the whole hub module on win32 (unix
   # sockets), so a Windows e2e job would report green on nothing.
   e2e:
     name: e2e (pytest)
@@ -145,7 +145,7 @@ jobs:
       # so the old `if grep …` could never fire on a runner. Test the output.
       - name: No scrubbed synonyms for the intake
         run: |
-          hits=$(grep -rniE 's''pool' src docs e2e scripts README.md || true)
+          hits=$(grep -rniE 's''pool' src docs tests README.md || true)
           if [ -n "$hits" ]; then
             echo "$hits"
             echo "::error::banned word: the intake is called the intake"

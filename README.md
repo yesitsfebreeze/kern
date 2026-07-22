@@ -157,6 +157,14 @@ ollama pull qwen3-embedding:0.6b  # embeddings (default)
 ollama pull granite4:3b       # distillation / reasoning (default; write path only)
 ```
 
+> **WSL2 with Ollama on the Windows host:** the default
+> `http://localhost:11434` resolves inside the WSL VM, where nothing listens.
+> The Windows host is the VM's default gateway — `ip route show default`
+> prints it (e.g. `172.27.176.1`). Point `[embed]`/`[reason]` `url` in
+> `kern.toml` (and the eval runners' `--embed-url`) at
+> `http://<gateway-ip>:11434`, and make sure Ollama listens beyond loopback
+> (`OLLAMA_HOST=0.0.0.0` on the Windows side).
+
 **1. Install the binary.** A prebuilt binary for your platform (built by CI and
 published to GitHub Releases):
 
@@ -398,7 +406,7 @@ propagate and a partitioned node that rejoins never catches up. Federation
 tuning at scale (batch size, push vs. pull) is open alongside it; see
 `docs/oracle/ROADMAP.md` — "Anti-entropy". Version `1.1.0`.
 
-**Measurement.** `e2e/test_recall.py` scores recall@1 / recall@5 / MRR over a
+**Measurement.** `tests/e2e/test_recall.py` scores recall@1 / recall@5 / MRR over a
 corpus the test itself authors, with no LLM anywhere in the scoring loop — it
 ingests the facts, so it knows the right answer for each probe, and scoring is
 rank arithmetic over the binary's own stdout. Currently 0.9306 / 0.9722 /
@@ -406,9 +414,9 @@ rank arithmetic over the binary's own stdout. Currently 0.9306 / 0.9722 /
 travel with that number and cannot be dropped from it. The floors make it a
 **regression detector, not a quality claim** — it can say kern got worse, never
 that kern is good, and it is comparable to nothing anyone else publishes.
-And the embedder in the loop is `e2e/fake_llm.py`'s feature-hashed bag of words,
+And the embedder in the loop is `tests/e2e/fake_llm.py`'s feature-hashed bag of words,
 deterministic and semantically empty by design, so the number measures kern's
 retrieval machinery over a fixed lexical signal, not a real embedding model's
-semantics. `e2e/test_invariants.py` asserts one property per `docs/oracle/VISION.md`
+semantics. `tests/e2e/test_invariants.py` asserts one property per `docs/oracle/VISION.md`
 criterion, and the properties kern does not yet satisfy are recorded there as
 skips and xfails rather than dropped.

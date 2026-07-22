@@ -12,7 +12,7 @@ self-compacting, self-distributing — each the inverse of a RAG chore you'd
 otherwise own. The competitive set is agent memory (Zep/Graphiti, Mem0, Letta),
 not general-purpose vector databases. kern publishes no number against that set
 and has none of its own; what measures retrieval quality with no LLM in the
-scoring loop now exists — `e2e/test_recall.py`, the answer to what was
+scoring loop now exists — `tests/e2e/test_recall.py`, the answer to what was
 `ROADMAP.md`'s first question — and it steers work without certifying anything,
 so the claim standard stands unchanged. Every open item lives in `ROADMAP.md`.
 
@@ -50,7 +50,7 @@ A change fails the vision if it breaks any of these:
 - **One dispatch core.** Every surface (MCP, RPC, CLI, any future one) goes
   through the single `mcp::Server::call_tool` — never a second copy.
 - **No quality claim without an instrument.** There is no recorded baseline —
-  it was withdrawn, not superseded. The scorer that exists (`e2e/test_recall.py`)
+  it was withdrawn, not superseded. The scorer that exists (`tests/e2e/test_recall.py`)
   runs against a bag-of-words embedder: it catches regressions and certifies
   nothing, so the standard is unchanged by its arrival (`ROADMAP.md` — "no
   quality claim of any kind") and kern claims no quality of any kind: not SOTA,

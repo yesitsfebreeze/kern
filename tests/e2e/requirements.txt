@@ -1,0 +1,3 @@
+pytest>=8
+# scripts/eval/datasets.py fetches LongMemEval from the HF hub; unused by tests
+huggingface-hub>=0.23

@@ -26,9 +26,9 @@ Still standalone (`src/base/diskann.rs:157` `build_and_save` + mmap
 `src/base/diskann.rs:385`). This note previously published a "recall@10 ≥ 0.90
 vs brute force" figure here; it came from tooling that no longer exists and is
 **withdrawn**, not superseded. The retrieval instrument that landed since
-(`e2e/test_recall.py` — recall@1 / recall@5 / MRR, no LLM in the scoring loop)
+(`tests/e2e/test_recall.py` — recall@1 / recall@5 / MRR, no LLM in the scoring loop)
 does not replace it and cannot: it scores the default resident backend (spill is
-off until `[graph] disk_threshold` is set, and nothing in `e2e/` sets it), its
+off until `[graph] disk_threshold` is set, and nothing in `tests/e2e/` sets it), its
 embeddings are feature-hashed bag of words rather than a real embedding model,
 and its floors make it a regression detector — it can say kern got worse, never
 that kern or this index is good, and no number it prints is comparable to
@@ -50,7 +50,7 @@ table and `tests/spill_memory.rs` for the instrument.
 A figure for this index against brute force now exists, from tooling that does:
 `tests/spill_transparency.rs` reports recall@10 = 0.9940 for the spilled path
 against exact cosine, versus 1.0000 for the resident HNSW on the same corpus.
-The caveats on `e2e/test_recall.py` below apply to it unchanged — feature-hashed
+The caveats on `tests/e2e/test_recall.py` below apply to it unchanged — feature-hashed
 embeddings, a fixed synthetic corpus, a regression detector and not a quality
 claim — so it is not comparable to anything published elsewhere.
 
@@ -150,7 +150,7 @@ shipped, as the `delta`/`tombstones` fields and the `DiskConsolidate` task.
   flush semantics differ; the daemon is per-cwd and single-writer, which helps.
 - **Incremental Vamana quality.** Naive incremental inserts degrade the graph;
   RobustPrune + periodic full rebuild is the usual answer. Nothing measures that
-  degradation: `e2e/test_recall.py` scores the resident path against regression
+  degradation: `tests/e2e/test_recall.py` scores the resident path against regression
   floors and never builds a snapshot.
 - **Crash consistency.** Disk graph + vectors + the bincode metadata must not
   diverge on a mid-write crash. Write-ahead or atomic rename per segment.

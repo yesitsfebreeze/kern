@@ -2,6 +2,55 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — The retrieval-only public-benchmark harness ships: LoCoMo-10 and
+  LongMemEval-S scored as recall@k / MRR / NDCG against the datasets' own
+  evidence labels, no LLM in ingest, retrieval, or scoring — the replacement
+  the 2026-07-20 deletion entry promised, now item 103 (run it) and item 104
+  (full-pipeline variant). `tests/e2e/eval/`: `datasets.py` fetches into the
+  gitignored `/eval/`, `score.py` is pure rank arithmetic (recall any-hit AND
+  all-hit — multi-evidence questions make bare "recall@k" ambiguous, so both
+  are computed and any quoted number must say which), `run_locomo.py` and
+  `run_longmemeval.py` drive the real binary through the e2e harness.
+  The stated blocker — turn-level claim provenance — turned out to gate only
+  the distillation path: the direct path stores verbatim Documents whose text
+  round-trips through `kern query`, so one turn per chunk gives turn identity
+  for free and the harness needed zero Rust changes. Sessions batch through
+  one `ingest --file` call and ride the paragraph split, ~15x fewer process
+  spawns than per-turn ingest. Truncation collisions (two turns sharing a
+  120-char printed prefix) are counted and resolved through `kern get`.
+  Category 5 (adversarial) is excluded and counted — it has no evidence turns
+  to rank, and it is where the public Zep/Mem0 dispute lived.
+  Layout, user-directed the same day: `e2e/` moved to `tests/e2e/`, the eval
+  runners live inside it, and `scripts/` is dissolved (`docs_check.py` is now
+  `tests/docs_check.py`); justfile, CI, and every live doc anchor repointed.
+  New recipes: `eval-fetch`, `eval-locomo`, `eval-longmemeval` — user-run by
+  design; CI runs only the scorer unit tests and a `--fake-llm` smoke whose
+  report marks itself MEANINGLESS.
+  The 2026-07-22 competitor survey that sized this (sources in the session,
+  vendor-claimed unless noted): Zep's LoCoMo went 84 -> self-corrected 75.14
+  -> 58.44 when Mem0 re-ran it; Mem0's 2026 algorithm claims LoCoMo 92.5 /
+  LongMemEval 94.4 with no independent reproduction; Letta scored 74.0 on
+  LoCoMo with a plain filesystem and published it as an indictment of the
+  benchmark; independent audits (Penfield Labs via "The Benchmark Theatre":
+  6.4% of LoCoMo questions corrupted, the standard judge accepting 62.8% of
+  wrong-but-topical answers; arXiv 2605.24060: scoring-target choice alone
+  flips rankings) mean NO LLM-judged vendor number reproduces. The only peer
+  publishing in this harness's protocol family is YourMemory (LoCoMo-10
+  Recall@5 0.59, LongMemEval-S Recall@5 0.894, vendor-run).
+  Tradeoffs, named: direct path only — distillation quality is unmeasured
+  until item 104; a real run's number is a property of kern + the pinned
+  embedder (`qwen3-embedding:0.6b` default), while the fake-embedder e2e
+  floors stay as the regression gate; retrieval-only numbers are not
+  comparable to anyone's LLM-judged scores and every report header says so;
+  session timestamps are not ingested, so temporal categories will read low;
+  near-duplicate dedup can absorb a gold turn into a survivor, which scores
+  as a miss — the product's behavior, reported not patched. No quality claim
+  accompanies this entry: the harness exists, the numbers do not (item 103).
+  Decided by: verify-before-claiming, name-the-tradeoff, fix-the-root (the
+  provenance blocker was re-derived from the code, not inherited from the
+  deletion entry's summary). Supersedes: nothing — the LLM-judged eval
+  stays deleted; this is its promised replacement, built.
+
 - 2026-07-22 — item 102 closed: the GNN re-embeds one corpus identically in every
   process. Four sources, not the two `e2e/test_gnn_recall.py` confessed —
   unseeded weight init and negative-edge sampling, plus `build_gnn_snapshot` and

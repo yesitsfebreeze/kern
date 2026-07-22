@@ -160,7 +160,7 @@ fn a_spilled_graph_answers_the_same_queries_as_one_that_never_spilled() {
 
 	// NOT equality, and the reason IS the finding: spilling swaps one approximate
 	// index for another, so identical answers were never on offer. RECORDED
-	// BASELINE, NOT A TARGET, in the shape `e2e/test_recall.py` uses — measured
+	// BASELINE, NOT A TARGET, in the shape `tests/e2e/test_recall.py` uses — measured
 	// 2026-07-21 at resident 1.0000, spilled 0.9940, overlap 0.9940, and rounded
 	// down. These are reruns rather than samples: the byte check above is what
 	// makes both builds reproducible.

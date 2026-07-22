@@ -1,36 +1,14 @@
+"""KernProject — one isolated kern install driven through its own binary.
+
+Lifted out of conftest.py so non-pytest callers (scripts/eval/) can drive the
+same harness; conftest re-exports everything here, so tests keep importing
+from conftest unchanged.
+"""
+
 import json
 import os
 import subprocess
 import time
-from pathlib import Path
-
-import pytest
-
-from fake_llm import FakeLlm
-
-ROOT = Path(__file__).resolve().parent.parent
-
-
-@pytest.fixture(scope="session")
-def kern_bin():
-	subprocess.run(["cargo", "build", "--bin", "kern"], cwd=ROOT, check=True)
-	# Asked, not assumed: a worktree can point build.target-dir at a shared cache,
-	# and `<repo>/target` is then a directory that never gets written.
-	meta = subprocess.run(
-		["cargo", "metadata", "--format-version", "1", "--no-deps"],
-		cwd=ROOT,
-		capture_output=True,
-		text=True,
-		check=True,
-	)
-	return Path(json.loads(meta.stdout)["target_directory"]) / "debug" / "kern"
-
-
-@pytest.fixture(scope="session")
-def fake_llm():
-	srv = FakeLlm()
-	yield srv
-	srv.close()
 
 
 class KernProject:
@@ -66,6 +44,8 @@ class KernProject:
 		gnn_min_thoughts=None,
 		tick_interval_secs=None,
 		reason_timeout_secs=None,
+		embed=None,
+		max_deliver_results=None,
 	):
 		"""(Re)write the project kern.toml. `data_dir` is cwd-relative.
 
@@ -100,6 +80,12 @@ class KernProject:
 		for the same byte-identity reason — and that omission is the default under
 		test: every other e2e runs with no such key and posts under the 600s the
 		`const` used to hardcode.
+
+		`embed` is an `(url, model)` pair pointing at a real embedding endpoint —
+		the eval harness's knob; None keeps the fake. `max_deliver_results`
+		widens the delivered list past the preset for recall@k with k above the
+		cap. Both omitted when None, same byte-identity reason as everything
+		above.
 		"""
 		head = f'data_dir = "{data_dir}"\n\n' if data_dir else ""
 		ttl = (
@@ -124,14 +110,20 @@ class KernProject:
 		reason_timeout = (
 			f"timeout_secs = {reason_timeout_secs}\n" if reason_timeout_secs else ""
 		)
+		embed_url, embed_model = embed if embed else (self.llm_url, "fake-embed")
+		retrieval = (
+			f"\n[retrieval]\nmax_deliver_results = {max_deliver_results}\n"
+			if max_deliver_results is not None
+			else ""
+		)
 		(self.cwd / ".kern" / "kern.toml").write_text(
 			f"{head}"
-			f'[embed]\nurl = "{self.llm_url}"\nmodel = "fake-embed"\n\n'
+			f'[embed]\nurl = "{embed_url}"\nmodel = "{embed_model}"\n\n'
 			f'[reason]\nurl = "{self.llm_url}"\nmodel = "fake-reason"\n'
 			f"{reason_timeout}\n"
 			f"{review}"
 			f"[intake]\nenabled = {str(intake_enabled).lower()}\n{ttl}"
-			f"{watcher}{gnn}{tick}\n"
+			f"{watcher}{gnn}{tick}{retrieval}\n"
 		)
 
 	def run(self, *args, timeout=120):
@@ -205,10 +197,3 @@ def wait_until(cond, secs, msg):
 	while not cond():
 		assert time.monotonic() < deadline, msg
 		time.sleep(0.1)
-
-
-@pytest.fixture
-def project(kern_bin, fake_llm, tmp_path):
-	p = KernProject(kern_bin, tmp_path, fake_llm.url)
-	yield p
-	p.kill_all()

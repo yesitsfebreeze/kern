@@ -40,7 +40,7 @@ PAGE_DIRS = [
 ]
 REF = re.compile(r"`(src/[A-Za-z0-9_/.-]+\.rs)(?::(\d+)(?:-(\d+))?)?`")
 REPO_PATH = re.compile(
-    r"`((?:docs|scripts|e2e|\.github|\.pi)/[A-Za-z0-9_/.-]+"
+    r"`((?:docs|tests|\.github|\.pi)/[A-Za-z0-9_/.-]+"
     r"\.(?:md|mdx|py|toml|yml|yaml|sh|json|txt|lock))(?::(\d+)(?:-(\d+))?)?`"
 )
 # A bare `FILE.md:NNN` with no directory — how ROADMAP.md indexes into FEATURES.md.
@@ -454,8 +454,8 @@ def selftest() -> None:
     ]
     assert REF.findall("src/base/merge.rs:20 unquoted") == []
     assert [m[0] for m in REPO_PATH.findall(
-        "`docs/kern/vllm.md:17-20` and `scripts/docs_check.py`"
-    )] == ["docs/kern/vllm.md", "scripts/docs_check.py"]
+        "`docs/kern/vllm.md:17-20` and `tests/docs_check.py`"
+    )] == ["docs/kern/vllm.md", "tests/docs_check.py"]
     assert SIBLING_REF.findall("see `FEATURES.md:733-736` and `ROADMAP.md:12`") == [
         ("FEATURES.md", "733", "736"),
         ("ROADMAP.md", "12", ""),

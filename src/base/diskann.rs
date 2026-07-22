@@ -482,7 +482,7 @@ mod tests {
 		assert!(recall >= 0.90, "recall@10 too low: {recall:.3}");
 	}
 
-	// Sparse feature-hashed vectors, the shape `e2e/test_recall.py` and the scaling
+	// Sparse feature-hashed vectors, the shape `tests/e2e/test_recall.py` and the scaling
 	// instruments use — and the shape that produces EXACTLY TIED cosine distances
 	// in bulk. Dense random floats never tie, which is why they cannot detect a
 	// tie-breaking bug.

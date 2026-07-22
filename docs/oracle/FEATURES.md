@@ -418,7 +418,7 @@ through ingest; that needs an explicit update path, or `forget` + re-ingest.
 **Gaps.** Distill prompt is one-shot; long deltas may truncate. No per-kind
 prompt tuning. Dedup threshold is global, not per-kind. Retention now reaches
 all four entrances, but the file-watcher one is unit-covered only — nothing in
-`e2e/` starts a watcher, since it is off by default — and `DirectJob` carries
+`tests/e2e/` starts a watcher, since it is off by default — and `DirectJob` carries
 `valid_until` but drops `valid_from` (item 90).
 Separately, a near-duplicate's alternate wording survives only on a `Rephrase`
 reason and is indexed neither lexically nor densely (item 94).
@@ -582,7 +582,7 @@ Trained per-kern, off the tick loop on a dedicated thread (`src/tick/trainer.rs`
   logs `kern.gnn` at INFO with the kern id and `nodes`, the number of embeddings
   the run produced. It is the only trace a *completed* propagation leaves outside
   the graph: `gnn_vector` is dropped on persist, so nothing on disk can say the
-  GNN ever ran. `e2e/test_gnn_recall.py` gates on this line.
+  GNN ever ran. `tests/e2e/test_gnn_recall.py` gates on this line.
 - **Optimizers** (`src/gnn/optim.rs`) — `Adam` (`:14`) behind an `Optimizer`
   trait. No SGD ships.
 - **Persist** (`src/gnn/persist.rs`) — `marshal_weights` (`:52`) /
@@ -596,7 +596,7 @@ Trained per-kern, off the tick loop on a dedicated thread (`src/tick/trainer.rs`
 `tick::gnn_propagate::do_gnn_propagate`.
 
 **Gaps.** Training is linear in edges since 2026-07-22 — 73.4s → 11.6s at 4096 measured back to back under load, 6.6s idle (`tests/gnn_scale.rs`); off the tick since 2026-07-21 (`src/tick/trainer.rs`). No GPU.
-Weights are per-kern, not shared across the tree. Link prediction only — no node-classification objective. **A propagation is reproducible since 2026-07-22** (`ROADMAP.md` item 102): one seed derived from the sorted node ids (`gnn_seed`, `src/tick/gnn_propagate.rs:182`) drives both weight init and negative-edge sampling (`src/gnn/propagate.rs:80`), and the two `HashMap` walks that outranked it are sorted — the snapshot's node order (`src/tick/gnn_propagate.rs:71`) and the `updates` write-back that fixes HNSW insert order (`src/tick/gnn_propagate.rs:212`) — so the same corpus re-embeds identically in every process and `e2e/test_gnn_recall.py` prints the same numbers on every run rather than scoring a draw.
+Weights are per-kern, not shared across the tree. Link prediction only — no node-classification objective. **A propagation is reproducible since 2026-07-22** (`ROADMAP.md` item 102): one seed derived from the sorted node ids (`gnn_seed`, `src/tick/gnn_propagate.rs:182`) drives both weight init and negative-edge sampling (`src/gnn/propagate.rs:80`), and the two `HashMap` walks that outranked it are sorted — the snapshot's node order (`src/tick/gnn_propagate.rs:71`) and the `updates` write-back that fixes HNSW insert order (`src/tick/gnn_propagate.rs:212`) — so the same corpus re-embeds identically in every process and `tests/e2e/test_gnn_recall.py` prints the same numbers on every run rather than scoring a draw.
 *Corrected 2026-07-21:* a repeatedly failing
 propagation does **not** re-enqueue every tick. `GnnPropagate` is enqueued only
 when `do_cluster` did structural work (`if did_structural_work`, `src/tick.rs:190`),
@@ -614,7 +614,7 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 
 | Tool | File | Purpose |
 | ------ | ------ | --------- |
-| `query` | `tools_query.rs` | Hybrid search, LLM-free; the caller synthesizes. Filters: `mode`/`kind`/`source`/`scheme`/time range/`min_conf`/`valid_at`/`as_of`; `include_history` for supersede chain; `exclude_pending` drops rows a `[ingest] review_policy` is still holding (opt-in, and the only predicate here with a CLI flag of its own, `kern query --exclude-pending` — which is what makes the review lifecycle e2e-measurable where `principals` is not). Returns edges **and path chains**, and `id` resolves a prefix and the cold tier (`entity_detail_by_id`) — both widenings exist so a CLI `query`/`get` routed through the daemon answers with what the local path answers. An `id` read runs the **same** filters: `src/mcp/tools_query.rs:137-157` builds `QueryOptions` first and puts the resolved row through `retrieval::score::matches_filter`, so `query {id, kind: "claim"}` on a `Fact` answers `thought not found`. A bare `query {id}` filters nothing — `QueryOptions::default()` leaves `valid_at`/`as_of` unset — which is what keeps an expired row served-and-flagged (`expired`/`valid_until`, `entity_detail` `src/mcp/tools_query.rs:390`, stamped `:435-437`) rather than hidden. `principals` (string array) is the caller's asserted identity and rides the same predicate, so `query {id, principals: ["bob"]}` on an alice-scoped row answers `thought not found` while a bare `query {id}` still serves it. A blank entry is a hard error (`parse_principals`, `src/mcp.rs`), never a silent skip — it would otherwise match the empty scope of every public entity. The row clearing the filter is not the end of it: an edge's text is written from **both** endpoint texts, so every edge the id read and the ranked read render is gated on its far endpoint through `acl::incident_edge` (`src/mcp/acl.rs`) — withheld drops the edge, unresolved renders it with `text` cleared. Naming no principal gates nothing here either, so `kern get` renders every edge exactly as before. **MCP-only: there is no CLI flag, so `e2e/` cannot reach it** (`e2e/conftest.py` drives the binary over subprocess and has no JSON-RPC client); the coverage is unit tests. |
+| `query` | `tools_query.rs` | Hybrid search, LLM-free; the caller synthesizes. Filters: `mode`/`kind`/`source`/`scheme`/time range/`min_conf`/`valid_at`/`as_of`; `include_history` for supersede chain; `exclude_pending` drops rows a `[ingest] review_policy` is still holding (opt-in, and the only predicate here with a CLI flag of its own, `kern query --exclude-pending` — which is what makes the review lifecycle e2e-measurable where `principals` is not). Returns edges **and path chains**, and `id` resolves a prefix and the cold tier (`entity_detail_by_id`) — both widenings exist so a CLI `query`/`get` routed through the daemon answers with what the local path answers. An `id` read runs the **same** filters: `src/mcp/tools_query.rs:137-157` builds `QueryOptions` first and puts the resolved row through `retrieval::score::matches_filter`, so `query {id, kind: "claim"}` on a `Fact` answers `thought not found`. A bare `query {id}` filters nothing — `QueryOptions::default()` leaves `valid_at`/`as_of` unset — which is what keeps an expired row served-and-flagged (`expired`/`valid_until`, `entity_detail` `src/mcp/tools_query.rs:390`, stamped `:435-437`) rather than hidden. `principals` (string array) is the caller's asserted identity and rides the same predicate, so `query {id, principals: ["bob"]}` on an alice-scoped row answers `thought not found` while a bare `query {id}` still serves it. A blank entry is a hard error (`parse_principals`, `src/mcp.rs`), never a silent skip — it would otherwise match the empty scope of every public entity. The row clearing the filter is not the end of it: an edge's text is written from **both** endpoint texts, so every edge the id read and the ranked read render is gated on its far endpoint through `acl::incident_edge` (`src/mcp/acl.rs`) — withheld drops the edge, unresolved renders it with `text` cleared. Naming no principal gates nothing here either, so `kern get` renders every edge exactly as before. **MCP-only: there is no CLI flag, so `tests/e2e/` cannot reach it** (`tests/e2e/conftest.py` drives the binary over subprocess and has no JSON-RPC client); the coverage is unit tests. |
 | `ingest` | `tools_mutate.rs` | Add text. `object_id` update semantics, free-text `hint` chunking context (`hint` is the only spelling — the `descriptor` alias retired in `7de23c0`), optional `retention_secs` TTL (integer seconds; `0`/absent = never) resolved to an absolute `valid_until` once, before the sync / durable-direct / RAM-queue branch, so all three carry the same deadline. Optional `scope` (string) + `principals` (string array) build the `Acl` stamped on every entity the job places (`acl_from_args` → `ingest::Job::acl` → `new_statement_entity`); naming neither leaves the thought public. Resolved on the same pre-branch line as `valid_until` and carried across the durable hop by `DirectJob::acl`, so the async path cannot silently republish a scoped ingest as public. |
 | `link` | `tools_mutate.rs` | Create a reason edge (LLM writes the reason if blank). Edge score is the asserted confidence (agent 0.95; CLI user 1.0), NOT `cosine(from,to)` — a deliberate link connects what similarity cannot, so similarity must not be its strength. |
 | `forget` | `tools_mutate.rs` | Remove a thought + cascade edges (Facts immune). |
@@ -630,7 +630,7 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 | `intake_drain` | `tools_intake.rs` | One immediate pass of the daemon's own intake drain (`ingest::intake::drain_now`), returning `archived`. Exists so `kern intake drain` has somewhere to route: the CLI's in-process pass reads the same queue directory and archives the same entries as the daemon's poll loop, so both distill the file and both race the archive move. |
 | `setup` | `tools_setup.rs` | Agent-facing installer: returns idempotent wiring instructions (seed gravitons, install the capture rule/hook in the host, verify) plus this project's current [done]/[todo] state. kern never writes host config; the calling agent does the wiring. |
 
-Plus MCP **prompts** (`src/mcp/prompt.rs`) and **resources** (`src/mcp/resources.rs`) — four static URIs (`kern://local/health`, `kern://local/thoughts`, `kern://local/kerns`, `kern://local/claim-kinds`, `resource_definitions`) plus two dynamic prefixes resolved in `handle_resource_read`, `thought://{id}` (full text and every incident edge's text) and `reason://{id}` (an edge's text). Anything else is `unknown resource`. **This surface takes no `principals`, so it is default-deny**: it serves only rows whose `Acl` is empty (`Acl::is_public()`, the same emptiness test `acl_admits` runs), never a scoped one. A scoped `thought://{id}` reads back through the same `None` arm a missing one takes — byte-identical, and nothing in the file logs. An edge is gated on **both** ends, because `explain_relationship_prompt` writes its text from both endpoint texts, and the endpoint verdict has three outcomes (`Endpoint`) rather than two: `find_entity` walks only the *resident* kern map, so an id that does not resolve may be a cold-spilled or unloaded scoped row still alive in the store — Withheld drops the edge, Unresolved serves it with `text` withheld, Admitted serves it whole; `resource_reason`'s `from` fails closed on Unresolved too. Since 2026-07-22 that verdict lives in `src/mcp/acl.rs` and the `query` tool's edge renderings share it — the admission *rule* is the parameter, not the principals, because this surface's rule is `Acl::is_public` and `query`'s is the caller's `principals`. The two `kern://local` counting URIs still count scoped rows — a cardinality oracle, no ids and no text, tracked in item 18. Narrower than any principal scheme item 24 lands, which can only widen it (`ROADMAP.md` item 18). **MCP-only: `e2e/` drives the binary over subprocess with no JSON-RPC client, so `resources/read` is unreachable from there**; the coverage is seven unit tests in `src/mcp/resources.rs`, one per guard.
+Plus MCP **prompts** (`src/mcp/prompt.rs`) and **resources** (`src/mcp/resources.rs`) — four static URIs (`kern://local/health`, `kern://local/thoughts`, `kern://local/kerns`, `kern://local/claim-kinds`, `resource_definitions`) plus two dynamic prefixes resolved in `handle_resource_read`, `thought://{id}` (full text and every incident edge's text) and `reason://{id}` (an edge's text). Anything else is `unknown resource`. **This surface takes no `principals`, so it is default-deny**: it serves only rows whose `Acl` is empty (`Acl::is_public()`, the same emptiness test `acl_admits` runs), never a scoped one. A scoped `thought://{id}` reads back through the same `None` arm a missing one takes — byte-identical, and nothing in the file logs. An edge is gated on **both** ends, because `explain_relationship_prompt` writes its text from both endpoint texts, and the endpoint verdict has three outcomes (`Endpoint`) rather than two: `find_entity` walks only the *resident* kern map, so an id that does not resolve may be a cold-spilled or unloaded scoped row still alive in the store — Withheld drops the edge, Unresolved serves it with `text` withheld, Admitted serves it whole; `resource_reason`'s `from` fails closed on Unresolved too. Since 2026-07-22 that verdict lives in `src/mcp/acl.rs` and the `query` tool's edge renderings share it — the admission *rule* is the parameter, not the principals, because this surface's rule is `Acl::is_public` and `query`'s is the caller's `principals`. The two `kern://local` counting URIs still count scoped rows — a cardinality oracle, no ids and no text, tracked in item 18. Narrower than any principal scheme item 24 lands, which can only widen it (`ROADMAP.md` item 18). **MCP-only: `tests/e2e/` drives the binary over subprocess with no JSON-RPC client, so `resources/read` is unreachable from there**; the coverage is seven unit tests in `src/mcp/resources.rs`, one per guard.
 
 **Server** (`src/mcp.rs`) — `Server` holds the shared `graph`/`worker`/`llm`/
 `task_q`/`cfg`; implements `trnsprt::McpServer`. `run`/`run_stdio` use the
@@ -1075,7 +1075,7 @@ client→node — the hub is connect-time only, never a proxy hop.
 
 **Where.** `src/hub/`, `src/trnsprt/src/hub_rpc/`, `src/commands/admin.rs`
 (`cmd_hub`), `src/config/hub.rs`, `src/config/detached_log.rs`,
-`e2e/test_hub.py`.
+`tests/e2e/test_hub.py`.
 
 **Gaps.** Gossip still lives in each node; the transport moves hub-side
 together with the TLS work (ordering recorded in `ROADMAP.md` — "Hub phase 3:
@@ -1187,14 +1187,14 @@ by the answerer: a grounded run (whole conversation in the prompt, kern
 bypassed) scored 0.187, so answer quality — not memory — set the ceiling, and
 three prompt tweaks moved the score more than any retrieval change.
 
-What replaced it is `21a` below: `e2e/` scores retrieval over a corpus the test
+What replaced it is `21a` below: `tests/e2e/` scores retrieval over a corpus the test
 writes itself, so no answerer and no judge sit in the loop. The constraint that
 sank every id-mapping proposal — ingest records no claim→source-turn mapping, so
 turn-level claim provenance does not exist — is sidestepped rather than solved:
 a test that ingests the facts already knows which id is correct.
 
 
-## 21a. E2E harness (`e2e/`, Python) — `active`
+## 21a. E2E harness (`tests/e2e/`, Python) — `active`
 
 **What.** `just e2e` (pytest) drives the real `kern` binary end to end, and is
 **the instrument retrieval quality is measured with** (`ROADMAP.md` item 1):
@@ -1209,15 +1209,15 @@ prompt. `conftest.py` isolates each test in a private project (own
 `XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME`, `.kern/kern.toml` pinned to the fake).
 `test_hub.py` is the ported Rust hub supervisor suite.
 
-**Measured.** `e2e/test_recall.py` — 36 facts, 72 paraphrase probes, scored
+**Measured.** `tests/e2e/test_recall.py` — 36 facts, 72 paraphrase probes, scored
 `recall@1` / `recall@5` / `MRR` against floors, printed on every run (`-s`).
 Current: **0.9306 / 0.9722 / 0.9471** (2026-07-21, after item 86's traversal
 credit; the founding 0.9583 / 1.0000 / 0.9792 predates the answer-leg removal),
-bit-identical across runs because the fake embedder has no RNG and no clock. `e2e/test_invariants.py` asserts the properties
+bit-identical across runs because the fake embedder has no RNG and no clock. `tests/e2e/test_invariants.py` asserts the properties
 each `VISION.md` criterion promises — self-recall, content addressing, supersede
 ordering, degrade, Fact durability.
 
-**Measured with the GNN running.** `e2e/test_gnn_recall.py` — the same 36 facts
+**Measured with the GNN running.** `tests/e2e/test_gnn_recall.py` — the same 36 facts
 and 72 probes, but scored on a graph a real propagation has touched: it lowers
 `[gnn] min_thoughts` to 4 (e2e-only; the shipped floor is 128), pins `[tick]
 interval_secs = 0` so only the daemon's boot pass runs, and **refuses to score
@@ -1227,9 +1227,9 @@ least 30 nodes. Floors **0.85 / 0.93 / 0.88**, set below the worst of 8 runs
 stochastic — not comparable to the CLI corpus's floors, since the seed index is
 fused 0.6/0.4 with the propagated one.
 
-**Where.** `e2e/conftest.py`, `e2e/fake_llm.py`, `e2e/ranking.py`,
-`e2e/test_retrieval.py`, `e2e/test_invariants.py`, `e2e/test_recall.py`,
-`e2e/test_gnn_recall.py`, `e2e/test_hub.py`, `e2e/requirements.txt`; `justfile`
+**Where.** `tests/e2e/conftest.py`, `tests/e2e/fake_llm.py`, `tests/e2e/ranking.py`,
+`tests/e2e/test_retrieval.py`, `tests/e2e/test_invariants.py`, `tests/e2e/test_recall.py`,
+`tests/e2e/test_gnn_recall.py`, `tests/e2e/test_hub.py`, `tests/e2e/requirements.txt`; `justfile`
 recipes `e2e` and `e2e-install`; `.github/workflows/ci.yml` job `e2e`.
 
 **Gaps.** The floors make this a **regression detector, not a quality claim** —
@@ -1268,9 +1268,9 @@ consumption. `NEXT_PUBLIC_BASE_PATH=/kern` in CI for GitHub Pages;
 (deleted 2026-07-20).
 
 **Doc/code contract.** Pages cite exact `src/…:line` locations, so drift is
-mechanically checkable: `scripts/docs_check.py` fails on any citation naming a
+mechanically checkable: `tests/docs_check.py` fails on any citation naming a
 missing file or a line past EOF, any backticked repo path under
-`docs/`/`scripts/`/`e2e/`/`.github/`/`.pi/` that does not exist, any relative
+`docs/`/`tests/`/`.github/`/`.pi/` that does not exist, any relative
 `.md`/`.mdx` page link whose target does not exist, and any link into this
 repo's own files on GitHub that names a file not committed — the check that
 would have caught the month-long dead `install.sh` link. It scans every
@@ -1284,7 +1284,7 @@ regexes and the escapes.
 unfiltered by path. Pages state only what exists today (including honest "not
 built"); what is *left* lives solely in `ROADMAP.md` per repo law 4.
 
-**Where.** `docs/site/` (app + content), `scripts/docs_check.py`, `justfile`
+**Where.** `docs/site/` (app + content), `tests/docs_check.py`, `justfile`
 recipes `docs` (dev server), `docs-build`, `docs-install`, `docs-check`.
 
 **Gaps.** No custom theme — stock fumadocs UI by explicit choice. Local dev
