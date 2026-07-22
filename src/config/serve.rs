@@ -91,6 +91,25 @@ impl ServeConfig {
 			Err(e) => Err(e),
 		}
 	}
+
+	/// Read-only twin of `resolve_mcp_token`, for the *callers* of kern.sock.
+	/// A client must be able to present the daemon's secret, never to invent
+	/// one: minting here would drop an `mcp-token` into every directory a CLI
+	/// is run in, and — the part that matters — a client that mints its own
+	/// token is a client authenticating against nothing.
+	///
+	/// `None` means "no secret to present", which the daemon refuses. That is
+	/// the right answer: whenever a daemon is listening it has already minted
+	/// the file, so an absent one means nothing is there to talk to anyway.
+	pub fn read_mcp_token(&self, data_dir: &Path) -> Option<String> {
+		if !self.mcp_token.is_empty() {
+			return Some(self.mcp_token.clone());
+		}
+		std::fs::read_to_string(mcp_token_path(data_dir))
+			.ok()
+			.map(|t| t.trim().to_string())
+			.filter(|t| !t.is_empty())
+	}
 }
 
 #[cfg(test)]

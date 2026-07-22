@@ -71,14 +71,18 @@ cannot ride this route as it stands, because the RPC's only mutation surface is
 `MAX_AI_CONFIDENCE`, while `cmd_ingest` mints at `clamp_confidence(1.0, "user")`
 and `cmd_link` at `1.0`. Routing them unchanged would silently demote every
 CLI-minted Fact to an agent Claim. Routing them *with* their trust intact means
-putting a trust field on an unauthenticated socket, which is item 24's hole
-widened into an escalation path. So this half is **blocked on item 24**, not on
-effort.
+putting a trust field on the socket. **Restated 2026-07-22:** that used to read
+"an unauthenticated socket"; the socket now authenticates, and the block did not
+lift, because the part this half needs was never the missing auth. A shared
+secret proves a uid, and the CLI and the agent's proxy are the same uid — so a
+`principal` on that frame is still *declared*, and a trust field riding a
+declared principal is the same escalation path it always was. Blocked on item
+24's residue, not on effort.
 
 That block is a new sequencing edge pointing *down* the file — item 24 sits in
 tier 3 and this sits in tier 1 — and the list was not reordered for it. Item 24
-does not move up because the trust field is one caller of it, not its severity:
-an unauthenticated socket is armed the same either way.
+does not move up because the trust field is one caller of it, not its severity —
+and now that its gate is built, what remains of it is smaller than this half is.
 
 **Closed 2026-07-21: `graviton add`/`remove` and `claim-kind add`/`rm`.** These
 were the four shipped subcommands that reached `with_graph`
@@ -177,7 +181,7 @@ underneath any of them gets a refused flush and a reload rather than a clobber.
 two unlocked callers".** The unguarded entry point is named
 `save_graph_unguarded` and carries its precondition, and walking its call sites
 turns up **three** classes, not two. The two this item already named stand and
-still do not belong to it: `cmd_hub_merge` (`src/commands/admin.rs:748`) writes
+still do not belong to it: `cmd_hub_merge` (`src/commands/admin.rs:785`) writes
 a destination graph it holds no lock on, and `maybe_self_heal_store`
 (`src/commands.rs:424`) rewrites the store during boot recovery — hub merge
 stops both daemons first, self-heal runs before the daemon serves, and neither
@@ -194,14 +198,14 @@ back over whatever the daemon had committed since — a full-graph clobber, not 
 lost write, and the exact race the writer lock and the route exist to close.
 **Corrected 2026-07-21 — this paragraph said "do not route at all" one commit
 after that stopped being true.** All four now route first
-(`graviton_at`, `src/commands/admin.rs:234`, route calls `:245` and `:290`;
+(`graviton_at`, `src/commands/admin.rs:242`, route calls `:258` and `:304`;
 `claim_kind_at`, `:343`, route calls `:346` and `:363`), keeping `with_graph`
 as the `NoDaemon` fallback. Unlike `ingest` and `link` they assert no trust:
 `graviton` carries a name, seed text and a mass; `claim_kind` a name and a
 description. Neither mints a Fact, so routing them widened item 24's hole no
 more than `intake drain` did, and the tools they route to already existed with
 matching semantics — `graviton` (`src/mcp/tools_admin.rs:87`, schema `:39`) and
-`claim_kind` (`:161`, schema `:52`), both dispatched at `src/mcp.rs:183-184`.
+`claim_kind` (`:161`, schema `:52`), both dispatched at `src/mcp.rs:184-185`.
 
 So the item's remainder is **one** half, not two: `ingest`/`link`, blocked on
 item 24. `graviton`/`claim_kind` were the unblocked half and are closed. The item
@@ -368,7 +372,10 @@ item 24 lands — default-deny can only be widened by it, never contradicted.
 
 **Still ungated — this is what keeps the item open.** What is *not* separable is
 how a principal arrives — resources get one per read or the server gets a session
-one — and that is the same missing-auth boundary as item 24. Until then the
+one — and that is item 24's residue. **Restated 2026-07-22:** a principal now
+does arrive on `kern.sock` (`AuthReq::principal`), but *declared*, not proven,
+and nothing reads it; a session principal a caller asserts about itself is not
+one an ACL can hold it to. Until then the
 surface serves public rows to any client that can open the transport, and a scoped
 row to nobody; the ACL is still not a boundary a caller can be *held to*, only one
 they cannot get around here. Two residues are deliberate and named rather than
@@ -438,9 +445,74 @@ auto-distilled claims out of retrieval until a human curates them. No
 
 ### 24. RPC socket has no auth `[surface]`
 
-`FEATURES.md:674-675`. The missing auth is the same boundary as 18's
-caller-asserted principals — decide them together or the principal stops at the
-MCP surface only. The item's second half is **retired 2026-07-21 — verified
+`FEATURES.md:674-678`. **Mostly closed 2026-07-22, and deliberately left open —
+read the residue at the bottom before citing this as a blocker.** The socket
+now authenticates; what it still cannot do is tell one same-uid caller from
+another, which is the half items 9 and 18 were waiting on.
+
+**Narrowed 2026-07-22 — "anything that can open the path" was already false on
+Unix when this was written.** `harden_socket`
+(`src/trnsprt/src/typed/local.rs:238`) sets the socket `0600` on both the fresh
+bind and the stale-rebind path, pinned by `a_bound_socket_is_owner_only` and
+`a_rebound_stale_socket_is_also_owner_only`, so a foreign uid never reaches it
+and the only residue is the sub-ms bind→chmod window item 84 already carries.
+No document said so — `FEATURES.md` §13 still read "anything that can open the
+path", which is why this is recorded here rather than assumed.
+
+**Built 2026-07-22 — the connection is authenticated.** One `AuthReq` frame
+(`src/trnsprt/src/kern_rpc/auth.rs:79`) carrying the graph's `mcp-token` — the
+same secret the HTTP surface already demands (`resolve_mcp_token`,
+`src/config/serve.rs:64`), never a second one — is compared in constant time
+before anything dispatches. The ordering is structural, not remembered:
+`serve_authenticated` (`src/rpc/kern_rpc_server.rs:173`) builds the handler
+*inside* a closure that only runs after the verdict, so on a refused connection
+no handler exists for a method to reach. Every non-match returns `Err`,
+including an empty `expected` — a daemon that cannot read its secret serves
+nobody rather than everybody — and `run_server` resolves the token before it
+binds, so that state is unreachable in practice as well as harmless. Windows
+gets the same posture the Unix `0600` states: an owner-only SDDL,
+`D:P(A;;GA;;;<user>)`, built from the process token's own SID
+(`src/trnsprt/src/typed/local.rs:250`) and passed to *every* pipe instance — <!-- docs-check: anchor-ok -->
+the `accept`-created ones too (`:490`), since an instance created without it
+would be a hole beside a locked door.
+
+**The tradeoff that was taken, named.** The secret proves *a uid*, not *a
+program*. The CLI, the `kern mcp` proxy an agent drives and the hub all run as
+the same user and can all read the same file, so no shared secret can separate
+them. `principal` is therefore **declared and recorded, never enforced** — the
+handler carries it, nothing consults it. This is honest but it is not what item
+9 needs to route `ingest`/`link` with their trust intact, nor what item 18 needs
+for a principal to survive past the MCP surface. Both must still cite something;
+they should now cite the *unproven principal*, not the missing socket auth.
+
+**Why it stays open — three residues, none of them "the gate might not hold".**
+The gate holds: making verification always succeed fails the no-token and the
+wrong-token tests, and gutting the byte compare fails them too (both mutations
+re-run 2026-07-22). What is left is everything the gate does not cover.
+1. **Windows is unexecuted.** The descriptor typechecks — `cargo check --target
+   x86_64-pc-windows-msvc -p trnsprt` is clean, and a deliberate type error
+   inside the `cfg(windows)` module does fail it, so that is not a vacuous
+   pass — but no line of it has ever run. The SDDL is unparsed, the token query
+   unmade, and there is no Windows test: `bind_tests_unix` is
+   `#[cfg(all(test, unix))]` and stays that way. Treat the pipe as *believed*
+   owner-only, not *known* to be.
+2. **`principal` is unproven**, above.
+3. **The socket secret is the HTTP secret, and the socket path is squattable.**
+   With no `XDG_RUNTIME_DIR` the endpoint falls back to `/tmp/kern-<tag>-<user>.sock`
+   (`Endpoint::scoped`, `src/trnsprt/src/typed/local.rs:44-55`), and `/tmp` is
+   sticky-but-writable: another
+   local user can bind that name first, and a client — which authenticates the
+   *server* not at all — then presents the graph's `mcp-token` to it in the clear.
+   The daemon's own bind sees the squatter answer and reports `AlreadyRunning`,
+   so it is a denial of service in the same move. On the socket the stolen token
+   buys nothing (the real socket is `0600`), but it is the *same* token
+   `mcp_addr` demands, so a socket-side disclosure is an HTTP-side compromise.
+   That is the cost of reuse, and reuse was still the right call — a second
+   secret is a second thing to mint, rotate and get wrong. Closing this means
+   either a separate socket token or a client that checks the socket's owner
+   before it speaks.
+
+The item's second half is **retired 2026-07-21 — verified
 false**: `KernRpc` does not mirror MCP 1:1 and never did. The contract is four
 methods (`health`/`shutdown`/`call_tool`/`list_tools`,
 `src/trnsprt/src/kern_rpc/svc.rs`) and every tool reaches the daemon through the
@@ -995,7 +1067,7 @@ that is the failure the new test reproduces when the bound is removed. Now
 `QUEUE_CAP` is the whole bound (`src/ingest/worker.rs:72`): `try_send` refuses
 the newest job rather than detaching (`:128`), the refusal is counted
 (`:131`) and reaches every health surface as `ingest_queue_refused`
-(`src/base/health.rs:81`, `src/mcp.rs:145`, `src/commands/admin.rs:85`). The
+(`src/base/health.rs:81`, `src/mcp.rs:145`, `src/commands/admin.rs:86`). The
 one producer that must not be refused waits instead — `submit` awaits capacity
 (`src/ingest/worker.rs:175`) and the file-watcher sink calls it
 (`src/ingest/file_watcher.rs:84`), because a watcher record has no durable
@@ -1170,7 +1242,7 @@ sorts by heat and truncates to `ENTITY_SYNC_BATCH = 32` per heartbeat
 (`src/gossip/handler.rs:156`, sorted `:181`),
 so cold entities may never propagate and a partitioned node that rejoins never
 catches up. (`Fetch` is live — `wire_fetch` installs the handler at
-`src/commands.rs:1042` and the question path issues it — but it is single-id, not a
+`src/commands.rs:1057` and the question path issues it — but it is single-id, not a
 catch-up mechanism.) Two pieces adopted on paper and unscheduled: **back-off
 pacing** with exponential jitter keyed to a divergence estimate
 (`docs/kern/fl-vs-knids-federation.md:163-168`), and **batch-size / push-vs-pull
@@ -1893,11 +1965,11 @@ non-goals.
 ### 76. The watchdog force-exit skips the final guarded flush `[store]`
 
 Confirmed against source 2026-07-21, and it is not a doc claim: `spawn_watchdog`
-(`src/commands.rs:870-909`) beats a counter once a second from the async runtime
+(`src/commands.rs:885-924`) beats a counter once a second from the async runtime
 and force-exits `std::process::exit(101)` (`:900`) after `STALL_LIMIT * CHECK_SECS`
 = 30s of no progress. `process::exit` runs no destructor and no `Drop`, so it
 skips the guarded shutdown flush the ordinary path takes — the `shutdown` notify
-at `src/commands.rs:832` unwinds into the guarded persist closure at `:592`,
+at `src/commands.rs:847` unwinds into the guarded persist closure at `:592`,
 which is the thing that "never overwrites a grown disk". Nothing on the watchdog
 path writes anything, and the exit line does not say so.
 
@@ -1954,16 +2026,16 @@ single local daemon and needs only sign-off.
 ### 81. `resources/list` and `prompts/list` return `-32601` on the proxy path `[surface]`
 
 `ProxyServer` implements `tools_list` / `call_tool` / `extra_capabilities` only
-(`src/commands/mcp_cmd.rs:290`, `:306`, `:343`) with no `handle_method` override,
+(`src/commands/mcp_cmd.rs:301`, `:317`, `:355`) with no `handle_method` override,
 so the trait default returns `None` (`src/trnsprt/src/server.rs:21`). Meanwhile
 `extra_capabilities` advertises `{"resources": {}, "prompts": {}}` (`:346`) to
-match standalone, which *does* serve them (`src/mcp.rs:212-221`, advertised `:158`). Advertised on
+match standalone, which *does* serve them (`src/mcp.rs:212-221`, advertised `:160`). Advertised on
 the normal path, non-functional there. Either forward them or stop advertising.
 
 ### 82. Standalone `kern mcp` runs no gossip `[surface]`
 
 **Corrected:** the previous version said "no maintenance tick and no gossip". The
-tick *is* started (`src/commands/mcp_cmd.rs:455-466`); only gossip is absent
+tick *is* started (`src/commands/mcp_cmd.rs:473-484`); only gossip is absent
 (`broadcast_q: None` at `:461`, `broadcast_pulse: None` at `:475`). A graph
 served that way decays, clusters and GCs normally, and simply does not federate.
 
@@ -2070,8 +2142,12 @@ propagation overwrites one — another 76.8 MB at this corpus size.
 - Under WSL2 NAT a loopback Ollama URL must be hand-pinned; kern neither rewrites
   nor warns (`FEATURES.md:1115-1117`).
 - RPC socket bind→chmod race — sub-millisecond, umask default — recorded as an
-  accepted risk (`concepts/security.mdx:40-43`); revisit only if the umask
-  alternative stops being worse.
+  accepted risk where it happens (`harden_socket`,
+  `src/trnsprt/src/typed/local.rs:233-241`); revisit only if the umask
+  alternative stops being worse. **Corrected 2026-07-22:** this cited
+  `concepts/security.mdx:40-43`, which is the API-key-vs-redirected-endpoint
+  rule and says nothing about the socket; that page states the `0600` mode at
+  `concepts/security.mdx:16` and does not record the race at all.
 
 ### 87. Do the preset tiers earn their numbers, now that `relaxed` is the default? `[eval]`
 
@@ -2512,12 +2588,12 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   scheduled; the three it actually caught were live lies in `FEATURES.md` and
   `SPECIALISTS.md` (CHANGELOG 2026-07-21).
 - **Pulse and Question senders are live.** `broadcast_pulse` / `broadcast_q` built
-  in `start_gossip` (`src/commands.rs:979-1053`), pulse wired into the maintenance
+  in `start_gossip` (`src/commands.rs:994-1068`), pulse wired into the maintenance
   tick (`:721`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
   `broadcast_q` invoked by `do_resolve` (`src/tick/tasks.rs:383`), `handle_question`
   live-dispatched (`src/gossip/handler.rs:44`).
 - **`Fetch` is wired** — `wire_fetch` installs the handler at
-  `src/commands.rs:1042`. Single-id, so it is not anti-entropy (item 36), but it
+  `src/commands.rs:1057`. Single-id, so it is not anti-entropy (item 36), but it
   is not dead.
 - **`union_statements` never existed**; remote heat is no longer pinnable
   (`src/base/merge.rs:20`, applied `:153`).

@@ -69,6 +69,17 @@ pub(crate) fn scratch_endpoint(tag: &str) -> trnsprt::typed::Endpoint {
 	trnsprt::typed::Endpoint::Unix(dir.join("kern.sock"))
 }
 
+// The secret a scratch daemon demands, and the identity its scratch clients
+// present. A fixed pair, because these endpoints live in temp dirs with no
+// config and no `mcp-token` to read.
+#[cfg(unix)]
+pub(crate) const TEST_TOKEN: &str = "scratch-token";
+
+#[cfg(unix)]
+pub(crate) fn test_caller() -> trnsprt::kern_rpc::AuthReq {
+	trnsprt::kern_rpc::AuthReq::new(TEST_TOKEN, trnsprt::kern_rpc::PRINCIPAL_CLI)
+}
+
 #[cfg(unix)]
 pub(crate) async fn serving(srv: crate::mcp::Server, endpoint: &trnsprt::typed::Endpoint) {
 	use std::sync::Arc;
@@ -82,7 +93,9 @@ pub(crate) async fn serving(srv: crate::mcp::Server, endpoint: &trnsprt::typed::
 		Arc::new(tokio::sync::Notify::new()),
 	);
 	tokio::spawn(crate::rpc::kern_rpc_server::serve_kern_rpc_loop(
-		listener, handler,
+		listener,
+		handler,
+		TEST_TOKEN.to_string(),
 	));
 }
 

@@ -83,7 +83,7 @@ impl HubRpc for HubRpcHandler {
 			{
 				let mut map = nodes.lock().await;
 				if let Some(handle) = map.get_mut(&root) {
-					if handle.alive() && node::probe(&handle.endpoint).await {
+					if handle.alive() && node::probe(&handle.root).await {
 						return ResolveRes {
 							ok: true,
 							endpoint: handle.endpoint.display(),
@@ -134,7 +134,7 @@ impl HubRpc for HubRpcHandler {
 				// handle) only reveal death through their socket.
 				let alive = match handle.child {
 					Some(_) => handle.alive(),
-					None => node::probe(&handle.endpoint).await,
+					None => node::probe(&handle.root).await,
 				};
 				out.push(NodeLite {
 					root: root.display().to_string(),
@@ -170,7 +170,7 @@ impl HubRpc for HubRpcHandler {
 			let Some(mut handle) = handle else {
 				// Not tracked — still try the socket so external daemons unload too.
 				let endpoint = Endpoint::kern_for(&root);
-				if node::probe(&endpoint).await {
+				if node::probe(&root).await {
 					let mut adopted = NodeHandle {
 						root,
 						endpoint,
@@ -251,16 +251,16 @@ fn spawn_reaper(handler: HubRpcHandler, idle_unload_secs: u64) {
 // started by hand is theirs to stop. idle_ms == 0 means a pre-field daemon;
 // treated as active, never unloaded on a lie.
 async fn idle_pass(handler: &HubRpcHandler, cutoff_ms: u64) {
-	let candidates: Vec<(PathBuf, Endpoint)> = {
+	let candidates: Vec<PathBuf> = {
 		let map = handler.nodes.lock().await;
 		map
 			.iter()
 			.filter(|(_, h)| h.child.is_some())
-			.map(|(r, h)| (r.clone(), h.endpoint.clone()))
+			.map(|(r, _)| r.clone())
 			.collect()
 	};
-	for (root, endpoint) in candidates {
-		let idle = node::idle_ms(&endpoint).await.unwrap_or(0);
+	for root in candidates {
+		let idle = node::idle_ms(&root).await.unwrap_or(0);
 		if idle == 0 || idle < cutoff_ms {
 			continue;
 		}
@@ -268,7 +268,7 @@ async fn idle_pass(handler: &HubRpcHandler, cutoff_ms: u64) {
 		let _guard = lock.lock().await;
 		// Re-check under the root lock: a resolve+tool-call may have landed
 		// between the first poll and here.
-		let idle = node::idle_ms(&endpoint).await.unwrap_or(0);
+		let idle = node::idle_ms(&root).await.unwrap_or(0);
 		if idle == 0 || idle < cutoff_ms {
 			continue;
 		}

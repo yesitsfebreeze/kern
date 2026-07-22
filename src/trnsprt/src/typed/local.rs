@@ -240,6 +240,143 @@ fn harden_socket(path: &Path) -> std::io::Result<()> {
 	std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
+// The same posture on Windows, where there are no mode bits to set. A named
+// pipe created with the default security descriptor is reachable by anything on
+// the machine that can name it, so every instance is created with an explicit
+// one instead: SDDL `D:P(A;;GA;;;<user>)` — a protected DACL (no inheritance)
+// carrying exactly one ACE, full access for the SID this process runs as. No
+// SYSTEM ACE and no Administrators ACE, because `0600` grants neither.
+#[cfg(windows)]
+mod owner_only {
+	use std::io;
+
+	use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
+	use windows_sys::Win32::Security::Authorization::{
+		ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+	};
+	use windows_sys::Win32::Security::{
+		GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
+		TOKEN_USER,
+	};
+	use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+	/// An owner-only security descriptor, freed on drop. Held by the listener
+	/// for the whole of its life: `accept` creates a fresh pipe instance per
+	/// connection, and an instance created without this is an open door.
+	pub struct OwnerOnlySd(PSECURITY_DESCRIPTOR);
+
+	// SAFETY: the pointer is owned, never mutated after construction, and only
+	// read through `attributes()`.
+	unsafe impl Send for OwnerOnlySd {}
+	unsafe impl Sync for OwnerOnlySd {}
+
+	impl OwnerOnlySd {
+		pub fn new() -> io::Result<Self> {
+			let sid = current_user_sid()?;
+			let sddl: Vec<u16> = format!("D:P(A;;GA;;;{sid})")
+				.encode_utf16()
+				.chain(std::iter::once(0))
+				.collect();
+			let mut psd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+			// SAFETY: `sddl` is NUL-terminated and outlives the call; `psd` receives
+			// a LocalAlloc'd descriptor this value then owns.
+			let ok = unsafe {
+				ConvertStringSecurityDescriptorToSecurityDescriptorW(
+					sddl.as_ptr(),
+					SDDL_REVISION_1,
+					&mut psd,
+					std::ptr::null_mut(),
+				)
+			};
+			if ok == 0 || psd.is_null() {
+				return Err(io::Error::last_os_error());
+			}
+			Ok(Self(psd))
+		}
+
+		pub fn attributes(&self) -> SECURITY_ATTRIBUTES {
+			SECURITY_ATTRIBUTES {
+				nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+				lpSecurityDescriptor: self.0,
+				bInheritHandle: 0,
+			}
+		}
+	}
+
+	impl Drop for OwnerOnlySd {
+		fn drop(&mut self) {
+			// SAFETY: allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW
+			// (LocalAlloc) and freed nowhere else.
+			unsafe { LocalFree(self.0.cast()) };
+		}
+	}
+
+	fn current_user_sid() -> io::Result<String> {
+		let mut token: HANDLE = std::ptr::null_mut();
+		// SAFETY: the pseudo-handle from GetCurrentProcess needs no close; `token`
+		// receives a real handle closed below.
+		if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+			return Err(io::Error::last_os_error());
+		}
+		let out = token_user_sid(token);
+		// SAFETY: `token` was opened here and is not used after this.
+		unsafe { CloseHandle(token) };
+		out
+	}
+
+	fn token_user_sid(token: HANDLE) -> io::Result<String> {
+		let mut len: u32 = 0;
+		// SAFETY: the sizing call is *expected* to fail; it only writes `len`.
+		unsafe { GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut len) };
+		if len == 0 {
+			return Err(io::Error::last_os_error());
+		}
+		let mut buf = vec![0u8; len as usize];
+		// SAFETY: `buf` is exactly the length the sizing call asked for.
+		if unsafe { GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), len, &mut len) } == 0
+		{
+			return Err(io::Error::last_os_error());
+		}
+		// SAFETY: the buffer now holds a TOKEN_USER whose `Sid` points inside it.
+		let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+		let mut raw: *mut u16 = std::ptr::null_mut();
+		// SAFETY: `sid` is valid for the lifetime of `buf`; `raw` receives a
+		// LocalAlloc'd NUL-terminated string freed below.
+		if unsafe { ConvertSidToStringSidW(sid, &mut raw) } == 0 || raw.is_null() {
+			return Err(io::Error::last_os_error());
+		}
+		let mut n = 0usize;
+		// SAFETY: walking a NUL-terminated buffer the call above guaranteed.
+		while unsafe { *raw.add(n) } != 0 {
+			n += 1;
+		}
+		// SAFETY: `raw[..n]` is the string body, exclusive of the terminator.
+		let s = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(raw, n) });
+		// SAFETY: `raw` came from ConvertSidToStringSidW and is dead after this.
+		unsafe { LocalFree(raw.cast()) };
+		Ok(s)
+	}
+}
+
+#[cfg(windows)]
+fn create_pipe_instance(
+	name: &str,
+	sd: &owner_only::OwnerOnlySd,
+	first: bool,
+) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+	use tokio::net::windows::named_pipe::ServerOptions;
+	let mut attrs = sd.attributes();
+	// SAFETY: `attrs` lives across the call and points at a descriptor `sd` owns.
+	unsafe {
+		ServerOptions::new()
+			.first_pipe_instance(first)
+			.create_with_security_attributes_raw(
+				name,
+				std::ptr::addr_of_mut!(attrs).cast::<std::ffi::c_void>(),
+			)
+	}
+}
+
 pub async fn bind_kern_listener(endpoint: &Endpoint) -> Result<BindOutcome, BindError> {
 	match endpoint {
 		#[cfg(unix)]
@@ -265,13 +402,14 @@ pub async fn bind_kern_listener(endpoint: &Endpoint) -> Result<BindOutcome, Bind
 		}
 		#[cfg(windows)]
 		Endpoint::NamedPipe(name) => {
-			use tokio::net::windows::named_pipe::ServerOptions;
-			match ServerOptions::new()
-                .first_pipe_instance(true)
-                .create(name)
-            {
+			// Fail closed: no descriptor, no pipe. A pipe created with the default
+			// DACL is one any process on the machine can open, which is worse than
+			// not serving — it looks like a daemon and guards nothing.
+			let security = owner_only::OwnerOnlySd::new()?;
+			match create_pipe_instance(name, &security, true) {
                 Ok(server) => Ok(BindOutcome::Bound(LocalListener {
                     pipe_name: name.clone(),
+                    security,
                     current: Some(server),
                 })),
                 Err(e)
@@ -315,6 +453,10 @@ pub struct LocalListener {
 	socket_path: PathBuf,
 	#[cfg(windows)]
 	pipe_name: String,
+	// Kept for the life of the listener: `accept` creates the *next* instance,
+	// and an instance without this descriptor is a hole beside a locked door.
+	#[cfg(windows)]
+	security: owner_only::OwnerOnlySd,
 	#[cfg(windows)]
 	current: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
 }
@@ -342,9 +484,12 @@ impl LocalListener {
 			let server = self.current.take().expect("listener uninitialised");
 			server.connect().await?;
 			// Pre-create the next instance so subsequent accept doesn't race
-			// a fast reconnect.
-			self.current =
-				Some(tokio::net::windows::named_pipe::ServerOptions::new().create(&self.pipe_name)?);
+			// a fast reconnect — with the same descriptor as the first.
+			self.current = Some(create_pipe_instance(
+				&self.pipe_name,
+				&self.security,
+				false,
+			)?);
 			Ok(LocalAdapter::NamedPipe(NamedPipeAdapter::from_server(
 				server,
 			)))

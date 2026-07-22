@@ -1,3 +1,4 @@
+use trnsprt::kern_rpc::{AuthReq, PRINCIPAL_CLI};
 use trnsprt::typed::Endpoint;
 
 use crate::base::util::short_id;
@@ -85,7 +86,7 @@ pub(super) async fn cmd_health(cfg: &crate::config::Config) {
 			h.ingest_queue_refused
 		);
 	}
-	for line in tick_health_lines(daemon_health().await.as_ref()) {
+	for line in tick_health_lines(daemon_health(cfg).await.as_ref()) {
 		println!("{line}");
 	}
 
@@ -106,12 +107,13 @@ pub(super) async fn cmd_health(cfg: &crate::config::Config) {
 
 // The tick queue lives in the daemon; an offline CLI has no view of it. One
 // attempt, no retry: `kern health` must not stall when nothing is serving.
-async fn daemon_health() -> Option<trnsprt::kern_rpc::HealthRes> {
-	use trnsprt::kern_rpc::KernRpcClient;
+async fn daemon_health(cfg: &crate::config::Config) -> Option<trnsprt::kern_rpc::HealthRes> {
+	use trnsprt::kern_rpc::{KernRpcClient, PRINCIPAL_CLI};
 	use trnsprt::typed::{Endpoint, JsonEnvelopeCodec};
 
 	let client = KernRpcClient::<JsonEnvelopeCodec>::connect_endpoint_with_retry(
 		&Endpoint::kern(),
+		&crate::rpc::caller_of(cfg, PRINCIPAL_CLI),
 		1,
 		std::time::Duration::ZERO,
 	)
@@ -225,13 +227,24 @@ fn print_graviton_removed(name: &str) {
 }
 
 pub(super) async fn cmd_graviton(cfg: &crate::config::Config, action: GravitonAction) {
-	graviton_at(cfg, &Endpoint::kern(), action).await
+	graviton_at(
+		cfg,
+		&Endpoint::kern(),
+		&crate::rpc::caller_of(cfg, PRINCIPAL_CLI),
+		action,
+	)
+	.await
 }
 
 // Routed first for the same reason as forget: `with_graph` writes the whole kern
 // map back unguarded, so a local graviton edit beside a serving daemon drops
 // everything that daemon has committed since this process loaded.
-async fn graviton_at(cfg: &crate::config::Config, endpoint: &Endpoint, action: GravitonAction) {
+async fn graviton_at(
+	cfg: &crate::config::Config,
+	endpoint: &Endpoint,
+	auth: &AuthReq,
+	action: GravitonAction,
+) {
 	match action {
 		GravitonAction::Add {
 			name,
@@ -244,6 +257,7 @@ async fn graviton_at(cfg: &crate::config::Config, endpoint: &Endpoint, action: G
 			// embedding here would be a second call to the same model for nothing.
 			match route_to(
 				endpoint,
+				auth,
 				"graviton",
 				serde_json::json!({"action": "add", "name": &name, "text": &text, "mass": mass}),
 			)
@@ -289,6 +303,7 @@ async fn graviton_at(cfg: &crate::config::Config, endpoint: &Endpoint, action: G
 		GravitonAction::Remove { name } => {
 			match route_to(
 				endpoint,
+				auth,
 				"graviton",
 				serde_json::json!({"action": "remove", "name": &name}),
 			)
@@ -337,14 +352,26 @@ fn print_claim_kind_removed(name: &str) {
 }
 
 pub(super) async fn cmd_claim_kind(cfg: &crate::config::Config, action: ClaimKindAction) {
-	claim_kind_at(cfg, &Endpoint::kern(), action).await
+	claim_kind_at(
+		cfg,
+		&Endpoint::kern(),
+		&crate::rpc::caller_of(cfg, PRINCIPAL_CLI),
+		action,
+	)
+	.await
 }
 
-async fn claim_kind_at(cfg: &crate::config::Config, endpoint: &Endpoint, action: ClaimKindAction) {
+async fn claim_kind_at(
+	cfg: &crate::config::Config,
+	endpoint: &Endpoint,
+	auth: &AuthReq,
+	action: ClaimKindAction,
+) {
 	match action {
 		ClaimKindAction::Add { name, description } => {
 			match route_to(
 				endpoint,
+				auth,
 				"claim_kind",
 				serde_json::json!({"action": "add", "name": &name, "description": &description}),
 			)
@@ -362,6 +389,7 @@ async fn claim_kind_at(cfg: &crate::config::Config, endpoint: &Endpoint, action:
 		ClaimKindAction::Rm { name } => {
 			match route_to(
 				endpoint,
+				auth,
 				"claim_kind",
 				serde_json::json!({"action": "rm", "name": &name}),
 			)
@@ -472,6 +500,7 @@ mod cmd_tests {
 		claim_kind_at(
 			&cfg,
 			&ep,
+			&crate::test_support::test_caller(),
 			ClaimKindAction::Add {
 				name: key.into(),
 				description: "a custom kind".into(),
@@ -485,7 +514,13 @@ mod cmd_tests {
 			"Add persists the claim kind onto the root",
 		);
 
-		claim_kind_at(&cfg, &ep, ClaimKindAction::Rm { name: key.into() }).await;
+		claim_kind_at(
+			&cfg,
+			&ep,
+			&crate::test_support::test_caller(),
+			ClaimKindAction::Rm { name: key.into() },
+		)
+		.await;
 		let g = load_graph(&cfg);
 		assert!(
 			!g.root.claim_kinds.contains_key(key),
@@ -509,6 +544,7 @@ mod cmd_tests {
 		claim_kind_at(
 			&cfg,
 			&ep,
+			&crate::test_support::test_caller(),
 			ClaimKindAction::Add {
 				name: "custom_test_kind".into(),
 				description: "a custom kind".into(),
@@ -554,6 +590,7 @@ mod cmd_tests {
 		graviton_at(
 			&cfg,
 			&ep,
+			&crate::test_support::test_caller(),
 			GravitonAction::Remove {
 				name: "docs".into(),
 			},
@@ -783,8 +820,7 @@ async fn cmd_hub_merge(src: &str, dst: &str) {
 		}
 	}
 	for root in [&src_root, &dst_root] {
-		let endpoint = trnsprt::typed::Endpoint::kern_for(root);
-		if crate::hub::node::probe(&endpoint).await {
+		if crate::hub::node::probe(root).await {
 			eprintln!(
 				"merge: a daemon still serves {} — stop it first",
 				root.display()
