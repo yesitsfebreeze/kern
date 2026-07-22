@@ -2,6 +2,43 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 94 closed: a deduped near-duplicate's alternate wording now
+  reaches the lexical index, as part of the survivor's one document.
+
+  The item was real — the first of this run's slices where the premise survived
+  contact. Measured before touching anything: the wording sits on a `Rephrase`
+  reason with `vector.len() == 0`, `reason_idx` empty, and the lexical index
+  answering nothing for a term only the merged document used. The query that
+  proves it: over a corpus where twenty fillers sit nearer the query vector,
+  `velocipede outbuilding` returned twenty fillers and never the survivor that
+  had swallowed those exact words.
+
+  **The remedy the item named would have made it worse.** It asked for "one
+  `lex.insert` of the rephrase text against the survivor's id". The index is
+  keyed by entity id and replaces on insert, so that would have swapped the
+  survivor's own wording out for the alternate's — a lateral move, not an
+  addition. Shipped instead: one document per entity, statements plus every
+  `Rephrase` text, which also settles "does it appear twice" structurally rather
+  than by a dedup rule.
+
+  Lexical only, no vector for the alternate: both dedup gates reach
+  `merge_duplicate` without an embedder, and `Mode::Hybrid` never reads
+  `reason_idx` anyway. The dense gap was the small one — two texts merge only
+  when their vectors are already within threshold.
+
+  **What did not move, and the honest reason.** Recall is unchanged at
+  0.9306 / 0.9722 / 0.9471: the e2e corpus has no near-duplicate pair, so no
+  `Rephrase` is minted and every document is byte-identical. Two probes were
+  written and thrown away for testing nothing — `kern search` turns out to be
+  pure vector and never reads the lexical index, and an "appears once" assertion
+  passed while reverted because the shared words carried it. Both were caught by
+  the revert step, not by reading. The residual is named in the item: the fix
+  makes the wording a *candidate*, and `fuse_hybrid_seeds` then re-ranks every
+  seed by the query cosine that failed to find it, which is item 61's question.
+
+  Decided by: verify-before-claiming — the item's own proposed fix was a claim
+  about code, and reading the index it named is what showed it backwards.
+
 - 2026-07-22 — merged item 92's closure. 195 + 2 + this one = 198, by union
   rebuild; the duplicate-94 renumber survived the merge and `### 96` is now
   unique.

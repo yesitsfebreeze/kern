@@ -433,6 +433,8 @@ pub(crate) fn degrade_entity_reasons(g: &mut GraphGnn, kern_id: &str, id: &str) 
 			if let Some(kern) = g.kerns.get_mut(kern_id) {
 				remove_reason(kern, rid);
 			}
+			// A degraded Rephrase takes its alternate wording out of the index with it.
+			crate::base::lexical::reindex_entity(g, kern_id, id);
 			removed += 1;
 		} else {
 			let lamport = g.bump_lamport();

@@ -438,7 +438,7 @@ auto-distilled claims out of retrieval until a human curates them. No
 
 ### 24. RPC socket has no auth `[surface]`
 
-`FEATURES.md:674-675`. The missing auth is the same boundary as 18's
+`FEATURES.md:677-678`. The missing auth is the same boundary as 18's
 caller-asserted principals — decide them together or the principal stops at the
 MCP surface only. The item's second half is **retired 2026-07-21 — verified
 false**: `KernRpc` does not mirror MCP 1:1 and never did. The contract is four
@@ -821,7 +821,7 @@ longer takes maintenance with it. The cost is quadratic in entities because
 (`src/gnn/graph.rs:133-167`) which every `try_forward_graph` then multiplies
 (`src/gnn/gcn.rs:44-45`) — while the real graph is sparse, since ingest gives
 each entity at most one similarity edge (`add_similarity_reason`,
-`src/base/accept.rs:378`). A sparse adjacency would make training linear in
+`src/base/accept.rs:380`). A sparse adjacency would make training linear in
 edges instead of quadratic in nodes, but it changes the numerics the ranking
 reads, so it is its own item with its own recall gate, not a rider on this one.
 Also unaddressed: `gnn_train_refused` reaches MCP health only — `kern status`
@@ -958,7 +958,7 @@ one producer that must not be refused waits instead — `submit` awaits capacity
 (`src/ingest/file_watcher.rs:84`), because a watcher record has no durable
 backstop; the MCP RAM-queue fallback gets a `tool_error`
 (`src/mcp/tools_mutate.rs:331`). Still distinct from the *tick* queue, which is
-bounded at 512 (`FEATURES.md:434-435`).
+bounded at 512 (`FEATURES.md:437-438`).
 
 Remaining, and the reason this item is narrowed rather than deleted: **the
 distill leg has no timeout budget** (no `timeout` in
@@ -987,34 +987,34 @@ Recorded in `FEATURES.md` gap blocks, planned nowhere:
   **(measured and retired 2026-07-22 — the width is real and unbounded, but it
   costs a linear ~2% at the widths the graph reaches, and the scan the wording
   blames is not where even that goes).** The location holds:
-  `route_to_child_id` (`src/base/accept.rs:880`) is a linear scan over the
+  `route_to_child_id` (`src/base/accept.rs:882`) is a linear scan over the
   parent's loaded named children against each child's stored `graviton_vec`,
-  reached from `route_entity` (`src/base/accept.rs:218`) once per accepted
+  reached from `route_entity` (`src/base/accept.rs:220`) once per accepted
   entity — per distilled claim and per chunk (`src/ingest/place.rs:133`,
   `src/ingest/place.rs:212`) — descending up to `MAX_ACCEPT_DEPTH`, in practice
   two levels. Unnamed children are capped at one per parent on the routing path
-  by `get_or_spawn_unnamed_child` (`src/base/accept.rs:642`, guarded by
-  `src/base/accept.rs:932`); only tick clustering makes more, one per spawnable
+  by `get_or_spawn_unnamed_child` (`src/base/accept.rs:644`, guarded by
+  `src/base/accept.rs:934`); only tick clustering makes more, one per spawnable
   cluster and deliberately (`src/tick.rs:196`).
 
   Instrument: `tests/route_fanout.rs`, release, `--ignored`. Fan-out costs
   **0.14-0.18us per child** across runs, of an accept that costs **1.4-2.1ms**
   at 20k entities — 0.5% at width 64, ~5% at 512, ~24% at 4096. The accept is
   dominated by the two HNSW searches it runs (the dedup gate at
-  `src/base/accept.rs:39`, the similarity reason at `src/base/accept.rs:314`)
+  `src/base/accept.rs:39`, the similarity reason at `src/base/accept.rs:316`)
   plus two index inserts, which is why width has to reach the thousands before
   it registers. A named/unnamed A/B over the same walk — identical descent,
   cosine skipped — attributes **-0.009, -0.001 and +0.003us per child** to the
   `graviton_vec` comparison on three runs: zero every time. What the width actually buys is two
-  `Vec<String>` clones per descent (`src/base/accept.rs:216`,
-  `src/base/accept.rs:681`) and a linear resident-map probe for the generic
+  `Vec<String>` clones per descent (`src/base/accept.rs:218`,
+  `src/base/accept.rs:683`) and a linear resident-map probe for the generic
   child; the comparison the bullet named is free.
 
   Nothing caps named children per parent, and unlike the other two claims this
   one survives measurement. Only two things create a child with a routable
-  `graviton_vec`: `add_graviton_with_mass` (`src/base/accept.rs:754`),
-  human-declared and root-only, and tick naming (`src/tick/tasks.rs:236`), whose
-  result `promote_to_root_if_generic` (`src/base/accept.rs:819`) lifts to root.
+  `graviton_vec`: `add_graviton_with_mass` (`src/base/accept.rs:756`),
+  human-declared and root-only, and tick naming (`src/tick/tasks.rs:239`), whose
+  result `promote_to_root_if_generic` (`src/base/accept.rs:821`) lifts to root.
   Driving that real accept → cluster → name → promote loop, root fan-out tracks
   distinct cohesive topics very nearly 1:1 — 8 topics -> 8 children, 64 -> 55,
   256 -> 191. `GRAVITON_DEDUP_THRESHOLD` collapses only topics whose graviton
@@ -1034,9 +1034,9 @@ Recorded in `FEATURES.md` gap blocks, planned nowhere:
 - `Entity` is a ~30-field flat struct (serialization cost on every store round
   trip) and `Kern` carries no per-kern stats — mean heat, fill ratio — that
   clustering could reuse (`FEATURES.md:90-92`).
-- DiskANN is build-once; the lexical index is RAM-only (`FEATURES.md:248-249`).
+- DiskANN is build-once; the lexical index is RAM-only (`FEATURES.md:251-252`).
 - LMDB compaction is manual and offline-only, and is the only way to shrink the
-  high-water mark (`FEATURES.md:319-321`).
+  high-water mark (`FEATURES.md:322-324`).
 
 ### 32. Tree depth is an unlisted eviction bias `[lifecycle]`
 
@@ -1241,7 +1241,7 @@ fallback and no way to distinguish discovery-failed from no-peers-present
 
 `TcpStream::connect` per call at `src/gossip/transport.rs:37` (`send_msg`) and
 `:45` (`send_and_receive`). No pooling. Separately, the `trnsprt` client has no
-pooling either (`FEATURES.md:961-962`) — that one is not gossip and is not gated
+pooling either (`FEATURES.md:964-965`) — that one is not gossip and is not gated
 on 33.
 
 ### 47. Hub phase 3: gossip moves hub-side `[hub]`
@@ -1257,7 +1257,7 @@ port-clash validation in `src/config/serve.rs` to collapse. (Corrected again
 item 84 owns.)
 
 Beside it: **hub↔node version skew is unmanaged** beyond same-binary spawning
-(`FEATURES.md:1067-1068`).
+(`FEATURES.md:1070-1071`).
 
 ### Decisions owed before the federation build
 
@@ -1294,7 +1294,7 @@ retired:** `CHANGELOG.md` 2026-07-20 shipped chunk external ids keyed on the ful
 source identity (`source_id()` + chunk index, not the bare section), and CLI
 `kern ingest` deriving its inline source hash from the text. What remains is the
 *dedup* key, not the external id. Beside it: the dedup threshold is global, not
-per-kind (`FEATURES.md:416`).
+per-kind (`FEATURES.md:419`).
 
 ### 49. The distill prompt is one-shot and global `[ingest]`
 
@@ -1330,7 +1330,7 @@ today.
 
 ### 51. Require reason text on supersede `[ingest]`
 
-`ReasonKind::Supersedes` edges are minted at `src/base/accept.rs:541` and `:636`
+`ReasonKind::Supersedes` edges are minted at `src/base/accept.rs:543` and `:638`
 with `fallback_label()` text (`src/base/types.rs:103`), never a caller-supplied
 rationale. The *why* is the thing the graph exists to hold.
 
@@ -1340,8 +1340,8 @@ rationale. The *why* is the thing the graph exists to hold.
 source at `src/mcp/tools_admin.rs:116`" with "chunk + mean-pool" as the unbuilt
 upgrade path. Both halves moved in `08c9971`: the acknowledgement comment was
 deleted, and chunk + mean-pool **shipped** for the multi-line case —
-`seed_examples` (`src/base/accept.rs:715-727`) splits a seed on newlines and
-`mean_pool` (`:718`) averages the per-line embeddings, wired at
+`seed_examples` (`src/base/accept.rs:717-729`) splits a seed on newlines and
+`mean_pool` (`:720`) averages the per-line embeddings, wired at
 `src/mcp/tools_admin.rs:119-136`. Line 116 now carries the mean-pool rationale,
 i.e. the opposite of what it was cited for.
 
@@ -1353,7 +1353,7 @@ newline one, and is still blocked on a real document long enough to truncate.
 
 ### 53. Clustering is vector-only `[lifecycle]`
 
-No semantic or structural features (`FEATURES.md:499`), and naming plus
+No semantic or structural features (`FEATURES.md:502`), and naming plus
 enrich are a cold LLM call per kern. The adopted-but-unbuilt upgrade is
 thought-level PageRank feeding the split heuristic — high-rank nodes become
 gravitons, bridge nodes become sub-kerns
@@ -1449,28 +1449,62 @@ What the instrument still cannot judge, and what that costs: the fake embedder i
 bag-of-words, so a change that only a real embedding model would reward looks
 neutral here. Item 64's stemmer swap is the clearest case.
 
-### 94. A near-duplicate's alternate wording is stored but indexed nowhere `[retrieval]`
+### 94. A near-duplicate's alternate wording is stored but indexed nowhere `[retrieval]` — CLOSED 2026-07-22
 
-Found 2026-07-21 while closing item 91, and *not* caused by it: item 91 removed a
-lexical posting that named a discarded id, and this is what was always missing
-underneath. When either dedup gate merges, `merge_duplicate`
-(`src/base/accept.rs:178-197`) keeps the incoming wording on a `Rephrase` reason
-and nothing else. That reason is minted with `vector: Vec::new()` (`:178`), and
-the tick's enrichment pass returns early unless `kern.entities` can `get` the
-reason's `to` (`src/tick/tasks.rs:345-348`), which a `Rephrase` deliberately
-leaves empty — so that wording enters neither `LexicalIndex` nor `reason_idx`.
-A user who phrases a recall query in the *merged* document's words, not the
-survivor's, gets nothing back, and every dedup widens that. Both gates
-have behaved this way since dedup existed; the fix is one `lex.insert` of the
-rephrase text against the **survivor's** id, in `merge_duplicate` where both
-gates already meet.
+The premise held. Confirmed by measurement before any fix: a dedup of
+`"alpha beta gamma"` and `"alpha beta gamma, restated"` leaves
+`rephrases=[("alpha beta gamma, restated", 0)]` on the survivor —
+stored, `vector.len() == 0` — with `reason_idx` empty and the lexical index
+answering `[]` for `restated` while it answers the survivor for `alpha`. The
+failing query that proves it is real: over a 21-entity corpus where 20 fillers
+sit nearer the query vector, `velocipede outbuilding` — the merged-away
+document's own words — returned twenty fillers and never the survivor.
 
-Ranks first in this tier because it is the only entry here that is a strict
-addition rather than a trade — it adds a posting that names a live entity and
-changes no existing score — and because its blast radius is every merge, not
-one stage of one query shape. Measure it the way this tier requires: the e2e
-corpus has no near-duplicate pair today, so the probe has to be added with the
-fix or the number cannot move either way.
+**The fix the item proposed would have been wrong.** `LexicalIndex` is keyed by
+entity id and `inner_insert` removes before it inserts, so "one `lex.insert` of
+the rephrase text against the survivor's id" would have *replaced* the
+survivor's own posting with the alternate's. Shipped instead: one lexical
+document per entity, `entity_document` (`src/base/lexical.rs:15`), being the
+entity's statements followed by every `Rephrase` text hanging off it. One
+document per id is also the answer to "does the entity appear twice" — BM25
+cannot return one id twice, so no dedup logic is needed at the seed layer.
+
+Lexical only; **no dense vector for the alternate**. `merge_duplicate` is a pure
+graph function reached from both gates and neither has an embedder in hand, so a
+vector would make dedup an I/O operation on the write path, and item 83 already
+names vectors as the largest single holder. It would also buy nothing on the
+default path: only `Mode::Reason` seeds off `reason_idx` (`seed_by_reason`);
+`Mode::Hybrid` never reads it. And the dense gap is the smaller one by
+construction — the two texts merged *because* their vectors were within
+`INGEST_DEDUP_THRESHOLD`, so the survivor's own vector already stands in for the
+alternate. The gap was purely lexical: exact rare terms.
+
+Lifecycle, so the wording cannot outlive its survivor: `reindex_entity`
+(`src/base/lexical.rs:34`) re-derives the document from the graph and is called
+at every site that mints or drops a `Rephrase` — `merge_duplicate`
+(`src/base/accept.rs:199`), the supersede path that consumes one
+(`src/tick/tasks.rs:209`), and `degrade_entity_reasons`
+(`src/commands/graph_ops.rs:437`). GC needed nothing: `remove_entity` already
+calls `lex.remove(id)`, and the wording lives in the survivor's own document.
+`rebuild_from_graph` uses the same builder, or the posting would survive exactly
+until the next reload.
+
+Cost, named: the survivor's `doc_len` grows, so BM25 length normalization
+(`b=0.75`) dilutes the primary wording's own terms a little. That is the trade
+for the alternate being reachable at all.
+
+**What it does not buy, and why the recall number did not move.** Recall is
+unchanged at 0.9306 / 0.9722 / 0.9471 because the e2e corpus has no
+near-duplicate pair, so no `Rephrase` is ever minted and every lexical document
+is byte-identical to what it was. The corpus was deliberately left alone so the
+baseline stays comparable. More importantly, a CLI-level probe cannot show this
+today: `cmd_search` (`src/commands/query.rs:90`) is pure vector and never reads
+the lexical index at all, and `kern query` runs `fuse_hybrid_seeds`, which
+rescores every fused seed by `cosine(qvec, entity.vector)` — so a lexical-only
+hit is re-ranked by exactly the signal that failed to find it and is cut
+whenever the candidate pool overflows the delivery cap. The fix makes the
+wording a *candidate* where it was not one; turning that into a delivered rank
+is item 61's question, not this one.
 
 ### 61. Move `merge_hits` onto RRF `[retrieval]`
 
@@ -1496,7 +1530,7 @@ via health and `kern://health`
 Three that must be judged together, since each moves the others:
 min-max normalize `apply_boosts`, which is purely additive and unnormalized today
 (`score * confidence + boost + fact_bonus`, `src/retrieval/score.rs:90-102`); swap
-the hand-rolled stemmer (`src/base/lexical.rs:206`, no stopword list, no
+the hand-rolled stemmer (`src/base/lexical.rs:244`, no stopword list, no
 `rust-stemmers` in `Cargo.toml`) for `rust-stemmers` 1.2.0 + stopwords, which
 needs a BM25 rebuild; and validate-or-remove GNN reranking, whose only expression
 is the 0.6 blend in item 61.
@@ -1517,7 +1551,7 @@ never auto-tuned (`FEATURES.md:216`).
 
 Its recall floor is too low without a rescoring pass; deliberately excluded from
 `parse` (`src/quant.rs:20-21`). Beside it: no int4 path and the quantization
-scale is fixed at encode time (`FEATURES.md:268`).
+scale is fixed at encode time (`FEATURES.md:271`).
 
 ### 69. Speculative decode for the distill leg `[ingest]`
 
@@ -1535,7 +1569,7 @@ contract nobody enforces is a contract nobody has.
 
 ### 93. Line anchors cannot survive a merge, and `docs-check` cannot see it `[process]`
 
-Every citation of the form `` `FEATURES.md:417-418` `` is a bet that nothing is
+Every citation of the form `` `FEATURES.md:420-421` `` is a bet that nothing is
 ever inserted above line 408. `FEATURES.md` only grows, so the bet loses on
 every merge that appends — and when two branches each append and then combine,
 it loses twice over. Four times on 2026-07-21: four anchors, then four more,
@@ -1570,7 +1604,7 @@ standing. `--strict-anchors` makes them fatal, for a CI that has decided to trus
 them — not yet. A nomination a human has adjudicated is silenced in place with a
 trailing `docs-check: anchor-ok` comment, the same idiom as the historical page
 marker, and the marker counts only outside backticks so a page may quote it. The
-paragraph above is the first user of that escape: its `FEATURES.md:417-418` is an
+paragraph above is the first user of that escape: its `FEATURES.md:420-421` is an
 illustration of the disease, not a citation, so it is acquitted rather than fixed
 — and so is this sentence, which repeats it. <!-- docs-check: anchor-ok -->
 
@@ -1583,7 +1617,7 @@ anchors in one `crdts-federation.md` status block are wrong. The 13 false ones
 share one weakness: the anchor is right but the target's distinguishing word is
 under four characters (`acl`, `rrf`, `run_hub`) or is a stem the prose inflects
 (`fn stem` against "stemmer"). Two more are self-inflicted — this item quoting
-`FEATURES.md:417-418` as an example rather than as a citation — and are acquitted
+`FEATURES.md:420-421` as an example rather than as a citation — and are acquitted
 in place, leaving **38 standing, 12 of them false, 32%**. <!-- docs-check: anchor-ok -->
 
 **One measured non-win, recorded rather than buried.** Splitting the camelCase
@@ -1617,7 +1651,7 @@ set.** Precision 27/38 = **71.1% → 26/29 = 89.7%**. False-positive rate **28.9
 92.9%** — *it went down*. The three-character floor that acquits `acl`, `rrf` and
 `hub` also acquits `gpu`, and `gpu` plus `kern` is enough to reach the two-word
 prose bar and silence a genuinely under-covering anchor (this file citing
-`FEATURES.md:590` for three claims that span 581-582). That is the same trade the
+`FEATURES.md:593` for three claims that span 584-585). That is the same trade the
 camelCase note above records, paid a second time, and it is recorded here for the
 same reason. A prose bar of 1 instead of 2 measures 96.3% precision at unchanged
 recall and was **declined**: the truth set holds only five prose-to-prose anchors,
@@ -1956,7 +1990,7 @@ Still open here, and the reason this item does not close: **nothing bounds the
 resident set.** Halving the O(N) term moves the ceiling; it does not install
 one. Also deliberately unclaimed, so that the number above measures one change:
 `do_reembed` seeds `vector` and `gnn_vector` from the same embed
-(`src/tick/tasks.rs:542-543`) and they could share a third allocation until GNN
+(`src/tick/tasks.rs:545-546`) and they could share a third allocation until GNN
 propagation overwrites one — another 76.8 MB at this corpus size.
 
 ### 84. Remaining operational odds and ends `[surface]`
@@ -1977,9 +2011,9 @@ propagation overwrites one — another 76.8 MB at this corpus size.
   requires either promoting them to real per-endpoint config or exposing that
   predicate. Was listed under item 11; it is a different job.
 - Hand-rolled tool schemas; no batch query
-  (`FEATURES.md:633-634`).
+  (`FEATURES.md:636-637`).
 - The LLM client is Ollama-centric with no retry/backoff policy object
-  (`FEATURES.md:907-908`).
+  (`FEATURES.md:910-911`).
 - ~~Watcher `.gitignore` parsing is approximate; no rename tracking~~ **(retired
   2026-07-21 — verified false on both counts).** `IgnoreRules` builds a real
   `Gitignore` through ripgrep's `ignore` crate
@@ -1996,12 +2030,12 @@ propagation overwrites one — another 76.8 MB at this corpus size.
   fires. It sits in this tier and not in tier 1 because the watcher is **off by
   default** — `WatcherConfig::enabled` is `false` unless a `kern.toml` sets it
   (`src/config/watcher.rs:14-16`) — so it is not a default-path defect
-  (`FEATURES.md:1075-1078`).
-- `unnamed` lists only; there is no `promote` (`FEATURES.md:806`).
+  (`FEATURES.md:1078-1081`).
+- `unnamed` lists only; there is no `promote` (`FEATURES.md:809`).
 - GNN has no GPU path, weights are per-kern rather than shared, and the objective
-  is link-prediction only (`FEATURES.md:590-591`).
+  is link-prediction only (`FEATURES.md:593-594`).
 - Under WSL2 NAT a loopback Ollama URL must be hand-pinned; kern neither rewrites
-  nor warns (`FEATURES.md:1115-1117`).
+  nor warns (`FEATURES.md:1118-1120`).
 - RPC socket bind→chmod race — sub-millisecond, umask default — recorded as an
   accepted risk (`concepts/security.mdx:40-43`); revisit only if the umask
   alternative stops being worse.
@@ -2031,7 +2065,7 @@ and item 1's instrument staying the scorer.
   corrected in the same change) the `id` path in `query` bypassed every filter
   (item 18); `howto/mcp.mdx:50` now says every filter applies to an `id` read.
 - (retired 2026-07-21 — the tables were filled in) the `move` MCP tool is listed
-  in `README.md:352` and `FEATURES.md:616`, and the site's count is now thirteen
+  in `README.md:352` and `FEATURES.md:619`, and the site's count is now thirteen
   (`howto/mcp.mdx:5, :75`), so the "Eleven tools" note is retired with it.
   <!-- docs-check: anchor-ok -->
 - `docs/kern/README.md:60` declares the directory holds "never plans"; five of
@@ -2257,7 +2291,7 @@ an overall eval score that makes specialization worth funding.
   a real `kern get` printing the expired fact with no marker. The bi-temporal
   escape is now pinned at the call site too, not only on the predicate:
   `retrieve_drops_an_expired_claim_from_the_default_path`
-  (`src/retrieval/query.rs:468`) runs the same corpus twice and asserts an
+  (`src/retrieval/query.rs:609`) runs the same corpus twice and asserts an
   `as_of` query still returns the since-expired claim; neutering the early
   return in `drop_expired` fails that half alone. What this did **not** buy is
   item 18's fourth bullet — that bullet wants ACL enforcement on the id path,
@@ -2447,7 +2481,7 @@ number ("blocked on item 13") and renumbering would silently repoint them.
 - **Pulse and Question senders are live.** `broadcast_pulse` / `broadcast_q` built
   in `start_gossip` (`src/commands.rs:979-1053`), pulse wired into the maintenance
   tick (`:721`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
-  `broadcast_q` invoked by `do_resolve` (`src/tick/tasks.rs:383`), `handle_question`
+  `broadcast_q` invoked by `do_resolve` (`src/tick/tasks.rs:386`), `handle_question`
   live-dispatched (`src/gossip/handler.rs:44`).
 - **`Fetch` is wired** — `wire_fetch` installs the handler at
   `src/commands.rs:1042`. Single-id, so it is not anti-entropy (item 36), but it
