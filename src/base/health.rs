@@ -1,6 +1,10 @@
 use crate::base::graph::GraphGnn;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+// `Default` is what lets a caller name the one or two counters it cares about
+// without reading the process statics `graph_health_stats` reads — which is the
+// difference between a test that is runner-independent and one that reds the
+// moment another test in the same process increments a counter.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HealthStats {
 	pub kerns: usize,
 	pub entities: usize,

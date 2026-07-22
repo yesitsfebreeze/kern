@@ -18,7 +18,7 @@ convergence metric so we can answer "is the bell curve actually converging?".
 > `created_at` — is older than 7 days, Facts/Documents immune — thresholds at
 > `src/base/constants.rs:101-103`), spilling to the capped cold tier first.
 > Rows the cold tier's FIFO cap then drops are counted and reported
-> (`src/base/store.rs:718`, `src/base/health.rs:12`), and a maintenance task
+> (`src/base/store.rs:718`, `src/base/health.rs:16`), and a maintenance task
 > that panics is contained and counted rather than killing decay, GC, clustering
 > and persist for the rest of the process (`src/tick.rs:67`,
 > `src/tick/queue.rs:152`). So health answers what the loop destroyed and where

@@ -38,6 +38,9 @@ pub(super) fn cmd_compress(src: &str, mode_str: &str, out: Option<&str>) {
 pub(super) async fn cmd_health(cfg: &crate::config::Config) {
 	let g = load_graph(cfg);
 	let h = crate::base::health::graph_health_stats(&g);
+	// Asked once, before anything prints: the degradation lines below need it too,
+	// not just the tick lines.
+	let d = daemon_health(cfg).await;
 
 	println!("data_dir:    {}", g.data_dir);
 	if h.gravitons.is_empty() {
@@ -63,30 +66,10 @@ pub(super) async fn cmd_health(cfg: &crate::config::Config) {
 			""
 		},
 	);
-	println!("evicted:     {} cold rows dropped", h.cold_evicted);
-	// Fail-open is the policy; invisible fail-open is the defect (ROADMAP item 7).
-	// Print the line only when something actually degraded, so a healthy kern stays
-	// quiet and a nonzero count is impossible to scroll past.
-	let degraded = h.query_dim_rejected
-		+ h.below_floor_deliveries
-		+ h.clock_skew_skips
-		+ h.ingest_dropped_chunks
-		+ h.remote_cap_dropped
-		+ h.unspilled_drops
-		+ h.ingest_queue_refused;
-	if degraded > 0 {
-		println!(
-			"degraded:    {} off-model queries dropped, {} below-floor deliveries, {} clock-skewed entities GC could not age, {} chunks lost to embedding, {} remote ids refused at the cap, {} dropped with nowhere to spill, {} ingest jobs refused at the queue bound",
-			h.query_dim_rejected,
-			h.below_floor_deliveries,
-			h.clock_skew_skips,
-			h.ingest_dropped_chunks,
-			h.remote_cap_dropped,
-			h.unspilled_drops,
-			h.ingest_queue_refused
-		);
+	for line in degradation_lines(&h, d.as_ref()) {
+		println!("{line}");
 	}
-	for line in tick_health_lines(daemon_health(cfg).await.as_ref()) {
+	for line in tick_health_lines(d.as_ref()) {
 		println!("{line}");
 	}
 
@@ -122,6 +105,67 @@ async fn daemon_health(cfg: &crate::config::Config) -> Option<trnsprt::kern_rpc:
 	client.health().await.ok().filter(|h| h.ok)
 }
 
+// The store-and-fail-open half of the surface. Every number here is scoped to
+// the process that reads it — seven `AtomicU64` statics plus a `Store` field
+// `Store::open` zeroes — and nothing on the `kern health` path searches, scores,
+// ticks, ingests or merges, so this process's copies can only be zero. A serving
+// daemon's are the only true ones, so prefer them (ROADMAP item 100); the local
+// values still stand when nothing is serving. Pure over its inputs, like
+// `tick_health_lines`: reading the statics here would make any test of it depend
+// on what else ran in the same process.
+fn degradation_lines(
+	h: &crate::base::health::HealthStats,
+	d: Option<&trnsprt::kern_rpc::HealthRes>,
+) -> Vec<String> {
+	let [cold_evicted, query_dim_rejected, below_floor_deliveries, clock_skew_skips, ingest_dropped_chunks, remote_cap_dropped, unspilled_drops, ingest_queue_refused] =
+		match d {
+			Some(d) => [
+				d.cold_evicted,
+				d.query_dim_rejected,
+				d.below_floor_deliveries,
+				d.clock_skew_skips,
+				d.ingest_dropped_chunks,
+				d.remote_cap_dropped,
+				d.unspilled_drops,
+				d.ingest_queue_refused,
+			],
+			None => [
+				h.cold_evicted,
+				h.query_dim_rejected,
+				h.below_floor_deliveries,
+				h.clock_skew_skips,
+				h.ingest_dropped_chunks,
+				h.remote_cap_dropped,
+				h.unspilled_drops,
+				h.ingest_queue_refused,
+			],
+		};
+	let mut lines = vec![format!("evicted:     {cold_evicted} cold rows dropped")];
+	// Fail-open is the policy; invisible fail-open is the defect (ROADMAP item 7).
+	// Print the line only when something actually degraded, so a healthy kern stays
+	// quiet and a nonzero count is impossible to scroll past.
+	let degraded = query_dim_rejected
+		+ below_floor_deliveries
+		+ clock_skew_skips
+		+ ingest_dropped_chunks
+		+ remote_cap_dropped
+		+ unspilled_drops
+		+ ingest_queue_refused;
+	if degraded > 0 {
+		lines.push(format!(
+			"degraded:    {} off-model queries dropped, {} below-floor deliveries, {} clock-skewed entities GC could not age, {} chunks lost to embedding, {} remote ids refused at the cap, {} dropped with nowhere to spill, {} ingest jobs refused at the queue bound",
+			query_dim_rejected,
+			below_floor_deliveries,
+			clock_skew_skips,
+			ingest_dropped_chunks,
+			remote_cap_dropped,
+			unspilled_drops,
+			ingest_queue_refused
+		));
+	}
+	lines
+}
+
 fn tick_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> {
 	let Some(h) = h else {
 		return vec!["tick:        (no daemon serving this directory)".to_string()];
@@ -143,6 +187,78 @@ fn tick_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> {
 		lines.push(format!("  last failure: {}", h.last_task_failure));
 	}
 	lines
+}
+
+#[cfg(test)]
+mod degradation_lines_tests {
+	use super::*;
+	use crate::base::health::HealthStats;
+	use trnsprt::kern_rpc::HealthRes;
+
+	// What a CLI can actually see of the eight: it opened its own store and ran
+	// no query, no tick and no ingest, so every one of them is zero.
+	fn blind_cli() -> HealthStats {
+		HealthStats::default()
+	}
+
+	#[test]
+	fn a_serving_daemons_counts_win_over_this_processs_zeros() {
+		let daemon = HealthRes {
+			ok: true,
+			cold_evicted: 3,
+			ingest_dropped_chunks: 9,
+			..Default::default()
+		};
+		let lines = degradation_lines(&blind_cli(), Some(&daemon));
+		assert_eq!(lines[0], "evicted:     3 cold rows dropped");
+		assert!(
+			lines[1].contains("9 chunks lost to embedding"),
+			"the daemon's drops reach the operator reading them: {lines:?}"
+		);
+	}
+
+	#[test]
+	fn a_local_count_is_not_printed_over_a_serving_daemons() {
+		// The inverted case, which a merge of the two sources would pass: the
+		// daemon is healthy and this process is not, and the daemon is what runs.
+		let local = HealthStats {
+			cold_evicted: 4,
+			unspilled_drops: 6,
+			..Default::default()
+		};
+		let daemon = HealthRes {
+			ok: true,
+			..Default::default()
+		};
+		let lines = degradation_lines(&local, Some(&daemon));
+		assert_eq!(lines[0], "evicted:     0 cold rows dropped");
+		assert_eq!(lines.len(), 1, "nothing degraded over there: {lines:?}");
+	}
+
+	#[test]
+	fn with_nothing_serving_the_local_counts_still_stand() {
+		let local = HealthStats {
+			cold_evicted: 2,
+			unspilled_drops: 5,
+			..Default::default()
+		};
+		let lines = degradation_lines(&local, None);
+		assert_eq!(lines[0], "evicted:     2 cold rows dropped");
+		assert!(
+			lines[1].contains("5 dropped with nowhere to spill"),
+			"the offline path is unchanged: {lines:?}"
+		);
+	}
+
+	#[test]
+	fn a_healthy_kern_prints_no_degraded_line_from_either_source() {
+		assert_eq!(degradation_lines(&blind_cli(), None).len(), 1);
+		let healthy = HealthRes {
+			ok: true,
+			..Default::default()
+		};
+		assert_eq!(degradation_lines(&blind_cli(), Some(&healthy)).len(), 1);
+	}
 }
 
 // Daemon must be stopped: a live daemon would race and re-persist the bloated graph.

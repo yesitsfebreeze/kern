@@ -2,6 +2,57 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 100 closed: `kern health` prints the serving daemon's
+  degradation counts instead of its own process's structural zeros. Eight
+  numbers — the seven fail-open `AtomicU64` statics summed into `degraded:` and
+  `evicted:`, a `Store` field every `Store::open` zeroes — were read out of the
+  CLI's own process, which opens a store and then runs no search, no scoring, no
+  tick, no ingest and no merge. The `if degraded > 0` branch was not
+  *sometimes* wrong; it was unreachable, and `evicted:` was 0 by construction.
+  The operator's first diagnostic was the one surface that could not report.
+
+  **The daemon's value wins outright; the two are never merged.** A `max()` or a
+  sum reads as the safe choice — neither source can hide a nonzero — and it is
+  the wrong one. These counters are not two samples of one quantity. They are
+  two different processes' records of what *they* degraded, and only one of them
+  is serving the store the operator is asking about. Merging would let a CLI
+  that dropped a query on a dimension mismatch print that drop as though the
+  daemon had suffered it, and a health surface that can attribute a fault to the
+  wrong process is a surface an operator has to second-guess — which is the
+  whole failure being fixed, in a new place. So `degradation_lines` takes the
+  daemon's eight whole when a daemon answers and the local eight whole when none
+  does, and the test that carries the decision is the inverted one: local
+  counters nonzero, daemon healthy, and the printed answer is the daemon's
+  zeros. It is the only formatter test a `max()` implementation fails, which was
+  confirmed by writing that `max()` and watching exactly that test red.
+
+  **The e2e driver the item specified could not be driven, and the item was
+  wrong about it rather than the code.** `ingest_queue_refused` was the obvious
+  lever — flood the queue past `QUEUE_CAP` from the CLI and read the refusal
+  back — but nothing on the intake path calls the refusing enqueue; the one
+  producer that must not be refused awaits capacity instead. A CLI flood cannot
+  move it, so the counter was replaced with `ingest_dropped_chunks`, which a
+  routed `intake drain` moves in the daemon: the fake LLM refuses any embed
+  carrying `FAIL_MARKER` with a permanent 400, the distilled claims fail to
+  embed, and the drops are counted over there. Three claims, and the test
+  asserts **exactly 3** rather than "nonzero" — a blinded CLI cannot hold that
+  number and a constant in the format string cannot match it. It also reads
+  `kern health` once *before* the drain and requires the line to be absent, so
+  the surface is shown tracking daemon state rather than merely printing.
+
+  The formatter is pure over its two arguments — no static reads, no store — for
+  the reason item 92 recorded: a test that reads a process static passes under
+  `nextest`'s fork-per-test and reds under `cargo test --locked`'s one process
+  the moment another test increments it. `HealthStats` gained `Default` only so
+  those tests can name the one or two counters they care about; nothing in the
+  tree constructs one, `graph_health_stats` still builds every field explicitly,
+  and the derive is reachable from test code alone.
+
+  Decided by: fix-the-root — the surface was not stale, it was reading the wrong
+  process, and a merge would have preserved that error while hiding it behind a
+  number that is never zero.
+
+
 - 2026-07-22 — merged item 26, which closes it, and with it the last of the
   retrieval performance items. 225 + 1 + this one = 227.
 
@@ -1669,7 +1720,7 @@
 
   Not closed, and named rather than waved off: `kern://local/health` and
   `kern://local/kerns` count every entity and reason, scoped included
-  (`graph_health_stats`, `src/base/health.rs:44-50`), so a scoped ingest moves a
+  (`graph_health_stats`, `src/base/health.rs:48-54`), so a scoped ingest moves a
   number. No ids, no text, and the same count the operational `health` tool
   reports — narrowing it is the separate question of what an unauthenticated
   operational surface may say. Gossip egress still replicates scoped entities

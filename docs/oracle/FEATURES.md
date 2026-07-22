@@ -332,7 +332,7 @@ and cold tier live together. Readers never block, writers serialize.
 
 **Gaps.** Single-writer is enforced, not assumed — `src/base/lock.rs` is an advisory
 lock `reembed`, `gc` and `compact` claim or refuse — but `cmd_hub_merge`
-(`src/commands/admin.rs:799`) and `maybe_self_heal_store` (`src/commands.rs:446`)
+(`src/commands/admin.rs:915`) and `maybe_self_heal_store` (`src/commands.rs:446`)
 still `save_graph_unguarded` holding none. No WAL but LMDB's; compaction is offline.
 
 ---
@@ -525,8 +525,8 @@ maintenance tick gated by `STIGMERGY_GC_INTERVAL = 1 hour` and clock validity.
 
 Past the cold cap the drop is **counted, not silent**: `cold_cap` increments
 `Store::cold_evicted` (`src/base/store.rs:718`) per deleted row and warns once
-per sweep, and `health` reports the running total on all three surfaces (MCP
-JSON, `HealthRes`, `kern health`). The bound itself is unchanged and intentional.
+per sweep, and `health` reports that total on all three surfaces (MCP JSON,
+`HealthRes`, `kern health` — the daemon's, item 100). The cap stays intentional.
 
 **Where.** `src/tick/stigmergy.rs`, `src/base/reason.rs` (`remove_entity`
 cascade-deletes its edges), `src/base/store.rs` (cap + eviction counter).
@@ -622,7 +622,7 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 | `degrade` | `tools_mutate.rs` | Down-weight edges along a bad retrieval path (`DEGRADE_*` decay). Returns `decayed_edges` and `removed_edges` — the reap count exists so a CLI `degrade` routed through the daemon can print what the local path prints. |
 | `move` | `tools_mutate.rs:491` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
 | `promote` | `tools_mutate.rs` | Release a thought a review policy is holding: flips `ReviewState::Pending` to `Active`, so a `query {exclude_pending: true}` returns it again. The release half of the lifecycle `[ingest] review_policy` opens; idempotent, returning `promoted: false` on an already-active row rather than failing, and a hard `thought not found` on an id nothing resolves — a silent success would tell a curator a claim was released while it is still held. Shares `graph_ops::promote_entity` with the CLI's no-daemon fallback so the routed and local writes cannot disagree. **Authority: this is a curation decision made on a declared principal** — a wider claim than `intake drain`, which asserts none — and since 2026-07-22 the socket authenticates the *connection*, proving a uid rather than which of that uid's programs asked, so the gate it rides on is still whatever `ROADMAP.md` item 24 lands. |
-| `health` | `tools_admin.rs:83` | Graph stats (gravitons/kerns/entities/reasons/unnamed/claim_kinds) **plus the degradation surface**: `queue_depth`, `tasks_done`, `task_avg_ms`, `task_panics`, `last_task_panic`, `task_failures`, `last_task_failure`, `cold_evicted`, `embed_model`, `embed_dim`, `embed_mismatch`, and the eight fail-open counters — `query_dim_rejected`, `below_floor_deliveries`, `clock_skew_skips`, `ingest_dropped_chunks`, `remote_cap_dropped`, `unspilled_drops`, `ingest_queue_refused`, `gnn_train_refused` — each a path that returns something rather than erroring, so the count is the only way to tell a degraded result from a good one (`Server::health_stats`, `src/mcp.rs:117`). The first seven come off `HealthStats` (`src/base/health.rs:36`); `gnn_train_refused` is read straight from the trainer's own global (`src/mcp.rs:147`), which is why only a daemon's answer carries it. |
+| `health` | `tools_admin.rs:83` | Graph stats (gravitons/kerns/entities/reasons/unnamed/claim_kinds) **plus the degradation surface**: `queue_depth`, `tasks_done`, `task_avg_ms`, `task_panics`, `last_task_panic`, `task_failures`, `last_task_failure`, `cold_evicted`, `embed_model`, `embed_dim`, `embed_mismatch`, and the eight fail-open counters — `query_dim_rejected`, `below_floor_deliveries`, `clock_skew_skips`, `ingest_dropped_chunks`, `remote_cap_dropped`, `unspilled_drops`, `ingest_queue_refused`, `gnn_train_refused` — each a path that returns something rather than erroring, so the count is the only way to tell a degraded result from a good one (`Server::health_stats`, `src/mcp.rs:117`). The first seven come off `HealthStats` (`src/base/health.rs:40`), `gnn_train_refused` straight from the trainer's own global (`src/mcp.rs:147`) — but all eight are process-scoped counters read in the *serving* process, which is why only a daemon's answer carries real ones and any other reader reports its own zeros (`ROADMAP.md` item 100). |
 | `graviton` | `tools_admin.rs` | list/add/remove focus attractors (name + text — phrase or full document — + optional mass). Replaced the single per-kern "purpose". |
 | `claim_kind` | `tools_admin.rs` | register/remove claim kinds; registered kinds extend the built-in distill set. |
 | `pulse` | `tools_admin.rs` | Trigger a clustering pass across the tree. |
@@ -789,9 +789,9 @@ Notable:
   rewrite succeeded; a cold-tier failure is reported explicitly (hot graph on the
   new model, cold tier still on the old). Takes the writer lock and refuses
   rather than racing a live daemon.
-- `health` (`admin.rs`) — prints the graph counts plus the degradation lines:
-  cold rows evicted, an embedding-model mismatch warning, the local fail-open
-  counters only when one is nonzero, and — whenever a daemon answers — always
+- `health` (`admin.rs`) — prints the graph counts, an embed-model mismatch
+  warning, `evicted:` and the fail-open `degraded:` line — the daemon's counts
+  when one answers, this process's otherwise (item 100) — and, from a daemon,
   `degraded: N panics | M failures | K refused GNN trainings`, faults named below.
 - `profile` (`profile_cmd.rs`) — runs a query with a `Profiler` timeline.
 - `compress` (`admin.rs`) — compresses vectors with a chosen `QuantizationMode`.
@@ -892,7 +892,7 @@ said so:* a per-origin budget ships and runs, but only on the `Question` path
 (`RateLimiter`, `src/gossip/rate.rs`, 30/min, checked at
 `src/gossip/handler.rs:318`). The `Delta` path — the one that takes the write
 lock — has none, and `origin` is self-declared so the budget is evadable by
-rotating it. No divergence signal at all (`HealthStats`, `src/base/health.rs:4`,
+rotating it. No divergence signal at all (`HealthStats`, `src/base/health.rs:8`,
 has no such field) (`ROADMAP.md` — "Backpressure,
 divergence metric, and delta write-lock starvation"). The unauthenticated
 local-row reach is closed: LWW deltas only touch `remote-*` kerns
