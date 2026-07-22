@@ -1,4 +1,4 @@
-use crate::base::constants::{DEGRADE_DECAY_BASE, DEGRADE_DECAY_POW, DEGRADE_MIN_THRESHOLD};
+use crate::base::constants::{DEGRADE_DECAY_BASE, DEGRADE_DECAY_POW, DEGRADE_FLOOR, DEGRADE_MIN_THRESHOLD};
 use crate::base::graph::GraphGnn;
 use crate::base::math::{average_vec, reason_id};
 use crate::base::reason::{add_reason, remove_entity, remove_reason};
@@ -495,7 +495,7 @@ pub(crate) fn degrade_entity_reasons(g: &mut GraphGnn, kern_id: &str, id: &str) 
 			let producer = g.network_id.clone();
 			if let Some(kern) = g.kerns.get_mut(kern_id) {
 				if let Some(r) = kern.reasons.get_mut(rid) {
-					r.score -= decay;
+					r.score = (r.score - decay).max(DEGRADE_FLOOR);
 					r.score_lamport = lamport;
 					r.score_producer = producer.clone();
 					let lww_value =
@@ -557,6 +557,35 @@ mod tests {
 			survivor.score >= DEGRADE_MIN_THRESHOLD,
 			"survivor stays above the floor"
 		);
+	}
+
+	#[test]
+	fn degrade_clamps_edge_score_at_floor() {
+		// Under current constants DEGRADE_MIN_THRESHOLD (0.05) > DEGRADE_FLOOR (0.0),
+		// so the threshold removes an edge before the clamp can fire on it. The
+		// clamp is defensive: it holds the invariant "no surviving reason score
+		// is below the floor" regardless of the threshold, and becomes live the
+		// moment a score arrives below the floor (e.g. via a gossip merge of a
+		// pre-floor-era value) or the threshold is lowered. Pin the invariant.
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("kx", "");
+		// A survivor well above the threshold, plus a sub-threshold edge that is removed.
+		add_reason(&mut k, edge("a", "b", 1.0));
+		add_reason(&mut k, edge("a", "c", 0.0));
+		g.kerns.insert("kx".into(), k);
+
+		degrade_entity_reasons(&mut g, "kx", "a");
+
+		let kern = g.kerns.get("kx").expect("kern present");
+		for r in kern.reasons.values() {
+			assert!(
+				r.score >= DEGRADE_FLOOR,
+				"surviving reason {} score {} is below the floor {}",
+				r.id,
+				r.score,
+				DEGRADE_FLOOR
+			);
+		}
 	}
 
 	// `kern link` takes no writer lock, so a daemon can commit between its load
