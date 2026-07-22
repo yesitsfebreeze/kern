@@ -311,12 +311,18 @@ fn commit_entity(
 	));
 
 	if !external_id.is_empty() {
+		let reason_text = g
+			.loaded(kern_id)
+			.and_then(|k| k.entities.get(&entity_id))
+			.map(|e| e.text())
+			.unwrap_or_default();
 		reason_ids.extend(supersede(
 			g,
 			kern_id,
 			&entity_id,
 			&thought_vec,
 			&external_id,
+			&reason_text,
 		));
 	}
 
@@ -328,6 +334,7 @@ fn commit_entity(
 	}
 }
 
+#[allow(clippy::too_many_arguments)]
 fn commit_reason(
 	g: &mut GraphGnn,
 	kern_id: &str,
@@ -336,6 +343,7 @@ fn commit_reason(
 	kind: ReasonKind,
 	score: f64,
 	vec: Embedding,
+	text: &str,
 ) -> String {
 	let rid = reason_id(from, to, kind, "", "");
 	let reason = Reason {
@@ -346,7 +354,7 @@ fn commit_reason(
 		to_net_id: String::new(),
 		kind,
 		dirty: false,
-		text: String::new(),
+		text: text.to_string(),
 		vector: vec.clone(),
 		score,
 		score_lamport: 0,
@@ -396,6 +404,7 @@ fn add_similarity_reason(
 			ReasonKind::Similarity,
 			h.score,
 			vec,
+			"",
 		);
 		return vec![rid];
 	}
@@ -431,6 +440,7 @@ fn add_provenance_reason(
 		ReasonKind::Provenance,
 		PROVENANCE_SCORE,
 		vec,
+		"",
 	);
 	vec![rid]
 }
@@ -441,6 +451,7 @@ fn supersede(
 	entity_id: &str,
 	thought_vec: &[f32],
 	external_id: &str,
+	reason_text: &str,
 ) -> Vec<String> {
 	let index_kern_id = g.kern_of_source(external_id).map(|s| s.to_string());
 	let old_id = index_kern_id.as_ref().and_then(|kid| {
@@ -530,6 +541,7 @@ fn supersede(
 		ReasonKind::Supersedes,
 		1.0,
 		vec,
+		reason_text,
 	)]
 }
 
@@ -564,6 +576,7 @@ pub fn supersede_by_contradiction(
 	kern_id: &str,
 	old_id: &str,
 	new_thought: Entity,
+	reason_text: &str,
 ) -> Vec<String> {
 	let new_id = new_thought.id.clone();
 	if new_id == old_id {
@@ -625,6 +638,7 @@ pub fn supersede_by_contradiction(
 		ReasonKind::Supersedes,
 		1.0,
 		vec,
+		reason_text,
 	)]
 }
 
@@ -1026,7 +1040,14 @@ mod tests {
 			"old is indexed before supersede"
 		);
 
-		supersede(&mut g, &kid, "new", &[1.0, 0.0], "ext1");
+		supersede(
+			&mut g,
+			&kid,
+			"new",
+			&[1.0, 0.0],
+			"ext1",
+			"replaced by newer version",
+		);
 
 		let after: Vec<String> = search_all_unlocked(&g, &[1.0, 0.0], 5)
 			.into_iter()
@@ -1106,7 +1127,7 @@ mod tests {
 		g.index_entity("new", &kid);
 		g.set_source_entry("ext1".into(), kid.clone());
 
-		supersede(&mut g, &kid, "new", &[1.0, 0.0], "ext1");
+		supersede(&mut g, &kid, "new", &[1.0, 0.0], "ext1", "temporal test");
 
 		let kern = g.loaded(&kid).unwrap();
 		let old_e = kern.entities.get("old").unwrap();
@@ -1150,8 +1171,12 @@ mod tests {
 			created_at: Some(std::time::SystemTime::now()),
 			..Default::default()
 		};
-		let rids = supersede_by_contradiction(&mut g, &kid, "old", new);
+		let rids = supersede_by_contradiction(&mut g, &kid, "old", new, "contradicts earlier claim");
 		assert_eq!(rids.len(), 1, "one Supersedes edge minted");
+
+		let kern = g.loaded(&kid).unwrap();
+		let sup_r = kern.reasons.get(&rids[0]).expect("supersede reason exists");
+		assert_eq!(sup_r.text, "contradicts earlier claim", "reason text stored");
 
 		let kern = g.loaded(&kid).unwrap();
 		assert!(
@@ -1180,7 +1205,7 @@ mod tests {
 			vector: vec![1.0, 0.0].into(),
 			..Default::default()
 		};
-		assert!(supersede_by_contradiction(&mut g, &kid, "ghost", new).is_empty());
+		assert!(supersede_by_contradiction(&mut g, &kid, "ghost", new, "missing old").is_empty());
 	}
 
 	#[test]

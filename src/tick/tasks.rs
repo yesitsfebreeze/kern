@@ -169,15 +169,8 @@ pub fn do_classify_contradiction(
 	if new_id == old_id {
 		return;
 	}
-	let new_thought = build_chunk_entity(
-		&new_text,
-		&vec,
-		old_kind,
-		&old_source,
-		"",
-		confidence,
-		None,
-	);
+	let new_thought =
+		build_chunk_entity(&new_text, &vec, old_kind, &old_source, "", confidence, None);
 
 	// Re-validate under the write guard — another tick may have superseded or
 	// removed this pair while we were unlocked.
@@ -195,7 +188,7 @@ pub fn do_classify_contradiction(
 		if !still_pending {
 			return;
 		}
-		let rids = supersede_by_contradiction(&mut graph, kern_id, &old_id, new_thought);
+		let rids = supersede_by_contradiction(&mut graph, kern_id, &old_id, new_thought, &new_text);
 		if !rids.is_empty() {
 			if let Some(k) = graph.get_mut(kern_id) {
 				remove_reason(k, rid);
