@@ -2017,11 +2017,41 @@ conditions that would flip kern to full versioning have **no instrumentation**
 (`docs/kern/wikipedia-edit-convergence.md:100-105`), so the flip is undetectable
 even in principle.
 
-### 59. `degrade` has no floor, no audit trail and no undo `[retrieval]`
+### 59. `degrade` has no floor, no audit trail and no undo — floor half-closed 2026-07-22 `[retrieval]`
 
-It lowers edge scores unboundedly (`howto/mcp.mdx:104-106`,
+**Floor half-closed 2026-07-22; audit trail and undo still open.**
+`degrade_entity_reasons` (`src/commands/graph_ops.rs`) now clamps
+`r.score = (r.score - decay).max(DEGRADE_FLOOR)` with `DEGRADE_FLOOR` (new,
+`src/base/constants.rs`, default `0.0`), so a surviving reason score never goes
+below the floor. **Honest gap, named:** under current constants
+`DEGRADE_MIN_THRESHOLD` (0.05) > `DEGRADE_FLOOR` (0.0), so `should_remove` fires
+(`score - decay < 0.05`) and removes an edge *before* the else-branch decay the
+clamp guards runs — an edge that survives has `score - decay >= 0.05 > 0.0`, so
+`.max(0.0)` is a no-op on it at default. The clamp is therefore **defensive at
+default**: it holds the invariant "no surviving reason score is below the floor"
+and becomes live the moment a score arrives below the floor (e.g. a gossip merge
+of a pre-floor-era negative value) or the threshold is lowered below the floor.
+The item's premise ("score can go negative") is already guarded by the threshold
+under the current code — there is one score-decrement site and it is always
+preceded by the threshold check; the brief's negative control ("clamp removed →
+score goes negative") is unwritable at default constants because removal
+preempts the clamp. Verified the clamp is wired by temporarily raising
+`DEGRADE_FLOOR` above the threshold (survivors clamp to the floor) and
+reverting. Shipped test pins the invariant (post-degrade, every surviving reason
+score `>= DEGRADE_FLOOR`); `degrade_decays_survivors_and_removes_below_threshold`
+green unedited. `cargo test -p kern --lib` green. Decided by fix-the-root (clamp
+the one decrement site, not every caller), name-the-tradeoff (defensive at
+default — the invariant is the value, the live fix is conditional), verify-
+before-claiming (the unwritable negative control was diagnosed, not faked). See
+the 2026-07-22 CHANGELOG entry.
+
+**Still open:** audit trail (durable record a degrade happened) and undo
+(reverse op) — the halves that address "erasing a correct path"; the floor does
+not stop removal below `DEGRADE_MIN_THRESHOLD`.
+
+~~It lowers edge scores unboundedly (`howto/mcp.mdx:104-106`,
 `concepts/why-kern.mdx:127-129`); nothing stops repeated degrades from
-permanently erasing a correct path, and nothing records that they happened.
+permanently erasing a correct path, and nothing records that they happened.~~
 
 ### 60. No re-classification when a contradiction pair changes `[lifecycle]`
 

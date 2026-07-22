@@ -2,6 +2,27 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 59 floor half-closed: `degrade_entity_reasons`
+  (`src/commands/graph_ops.rs`) clamps `r.score = (r.score - decay).max(DEGRADE_FLOOR)`
+  with `DEGRADE_FLOOR` (new, `src/base/constants.rs`, default `0.0`), so a
+  surviving reason score never goes below the floor. **Honest gap:** under
+  current constants `DEGRADE_MIN_THRESHOLD` (0.05) > `DEGRADE_FLOOR` (0.0), so
+  `should_remove` fires and removes an edge before the clamped decay runs — an
+  edge that survives has `score - decay >= 0.05 > 0.0`, so `.max(0.0)` is a
+  no-op at default. The clamp is **defensive at default**: it holds the
+  invariant "no surviving reason score is below the floor" and goes live the
+  moment a score arrives below the floor (e.g. a gossip merge of a pre-floor-era
+  negative) or the threshold is lowered below the floor. The item's premise
+  ("score can go negative") is already guarded by the threshold — one decrement
+  site, always preceded by the threshold check; the brief's negative control
+  ("clamp removed → negative") is unwritable at default because removal
+  preempts the clamp. Verified by temporarily raising `DEGRADE_FLOOR` above the
+  threshold (survivors clamp to the floor) and reverting. Shipped test pins the
+  invariant; `degrade_decays_survivors_and_removes_below_threshold` green
+  unedited. `cargo test -p kern --lib` green.
+  Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming.
+  Still open: audit trail + undo halves.
+
 - 2026-07-22 — item 84 sub-fix closed: a renamed-and-edited file now supersedes
   the old-path `Document` instead of leaving it dangling. `build_record`
   carries the old file URI on a `Renamed` event; the sink resolves it to the
