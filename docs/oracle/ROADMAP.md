@@ -3005,11 +3005,17 @@ propagation overwrites one — another 76.8 MB at this corpus size.
 
 - **`serve.mcp_addr` is a config field with no reader.** ~~Added when item 11 landed~~ **Closed 2026-07-22.** `run_server` now resolves CLI flag first, falls back to `cfg.serve.mcp_addr`.
 - **`kern merge` still defaults on a broken foreign config.** ~~`src/commands/admin.rs` does `Config::load(..).unwrap_or_else(..)` for both the source and destination roots~~ **Closed 2026-07-22.** Both src and dst configs now fail loud on load error.
-- **`num_ctx` / `keep_alive` / `num_gpu` cannot warn when ignored on the `/v1`
-  path**, because they are not config keys at all — they are constants in
-  `src/llm.rs`, and the native-vs-compat decision is a private fn there. Warning
-  requires either promoting them to real per-endpoint config or exposing that
-  predicate. Was listed under item 11; it is a different job.
+- ~~**`num_ctx` / `keep_alive` / `num_gpu` cannot warn when ignored on the `/v1`
+  path**~~ — **Closed 2026-07-22.** `num_ctx` and `keep_alive` are now real
+  per-endpoint config keys on `[embed]` and `[reason]` (defaults = the former
+  constants in `src/llm.rs`, now `pub`), threaded through `Client` via
+  `with_embed_num_ctx` / `with_embed_keep_alive` / `with_reason_keep_alive`
+  (and `with_num_ctx` for reason, now 0-keeps-default). `wants_native` is
+  exposed as `pub fn is_openai_compat` (`src/llm.rs`), and
+  `Config::native_knob_warnings` (`src/config/mod.rs`) emits one non-fatal
+  `tracing::warn!` at boot per knob a config sets on a `/v1` endpoint — default
+  knobs on `/v1` are silent, a default is not "trying to tune". `num_gpu` was
+  never a knob kern sends, so it is not a config key; nothing ignores it.
 - Hand-rolled tool schemas; no batch query
   (`FEATURES.md:635-636`).
 - The LLM client is Ollama-centric with no retry/backoff policy object

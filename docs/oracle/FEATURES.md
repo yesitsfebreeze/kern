@@ -1173,6 +1173,18 @@ silently — `load` already handles `NotFound` — so every error it does return
 a real one. The CLI is parsed *first*, so `--help`/`--version` still answer in a
 repo whose config is broken.
 
+**Per-endpoint Ollama-native knobs.** `[embed]` and `[reason]` each take
+`num_ctx` (u64, 0 keeps the default — 2048 embed / 8192 reason) and `keep_alive`
+(string, empty keeps the default — `10m` embed / `2m` reason). These were
+constants in `src/llm.rs`; they are now config so a model with a larger context
+or a different residency can be tuned without a recompile. They are sent only on
+the Ollama-native path (`wants_native`, `src/llm.rs`) — a `/v1` (OpenAI-compat)
+endpoint has no client-side `num_ctx` or `keep_alive`, so `Config::native_knob_warnings`
+(`src/config/mod.rs`) emits one non-fatal `tracing::warn!` per knob a config sets
+on a `/v1` endpoint, at boot, alongside the `egress_warnings` from item 78. Default
+knobs on a `/v1` endpoint are silent — a default is not "trying to tune", so there
+is nothing to warn about.
+
 **Where.** `src/config/*` (17 files), `src/main.rs` (boot gate).
 
 **Gaps.** No env-var override layer. Secrets (API keys) stored in plaintext TOML.

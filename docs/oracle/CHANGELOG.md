@@ -2,6 +2,20 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 84 sub-fix closed: `num_ctx` and `keep_alive` promoted from
+  constants in `src/llm.rs` to real per-endpoint config keys on `[embed]` and
+  `[reason]` (defaults = the former constants, now `pub`), so a model with a
+  larger context or different residency can be tuned without a recompile.
+  Threaded through `Client` via `with_embed_num_ctx` / `with_embed_keep_alive` /
+  `with_reason_keep_alive` (`with_num_ctx` for reason now honours 0-keeps-default,
+  the `[reason] timeout_secs` convention); `wants_native` exposed as
+  `pub fn is_openai_compat`. `Config::native_knob_warnings` emits one non-fatal
+  `tracing::warn!` at boot per knob a config sets on a `/v1` endpoint — a `/v1`
+  endpoint has no client-side `num_ctx`/`keep_alive`, default knobs on `/v1` are
+  silent. `num_gpu` was never a knob kern sends. 1010 tests pass, fmt clean, 4
+  new config tests pin both directions. Decided by: fix-the-root, the-oracle.
+  Supersedes: nothing.
+
 - 2026-07-22 — item 65 closed: `apply_boosts` (`src/retrieval/score.rs:131`)
   ranks by the lower confidence bound `conf_mean() − K·√conf_variance()`
   (clamped `>= 0.0`), not the mean, so a single-observation claim stops
