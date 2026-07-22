@@ -2,6 +2,27 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 76 closed: the watchdog force-exit attempts a bounded guarded
+  flush before `process::exit(101)` and logs which of the two happened.
+  `spawn_watchdog` (`src/commands.rs:969`) now takes `save_fn` and is spawned after
+  it is available (`:722`), so a stall can flush. The stall branch calls
+  `watchdog_flush_attempt` (`:945`) — a testable free function that runs `save_fn`
+  on a dedicated thread and waits at most `FLUSH_DEADLINE_SECS` = 5s via
+  `mpsc::recv_timeout`, returning `WatchdogFlush::Flushed` (the guarded persist
+  landed) or `WatchdogFlush::Blocked` (it overran the deadline). The exit line
+  names which happened before `process::exit(101)` (`:1010`) — the silence is gone.
+  A flush killed mid-write is safe: `atomic_write` is tmp+rename, so the live file
+  stays intact and the detached flush thread the exit leaves behind never finishes
+  a partial write onto it. The watchdog starts after `save_fn` is built rather than
+  at entry — before the graph loads there is nothing to lose, so the later start
+  costs nothing and buys the flush. Proved two ways:
+  `a_fast_save_fn_returns_flushed_and_ran` and
+  `a_save_fn_that_overruns_the_deadline_returns_blocked`. Decided by: fix-the-root
+  (flush on the watchdog's own thread, not the stalled async one), name-the-tradeoff
+  (the deadline is best-effort — a flush that cannot finish in 5s on a dead
+  runtime is hopeless, and the detached thread is reaped by the exit). Supersedes:
+  nothing — the item described the defect, now removed.
+
 - 2026-07-22 — `lexical_top_boost` now re-sorts after MMR, not before. The
   bonus was applied before `diversify::mmr` and `filter_delivery`, so it was
   invisible whenever the candidate pool exceeded `max_deliver_results`: MMR's

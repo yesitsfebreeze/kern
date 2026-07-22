@@ -664,7 +664,6 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 		}
 	};
 
-	spawn_watchdog();
 	let reason_url = if cli.reason_url.is_empty() {
 		cfg.reason_url().to_string()
 	} else {
@@ -716,6 +715,11 @@ pub(crate) async fn bootstrap(cli: &Cli, cfg: &crate::config::Config) -> EngineH
 	let worker = entry.worker.clone();
 	let q = entry.tick_q.clone();
 	let save_fn = entry.save_fn.clone();
+
+	// Watchdog starts after save_fn is available so a stall can attempt a bounded
+	// guarded flush before force-exiting (item 76) — before the graph loads there
+	// is nothing to lose, so the later start costs nothing and buys the flush.
+	spawn_watchdog(save_fn.clone());
 
 	{
 		let (before, reaped, after) = g.write().gc_empty_kerns_counted();
@@ -926,8 +930,43 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 
 type SharedGraph = Arc<parking_lot::RwLock<GraphGnn>>;
 
+// Bounded flush the watchdog attempts before force-exiting on a stalled runtime.
+// `save_fn` runs on a dedicated thread; the watchdog waits at most `deadline` for
+// it to return. `Flushed` = the guarded persist landed; `Blocked` = it did not
+// finish in the window (the stall may be inside the flush itself). Best-effort:
+// never blocks the exit on a runtime that is already dead. A flush killed
+// mid-write is safe — `atomic_write` is tmp+rename, so the live file stays intact.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WatchdogFlush {
+	Flushed,
+	Blocked,
+}
+
+pub(crate) fn watchdog_flush_attempt(
+	save_fn: &std::sync::Arc<dyn Fn() + Send + Sync>,
+	deadline: std::time::Duration,
+) -> WatchdogFlush {
+		let (tx, rx) = std::sync::mpsc::channel::<()>();
+		let f = save_fn.clone();
+		// Detached by design: on Blocked the process exits immediately after, so a
+		// still-running flush never finishes a partial write onto the live file.
+		std::thread::Builder::new()
+			.name("kern-watchdog-flush".into())
+			.spawn(move || {
+				f();
+				let _ = tx.send(());
+			})
+			.ok();
+		match rx.recv_timeout(deadline) {
+			Ok(()) => WatchdogFlush::Flushed,
+			Err(_) => WatchdogFlush::Blocked,
+		}
+}
+
 // Force-exits if the async beat stalls ~30s (deadlock/starvation) so a peer can take the hub.
-fn spawn_watchdog() {
+// On the stall it first attempts a bounded guarded flush (`watchdog_flush_attempt`) so the
+// in-memory graph is not silently lost, and logs which of the two happened before exiting.
+fn spawn_watchdog(save_fn: std::sync::Arc<dyn Fn() + Send + Sync>) {
 	use std::sync::atomic::{AtomicU64, Ordering};
 	let beat = Arc::new(AtomicU64::new(0));
 	{
@@ -952,13 +991,24 @@ fn spawn_watchdog() {
 				let now = beat.load(Ordering::Relaxed);
 				if now == last {
 					stalls += 1;
-					if stalls >= STALL_LIMIT {
-						eprintln!(
-							"kern watchdog: async runtime stalled ~{}s (graph deadlock or worker starvation) — exiting so a peer can take the hub",
+				if stalls >= STALL_LIMIT {
+					const FLUSH_DEADLINE_SECS: u64 = 5;
+					let outcome = watchdog_flush_attempt(
+						&save_fn,
+						std::time::Duration::from_secs(FLUSH_DEADLINE_SECS),
+					);
+					match outcome {
+						WatchdogFlush::Flushed => eprintln!(
+							"kern watchdog: async runtime stalled ~{}s (graph deadlock or worker starvation) — guarded flush landed, exiting so a peer can take the hub",
 							u64::from(stalls) * CHECK_SECS
-						);
-						std::process::exit(101);
+						),
+						WatchdogFlush::Blocked => eprintln!(
+							"kern watchdog: async runtime stalled ~{}s (graph deadlock or worker starvation) — guarded flush blocked past {}s, exiting anyway so a peer can take the hub",
+							u64::from(stalls) * CHECK_SECS, FLUSH_DEADLINE_SECS
+						),
 					}
+					std::process::exit(101);
+				}
 				} else {
 					stalls = 0;
 					last = now;
@@ -1552,6 +1602,48 @@ mod entry_point_tests {
 		assert!(
 			matches!(g2.entity_idx, VectorBackend::Resident(_)),
 			"default-off stays in-RAM"
+		);
+	}
+}
+
+#[cfg(test)]
+mod watchdog_flush_tests {
+	use super::{watchdog_flush_attempt, WatchdogFlush};
+	use std::sync::{Arc, Mutex};
+	use std::time::Duration;
+
+	#[test]
+	fn a_fast_save_fn_returns_flushed_and_ran() {
+		let ran = Arc::new(Mutex::new(false));
+		let ran_for_thread = ran.clone();
+		let save_fn: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+			*ran_for_thread.lock().unwrap() = true;
+		});
+		let outcome = watchdog_flush_attempt(&save_fn, Duration::from_secs(2));
+		assert_eq!(outcome, WatchdogFlush::Flushed, "the flush returned in window");
+		std::thread::sleep(Duration::from_millis(50));
+		assert!(*ran.lock().unwrap(), "the save_fn actually executed");
+	}
+
+	#[test]
+	fn a_save_fn_that_overruns_the_deadline_returns_blocked() {
+		let ran = Arc::new(Mutex::new(false));
+		let ran_for_thread = ran.clone();
+		let save_fn: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+			std::thread::sleep(Duration::from_secs(3));
+			*ran_for_thread.lock().unwrap() = true;
+		});
+		let start = std::time::Instant::now();
+		let outcome = watchdog_flush_attempt(&save_fn, Duration::from_millis(200));
+		let elapsed = start.elapsed();
+		assert_eq!(outcome, WatchdogFlush::Blocked, "the flush overran the deadline");
+		assert!(
+			elapsed < Duration::from_secs(1),
+			"the watchdog did not block past the deadline: {elapsed:?}"
+		);
+		assert!(
+			!(*ran.lock().unwrap()),
+			"the save_fn did not complete inside the window"
 		);
 	}
 }
