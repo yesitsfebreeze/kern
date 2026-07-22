@@ -57,4 +57,6 @@ says so and the body does not.
 ## Planning
 
 All open work lives in one file: **[ROADMAP.md](../oracle/ROADMAP.md)**.
-This directory holds reference and measurement records only — never plans.
+This directory holds reference and measurement records; any forward-looking
+plans a note carries are historical, and ROADMAP.md alone is authoritative
+for new work.
