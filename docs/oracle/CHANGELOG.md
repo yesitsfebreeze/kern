@@ -2,6 +2,34 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — the stale-heading defect has a second form, and three closed items
+  were in it. Items 21, 94 and 97 led with the defect and appended "CLOSED":
+  *"The e2e harness cannot exercise the GNN at all — closed"*, *"A near-duplicate's
+  alternate wording is stored but indexed nowhere — CLOSED"*. Every word before
+  the dash is false, and slice selection reads `^### ` — a scan sees a live
+  defect unless it reaches the end of a 120-character line.
+
+  Aligned to the convention items 27, 95, 98 and 32 already use: **state the
+  resolved condition, then the closure.** "A GC sweep pays one LMDB commit, not
+  one per victim — closed". "The pre-auth frame is capped and deadlined —
+  closed". The title reads true on its own, and the date is a footnote rather
+  than the correction.
+
+  This is the same failure as the seven titles retitled earlier this run, but it
+  survived those passes because the earlier heuristic asked "does the title
+  contain a closure marker" — and these do. The marker was present; the sentence
+  was still false. A rule that checks for the presence of a word cannot see word
+  order, which is the third heuristic this run to founder on the difference
+  between form and meaning.
+
+  Worth stating as a convention rather than three fixes, because the next closure
+  will be written by whoever closes it: **an item's title is a claim about the
+  repo, and it is read alone.** If it is only true when read to the end, it is
+  not true.
+
+  Decided by: fix-the-root — the recurring defect is titles written as edits to
+  the old title rather than as fresh statements of the current truth.
+
 - 2026-07-22 — merged item 97, and with it the last of the four verification
   gaps this run found in its own instruments. 218 + 1 + this one = 220.
 

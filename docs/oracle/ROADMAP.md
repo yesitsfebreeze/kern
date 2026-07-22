@@ -433,7 +433,7 @@ new field, so a store format bump, and it belongs with whoever holds
 `src/base/types.rs`. Deciding behavior: fix-the-root. Until then, do not add
 `_user` / `_agent` knobs; they would read as working and weight nothing.
 
-### 21. The review lifecycle has no caller-facing surface — no `promote`, and no way to ASK for `exclude_pending` `[surface]` — CLOSED 2026-07-22
+### 21. The review lifecycle has a caller-facing surface: `promote` and `exclude_pending` — closed 2026-07-22 `[surface]`
 
 **Corrected 2026-07-22 — "three of four parts landed" counted a part no caller
 can reach.** Two parts landed and are reachable. `ReviewState` is on `Entity`
@@ -1818,7 +1818,7 @@ What the instrument still cannot judge, and what that costs: the fake embedder i
 bag-of-words, so a change that only a real embedding model would reward looks
 neutral here. Item 64's stemmer swap is the clearest case.
 
-### 94. A near-duplicate's alternate wording is stored but indexed nowhere `[retrieval]` — CLOSED 2026-07-22
+### 94. A near-duplicate's alternate wording is indexed and findable — closed 2026-07-22 `[retrieval]`
 
 The premise held. Confirmed by measurement before any fix: a dedup of
 `"alpha beta gamma"` and `"alpha beta gamma, restated"` leaves
@@ -2159,7 +2159,7 @@ What survives: the by-name discipline. It is cheap, it catches mode 1
 independently of the build layout, and it is what confirmed both cycles that
 found this.
 
-### 97. The e2e harness cannot exercise the GNN at all — closed 2026-07-22 `[eval]`
+### 97. The e2e harness runs the GNN and gates on it — closed 2026-07-22 `[eval]`
 
 **Closed. The premise was right and understated: there were two independent
 reasons no propagation ran, and only one of them was the corpus.**
