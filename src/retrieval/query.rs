@@ -222,9 +222,8 @@ pub fn retrieve_profiled(
 	if cfg.lexical_top_boost > 0.0 {
 		if let Some(lex) = lex_ref {
 			score::apply_lexical_boost(lex, cfg, query_text, &mut results);
-			results.sort_by(|a, b| {
-				crate::base::util::cmp_rank(a.score, &a.entity.id, b.score, &b.entity.id)
-			});
+			results
+				.sort_by(|a, b| crate::base::util::cmp_rank(a.score, &a.entity.id, b.score, &b.entity.id));
 		}
 	}
 
@@ -455,56 +454,67 @@ mod tests {
 			1,
 			"delivery carries it once, not once per matching wording: {ids:?}"
 		);
-		}
+	}
 
-		#[test]
-		fn lexical_top_boost_pins_a_verbatim_match_to_the_top_past_higher_cosine_decoys() {
-			// The query vector points at the filler field, so the 20 decoys outrank the
-			// survivor by content score alone. With `lexical_top_boost` on, the
-			// survivor's verbatim BM25 overlap must lift it to #1 of the delivered list
-			// — the post-MMR re-sort is what makes the bonus visible past diversity.
-			let g = deduped_corpus();
-			let cfg = crate::config::RetrievalConfig {
-						pagerank_enabled: false,
-						lexical_top_boost: 1.0,
-						..Default::default()
-			};
-			let w = Weights { content: 0.70, reason: 0.15, edge: 0.15 };
-			let ids = retrieve(&g, &cfg, &[0.0, 1.0], "bicycle shed", Mode::Hybrid, None, w)
-						.results
-						.into_iter()
-						.map(|r| r.entity.id)
-						.collect::<Vec<_>>();
-			assert!(
-						!ids.is_empty(),
-						"precondition: the query delivered something: {ids:?}"
-			);
-			assert_eq!(
-						ids.first(),
-						Some(&"survivor".to_string()),
-						"the verbatim-lexical match wins the top over higher-cosine decoys: {ids:?}"
-			);
+	#[test]
+	fn lexical_top_boost_pins_a_verbatim_match_to_the_top_past_higher_cosine_decoys() {
+		// The query vector points at the filler field, so the 20 decoys outrank the
+		// survivor by content score alone. With `lexical_top_boost` on, the
+		// survivor's verbatim BM25 overlap must lift it to #1 of the delivered list
+		// — the post-MMR re-sort is what makes the bonus visible past diversity.
+		let g = deduped_corpus();
+		let cfg = crate::config::RetrievalConfig {
+			pagerank_enabled: false,
+			lexical_top_boost: 1.0,
+			..Default::default()
+		};
+		let w = Weights {
+			content: 0.70,
+			reason: 0.15,
+			edge: 0.15,
+		};
+		let ids = retrieve(&g, &cfg, &[0.0, 1.0], "bicycle shed", Mode::Hybrid, None, w)
+			.results
+			.into_iter()
+			.map(|r| r.entity.id)
+			.collect::<Vec<_>>();
+		assert!(
+			!ids.is_empty(),
+			"precondition: the query delivered something: {ids:?}"
+		);
+		assert_eq!(
+			ids.first(),
+			Some(&"survivor".to_string()),
+			"the verbatim-lexical match wins the top over higher-cosine decoys: {ids:?}"
+		);
 
-			// And the same query without the boost leaves the survivor buried — the
-			// decoys' content score wins. This is the counterfactual that proves the
-			// boost is doing the work, not the seed.
-			let cfg_off = crate::config::RetrievalConfig {
-						pagerank_enabled: false,
-						lexical_top_boost: 0.0,
-						..Default::default()
-			};
-			let ids_off =
-						retrieve(&g, &cfg_off, &[0.0, 1.0], "bicycle shed", Mode::Hybrid, None, w)
-								.results
-								.into_iter()
-						.map(|r| r.entity.id)
-								.collect::<Vec<_>>();
-			assert_ne!(
-						ids_off.first(),
-						Some(&"survivor".to_string()),
-						"without the boost the cosine-dominant decoys keep the top: {ids_off:?}"
-			);
-		}
+		// And the same query without the boost leaves the survivor buried — the
+		// decoys' content score wins. This is the counterfactual that proves the
+		// boost is doing the work, not the seed.
+		let cfg_off = crate::config::RetrievalConfig {
+			pagerank_enabled: false,
+			lexical_top_boost: 0.0,
+			..Default::default()
+		};
+		let ids_off = retrieve(
+			&g,
+			&cfg_off,
+			&[0.0, 1.0],
+			"bicycle shed",
+			Mode::Hybrid,
+			None,
+			w,
+		)
+		.results
+		.into_iter()
+		.map(|r| r.entity.id)
+		.collect::<Vec<_>>();
+		assert_ne!(
+			ids_off.first(),
+			Some(&"survivor".to_string()),
+			"without the boost the cosine-dominant decoys keep the top: {ids_off:?}"
+		);
+	}
 
 	#[test]
 	fn format_chains_renders_entities_and_reason_labels() {

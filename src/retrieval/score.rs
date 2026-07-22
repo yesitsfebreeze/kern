@@ -106,8 +106,15 @@ pub fn apply_lexical_boost<T: Scored>(
 	if hits.is_empty() {
 		return;
 	}
-	let max = hits.iter().map(|h| h.score).fold(0.0f32, f32::max).max(1e-9);
-	let bm25: HashMap<&str, f32> = hits.iter().map(|h| (h.entity_id.as_str(), h.score)).collect();
+	let max = hits
+		.iter()
+		.map(|h| h.score)
+		.fold(0.0f32, f32::max)
+		.max(1e-9);
+	let bm25: HashMap<&str, f32> = hits
+		.iter()
+		.map(|h| (h.entity_id.as_str(), h.score))
+		.collect();
 	for r in results.iter_mut() {
 		let norm = (*bm25.get(r.entity().id.as_str()).unwrap_or(&0.0) / max) as f64;
 		r.set_score(r.score() + cfg.lexical_top_boost * norm);
@@ -512,7 +519,6 @@ mod query_filter_tests {
 				..Default::default()
 			}
 		));
-
 	}
 
 	// Both halves matter. A pending entity that is never in the set proves nothing:
@@ -1243,15 +1249,30 @@ mod lexical_boost_tests {
 		lex.insert("partial", "alice visited paris once");
 		lex.insert("none", "bob likes hiking");
 		// Start them equal; the BM25 bonus alone must order them.
-		let mut results = vec![scored("none", 0.5), scored("partial", 0.5), scored("match", 0.5)];
+		let mut results = vec![
+			scored("none", 0.5),
+			scored("partial", 0.5),
+			scored("match", 0.5),
+		];
 		let cfg = RetrievalConfig {
 			lexical_top_boost: 1.0,
 			..Default::default()
 		};
 		apply_lexical_boost(&lex, &cfg, "alice red car paris", &mut results);
-		results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-		assert_eq!(results[0].entity.id, "match", "the verbatim-overlap doc wins the top");
-		assert_eq!(results.last().unwrap().entity.id, "none", "the no-overlap doc stays last");
+		results.sort_by(|a, b| {
+			b.score
+				.partial_cmp(&a.score)
+				.unwrap_or(std::cmp::Ordering::Equal)
+		});
+		assert_eq!(
+			results[0].entity.id, "match",
+			"the verbatim-overlap doc wins the top"
+		);
+		assert_eq!(
+			results.last().unwrap().entity.id,
+			"none",
+			"the no-overlap doc stays last"
+		);
 		assert!(results[0].score > results.last().unwrap().score);
 	}
 }
