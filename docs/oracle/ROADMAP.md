@@ -2091,6 +2091,37 @@ Two open questions beside it, from `docs/kern/bayesian-belief.md:159-162`: shoul
 `Reason` edges carry belief symmetrically, and does superseding reset or inherit
 belief?
 
+**Belief half closed 2026-07-22 by decision; re-classification wiring stays
+open.** The two `bayesian-belief.md` questions are settled, both conservatively
+to the behaviour already shipped:
+
+- **Edges carry belief directionally, not symmetrically.** A `Reason` edge is
+  evidence `from` holds about `to` — `Provenance` (a session justified a claim),
+  `Question` (an entity asks another), `Supersedes` (new replaces old) are
+  directional by construction. Making belief symmetric would conflate "A vouches
+  for B" with "B vouches for A" and erase the one-direction `traversal_count`
+  GCounter a walk already reads. The CRDT `score` on an edge stays the one
+  symmetric field (LWW-convergent), and belief stays on the entities.
+- **Superseding resets belief, it does not inherit.** A supersede is a *new*
+  claim with its own text; the new entity mints its own beta prior from its
+  minted confidence (`beta_params_from_confidence`). Inheriting the old
+  entity's `conf_alpha`/`conf_beta` would fold accumulated evidence for a
+  statement nobody makes anymore into a statement just minted — a single
+  observation would read as well-evidenced. Reset is the current behaviour and
+  the decision; `observe_support`/`observe_contradict` accrue on the new entity
+  from its own later corroboration.
+
+What stays open is the item's title: when one side of a classified pair moves
+(an entity carrying a deferred `Rephrase` candidate is itself superseded),
+`do_classify_contradiction` returns early on `old.is_superseded()` and the
+candidate is never re-classified against the new active entity. The fix re-points
+the `Rephrase` edge from the superseded entity to its replacer and re-enqueues
+`ClassifyContradiction`; that wiring touches `stamp_superseded` (accept.rs,
+sync) and the `DeferContradictionFn` tick enqueue, and is the code half this
+decision does not build. Decided by: name-the-tradeoff, verify-before-claiming
+(both decisions match shipped behaviour — no code change, the record is the
+fix).
+
 ---
 
 # Tier 8 — retrieval quality, now measurable

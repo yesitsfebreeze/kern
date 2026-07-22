@@ -2,6 +2,16 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 60 belief half closed by decision: Reason edges carry
+  belief directionally (not symmetrically — Provenance/Question/Supersedes are
+  directional by construction; symmetry would conflate a vouch with its
+  reverse), and superseding resets belief (a supersede is a new claim that mints
+  its own beta prior; inheriting the old's evidence would read a single
+  observation as well-evidenced). Both match shipped behaviour — no code change.
+  The re-classification wiring (re-point a deferred Rephrase to the replacer
+  when one side of a pair is superseded) stays open. Decided by: name-the-tradeoff,
+  verify-before-claiming. Supersedes: nothing.
+
 - 2026-07-22 — item 49 chunking half-closed: `distill` (`src/ingest/distill.rs`)
   now batches a long conversation into turn-groups of `DISTILL_CHUNK_TURNS`
   (new, `src/base/constants.rs`, default `48`), calls `llm` + `parse_claims`
