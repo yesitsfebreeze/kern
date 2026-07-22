@@ -2,6 +2,18 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 60 re-classification wiring closed: when an entity
+  carrying a deferred Rephrase candidate is superseded by a different update,
+  stamp_superseded now re-points the candidate's from to the new active entity
+  and pushes (kern_id, reason_id) onto a new GraphGnn::pending_reclass set; the
+  tick loop drains it and re-enqueues ClassifyContradiction, so the candidate
+  re-classifies against the new claim instead of orphaning on
+  do_classify_contradiction's old.is_superseded() early return. The queue is an
+  acceleration (the re-pointed Rephrase persists, so a restart classifies
+  anyway). New test pins re-point + queue. 1030 pass. Item 60 fully closed
+  (belief half + reclass wiring). Decided by: fix-the-root, name-the-tradeoff,
+  verify-before-claiming. Supersedes: nothing.
+
 - 2026-07-22 — item 60 belief half closed by decision: Reason edges carry
   belief directionally (not symmetrically — Provenance/Question/Supersedes are
   directional by construction; symmetry would conflate a vouch with its

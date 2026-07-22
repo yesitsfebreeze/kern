@@ -2083,7 +2083,7 @@ not stop removal below `DEGRADE_MIN_THRESHOLD`.
 `concepts/why-kern.mdx:127-129`); nothing stops repeated degrades from
 permanently erasing a correct path, and nothing records that they happened.~~
 
-### 60. No re-classification when a contradiction pair changes `[lifecycle]`
+### 60. No re-classification when a contradiction pair changes `[lifecycle]` — closed 2026-07-22
 
 Either side of a classified pair can move and nothing re-runs the call, and no
 tool exposes the supersede chain beyond `include_history` (`FEATURES.md:173-174`).
@@ -2114,13 +2114,23 @@ to the behaviour already shipped:
 What stays open is the item's title: when one side of a classified pair moves
 (an entity carrying a deferred `Rephrase` candidate is itself superseded),
 `do_classify_contradiction` returns early on `old.is_superseded()` and the
-candidate is never re-classified against the new active entity. The fix re-points
-the `Rephrase` edge from the superseded entity to its replacer and re-enqueues
-`ClassifyContradiction`; that wiring touches `stamp_superseded` (accept.rs,
-sync) and the `DeferContradictionFn` tick enqueue, and is the code half this
-decision does not build. Decided by: name-the-tradeoff, verify-before-claiming
-(both decisions match shipped behaviour — no code change, the record is the
-fix).
+candidate is never re-classified against the new active entity.
+
+**Re-classification wiring closed 2026-07-22.** `stamp_superseded` (the shared
+supersede tail in `src/base/accept.rs`) now walks the old entity's deferred
+`Rephrase` edges (`kind == Rephrase`, `to` empty, `from == old_id`), re-points
+`from` to the new active entity, and pushes `(kern_id, reason_id)` onto a new
+`GraphGnn::pending_reclass` set (`parking_lot::Mutex<Vec<_>>`, the
+`pending_deltas` pattern). The tick loop (`src/tick.rs::start`) drains
+`drain_pending_reclass` each iteration and re-enqueues
+`ClassifyContradiction` via `task_extra`, so the candidate re-classifies the
+new entity's text against the deferred wording on the next tick. A crash or
+restart drops the pending set (the Rephrase is already re-pointed on disk via
+the supersede's persist, so a restart's `do_classify_contradiction` loads the
+re-pointed `from` and classifies anyway — the queue is an acceleration, not a
+correctness dependence). New test `supersede_repoints_a_deferred_rephrase_to_
+the_new_entity` pins the re-point + queue. Decided by: name-the-tradeoff,
+verify-before-claiming, fix-the-root.
 
 ---
 
