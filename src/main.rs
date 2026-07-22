@@ -19,6 +19,9 @@ fn boot_config(loaded: Result<Config, kern::config::io::Error>) -> Result<Config
 	})?;
 	cfg.validate()
 		.map_err(|e| format!("kern: invalid config: {e}\n  fix that key in .kern/kern.toml (or the user-level kern.toml) and retry"))?;
+	for w in cfg.egress_warnings() {
+		tracing::warn!(target: "kern", "{w}");
+	}
 	Ok(cfg)
 }
 

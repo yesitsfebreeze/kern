@@ -497,6 +497,74 @@ fn is_local_ollama(url: &str) -> bool {
 	url.contains("//localhost") || url.contains("//127.0.0.1") || url.contains(":11434")
 }
 
+/// True when the URL's host is local to this machine: loopback, RFC1918,
+/// link-local, the `ollama` host, or the `:11434` default-port heuristic
+/// `is_local_ollama` already covers. kern's first claim is "local-first, zero
+/// egress"; `egress_warnings` uses this so the one setting that voids it is no
+/// longer silent at config load. No URL parser dependency — the host is the
+/// span between `//` and the first `:`, `/` or end.
+pub fn is_local_url(url: &str) -> bool {
+	if is_local_ollama(url) {
+		return true;
+	}
+	let host = match host_of(url) {
+		Some(h) => h,
+		None => return false,
+	};
+	if host == "localhost" || host == "ollama" {
+		return true;
+	}
+	// Bracketed IPv6 like `[::1]`.
+	if let Some(rest) = host.strip_prefix('[') {
+		if let Some(v6) = rest.strip_suffix(']') {
+			return v6 == "::1";
+		}
+		return false;
+	}
+	if let Some(o) = parse_ipv4(host) {
+		return is_local_ipv4(&o);
+	}
+	false
+}
+
+fn host_of(url: &str) -> Option<&str> {
+	let after = url.split("//").nth(1)?;
+	// Bracketed IPv6: host is `[... ]`, the port `:port` follows the `]`.
+	let end = if after.starts_with('[') {
+		after.find(']').unwrap_or(after.len()) + 1
+	} else {
+		after
+			.find(|c: char| c == '/' || c == ':' || c == '?')
+			.unwrap_or(after.len())
+	};
+	let h = &after[..end];
+	if h.is_empty() {
+		None
+	} else {
+		Some(h)
+	}
+}
+
+fn parse_ipv4(host: &str) -> Option<[u8; 4]> {
+	let mut o = [0u8; 4];
+	let parts: Vec<&str> = host.split('.').collect();
+	if parts.len() != 4 {
+		return None;
+	}
+	for (i, p) in parts.iter().enumerate() {
+		o[i] = p.parse().ok()?;
+	}
+	Some(o)
+}
+
+fn is_local_ipv4(o: &[u8; 4]) -> bool {
+	o[0] == 127 // loopback 127.0.0.0/8
+		|| o[0] == 10 // RFC1918 10.0.0.0/8
+		|| (o[0] == 172 && (16..=31).contains(&o[1])) // RFC1918 172.16.0.0/12
+		|| (o[0] == 192 && o[1] == 168) // RFC1918 192.168.0.0/16
+		|| (o[0] == 169 && o[1] == 254) // link-local 169.254.0.0/16
+}
+
 fn wants_native(url: &str) -> bool {
 	!url.trim_end_matches('/').ends_with("/v1") && is_local_ollama(url)
 }
@@ -590,6 +658,38 @@ mod tests {
 		assert!(is_local_ollama("http://ollama:11434"));
 		assert!(!is_local_ollama("https://api.openai.com"));
 		assert!(!is_local_ollama("http://notlocalhost.com"));
+	}
+
+	#[test]
+	fn is_local_url_accepts_local_hosts() {
+		// loopback variants
+		assert!(is_local_url("http://localhost"));
+		assert!(is_local_url("http://127.0.0.1"));
+		assert!(is_local_url("http://127.1.2.3:11434"));
+		assert!(is_local_url("http://[::1]:8080"));
+		// RFC1918
+		assert!(is_local_url("http://10.0.0.1"));
+		assert!(is_local_url("http://172.16.0.1"));
+		assert!(is_local_url("http://172.27.176.1:11434")); // WSL2 gateway used by the LoCoMo run
+		assert!(is_local_url("http://172.31.255.255"));
+		assert!(is_local_url("http://192.168.1.1/embed"));
+		// link-local
+		assert!(is_local_url("http://169.254.0.1"));
+		// ollama host / default port (reuses is_local_ollama)
+		assert!(is_local_url("http://ollama:11434"));
+		assert!(is_local_url("http://ollama"));
+		assert!(is_local_url("http://anything:11434"));
+	}
+
+	#[test]
+	fn is_local_url_rejects_public_hosts() {
+		assert!(!is_local_url("https://api.openai.com"));
+		assert!(!is_local_url("http://example.com"));
+		assert!(!is_local_url("http://203.0.113.5"));
+		assert!(!is_local_url("https://1.2.3.4/v1"));
+		assert!(!is_local_url("http://8.8.8.8"));
+		// 172.32 is outside the RFC1918 /12, not local
+		assert!(!is_local_url("http://172.32.0.1"));
 	}
 
 	#[test]
