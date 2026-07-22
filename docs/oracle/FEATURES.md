@@ -160,7 +160,7 @@ stays as history with a stamped `valid_to`; `query` can recover the past via
   `superseded_by` chain.
 - The three stamps survive the **cold tier**. A spilled row is a `ColdRow`
   (`src/base/store.rs`) = `Entity` ++ `StoredTemporal`, written under
-  `FORMAT_V5` and decoded strictly, never by parse-sniffing (`decode_cold`) — a
+  `FORMAT_VERSION` and decoded strictly, never by parse-sniffing (`decode_cold`) — a
   truncated value errors instead of silently degrading to a stampless `Entity`. So a
   cold-recovered revision keeps `valid_from`/`valid_to`/`invalidated_at` and
   `is_valid_at` answers over the cold tail exactly as it does over the hot graph.
@@ -277,7 +277,7 @@ and cold tier live together. Readers never block, writers serialize.
   `StoredKern`/`StoredVec`/`StoredTemporal`/`ColdRow` are the on-disk bincode
   shapes, each value a version byte followed by a `zstd` frame
   (`encode_at`/`strip_version`, `src/base/store.rs`), vectors int8. Exactly one
-  live format, `FORMAT_V5`; any other version byte is rejected, never
+  live format, `FORMAT_VERSION`; any other version byte is rejected, never
   mis-decoded and never migrated.
 - **Guarded flush** (`Store::flush_guarded` `src/base/store.rs:571`,
   `persist::flush_guarded` `src/base/persist.rs:129`) — a snapshot carries an

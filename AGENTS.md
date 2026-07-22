@@ -7,7 +7,7 @@ Read `docs/oracle/ORACLE.md` before acting.
 kern is version alpha. Features we change need **no** backward compatibility:
 no migration paths, no legacy decode fallbacks, no serde aliases for renamed
 fields, no wire-format stability across builds. When a persisted or wire format
-changes, bump the single live format version (`FORMAT_V5` in
+changes, bump the single live format version (`FORMAT_VERSION` in
 `src/base/store.rs`, `WEIGHT_FILE_VERSION` in `src/gnn/persist.rs`) so old data
 is rejected cleanly — never migrated, never sniffed. Old stores are wiped and
 reingested.

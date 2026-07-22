@@ -33,7 +33,7 @@ sets; parallelize only what does not overlap.
 - **Scope:** `src/store.rs`, persistence, cold tier, `src/crdt.rs`.
 - **Knows:** the single LMDB env (heed) per data dir, single-writer +
   guarded-flush protocol, `zstd(bincode)` values, the single-version law
-  (exactly one decodable format, `FORMAT_V5`; any persisted-schema change bumps
+  (exactly one decodable format, `FORMAT_VERSION`; any persisted-schema change bumps
   it and old stores are rejected, never appended-for or migrated — guard schema
   touches with a round-trip test), content-hash ids as the merge foundation.
 - **Delegate when:** persistence, schema, durability (snapshots/WAL), or
@@ -94,4 +94,3 @@ sets; parallelize only what does not overlap.
   directly and are the open half of `ROADMAP.md` item 9, blocked not on item
   24's socket auth (landed 2026-07-22) but on its unproven `principal`.
 - **Delegate when:** tool schemas or CLI subcommands.
-

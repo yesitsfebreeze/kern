@@ -34,7 +34,7 @@ const EMBED_KEY: &str = "embed";
 // Version byte prepended ahead of the zstd frame so a reader rejects any other
 // format instead of mis-decoding it. Alpha: exactly one version is ever
 // decodable — a mismatch is a clean BadVersion, never a migration.
-const FORMAT_V7: u8 = 7;
+const FORMAT_VERSION: u8 = 7;
 const ZSTD_LEVEL: i32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,12 +80,12 @@ fn encode_at<T: Serialize>(ver: u8, v: &T) -> Result<Vec<u8>, StoreError> {
 }
 
 fn encode<T: Serialize>(v: &T) -> Result<Vec<u8>, StoreError> {
-	encode_at(FORMAT_V7, v)
+	encode_at(FORMAT_VERSION, v)
 }
 
 fn strip_version(bytes: &[u8]) -> Result<(u8, Vec<u8>), StoreError> {
 	let (&ver, body) = bytes.split_first().ok_or(StoreError::BadVersion(0))?;
-	if ver != FORMAT_V7 {
+	if ver != FORMAT_VERSION {
 		return Err(StoreError::BadVersion(ver));
 	}
 	Ok((ver, zstd::decode_all(body)?))
@@ -199,7 +199,7 @@ fn decode_vec(bytes: &[u8]) -> Embedding {
 }
 
 fn encode_cold(row: &ColdRow) -> Result<Vec<u8>, StoreError> {
-	encode_at(FORMAT_V7, row)
+	encode_at(FORMAT_VERSION, row)
 }
 
 // A decode failure here is real corruption and must reach scan_with's warning
@@ -882,7 +882,7 @@ mod tests {
 		})
 		.unwrap();
 		assert_eq!(
-			bytes[0], FORMAT_V7,
+			bytes[0], FORMAT_VERSION,
 			"first byte is the current write version"
 		);
 	}
@@ -894,16 +894,16 @@ mod tests {
 			nums: vec![1.0],
 		})
 		.unwrap();
-		bytes[0] = FORMAT_V7 - 1;
+		bytes[0] = FORMAT_VERSION - 1;
 		match decode::<Sample>(&bytes) {
-			Err(StoreError::BadVersion(v)) => assert_eq!(v, FORMAT_V7 - 1),
+			Err(StoreError::BadVersion(v)) => assert_eq!(v, FORMAT_VERSION - 1),
 			other => panic!("expected BadVersion, got {other:?}"),
 		}
 	}
 
 	// The `ReviewState` field made every v6 Entity row mis-decode positionally, so
 	// the bump has to reject a v6 store outright rather than read one field short.
-	// Pinned on the literal 6, not on `FORMAT_V7 - 1`: the next bump must not
+	// Pinned on the literal 6, not on `FORMAT_VERSION - 1`: the next bump must not
 	// silently drag this assertion forward and stop covering this one.
 	#[test]
 	fn a_v6_entity_row_is_rejected_rather_than_misdecoded() {
@@ -913,7 +913,7 @@ mod tests {
 			Err(StoreError::BadVersion(v)) => assert_eq!(v, 6),
 			other => panic!("expected BadVersion(6), got {other:?}"),
 		}
-		bytes[0] = FORMAT_V7;
+		bytes[0] = FORMAT_VERSION;
 		assert_eq!(
 			decode::<Entity>(&bytes).unwrap().review,
 			ReviewState::Active,
@@ -1077,7 +1077,7 @@ mod tests {
 		let k = kern_with("k", e);
 
 		let bytes = encode(&StoredKern::from_kern(&k)).unwrap();
-		assert_eq!(bytes[0], FORMAT_V7, "kern rows carry the live version");
+		assert_eq!(bytes[0], FORMAT_VERSION, "kern rows carry the live version");
 		let back = decode::<StoredKern>(&bytes).unwrap().into_kern();
 		let be = &back.entities["e1"];
 		assert_eq!(be.valid_from, Some(t0), "valid_from survives");
@@ -1513,7 +1513,7 @@ mod tests {
 		// A current-version value whose ColdRow tail is missing: a bare Entity
 		// parses cleanly as a ColdRow prefix, so only a strict decode catches it.
 		{
-			let bytes = encode_at(FORMAT_V7, &e).unwrap();
+			let bytes = encode_at(FORMAT_VERSION, &e).unwrap();
 			let mut wtxn = s.env.write_txn().unwrap();
 			s.cold.put(&mut wtxn, "trunc", bytes.as_slice()).unwrap();
 			wtxn.commit().unwrap();

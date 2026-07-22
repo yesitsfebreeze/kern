@@ -2,6 +2,18 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — The store's live format-version constant is renamed
+  `FORMAT_V7` → `FORMAT_VERSION` (same value, 7). There is one decodable
+  format; the numbered `FORMAT_V<N>` naming implied a coexisting family and
+  drifted out of sync with AGENTS.md (`FORMAT_V5`) and the oracle docs. A
+  format change now = update the one constant's value, nothing else — no new
+  constant, no migration. `WEIGHT_FILE_VERSION` (gnn/persist) already followed
+  this shape and is unchanged. AGENTS.md, SPECIALISTS, FEATURES updated to
+  `FORMAT_VERSION`; CHANGELOG/ROADMAP historical bump-event mentions left as
+  record. Pinned by the existing `codec_prepends_format_version` /
+  `decode_rejects_older_version_bytes` / `a_v6_entity_row_is_rejected_rather_than_misdecoded`
+  tests (the literal-6 pin still guards the v6 ReviewState boundary). Decided by: name-the-tradeoff (one decodable format = one name, not a versioned series — the drift proved the numbered naming was a liability, not a guard; cost: historical bump-event mentions in CHANGELOG/ROADMAP stay as record, not updated).
+
 - 2026-07-22 — `lexical_top_boost` now re-sorts after MMR, not before. The
   bonus was applied before `diversify::mmr` and `filter_delivery`, so it was
   invisible whenever the candidate pool exceeded `max_deliver_results`: MMR's
