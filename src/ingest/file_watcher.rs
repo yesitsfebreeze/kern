@@ -268,12 +268,14 @@ mod tests {
 				.object_id()
 				.to_string();
 				if !old_external.is_empty() {
+					let new_external = source.object_id().to_string();
 					accept::supersede_renamed(
 						&mut self.graph.write(),
 						&root_id,
 						&placed.entity_id,
 						&new_vec,
 						&old_external,
+						&new_external,
 						"renamed",
 					);
 				}
@@ -815,5 +817,66 @@ mod tests {
 			.filter(|e| matches!(e.kind, EntityKind::Document))
 			.all(|e| matches!(e.status, EntityStatus::Active));
 		assert!(active, "nothing was superseded");
+	}
+
+	// A pure rename (content unchanged → same id) re-keys the survivor's
+	// external_id and source-index from the old path to the new path, so a
+	// `forget --source file://new` resolves and `file://old` does not.
+	#[tokio::test]
+	async fn a_pure_rename_re_keys_the_survivor_external_id() {
+		let g = Arc::new(RwLock::new(GraphGnn::new()));
+		let sink = DirectFileSink::new(g.clone());
+
+		// original file at /tmp/old.rs
+		sink
+			.ingest(IngestRecord {
+				source_uri: "file:///tmp/old.rs".to_string(),
+				content: "fn unchanged() {}".to_string(),
+				language_hint: Some("rust".to_string()),
+				replaces: None,
+			})
+			.await;
+
+		let old_id = {
+			let g = g.read();
+			g.kerns
+				.values()
+				.flat_map(|k| k.entities.values())
+				.find(|e| matches!(e.kind, EntityKind::Document) && e.source.object_id() == "tmp/old.rs")
+				.map(|e| e.id.clone())
+				.expect("old doc placed")
+		};
+
+		// renamed to /tmp/new.rs, content unchanged — `replaces` carries old URI
+		sink
+			.ingest(IngestRecord {
+				source_uri: "file:///tmp/new.rs".to_string(),
+				content: "fn unchanged() {}".to_string(),
+				language_hint: Some("rust".to_string()),
+				replaces: Some("file:///tmp/old.rs".to_string()),
+			})
+			.await;
+
+		let g = g.read();
+		assert_eq!(count_file_documents(&g), 1, "one doc, no supersede");
+		let survivor = g
+			.kerns
+			.values()
+			.flat_map(|k| k.entities.values())
+			.find(|e| e.id == old_id)
+			.expect("survivor kept");
+		assert_eq!(survivor.external_id, "tmp/new.rs", "external_id re-keyed to new path");
+		assert!(
+			matches!(survivor.status, EntityStatus::Active),
+			"survivor active, not superseded"
+		);
+		assert!(g.kern_of_source("tmp/old.rs").is_none(), "old source-index cleared");
+		let holder = g
+			.kern_of_source("tmp/new.rs")
+			.expect("new source-index set");
+		assert!(
+			g.kerns.get(holder).is_some(),
+			"new source-index points at a real kern"
+		);
 	}
 }
