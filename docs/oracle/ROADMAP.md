@@ -1608,7 +1608,7 @@ fallback and no way to distinguish discovery-failed from no-peers-present
 
 `TcpStream::connect` per call at `src/gossip/transport.rs:37` (`send_msg`) and
 `:45` (`send_and_receive`). No pooling. Separately, the `trnsprt` client has no
-pooling either (`FEATURES.md:971-972`) — that one is not gossip and is not gated
+pooling either (`FEATURES.md:976-977`) — that one is not gossip and is not gated
 on 33.
 
 ### 47. Hub phase 3: gossip moves hub-side `[hub]`
@@ -1624,7 +1624,7 @@ port-clash validation in `src/config/serve.rs` to collapse. (Corrected again
 item 84 owns.)
 
 Beside it: **hub↔node version skew is unmanaged** beyond same-binary spawning
-(`FEATURES.md:1077-1078`).
+(`FEATURES.md:1082-1083`).
 
 ### Decisions owed before the federation build
 
@@ -2020,7 +2020,7 @@ set.** Precision 27/38 = **71.1% → 26/29 = 89.7%**. False-positive rate **28.9
 92.9%** — *it went down*. The three-character floor that acquits `acl`, `rrf` and
 `hub` also acquits `gpu`, and `gpu` plus `kern` is enough to reach the two-word
 prose bar and silence a genuinely under-covering anchor (this file citing
-`FEATURES.md:593` for three claims that span 584-585). That is the same trade the
+`FEATURES.md:598` for three claims that span 589-590). That is the same trade the
 camelCase note above records, paid a second time, and it is recorded here for the
 same reason. A prose bar of 1 instead of 2 measures 96.3% precision at unchanged
 recall and was **declined**: the truth set holds only five prose-to-prose anchors,
@@ -2159,29 +2159,57 @@ What survives: the by-name discipline. It is cheap, it catches mode 1
 independently of the build layout, and it is what confirmed both cycles that
 found this.
 
-### 97. The e2e harness cannot exercise the GNN at all `[eval]`
+### 97. The e2e harness cannot exercise the GNN at all — closed 2026-07-22 `[eval]`
 
+**Closed. The premise was right and understated: there were two independent
+reasons no propagation ran, and only one of them was the corpus.**
 `DEFAULT_MIN_THOUGHTS` is 128 (`src/gnn/propagate.rs:16`) and the recall corpus
-is 36 facts (`e2e/test_recall.py:199`), so **no GNN propagation runs in `e2e/`,
-in any column.** Every "recall unchanged" result reported for a GNN change to
-date is a true green about nothing: the code under test never executed.
+is 36 facts (`e2e/test_recall.py:199`) — but `test_recall.py` drives the CLI,
+and **the CLI has no tick loop at all**. `do_gnn_propagate` is reachable only
+from `tick::start` (spawned by `store::Registry::open`, i.e. a daemon or `kern
+mcp`) and from `tick_sync`, whose one caller is a unit test. So the propagation
+was not merely skipped at the threshold there; it was never called.
 
-Found by the item 28 slice, which had been given a recall gate as its safety bar
-and discovered the gate was vacuous. That change shipped on a bit-identity proof
-instead — the right call, and the reason the gap surfaced at all rather than
-being papered over by a green suite.
+Both halves were measured through the real binary, with the daemon's own
+propagation entry temporarily instrumented. At 36 facts under a daemon:
+`entities=36 min=128`, entered and returned, nothing applied. **And at 150
+facts: still nothing** — the boot cluster pass split the root into 36 + 114 and
+neither part reached 128. That is structural, not incidental: `do_cluster`
+enqueues `GnnPropagate` only `if did_structural_work`, and structural work is
+the same act that moves entities *out* of the kern about to be propagated.
 
-What this costs: `gnn_vector` feeds retrieval, so a GNN change that alters
-ranking has no automated detector. The bit-identity standard covers changes that
-claim to be exact; it says nothing about a change that intends to move ranking,
-which is precisely when a recall gate would matter.
+**So the closure the item favoured — grow the corpus — does not work at the
+size it implies.** 150 facts leave the largest kern at 114, and the ingest cost
+is already superlinear through the CLI: 1.9 s for 36 facts, 54.7 s for 150, each
+`kern ingest` loading and re-saving the whole graph. Reaching a *post-split* kern
+of 128 would cost minutes per e2e run and would depend on clustering behaviour
+nobody has pinned — a gate that silently stops running the day that behaviour
+shifts, which is the failure being fixed here, not a fix for it.
 
-Two closures, neither obviously right. Lower `min_thoughts` in an e2e-only
-config so the existing corpus trains — cheap, but it measures a 36-node graph,
-which is not the regime any real propagation runs in. Or grow the corpus past
-128 — honest, but it lengthens every e2e run and the recall floors would need
-re-deriving against a corpus nobody has measured yet. The second is probably
-right and is not free.
+**What shipped is the other closure, plus the liveness assertion that makes it
+worth having.** `e2e/test_gnn_recall.py` writes an e2e-only `[gnn]
+min_thoughts = 4` and `[tick] interval_secs = 0` (boot pass only, so the
+embeddings are not still moving under the probes), starts a daemon with
+`RUST_LOG=kern.gnn=info`, and **waits for the propagation to report itself**
+before scoring anything. `do_gnn_propagate` now logs `learned propagation
+applied` with a `nodes` count on success — failure was already loud, success was
+silent, and `gnn_vector` is not persisted, so nothing on disk could have
+answered "did it run". The test fails if no propagation arrives in 60 s, fails
+if it covered fewer than 30 nodes, and only then scores recall.
+
+Proof it is not another vacuous gate. With entity `i`'s propagated embedding
+deliberately written to entity `i+1`: **`cargo nextest run --workspace` 972
+passed, `e2e/test_recall.py` passed printing its usual 0.9306 / 0.9722 / 0.9471,
+and the new test failed 3 of 3 runs** (recall@1 0.7917 / 0.7222 / 0.7361 against
+a 0.85 floor). Every existing gate was blind to a GNN wiring bug; this one is
+not.
+
+What is left, and it is what the item warned about: **the gate measures a
+36-node graph.** It cannot catch a regression that only appears at scale, and
+`tests/gnn_scale.rs` — the only thing that runs at 128+ — is `#[ignore]`d and
+asserts nothing about ranking. Also unchanged: the propagation is stochastic
+(unseeded weight init and negative-edge sampling), so its floors are looser than
+the CLI corpus's and were set below the worst of 8 runs rather than from one.
 
 ### 92. Tests that race a backward-stepping `CLOCK_REALTIME` — closed 2026-07-22 `[eval]`
 
@@ -2452,9 +2480,9 @@ propagation overwrites one — another 76.8 MB at this corpus size.
   requires either promoting them to real per-endpoint config or exposing that
   predicate. Was listed under item 11; it is a different job.
 - Hand-rolled tool schemas; no batch query
-  (`FEATURES.md:636-637`).
+  (`FEATURES.md:641-642`).
 - The LLM client is Ollama-centric with no retry/backoff policy object
-  (`FEATURES.md:914-915`).
+  (`FEATURES.md:919-920`).
 - ~~Watcher `.gitignore` parsing is approximate; no rename tracking~~ **(retired
   2026-07-21 — verified false on both counts).** `IgnoreRules` builds a real
   `Gitignore` through ripgrep's `ignore` crate
@@ -2472,11 +2500,11 @@ propagation overwrites one — another 76.8 MB at this corpus size.
   default** — `WatcherConfig::enabled` is `false` unless a `kern.toml` sets it
   (`src/config/watcher.rs:14-16`) — so it is not a default-path defect
   (`FEATURES.md:1085-1088`).
-- `unnamed` lists only; there is no `promote` (`FEATURES.md:813`).
+- `unnamed` lists only; there is no `promote` (`FEATURES.md:818`).
 - GNN has no GPU path, weights are per-kern rather than shared, and the objective
   is link-prediction only (`FEATURES.md:593-594`).
 - Under WSL2 NAT a loopback Ollama URL must be hand-pinned; kern neither rewrites
-  nor warns (`FEATURES.md:1125-1127`).
+  nor warns (`FEATURES.md:1130-1132`).
 - RPC socket bind→chmod race — sub-millisecond, umask default — recorded as an
   accepted risk where it happens (`harden_socket`,
   `src/trnsprt/src/typed/local.rs:348-358`); revisit only if the umask

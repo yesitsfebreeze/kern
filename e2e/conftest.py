@@ -63,6 +63,8 @@ class KernProject:
 		review_policy=None,
 		watcher_enabled=False,
 		watcher_roots=None,
+		gnn_min_thoughts=None,
+		tick_interval_secs=None,
 	):
 		"""(Re)write the project kern.toml. `data_dir` is cwd-relative.
 
@@ -87,6 +89,11 @@ class KernProject:
 		`roots` are cwd-relative and default to the whole cwd. The section is
 		emitted only when enabled, for the same reason: every other test's
 		config text stays byte-identical.
+
+		`gnn_min_thoughts` lowers the GNN's entity floor and `tick_interval_secs`
+		sets the maintenance driver's period — `0` disables the periodic driver,
+		leaving only the one maintenance pass a daemon enqueues at boot. Both are
+		omitted when None, again so every other test's config text is unchanged.
 		"""
 		head = f'data_dir = "{data_dir}"\n\n' if data_dir else ""
 		ttl = (
@@ -101,13 +108,20 @@ class KernProject:
 		if watcher_enabled:
 			roots = f"roots = {json.dumps(list(watcher_roots))}\n" if watcher_roots else ""
 			watcher = f"\n[watcher]\nenabled = true\n{roots}"
+
+		gnn = f"\n[gnn]\nmin_thoughts = {gnn_min_thoughts}\n" if gnn_min_thoughts else ""
+		tick = (
+			f"\n[tick]\ninterval_secs = {tick_interval_secs}\n"
+			if tick_interval_secs is not None
+			else ""
+		)
 		(self.cwd / ".kern" / "kern.toml").write_text(
 			f"{head}"
 			f'[embed]\nurl = "{self.llm_url}"\nmodel = "fake-embed"\n\n'
 			f'[reason]\nurl = "{self.llm_url}"\nmodel = "fake-reason"\n\n'
 			f"{review}"
 			f"[intake]\nenabled = {str(intake_enabled).lower()}\n{ttl}"
-			f"{watcher}\n"
+			f"{watcher}{gnn}{tick}\n"
 		)
 
 	def run(self, *args, timeout=120):
@@ -148,8 +162,8 @@ class KernProject:
 			if p.name.startswith("kern-") and p.name != "kern-hub.sock"
 		]
 
-	def start_daemon(self):
-		child = self.spawn("--daemon")
+	def start_daemon(self, **popen_kw):
+		child = self.spawn("--daemon", **popen_kw)
 		self._children.append(child)
 		wait_until(
 			lambda: bool(self.node_sockets()),
