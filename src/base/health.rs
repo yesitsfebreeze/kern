@@ -4,7 +4,8 @@ use crate::base::graph::GraphGnn;
 // without reading the process statics `graph_health_stats` reads — which is the
 // difference between a test that is runner-independent and one that reds the
 // moment another test in the same process increments a counter.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+// `f64` is not `Eq`, so the lower-confidence-bound field below drops the derive.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct HealthStats {
 	pub kerns: usize,
 	pub entities: usize,
@@ -38,6 +39,33 @@ pub struct HealthStats {
 	// Jobs the ingest queue refused because it was full. Nonzero means a producer
 	// is outrunning the LLM leg and text was handed back, not stored.
 	pub ingest_queue_refused: u64,
+	// Gini coefficient over resident entities' access counts — 0.0 when every
+	// entity is accessed equally (converged on uniform paths), →1.0 when one
+	// entity holds all access (not converged). Empty graph → 0.0. Makes the
+	// "corpus converges on efficient paths" claim measurable (ROADMAP item 62).
+	pub gini_access: f64,
+}
+
+/// Gini coefficient over the access-count distribution. 0.0 when all counts are
+/// equal (or empty); →1.0 when one entity holds all access. Standard formula
+/// `G = (Σ_i Σ_j |x_i − x_j|) / (2 n Σ x)`; 0.0 for an empty or zero-sum slice.
+pub fn gini_over_access(counts: &[u64]) -> f64 {
+	let n = counts.len();
+	if n == 0 {
+		return 0.0;
+	}
+	let sum: u64 = counts.iter().sum();
+	if sum == 0 {
+		return 0.0;
+	}
+	let mut abs_diff_sum: u128 = 0;
+	for i in 0..n {
+		for j in 0..n {
+			abs_diff_sum += (counts[i].max(counts[j]) - counts[i].min(counts[j])) as u128;
+		}
+	}
+	let denom = 2u128 * (n as u128) * (sum as u128);
+	(abs_diff_sum as f64) / (denom as f64)
 }
 
 pub fn graph_health_stats(g: &GraphGnn) -> HealthStats {
@@ -57,6 +85,14 @@ pub fn graph_health_stats(g: &GraphGnn) -> HealthStats {
 		.filter_map(|cid| g.loaded(cid))
 		.map(|c| c.graviton_text.clone())
 		.collect();
+	// Resident entities only — an unloaded kern's access counts are on disk and
+	// not part of the live distribution the metric describes.
+	let access_counts: Vec<u64> = g
+		.all()
+		.iter()
+		.flat_map(|k| k.entities.values().map(|e| e.access_count.value()))
+		.collect();
+	let gini_access = gini_over_access(&access_counts);
 	let store = g.store();
 	let stamp = store
 		.as_ref()
@@ -83,6 +119,7 @@ pub fn graph_health_stats(g: &GraphGnn) -> HealthStats {
 		remote_cap_dropped: crate::base::merge::remote_cap_dropped(),
 		unspilled_drops: crate::tick::stigmergy::unspilled_drops(),
 		ingest_queue_refused: crate::ingest::worker::ingest_queue_refused(),
+		gini_access,
 	}
 }
 
@@ -148,6 +185,62 @@ mod tests {
 			graph_health_stats(&g).cold_evicted,
 			2,
 			"evicted rows are reported, not silently dropped"
+		);
+	}
+
+	#[test]
+	fn gini_over_access_pins_known_distributions() {
+		assert_eq!(gini_over_access(&[]), 0.0, "empty -> 0.0");
+		assert_eq!(gini_over_access(&[5, 5, 5]), 0.0, "uniform -> 0.0");
+		assert_eq!(gini_over_access(&[1, 1, 1, 1]), 0.0, "uniform -> 0.0");
+		assert_eq!(gini_over_access(&[0, 0, 0]), 0.0, "zero-sum -> 0.0");
+		// [10,0,0]: standard Gini, one entity holds all access over n=3 ->
+		// (n-1)/n = 2/3.
+		assert!(
+			(gini_over_access(&[10, 0, 0]) - 2.0 / 3.0).abs() < 1e-12,
+			"one of three holds all access -> 2/3"
+		);
+		// [100,0]: n=2 -> (n-1)/n = 1/2.
+		assert!(
+			(gini_over_access(&[100, 0]) - 0.5).abs() < 1e-12,
+			"two entities, one holds all -> 0.5"
+		);
+	}
+
+	#[test]
+	fn graph_health_stats_empty_graph_gini_is_zero() {
+		let h = graph_health_stats(&GraphGnn::new());
+		assert_eq!(h.gini_access, 0.0, "no entities -> uniform 0.0");
+	}
+
+	#[test]
+	fn graph_health_stats_skewed_access_gini_above_half() {
+		use crate::base::types::{mk_entity, EntityKind};
+		use crate::crdt::GCounter;
+
+		let mut g = GraphGnn::new();
+		// One heavily-accessed entity, several untouched. Insert via
+		// `root_kern_mut` so the kerns-map root (what `all()` reads) is mutated,
+		// not the separate `g.root` field.
+		{
+			let root = g.root_kern_mut().expect("root kern present");
+			let mut hot = mk_entity("hot", "hot", 0.0, EntityKind::Claim);
+			hot.access_count = {
+				let mut c = GCounter::new();
+				c.increment("local", 50);
+				c
+			};
+			root.entities.insert("hot".into(), hot);
+			for i in 0..5 {
+				let cold = mk_entity(&format!("c{i}"), "cold", 0.0, EntityKind::Claim);
+				root.entities.insert(format!("c{i}"), cold);
+			}
+		}
+		let h = graph_health_stats(&g);
+		assert!(
+			h.gini_access > 0.5,
+			"one entity holds all access -> gini > 0.5, got {}",
+			h.gini_access
 		);
 	}
 }

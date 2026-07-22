@@ -68,6 +68,10 @@ pub struct HealthRes {
 	// Jobs parked in the ingest RAM queue right now — a gauge, not a counter.
 	#[serde(default)]
 	pub ingest_queue_depth: u64,
+	// Gini over resident entities' access counts: 0.0 = uniform (converged),
+	// →1.0 = one entity holds all access. 0.0 from older daemons (item 62).
+	#[serde(default)]
+	pub gini_access: f64,
 	// Propagations the trainer refused past its queue cap. Those kerns keep the
 	// `gnn_vector` they already had, so the count is the only trace.
 	#[serde(default)]
@@ -187,6 +191,7 @@ mod dto_serde_tests {
 			unspilled_drops: 16,
 			ingest_queue_refused: 17,
 			ingest_queue_depth: 21,
+			gini_access: 0.42,
 			gnn_train_refused: 18,
 			llm_complete_failed: 19,
 			last_llm_complete_failure: "transient: HTTP error: operation timed out".into(),
@@ -211,6 +216,7 @@ mod dto_serde_tests {
 		assert_eq!(back.unspilled_drops, 16);
 		assert_eq!(back.ingest_queue_refused, 17);
 		assert_eq!(back.ingest_queue_depth, 21);
+		assert!((back.gini_access - 0.42).abs() < 1e-12);
 		assert_eq!(back.gnn_train_refused, 18);
 		assert_eq!(back.llm_complete_failed, 19);
 		assert_eq!(
