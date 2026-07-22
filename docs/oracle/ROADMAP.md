@@ -2255,17 +2255,25 @@ neutral here. Item 64's stemmer swap is the clearest case.
 The harness exists (`tests/e2e/eval/`, CHANGELOG 2026-07-22): LoCoMo-10 and
 LongMemEval-S scored retrieval-only — recall@k / MRR / NDCG against the
 datasets' own evidence labels, no LLM anywhere in ingest, retrieval, or
-scoring — exactly the replacement the 2026-07-20 deletion entry promised. What
-has NOT happened is a real run: every number so far came from `--fake-llm`
-plumbing smoke, which the report itself marks MEANINGLESS. Wanted: `just
-eval-fetch`, then `just eval-locomo` and `just eval-longmemeval` against local
-Ollama with the pinned default (`qwen3-embedding:0.6b`), numbers recorded here
-and in the CHANGELOG with the protocol named. The only published peer numbers
-in the same protocol family are YourMemory's (LoCoMo-10 Recall@5 0.59,
-LongMemEval-S Recall@5 0.894, vendor-run); Zep's 75.14 and Mem0's 92.5 are
-LLM-judged end-to-end scores and are not comparable — any quote of our numbers
-next to theirs must say so. Until this runs, the claim standard in the North
-star stands unchanged: no quality claim of any kind.
+scoring — exactly the replacement the 2026-07-20 deletion entry promised.
+
+**LoCoMo-10 half done, measured 2026-07-22** (`qwen3-embedding:0.6b` on
+Ollama, direct path, k=10, 1536 questions, 446 adversarial + 4 evidence-less
+excluded, 0 truncation collisions; report
+`eval/reports/locomo-20260722-081539.json`, CHANGELOG entry same day):
+recall_any@1 **0.3092**, recall_any@5 **0.5983**, recall_any@10 **0.7129**,
+recall_all@10 0.5710, MRR 0.4427, NDCG@10 0.4602. Per category (any@5):
+temporal 0.6760, single-hop 0.6088, multi-hop 0.5532, open-domain 0.3696.
+Query latency p50 0.62s / p95 0.68s — cold-process CLI wall clock, not a
+serving-path number. The one peer in this protocol family, YourMemory,
+publishes LoCoMo-10 Recall@5 0.59 (vendor-run, hit-definition unstated);
+kern's any@5 0.5983 sits at parity with that claim, and no stronger sentence
+than "parity with the one vendor-run peer number" is licensed. Zep's 75.14 and
+Mem0's 92.5 are LLM-judged end-to-end scores and are not comparable.
+
+Still wanted before this closes: the LongMemEval-S run (dataset fetch needs
+`huggingface-hub`, `just e2e-install`), recorded the same way. Weakest
+category is open-domain (0.3696 any@5) — a finding for Tier 8, not a claim.
 
 ### 104. Benchmark the full pipeline, which needs turn-level claim provenance `[ingest]`
 
@@ -3266,12 +3274,16 @@ the harness.
 The previously published figures (overall 0.137 ± 0.018, "gap 0.46") are
 therefore **withdrawn, not superseded** — no current number replaces them.
 
-Claim standard, unchanged by item 1's closure: **no quality claim of any kind.**
-Not SOTA, not parity, not regression, not improvement. Latency claims remain
-permitted from the e2e harness. What item 1 delivered is a *scorer*
-(`tests/e2e/test_recall.py`) — it steers work and catches regressions against a
-bag-of-words embedder, and it certifies nothing. The standard stands until
-something can.
+Claim standard, amended 2026-07-22 by item 103's first measured run:
+**retrieval-only claims are permitted, and only those.** A permitted claim
+names the harness (`tests/e2e/eval/`), the dataset, the pinned embedder, and
+the hit definition (any-hit vs all-hit) — e.g. "LoCoMo-10 recall_any@5 0.5983,
+qwen3-embedding:0.6b, direct path". End-to-end quality claims (anything a
+reader could compare to an LLM-judged J-score) remain forbidden: kern has no
+number in that protocol family and the family itself does not reproduce.
+Latency claims remain permitted from the e2e harness. Item 1's scorer
+(`tests/e2e/test_recall.py`) still certifies nothing — it steers work and
+catches regressions against a bag-of-words embedder.
 
 ## How we supersede Zep / Mem0 / Letta / Qdrant
 
@@ -3279,8 +3291,9 @@ Not by matching feature lists. By owning a combination none of them hold, then
 proving it — on a *comparable* measurement. Item 1 shipped a scorer that
 measures kern against its own past, not against them; item 103's harness
 (2026-07-22) scores the public datasets retrieval-only, comparable to the one
-rival that publishes in the same protocol family (YourMemory) — and has not
-had a real run yet, so the numbers column below is still honest.
+rival that publishes in the same protocol family (YourMemory) — first real
+LoCoMo-10 run recorded the same day at any@5 0.5983 against YourMemory's
+vendor-run 0.59. Parity with one unverified peer number, not supersession.
 
 | property | kern | Zep/Graphiti | Mem0 | Letta | Qdrant |
 |---|---|---|---|---|---|
@@ -3291,7 +3304,7 @@ had a real run yet, so the numbers column below is still honest.
 | Graph + dense ANN + BM25 + GNN in one process | ✅ | partial | ❌ | ❌ | ❌ |
 | Bi-temporal supersede off the recall path | ✅ local / 🟡 item 44 federated | ✅ | ❌ | ❌ | ❌ |
 | Coordinator-free CRDT federation | 🟡 building | ❌ | ❌ | ❌ | ❌ |
-| Published eval numbers | ❌ withdrawn; harness ready, item 103 | ✅ | ✅ | ✅ | n/a |
+| Published eval numbers | 🟡 LoCoMo-10 recorded 2026-07-22, item 103 | ✅ | ✅ | ✅ | n/a |
 
 Two rows carried an unqualified ✅ in an earlier version while this same file
 funded the defects that break them. They are 🟡 with the items named — a

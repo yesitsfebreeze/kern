@@ -2,6 +2,35 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — First real LoCoMo-10 numbers, and the claim standard is amended
+  to permit exactly what they are. Run: `just eval-locomo --embed-url
+  http://172.27.176.1:11434` (Ollama 0.32.1 on the Windows host across the
+  WSL2 gateway — reconciliation now documented in README's quickstart;
+  `localhost:11434` resolves inside the VM where nothing listens),
+  `qwen3-embedding:0.6b`, direct path, k=10, release binary, ~16 minutes
+  wall. 1536 questions scored, 446 adversarial + 4 evidence-less excluded,
+  272 session ingests all committed, 0 truncation collisions. Results
+  (`eval/reports/locomo-20260722-081539.json`): recall_any@1 0.3092,
+  recall_any@5 0.5983, recall_any@10 0.7129, recall_all@10 0.5710, MRR
+  0.4427, NDCG@10 0.4602. Per category, any@5: temporal 0.6760, single-hop
+  0.6088, multi-hop 0.5532, open-domain 0.3696 — open-domain is the weakest
+  slice and goes to Tier 8 as a finding. Query latency p50 0.62s / p95 0.68s,
+  cold-process CLI wall clock (spawn + graph load + embed round-trip to
+  another VM + retrieve), not a serving-path figure. Context for the one
+  comparable number: YourMemory publishes LoCoMo-10 Recall@5 0.59,
+  vendor-run, hit-definition unstated — kern's any@5 0.5983 is parity with
+  that claim and nothing stronger; Zep (75.14) and Mem0 (92.5) are LLM-judged
+  end-to-end scores in a protocol family that does not reproduce and are not
+  comparable. The report's `commit` field names the parent commit because the
+  harness landed in the same change that records this entry. Claim standard
+  amended in ROADMAP's North star: retrieval-only claims permitted when they
+  name harness, dataset, embedder, and hit definition; end-to-end claims
+  remain forbidden. LongMemEval-S still pending (item 103 stays open).
+  Decided by: verify-before-claiming (the numbers exist before the sentence
+  about them), name-the-tradeoff (cold-process latency labelled as such).
+  Supersedes: the "no quality claim of any kind" standard, in force since the
+  2026-07-20 deletion, narrowed — not lifted.
+
 - 2026-07-22 — The retrieval-only public-benchmark harness ships: LoCoMo-10 and
   LongMemEval-S scored as recall@k / MRR / NDCG against the datasets' own
   evidence labels, no LLM in ingest, retrieval, or scoring — the replacement
