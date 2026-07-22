@@ -2,6 +2,49 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 101 closed: **every anchor the widened `docs-check` exposed
+  now points where its sentence says.** The filing said 18; the list was 20, and
+  each was adjudicated by opening the cited line, finding the thing the sentence
+  describes, and reading the new target back.
+
+  Sixteen were genuinely wrong. Four of those were item 52's hazard exactly as
+  predicted — a bare `` `:NNN` `` binding to the nearest preceding path and
+  meaning another file. `bind_unix`'s continuation bound to `src/commands.rs`
+  and meant `src/trnsprt/src/typed/local.rs`; `Worker::submit`'s bound to
+  `src/ingest/direct.rs` and meant `src/ingest/file_watcher.rs`, where **the
+  line number was right and only the file was wrong** — the quietest failure in
+  the set, because nothing about it looks stale; and item 75's two doc-only
+  leads bound to `src/base/graph.rs` while meaning
+  `docs/kern/diskann-disk-index.md`.
+
+  Two more were not anchors at all but **quotations the checker read as
+  citations** — prose naming a broken ref in single backticks, which makes a
+  fresh copy of it. Item 101's own first draft did this, and so did the note
+  recording item 30's dead `concepts/acceptance.mdx` citation. The repo already
+  had the fix (a doubly-backticked span is an illustration and is blanked before
+  scanning); it just was not used. A page describing a broken citation must
+  display it, not make it.
+
+  **Two were false positives, and both are floor artefacts.** The `gc` row cited
+  `tool_gc` correctly and `README.md:399` pins the version correctly; in each the
+  only distinguishing token is below the three-character floor (`gc`) or is
+  digits the tokeniser drops (`1.1.0`). Neither was silenced with `anchor-ok` —
+  **no acquittal was written this pass.** The `gc` anchor was widened two lines
+  to reach the `reaped`/`before`/`after` binding the row describes, and the
+  `README` sentence now names the anti-entropy pointer sharing that line. Both
+  true of the target, and both leave the anchor checked instead of dark. So
+  `--strict-anchors` faces a 2-in-20 false-positive rate on the widened
+  checker's first real list, neither one a judgement error.
+
+  Two further repoints came out of the reading rather than the nominations:
+  `Entity::acl` and `start_gossip`'s builders were both cited into unrelated
+  spans and neither was nominated, because a long enough citing block shares
+  words with almost anything. The content check bites where the sentence is
+  short; that is the residual, and it is worth knowing before the flag is armed.
+
+  Decided by: verify-before-claiming — a repoint is a claim, so each one was
+  read back at its new target before it was believed.
+
 - 2026-07-22 — merged item 18's close, and filed item 101 for what the merge
   exposed. 229 + 1 + this one = 231.
 
