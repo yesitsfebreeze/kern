@@ -65,6 +65,7 @@ class KernProject:
 		watcher_roots=None,
 		gnn_min_thoughts=None,
 		tick_interval_secs=None,
+		reason_timeout_secs=None,
 	):
 		"""(Re)write the project kern.toml. `data_dir` is cwd-relative.
 
@@ -94,6 +95,11 @@ class KernProject:
 		sets the maintenance driver's period — `0` disables the periodic driver,
 		leaving only the one maintenance pass a daemon enqueues at boot. Both are
 		omitted when None, again so every other test's config text is unchanged.
+
+		`reason_timeout_secs` is the ceiling on one completion. Omitted when None
+		for the same byte-identity reason — and that omission is the default under
+		test: every other e2e runs with no such key and posts under the 600s the
+		`const` used to hardcode.
 		"""
 		head = f'data_dir = "{data_dir}"\n\n' if data_dir else ""
 		ttl = (
@@ -115,10 +121,14 @@ class KernProject:
 			if tick_interval_secs is not None
 			else ""
 		)
+		reason_timeout = (
+			f"timeout_secs = {reason_timeout_secs}\n" if reason_timeout_secs else ""
+		)
 		(self.cwd / ".kern" / "kern.toml").write_text(
 			f"{head}"
 			f'[embed]\nurl = "{self.llm_url}"\nmodel = "fake-embed"\n\n'
-			f'[reason]\nurl = "{self.llm_url}"\nmodel = "fake-reason"\n\n'
+			f'[reason]\nurl = "{self.llm_url}"\nmodel = "fake-reason"\n'
+			f"{reason_timeout}\n"
 			f"{review}"
 			f"[intake]\nenabled = {str(intake_enabled).lower()}\n{ttl}"
 			f"{watcher}{gnn}{tick}\n"

@@ -183,6 +183,21 @@
   Decided by: name-the-tradeoff — public is the honest default when the system
   cannot verify the alternative, and the cost is that a watched file is readable
   by every caller.
+- 2026-07-22 — item 30's distill leg got a failure channel, and its ceiling got
+  chosen. `complete_func` ended `.and_then(Result::ok).unwrap_or_default()`, so a
+  600 s timeout, a refused connection, an HTTP 500, an auth rejection and an
+  empty completion all arrived as `""` — no log, no counter, six call sites.
+  `is_transient` already classified exactly those cases and was consulted only on
+  the embed leg. `LLM_TIMEOUT` becomes `[reason] timeout_secs`, default 600, so an
+  unconfigured kern is unchanged.
+
+  The defect was confessed in shipping strings before anyone filed it:
+  `record_stuck` already wrote *"the reason model returned no parseable claims
+  (prose reply, or endpoint unreachable)"* — naming both causes and conceding it
+  could not say which, because by then there was nothing left to say it with.
+  Decided by: fix-the-root — the item called this a tuning question about a
+  `const`, and the tuning half was the smaller half; a bound nobody can observe
+  being hit is not a bound.
 
 - 2026-07-22 — item 93: the anchor checker had been reading 63% of the anchors
   and reporting on all of them. 223 + this one = 224.

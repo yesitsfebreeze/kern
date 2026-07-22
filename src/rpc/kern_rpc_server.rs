@@ -110,6 +110,8 @@ impl KernRpc for KernRpcHandler {
 				unspilled_drops: u64_at("unspilled_drops"),
 				ingest_queue_refused: u64_at("ingest_queue_refused"),
 				gnn_train_refused: u64_at("gnn_train_refused"),
+				llm_complete_failed: u64_at("llm_complete_failed"),
+				last_llm_complete_failure: str_at("last_llm_complete_failure"),
 				embed_model: str_at("embed_model"),
 				embed_dim: u64_at("embed_dim"),
 				embed_mismatch: payload

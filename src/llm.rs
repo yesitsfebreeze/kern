@@ -1,6 +1,8 @@
+use crate::base::log_throttle::LogThrottle;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,6 +36,64 @@ pub fn is_transient(err: &LlmError) -> bool {
 
 fn should_retry_single(err: &LlmError) -> bool {
 	is_transient(err) || matches!(err, LlmError::EmptyEmbedding)
+}
+
+const COMPLETE_WARN_SECS: u64 = 60;
+static COMPLETE_FAILED: AtomicU64 = AtomicU64::new(0);
+static COMPLETE_WARN: LogThrottle = LogThrottle::new(COMPLETE_WARN_SECS);
+static LAST_COMPLETE_FAILURE: parking_lot::Mutex<String> = parking_lot::Mutex::new(String::new());
+
+// Completions that failed since this process started. `complete_func` hands its
+// caller `""` either way, and downstream reads `""` as "nothing worth keeping",
+// so without the count a dead endpoint and a model too weak to answer are the
+// same event. Nonzero means the endpoint, not the model.
+pub fn complete_failed() -> u64 {
+	COMPLETE_FAILED.load(Ordering::Relaxed)
+}
+
+// The last failure in words — a timeout, a refused connection and an empty body
+// all raise the counter, and only this says which. Empty until one happens.
+pub fn last_complete_failure() -> String {
+	LAST_COMPLETE_FAILURE.lock().clone()
+}
+
+// The recorded reason lands on one line of `kern health`, and `LlmError::Api`
+// carries the endpoint's whole body — which is an HTML error page often enough
+// to matter. First line, bounded, char-boundary safe.
+const REASON_MAX_CHARS: usize = 160;
+
+fn one_line_reason(err: &LlmError) -> String {
+	let full = err.to_string();
+	let first = full.lines().next().unwrap_or_default().trim();
+	match first.char_indices().nth(REASON_MAX_CHARS) {
+		Some((i, _)) => format!("{}…", &first[..i]),
+		None => first.to_string(),
+	}
+}
+
+fn record_complete_failure(err: &LlmError) {
+	let total = COMPLETE_FAILED.fetch_add(1, Ordering::Relaxed) + 1;
+	let transient = is_transient(err);
+	// `is_transient` already sorts these cases for the embed leg; reuse its
+	// verdict rather than re-deciding what a retryable completion looks like.
+	*LAST_COMPLETE_FAILURE.lock() = format!(
+		"{}{}",
+		if transient {
+			"transient: "
+		} else {
+			"permanent: "
+		},
+		one_line_reason(err)
+	);
+	if COMPLETE_WARN.allow() {
+		tracing::warn!(
+			target: "kern.llm",
+			transient,
+			total_failed = total,
+			error = %err,
+			"reason completion failed; the caller sees an empty completion (further failures counted, not logged)"
+		);
+	}
 }
 
 #[derive(Default, Clone)]
@@ -72,6 +132,9 @@ struct Inner {
 	seed: Option<i64>,
 	temperature: Option<f64>,
 	num_ctx: Option<u64>,
+	// Per-request ceiling on `complete`. `LLM_TIMEOUT` until `[reason]
+	// timeout_secs` says otherwise, and that key defaults to the same number.
+	reason_timeout: Duration,
 }
 
 impl Client {
@@ -113,6 +176,7 @@ impl Client {
 				seed: None,
 				temperature: None,
 				num_ctx: None,
+				reason_timeout: LLM_TIMEOUT,
 			}),
 		}
 	}
@@ -124,6 +188,15 @@ impl Client {
 
 	pub fn with_temperature(mut self, t: f64) -> Self {
 		Arc::make_mut(&mut self.inner).temperature = Some(t);
+		self
+	}
+
+	// `[reason] timeout_secs`. 0 reads as unset and keeps `LLM_TIMEOUT`, the way
+	// an empty url/key falls back rather than taking effect as itself.
+	pub fn with_timeout_secs(mut self, secs: u64) -> Self {
+		if secs > 0 {
+			Arc::make_mut(&mut self.inner).reason_timeout = Duration::from_secs(secs);
+		}
 		self
 	}
 
@@ -264,7 +337,12 @@ impl Client {
 				"options": options,
 			});
 			let resp = self
-				.post_checked(&url, &self.inner.reason_headers, &body, LLM_TIMEOUT)
+				.post_checked(
+					&url,
+					&self.inner.reason_headers,
+					&body,
+					self.inner.reason_timeout,
+				)
 				.await?;
 			return resp
 				.json::<ChatLine>()
@@ -286,7 +364,12 @@ impl Client {
 			temperature: self.inner.temperature,
 		};
 		let resp = self
-			.post_checked(&url, &self.inner.reason_headers, &body, LLM_TIMEOUT)
+			.post_checked(
+				&url,
+				&self.inner.reason_headers,
+				&body,
+				self.inner.reason_timeout,
+			)
 			.await?;
 		let parsed: ChatResponse = resp.json().await?;
 		let [c] = parsed.choices;
@@ -297,14 +380,26 @@ impl Client {
 		Ok(content)
 	}
 
+	// The blocking bridge's contract is `String`, and `""` is how every caller
+	// reads "nothing came back" — that stays. What does not stay is the silence:
+	// the error is counted and named on its way to being discarded, so a hung
+	// endpoint, a refused connection and a model too weak to answer stop being
+	// the same empty string (ROADMAP item 30).
 	pub fn complete_func(&self) -> impl Fn(&str) -> String + Send + Sync + 'static {
 		let client = self.clone();
 		move |prompt: &str| {
 			let client = client.clone();
 			let prompt = prompt.to_string();
-			block_on_in_place(client.complete(&prompt))
-				.and_then(Result::ok)
-				.unwrap_or_default()
+			match block_on_in_place(client.complete(&prompt)) {
+				Some(Ok(text)) => text,
+				Some(Err(e)) => {
+					record_complete_failure(&e);
+					String::new()
+				}
+				// No runtime to block on: a caller bug, not an endpoint fault, and
+				// counting it would read as one.
+				None => String::new(),
+			}
 		}
 	}
 }
@@ -393,7 +488,8 @@ const REASON_NUM_CTX: u64 = 8192;
 const REASON_KEEP_ALIVE: &str = "2m";
 
 // Overrides the client's 120 s default: slow CPU inference / large RAG prompts / long streams run past it.
-const LLM_TIMEOUT: Duration = Duration::from_secs(600);
+// The floor `with_timeout_secs` starts from, and the same number `[reason] timeout_secs` defaults to.
+const LLM_TIMEOUT: Duration = Duration::from_secs(crate::config::DEFAULT_REASON_TIMEOUT_SECS);
 
 const EMBED_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -584,6 +680,173 @@ mod tests {
 			hits.load(Ordering::SeqCst),
 			1,
 			"no wasted single retry on a permanent error"
+		);
+	}
+
+	// A chat endpoint that answers however the test needs it to fail. Kept here
+	// rather than in `test_support` because only the completion leg's failure
+	// channel cares about the shapes.
+	fn chat_app(mode: &'static str) -> axum::Router {
+		use axum::http::StatusCode;
+		use axum::response::IntoResponse;
+		axum::Router::new().route(
+			"/api/chat",
+			axum::routing::post(move |_b: axum::Json<Value>| async move {
+				match mode {
+					"hang" => {
+						std::future::pending::<()>().await;
+						unreachable!()
+					}
+					// A real gateway answers 5xx with an HTML page, not JSON — and
+					// `LlmError::Api` renders the whole body, so this is what would
+					// end up on a health line if nothing bounded it.
+					"500" => (
+						StatusCode::INTERNAL_SERVER_ERROR,
+						format!(
+							"<!DOCTYPE HTML>\n<html><body>{}</body></html>",
+							"x".repeat(400)
+						),
+					)
+						.into_response(),
+					// A well-formed reply carrying nothing — the weak model.
+					_ => axum::Json(serde_json::json!({
+						"message": { "role": "assistant", "content": "" },
+						"done": true
+					}))
+					.into_response(),
+				}
+			}),
+		)
+	}
+
+	// The bit-identity claim, checked rather than asserted: the key that replaced
+	// the const defaults to the const, and a client built from an unconfigured
+	// config posts under the same `Duration` as one that never heard of the key.
+	#[test]
+	fn the_unconfigured_timeout_is_the_const_it_replaced() {
+		let cfg = crate::config::Config::default();
+		assert_eq!(
+			Duration::from_secs(cfg.reason.timeout_secs),
+			LLM_TIMEOUT,
+			"an unconfigured kern must post under exactly the old ceiling"
+		);
+		let plain = Client::new(
+			Endpoint::new("http://localhost:11434", "m", ""),
+			Endpoint::default(),
+		);
+		assert_eq!(plain.inner.reason_timeout, LLM_TIMEOUT);
+		assert_eq!(
+			plain
+				.clone()
+				.with_timeout_secs(cfg.reason.timeout_secs)
+				.inner
+				.reason_timeout,
+			plain.inner.reason_timeout,
+			"applying the default must be a no-op"
+		);
+		// 0 is "unset", not "give up immediately".
+		assert_eq!(
+			plain.clone().with_timeout_secs(0).inner.reason_timeout,
+			LLM_TIMEOUT
+		);
+		assert_eq!(
+			plain.with_timeout_secs(45).inner.reason_timeout,
+			Duration::from_secs(45),
+			"a configured ceiling must actually replace it"
+		);
+	}
+
+	// The three outcomes item 30 says were one empty string. Deltas, never
+	// absolutes: the counter is a process-global static, so `cargo test` running
+	// the whole crate in one process sees every other test's failures too, and an
+	// `assert_eq!(complete_failed(), 1)` is green under nextest and red under it.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_failed_completion_is_counted_and_named_instead_of_erased() {
+		let mut named: Vec<(&str, String)> = Vec::new();
+		for (mode, want) in [
+			("hang", "transient: HTTP error"),
+			("refused", "transient: HTTP error"),
+			("500", "transient: API error (500)"),
+			("empty", "permanent: empty completion response"),
+		] {
+			// A closed port for the refusal, a served one for the rest.
+			let (url, _server) = match mode {
+				"refused" => ("http://127.0.0.1:1".to_string(), None),
+				_ => {
+					let (u, h) = crate::test_support::spawn_http(chat_app(mode)).await;
+					(u, Some(h))
+				}
+			};
+			// One second, not ten minutes: the same key the config now sets, which
+			// is also what makes the hang case finish inside a test.
+			let f = Client::new(Endpoint::new(&url, "m", ""), Endpoint::default())
+				.with_timeout_secs(1)
+				.complete_func();
+
+			let before = complete_failed();
+			let out = tokio::task::spawn_blocking(move || f("say something"))
+				.await
+				.unwrap();
+
+			assert_eq!(out, "", "{mode}: the caller's contract is unchanged");
+			assert_eq!(
+				complete_failed() - before,
+				1,
+				"{mode}: exactly one failure counted"
+			);
+			let last = last_complete_failure();
+			assert!(
+				last.starts_with(want),
+				"{mode}: the surface must name the failure, got {last:?}"
+			);
+			// It has to fit on a health line: an endpoint's 5xx body is an HTML
+			// page, and pasting it whole would push every other line off screen.
+			assert!(!last.contains('\n'), "{mode}: one line only, got {last:?}");
+			assert!(
+				last.chars().count() <= REASON_MAX_CHARS + 16,
+				"{mode}: unbounded reason, got {} chars",
+				last.chars().count()
+			);
+			named.push((mode, last));
+		}
+
+		// The point of the item, not merely that each is named: no two read alike.
+		// A surface that printed one string for all four would satisfy every
+		// assertion above and none of item 30.
+		for (i, (a_mode, a)) in named.iter().enumerate() {
+			for (b_mode, b) in &named[i + 1..] {
+				assert_ne!(a, b, "{a_mode} and {b_mode} must not read alike");
+			}
+		}
+	}
+
+	// The control for the test above: a model that answers with prose is not an
+	// endpoint failure, and must not raise the counter that says the endpoint is
+	// at fault. This is the case `record_stuck` could not distinguish.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_weak_model_that_answers_is_not_counted_as_a_failure() {
+		let app = axum::Router::new().route(
+			"/api/chat",
+			axum::routing::post(|_b: axum::Json<Value>| async move {
+				axum::Json(serde_json::json!({
+					"message": { "role": "assistant", "content": "I am not sure." },
+					"done": true
+				}))
+			}),
+		);
+		let (url, _server) = crate::test_support::spawn_http(app).await;
+		let f = Client::new(Endpoint::new(&url, "m", ""), Endpoint::default()).complete_func();
+
+		let before = complete_failed();
+		let out = tokio::task::spawn_blocking(move || f("say something"))
+			.await
+			.unwrap();
+
+		assert_eq!(out, "I am not sure.");
+		assert_eq!(
+			complete_failed() - before,
+			0,
+			"prose is the model's answer, not the endpoint's fault"
 		);
 	}
 }

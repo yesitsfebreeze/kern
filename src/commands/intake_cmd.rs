@@ -139,7 +139,8 @@ async fn drain_locally(
 	let llm_client = Client::new(
 		Endpoint::new(reason_url, reason_model, cfg.reason_key()),
 		Endpoint::new(embed_url, embed_model, &cfg.embed.key),
-	);
+	)
+	.with_timeout_secs(cfg.reason.timeout_secs);
 	let llm_fn: Option<crate::ingest::LlmFunc> = if reason_url.is_empty() {
 		// Only worth saying when something in the queue actually needs it —
 		// documents drain fine with no reason model at all.
