@@ -2682,25 +2682,44 @@ and flush semantics differ on Windows
 no retrain trigger — "a bad codebook silently degrades recall" (`:145-148`) —
 which lands in item 1's lap the moment PQ is promoted out of the non-goals.
 
-### 76. The watchdog force-exit skips the final guarded flush `[store]`
+### 76. The watchdog force-exit attempts a bounded guarded flush and logs which happened — closed 2026-07-22 `[store]`
 
-Confirmed against source 2026-07-21, and it is not a doc claim: `spawn_watchdog`
-(`src/commands.rs:930-969`) beats a counter once a second from the async runtime
-and force-exits `std::process::exit(101)` (`:960`) after `STALL_LIMIT * CHECK_SECS`
-= 30s of no progress. `process::exit` runs no destructor and no `Drop`, so it
-skips the guarded shutdown flush the ordinary path takes — the `shutdown` notify
-at `src/commands.rs:892` unwinds into the guarded persist closure `save_fn`
-(`:633`, called at `:898`),
-which is the thing that "never overwrites a grown disk". Nothing on the watchdog
-path writes anything, and the exit line does not say so.
+~~`spawn_watchdog` beats a counter once a second from the async runtime and
+force-exits `std::process::exit(101)` after `STALL_LIMIT * CHECK_SECS` = 30s of
+no progress. `process::exit` runs no destructor and no `Drop`, so it skips the
+guarded shutdown flush the ordinary path takes — the `shutdown` notify at
+`src/commands.rs:896` unwinds into the guarded persist closure `save_fn`
+(`:633`, called at `:902`), which is the thing that "never overwrites a grown
+disk". Nothing on the watchdog path wrote anything, and the exit line did not
+say so.~~ **(The defect, closed 2026-07-22.)**
 
 The stall it fires on is named as "graph deadlock or worker starvation", which is
 precisely the state where the in-memory graph is ahead of disk and unreachable.
-Combined with item 10 the default posture can lose up to a tick interval of
+Combined with item 10 the default posture could lose up to a tick interval of
 writes with no log. The awkward part is that a stalled runtime is exactly when a
-flush may itself block, so "flush before exiting" is not free — wanted is a
-bounded attempt (flush on the watchdog's own thread with a hard deadline, exit
-either way) plus a line saying which of the two happened.
+flush may itself block, so "flush before exiting" is not free.
+
+**Closed 2026-07-22 by the bounded attempt the item asked for.** `spawn_watchdog`
+(`src/commands.rs:969`) now takes `save_fn` and is spawned after it is available
+(`:722`), so a stall can attempt a flush before exiting. The stall branch calls
+`watchdog_flush_attempt` (`:945`) — a testable free function that runs `save_fn` on
+a dedicated thread and waits at most `FLUSH_DEADLINE_SECS` = 5s via
+`mpsc::recv_timeout`, returning `WatchdogFlush::Flushed` (the guarded persist
+landed) or `WatchdogFlush::Blocked` (it overran the deadline). The exit line names
+which of the two happened before `process::exit(101)` (`:1010`) — the silence is
+gone. A flush killed mid-write is safe because `atomic_write` is tmp+rename: the
+live file stays intact and a detached flush thread that the process leaves behind
+never finishes a partial write onto it. The watchdog starts after `save_fn` is
+built rather than at process entry — before the graph loads there is nothing to
+lose, so the later start costs nothing and buys the flush. Proved two ways:
+`a_fast_save_fn_returns_flushed_and_ran` (a fast closure returns `Flushed` and
+actually ran) and `a_save_fn_that_overruns_the_deadline_returns_blocked` (a closure
+sleeping past 200ms returns `Blocked`, the watchdog did not block past the
+deadline, and the closure did not complete inside the window). Decided by:
+fix-the-root (flush on the watchdog's own thread, not the stalled async one),
+name-the-tradeoff (the deadline is best-effort — a flush that cannot finish in 5s
+on a dead runtime is hopeless, and the detached thread is reaped by the exit).
+Supersedes: nothing — the item described the defect, now removed.
 
 ### 77. Hash composition is an unguarded breaking change `[store]`
 
@@ -2966,7 +2985,7 @@ Item 30's durable backstop put a kern-written file inside the default watched
 root and the watcher ate it — 283 payloads from one seed edit before the fix. The
 fix works and is measured: `IgnoreRules::with_denied`
 (`src/watcher/src/ignore_rules.rs:45`) takes the resolved `intake.dir` and
-`data_dir` from `spawn_file_watcher` (`src/commands.rs:968`). But it closes that
+`data_dir` from `spawn_file_watcher` (`src/commands.rs:1034`). But it closes that
 loop by *enumerating* the two directories that were writing, not by making the
 class impossible. Anything kern writes under a watched root in future is
 ingestible again unless someone remembers to add it, and there is no test that
