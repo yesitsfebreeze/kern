@@ -150,7 +150,6 @@ pub fn merge_duplicate(
 	let (differs, old_kind) = {
 		let t = kern.entities.get_mut(entity_id)?;
 		t.observe_support(new_score);
-		t.updated_at = Some(std::time::SystemTime::now());
 		(t.text() != new_text, t.kind)
 	};
 	let same_kind = incoming_kind == old_kind;

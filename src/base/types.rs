@@ -411,12 +411,14 @@ impl Entity {
 	pub fn observe_support(&mut self, w: f64) {
 		let w = w.clamp(0.0, 1.0) as f32;
 		self.conf_alpha += w;
+		self.updated_at = Some(SystemTime::now());
 		self.refresh_score();
 	}
 
 	pub fn observe_contradict(&mut self, w: f64) {
 		let w = w.clamp(0.0, 1.0) as f32;
 		self.conf_beta += w;
+		self.updated_at = Some(SystemTime::now());
 		self.refresh_score();
 	}
 }
@@ -874,6 +876,21 @@ mod tests {
 		assert_eq!(
 			named_child_kern_id("root", "generic", 7),
 			util::content_hash("rootgeneric7")
+		);
+	}
+
+	#[test]
+	fn observe_support_and_observe_contradict_stamp_updated_at() {
+		let mut e = mk_entity("e", "x", 0.0, EntityKind::Fact);
+		assert!(e.updated_at.is_none(), "fresh entity has no updated_at");
+		e.observe_support(0.5);
+		let support_stamp = e.updated_at;
+		assert!(support_stamp.is_some(), "observe_support stamps updated_at");
+		std::thread::sleep(std::time::Duration::from_millis(2));
+		e.observe_contradict(0.5);
+		assert!(
+			e.updated_at > support_stamp,
+			"observe_contradict stamps updated_at afresh"
 		);
 	}
 }
