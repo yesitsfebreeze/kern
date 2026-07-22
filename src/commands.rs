@@ -876,8 +876,12 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	if cli.mcp_stdio {
 		mcp_server.run_stdio();
 	} else {
-		if !cli.mcp_addr.is_empty() {
-			let mcp_addr = cli.mcp_addr.clone();
+		let mcp_addr = if !cli.mcp_addr.is_empty() {
+			cli.mcp_addr.clone()
+		} else {
+			cfg.serve.mcp_addr.clone()
+		};
+		if !mcp_addr.is_empty() {
 			let mcp_s = mcp_server.clone();
 			tokio::spawn(async move {
 				if let Err(e) = crate::mcp::sse::run_sse(mcp_s, &mcp_addr).await {
