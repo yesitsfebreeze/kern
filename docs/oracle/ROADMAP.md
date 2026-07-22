@@ -2666,16 +2666,34 @@ intermittent failure nobody has recorded is indistinguishable from a regression
 nobody has noticed — and one recorded with a wrong constant is worse, because it
 reads as adjudicated.
 
-### 70. The oracle pre-commit hook is untracked and has no installer `[process]`
+### 70. The oracle pre-commit hook is untracked and has no installer — closed 2026-07-22 `[process]`
 
-`ORACLE.md` rule 1 is enforced by `.git/hooks/pre-commit`, which lives only in
+**Closed 2026-07-22.** The oracle ruling hook is now tracked at
+`hooks/pre-commit` (byte-identical to the legacy `.git/hooks/pre-commit`, 3049 B,
+no logic change) and installed via a `just hooks` recipe that runs
+`git config core.hooksPath hooks` (idempotent — re-run is a no-op), wired into
+`.pi/update.sh` after the existing install lines so a fresh clone gets
+enforcement after `pi install`. `core.hooksPath` supersedes `.git/hooks/`
+entirely, so the legacy untracked file becomes inert and harmless — left in
+place (no `.git/` write) as a fallback if someone unsets the path. Negative
+control: with `core.hooksPath` unset and the legacy hook moved aside, a
+throwaway `docs/oracle/ROADMAP.md` edit commits clean (gate absent); with
+`just hooks` run, the same commit is refused by the oracle gate (rule 1
+block, the new entry uncited). `just check` + `just docs-check` green; no Rust, no
+hook-logic change, no new deps. Decided by fix-the-root (track + install the
+hook the ruling already depends on, do not re-rule), name-the-tradeoff
+(`core.hooksPath` supersedes rather than deletes — no `.git/` write, legacy stays
+as fallback), verify-before-claiming (negative control: unset+no-legacy
+commits, set+tracked blocks). See the 2026-07-22 CHANGELOG entry.
+
+~~`ORACLE.md` rule 1 is enforced by `.git/hooks/pre-commit`, which lives only in
 `.git/` and is created by nothing in the repo — no `justfile` recipe, no
 `install.sh` step, no `.pi/update.sh` line. A fresh clone has **zero enforcement
 of the ruling every commit is supposed to answer to**, and nothing announces it.
 The hook itself calls this out as a "per-clone install product"; the install half
 does not exist. Wanted: track it in the repo (`scripts/` was dissolved
 2026-07-22; `.pi/` or a tracked hooks dir) and install it via
-`core.hooksPath` or a `just` recipe run by `.pi/update.sh`.
+`core.hooksPath` or a `just` recipe run by `.pi/update.sh`.~~
 
 ### 75. Crash consistency on the DiskANN path `[store]`
 

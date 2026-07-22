@@ -2,6 +2,23 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 70 closed: the oracle ruling hook is tracked at
+  `hooks/pre-commit` (byte-identical to the legacy `.git/hooks/pre-commit`,
+  3049 B, no logic change) and installed via a `just hooks` recipe that runs
+  `git config core.hooksPath hooks` (idempotent — re-run is a no-op), wired
+  into `.pi/update.sh` after the existing install lines so a fresh clone gets
+  enforcement after `pi install`. A fresh clone previously had **zero
+  enforcement** of `ORACLE.md` rule 1 — the hook lived only in `.git/`,
+  created by nothing in the repo. `core.hooksPath` supersedes `.git/hooks/`
+  entirely, so the legacy untracked file becomes inert and harmless — left in
+  place (no `.git/` write) as a fallback if someone unsets the path. Negative
+  control: with `core.hooksPath` unset and the legacy hook moved aside, a
+  throwaway `docs/oracle/ROADMAP.md` edit commits clean (gate absent); with
+  `just hooks` run, the same commit is refused by the oracle gate (rule 1
+  block, the new entry uncited). `just check` + `just docs-check` green; no Rust,
+  no hook-logic change, no new deps.
+  Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming.
+
 - 2026-07-22 — item 78 half-closed (the "no warning at config load" half): a
   non-fatal warning now fires at config load when a configured `embed.url` or
   `reason.url` points at a non-local host, so the one setting that voids
