@@ -50,7 +50,7 @@ pub(super) async fn cmd_reembed(cfg: &crate::config::Config, embed_url: &str, em
 		for e in kern.entities.values_mut() {
 			if let Some(v) = new_vecs.get(&e.id) {
 				e.vector = v.clone().into();
-				e.gnn_vector = v.clone().into();
+				e.gnn_vector = e.vector.clone();
 			}
 		}
 	}

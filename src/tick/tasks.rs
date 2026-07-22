@@ -532,7 +532,7 @@ pub fn do_reembed(g: &Arc<RwLock<GraphGnn>>, kern_id: &str, embed: Option<&Embed
 		for (id, v) in &new_vecs {
 			if let Some(e) = k.entities.get_mut(id) {
 				e.vector = v.clone().into();
-				e.gnn_vector = v.clone().into();
+				e.gnn_vector = e.vector.clone();
 				e.dirty = false;
 			}
 		}
@@ -795,6 +795,30 @@ mod tests {
 		let e = g.kerns.get(&kid).unwrap().entities.get("e1").unwrap();
 		assert!(!e.dirty, "dirty must be cleared after reembed");
 		assert_eq!(e.vector[..], [0.1, 0.2, 0.3]);
+	}
+
+	#[test]
+	fn do_reembed_shares_vector_allocation_with_gnn_vector() {
+		let mut g = GraphGnn::new();
+		let kid = "k1".to_string();
+		let mut kern = Kern::new(kid.clone(), "");
+		let mut e = Entity {
+			id: "e1".into(),
+			dirty: true,
+			..Default::default()
+		};
+		e.set_text("hello world".into());
+		kern.entities.insert(e.id.clone(), e);
+		g.kerns.insert(kid.clone(), kern);
+		let g = Arc::new(RwLock::new(g));
+		let embed: EmbedFunc = Arc::new(|_t: &str| Ok(vec![0.1, 0.2, 0.3]));
+		do_reembed(&g, &kid, Some(&embed));
+		let g = g.read();
+		let e = g.kerns.get(&kid).unwrap().entities.get("e1").unwrap();
+		assert!(
+			std::sync::Arc::ptr_eq(&e.vector, &e.gnn_vector),
+			"reembed must share the Arc between vector and gnn_vector, not allocate twice"
+		);
 	}
 
 	#[test]
