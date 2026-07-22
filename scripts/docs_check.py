@@ -45,6 +45,26 @@ REPO_PATH = re.compile(
 )
 # A bare `FILE.md:NNN` with no directory — how ROADMAP.md indexes into FEATURES.md.
 SIBLING_REF = re.compile(r"`([A-Z][A-Za-z0-9_.-]*\.mdx?):(\d+)(?:-(\d+))?`")
+# Two anchor forms `REF` cannot see, because it demands a literal `src/` prefix.
+# A continuation — `` `src/base/store.rs:624` ... `:636` `` — names the line and
+# lets the file it belongs to stand from the citation before it, which is how the
+# docs cite a run of functions out of one module without repeating the path nine
+# times. A bare `place.rs:112` does the same for the file name. Together they were
+# 245 of 664 line anchors: never existence-checked, never content-checked, and
+# therefore free to rot exactly where re-pointing is most tedious. They resolve
+# against the last file cited before them, so both are read the way a human reads
+# them — and the scope resets at a heading, because a section is where a reader
+# stops carrying context forward.
+CONTINUATION = re.compile(r"`:(\d+)(?:-(\d+))?`")
+BARE_RS = re.compile(r"`([A-Za-z0-9_]+\.rs):(\d+)(?:-(\d+))?`")
+HEADING = re.compile(r"^#{1,6}\s")
+# A doubly-backticked span is a *quotation* of the syntax, not a use of it: item 93
+# writes `` `:533` `` to display the form it is discussing. Blanked before the two
+# new forms are scanned — length-preserving, so match offsets still order correctly
+# against the citations that were not blanked. Deliberately not applied to `REF`,
+# `REPO_PATH` or `SIBLING_REF`: they have counted those spans since they were
+# written, and two such quotations already carry an `anchor-ok` acquittal.
+ILLUSTRATION = re.compile(r"``.+?``")
 LINK = re.compile(r"\]\((\.\.?/[^)\s#]+\.mdx?)(?:#[^)\s]*)?\)")
 SELF_URL = re.compile(
     r"https://(?:raw\.githubusercontent\.com/yesitsfebreeze/kern"
@@ -155,6 +175,28 @@ def text_of(path: Path) -> list[str]:
     return file_lines[path]
 
 
+rs_by_name: dict[str, list[Path]] | None = None
+
+
+def resolve_rs(base: str, cur: Path | None) -> Path | None:
+    """Which `src/` file does a bare `place.rs:112` mean? The one the surrounding
+    text is already citing, if the name agrees — otherwise the only file in the
+    tree with that name. `graph.rs` is three files (`base`, `gnn`, `retrieval`),
+    so an ambiguous name with no antecedent resolves to nothing and is reported
+    rather than guessed: a checker that picks one at random is worse than a
+    checker that says it cannot tell."""
+    global rs_by_name
+    if cur is not None and cur.name == base:
+        return cur
+    if rs_by_name is None:
+        idx: dict[str, list[Path]] = {}
+        for p in (ROOT / "src").rglob("*.rs"):
+            idx.setdefault(p.name, []).append(p)
+        rs_by_name = idx
+    hits = rs_by_name.get(base, [])
+    return hits[0] if len(hits) == 1 else None
+
+
 def tokens(text: str) -> set[str]:
     """Content words: lowercase, stemmed, three characters or more, connectives
     dropped. `merge_claims` and `mergeClaims` both reach a sentence saying "merge
@@ -244,18 +286,19 @@ def check_page(page: Path, failures: list[str], nominations: list[str] | None = 
     spans = blocks_of(lines)
     total = 0
 
-    def anchor(m: re.Match[str], target: Path, lineno: int, label: str) -> None:
+    def anchor(
+        citation: str, target: Path, lineno: int, label: str, start: int, end: int
+    ) -> None:
         """Existence is settled by the caller; this asks whether the words agree."""
-        if nominations is None or not m.group(2):
+        if nominations is None:
             return
         lo, hi = block_at(spans, lineno - 1)
         # The citing line is inside its own block, so one sweep acquits both.
         if any(acquitted(l) for l in lines[lo:hi]):
             return
-        start, end = int(m.group(2)), int(m.group(3) or m.group(2))
         if start < 1 or start > lines_of(target):
             return
-        verdict = nominate("\n".join(lines[lo:hi]), m.group(0), target, start, end)
+        verdict = nominate("\n".join(lines[lo:hi]), citation, target, start, end)
         if verdict is not None:
             count, shared = verdict
             witness = ", ".join(sorted(shared)) if shared else "nothing"
@@ -264,52 +307,105 @@ def check_page(page: Path, failures: list[str], nominations: list[str] | None = 
                 f"({witness}) — {text_of(target)[start - 1].strip()[:60]!r}"
             )
 
+    def check(
+        citation: str, target: Path, lineno: int, name: str, cited: str, missing: str
+    ) -> None:
+        """Existence, then agreement. One body for all five citation forms, so a
+        continuation is held to exactly what a spelled-out `src/` path is held to."""
+        nonlocal total
+        total += 1
+        if not target.is_file():
+            failures.append(f"{rel}:{lineno}: {missing}")
+        elif cited and int(cited.split("-")[-1]) > lines_of(target):
+            failures.append(
+                f"{rel}:{lineno}: {name}:{cited} beyond EOF ({lines_of(target)} lines)"
+            )
+        elif cited:
+            lo = int(cited.split("-")[0])
+            anchor(citation, target, lineno, f"{name}:{lo}", lo, int(cited.split("-")[-1]))
+
+    # The file a bare `:NNN` belongs to: the last one cited, reset at every heading.
+    cur: Path | None = None
     for lineno, text in enumerate(lines, 1):
+        if HEADING.match(text):
+            cur = None
         if GONE.search(text):
             continue
+        # Offsets survive the blanking, so the sort below still reads left to right.
+        quoted = ILLUSTRATION.sub(lambda m: " " * len(m.group(0)), text)
+        found: list[tuple[int, str, re.Match[str]]] = []
         for m in REF.finditer(text):
-            total += 1
-            target = ROOT / m.group(1)
-            cited = m.group(3) or m.group(2)
-            if not target.is_file():
-                failures.append(f"{rel}:{lineno}: missing file {m.group(1)}")
-            elif cited and int(cited) > lines_of(target):
-                failures.append(
-                    f"{rel}:{lineno}: {m.group(1)}:{cited} beyond EOF "
-                    f"({lines_of(target)} lines)"
-                )
-            else:
-                anchor(m, target, lineno, f"{m.group(1)}:{m.group(2)}")
+            found.append((m.start(), "src", m))
         for m in REPO_PATH.finditer(text):
-            total += 1
-            target = ROOT / m.group(1)
-            cited = m.group(3) or m.group(2)
-            if not target.is_file():
-                failures.append(f"{rel}:{lineno}: missing file {m.group(1)}")
-            elif cited and int(cited) > lines_of(target):
-                failures.append(
-                    f"{rel}:{lineno}: {m.group(1)}:{cited} beyond EOF "
-                    f"({lines_of(target)} lines)"
-                )
-            else:
-                anchor(m, target, lineno, f"{m.group(1)}:{m.group(2)}")
+            found.append((m.start(), "repo", m))
         for m in SIBLING_REF.finditer(text):
-            total += 1
-            # Beside the citing page first, then the repo root — `README.md:159` in
-            # docs/oracle/ROADMAP.md means the top-level README.
-            target = page.parent / m.group(1)
-            if not target.is_file():
+            found.append((m.start(), "sibling", m))
+        for m in BARE_RS.finditer(quoted):
+            found.append((m.start(), "bare", m))
+        for m in CONTINUATION.finditer(quoted):
+            found.append((m.start(), "cont", m))
+        found.sort(key=lambda e: e[0])
+
+        # A range is carried as `lo-hi` and a single line as `lo`; `check` reads the
+        # last field for the EOF test and the first for the anchor, so a range, a
+        # single line and the lineless `src/crdt.rs` all go through one body.
+        def span(lo: str | None, hi: str | None) -> str:
+            return f"{lo}-{hi}" if hi else (lo or "")
+
+        for _, kind, m in found:
+            if kind in ("src", "repo"):
                 target = ROOT / m.group(1)
-            cited = m.group(3) or m.group(2)
-            if not target.is_file():
-                failures.append(f"{rel}:{lineno}: missing sibling {m.group(1)}")
-            elif int(cited) > lines_of(target):
-                failures.append(
-                    f"{rel}:{lineno}: {m.group(1)}:{cited} beyond EOF "
-                    f"({lines_of(target)} lines)"
+                cur = target
+                check(
+                    m.group(0), target, lineno, m.group(1),
+                    span(m.group(2), m.group(3)), f"missing file {m.group(1)}",
                 )
-            else:
-                anchor(m, target, lineno, f"{m.group(1)}:{m.group(2)}")
+            elif kind == "sibling":
+                # Beside the citing page first, then the repo root — `README.md:159` in
+                # docs/oracle/ROADMAP.md means the top-level README.
+                target = page.parent / m.group(1)
+                if not target.is_file():
+                    target = ROOT / m.group(1)
+                cur = target
+                check(
+                    m.group(0), target, lineno, m.group(1),
+                    span(m.group(2), m.group(3)), f"missing sibling {m.group(1)}",
+                )
+            elif kind == "bare":
+                target_or_none = resolve_rs(m.group(1), cur)
+                if target_or_none is None:
+                    total += 1
+                    if nominations is not None:
+                        nominations.append(
+                            f"{rel}:{lineno}: {m.group(0)} names no single file under "
+                            f"src/ and no citation above it in this section says which"
+                        )
+                    continue
+                cur = target_or_none
+                check(
+                    m.group(0), target_or_none, lineno,
+                    str(target_or_none.relative_to(ROOT)),
+                    span(m.group(2), m.group(3)), f"missing file {m.group(1)}",
+                )
+            else:  # a continuation of whatever was cited last
+                if cur is None:
+                    total += 1
+                    if nominations is not None:
+                        nominations.append(
+                            f"{rel}:{lineno}: {m.group(0)} continues nothing — no file is "
+                            f"cited above it in this section, so it names no line"
+                        )
+                    continue
+                try:
+                    name = str(cur.relative_to(ROOT))
+                except ValueError:
+                    name = cur.name
+                check(
+                    m.group(0), cur, lineno, name,
+                    span(m.group(1), m.group(2)),
+                    f"missing file {name}",
+                )
+
         for m in LINK.finditer(text):
             total += 1
             if not (page.parent / m.group(1)).resolve().is_file():
@@ -543,6 +639,55 @@ def anchor_selftest() -> None:
         for prose, line, want, why in cases:
             got = nominate(prose, "`x`", drift, line, line)
             assert got == want, f"drift.rs:{line} — {why}: wanted {want}, got {got}"
+
+        # The two forms `REF` cannot see. Written as a page and run through
+        # `check_page`, not asserted against the regexes, because the regexes are
+        # the easy half: what has to hold is that a continuation is *resolved* to
+        # the file above it and then held to the same existence check a spelled-out
+        # path is held to. Every assertion below fails on the build that shipped
+        # before this one — the past-EOF continuation went unreported there, which
+        # is exactly how `ROADMAP.md:651` cited line 654 of a 146-line file.
+        cont = d / "CONT.md"
+        cont.write_text(
+            "# Section\n"
+            "\n"
+            "The kinds (`src/base/types.rs:10`) and a tail (`:999999`).\n"
+            "A unique bare name (`place.rs:1`) needs no antecedent.\n"
+            "An ambiguous one (`types.rs:1`) has four candidates.\n"
+            "Quoting the form `` `:7` `` displays it rather than citing it.\n"
+            "\n"
+            "# Another\n"
+            "\n"
+            "An orphan continuation (`:12`).\n",
+            encoding="utf-8",
+        )
+        failures = []
+        nominations = []
+        total = check_page(cont, failures, nominations)
+        assert len(failures) == 1 and "999999" in failures[0], (
+            f"a continuation past EOF is a dead reference like any other: {failures}"
+        )
+        assert "src/base/types.rs" in failures[0], (
+            f"and it is reported against the file it continues: {failures[0]}"
+        )
+        assert any("names no single file" in n for n in nominations), (
+            f"`types.rs` is four files — say so rather than pick one: {nominations}"
+        )
+        assert any("continues nothing" in n for n in nominations), (
+            f"a heading ends the scope, so `:12` continues nothing: {nominations}"
+        )
+        assert total == 5, (
+            "five citations: the path, its continuation, the unique bare name, the "
+            f"ambiguous one and the orphan — the quoted `:7` is not one of them: {total}"
+        )
+        assert resolve_rs("place.rs", None) == ROOT / "src" / "ingest" / "place.rs", (
+            "a bare name unique under src/ resolves with no antecedent at all"
+        )
+        assert resolve_rs("types.rs", None) is None, "an ambiguous name resolves to nothing"
+        assert resolve_rs("types.rs", ROOT / "src" / "base" / "types.rs") == (
+            ROOT / "src" / "base" / "types.rs"
+        ), "an antecedent of the same name settles it"
+        assert ILLUSTRATION.sub("", "quoting `` `:7` `` here") == "quoting  here"
 
         line_counts.clear()
         file_lines.clear()

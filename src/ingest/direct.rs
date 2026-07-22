@@ -275,6 +275,69 @@ mod tests {
 		}
 	}
 
+	// The drain has no ACL of its own — that is what makes the watcher's public
+	// default (ROADMAP item 18) a decision made in one place rather than two that
+	// happen to match. The caller's principal is gone by the time this runs, so a
+	// drain that stamped anything here would republish a scoped ingest under its
+	// own answer; `run_with_acl(job.acl)` is the whole guard and this is the test
+	// that it stays. A public payload proves nothing — every default is public —
+	// so the payload is scoped and the check is that a non-member is refused.
+	#[tokio::test]
+	async fn drain_direct_once_carries_the_payloads_acl_rather_than_stamping_its_own() {
+		let (url, _server) =
+			crate::test_support::spawn_http(crate::test_support::fixed_vec_embed_app()).await;
+		let graph = Arc::new(RwLock::new(GraphGnn::new()));
+		let embedder = crate::llm::Client::new_embed_only(&url, "m", "");
+		let worker = Worker::new(graph.clone(), embedder, None, None, None);
+
+		let dir = tempdir().unwrap();
+		let direct = dir.path().join("direct");
+		let mut j = job("the quarterly numbers are not public");
+		j.acl = Acl {
+			scope: "acme".into(),
+			users: vec!["alice".into()],
+			groups: vec![],
+		};
+		intake_direct(&direct, &j).expect("accepted");
+
+		let cfg = crate::ingest::Config {
+			dedup_threshold: 0.95,
+			..Default::default()
+		};
+		assert_eq!(
+			drain_direct_once(&direct, &worker, &cfg).await,
+			1,
+			"the job committed"
+		);
+
+		let g = graph.read();
+		let placed: Vec<&crate::base::types::Entity> =
+			g.kerns.values().flat_map(|k| k.entities.values()).collect();
+		assert!(!placed.is_empty(), "the payload reached the graph");
+		let bob = crate::retrieval::score::QueryOptions {
+			principals: vec!["bob".into()],
+			..Default::default()
+		};
+		let alice = crate::retrieval::score::QueryOptions {
+			principals: vec!["alice".into()],
+			..Default::default()
+		};
+		for e in &placed {
+			assert_eq!(
+				e.acl, j.acl,
+				"the payload's own ACL survived the durable hop"
+			);
+			assert!(
+				!crate::retrieval::score::matches_filter(e, &bob),
+				"a non-member is refused after the hop; the drain did not republish it"
+			);
+			assert!(
+				crate::retrieval::score::matches_filter(e, &alice),
+				"the named member still reads it"
+			);
+		}
+	}
+
 	#[tokio::test]
 	async fn drain_direct_once_leaves_failed_job_for_retry() {
 		let embedder = crate::llm::Client::new_embed_only("http://127.0.0.1:1", "m", "");

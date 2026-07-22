@@ -52,6 +52,184 @@
   process, and a merge would have preserved that error while hiding it behind a
   number that is never zero.
 
+- 2026-07-22 — item 101 closed: **every anchor the widened `docs-check` exposed
+  now points where its sentence says.** The filing said 18; the list was 20, and
+  each was adjudicated by opening the cited line, finding the thing the sentence
+  describes, and reading the new target back.
+
+  Sixteen were genuinely wrong. Four of those were item 52's hazard exactly as
+  predicted — a bare `` `:NNN` `` binding to the nearest preceding path and
+  meaning another file. `bind_unix`'s continuation bound to `src/commands.rs`
+  and meant `src/trnsprt/src/typed/local.rs`; `Worker::submit`'s bound to
+  `src/ingest/direct.rs` and meant `src/ingest/file_watcher.rs`, where **the
+  line number was right and only the file was wrong** — the quietest failure in
+  the set, because nothing about it looks stale; and item 75's two doc-only
+  leads bound to `src/base/graph.rs` while meaning
+  `docs/kern/diskann-disk-index.md`.
+
+  Two more were not anchors at all but **quotations the checker read as
+  citations** — prose naming a broken ref in single backticks, which makes a
+  fresh copy of it. Item 101's own first draft did this, and so did the note
+  recording item 30's dead `concepts/acceptance.mdx` citation. The repo already
+  had the fix (a doubly-backticked span is an illustration and is blanked before
+  scanning); it just was not used. A page describing a broken citation must
+  display it, not make it.
+
+  **Two were false positives, and both are floor artefacts.** The `gc` row cited
+  `tool_gc` correctly and `README.md:399` pins the version correctly; in each the
+  only distinguishing token is below the three-character floor (`gc`) or is
+  digits the tokeniser drops (`1.1.0`). Neither was silenced with `anchor-ok` —
+  **no acquittal was written this pass.** The `gc` anchor was widened two lines
+  to reach the `reaped`/`before`/`after` binding the row describes, and the
+  `README` sentence now names the anti-entropy pointer sharing that line. Both
+  true of the target, and both leave the anchor checked instead of dark. So
+  `--strict-anchors` faces a 2-in-20 false-positive rate on the widened
+  checker's first real list, neither one a judgement error.
+
+  Two further repoints came out of the reading rather than the nominations:
+  `Entity::acl` and `start_gossip`'s builders were both cited into unrelated
+  spans and neither was nominated, because a long enough citing block shares
+  words with almost anything. The content check bites where the sentence is
+  short; that is the residual, and it is worth knowing before the flag is armed.
+
+  Decided by: verify-before-claiming — a repoint is a claim, so each one was
+  read back at its new target before it was believed.
+
+- 2026-07-22 — merged item 18's close, and filed item 101 for what the merge
+  exposed. 229 + 1 + this one = 231.
+
+  **A second empty merge, same cause as the first.** The reap left `MERGE_HEAD`
+  set with a staged diff identical to HEAD — `git show :src/ingest/file_watcher.rs`
+  had none of the branch's work while the branch had all of it — and a stale
+  `.git/index.lock` sat beside it with no process holding it. Committing would
+  have recorded item 18 as merged while discarding it. Caught by the same check
+  as last time: the branch's test name was absent from the index.
+
+  That check is now worth stating as a rule rather than a habit. **After any
+  merge, confirm one symbol from the branch is present in the index.** A clean
+  `git status`, a plausible `MERGE_HEAD` and an empty conflict list are all
+  consistent with a merge that did nothing.
+
+  **The widened `docs-check` immediately nominated 18 anchors** — it learned to
+  resolve bare continuation refs, and every one of those was wrong before and
+  invisible. Filed as item 101 rather than fixed inline: two different faults are
+  mixed in (ordinary stale numbers, and item 52's bare-ref-continues-the-wrong-file
+  hazard), and several need a judgement about which file a bare ref was meant to
+  continue. Eighteen repoints at the tail of a merge is how one lands on a
+  plausible wrong line and goes quiet again.
+
+  The uncomfortable corollary: every "no anchors nominated" this run meant "none
+  among the 63% the regex could parse". The checker's own improvement is what
+  falsified its previous coverage claim — which is the same lesson as the four
+  false-green gates, arriving from the opposite direction.
+
+  Decided by: verify-before-claiming — a green checker measures what it looks at.
+
+- 2026-07-22 — item 18 closed by deciding: **a watched file is public.**
+  `Acl::default()` names nothing, `Acl::is_public` is exactly that emptiness, and
+  both watcher legs pass it while `drain_direct_once` carries the payload's own
+  ACL rather than stamping one.
+
+  Tenant-default lost on the same ground item 20's `source_trust_user` did. There
+  is no tenant identity on the wire — item 24's principal is declared, not
+  proven, and its residue says same-uid callers are indistinguishable. Stamping
+  `scope: "tenant"` names a boundary nothing can verify, which reads as
+  enforcement and is not. Configurable lost because it ships a knob plus a
+  default and asks the same question at the default.
+
+  **The slice's own test was a false green, and the sixth of this run.** Its
+  agent died mid-falsification — its last words were "now the drain-carrier
+  mutation" — leaving a mutation in `Worker::submit` still applied in the tree.
+  Committing that would have shipped the exact design the decision rejects: a
+  watcher stamping `scope: "tenant"`. Restored, then falsified properly, and the
+  test passed *with the mutation in place*: it drains only the durable leg, while
+  `submit`'s job waits in a channel for a worker loop the fixture never spawns.
+  Renamed to `a_watched_file_is_public_once_the_durable_leg_commits` and the gap
+  written into the item.
+
+  Two things worth keeping. **A stalled revert-check leaves the tree mutated**,
+  and a mutation that compiles and passes is indistinguishable from intent —
+  three agents have now died mid-verification, and this is the first where the
+  leftover would have inverted the decision being made. And the false green was
+  the trap this brief named in advance ("a test where no entity is scoped passes
+  whatever the default is"); naming it did not prevent it, catching it required
+  running the mutation.
+
+  Decided by: name-the-tradeoff — public is the honest default when the system
+  cannot verify the alternative, and the cost is that a watched file is readable
+  by every caller.
+
+- 2026-07-22 — item 93: the anchor checker had been reading 63% of the anchors
+  and reporting on all of them. 223 + this one = 224.
+
+  `scripts/docs_check.py` verifies that every line citation points at a line
+  that exists, and since 2026-07-21 that the line still reads like the sentence
+  citing it. Both of the previous passes on this item tuned the *content* rule —
+  tokenising, stemming, a three-character floor, a precision/recall trade
+  recorded twice — and neither asked the prior question: what does the scanner
+  see at all? `REF` demands a literal `src/` prefix, so two forms it never
+  matched were invisible. A bare continuation, where a bullet names
+  `src/base/store.rs:624` once and then cites the next eight functions by line
+  alone. And a bare `place.rs:112`. Together, **245 of 664 line anchors — 37% —
+  had no existence check and no content check on them.**
+
+  That is the loop's own instrument, and the blind spot sat exactly where the
+  cost is: the second pass re-pointed 29 anchors and had to count two of them by
+  hand, "the continuations the regex never sees", in its own words. It named the
+  gap and did not read it as a gap.
+
+  Both forms now resolve against the last file cited before them and the scope
+  resets at each heading, because that is how a human resolves them. A bare name
+  with no antecedent falls back to a unique match under `src/`; `types.rs` is
+  four files, so an ambiguous one is reported rather than guessed — a checker
+  that picks one at random is worse than one that says it cannot tell. A
+  doubly-backticked span is a quotation of the form rather than a use of it, so
+  an item discussing anchors can display one without citing it. References
+  checked: **834 -> 1008.**
+
+  **It found a dead reference on the first run, and its shape is the argument
+  for the whole change.** `ROADMAP.md` cited `Drop for LocalListener` by line
+  alone under a paragraph whose last named file was `client_local.rs`, which is
+  146 lines long; the symbol is at `src/trnsprt/src/typed/local.rs:654`. The
+  line number was right and the file was wrong. A continuation's existence is
+  not a property of the anchor — it is a property of the anchor plus every
+  citation above it, so inserting one unrelated reference silently re-points
+  every continuation beneath it. Spelling the path out is the only fix that
+  survives the next insertion, and that is what landed.
+
+  18 nominations followed, adjudicated one at a time against the tree: **15
+  true, 3 false — 83.3% precision on a population that had never been checked
+  once.** Five are the same wrong-file class as the dead reference. They are
+  reported and not fixed: every one is a `[surface]`, `[retrieval]`,
+  `[lifecycle]` or `[federation]` claim and this pass owns `[process]`.
+
+  The guard is a fixture page run through `check_page`, not an assertion about
+  the regexes, and it was checked against the previous build rather than assumed
+  to bite: there the page yields one visible citation and an empty failure list,
+  here it yields five and fails the continuation that points past EOF.
+
+  **Verified independently the same day, against the commit.** This item was
+  reconciled, implemented and recorded in one pass, so the verify stage ran
+  afterwards rather than alongside. `just docs-check`, `just check` and
+  `just test` are green with both recall floors unmoved; the 834 -> 1008
+  comparison reproduces against the prior script over the prior tree; and the
+  four-loop collapse is verdict-identical — with the two new patterns neutered
+  the sweep prints byte-for-byte what the prior build printed. Two corrections
+  landed in the ROADMAP entry: the wrong-file class is four and not five, and
+  `--strict-anchors` now exits 1 rather than 0, because the 18 nominations
+  stand. Re-adjudicating them gives 12 true rather than 15 — the three in
+  dispute are anchors a human resolves correctly and the checker does not, which
+  is under-specification rather than rot, and that class is also the only one
+  that can turn the run red. The open residual is that both new forms are read
+  inside fenced code blocks, where a number that merely looks like a line can
+  fail the run; none exist in the tree today.
+
+  Decided by: fix-the-root — two passes had tuned the judgement of anchors the
+  scanner could see, while a third of them were never handed to it.
+
+  Decided by: verify-before-claiming — the precision number, the reference
+  count, the refactor's neutrality and the exit codes were each re-derived
+  rather than read off the commit message.
 
 - 2026-07-22 — merged item 26, which closes it, and with it the last of the
   retrieval performance items. 225 + 1 + this one = 227.
@@ -79,7 +257,6 @@
 
   Decided by: verify-before-claiming — four passes, four corrections, and the
   file was the thing being corrected each time.
-
 
 - 2026-07-22 — item 26 closed: PageRank's four N-wide buffers are lent by the
   thread instead of built per query. **2,540,344 B → 40,344 B per call** at

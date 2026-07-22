@@ -277,7 +277,33 @@ are GC-immune, not ACL-immune** — a Fact the requester cannot see must still n
 be returned. Default semantics: empty `principals` means *no filter*, not
 *public only*, or every single-agent caller goes blind.
 
-### 18. Every read surface enforces the ACL; the file watcher's default is the last decision owed `[surface]`
+### 18. Every read surface enforces the ACL, and a watched file is public by decision — closed 2026-07-22 `[surface]`
+
+**Closed 2026-07-22 by deciding, not by building.** A watched file stays public:
+`Acl::default()` names no scope, no user and no group, and `Acl::is_public` —
+the single definition of public in the tree — is exactly that emptiness. Both
+watcher legs pass it, and `drain_direct_once` carries the payload's own ACL
+rather than stamping one, so the decision is made in one place instead of two
+that happen to agree.
+
+**Tenant-default lost on the same ground item 20's `source_trust_user` did.**
+There is no tenant identity anywhere on the wire: item 24's principal is
+*declared*, not proven, and its own residue says same-uid callers are
+indistinguishable. Stamping `scope: "tenant"` would name a boundary nothing can
+verify — a label that reads as enforcement and is not. Configurable lost because
+it does not avoid the decision, it ships a knob plus a default and asks the
+question again at the default.
+
+So the deliverable is a pin and a statement rather than code: **a watched file is
+readable by every caller, including one naming no principal.** A host that wants
+otherwise sets an ACL at ingest, or holds the claim with `review_policy`.
+
+**One gap, recorded rather than papered over.** The test pins the durable leg
+only. The RAM leg reaches `Worker::submit`, whose job waits in the channel for a
+worker loop the test does not spawn, so a wrong ACL written there is invisible to
+it. Both call sites pass `Acl::default()` and cannot drift without someone
+editing one — which is precisely the edit this test would miss. Closing an
+end-to-end assertion on that leg wants a running worker loop in the fixture.
 
 **Title narrowed 2026-07-22.** It read "a bare `query {id}` still filters
 nothing" for a day after that stopped being a defect. The id path runs
@@ -695,15 +721,15 @@ re-run 2026-07-22). What is left is everything the gate does not cover.
    **Why two checks and not one.** The stat is the cheap one and it is not
    sufficient on its own: it describes a *name* at one instant, and the window
    between it and the `connect` is opened by our own daemon rather than by an
-   attacker — `Drop for LocalListener` (`:654`) unlinks the socket on every
-   shutdown and the stale-rebind path unlinks it too, so a name that stats as
-   ours can be free a microsecond later and rebound by somebody else before the
-   `connect` lands. Waiting for a daemon restart is not a privilege an attacker
-   has to earn. `SO_PEERCRED` is the fact the kernel recorded when the peer
-   called `listen`, so no rename can move it; the stat is kept in front of it
-   only because refusing before opening a connection gives a message that names
-   the squatter's uid. **Do not describe the stat alone as sufficient** — an
-   earlier draft of this entry did, and it was wrong.
+   attacker — `Drop for LocalListener` (`src/trnsprt/src/typed/local.rs:654`)
+   unlinks the socket on every shutdown and the stale-rebind path unlinks it
+   too, so a name that stats as ours can be free a microsecond later and rebound
+   by somebody else before the `connect` lands. Waiting for a daemon restart is
+   not a privilege an attacker has to earn. `SO_PEERCRED` is the fact the kernel
+   recorded when the peer called `listen`, so no rename can move it; the stat is
+   kept in front of it only because refusing before opening a connection gives a
+   message that names the squatter's uid. **Do not describe the stat alone as
+   sufficient** — an earlier draft of this entry did, and it was wrong.
 
    **Both checks are mutation-tested (re-run 2026-07-22).** Neutering
    `require_owned_by_caller` to `Ok(())` fails 6 of 6 targeted tests, including
@@ -772,11 +798,12 @@ re-run 2026-07-22). What is left is everything the gate does not cover.
    - **The peer check's wiring is covered in the bind arm and not in
      `connect_kern`.** It was recorded here as untestable on one uid; it was
      untested. The arm is reached through `bind_unix(path, expected_peer)`
-     (`:507`), split out exactly as `require_peer_uid` is split out of
-     `require_peer_is_caller` and for the same reason, so a test drives the
-     whole arm against a real socket and a real `SO_PEERCRED` read with a uid
-     that is deliberately not the server's. The two alternatives considered do
-     not bite: a same-uid child with a different exe is *correctly* accepted,
+     (`src/trnsprt/src/typed/local.rs:507`), split out exactly as
+     `require_peer_uid` is split out of `require_peer_is_caller` and for the
+     same reason, so a test drives the whole arm against a real socket and a
+     real `SO_PEERCRED` read with a uid that is deliberately not the server's.
+     The two alternatives considered do not bite: a same-uid child with a
+     different exe is *correctly* accepted,
      because the check claims a uid and nothing finer (measured above), and an
      abstract-namespace socket or a `socketpair` has no filesystem name, so a
      path bind never returns `EADDRINUSE` for one and the arm is never
@@ -1362,7 +1389,7 @@ free-direction reading inside one process is a lie), RSS from
 `/proc/self/statm`, and **two readings: cold, and hot after 200 searches.** The
 hot one is the honest one, because mmap pages are only resident once touched.
 50k entities at dim 384, each with `vector` AND `gnn_vector`
-(`src/base/types.rs:303-304`), plus 25k reasons with vectors (`:427`):
+(`src/base/types.rs:303-304`), plus 25k reasons with vectors (`:450`):
 
 | configuration | cold MB | **hot MB** |
 | --- | --- | --- |
@@ -1498,9 +1525,10 @@ question rather than a liveness defect.
 **The durability half is closed 2026-07-22.** `KernFileWatcherSink::ingest` now
 writes a `DirectJob` through `intake_direct` first
 (`src/ingest/file_watcher.rs:104`, tmp + rename at `src/ingest/direct.rs:42`) and
-falls through to `Worker::submit` (`:129`) only when that write fails — the shape
-`tool_ingest` already had (`src/mcp/tools_mutate.rs:300`). It is gated on
-`intake.enabled` alone (`src/commands.rs:974`), which is exactly the flag
+falls through to `Worker::submit` (`src/ingest/file_watcher.rs:129`) only when
+that write fails — the shape `tool_ingest` already had
+(`src/mcp/tools_mutate.rs:300`). It is gated on `intake.enabled` alone
+(`src/commands.rs:974`), which is exactly the flag
 `spawn_intake` gates on, so the directory is never written unless something
 drains it; `drain_direct_once` needs no reason LLM, so the stricter gate
 `tool_ingest` uses would have parked nothing on a reason-less host that drains
@@ -1538,8 +1566,9 @@ The queue-depth half is
 `pending=/stuck=/failed=/done=` readout (`src/commands/intake_cmd.rs:43-45`),
 so the file-backed queue reports its depth; the in-process `Worker` channel
 still does not. "The only LLM call on the path"
-(`concepts/acceptance.mdx:7` — the old citation `:189-192` was past the end of
-an 86-line page and quoted a sentence that is nowhere in the tree), and with the
+(`concepts/acceptance.mdx:7` — the old citation `` `:189-192` `` was past the
+end of an 86-line page and quoted a sentence that is nowhere in the tree), and
+with the
 answer leg removed (2026-07-21) the distill leg is still the only LLM on any
 path — no latency work has landed on it.
 
@@ -1786,9 +1815,9 @@ an invariant.
 
 Two leads from `docs/kern/crdts-federation.md`, adopted and never scheduled:
 
-- **Tombstone and LWW-history growth is unbounded** (`:259-261`); the note's own
+- **Tombstone and LWW-history growth is unbounded** (`:278-281`); the note's own
   follow-up was "time-bounded compaction".
-- **Vector LWW is coarse across heterogeneous embedding models** (`:264-266`),
+- **Vector LWW is coarse across heterogeneous embedding models** (`:284-286`),
   and `docs/kern/fl-vs-knids-federation.md:200-204` explicitly *allows*
   per-node model choice. Item 3 covers the local swap; the federated case — no
   model-identity stamp on the wire — is separate and unfunded.
@@ -2243,6 +2272,108 @@ one nomination in ten and will still go quiet on an off-by-a-range anchor.
 Symbolic anchors remain the better and larger answer, and nothing here replaces
 them.
 
+**Third pass, 2026-07-22 — the checker was measuring 63% of the anchors and
+reporting on all of them.** Both earlier passes tuned the *content* rule and
+neither asked what the scanner could see. `REF` demands a literal `src/` prefix,
+so two forms were invisible to it: a bare `` `:NNN` `` continuation, and a bare
+`` `place.rs:112` ``. The docs use both constantly — a bullet names
+`` `src/base/store.rs:624` `` once and then cites `` `:636` ``, `` `:649` `` and
+`` `:684` `` rather than repeating the path — and across the scanned pages they
+were **245 of 664 line anchors, 37%**, carrying no existence check and no
+content check at all. The `store.rs` anchor there is an illustration of the
+form, not a citation of the function, so it is acquitted in place rather than
+re-pointed — the same verdict the `FEATURES.md` example above carries, and the
+reason the doubly-backticked escape covers only the two forms added here.
+<!-- docs-check: anchor-ok -->
+The second pass felt this without naming it: it re-pointed "29 anchors in
+all, counting the two bare `` `:533` ``/`` `:398` `` continuations the regex never
+sees", by hand, because the tool could not.
+
+Both now resolve against the last file cited before them, which is how a reader
+resolves them, and the scope resets at every heading — a section is where a
+reader stops carrying context forward. A bare name with no antecedent falls back
+to a unique match under `src/`; `types.rs` is four files and `graph.rs` is three,
+so an ambiguous one resolves to nothing and is reported rather than guessed. A
+doubly-backticked span is a quotation of the form, not a use of it, so the
+paragraph above displays `` `:533` `` without citing it. References checked, on
+the tree as this pass found it: **834 -> 1008**; it reads higher now only
+because this entry cites five things of its own. The remainder of the 245 live
+in `CHANGELOG.md`, which carries the historical marker and is skipped whole.
+
+**It found a dead reference on its first run, and the shape of it is the
+argument.** This file cited `Drop for LocalListener` at `` `:654` `` under a
+paragraph whose last named file was `client_local.rs` — 146 lines long. The
+line number was right and the *file* was wrong: `Drop for LocalListener` is
+`src/trnsprt/src/typed/local.rs:654`. That is a failure mode a spelled-out path
+does not have, and it is the one a continuation adds: existence stops being a
+property of the anchor and becomes a property of the anchor plus everything
+above it, so an edit that inserts an unrelated citation silently re-points every
+continuation under it. Fixed here by spelling the path out, which is the only
+fix that survives the next insertion.
+
+**18 nominations, adjudicated one at a time against the real tree: 15 true, 3
+false — 83.3% precision on a population that had never been checked.** Five of
+the 15 are the wrong-file class the dead reference belongs to
+(`` `:507` `` reaching `src/commands.rs` for a `bind_unix` that lives in
+`src/trnsprt/`, `` `:129` `` reaching `direct.rs` for a `Worker::submit` in
+`file_watcher.rs`, and the two Windows/PQ notes at `` `:136-137` `` and
+`` `:132-134` `` that say "doc-only" while landing in `src/base/graph.rs`);
+the other ten are ordinary rot, including
+`FEATURES.md:55` citing `Acl { scope, users, groups }` at a `_ => None,` thirteen
+lines above the struct. The three false ones are the known weaknesses, not new
+ones: `gc` is two characters and falls under the token floor, so the `gc` row
+citing `fn tool_gc` shares nothing; and two are historical quotations of an
+anchor being *discussed*. **They are reported, not fixed** — every one is a
+`[surface]`, `[retrieval]`, `[lifecycle]` or `[federation]` claim, and this pass
+owns `[process]`.
+
+The remaining blind spot is unchanged in kind and now smaller in reach: symbolic
+anchors are still the answer, and a continuation is the strongest argument yet
+for them, because it is a line number that does not even name its own file.
+
+**Verified independently 2026-07-22, against the commit rather than a working
+tree.** The third pass reconciled, implemented and recorded in one go, so no
+adversary had read it. Re-run: `just docs-check` green with its selftest,
+`just check` green, `just test` 39 passed and 4 skipped with both recall floors
+printed and unmoved. The 834 -> 1008 comparison reproduces — the prior script
+over the prior tree reports 834 and nominates nothing, this one reports 1008 and
+the single dead reference. The four-loops-into-one-sweep refactor is
+verdict-identical: with the two new patterns neutered, the sweep prints
+byte-for-byte what the prior build printed, so it moved no failure and no
+nomination.
+
+Two corrections to the paragraphs above. **The wrong-file class is four, not
+five** — the two anchors reaching the wrong `src/` file and the two doc-only
+notes; the fifth candidate is the retired `` `:189-192` `` note, counted among
+the false ones above, which is the same class seen from the other side. And
+**`--strict-anchors` no longer exits 0 on this tree**: 18 nominations stand, so
+it exits 1. The second-pass sentence saying otherwise was true when written and
+is superseded now.
+
+**Re-adjudication does not reproduce 83.3%, and the gap is a definition rather
+than a mistake.** Twelve of the 18 are rot by any reading. The three in dispute
+are the wrong-file class, and for those the anchor a human resolves is
+*correct*: `` `:507` ``, under a paragraph about `bind_unix`, means
+`src/trnsprt/src/typed/local.rs`, which is where `bind_unix` is, and `` `:129` ``,
+under one about `Worker::submit`, means `src/ingest/file_watcher.rs`, which is
+where the `submit` call is. Both hit the named symbol exactly. So the count is
+15 if the question is "is this anchor under-specified" and 12 — 66.7% — if it is
+"is the docs' information wrong". Either is defensible; the record should not
+read as though only one measurement exists.
+
+The distinction is load-bearing because the wrong-file class is the only one
+that can turn the run *red*. It did exactly that once already, on this file's
+own `Drop for LocalListener` note, and the fix was to edit the doc. Whenever an
+inherited file is shorter than its inherited line, a page no human considers
+wrong fails the check.
+
+**One residual this pass opens and does not close.** Both new forms are matched
+inside fenced code blocks, and inside any backticked span that merely looks like
+a line number — a port, a ratio, a `sed` address. Either is a failure and not a
+nomination once the number runs past the inherited file. There are none in the
+tree today. The doubly-backticked escape covers prose and not fences; skipping
+fenced blocks is the fix when one appears.
+
 Neither is a defect in a running kern, which is why this sits in tier 9 — but it
 is the reason every reconcile pass so far has spent most of its effort
 re-pointing citations instead of checking claims.
@@ -2520,10 +2651,10 @@ is silent staleness, not a crash. Wanted: one rename that publishes all three
 to), and an fsync before it.
 
 Beside it, both unverified against source and still doc-only: mmap file-locking
-and flush semantics differ on Windows (`:136-137`), and PQ codebook
-training/drift has no retrain trigger — "a bad codebook silently degrades recall"
-(`:132-134`) — which lands in item 1's lap the moment PQ is promoted out of the
-non-goals.
+and flush semantics differ on Windows
+(`docs/kern/diskann-disk-index.md:149-150`), and PQ codebook training/drift has
+no retrain trigger — "a bad codebook silently degrades recall" (`:145-148`) —
+which lands in item 1's lap the moment PQ is promoted out of the non-goals.
 
 ### 76. The watchdog force-exit skips the final guarded flush `[store]`
 
@@ -2557,7 +2688,8 @@ ids are `content_hash(text)` bare (`src/ingest/place.rs`,
 `src/ingest/worker.rs:148`), `Source::source_id` is
 `scheme \x00 object \x00 section` (`src/base/types.rs:270-282`), child and named
 ids are `parent_id + nonce` and `parent_id + name + nonce`
-(`types.rs:502`, `:507`), and the HNSW canon has its own (`src/base/hnsw.rs:525`).
+(`types.rs:515-516`, `:520-521`), and the HNSW canon has its own
+(`src/base/hnsw.rs:525`).
 
 The bare-text composition is load-bearing beyond identity: the gossip import
 guard re-derives `content_hash(&e.text()) == e.id` to refuse a forged remote
@@ -2602,7 +2734,7 @@ the normal path, non-functional there. Either forward them or stop advertising.
 
 **Corrected:** the previous version said "no maintenance tick and no gossip". The
 tick *is* started (`src/commands/mcp_cmd.rs:473-484`); only gossip is absent
-(`broadcast_q: None` at `:461`, `broadcast_pulse: None` at `:475`). A graph
+(`broadcast_q: None` at `:479`, `broadcast_pulse: None` at `:493`). A graph
 served that way decays, clusters and GCs normally, and simply does not federate.
 
 ### 83. Nothing bounds memory deterministically: eviction and spill are both disarmed `[lifecycle]`
@@ -2715,6 +2847,66 @@ propagation overwrites one — another 76.8 MB at this corpus size.
   rule and says nothing about the socket; that page states the `0600` mode at
   `concepts/security.mdx:16` and does not record the race at all.
 
+### 101. Every anchor the widened checker exposed now points where its sentence says — closed 2026-07-22 `[process]`
+
+`docs-check` learned to resolve bare continuation refs — `` `:239` `` following a
+`` `place.rs:112` `` — and immediately nominated a list that was always wrong and
+always invisible. The count is a measurement of the old blind spot, not of new
+damage: nothing broke, the checker started looking. The merge that filed this
+counted 18; the list read off this branch is **20**. The discrepancy was not
+chased — the list is what the checker prints, not what the filing remembered.
+
+Each of the 20 was adjudicated by reading the citing sentence, opening the cited
+line, finding where the described thing actually lives, and reading the new
+target back. The list resolved into four classes, not the two the filing guessed:
+
+- **Stale line numbers**, the ordinary rot — 11 of them. The `move` row's
+  `` `tools_mutate.rs:491` `` was three lines short of `tool_move`; the `Acl`
+  struct had moved 13 lines; `mcp_cmd.rs`'s two `None`s had drifted 18.
+  Mechanical, one target read at a time.
+- **A bare ref continuing the wrong file** — 4, plus a fifth wearing a
+  quotation's clothes. Item 52 documented the hazard and it is exactly as
+  predicted: `bind_unix`'s `` `:507` `` bound to `src/commands.rs` and meant
+  `src/trnsprt/src/typed/local.rs`; `Worker::submit`'s `` `:129` `` bound to
+  `src/ingest/direct.rs` and meant `src/ingest/file_watcher.rs` — the *number*
+  was right, only the file was wrong, which is the quietest failure of the set;
+  and item 75's two doc-only leads bound to `src/base/graph.rs` while meaning
+  `docs/kern/diskann-disk-index.md`. None of these can be fixed by adjusting a
+  number. Each citation is now spelled in full at the point the file changes,
+  and only the continuations that follow it are left bare.
+- **A quotation the checker read as a citation** — 2, both in this item's own
+  first draft, which named the broken anchors in single backticks and so made
+  fresh copies of them. The fifth counted above — item 30's note on the dead
+  `concepts/acceptance.mdx` citation — is the same defect wearing a wrong-file
+  binding as well. The repo already has the fix: a doubly-backticked span is an
+  illustration and is blanked before scanning. The lesson is narrow and worth
+  keeping: **a page describing a broken citation must display it, not make it.**
+  Writing this entry reproduced the fault twice before the checker caught it.
+- **False positives** — 2, and both are the same shape. The `gc` row cited
+  `tool_gc` correctly, and `README.md:399` pins the version correctly; in both
+  the only distinguishing token is under the three-character floor (`gc`) or is
+  digits the tokeniser discards (`1.1.0`). Neither was acquitted with
+  `anchor-ok`. The `gc` anchor was widened by two lines to reach the `reaped` /
+  `before` / `after` binding the row actually describes, and the `README` line
+  now names the anti-entropy pointer that shares it — both true of the target,
+  and both leave the anchor checked rather than silenced.
+
+**Two out-of-band repoints came with them**, found by reading targets rather than
+by nomination: `Entity::acl` was cited into `src/base/types.rs` at `` `:296` ``
+(an unrelated field) and `start_gossip`'s builders into `src/commands.rs` at
+`` `:1046-1127` `` (an unrelated span). Both are wrong the same way and neither
+was nominated, because a long enough citing block shares words with almost
+anything. That is the residual: the content check bites where the sentence is
+short.
+
+11 + 5 + 2 + 2 = 20. So the false-positive rate on the widened checker's first
+real list is 2 in 20, and both are floor artefacts rather than judgement errors
+— which is the number `--strict-anchors` has to be adopted against.
+
+Note the shape of the win: the checker's own improvement is what made its
+previous coverage claim false. Every "no anchors nominated" before this widening
+meant "none among the 63% I could parse".
+
 ### 99. The watcher's off-limits set is a list of names, not an invariant `[ingest]`
 
 Item 30's durable backstop put a kern-written file inside the default watched
@@ -2801,8 +2993,8 @@ and item 1's instrument staying the scorer.
   opens on "takes in durable facts from your sessions" or "learns on its own"
   any more; `VISION.md:52` now *states* there is no recorded baseline instead of
   gating claims on one; `README.md:393-394` says the Question and Pulse senders and
-  the fetch RPC are live, and `:399` pins the version at `1.1.0`, matching
-  `FEATURES.md`.
+  the fetch RPC are live, and `:399` pins the version at `1.1.0` beside the
+  anti-entropy pointer, matching `FEATURES.md`.
 - (retired 2026-07-21 — all three fixed) `FEATURES.md:54` now lists `Entity`'s
   `acl` <!-- docs-check: anchor-ok -->; the retired query-cache finding is gone from the file entirely; and
   `:634-635` marks prompts and resources "served on the standalone path only",
@@ -3185,8 +3377,8 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   scheduled; the three it actually caught were live lies in `FEATURES.md` and
   `SPECIALISTS.md` (CHANGELOG 2026-07-21).
 - **Pulse and Question senders are live.** `broadcast_pulse` / `broadcast_q` built
-  in `start_gossip` (`src/commands.rs:1046-1127`), pulse wired into the maintenance
-  tick (`:721`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
+  in `start_gossip` (`src/commands.rs:1105-1136`), pulse wired into the maintenance
+  tick (`:760`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
   `broadcast_q` invoked by `do_resolve` (`src/tick/tasks.rs:386`), `handle_question`
   live-dispatched (`src/gossip/handler.rs:44`).
 - **`Fetch` is wired** — `wire_fetch` installs the handler at
