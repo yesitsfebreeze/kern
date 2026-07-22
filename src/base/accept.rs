@@ -1089,6 +1089,52 @@ mod tests {
 		);
 	}
 
+	// ROADMAP item 83: the cluster path uses `spawn_unnamed_child` (always a
+	// distinct child), unlike `get_or_spawn_unnamed_child` (reuses). Under a cap,
+	// `register` inside `spawn_unnamed_child` can evict the parent before its
+	// `children` list gains the new id. This pins that the parent's persisted
+	// `children` survives the eviction — no re-spawn loop, no fragmentation.
+	#[test]
+	fn spawn_unnamed_child_under_cap_keeps_the_child_in_parent_children() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut g = GraphGnn::new();
+		g.data_dir = dir.path().to_string_lossy().into_owned();
+		g.set_store(std::sync::Arc::new(
+			crate::base::store::Store::open(&g.data_dir).unwrap(),
+		));
+		let root = g.root.id.clone();
+		let root_net = g.root.root_id.clone();
+		// cap = 2 so registering a child under a non-root parent forces eviction
+		g.set_max_loaded_kerns(2);
+		let parent = {
+			let p = Kern::new_named_child(&root, &root_net, "parent-graviton", vec![1.0, 0.0]);
+			let pid = p.id.clone();
+			g.register(p);
+			if let Some(r) = g.get_mut(&root) {
+				if !r.children.contains(&pid) {
+					r.children.push(pid.clone());
+				}
+			}
+			pid
+		};
+		let child = spawn_unnamed_child(&mut g, &parent);
+		// reload the parent from the store — the eviction inside `register` may
+		// have unloaded it, so `loaded` alone could miss the persisted children.
+		let reloaded_children = g
+			.get(&parent)
+			.map(|k| k.children.clone())
+			.unwrap_or_default();
+		assert!(
+			reloaded_children.contains(&child),
+			"the new child must be in the parent's persisted children after eviction: got {reloaded_children:?}"
+		);
+		assert_eq!(
+			g.count(),
+			3,
+			"root + parent + one child, no re-spawn runaway"
+		);
+	}
+
 	#[test]
 	fn supersede_drops_the_old_entity_from_the_search_index() {
 		let mut g = GraphGnn::new();

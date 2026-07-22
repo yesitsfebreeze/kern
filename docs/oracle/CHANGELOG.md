@@ -2,6 +2,29 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 83 resident-cap half closed: `GraphConfig::default().
+  max_kerns` is now 128 (was `KERN_CAP_DISABLED`/`usize::MAX`). The old
+  "currently unsafe — eviction drops unpersisted children pushes" comment was
+  stale, verified: `get_mut` auto-loads from the store, so a parent evicted
+  inside `spawn_unnamed_child`'s `register` is reloaded by the post-register
+  `get_mut` and the children-push persists — no re-spawn loop. A new test pins
+  it under `max_kerns = 2` with a store bound. 128 is a conservative resident
+  bound (normal use <10 kerns); eviction unloads to the cold tier, never
+  forgets; `usize::MAX` still opts out. `disk_threshold` stays disabled until
+  item 75 (DiskANN crash consistency) closes — arming it exposes the spill
+  crash window. 1024 pass. Decided by: verify-before-claiming, fix-the-root, name-the-tradeoff. Supersedes: the stale "currently unsafe" comment in `GraphConfig::default`.
+
+- 2026-07-22 — item 99 half-closed: the watcher now denies `.kern/` whole,
+  not just the two enumerated dirs. `spawn_file_watcher` builds the deny set
+  from a new pure `watcher_denied_paths(cfg, cwd)` (`src/commands.rs`) =
+  `.kern/` + `intake.dir` + `data_dir`. The union is the invariant "everything
+  kern writes under a watched root is denied", whether it lives under `.kern/`
+  (config, logs, mcp-token, default data+intake) or under a `data_dir` /
+  `intake.dir` pointed outside `.kern/` (supported config). A future writer
+  under `.kern/` is covered without remembering to add it. The registry half
+  (a writer outside both `.kern/` and the configured data/intake dirs) stays
+  open — no such writer exists today. 1023 pass, 2 new unit tests. Decided by: fix-the-root, the-oracle. Supersedes: nothing.
+
 - 2026-07-22 — item 93 fenced-block residual closed: `tests/docs_check.py`
   tracks ```` ``` ```` fence state per page and skips `REF` / bare-continuation /
   bare-name matching inside a fenced block (heading-scope reset and the `GONE`

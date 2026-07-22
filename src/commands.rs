@@ -1039,6 +1039,26 @@ fn spawn_keepalive(llm_client: &Client) {
 	});
 }
 
+/// The set of paths under a watched root that kern writes itself, so the
+/// watcher never feeds them back as content. The union is the invariant item 99
+/// names: everything kern writes is denied, whether it lives under `.kern/`
+/// (config, logs, mcp-token, default data + intake) or under a `data_dir` /
+/// `intake.dir` pointed outside `.kern/` (a supported config). Denying `.kern/`
+/// whole closes the hole the two-dir enumeration left — a future writer under
+/// `.kern/` is covered without remembering to add it; a future writer outside
+/// both `.kern/` and the configured data/intake dirs would still need a line
+/// here, and that is the registry the full item 99 names.
+fn watcher_denied_paths(
+	cfg: &crate::config::Config,
+	cwd: &std::path::Path,
+) -> Vec<std::path::PathBuf> {
+	vec![
+		cwd.join(".kern"),
+		cwd.join(&cfg.intake.dir),
+		std::path::PathBuf::from(&cfg.data_dir),
+	]
+}
+
 fn spawn_file_watcher(cfg: &crate::config::Config, worker: &Arc<crate::ingest::Worker>) {
 	if !cfg.watcher.enabled {
 		return;
@@ -1054,10 +1074,7 @@ fn spawn_file_watcher(cfg: &crate::config::Config, worker: &Arc<crate::ingest::W
 	// files and 1.7 MB payloads from a single seed edit in 60 seconds. Named here
 	// rather than hardcoded in the watcher crate — both dirs are configurable,
 	// and that crate must not know what kern is.
-	let ignore = IgnoreRules::from_roots(&roots).with_denied(vec![
-		cwd.join(&cfg.intake.dir),
-		std::path::PathBuf::from(&cfg.data_dir),
-	]);
+	let ignore = IgnoreRules::from_roots(&roots).with_denied(watcher_denied_paths(cfg, &cwd));
 	// The backstop only where something drains it — `spawn_intake` below gates on
 	// exactly this flag, so it is the whole condition. Without a drain the durable
 	// write would be a directory nobody reads, which is worse than the RAM queue.
@@ -1238,6 +1255,52 @@ fn spawn_maintenance_tick(
 			snapshot_if_dirty(&g_tick, &cfg_tick, &mut last_snap_epoch);
 		}
 	});
+}
+
+#[cfg(test)]
+mod watcher_deny_tests {
+	use super::watcher_denied_paths;
+	use crate::config::Config;
+	use std::path::Path;
+
+	#[test]
+	fn denies_kern_state_dir_whole_plus_data_and_intake() {
+		let cfg = Config::default_in(Path::new("/proj"));
+		let cwd = Path::new("/proj");
+		let denied = watcher_denied_paths(&cfg, cwd);
+		// `.kern/` whole — closes the item 99 hole: config, logs, mcp-token and any
+		// future writer under it are covered without enumerating each.
+		assert!(
+			denied.contains(&cwd.join(".kern")),
+			"the state dir is denied"
+		);
+		// the configured data + intake dirs are still denied even when outside .kern
+		assert!(
+			denied.contains(&cwd.join(&cfg.intake.dir)),
+			"intake dir denied"
+		);
+		assert!(
+			denied.contains(&std::path::PathBuf::from(&cfg.data_dir)),
+			"data dir denied"
+		);
+	}
+
+	#[test]
+	fn denies_kern_dir_even_when_data_dir_points_outside_it() {
+		let mut cfg = Config::default_in(Path::new("/proj"));
+		// supported config: data_dir outside .kern/
+		cfg.data_dir = "/var/kern-data".into();
+		let cwd = Path::new("/proj");
+		let denied = watcher_denied_paths(&cfg, cwd);
+		assert!(
+			denied.contains(&cwd.join(".kern")),
+			"still deny .kern/ for config/logs"
+		);
+		assert!(
+			denied.contains(&std::path::PathBuf::from("/var/kern-data")),
+			"outside data dir denied"
+		);
+	}
 }
 
 #[cfg(test)]

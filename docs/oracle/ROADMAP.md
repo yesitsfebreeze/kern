@@ -3069,8 +3069,27 @@ unloads a kern, and the DiskANN spill branch (`src/base/graph.rs:296`) never
 fires. A per-kern *entity* cap for local kerns does not exist at all — the only
 one in the tree is `GOSSIP_REMOTE_KERN_ENTITY_CAP` for `remote-*`. Wanted,
 unchanged: a safe cap plus an escalation policy. The comment's "currently unsafe"
-is a real reason nothing is set — eviction drops unpersisted `children` pushes
+is a real reason nothing was set — eviction drops unpersisted `children` pushes
 (`src/config/graph.rs:16-17`).
+
+**Resident-cap half closed 2026-07-22; DiskANN-spill half stays for item 75.**
+The "currently unsafe" comment was **stale, verified**: `get_mut` auto-loads
+from the store, so when `register` inside `spawn_unnamed_child` evicts the
+parent before its `children` list gains the new id, the post-register
+`get_mut(parent)` reloads the persisted copy and the children-push lands on a
+reloaded row that persists — no re-spawn loop, no fragmentation. A new test
+(`spawn_unnamed_child_under_cap_keeps_the_child_in_parent_children`,
+`src/base/accept.rs`) pins it under `max_kerns = 2` with a store bound.
+`GraphConfig::default().max_kerns` is now **128** (was `KERN_CAP_DISABLED`): a
+conservative resident bound — most projects carry <10 kerns, 128 bounds the
+pathological case, and eviction unloads to the cold tier (it never forgets).
+`disk_threshold` stays `KERN_CAP_DISABLED` until item 75 (DiskANN crash
+consistency) closes — arming it would expose the spill path's crash window, so
+the spill half of "bounds memory" remains open there. A per-kern *entity* cap
+for local kerns still does not exist; the resident-kern bound is the half that
+satisfies "the hot graph stays bounded" without touching DiskANN. An explicit
+`max_kerns = usize::MAX` in a `kern.toml` still opts out (the sentinel is the
+uncapped marker).
 
 **The double-storage half shipped 2026-07-21; the bounding half is untouched.**
 Item 29 finding 3 assigned it here: every vector was resident twice. Verified
@@ -3271,8 +3290,25 @@ failure mode is amplification rather than a wrong answer, and the whole watcher
 is off unless a `kern.toml` enables it (`src/config/watcher.rs:8`). <!-- docs-check: anchor-ok -->
 It is a latent correctness hole, not a live one.
 
+**Closed 2026-07-22 — the "one state root" half shipped, and it is the invariant
+for every writer today.** `spawn_file_watcher` now denies `.kern/` whole (via a
+new pure `watcher_denied_paths(cfg, cwd)` in `src/commands.rs`), in addition to
+the resolved `intake.dir` and `data_dir`. The union is the invariant item 99
+names: everything kern writes is denied, whether it lives under `.kern/`
+(config, logs, mcp-token, default data + intake) or under a `data_dir` /
+`intake.dir` pointed outside `.kern/` (a supported config — and the reason the
+deny list is computed, not hardcoded). Denying `.kern/` whole closes the hole
+the two-dir enumeration left: a future writer under `.kern/` is covered without
+remembering to add it. What stays open, and is the registry the item's second
+shape names: a future writer under a watched root but outside *both* `.kern/`
+and the configured data/intake dirs would still need a line here — none exists
+today, and the union is the derived invariant for every writer that does. The
+regression e2e still pins the two dirs; two new unit tests pin
+`watcher_denied_paths` (default + data-dir-outside-`.kern`). 1023 pass.
+
 Deciding behavior: fix-the-root — the enumeration is the symptom-level fix, kept
-because the root fix is a registry and the loop was live.
+because the root fix is a registry and the loop was live; this half closes the
+state-root invariant the registry was the full answer to.
 
 ### 87. Do the preset tiers earn their numbers, now that `relaxed` is the default? `[eval]`
 

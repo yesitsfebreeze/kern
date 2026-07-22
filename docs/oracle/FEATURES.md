@@ -492,13 +492,17 @@ maintains itself.
 **Where.** `src/tick/*` (3589 LoC, 8 files) + `src/tick.rs` (1070 LoC) — remeasured 2026-07-22, the old 2912/893 had drifted ~660 and ~177 lines behind the tree. `trainer.rs` is the one that is not a queue task: GNN training runs on its own thread.
 
 **Gaps.** `KERN_CAP_DISABLED` (`src/base/constants.rs:30`) is a **kern-eviction**
-sentinel, not an entity cap — corrected 2026-07-21, the old wording named the
-wrong thing. Its own comment says so, and its two readers are `max_loaded_kerns`
-(how many kerns stay resident, `enforce_kern_cap`, `src/base/graph.rs:216`) and
+sentinel, not an entity cap. Its two readers are `max_loaded_kerns` (how many
+kerns stay resident, `enforce_kern_cap`, `src/base/graph.rs:216`) and
 `disk_threshold` (the per-kern entity count that triggers a DiskANN spill,
-`src/base/graph.rs:296`). Both default to it, so neither eviction nor spill is
-armed by default. A per-kern *entity* cap does not exist for local kerns at all;
-the only one in the tree is `GOSSIP_REMOTE_KERN_ENTITY_CAP` for `remote-*`.
+`src/base/graph.rs:296`). `max_kerns` now defaults to **128** (2026-07-22, item
+83): a conservative resident bound — eviction is proven safe (`get_mut`
+auto-loads; `spawn_unnamed_child_under_cap_keeps_the_child_in_parent_children`),
+128 bounds the pathological case, and an explicit `usize::MAX` opts out.
+`disk_threshold` still defaults to `KERN_CAP_DISABLED` until item 75 (DiskANN
+crash consistency) closes. A per-kern *entity* cap does not exist for local
+kerns at all; the only one in the tree is `GOSSIP_REMOTE_KERN_ENTITY_CAP` for
+`remote-*`.
 Clustering is vector-only; no semantic/structural features. Naming/enrich are
 LLM-cold per kern. Only `GnnPropagate` reports a *contained* failure today
 (`src/tick/gnn_propagate.rs:57`); every other task's early return is still
