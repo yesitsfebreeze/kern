@@ -93,12 +93,8 @@ pub(super) async fn cmd_profile(cfg: &crate::config::Config, text: &str, no_llm:
 		let llm_fn: crate::retrieval::LlmFunc = Arc::new(llm_client.complete_func());
 
 		let t = Instant::now();
-		let claims = crate::ingest::distill::distill(
-			DISTILL_SAMPLE,
-			&[],
-			&*llm_fn,
-			std::time::SystemTime::now(),
-		);
+		let claims =
+			crate::ingest::distill::distill(DISTILL_SAMPLE, &[], &*llm_fn, std::time::SystemTime::now());
 		let n = claims.map(|c| c.len()).unwrap_or(0);
 		profiles.push(flat(&format!("distill ({n} claims)"), ms(t)));
 	}

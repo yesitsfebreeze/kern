@@ -950,21 +950,21 @@ pub(crate) fn watchdog_flush_attempt(
 	save_fn: &std::sync::Arc<dyn Fn() + Send + Sync>,
 	deadline: std::time::Duration,
 ) -> WatchdogFlush {
-		let (tx, rx) = std::sync::mpsc::channel::<()>();
-		let f = save_fn.clone();
-		// Detached by design: on Blocked the process exits immediately after, so a
-		// still-running flush never finishes a partial write onto the live file.
-		std::thread::Builder::new()
-			.name("kern-watchdog-flush".into())
-			.spawn(move || {
-				f();
-				let _ = tx.send(());
-			})
-			.ok();
-		match rx.recv_timeout(deadline) {
-			Ok(()) => WatchdogFlush::Flushed,
-			Err(_) => WatchdogFlush::Blocked,
-		}
+	let (tx, rx) = std::sync::mpsc::channel::<()>();
+	let f = save_fn.clone();
+	// Detached by design: on Blocked the process exits immediately after, so a
+	// still-running flush never finishes a partial write onto the live file.
+	std::thread::Builder::new()
+		.name("kern-watchdog-flush".into())
+		.spawn(move || {
+			f();
+			let _ = tx.send(());
+		})
+		.ok();
+	match rx.recv_timeout(deadline) {
+		Ok(()) => WatchdogFlush::Flushed,
+		Err(_) => WatchdogFlush::Blocked,
+	}
 }
 
 // Force-exits if the async beat stalls ~30s (deadlock/starvation) so a peer can take the hub.
@@ -1624,7 +1624,11 @@ mod watchdog_flush_tests {
 			*ran_for_thread.lock().unwrap() = true;
 		});
 		let outcome = watchdog_flush_attempt(&save_fn, Duration::from_secs(2));
-		assert_eq!(outcome, WatchdogFlush::Flushed, "the flush returned in window");
+		assert_eq!(
+			outcome,
+			WatchdogFlush::Flushed,
+			"the flush returned in window"
+		);
 		std::thread::sleep(Duration::from_millis(50));
 		assert!(*ran.lock().unwrap(), "the save_fn actually executed");
 	}
@@ -1640,7 +1644,11 @@ mod watchdog_flush_tests {
 		let start = std::time::Instant::now();
 		let outcome = watchdog_flush_attempt(&save_fn, Duration::from_millis(200));
 		let elapsed = start.elapsed();
-		assert_eq!(outcome, WatchdogFlush::Blocked, "the flush overran the deadline");
+		assert_eq!(
+			outcome,
+			WatchdogFlush::Blocked,
+			"the flush overran the deadline"
+		);
 		assert!(
 			elapsed < Duration::from_secs(1),
 			"the watchdog did not block past the deadline: {elapsed:?}"

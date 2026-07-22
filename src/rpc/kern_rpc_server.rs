@@ -17,10 +17,7 @@ pub struct KernRpcHandler {
 
 impl KernRpcHandler {
 	pub fn new(kern: Arc<crate::mcp::Server>, shutdown: Arc<tokio::sync::Notify>) -> Self {
-		Self {
-			kern,
-			shutdown,
-		}
+		Self { kern, shutdown }
 	}
 }
 

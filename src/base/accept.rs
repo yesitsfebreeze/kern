@@ -1176,7 +1176,10 @@ mod tests {
 
 		let kern = g.loaded(&kid).unwrap();
 		let sup_r = kern.reasons.get(&rids[0]).expect("supersede reason exists");
-		assert_eq!(sup_r.text, "contradicts earlier claim", "reason text stored");
+		assert_eq!(
+			sup_r.text, "contradicts earlier claim",
+			"reason text stored"
+		);
 
 		let kern = g.loaded(&kid).unwrap();
 		assert!(

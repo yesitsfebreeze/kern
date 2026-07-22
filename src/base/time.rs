@@ -31,7 +31,6 @@ pub(crate) fn parse_rfc3339(s: &str) -> Result<std::time::SystemTime, ()> {
 	Ok(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64))
 }
 
-
 /// The inverse of `days_from_civil`: days since the Unix epoch -> (year, month,
 /// day). Howard Hinnant's algorithm, the same one `days_from_civil` inverts, so
 /// the pair round-trips. Used to render a `SystemTime` as a calendar date for

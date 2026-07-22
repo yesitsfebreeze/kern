@@ -166,14 +166,7 @@ impl Worker {
 	) -> Option<String> {
 		let doc_id = util::content_hash(&text);
 		let job = job(
-			text,
-			source,
-			kind,
-			hint,
-			confidence,
-			source_tag,
-			config,
-			None,
+			text, source, kind, hint, confidence, source_tag, config, None,
 		);
 		self.tx.send(job).await.ok().map(|()| doc_id)
 	}

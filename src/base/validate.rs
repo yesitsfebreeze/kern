@@ -49,4 +49,3 @@ mod tests {
 		assert_eq!(validate_conf(0.5), Ok(0.5));
 	}
 }
-

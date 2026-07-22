@@ -230,10 +230,7 @@ mod tests {
 	async fn an_auth_frame_with_no_token_field_is_refused() {
 		let (mut server, mut client) = pair();
 		let task = tokio::spawn(async move { verify_auth(&mut server, "s3cret").await });
-		client
-			.send(serde_json::json!({"auth": {}}))
-			.await
-			.unwrap();
+		client.send(serde_json::json!({"auth": {}})).await.unwrap();
 		assert!(task.await.unwrap().is_err(), "no token is not a token");
 	}
 

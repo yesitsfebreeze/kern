@@ -188,7 +188,11 @@ async fn drain_entry(
 		let section = if c.turns.is_empty() {
 			String::new()
 		} else {
-			c.turns.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(",")
+			c.turns
+				.iter()
+				.map(|t| t.to_string())
+				.collect::<Vec<_>>()
+				.join(",")
 		};
 		let src = Source::Session {
 			session_id: format!("session:{stem}"),

@@ -381,13 +381,7 @@ fn print_graviton_removed(name: &str) {
 }
 
 pub(super) async fn cmd_graviton(cfg: &crate::config::Config, action: GravitonAction) {
-	graviton_at(
-		cfg,
-		&Endpoint::kern(),
-		&crate::rpc::caller_of(cfg),
-		action,
-	)
-	.await
+	graviton_at(cfg, &Endpoint::kern(), &crate::rpc::caller_of(cfg), action).await
 }
 
 // Routed first for the same reason as forget: `with_graph` writes the whole kern
@@ -506,13 +500,7 @@ fn print_claim_kind_removed(name: &str) {
 }
 
 pub(super) async fn cmd_claim_kind(cfg: &crate::config::Config, action: ClaimKindAction) {
-	claim_kind_at(
-		cfg,
-		&Endpoint::kern(),
-		&crate::rpc::caller_of(cfg),
-		action,
-	)
-	.await
+	claim_kind_at(cfg, &Endpoint::kern(), &crate::rpc::caller_of(cfg), action).await
 }
 
 async fn claim_kind_at(

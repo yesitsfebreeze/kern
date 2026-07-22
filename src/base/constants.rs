@@ -69,6 +69,12 @@ pub const DEFAULT_CONFIDENCE: f64 = 0.5;
 pub const MAX_AI_CONFIDENCE: f64 = 0.95;
 pub const FACT_CONFIDENCE: f64 = 1.0;
 
+// Ranking uses the lower confidence bound `conf_mean - K*sqrt(conf_variance)`
+// (Wilson-style), not the mean alone — so a single-observation claim stops
+// outranking a well-evidenced one at equal mean (ROADMAP item 65). One
+// standard deviation; auto-tuning is item 66.
+pub const CONFIDENCE_BOUND_K: f64 = 1.0;
+
 pub const PROVENANCE_SCORE: f64 = 0.85;
 
 pub const QUERY_MAX_CHAINS: usize = 5;

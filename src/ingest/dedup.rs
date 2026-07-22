@@ -211,5 +211,4 @@ mod tests {
 			"duplicate rephrase observations collapse to one edge"
 		);
 	}
-
 }

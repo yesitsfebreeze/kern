@@ -224,12 +224,9 @@ async fn attach_via_hub(
 		spawned = res.spawned,
 		"attached via hub"
 	);
-	KernRpcClient::<JsonEnvelopeCodec>::connect_endpoint(
-		&endpoint,
-		&crate::rpc::caller_at(&root),
-	)
-	.await
-	.ok()
+	KernRpcClient::<JsonEnvelopeCodec>::connect_endpoint(&endpoint, &crate::rpc::caller_at(&root))
+		.await
+		.ok()
 }
 
 async fn attach_with_retry(
@@ -431,9 +428,7 @@ async fn run_standalone(cfg: &crate::config::Config) {
 	.await
 	{
 		StandaloneEntry::Own(l) => l,
-		StandaloneEntry::Attach(client) => {
-			return run_proxy(*client, crate::rpc::caller_of(cfg)).await
-		}
+		StandaloneEntry::Attach(client) => return run_proxy(*client, crate::rpc::caller_of(cfg)).await,
 		StandaloneEntry::Refuse(who) => {
 			eprintln!("kern mcp: {who}");
 			eprintln!(
@@ -789,9 +784,9 @@ mod proxy_method_tests {
 			trnsprt::serve_rw(&mut reader, &mut out, &proxy).expect("stdio loop");
 			String::from_utf8(out)
 				.unwrap()
-			.lines()
-			.map(|l| serde_json::from_str::<Value>(l).expect("one JSON frame per line"))
-			.collect()
+				.lines()
+				.map(|l| serde_json::from_str::<Value>(l).expect("one JSON frame per line"))
+				.collect()
 		})
 		.await
 		.expect("blocking loop")
@@ -831,7 +826,11 @@ mod proxy_method_tests {
 
 		assert_eq!(out[1]["result"]["resources"].as_array().unwrap().len(), 4);
 		assert_eq!(out[2]["result"]["prompts"].as_array().unwrap().len(), 1);
-		assert_eq!(out[3]["result"], json!({}), "ping answers with an empty result");
+		assert_eq!(
+			out[3]["result"],
+			json!({}),
+			"ping answers with an empty result"
+		);
 		assert_eq!(out[4]["result"]["messages"].as_array().unwrap().len(), 1);
 
 		let contents = out[5]["result"]["contents"].as_array().expect("contents");
@@ -904,7 +903,9 @@ mod proxy_method_tests {
 			"the carrier added no tool"
 		);
 		assert!(
-			!listed.iter().any(|t| t.name == crate::mcp::RESOURCE_READ_TOOL),
+			!listed
+				.iter()
+				.any(|t| t.name == crate::mcp::RESOURCE_READ_TOOL),
 			"`{}` is on the agent tool surface",
 			crate::mcp::RESOURCE_READ_TOOL
 		);
