@@ -2,6 +2,23 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 93 fenced-block residual closed: `tests/docs_check.py`
+  tracks ```` ``` ```` fence state per page and skips `REF` / bare-continuation /
+  bare-name matching inside a fenced block (heading-scope reset and the `GONE`
+  skip bypassed too — a `#` shell comment or `deleted` word in code is not a
+  heading or retirement). Guarded by a new `anchor_selftest` fixture (real
+  `src/base/store.rs:624` citation before a fence, then fenced `` `:8080` `` +
+  `` `graph.rs:9999` ``; with the skip 0 failures total==1; negative control
+  reds on `` `:8080` `` as `store.rs:8080 beyond EOF`). **Honest finding — the
+  skip is NOT a no-op on the real tree:** three fenced `` `src/llm.rs:11434` ``
+  tokens in `docs/oracle/FEATURES.md:918` and `docs/oracle/ROADMAP.md:2916`/`:2925`
+  were matched as dead references (`llm.rs` has 991 lines); with the skip they
+  are silent. Before: 3 dead references, 129 nominations. After: 0 dead
+  references, 129 nominations — nomination count unchanged, three false
+  positives fixed. `python3 tests/docs_check.py --selftest` prints `selftest OK`.
+  Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming.
+  Symbolic anchors remain open; this closes the fenced-block residual only.
+
 - 2026-07-22 — item 67 closed by decision: binary quantization stays
   non-user-selectable. Its recall floor is too low without a rescoring pass, and
   kern claims no retrieval quality it has not measured — exposing `binary`

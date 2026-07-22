@@ -2512,6 +2512,30 @@ nomination once the number runs past the inherited file. There are none in the
 tree today. The doubly-backticked escape covers prose and not fences; skipping
 fenced blocks is the fix when one appears.
 
+**Fourth pass, 2026-07-22 — the fenced-block residual closed.** `tests/docs_check.py`
+now tracks ```` ``` ```` fence state per page and skips `REF` / bare-continuation /
+bare-name matching inside a fenced block (heading-scope reset and the `GONE` skip
+bypassed too — a `#` shell comment or `deleted` word in code is not a heading or
+retirement). Guarded by a new `anchor_selftest` fixture: a real
+`` `src/base/store.rs:624` `` citation before a fence, then a fenced block with
+`` `:8080` `` (continuation past `store.rs`) + `` `graph.rs:9999` `` (bare name
+past `graph.rs`); with the skip, 0 failures, total == 1; negative control (skip
+disabled) reds on `` `:8080` `` as `store.rs:8080 beyond EOF`. **Honest finding —
+the skip is NOT a no-op on the real tree, contrary to the third pass's "none in
+the tree today":** three fenced `` `src/llm.rs:11434` `` tokens in
+`docs/oracle/FEATURES.md:918` and `docs/oracle/ROADMAP.md:2916`/`:2925` were
+being matched as dead references (`llm.rs` has 991 lines). With the skip they are
+silent. Before: 3 dead references, 129 nominations. After: 0 dead references,
+129 nominations — nomination count unchanged, three false positives fixed.
+`python3 tests/docs_check.py --selftest` prints `selftest OK`. Decided by
+fix-the-root (a fence is prose-as-code, not a citation — same reasoning as the
+doubly-backticked escape), name-the-tradeoff (the skip is structural, not
+tokenisation — it does not help a single-backtick `:8080` port outside a fence),
+verify-before-claiming (the negative control reds, and the three real false
+positives were found, not assumed). **Symbolic anchors remain open and the
+better larger answer; this closes the fenced-block residual only.** See the
+2026-07-22 CHANGELOG entry.
+
 Neither is a defect in a running kern, which is why this sits in tier 9 — but it
 is the reason every reconcile pass so far has spent most of its effort
 re-pointing citations instead of checking claims.
