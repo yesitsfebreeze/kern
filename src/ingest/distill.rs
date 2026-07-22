@@ -52,6 +52,7 @@ pub fn distill(
 	conversation: &str,
 	extra_kinds: &[String],
 	llm: &dyn Fn(&str) -> String,
+	now: std::time::SystemTime,
 ) -> Option<Vec<Claim>> {
 	if conversation.trim().is_empty() {
 		return Some(Vec::new());
@@ -66,13 +67,17 @@ pub fn distill(
 		.map(|(i, t)| format!("[{i}] {t}"))
 		.collect::<Vec<_>>()
 		.join("\n\n");
+	let today = crate::base::time::date_string(now);
 	let prompt = format!(
 		"Extract durable, reusable knowledge from this conversation between a \
 user and an AI coding assistant. The transcript below is marked with 1-based \
 turn numbers in [brackets]. Output ONLY a JSON array. Each element must be \
 {{\"text\": \"<one self-contained statement>\", \"kind\": \"<one of: {kinds}>\"}}. Optionally add \
 \"valid_from\": \"<ISO8601 date>\" ONLY when the statement itself says when it \
-became true (e.g. \"since March 2026\", \"as of v2\"); omit it otherwise. \
+became true (e.g. \"since March 2026\", \"as of v2\"); resolve relative date \
+phrases (\"last Tuesday\", \"yesterday\", \"two weeks ago\") to the absolute ISO8601 \
+date against today, which is {today}. Omit valid_from when the statement \
+carries no date. \
 Optionally add \"turns\": [<1-based turn numbers the claim is drawn from, as marked>] \
 when the claim is grounded in specific turns; omit it when it spans the whole \
 transcript or is uncertain. \
@@ -172,6 +177,9 @@ pub(crate) fn parse_claims(raw: &str, extra_kinds: &[String]) -> Option<Vec<Clai
 
 #[cfg(test)]
 mod tests {
+	fn now() -> std::time::SystemTime {
+		std::time::UNIX_EPOCH
+	}
 	use super::*;
 
 	fn stub(json: &'static str) -> impl Fn(&str) -> String {
@@ -183,7 +191,7 @@ mod tests {
 		let llm = stub(
 			r#"[{"text":"User prefers tabs","kind":"preference"},{"text":"kern owns the graph","kind":"code-fact"}]"#,
 		);
-		let claims = distill("some conversation", &[], &llm).expect("some");
+		let claims = distill("some conversation", &[], &llm, now()).expect("some");
 		assert_eq!(claims.len(), 2);
 		assert_eq!(claims[0].text, "User prefers tabs");
 		assert_eq!(claims[0].kind, "preference");
@@ -193,7 +201,7 @@ mod tests {
 	#[test]
 	fn procedural_kind_maps_through() {
 		let llm = stub(r#"[{"text":"Always run cargo test before committing","kind":"procedural"}]"#);
-		let claims = distill("c", &[], &llm).expect("some");
+		let claims = distill("c", &[], &llm, now()).expect("some");
 		assert_eq!(claims.len(), 1);
 		assert_eq!(claims[0].kind, "procedural");
 		assert!(DEFAULT_KINDS.contains(&"procedural"));
@@ -202,14 +210,14 @@ mod tests {
 	#[test]
 	fn unknown_kind_falls_back_to_fact() {
 		let llm = stub(r#"[{"text":"x","kind":"banana"}]"#);
-		let claims = distill("c", &[], &llm).expect("some");
+		let claims = distill("c", &[], &llm, now()).expect("some");
 		assert_eq!(claims[0].kind, "fact");
 	}
 
 	#[test]
 	fn parse_claims_records_turn_provenance() {
 		let llm = stub(r#"[{"text":"the key is in vault X","kind":"fact","turns":[1,3]}]"#);
-		let claims = distill("turn one\n\nturn two\n\nturn three", &[], &llm).expect("some");
+		let claims = distill("turn one\n\nturn two\n\nturn three", &[], &llm, now()).expect("some");
 		assert_eq!(claims.len(), 1);
 		assert_eq!(claims[0].turns, vec![1, 3], "cited turn numbers round-trip");
 	}
@@ -217,12 +225,12 @@ mod tests {
 	#[test]
 	fn turns_absent_or_malformed_leaves_empty() {
 		let no_turns = stub(r#"[{"text":"x","kind":"fact"}]"#);
-		assert!(distill("c", &[], &no_turns).expect("some")[0]
+		assert!(distill("c", &[], &no_turns, now()).expect("some")[0]
 			.turns
 			.is_empty());
 		// floats accepted, zeros/negatives dropped — degrades to empty, never panics
 		let messy = stub(r#"[{"text":"y","kind":"fact","turns":[2.0,0,"oops"]}]"#);
-		assert_eq!(distill("c", &[], &messy).expect("some")[0].turns, vec![2]);
+		assert_eq!(distill("c", &[], &messy, now()).expect("some")[0].turns, vec![2]);
 	}
 
 	#[test]
@@ -245,7 +253,7 @@ mod tests {
 			r#"[{"text":"finding X","kind":"audit-finding"}]"#.to_string()
 		};
 		let extra = vec!["audit-finding".to_string()];
-		let claims = distill("c", &extra, &llm).expect("some");
+		let claims = distill("c", &extra, &llm, now()).expect("some");
 		assert_eq!(claims[0].kind, "audit-finding");
 		assert!(
 			seen.lock().unwrap().contains("audit-finding"),
@@ -265,7 +273,7 @@ mod tests {
 	fn prose_reply_signals_retry_not_archive() {
 		let llm = stub("I could not find anything useful, sorry!");
 		assert!(
-			distill("c", &[], &llm).is_none(),
+			distill("c", &[], &llm, now()).is_none(),
 			"a prose reply with no JSON array is a format failure — retry, never archive"
 		);
 	}
@@ -276,7 +284,7 @@ mod tests {
 		// delta to be archived having stored nothing.
 		let llm = stub("The user prefers tabs, and they decided to deploy on Fridays.");
 		assert!(
-			distill("a real conversation", &[], &llm).is_none(),
+			distill("a real conversation", &[], &llm, now()).is_none(),
 			"non-JSON reply carrying real knowledge signals retry, so nothing is silently lost"
 		);
 	}
@@ -284,31 +292,31 @@ mod tests {
 	#[test]
 	fn empty_conversation_skips_llm() {
 		let llm = stub(r#"[{"text":"should not appear","kind":"fact"}]"#);
-		assert!(distill("   \n  ", &[], &llm).expect("some").is_empty());
+		assert!(distill("   \n  ", &[], &llm, now()).expect("some").is_empty());
 	}
 
 	#[test]
 	fn empty_llm_response_signals_retry() {
 		let llm = stub("");
-		assert!(distill("a real conversation worth keeping", &[], &llm).is_none());
+		assert!(distill("a real conversation worth keeping", &[], &llm, now()).is_none());
 	}
 
 	#[test]
 	fn whitespace_llm_response_signals_retry() {
 		let llm = stub("   \n\t ");
-		assert!(distill("a real conversation", &[], &llm).is_none());
+		assert!(distill("a real conversation", &[], &llm, now()).is_none());
 	}
 
 	#[test]
 	fn genuine_empty_array_is_some_empty() {
 		let llm = stub("[]");
-		assert_eq!(distill("a real conversation", &[], &llm), Some(Vec::new()));
+		assert_eq!(distill("a real conversation", &[], &llm, now()), Some(Vec::new()));
 	}
 
 	#[test]
 	fn tolerates_prose_around_json() {
 		let llm = stub("Here you go:\n[{\"text\":\"a\",\"kind\":\"fact\"}]\nHope that helps");
-		let claims = distill("c", &[], &llm).expect("some");
+		let claims = distill("c", &[], &llm, now()).expect("some");
 		assert_eq!(claims.len(), 1);
 		assert_eq!(claims[0].text, "a");
 	}
@@ -318,7 +326,7 @@ mod tests {
 		let good = stub(
 			r#"[{"text":"we moved to spaces","kind":"decision","valid_from":"2026-03-01T00:00:00Z"}]"#,
 		);
-		let claims = distill("c", &[], &good).expect("some");
+		let claims = distill("c", &[], &good, now()).expect("some");
 		assert_eq!(claims.len(), 1);
 		assert!(
 			claims[0].valid_from.is_some(),
@@ -327,14 +335,14 @@ mod tests {
 
 		let garbage = stub(r#"[{"text":"x","kind":"fact","valid_from":"since March"}]"#);
 		assert_eq!(
-			distill("c", &[], &garbage).expect("some")[0].valid_from,
+			distill("c", &[], &garbage, now()).expect("some")[0].valid_from,
 			None,
 			"an unparseable valid_from is ignored, not fatal"
 		);
 
 		let absent = stub(r#"[{"text":"y","kind":"fact"}]"#);
 		assert_eq!(
-			distill("c", &[], &absent).expect("some")[0].valid_from,
+			distill("c", &[], &absent, now()).expect("some")[0].valid_from,
 			None
 		);
 	}
@@ -342,7 +350,7 @@ mod tests {
 	#[test]
 	fn absent_kind_falls_back_to_fact() {
 		let llm = stub(r#"[{"text":"x"}]"#);
-		let claims = distill("c", &[], &llm).expect("some");
+		let claims = distill("c", &[], &llm, now()).expect("some");
 		assert_eq!(claims.len(), 1);
 		assert_eq!(claims[0].kind, "fact");
 	}
@@ -350,7 +358,7 @@ mod tests {
 	#[test]
 	fn empty_or_missing_text_is_skipped() {
 		let llm = stub(r#"[{"text":"","kind":"fact"},{"kind":"fact"},{"text":"keep","kind":"fact"}]"#);
-		let claims = distill("c", &[], &llm).expect("some");
+		let claims = distill("c", &[], &llm, now()).expect("some");
 		assert_eq!(claims.len(), 1);
 		assert_eq!(claims[0].text, "keep");
 	}
@@ -358,7 +366,7 @@ mod tests {
 	#[test]
 	fn single_nested_array_is_unwrapped() {
 		let llm = stub(r#"[[{"text":"a","kind":"fact"}]]"#);
-		let claims = distill("c", &[], &llm).expect("some");
+		let claims = distill("c", &[], &llm, now()).expect("some");
 		assert_eq!(claims.len(), 1);
 		assert_eq!(claims[0].text, "a");
 	}
@@ -367,7 +375,7 @@ mod tests {
 	fn multiple_sibling_arrays_signal_retry() {
 		let two_siblings = stub(r#"[{"text":"a","kind":"fact"}] [{"text":"b","kind":"fact"}]"#);
 		assert!(
-			distill("c", &[], &two_siblings).is_none(),
+			distill("c", &[], &two_siblings, now()).is_none(),
 			"sibling arrays span to invalid JSON — a format failure, so retry not archive",
 		);
 	}
@@ -378,10 +386,26 @@ mod tests {
 		// genuine no-claims result rather than retrying forever.
 		let array_of_arrays = stub(r#"[[{"text":"a","kind":"fact"}],[{"text":"b","kind":"fact"}]]"#);
 		assert!(
-			distill("c", &[], &array_of_arrays)
+			distill("c", &[], &array_of_arrays, now())
 				.expect("some")
 				.is_empty(),
 			"a len-2 array-of-arrays is neither unwrapped nor merged",
 		);
 	}
+	#[test]
+	fn distill_prompt_injects_current_date_for_relative_resolution() {
+		let captured = std::sync::Mutex::new(String::new());
+		let llm = |p: &str| {
+			*captured.lock().unwrap() = p.to_string();
+			r#"[{"text":"x","kind":"fact"}]"#.to_string()
+		};
+		let now = crate::base::time::parse_rfc3339("2026-07-22T00:00:00").unwrap();
+		let _ = distill("some conversation about last Tuesday", &[], &llm, now);
+		let prompt = captured.into_inner().unwrap();
+		assert!(
+			prompt.contains("2026-07-22"),
+			"prompt must name today for relative-date resolution: {prompt}"
+		);
+	}
+
 }
