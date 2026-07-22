@@ -13,6 +13,14 @@ pub enum AdapterError {
 	// it to "nothing is serving" and go act on the resource itself.
 	#[error("adapter unauthenticated: {0}")]
 	Unauthenticated(String),
+	// The other direction: *this* caller refused *the endpoint*, before saying
+	// anything to it. Distinct from `Io` because an absent socket and a socket
+	// belonging to somebody else are opposite facts — one means no daemon, the
+	// other means something is bound that this user does not own — and distinct
+	// from `Unauthenticated` because no peer has been consulted, so it must
+	// never be reported as the daemon's verdict.
+	#[error("adapter untrusted endpoint: {0}")]
+	UntrustedEndpoint(String),
 	#[error("adapter: {0}")]
 	Other(String),
 }

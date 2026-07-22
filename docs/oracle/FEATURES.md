@@ -677,8 +677,12 @@ the MCP JSON does — `task_panics`/`last_task_panic`,
 **Gaps.** The socket has auth now: one token frame carrying the graph's `mcp-token`
 (`src/trnsprt/src/kern_rpc/auth.rs`), verified before any method dispatches; the
 named pipe carries an owner-only SDDL that typechecks for Windows and has never
-run on one. `principal` is declared, not proven, and the pre-auth frame is
-unbounded and untimed (`ROADMAP.md` — item 24). `HealthRes` stays a flat DTO.
+run on one. Authentication runs both ways as of 2026-07-22 —
+`require_owned_by_caller` checks the endpoint's owner before the connect and
+`require_peer_is_caller` checks the serving uid after it, both ahead of the
+token frame (`src/trnsprt/src/typed/local.rs:237`, `:283`). `principal` is
+declared, not proven, and the pre-auth frame is unbounded and untimed
+(`ROADMAP.md` — item 24). `HealthRes` stays a flat DTO.
 
 ---
 
@@ -950,9 +954,12 @@ re-exports: `McpError`, `serve_http`, `serve_rw`, `serve_stdio`, `McpServer`,
   `Codec`/`JsonEnvelopeCodec` (`src/trnsprt/src/typed/codec.rs:7`/`:18`),
   `Channel` (`src/trnsprt/src/typed/channel.rs:8`), and
   `src/trnsprt/src/typed/local.rs` — `Endpoint`
-  (`kern()`/`kern_for(root)`/`hub()`), `bind_kern_listener` (`:243`) /
-  `connect_kern` (`:211`), `LocalListener` (`:311`), and the two platform
-  adapters (`UnixStreamAdapter`, `NamedPipeAdapter`).
+  (`kern()`/`kern_for(root)`/`hub()`), `bind_kern_listener` (`:490`) /
+  `connect_kern` (`:314`), `LocalListener` (`:559`), and the two platform
+  adapters (`UnixStreamAdapter`, `NamedPipeAdapter`). `connect_kern` refuses an
+  endpoint this euid does not own, by `require_owned_by_caller` (`:237`) before
+  the connect and `require_peer_is_caller` (`:283`) after it, so no client
+  presents a token to a socket somebody else bound.
 - **Service macro** (`src/trnsprt/macros/`) — `service!` turns a trait of
   `async fn`s into client + server + dispatch code. Both RPC contracts are one
   short file each: `kern_rpc/svc.rs`, `hub_rpc/svc.rs`, with their DTOs beside

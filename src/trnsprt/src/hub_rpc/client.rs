@@ -17,6 +17,10 @@ impl HubRpcClient<JsonEnvelopeCodec> {
 					let channel = Channel::new(adapter, JsonEnvelopeCodec::new());
 					return Ok(HubRpcClient::new(channel));
 				}
+				// `Endpoint::hub()` is `scoped()` too, so the hub socket carries the
+				// same squattable name as a node's — and the same verdict: an endpoint
+				// this user does not own will not become theirs on the second try.
+				Err(e @ AdapterError::UntrustedEndpoint(_)) => return Err(e),
 				Err(e) => {
 					last_err = Some(e);
 					if i + 1 < RETRIES {

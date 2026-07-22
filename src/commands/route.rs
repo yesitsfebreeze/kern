@@ -42,6 +42,14 @@ pub(crate) async fn route_to(
 		Err(AdapterError::Unauthenticated(e)) => {
 			return Routed::Refused(format!("daemon refused this caller: {e}"))
 		}
+		// Not an absence either, and not the daemon's verdict — this caller
+		// refused the endpoint. Something is bound at the socket path that this
+		// user does not own, which means no daemon of ours is reachable there;
+		// reporting NoDaemon would send the CLI off to write locally without
+		// ever mentioning that somebody else holds the name.
+		Err(AdapterError::UntrustedEndpoint(e)) => {
+			return Routed::Refused(format!("refusing endpoint: {e}"))
+		}
 		Err(_) => return Routed::NoDaemon,
 	};
 	let req = CallToolReq {
