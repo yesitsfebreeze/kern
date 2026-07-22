@@ -426,7 +426,32 @@ new field, so a store format bump, and it belongs with whoever holds
 `src/base/types.rs`. Deciding behavior: fix-the-root. Until then, do not add
 `_user` / `_agent` knobs; they would read as working and weight nothing.
 
-### 21. Review / draft lifecycle `[surface]`
+### 21. Review lifecycle lands except `promote` — nothing can un-hold a held claim `[surface]`
+
+**Three of four parts landed 2026-07-22; the fourth is the one that matters for
+usability.** `ReviewState` is on `Entity` (`src/base/types.rs:300`) behind a
+`FORMAT_V7` bump — old stores are rejected rather than defaulted, per the
+`FORMAT_V6` precedent, pinned by `decode_rejects_older_version_bytes`.
+`exclude_pending` is a `QueryOptions` predicate (`src/retrieval/score.rs:54`,
+applied at `:242`), and source-level policy is `IngestConfig::review_policy`
+keyed on source scheme with unknown schemes rejected at config load.
+
+**The default is `Active`, deliberately.** Pending-by-default would have made
+every existing ingest path silently non-retrievable — a behaviour change
+disguised as a schema addition, and one that craters recall rather than failing
+loudly. Active-by-default means the feature does nothing until a host opts in,
+which is the correct direction for a filter that can hide data.
+
+**What remains: the `promote` tool.** No `"promote"` arm exists in the MCP
+dispatch. So a host can configure a scheme to arrive `Pending` and can filter
+those rows out of retrieval, but has **no supported way to mark one reviewed** —
+the state is writable only by ingest. Shipping the hold without the release is
+worse than shipping neither, because a host that enables the policy today
+strands every claim it holds. Do not enable `review_policy` until this lands.
+
+When it does: item 9 established that a mutating CLI path must route through the
+daemon when one is serving, so `promote` needs the `route()` treatment rather
+than a local write.
 
 `ReviewState` on `Entity` (added with a store format-version bump — alpha
 rejects old stores rather than defaulting them) + source-level review policy in

@@ -72,6 +72,19 @@ pub enum EntityStatus {
 	Superseded = 1,
 }
 
+/// Curation state. `Active` is the default so a schema addition is not a
+/// behaviour change: a claim is retrievable unless a host's review policy asked
+/// for it to be held (`IngestConfig::review_policy`), and only an
+/// `exclude_pending` query drops a held one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[repr(i32)]
+pub enum ReviewState {
+	#[default]
+	Active = 0,
+	Pending = 1,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[repr(i32)]
 pub enum ReasonKind {
@@ -284,6 +297,7 @@ pub struct Entity {
 	pub superseded_by: String,
 	pub kind: EntityKind,
 	pub status: EntityStatus,
+	pub review: ReviewState,
 	pub statements: Vec<String>,
 	pub chunks: Vec<ChunkPart>,
 	pub vector: Embedding,
@@ -603,6 +617,7 @@ pub(crate) fn mk_entity(id: &str, text: &str, heat: f64, kind: EntityKind) -> En
 		superseded_by: String::new(),
 		kind,
 		status: EntityStatus::Active,
+		review: ReviewState::default(),
 		statements: vec![text.to_string()],
 		chunks: vec![ChunkPart {
 			kind: ChunkPartKind::StatementRef,

@@ -28,13 +28,19 @@ fn strip_file_uri(uri: &str) -> String {
 pub struct KernFileWatcherSink {
 	worker: Arc<Worker>,
 	retention_secs: u64,
+	review_policy: crate::ingest::ReviewPolicy,
 }
 
 impl KernFileWatcherSink {
-	pub fn new(worker: Arc<Worker>, retention_secs: u64) -> Self {
+	pub fn new(
+		worker: Arc<Worker>,
+		retention_secs: u64,
+		review_policy: crate::ingest::ReviewPolicy,
+	) -> Self {
 		Self {
 			worker,
 			retention_secs,
+			review_policy,
 		}
 	}
 
@@ -42,7 +48,11 @@ impl KernFileWatcherSink {
 	// daemon, and a deadline resolved at startup would give a file edited a
 	// month later a TTL measured from boot.
 	fn ingest_config(&self) -> IngestRunConfig {
-		IngestRunConfig::default().with_retention(self.retention_secs)
+		IngestRunConfig {
+			review_policy: self.review_policy.clone(),
+			..Default::default()
+		}
+		.with_retention(self.retention_secs)
 	}
 }
 
@@ -142,6 +152,7 @@ mod tests {
 				superseded_by: String::new(),
 				kind: EntityKind::Document,
 				status: EntityStatus::Active,
+				review: Default::default(),
 				statements: vec![text],
 				chunks: vec![ChunkPart {
 					kind: ChunkPartKind::StatementRef,
@@ -313,7 +324,7 @@ mod tests {
 			None,
 			None,
 		));
-		let sink = KernFileWatcherSink::new(worker.clone(), 3600);
+		let sink = KernFileWatcherSink::new(worker.clone(), 3600, Default::default());
 
 		let before = SystemTime::now();
 		sink
@@ -350,7 +361,7 @@ mod tests {
 		}
 
 		assert_eq!(
-			KernFileWatcherSink::new(worker, 0)
+			KernFileWatcherSink::new(worker, 0, Default::default())
 				.ingest_config()
 				.valid_until,
 			None,
@@ -398,7 +409,7 @@ mod tests {
 		}
 
 		let refused_before = crate::ingest::worker::ingest_queue_refused();
-		let sink = KernFileWatcherSink::new(worker, 0);
+		let sink = KernFileWatcherSink::new(worker, 0, Default::default());
 		let blocked = timeout(
 			Duration::from_millis(150),
 			sink.ingest(IngestRecord {
@@ -437,7 +448,7 @@ mod tests {
 			None,
 		));
 
-		KernFileWatcherSink::new(worker, 0)
+		KernFileWatcherSink::new(worker, 0, Default::default())
 			.ingest(IngestRecord {
 				source_uri: "file:///tmp/trusted.rs".to_string(),
 				content: "fn appears_on_disk() {}".to_string(),

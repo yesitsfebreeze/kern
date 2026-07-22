@@ -26,6 +26,8 @@ pub(crate) struct Job {
 	// documented default for every producer with no principal to name (the file
 	// watcher, the intake drain).
 	pub(crate) acl: Acl,
+	// Resolved from `config.review_policy` against `source`, once, at the gate.
+	pub(crate) review: ReviewState,
 	pub(crate) result_tx: Option<oneshot::Sender<Outcome>>,
 }
 
@@ -49,6 +51,10 @@ fn job(
 	// The confidence only. `kind` stays the producer's: a watched file is a
 	// Document at 0.95, not the Claim the clamp's own classification would name.
 	let (confidence, _) = clamp_confidence(confidence, source_tag);
+	// Here for the same reason as the clamp: a producer that resolved its own
+	// review state, or forgot to, is the defect. The scheme is only knowable per
+	// job, so the policy travels and the resolution happens once, here.
+	let review = crate::ingest::review_for(&config.review_policy, &source);
 	Job {
 		text,
 		source,
@@ -57,6 +63,7 @@ fn job(
 		confidence,
 		config,
 		acl,
+		review,
 		result_tx,
 	}
 }
@@ -601,6 +608,7 @@ mod tests {
 			confidence: 1.0,
 			config: Config::default(),
 			acl: Acl::default(),
+			review: ReviewState::default(),
 			result_tx: None,
 		}
 	}

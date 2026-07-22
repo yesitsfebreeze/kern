@@ -2,6 +2,38 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 21's review lifecycle lands three parts of four, and the
+  missing fourth is the one that makes the feature safe to turn on.
+
+  Shipped: `ReviewState` on `Entity` behind a `FORMAT_V7` bump with old stores
+  rejected rather than defaulted; `exclude_pending` as a `QueryOptions`
+  predicate; and source-scheme review policy in `IngestConfig`, with unknown
+  schemes rejected at load.
+
+  **The default is `Active` and that was the whole risk.** Pending-by-default
+  would have made every existing ingest path silently non-retrievable — a
+  behaviour change wearing a schema addition's clothes, which craters recall
+  instead of failing loudly. Active-by-default means the feature is inert until a
+  host opts in. Recall is unmoved at 0.9306 / 0.9722 / 0.9471, which is the
+  evidence that inertness is real rather than intended.
+
+  **Not shipped: `promote`.** No such arm exists in the MCP dispatch. A host can
+  therefore configure a scheme to arrive held, and can filter held rows out of
+  retrieval, but has no supported way to release one. Shipping the hold without
+  the release is worse than shipping neither, so item 21 is retitled to say so
+  and carries a do-not-enable warning rather than a completion note.
+
+  The docs are written by me rather than the slice: its agent stalled twice, the
+  second time after fixing the compile error that blocked verification but before
+  touching `ROADMAP.md` or this file. Code and tests were verified green
+  independently — 927 tests, `exclude_pending` pinned in both directions, the
+  format rejection pinned by the same test that pinned `FORMAT_V6`. What was
+  missing was only the record, and a slice that stalls before recording leaves
+  work that looks finished to `git status` and unfinished to everyone else.
+
+  Decided by: name-the-tradeoff — an inert default is the safe half of a feature
+  that can hide data, and the half that can un-hide it is not there yet.
+
 - 2026-07-22 — merged item 92's closure. 195 + 2 + this one = 198, by union
   rebuild; the duplicate-94 renumber survived the merge and `### 96` is now
   unique.
