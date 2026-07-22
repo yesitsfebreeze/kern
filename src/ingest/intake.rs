@@ -24,7 +24,7 @@ pub fn extract_claims(
 		.and_then(|s| s.to_str())
 		.unwrap_or("session")
 		.to_string();
-	let claims = match distill(&text, extra_kinds, llm) {
+	let claims = match distill(&text, extra_kinds, llm, std::time::SystemTime::now()) {
 		Some(c) => c,
 		None => {
 			tracing::warn!(target: "kern.ingest.intake", path = %path.display(), "distill got no LLM output; leaving delta in intake for retry");
