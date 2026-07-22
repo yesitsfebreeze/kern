@@ -2,6 +2,15 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 84 sub-fix closed: `complete` now retries a transient
+  (5xx/429/timeout/connect) with the embed leg's [150,300,600]ms cadence via a
+  new `post_with_retry` (`src/llm.rs`) before surfacing the failure — a gateway
+  blip no longer re-queues a whole distill transcript. `complete_func` records
+  the final failure once; a recovered completion is not counted. The
+  Ollama-centric half stays by design (local-first: Ollama-native + OpenAI-compat
+  only). New test pins 500-then-ok. 1038 pass. Decided by: fix-the-root, the-oracle.
+  Supersedes: nothing.
+
 - 2026-07-22 — item 57 mechanism half-closed (default-off): `decay_evidence`
   (new, `src/tick/stigmergy.rs`) γ-damps `conf_alpha`/`conf_beta` toward the
   Jeffreys prior `(1,1)` by a half-life, gated by `EVIDENCE_HALF_LIFE_SECS`

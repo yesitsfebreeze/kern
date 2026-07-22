@@ -295,6 +295,31 @@ impl Client {
 		.await
 	}
 
+	// `complete`'s post with a transient backoff — a 5xx/429/timeout/connect
+	// retries before the caller sees a failure (and `complete_func` records the
+	// final one). Permanent errors surface immediately. The embed leg keeps its
+	// own `embed_with_retry`; this is the reason leg's mirror.
+	async fn post_with_retry<T: Serialize + ?Sized>(
+		&self,
+		url: &str,
+		headers: &HeaderMap,
+		body: &T,
+		timeout: Duration,
+	) -> Result<reqwest::Response, LlmError> {
+		let mut last = None;
+		for delay_ms in COMPLETE_RETRY_DELAYS_MS.iter() {
+			match self.post_checked(url, headers, body, timeout).await {
+				Ok(r) => return Ok(r),
+				Err(e) if is_transient(&e) => {
+					last = Some(e);
+					tokio::time::sleep(Duration::from_millis(*delay_ms)).await;
+				}
+				Err(e) => return Err(e),
+			}
+		}
+		Err(last.expect("retry loop ran at least once"))
+	}
+
 	pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, LlmError> {
 		if self.inner.embed_native {
 			let url = format!("{}/api/embed", self.inner.embed_url);
@@ -371,7 +396,7 @@ impl Client {
 				"options": options,
 			});
 			let resp = self
-				.post_checked(
+				.post_with_retry(
 					&url,
 					&self.inner.reason_headers,
 					&body,
@@ -398,7 +423,7 @@ impl Client {
 			temperature: self.inner.temperature,
 		};
 		let resp = self
-			.post_checked(
+			.post_with_retry(
 				&url,
 				&self.inner.reason_headers,
 				&body,
@@ -526,6 +551,11 @@ pub const REASON_KEEP_ALIVE: &str = "2m";
 const LLM_TIMEOUT: Duration = Duration::from_secs(crate::config::DEFAULT_REASON_TIMEOUT_SECS);
 
 const EMBED_TIMEOUT: Duration = Duration::from_secs(120);
+
+// Backoff for a transient reason-completion failure (5xx/429/timeout/connect).
+// The distill leg is the one LLM latency that matters; a transient blip should
+// not re-queue the whole transcript. Three attempts, the embed leg's cadence.
+const COMPLETE_RETRY_DELAYS_MS: [u64; 3] = [150, 300, 600];
 
 fn is_local_ollama(url: &str) -> bool {
 	url.contains("//localhost") || url.contains("//127.0.0.1") || url.contains(":11434")
@@ -994,6 +1024,48 @@ mod tests {
 	// The control for the test above: a model that answers with prose is not an
 	// endpoint failure, and must not raise the counter that says the endpoint is
 	// at fault. This is the case `record_stuck` could not distinguish.
+	// ROADMAP item 84: `complete` retries a transient (5xx) before surfacing
+	// the failure — the distill leg should not re-queue a whole transcript on a
+	// gateway blip. The first call 500s, the second answers; the completion
+	// returns the content, not "".
+	#[tokio::test(flavor = "multi_thread")]
+	async fn complete_retries_a_transient_5xx_then_succeeds() {
+		use axum::response::IntoResponse;
+		use std::sync::atomic::{AtomicU32, Ordering};
+		use std::sync::Arc;
+		let calls = Arc::new(AtomicU32::new(0));
+		let calls2 = calls.clone();
+		let app = axum::Router::new().route(
+			"/api/chat",
+			axum::routing::post(move |_b: axum::Json<Value>| async move {
+				let n = calls2.fetch_add(1, Ordering::SeqCst);
+				if n == 0 {
+					(
+						axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+						"blip".to_string(),
+					)
+						.into_response()
+				} else {
+					axum::Json(serde_json::json!({
+						"message": { "role": "assistant", "content": "recovered" },
+						"done": true
+					}))
+					.into_response()
+				}
+			}),
+		);
+		let (url, _server) = crate::test_support::spawn_http(app).await;
+		let client = Client::new(Endpoint::new(&url, "m", ""), Endpoint::default());
+		let out = client.complete("say something").await.unwrap();
+		assert_eq!(out, "recovered", "the retry reached the answering call");
+		assert_eq!(calls.load(Ordering::SeqCst), 2, "one 500 + one ok");
+		assert_eq!(
+			complete_failed(),
+			0,
+			"a recovered completion is not a failure"
+		);
+	}
+
 	#[tokio::test(flavor = "multi_thread")]
 	async fn a_weak_model_that_answers_is_not_counted_as_a_failure() {
 		let app = axum::Router::new().route(

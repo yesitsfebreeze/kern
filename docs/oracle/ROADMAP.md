@@ -3320,8 +3320,15 @@ propagation overwrites one — another 76.8 MB at this corpus size.
   single-`id` path honours — the per-row predicate, not a silent skip. The
   hand-rolled-schemas half stays: the tool schemas are still hand-written JSON
   (not derived from types), which is a style debt, not a correctness gap.
-- The LLM client is Ollama-centric with no retry/backoff policy object
-  (`FEATURES.md:914-915`).
+- ~~The LLM client is Ollama-centric with no retry/backoff policy object~~
+  — **retry/backoff half closed 2026-07-22.** `complete` now retries a transient
+  (5xx/429/timeout/connect) with the embed leg's `[150, 300, 600]ms` cadence via
+  a new `post_with_retry` (`src/llm.rs`) before surfacing the failure — a
+  gateway blip no longer re-queues a whole distill transcript. `complete_func`
+  still records the *final* failure once (a recovered completion is not a
+  failure). The `Ollama-centric` half stays: the client speaks Ollama-native
+  + OpenAI-compat and no other provider, by design (local-first). New test
+  `complete_retries_a_transient_5xx_then_succeeds`. 1038 pass.
 - ~~Watcher `.gitignore` parsing is approximate; no rename tracking~~ **(retired
   2026-07-21 — verified false on both counts).** `IgnoreRules` builds a real
   `Gitignore` through ripgrep's `ignore` crate
