@@ -2,6 +2,31 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 102 closed: the GNN re-embeds one corpus identically in every
+  process. Four sources, not the two `e2e/test_gnn_recall.py` confessed —
+  unseeded weight init and negative-edge sampling, plus `build_gnn_snapshot` and
+  `apply_gnn_updates` both walking `HashMap`s, so the feature-matrix rows, the
+  edge indices and the HNSW insertion order (hence its entry point) were
+  per-process. The last two are item 29's defect verbatim, in a second place that
+  sweep never reached.
+
+  **The seed derives from the corpus, not the kern id.** The kern id was the
+  recommendation and it fails the item's own title: `Kern::new_unnamed` folds
+  `now_nanos` into the id, so the same facts in a fresh project draw a new seed —
+  measured over four e2e runs at 0.9306 / 0.8889 / 0.9167 / 0.9306. Sorted node
+  ids are content hashes; streaming them through SHA-256 gives one seed per
+  corpus, reproducible in any process, still distinct per kern. A constant seed
+  was also measured: it reproduced, and proved there is no fifth source, but it
+  would hand every kern in a fleet the same initial weights.
+
+  Floors recalibrated only after three consecutive identical runs, and written as
+  `65 / 72` rather than `0.9028` — the literal fails, because 65/72 is 0.90277…
+  The old figures in items 28 and 97 were draws from a distribution; this one is
+  a value, and they are no longer comparable.
+  Decided by: verify-before-claiming — a recall floor set under a stochastic path
+  scored the draw, not the code, and its own recorded minimum had already been
+  falsified by a run nobody re-ran.
+
 - 2026-07-22 — item 100 closed: `kern health` prints the serving daemon's
   degradation counts instead of its own process's structural zeros. Eight
   numbers — the seven fail-open `AtomicU64` statics summed into `degraded:` and

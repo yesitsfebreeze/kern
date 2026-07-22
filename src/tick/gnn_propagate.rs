@@ -64,9 +64,17 @@ pub fn build_gnn_snapshot(kern: &Kern, cfg: &GnnConfig) -> Option<GnnSnapshot> {
 		return None;
 	}
 
+	// Sorted, not `kern.entities` order. A HashMap walk put `ids`, the
+	// feature-matrix rows, `dim`'s reference entity and every `pos_edges` index
+	// in per-process hash order, which no seed can undo — item 29's defect in a
+	// second place (ROADMAP item 102).
+	let mut entity_ids: Vec<&String> = kern.entities.keys().collect();
+	entity_ids.sort();
+
 	let mut ids = Vec::with_capacity(kern.entities.len());
 	let mut dim = 0usize;
-	for (id, t) in &kern.entities {
+	for id in entity_ids {
+		let t = &kern.entities[id];
 		if !t.has_vector() {
 			continue;
 		}
@@ -102,7 +110,13 @@ pub fn build_gnn_snapshot(kern: &Kern, cfg: &GnnConfig) -> Option<GnnSnapshot> {
 	let mut pair_seen = HashSet::new();
 	let mut pos_edges: Vec<[usize; 2]> = Vec::new();
 
-	for r in kern.reasons.values() {
+	// Sorted for the same reason as `ids`: this walk fixes `pos_edges`' order and
+	// the order edges enter `gg`.
+	let mut reason_ids: Vec<&String> = kern.reasons.keys().collect();
+	reason_ids.sort();
+
+	for rid in reason_ids {
+		let r = &kern.reasons[rid];
 		if !r.to_kern_id.is_empty() || r.to.is_empty() {
 			continue;
 		}
@@ -133,13 +147,49 @@ pub fn build_gnn_snapshot(kern: &Kern, cfg: &GnnConfig) -> Option<GnnSnapshot> {
 
 	let features = gg.feature_matrix();
 
+	let seed = gnn_seed(&ids);
+
 	Some(GnnSnapshot {
 		ids,
 		features,
 		graph: gg,
 		pos_edges,
 		weights: kern.gnn_weights.clone(),
+		seed,
 	})
+}
+
+/// The seed every draw in one propagation comes from — derived from the CORPUS:
+/// the sorted node ids, which are content hashes, streamed through the same
+/// SHA-256 `base::util::content_hash` uses.
+///
+/// ROADMAP item 102 posed this as a choice between a constant and the kern id,
+/// and neither is right. A constant gives every kern in the fleet the same
+/// initial weights, so a seed that happens to initialise some graph shape badly
+/// does it to all of them at once, with no diversity left to expose it. The kern
+/// id looks like the safe alternative but does not deliver what the item asks
+/// for: `Kern::new_unnamed` / `new_named_child` fold `now_nanos` into the id
+/// (`src/base/types.rs`), so re-ingesting the same corpus into a fresh project
+/// is a new id and a new seed. MEASURED: four e2e runs under a kern-id seed gave
+/// recall@1 0.9306 / 0.8889 / 0.9167 / 0.9306; three under a constant gave
+/// 0.9306 three times.
+///
+/// The corpus is the input the item's own title names. Same facts -> same
+/// content-hash ids -> same seed, in any process and in a project rebuilt from
+/// scratch; different kerns hold different facts, so their models stay
+/// independent. It decides only the COLD start — once `gnn_weights` is non-empty
+/// the run loads those instead.
+fn gnn_seed(ids: &[String]) -> u64 {
+	use sha2::{Digest, Sha256};
+	let mut h = Sha256::new();
+	for id in ids {
+		h.update(id.as_bytes());
+		// Length-delimited, so ["ab","c"] and ["a","bc"] are not one corpus.
+		h.update([0u8]);
+	}
+	let mut out = [0u8; 8];
+	out.copy_from_slice(&h.finalize()[..8]);
+	u64::from_be_bytes(out)
 }
 
 fn apply_gnn_updates(
@@ -154,8 +204,17 @@ fn apply_gnn_updates(
 	}
 	let mut graph = g.write();
 	let mut changed: Vec<(String, Embedding)> = Vec::new();
+	// Sorted, not `updates` order. `changed` is replayed into `gnn_entity_idx`
+	// below, and HNSW links each new node to what is already there and takes its
+	// entry point from the first insert (`src/base/hnsw.rs`), so a HashMap walk
+	// here made the index *topology* per-process random even once the embeddings
+	// were not (ROADMAP item 102).
+	let mut update_ids: Vec<&String> = updates.keys().collect();
+	update_ids.sort();
+
 	if let Some(kern) = graph.kerns.get_mut(kern_id) {
-		for (entity_id, vec) in &updates {
+		for entity_id in update_ids {
+			let vec = &updates[entity_id];
 			if vec.is_empty() {
 				continue;
 			}
@@ -247,6 +306,32 @@ mod tests {
 		assert!(
 			build_gnn_snapshot(&k, &cfg).is_some(),
 			"with a low floor and local edges, a snapshot builds"
+		);
+	}
+
+	// The negative control for sources 3 and 4 of ROADMAP item 102 — the half no
+	// seed can fix. Two identically built kerns hash their keys in different
+	// orders inside one process, so with the sorts reverted `ids` and
+	// `pos_edges` disagree here; a seeded rng over a shuffled snapshot is still
+	// a different training run.
+	#[test]
+	fn two_identical_kerns_snapshot_in_the_same_order() {
+		let cfg = GnnConfig {
+			min_thoughts: 2,
+			..GnnConfig::defaults()
+		};
+		let a = build_gnn_snapshot(&kern_with_n(24), &cfg).expect("snapshot builds");
+		let b = build_gnn_snapshot(&kern_with_n(24), &cfg).expect("snapshot builds");
+		assert_eq!(a.ids, b.ids, "node order must not be hash order");
+		assert_eq!(
+			a.pos_edges, b.pos_edges,
+			"edge order must not be hash order"
+		);
+		assert_eq!(a.seed, b.seed, "one corpus seeds one training run");
+		let other = build_gnn_snapshot(&kern_with_n(23), &cfg).expect("snapshot builds");
+		assert_ne!(
+			a.seed, other.seed,
+			"a different corpus gets its own seed — kerns are not initialised alike"
 		);
 	}
 

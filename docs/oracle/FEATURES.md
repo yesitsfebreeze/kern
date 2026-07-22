@@ -206,7 +206,7 @@ profiled via `src/profile.rs`):
 | 13 | **Cold backfill** | `src/mcp/tools_query.rs:212` | If hot returns `< k`, cold-tier hits (brute-force `Store::cold_search`, `src/base/store.rs:629`) fill remaining slots, flagged `cold:true` — each first put through `matches_filter`, because `cold_search` is a raw cosine scan that answers no predicate of its own and an unfiltered fill made spilling an entity the way around every filter the hot path enforces. Skipped on the exact-text fast path, which never embedded a query vector. <!-- docs-check: anchor-ok --> |
 | 14 | **Access stamping** | `retrieval/score.rs` | Heat deposits off the hot path: `score::commit_access` stamps delivered hits; the tick's `CommitAccess` task calls `score::commit_access_ids`. |
 
-**Where.** `src/retrieval/*` (4374 LoC, 12 files). Entry: `retrieval::query`
+**Where.** `src/retrieval/*` (5182 LoC, 9 files). Entry: `retrieval::query`
 (one-shot CLI) and `retrieval::query_locked` (daemon, holds read lock only for
 the graph phase; every LLM call runs unlocked).
 
@@ -562,7 +562,7 @@ Trained per-kern, off the tick loop on a dedicated thread (`src/tick/trainer.rs`
   inside them is a `try_` variant, so a shape or missing-forward-state error
   propagates instead of silently zeroing. `GnnError::MissingForwardState`
   (`src/gnn/mod.rs`) is the specific case a backward-without-forward raises.
-- **Training** (`run_learned_propagation`, `src/gnn/propagate.rs:60`) — builds
+- **Training** (`run_learned_propagation`, `src/gnn/propagate.rs:67`) — builds
   a `GnnSnapshot` (features + positive reason edges + last weights), samples
   negative edges, trains a 2-layer GCN (`dim → (dim/2).clamp(16,256) → dim`) for
   `DEFAULT_TRAIN_EPOCHS=24` with `Adam` (`DEFAULT_TRAIN_LEARNING_RATE=0.01`) on
@@ -596,8 +596,8 @@ Trained per-kern, off the tick loop on a dedicated thread (`src/tick/trainer.rs`
 `tick::gnn_propagate::do_gnn_propagate`.
 
 **Gaps.** Training is linear in edges since 2026-07-22 — 73.4s → 11.6s at 4096 measured back to back under load, 6.6s idle (`tests/gnn_scale.rs`); off the tick since 2026-07-21 (`src/tick/trainer.rs`). No GPU.
-Weights are per-kern, not shared across the tree. Link prediction only — no
-node-classification objective. *Corrected 2026-07-21:* a repeatedly failing
+Weights are per-kern, not shared across the tree. Link prediction only — no node-classification objective. **A propagation is reproducible since 2026-07-22** (`ROADMAP.md` item 102): one seed derived from the sorted node ids (`gnn_seed`, `src/tick/gnn_propagate.rs:182`) drives both weight init and negative-edge sampling (`src/gnn/propagate.rs:80`), and the two `HashMap` walks that outranked it are sorted — the snapshot's node order (`src/tick/gnn_propagate.rs:71`) and the `updates` write-back that fixes HNSW insert order (`src/tick/gnn_propagate.rs:212`) — so the same corpus re-embeds identically in every process and `e2e/test_gnn_recall.py` prints the same numbers on every run rather than scoring a draw.
+*Corrected 2026-07-21:* a repeatedly failing
 propagation does **not** re-enqueue every tick. `GnnPropagate` is enqueued only
 when `do_cluster` did structural work (`if did_structural_work`, `src/tick.rs:190`),
 so a quiescent kern retries nothing; the climbing `task_failures` count
@@ -1367,8 +1367,8 @@ Ranked by leverage:
 1. (retired 2026-07-21 — ROADMAP item 86 closed) a reason edge does lift its
    neighbour now: bounded source-weighted traversal credit in `expand`, clamped
    below the strongest voucher, all 8 linked pairs in the top 5.
-2. **O(N) importance scan per retrieve** (`src/retrieval/seed.rs:127`) —
-   `seed_important` walks every entity each query (`par_iter`, `:139`); index
+2. **O(N) importance scan per retrieve** (`src/retrieval/seed.rs:131`) —
+   `seed_important` walks every entity each query (`par_iter`, `:143`); index
    it, it's the scaling cliff at query time. Open as `ROADMAP.md` item 25.
 3. **Federation security** — add auth + encryption before any real deployment
    (`ROADMAP.md` — "Transport security"). The three fixes that needed no auth

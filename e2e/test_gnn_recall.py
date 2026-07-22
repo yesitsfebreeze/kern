@@ -38,12 +38,26 @@ GNN_MIN_THOUGHTS = 4
 # separate set of numbers because this is a different graph: the seed index is
 # fused 0.6/0.4 with the propagated one (src/base/search.rs), so these are not
 # comparable to the CLI corpus floors and neither set may be copied to the other.
-# Propagation is stochastic (unseeded weight init and negative-edge sampling in
-# src/gnn/propagate.rs), so these are set below the worst of a multi-run sample —
-# see the CHANGELOG entry for the run count and the spread.
-RECALL_AT_1_FLOOR = 0.85  # 8 runs, 2026-07-22: 0.8889 - 0.9306
-RECALL_AT_5_FLOOR = 0.93  # 0.9583 - 0.9722
-MRR_FLOOR = 0.88  # 0.9219 - 0.9508
+#
+# These are EXACT, not a margin under a sample. Since ROADMAP item 102 the
+# propagation is seeded off the corpus (`gnn_seed`, src/tick/gnn_propagate.rs),
+# so this suite prints the same three numbers every run — measured identical on
+# three consecutive runs, 2026-07-22. A move of any size is a real change in
+# ranking, not a draw, and is meant to be looked at rather than absorbed.
+#
+# What was here before was NOT conservative, it was uncalibrated: the old floors
+# sat under a recorded "8 runs: 0.8889 - 0.9306" sample that a later run of the
+# unchanged suite fell straight through at 0.8611. Both that sample and those
+# floors described a distribution nothing draws from now; they are not kept for
+# comparison because they were never a measurement of the code.
+# Written as the counts they are, not as the 4-decimal display: 65/72 prints
+# "0.9028" and is strictly LESS than the literal 0.9028, so a pasted-in printed
+# value fails against the very run it was read from.
+RECALL_AT_1_FLOOR = 65 / 72  # 65 of 72 probes at rank 1
+RECALL_AT_5_FLOOR = 69 / 72  # 69 of 72 within the top 5
+# MRR is a sum of reciprocal ranks with no short exact decimal, so this one sits
+# at the printed precision — 0.0001 below the value, not a margin under a sample.
+MRR_FLOOR = 0.9314
 
 # `min_thoughts` bounds this from below, but only the propagation's own report
 # says how many nodes it really covered.

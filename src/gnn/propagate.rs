@@ -8,6 +8,8 @@ use crate::gnn::model::Model;
 use crate::gnn::optim::Adam;
 use crate::gnn::persist::{marshal_weights, unmarshal_weights};
 use crate::gnn::tensor::Tensor;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 
 /// Single source of truth for the GnnConfig defaults — both [`GnnConfig::defaults`]
 /// and the serde `crate::config::GnnConfig` must read them from here, never re-literal.
@@ -50,6 +52,11 @@ pub struct GnnSnapshot {
 	pub graph: Graph,
 	pub pos_edges: Vec<[usize; 2]>,
 	pub weights: Vec<u8>,
+	/// Every draw this propagation makes — weight init and negative-edge
+	/// sampling — comes from here, so one snapshot always trains to the same
+	/// embeddings. Derived from the corpus by `tick::gnn_propagate::gnn_seed`;
+	/// see there for why that input and not another (ROADMAP item 102).
+	pub seed: u64,
 }
 
 pub struct PropagationResult {
@@ -67,13 +74,23 @@ pub fn run_learned_propagation(
 	let dim = snap.features.cols;
 	let hidden = (dim / 2).clamp(16, 256);
 
-	let neg_edges = sample_negative_edges(snap.ids.len(), &snap.pos_edges, snap.pos_edges.len());
+	// One rng for the whole run, seeded off the snapshot: the negative set and
+	// both layers' initial weights were the two unseeded `rand::rng()` draws that
+	// made a propagation unrepeatable (ROADMAP item 102).
+	let mut rng = StdRng::seed_from_u64(snap.seed);
+
+	let neg_edges = sample_negative_edges(
+		snap.ids.len(),
+		&snap.pos_edges,
+		snap.pos_edges.len(),
+		&mut rng,
+	);
 	if neg_edges.is_empty() {
 		return Err("could not sample negative edges".into());
 	}
 
-	let l1 = GCNLayer::new(dim, hidden, Some(Activation::Relu), true);
-	let l2 = GCNLayer::new(hidden, dim, None, false);
+	let l1 = GCNLayer::with_rng(dim, hidden, Some(Activation::Relu), true, &mut rng);
+	let l2 = GCNLayer::with_rng(hidden, dim, None, false, &mut rng);
 	let mut model = Model::new(vec![l1, l2], None);
 
 	if !snap.weights.is_empty() {
@@ -127,7 +144,12 @@ pub fn run_learned_propagation(
 	Ok(PropagationResult { updates, weights })
 }
 
-pub fn sample_negative_edges(n: usize, pos_edges: &[[usize; 2]], want: usize) -> Vec<[usize; 2]> {
+pub fn sample_negative_edges<R: rand::Rng>(
+	n: usize,
+	pos_edges: &[[usize; 2]],
+	want: usize,
+	rng: &mut R,
+) -> Vec<[usize; 2]> {
 	if n < 2 || want == 0 {
 		return Vec::new();
 	}
@@ -148,7 +170,6 @@ pub fn sample_negative_edges(n: usize, pos_edges: &[[usize; 2]], want: usize) ->
 	let want = want.min(max_neg);
 
 	use rand::RngExt;
-	let mut rng = rand::rng();
 	let mut neg_set = HashSet::new();
 	let mut neg = Vec::with_capacity(want);
 	let limit = want * 30;
@@ -207,6 +228,7 @@ mod tests {
 			graph,
 			pos_edges,
 			weights: Vec::new(),
+			seed: 0xC0FFEE,
 		}
 	}
 
@@ -218,6 +240,7 @@ mod tests {
 			graph: Graph::new(),
 			pos_edges: Vec::new(),
 			weights: Vec::new(),
+			seed: 1,
 		};
 		let err = match run_learned_propagation(&snap, &GnnConfig::defaults()) {
 			Err(e) => e,
@@ -267,10 +290,46 @@ mod tests {
 		);
 	}
 
+	// The negative control for the seed (sources 1 and 2 of ROADMAP item 102).
+	// Bit equality, not approximate: a tolerance would pass on two independently
+	// trained models whose embeddings merely landed near each other. Restore
+	// `rand::rng()` here and `n0` re-embeds 0.2173 against -0.1046. The snapshot
+	// is built by hand, so the ORDER sources are controlled separately, by
+	// `tick::gnn_propagate::two_identical_kerns_snapshot_in_the_same_order`.
+	#[test]
+	fn two_propagations_of_one_snapshot_are_bit_identical() {
+		let dim = 8;
+		let snap = tiny_snapshot(6, dim);
+		let cfg = GnnConfig {
+			train_epochs: 3,
+			..GnnConfig::defaults()
+		};
+
+		let a = run_learned_propagation(&snap, &cfg).unwrap();
+		let b = run_learned_propagation(&snap, &cfg).unwrap();
+
+		// Embeddings before weights: both diverge together, and the embedding
+		// diff is the one a human can read.
+		for id in &snap.ids {
+			let (va, vb) = (&a.updates[id], &b.updates[id]);
+			let bits_a: Vec<u64> = va.iter().map(|x| x.to_bits()).collect();
+			let bits_b: Vec<u64> = vb.iter().map(|x| x.to_bits()).collect();
+			assert_eq!(
+				bits_a, bits_b,
+				"{id} re-embedded differently: {va:?} vs {vb:?}"
+			);
+		}
+		assert_eq!(
+			a.weights, b.weights,
+			"the same snapshot must marshal the same weights"
+		);
+	}
+
 	#[test]
 	fn sample_negative_edges_avoids_positives_and_self_loops() {
 		let pos = vec![[0, 1], [1, 2]];
-		let neg = sample_negative_edges(5, &pos, 4);
+		let mut rng = StdRng::seed_from_u64(5);
+		let neg = sample_negative_edges(5, &pos, 4, &mut rng);
 		for e in &neg {
 			assert_ne!(e[0], e[1], "no self loops");
 			let (lo, hi) = if e[0] < e[1] {
