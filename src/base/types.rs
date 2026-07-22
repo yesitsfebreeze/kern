@@ -816,4 +816,64 @@ mod tests {
 		assert!(Source::parse_scheme("file").is_some());
 		assert!(Source::parse_scheme("bogus").is_none());
 	}
+
+	#[test]
+	fn source_id_pins_null_delimited_composition() {
+		// `source_id` = content_hash(scheme \x00 object \x00 section); the \x00
+		// delimiter is load-bearing, not a separator of convenience. Changing it
+		// or reordering the fields orphans every source id and breaks the gossip
+		// import guard that checks `content_hash(&e.text()) == e.id`
+		// (ROADMAP item 77).
+		let ticket = Source::Ticket {
+			system: "gh".into(),
+			object_id: "42".into(),
+			section: "disc".into(),
+			title: String::new(),
+			author: String::new(),
+			url: String::new(),
+		};
+		assert_eq!(
+			ticket.source_id(),
+			Some(util::content_hash("ticket\x0042\x00disc"))
+		);
+		// An empty object short-circuits to None before the hash; pin that the
+		// guard is the emptiness check, not a digest of an empty object.
+		assert_eq!(
+			Source::Ticket {
+				system: "gh".into(),
+				object_id: String::new(),
+				section: String::new(),
+				title: String::new(),
+				author: String::new(),
+				url: String::new(),
+			}
+			.source_id(),
+			None
+		);
+	}
+
+	#[test]
+	fn unnamed_kern_id_pins_parent_then_nonce_composition() {
+		// `unnamed_kern_id` = content_hash(parent_id ++ nonce_nanos) with no
+		// delimiter. Inserting one (e.g. `\x00`) passes the determinism test above
+		// and orphans every kern in existence (ROADMAP item 77).
+		assert_eq!(unnamed_kern_id("p", 42), util::content_hash("p42"));
+		assert_eq!(unnamed_kern_id("root", 0), util::content_hash("root0"));
+	}
+
+	#[test]
+	fn named_child_kern_id_pins_parent_name_nonce_composition() {
+		// `named_child_kern_id` = content_hash(parent_id ++ name ++ nonce_nanos),
+		// again delimiter-free. Reordering the fields (name before parent) or
+		// inserting a separator passes the determinism test above and orphans
+		// every named child (ROADMAP item 77).
+		assert_eq!(
+			named_child_kern_id("p", "code", 9),
+			util::content_hash("pcode9")
+		);
+		assert_eq!(
+			named_child_kern_id("root", "generic", 7),
+			util::content_hash("rootgeneric7")
+		);
+	}
 }
