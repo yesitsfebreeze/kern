@@ -113,6 +113,10 @@ e2e-install:
 docs-install:
     cd docs/site && npm ci
 
+# point git at the tracked oracle pre-commit hook (idempotent)
+hooks:
+    git config core.hooksPath hooks
+
 # verify every src/...:line citation and page link in the docs site is alive
 docs-check:
     python3 tests/docs_check.py --selftest
