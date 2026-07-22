@@ -1,4 +1,6 @@
-use crate::base::constants::{DEGRADE_DECAY_BASE, DEGRADE_DECAY_POW, DEGRADE_FLOOR, DEGRADE_MIN_THRESHOLD};
+use crate::base::constants::{
+	DEGRADE_DECAY_BASE, DEGRADE_DECAY_POW, DEGRADE_FLOOR, DEGRADE_MIN_THRESHOLD,
+};
 use crate::base::graph::GraphGnn;
 use crate::base::math::{average_vec, reason_id};
 use crate::base::reason::{add_reason, remove_entity, remove_reason};
