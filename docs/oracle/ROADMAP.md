@@ -63,11 +63,11 @@ stale-and-sometimes-wrong: structurally zero.
 
 Closed by preferring the wire. `cmd_health` awaits `daemon_health` once, up
 front (`src/commands/admin.rs:43`), and hands the response to a new
-`degradation_lines` (`:116`) beside `tick_health_lines` (`:169`). `HealthRes`
+`degradation_lines` (`:119`) beside `tick_health_lines` (`:172`). `HealthRes`
 already carried all eight — `cold_evicted` (`src/trnsprt/src/kern_rpc/dto.rs:42`)
 and the seven at `:55`–`:67`, filled from the daemon's own `health_stats`
-(`src/rpc/kern_rpc_server.rs:104`) — and all eight are now taken **whole**
-(`src/commands/admin.rs:125`), not merged: a daemon is serving the store, so its
+(`src/rpc/kern_rpc_server.rs:94`) — and all eight are now taken **whole**
+(`src/commands/admin.rs:125`), not merged: a daemon is serving the store, so its <!-- docs-check: anchor-ok -->
 counts are the true ones and this process's are noise about a graph nobody
 queried. The local read stands only when nothing answers (`:135`), where zero is
 honest. The no-daemon output is byte-identical to before, empty graph and
@@ -117,19 +117,15 @@ cannot ride this route as it stands, because the RPC's only mutation surface is
 "regardless of what `p.source` claims" and `tool_link` writes
 `MAX_AI_CONFIDENCE`, while `cmd_ingest` mints at `clamp_confidence(1.0, "user")`
 and `cmd_link` at `1.0`. Routing them unchanged would silently demote every
-CLI-minted Fact to an agent Claim. Routing them *with* their trust intact means
-putting a trust field on the socket. **Restated 2026-07-22:** that used to read
-"an unauthenticated socket"; the socket now authenticates, and the block did not
-lift, because the part this half needs was never the missing auth. A shared
-secret proves a uid, and the CLI and the agent's proxy are the same uid — so a
-`principal` on that frame is still *declared*, and a trust field riding a
-declared principal is the same escalation path it always was. Blocked on item
-24's residue, not on effort.
-
-That block is a new sequencing edge pointing *down* the file — item 24 sits in
-tier 3 and this sits in tier 1 — and the list was not reordered for it. Item 24
-does not move up because the trust field is one caller of it, not its severity —
-and now that its gate is built, what remains of it is smaller than this half is.
+CLI-minted Fact to an agent Claim. Routing them *with* their trust intact meant
+putting a trust field on the socket — and a shared secret proves a uid, never
+which of that uid's programs is talking, so any such field is declared, not
+proven. **Restated 2026-07-22, after the item 18 removal decision:** kern
+carries no caller identity, by decision, so the "wait for a provable
+principal" exit no longer exists. The remaining choice is now binary and owed
+here: route `ingest`/`link` and accept the agent-level clamp for routed
+writes, or keep them local-with-guarded-flush (the status quo, which
+`flush_guarded` already makes safe). Nothing is blocked on item 24 anymore.
 
 **Closed 2026-07-21: `graviton add`/`remove` and `claim-kind add`/`rm`.** These
 were the four shipped subcommands that reached `with_graph`
@@ -214,7 +210,7 @@ after `tool_query` learned to return path chains, without which a routed
 route cost a widening of the tool first; that is the shape of the remaining work
 too.
 
-`ingest` and `link` (blocked on item 24) still write the store directly;
+`ingest` and `link` (routing decision owed above) still write the store directly;
 `intake drain` joined the route 2026-07-21 once it was given a tool to route to.
 Both are one-shot, so the exposure is a lost write rather than a lost graph —
 and both direct-write paths are guarded. `cmd_ingest`
@@ -253,17 +249,16 @@ more than `intake drain` did, and the tools they route to already existed with
 matching semantics — `graviton` (`src/mcp/tools_admin.rs:87`, schema `:39`) and
 `claim_kind` (`:161`, schema `:52`), both dispatched at `src/mcp.rs:188-189`.
 
-So the item's remainder is **one** half, not two: `ingest`/`link`, blocked on
-item 24. `graviton`/`claim_kind` were the unblocked half and are closed. The item
-does not close on the read side alone, and it cannot close at all until item 24
-decides how trust crosses the socket.
+So the item's remainder is **one** half, not two: `ingest`/`link`.
+`graviton`/`claim_kind` were the unblocked half and are closed. The item does
+not close on the read side alone; it closes when the route-and-clamp vs
+stay-local decision above is made and recorded.
 
 ### 102. The GNN re-embeds the same corpus differently in every process `[retrieval]`
 
 **Filed 2026-07-22.** It sits below item 9 because item 9 is the more severe
-defect, and above everything after it because item 9 is blocked on item 24's
-principal and this is blocked on nothing. It is the first Tier-1 item that can
-be started.
+defect, and above everything after it because item 9 waits on a decision and
+this is blocked on nothing. It is the first Tier-1 item that can be started.
 
 **The symptom that found it.** `kern-gnn recall@1` measured 0.9028 and then
 0.8611 across two runs of the *unchanged* suite, against a 0.8500 floor — 0.0111
@@ -344,7 +339,7 @@ CORPUS — the sorted node ids, which are content hashes, streamed through SHA-2
 
 Why not the recommendation: a kern-id seed does not satisfy this item's own
 title. `Kern::new_unnamed` / `new_named_child` fold `now_nanos` into the id
-(`src/base/types.rs:513`), so the same corpus re-ingested into a fresh project is
+(`src/base/types.rs:524`), so the same corpus re-ingested into a fresh project is
 a new kern, a new seed and a different embedding — measured, four e2e runs under
 a kern-id seed printed recall@1 0.9306 / 0.8889 / 0.9167 / 0.9306. A constant
 held three runs identical but hands every kern in the fleet the same initial
@@ -385,261 +380,46 @@ uncomparable to it.
 # Tier 3 — the embeddable-endpoint track
 
 kern's competitive claim is "everything a hosted service structurally cannot
-do". The flip side is that a hosted service serves *many callers* and kern
-assumes exactly one. This is the most valuable track in the file now that item 1 is
-answered, because it converts kern from "my agent's memory" into "the memory layer
-any agentic workflow embeds". It ranks below tier 1 because none of it is a
-live defect, and above tier 5 because no shipped host is blocked on federation.
+do". An earlier cut of this track read "a hosted service serves *many callers*"
+and grew a per-row ACL to chase that. That whole sub-track is **removed, not
+deferred** — see the decision below.
 
-Two constraints hold across all of it. **ACL is caller-asserted** — the daemon
-cannot verify a caller's principals, exactly like the existing
-`validate_fact_source` boundary, so trust ends at the process edge. And **Facts
-are GC-immune, not ACL-immune** — a Fact the requester cannot see must still not
-be returned. Default semantics: empty `principals` means *no filter*, not
-*public only*, or every single-agent caller goes blind.
+### 18. Per-row ACL and user scoping — REMOVED 2026-07-22 `[surface]`
 
-### 18. Every read surface enforces the ACL, and a watched file is public by decision — closed 2026-07-22 `[surface]`
+**Decision 2026-07-22: kern carries no per-row ACL and no user identity.** The
+`Acl {scope, users, groups}` field on `Entity`, the `principals`/`scope`
+arguments on the MCP `ingest` and `query` tools, `acl_admits` in
+`matches_filter`, the `mcp/acl.rs` edge-endpoint verdict module (deleted with
+the rest), the default-deny
+resources surface, the ACL-aware dedup/supersede carries and the declared
+`AuthReq::principal` were all removed wholesale, with no store or wire
+compatibility kept.
 
-**Closed 2026-07-22 by deciding, not by building.** A watched file stays public:
-`Acl::default()` names no scope, no user and no group, and `Acl::is_public` —
-the single definition of public in the tree — is exactly that emptiness. Both
-watcher legs pass it, and `drain_direct_once` carries the payload's own ACL
-rather than stamping one, so the decision is made in one place instead of two
-that happen to agree.
+**Why removed rather than finished.** The mechanism was structurally
+unenforceable in this architecture, by its own record: ACL was caller-asserted
+("the daemon cannot verify a caller's principals"), the socket principal was
+declared and never proven, and same-uid callers are indistinguishable — no
+shared secret can separate the CLI, the `kern mcp` proxy and the hub. Empty
+`principals` meant *no filter*, so any caller could read everything by naming
+nobody. That is a cooperative filter, not an access control, and it charged a
+recurring tax: three read-surface bypasses were found and fixed after "done"
+(cold-tier backfill, path chains, edge text), the per-edge endpoint verdict
+cost a `find_entity` per edge and failed open on non-resident endpoints,
+`Reason` never had an ACL of its own, and gossip shipped scoped rows ungated.
+Every future read surface would have had to re-answer "does the ACL hold
+here", and the history said the answer starts wrong.
 
-**Tenant-default lost on the same ground item 20's `source_trust_user` did.**
-There is no tenant identity anywhere on the wire: item 24's principal is
-*declared*, not proven, and its own residue says same-uid callers are
-indistinguishable. Stamping `scope: "tenant"` would name a boundary nothing can
-verify — a label that reads as enforcement and is not. Configurable lost because
-it does not avoid the decision, it ships a knob plus a default and asks the
-question again at the default.
+**The model now.** kern is a single-trust-domain store, like SQLite or LMDB:
+the process boundary is the access model — socket `0600`, `mcp-token` auth,
+and the anti-squat checks (item 24's transport half, which stays). A host that
+needs multi-caller scoping runs one kern per trust domain or gates its own
+proxy in front; that isolation is *stronger* than anything kern could enforce
+same-uid, which is the point.
 
-So the deliverable is a pin and a statement rather than code: **a watched file is
-readable by every caller, including one naming no principal.** A host that wants
-otherwise sets an ACL at ingest, or holds the claim with `review_policy`.
-
-**One gap, recorded rather than papered over.** The test pins the durable leg
-only. The RAM leg reaches `Worker::submit`, whose job waits in the channel for a
-worker loop the test does not spawn, so a wrong ACL written there is invisible to
-it. Both call sites pass `Acl::default()` and cannot drift without someone
-editing one — which is precisely the edit this test would miss. Closing an
-end-to-end assertion on that leg wants a running worker loop in the fixture.
-
-**Title narrowed 2026-07-22.** It read "a bare `query {id}` still filters
-nothing" for a day after that stopped being a defect. The id path runs
-`matches_filter` (`src/mcp/tools_query.rs:151-152`), so `query {id, principals:
-["bob"]}` on an alice-scoped row answers `thought not found`
-(`id_read_withholds_a_scoped_row_from_a_non_member`); a *bare* `query {id}`
-filtering nothing is the **decided** empty-principals default, pinned by
-`bare_id_read_still_serves_a_scoped_row`, not a gap. What the old title hid is
-below: the row was gated and its **edges were not**, on both the id read and the
-ranked read.
-
-**Four bullets done 2026-07-21; the item stays open.** `Entity` carries `Acl`
-(struct `{scope, users, groups}`, `src/base/types.rs:133-137`) and it is now
-written from the caller, not hardcoded — but "enforced in `matches_filter`" is
-only worth what the read surfaces that *run* `matches_filter` are worth, and two
-of them did not. Both are fixed below; the ones that still do not are listed at
-the end, and they are what keeps this item open. What shipped:
-
-- ~~Expose `principals` / `scope` on the MCP `ingest` schema.~~ **Done.**
-  `IngestArgs` takes both; `acl_from_args` (`src/mcp/tools_mutate.rs`) builds the
-  `Acl` on the same pre-branch line as `valid_until`, so the sync, durable-direct
-  and RAM-queue paths all carry it. It rides `ingest::Job::acl`
-  (`src/ingest/worker.rs`) into `new_statement_entity`
-  (`src/ingest/place.rs`), which no longer hardcodes `Acl::default()`.
-  `DirectJob::acl` (`src/ingest/direct.rs`) carries it across the durable hop for
-  the same reason `valid_until` is carried: the caller's principal is gone by the
-  time the drain runs, so dropping it there would silently republish a scoped
-  ingest as public. `Worker::enqueue`/`run` keep their arity and delegate to
-  `enqueue_with_acl`/`run_with_acl` with `Acl::default()` — that is what leaves
-  the file watcher and the intake drain public, per the deferred decision below.
-- ~~Accept `principals` on `query`.~~ **Done.** `QueryArgs.principals`
-  (`src/mcp/tools_query.rs`) → `QueryOptions.principals`
-  (`src/retrieval/score.rs`), validated by the shared `parse_principals`
-  (`src/mcp.rs`) that both surfaces use. A blank entry is a hard error, never a
-  silent skip: it would match the empty `Acl::scope` of every public entity, so
-  accepting it would turn a caller's typo into an access decision.
-- ~~Enforce in `matches_filter`.~~ **Done.** `acl_admits`
-  (`src/retrieval/score.rs`) runs first in `matches_filter`. Both tier-wide rules
-  are enforced and tested in `matches_filter_is_the_per_entity_predicate`: a
-  scoped **Fact** is dropped for a non-member exactly like a scoped Claim
-  (GC-immunity is not ACL-immunity), and an **empty `principals` is no filter at
-  all**, not public-only. `principals` also makes `QueryOptions::is_active()`
-  true, so an ACL-only query takes the pre-filtered ANN path rather than the
-  unfiltered seed path — the same predicate either way.
-- ~~**Guard the id path.**~~ **Done 2026-07-21.** `src/mcp/tools_query.rs:137-157`
-  now builds `QueryOptions` first and runs the resolved row through
-  `retrieval::score::matches_filter` (`src/retrieval/score.rs:231`) before it
-  renders, so the id read honours every filter the ranked read honours —
-  `query {id, kind: "claim"}` on a `Fact` answers `thought not found`
-  (`id_filter_tests`, same file). Previously it returned `entity_detail_by_id`
-  directly and no filter of any kind ran, which made ACL decorative and put
-  `kern get` — routed here by item 9 — behind the same unfiltered path.
-  A bare `query {id}` still filters nothing, because `QueryOptions::default()`
-  leaves `valid_at`/`as_of` unset; that is what preserves the retired item 91
-  `[retrieval]` decision (closed 2026-07-21, not the open item 91 `[ingest]`) to
-  *flag* an expired row rather than hide it. The ACL predicate landed on this
-  path and the ranked path at once, because both go through `matches_filter`.
-
-**Coverage is unit tests only, and cannot be more.** `principals` is MCP-only —
-there is no CLI flag — and `tests/e2e/conftest.py` drives the `kern` binary over
-subprocess with no MCP JSON-RPC client, so nothing in `tests/e2e/` can reach this
-surface. Reaching it would mean building an MCP stdio driver fixture, which is
-larger than the feature. The behaviour is pinned by
-`matches_filter_is_the_per_entity_predicate` (`src/retrieval/score.rs`),
-`id_filter_tests` (`src/mcp/tools_query.rs`) and `ingest_acl_tests`
-(`src/mcp/tools_mutate.rs`), the last of which follows an `ingest` carrying
-`principals`/`scope` all the way to the `Acl` on the placed entity.
-
-**Still open, deliberately deferred:** does the file watcher give `Document`
-entities a tenant-default ACL, or leave them public? Recommend configurable,
-default public-within-tenant, since the tenant boundary is the process.
-`src/ingest/file_watcher.rs:113` hardcodes `Acl::default()` — which is that
-recommended default — and `Worker::enqueue`'s public delegation keeps it there
-until the decision is made.
-
-**The dedup rule is decided, not deferred.** The survivor keeps its own ACL —
-an id *is* its content hash, so one text cannot exist under two audiences and no
-other answer is available. The hole was never the entity, it was the `Rephrase`
-edge: `merge_duplicate` stored the incoming text **verbatim** on the survivor, a
-`Reason` carries no ACL of its own, and every surface that renders an entity
-renders its edges (`entity_detail` untruncated, the ranked `edges` array,
-`resource_thought`, `format_chains`). A scoped ingest landing within
-`dedup_threshold` cosine of any public thought therefore published its own text
-to everyone. `merge_duplicate` (`src/base/accept.rs`) now takes the incoming
-`Acl` and skips the rephrase write when it differs from the survivor's, in either
-direction; a support observation is metadata about a statement and still merges,
-the wording does not (`ingest::dedup::tests`). The supersede path was already
-handled: `src/tick/tasks.rs` carries the old entity's `Acl` into
-`build_chunk_entity`, so a rephrase cannot launder a scoped thought into a public
-one.
-
-**The `query` tool gated the row and published its neighbours — closed
-2026-07-22.** The 2026-07-21 bullet above guarded *the row* an id names and
-stopped there, and the same paragraph that enumerated the four surfaces which
-render an entity's edges (`entity_detail` untruncated, the ranked `edges` array,
-`resource_thought`, `format_chains`) fixed the last two and left the first two.
-A `Reason` carries no ACL, but `link` writes its body from
-`explain_relationship_prompt` — up to 500 chars of **both** endpoint texts — so
-an edge is its endpoints' text under an id that is neither one's. The row
-clearing `matches_filter` says nothing about its neighbour, so
-`query {id: <public row>, principals: ["bob"]}` served an alice-scoped Fact's
-text verbatim through any public neighbour, and the ranked read did the same at
-120 chars. Both are the *reads item 9 routes `kern get` to*, which is what made
-this an ACL bypass rather than a cosmetic gap.
-
-Fixed at the root rather than in the two branches: the endpoint verdict left
-`src/mcp/resources.rs` and became `src/mcp/acl.rs`, one `Endpoint` +
-`incident_edge` all four renderings call. It takes the *admission rule* as a
-parameter rather than the principals, because the two surfaces disagree about
-what "allowed" means and must keep disagreeing — resources can name no principal
-so its rule is `Acl::is_public`, while `query` takes the caller's `principals`.
-Variants renamed `Public`/`Scoped` → `Admitted`/`Withheld` for the same reason;
-`Unresolved` is unchanged and still redacts rather than drops. The `query` side
-of the rule is `retrieval::score::acl_admits_entity`, the ACL half of
-`matches_filter` lifted out so the edge gate cannot re-derive the
-empty-principals default and get it wrong — an edge answers its far endpoint's
-**ACL and nothing else**, since `kind` or `since` on the row a caller asked for
-says nothing about whether a neighbour's quoted text may be read.
-`entity_detail_by_id` — the local `kern get` fallback, which has no principal to
-name — passes `QueryOptions::default()` and so renders exactly as before. Pinned
-by `edge_acl_tests` (`src/mcp/tools_query.rs`): id read and ranked read each
-withhold a scoped **Fact**'s edge text from a non-member and each fails alone
-when its own gate is reverted, a member still reads the edge whole, and
-`a_bare_id_read_still_renders_the_whole_edge` pins the inert default on the edge
-rendering too.
-
-**Two reads returned entity text without passing the predicate**, found by
-enumerating the read surfaces rather than trusting the single gate — both now
-run `matches_filter`. *Cold-tier backfill* (`src/mcp/tools_query.rs`) pushed
-`Store::cold_search` hits straight into the delivered set; that is a raw cosine
-scan answering no filter, so spilling an entity was the way around every
-predicate the hot path enforces, ACL included. *Path chains* (`format_chains`)
-render the text of every entity on a walk and `retrieve` filtered only
-`results` — the ACL stopped the row and the chain printed it anyway. A chain
-touching a withheld entity is dropped whole: a chain with a hole in it still says
-the withheld thought exists and what it connects.
-
-**The resources surface is now default-deny** — the separable half, done
-2026-07-21. `src/mcp/resources.rs` can name no principal, so the question it can
-answer without item 24 is what such a surface may return *at all*, and the answer
-is: only rows carrying no ACL. All three reads enforce it. `kern://local/thoughts`
-(`resource_thoughts`, the top 50 by rank, text truncated to 200) skips a
-non-public entity *before* it ranks, so a withheld row does not even spend a slot.
-`thought://{id}` (`resource_thought`, full text **plus every incident edge's
-text**) reads a scoped id back as `thought not found` — the same `None` arm and
-the same format string a missing id takes, byte-identical for a given id, and the
-file logs nothing, so the surface that withholds the text does not leak the id's
-existence. `reason://{id}` (`resource_reason`) previously checked nothing at all;
-that was the worst of the three, an unchecked read of scoped entity text through
-an id that is not the entity's. "Non-public" is `Acl::is_public()`
-(`src/base/types.rs`), the same emptiness test `acl_admits` runs, so this surface
-and `matches_filter` cannot drift apart on what "public" means.
-
-**An edge is gated on BOTH its ends, and "did not resolve" is its own answer.**
-`explain_relationship_prompt` (`src/base/util.rs:87`) hands the LLM up to 500
-chars of both endpoint texts and the reply becomes `reason.text`, so the text
-belongs to the endpoints and a public `from` does not make it public — an earlier
-cut of this gated `reason://{id}` on `from` alone and still served an edge whose
-`to` was scoped, naming that scoped id outright. Both ends are checked now. The
-harder half is that `find_entity` (`src/base/search.rs:148`) walks only the
-**resident** kern map — `loaded` is `kerns.get`, `all()` is `kerns.values()`,
-neither sees `unloaded` or the cold tier — so *an id that does not resolve is not
-an id that does not exist*. A GC cold-spill (`src/tick/stigmergy.rs`) or a
-kern-cap unload (`GraphGnn::unload`) leaves a scoped row alive in the store with
-its ACL intact and invisible here, while the edge quoting it survives untouched:
-a kern hosts a reason iff it hosts its `from` (`src/base/reason.rs:78`), so
-`move_entity` leaves an incoming edge behind in the *source* kern and
-`remove_entity` cascades only within one kern. Treating that as "allowed" is a
-fail-open read of scoped text, with no race in it — it is the stable committed
-state. So the endpoint verdict has three outcomes (`Endpoint`, now
-`src/mcp/acl.rs`), not two: **Withheld** drops the edge, **Admitted** serves it
-whole, and **Unresolved** serves the edge
-with its `text` withheld. Redaction rather than a drop, because a dangling
-endpoint is ordinary here (`Reason::to` is optional in `add_reason`) and dropping
-every edge with one would hide a public entity's own structure — that is the line
-between default-deny and deny-all. `resource_reason` runs the same rule, except
-that `from` fails closed on Unresolved too: it is the entity the edge hangs off,
-and one that did not resolve is not one that said the read was allowed.
-
-Pinned by seven tests in `src/mcp/resources.rs`, one per guard — each guard
-mutated away fails exactly its own test and no other. The four that predate them
-seed `Entity::default()` and are unchanged, the regression guard that default-deny
-did not become deny-all. This is deliberately narrower than any principal scheme
-item 24 lands — default-deny can only be widened by it, never contradicted.
-
-**Still ungated — this is what keeps the item open.** What is *not* separable is
-how a principal arrives — resources get one per read or the server gets a session
-one — and that is item 24's residue. **Restated 2026-07-22:** a principal now
-does arrive on `kern.sock` (`AuthReq::principal`), but *declared*, not proven,
-and nothing reads it; a session principal a caller asserts about itself is not
-one an ACL can hold it to. Until then the
-surface serves public rows to any client that can open the transport, and a scoped
-row to nobody; the ACL is still not a boundary a caller can be *held to*, only one
-they cannot get around here. Two residues are deliberate and named rather than
-closed. A **cardinality oracle**: `kern://local/health` and `kern://local/kerns`
-count every entity and reason, scoped included (`graph_health_stats`,
-`src/base/health.rs:48-54`; `k.entities.len()`, `resource_kerns`), so ingesting a
-scoped row moves a number. It discloses no id and no text, and it is the same
-count the operational `health` tool and CLI report — narrowing it is the separate
-question of what an unauthenticated *operational* surface may say, which belongs
-with item 24. And an **Unresolved endpoint id is still named** in the edge body:
-ids are `content_hash(text)`, so at worst that confirms a guessed text, never
-discloses one.
-
-**Gossip egress** replicates a scoped `Entity` to peers with no ACL gate — the
-`Acl` does ride the wire and `merge_entity` never imports a remote ACL over a
-local one, so neither side can widen the other's, but shipping the row at all is
-a trust decision nobody has made. And **`Reason` still has no ACL of its own**:
-`link`'s `explain_relationship_prompt` writes a scoped entity's text into an edge
-hanging off a public one, and every reader has to re-derive the verdict from the
-endpoints. All four renderings now do, through the one `src/mcp/acl.rs` verdict —
-which is the cheap fix, not the right one: re-deriving it per read costs a
-`find_entity` per edge and fails open on a non-resident endpoint by design.
-Storing the verdict on the edge at write time is the real fix and is not this
-item.
+**What re-adding would cost, named so nobody drifts into it.** A store format
+bump, a gossip wire change, and re-litigating every read surface item 18's
+history enumerated. Do not re-add fields "for later"; the tenant boundary is
+the process.
 
 ### 20. Source-trust weighting `[retrieval]`
 
@@ -655,7 +435,7 @@ item.
 `{File, Ticket, Session, Agent, Inline}` — a URI scheme. `kern ingest`, the
 human path, writes `Source::Inline` (`src/commands/ingest_cmd.rs:63`), and the
 MCP `ingest` tool's default writes `Source::Inline` too
-(`src/mcp/tools_mutate.rs:231`). One tag, two trust principals: no weighting
+(`src/mcp/tools_mutate.rs:207`). One tag, two trust principals: no weighting
 keyed on scheme can separate a person from an agent, so `source_trust_user` and
 `source_trust_agent` were not built — they would have been labels for a
 distinction nothing records.
@@ -671,30 +451,31 @@ heat — is true by default at last, but only by 2.6%, which is a rounding error
 rather than a trust model. `source_trust = { file = 0.8 }` is how to make it
 mean something, and it is the channel it penalises, not the author.
 
-The blocker is an author principal on `Entity`, stamped at each write path — a
-new field, so a store format bump, and it belongs with whoever holds
-`src/base/types.rs`. Deciding behavior: fix-the-root. Until then, do not add
+**Author-level trust is retired under the item 18 decision (2026-07-22).** An
+author principal on `Entity` is user identity, which kern no longer carries;
+the consumer that wants author-weighted trust holds that mapping outside kern.
+`source_trust` keyed on channel scheme is the whole trust surface. Do not add
 `_user` / `_agent` knobs; they would read as working and weight nothing.
 
 ### 21. The review lifecycle has a caller-facing surface: `promote` and `exclude_pending` — closed 2026-07-22 `[surface]`
 
 **Corrected 2026-07-22 — "three of four parts landed" counted a part no caller
 can reach.** Two parts landed and are reachable. `ReviewState` is on `Entity`
-(`src/base/types.rs:300`) behind a `FORMAT_V7` bump — old stores are rejected
+(`src/base/types.rs:284`) behind a `FORMAT_V7` bump — old stores are rejected
 rather than defaulted, per the `FORMAT_V6` precedent, pinned by
 `decode_rejects_older_version_bytes`. Source-level policy is
 `IngestConfig::review_policy` (`src/config/ingest.rs:17`), keyed on source scheme
 with unknown schemes rejected at config load (`:33`), resolved once at the ingest
-gate by `review_for` (`src/ingest/worker.rs:57`). Both work.
+gate by `review_for` (`src/ingest/config.rs:13`). Both work.
 
 **The third part was engine-only, and re-verified as such before any code was
 written.** `exclude_pending` was already a real `QueryOptions` field
-(`src/retrieval/score.rs:54`) and a real predicate (`:242`) that also makes
-`is_active()` true (`:69`) so the filter takes the pre-filtered ANN path — but
+(`src/retrieval/score.rs:49`) and a real predicate (`:215`) that also makes
+`is_active()` true (`:63`) so the filter takes the pre-filtered ANN path — but
 **nothing outside `src/` could set it to `true`.** It was absent from `QueryArgs`
 and from the `query` tool's schema `properties` (both `src/mcp/tools_query.rs`),
 and there was no CLI flag; walking every `exclude_pending` in the tree found
-exactly one write, in its own unit test (`src/retrieval/score.rs:610`). So the
+exactly one write, in its own unit test (`src/retrieval/score.rs:498`). So the
 hold half was as unusable as the release half, for the same reason — the state
 was decided entirely inside the process. That is why this was one slice:
 `promote` alone would not have made the feature usable, because a host that
@@ -731,19 +512,13 @@ and nothing else; `[heat]` and `[retrieval]` are untouched, and a tuning knob
 smuggled in beside `review_policy` is still refused. Both directions are pinned
 by `a_real_kern_toml_can_set_review_policy_and_nothing_else_in_ingest`.
 
-**The tradeoff, taken deliberately rather than sequenced behind 24.** `promote`
-lands on the same socket `intake drain` widened — which now authenticates the
-connection but still cannot tell one same-uid caller from another — but it is a
-wider claim than `drain`: draining asserts no authority, and releasing a held
-claim IS a curation-authority decision — anything that can open the path can
-release one. Item 24 is in flight and will gate this; **promote's authority rides
-on whatever 24 lands**, and that is said on the tool description, on
-`cmd_promote`, in `FEATURES.md`'s tool table and in the user-facing
-`configure.mdx`. Taken now because the alternative was shipping neither half, and
-a host that enabled `review_policy` today would strand every claim it held.
+**The tradeoff, named.** `promote` lands on the authenticated socket, and any
+caller holding the graph's `mcp-token` can release a held claim — the process
+boundary is the whole authority model, per the item 18 removal decision. Taken
+because the alternative was shipping neither half, and a host that enabled
+`review_policy` would strand every claim it held.
 
-**Coverage.** Unlike item 18's `principals`, this is e2e-measurable, and it is
-measured: `tests/e2e/test_review_lifecycle.py` runs the whole loop — policy holds an
+**Coverage.** This is e2e-measurable, and it is measured: `tests/e2e/test_review_lifecycle.py` runs the whole loop — policy holds an
 `inline` ingest, `query --exclude-pending` misses it, `kern promote` releases it,
 the same query returns it — twice, once against a serving daemon blinded the way
 `test_graviton_routing` blinds it (so the release provably landed in the daemon's
@@ -760,12 +535,13 @@ more `matches_filter` predicates. *(The sentence "No `ReviewState`,
 `exclude_pending` or `promote` exists in `src/`" was true when filed and is now
 wrong about the first two.)*
 
-### 24. RPC socket authenticates the connection but not the caller — same-uid callers are indistinguishable `[surface]`
+### 24. RPC socket authentication `[surface]`
 
-`FEATURES.md:677-685`. **Mostly closed 2026-07-22, and deliberately left open —
-read the residue at the bottom before citing this as a blocker.** The socket
-now authenticates; what it still cannot do is tell one same-uid caller from
-another, which is the half items 9 and 18 were waiting on.
+**Mostly closed 2026-07-22, and deliberately left open — read the residues at
+the bottom before citing this as a blocker.** The socket authenticates the
+connection. It cannot tell one same-uid caller from another, and by the item 18
+removal decision (2026-07-22) it never will: kern carries no caller identity,
+so the token gate plus the `0600` socket *is* the whole access model.
 
 **Narrowed 2026-07-22 — "anything that can open the path" was already false on
 Unix when this was written.** `harden_socket`
@@ -796,13 +572,11 @@ would be a hole beside a locked door.
 **The tradeoff that was taken, named.** The secret proves *a uid*, not *a
 program*. The CLI, the `kern mcp` proxy an agent drives and the hub all run as
 the same user and can all read the same file, so no shared secret can separate
-them. `principal` is therefore **declared and recorded, never enforced** — the
-handler carries it, nothing consults it. This is honest but it is not what item
-9 needs to route `ingest`/`link` with their trust intact, nor what item 18 needs
-for a principal to survive past the MCP surface. Both must still cite something;
-they should now cite the *unproven principal*, not the missing socket auth.
+them. The declared `AuthReq::principal` field that used to ride the frame was
+removed with item 18 — it was recorded and never consulted, a label that read
+as identity and was not.
 
-**Why it stays open — four residues, none of them "the gate might not hold".**
+**Why it stays open — residues, none of them "the gate might not hold".**
 The gate holds: making verification always succeed fails the no-token and the
 wrong-token tests, and gutting the byte compare fails them too (both mutations
 re-run 2026-07-22). What is left is everything the gate does not cover.
@@ -813,8 +587,7 @@ re-run 2026-07-22). What is left is everything the gate does not cover.
    unmade, and there is no Windows test: `bind_tests_unix` is
    `#[cfg(all(test, unix))]` and stays that way. Treat the pipe as *believed*
    owner-only, not *known* to be.
-2. **`principal` is unproven**, above.
-3. **The socket secret is the HTTP secret, and the socket path is squattable.**
+2. **The socket secret is the HTTP secret, and the socket path is squattable.**
    With no `XDG_RUNTIME_DIR` the endpoint falls back to `/tmp/kern-<tag>-<user>.sock`
    (`Endpoint::scoped`, `src/trnsprt/src/typed/local.rs:44-55`), and `/tmp` is
    sticky-but-writable: another local user can bind that name first. On the
@@ -1046,7 +819,7 @@ changes an input to the importance gate (`has_vector`, kind, `access_count`)
 while leaving the epoch untouched.
 
 Worse, the one mutation that *creates* importance is epoch-silent on purpose:
-`commit_access_ids` (`src/retrieval/score.rs:361`) stamps access on every
+`commit_access_ids` (`src/retrieval/score.rs:326`) stamps access on every
 delivered result and deliberately bypasses `get_mut` so it will not invalidate
 the semantic query cache (`src/retrieval/score.rs:360`). An eligible-set index
 keyed on the epoch would never see a Claim cross
@@ -1354,7 +1127,7 @@ at 1024, 21.6s at 2048 and 79.7s at 4096. Every other tick task at the same
 sizes was sub-millisecond: `stigmergy_gc` 0.151ms, `commit_access` 0.002ms,
 `idle_sweep` 0.000ms at N=4096. On the real loop (`tick::start`) the recall
 path's own heat write-back — `CommitAccess`, enqueued at
-`src/mcp/tools_query.rs:200` — landed in 2.2ms with nothing ahead of it and in
+`src/mcp/tools_query.rs:196` — landed in 2.2ms with nothing ahead of it and in
 **56,787ms** with one propagation ahead of it at N=2048. The premise held.
 
 Training now runs on a dedicated thread (`src/tick/trainer.rs`), and the tick
@@ -1515,7 +1288,7 @@ free-direction reading inside one process is a lie), RSS from
 `/proc/self/statm`, and **two readings: cold, and hot after 200 searches.** The
 hot one is the honest one, because mmap pages are only resident once touched.
 50k entities at dim 384, each with `vector` AND `gnn_vector`
-(`src/base/types.rs:303-304`), plus 25k reasons with vectors (`:450`):
+(`src/base/types.rs:287-288`), plus 25k reasons with vectors (`:433`):
 
 | configuration | cold MB | **hot MB** |
 | --- | --- | --- |
@@ -1582,9 +1355,8 @@ would have closed one of two live holes and left the other, which is the same
 "a convention each caller remembers" failure one method further down.
 
 So the guard went one level lower: `Worker`'s private `job()`
-(`src/ingest/worker.rs:40`) is now the ONLY place a `Job` is built — `run_with_acl`
-no longer assembles one by hand — and it clamps. Every entrance
-(`enqueue`, `enqueue_with_acl`, `submit`, `run`, `run_with_acl`) takes a
+(`src/ingest/worker.rs:39`) is now the ONLY place a `Job` is built, and it
+clamps. Every entrance (`enqueue`, `submit`, `run`) takes a
 `source_tag` it cannot omit, so a future producer is asked "who is asserting
 this?" by the compiler rather than by a convention. The clamp takes the
 confidence only; `kind` stays the producer's, or a watched file would be
@@ -1599,9 +1371,8 @@ only separates `USER_SOURCE` from everything else, so a new tag would be a
 second name for the same 0.95 ceiling, exactly the label-that-weights-nothing
 item 20 refused. `scheme()` is already what `RetrievalConfig::source_trust`
 keys on, so `source_trust = { file = ... }` is the lever that actually separates
-watcher from agent. The two paths that DO know their principal name it
-explicitly, because `Source` cannot record an author (item 20's open blocker):
-the CLI passes `USER_SOURCE`, MCP and the direct-intake replay pass
+watcher from agent. The two paths that DO know their channel name it
+explicitly: the CLI passes `USER_SOURCE`, MCP and the direct-intake replay pass
 `AGENT_SOURCE`.
 
 **Ranking moved for `Document`s, and not at all for the recall corpus.** A
@@ -1621,15 +1392,15 @@ changed: not a silent drop but unbounded growth. `tokio`'s `send` only errors on
 a closed channel, so every detached task *parked* on a full queue holding its
 whole text — 500 offered to a stalled worker, 500 accepted, nothing refused, and
 that is the failure the new test reproduces when the bound is removed. Now
-`QUEUE_CAP` is the whole bound (`src/ingest/worker.rs:79`): `try_send` refuses
-the newest job rather than detaching (`:158`), the refusal is counted
-(`:163`) and reaches every health surface as `ingest_queue_refused`
-(`src/base/health.rs:85`, `src/mcp.rs:145`, `src/commands/admin.rs:163`). The
+`QUEUE_CAP` is the whole bound (`src/ingest/worker.rs:73`): `try_send` refuses
+the newest job rather than detaching (`:125`), the refusal is counted
+(`:130`) and reaches every health surface as `ingest_queue_refused`
+(`src/base/health.rs:85`, `src/mcp.rs:145`, `src/commands/admin.rs:166`). The
 one producer that must not be refused waits instead — `submit` awaits capacity
-(`src/ingest/worker.rs:182`) and the file-watcher sink still calls it
-(`src/ingest/file_watcher.rs:129`) — now as the fail-open fallback behind item
+(`src/ingest/worker.rs:149`) and the file-watcher sink still calls it
+(`src/ingest/file_watcher.rs:128`) — now as the fail-open fallback behind item
 30's durable backstop rather than as the only path it has; the MCP RAM-queue
-fallback gets a `tool_error` (`src/mcp/tools_mutate.rs:338`). Still distinct
+fallback gets a `tool_error` (`src/mcp/tools_mutate.rs:327`). Still distinct
 from the *tick* queue, which is bounded at 512 (`FEATURES.md:437-438`).
 
 **Corrected 2026-07-22 — the "no timeout budget" half was never true, and the
@@ -1678,8 +1449,8 @@ counts the queue's. The second is the liveness half the item denied it had.
 
 **The durability half is closed 2026-07-22.** `KernFileWatcherSink::ingest` now
 writes a `DirectJob` through `intake_direct` first
-(`src/ingest/file_watcher.rs:104`, tmp + rename at `src/ingest/direct.rs:42`) and
-falls through to `Worker::submit` (`src/ingest/file_watcher.rs:129`) only when
+(`src/ingest/file_watcher.rs:104`, tmp + rename at `src/ingest/direct.rs:44`) and
+falls through to `Worker::submit` (`src/ingest/file_watcher.rs:128`) only when
 that write fails — the shape `tool_ingest` already had
 (`src/mcp/tools_mutate.rs:300`). It is gated on `intake.enabled` alone
 (`src/commands.rs:974`), which is exactly the flag
@@ -1694,9 +1465,9 @@ fine. `notify` installs its watches and reports nothing that happened before
 scan, so before this a watcher record still in the channel when the daemon died
 was lost with nothing to re-offer it.
 
-`DirectJob` grew a `source_tag` (`src/ingest/direct.rs:35`) to make that hop
+`DirectJob` grew a `source_tag` (`src/ingest/direct.rs:30`) to make that hop
 safe: `drain_direct_once` used to name `AGENT_SOURCE` for every payload it read
-(now `:106`), because every payload there was minted by the MCP tool — routing
+(now `:101`), because every payload there was minted by the MCP tool — routing
 the watcher through it unchanged would have relabelled `"file"` as `"agent"` and
 undone item 95's "the tag is the channel". Old payloads keep the old behaviour
 through `#[serde(default)]` (`:38`). The relabel is numerically invisible —
@@ -1761,7 +1532,7 @@ so the counter that means "the endpoint is at fault" stays at zero, which is the
 one bit `record_stuck` needed and did not have. Proved four ways rather than
 asserted: `llm.rs`'s four-mode test compares the recorded strings pairwise for
 distinctness and takes a *delta* off the process-global counter
-(`src/llm.rs:764`) — the shape `src/ingest/worker.rs:521` established, which
+(`src/llm.rs:764`) — the shape `src/ingest/worker.rs:459` established, which
 reads `before = ingest_queue_refused()` and asserts the difference, because
 `cargo test` runs the whole crate in one process and an absolute count is green
 under `nextest` and red under it; a control test proves a working model moves
@@ -1788,19 +1559,19 @@ Recorded in `FEATURES.md` gap blocks, planned nowhere:
   blames is not where even that goes).** The location holds:
   `route_to_child_id` (`src/base/accept.rs:882`) is a linear scan over the
   parent's loaded named children against each child's stored `graviton_vec`,
-  reached from `route_entity` (`src/base/accept.rs:220`) once per accepted
-  entity — per distilled claim and per chunk (`src/ingest/place.rs:133`,
-  `src/ingest/place.rs:212`) — descending up to `MAX_ACCEPT_DEPTH`, in practice
+  reached from `route_entity` (`src/base/accept.rs:196`) once per accepted
+  entity — per distilled claim and per chunk (`src/ingest/place.rs:131`,
+  `src/ingest/place.rs:209`) — descending up to `MAX_ACCEPT_DEPTH`, in practice
   two levels. Unnamed children are capped at one per parent on the routing path
-  by `get_or_spawn_unnamed_child` (`src/base/accept.rs:644`, guarded by
-  `src/base/accept.rs:934`); only tick clustering makes more, one per spawnable
+  by `get_or_spawn_unnamed_child` (`src/base/accept.rs:631`, guarded by
+  `src/base/accept.rs:921`); only tick clustering makes more, one per spawnable
   cluster and deliberately (`src/tick.rs:196`).
 
   Instrument: `tests/route_fanout.rs`, release, `--ignored`. Fan-out costs
   **0.14-0.18us per child** across runs, of an accept that costs **1.4-2.1ms**
   at 20k entities — 0.5% at width 64, ~5% at 512, ~24% at 4096. The accept is
   dominated by the two HNSW searches it runs (the dedup gate at
-  `src/base/accept.rs:39`, the similarity reason at `src/base/accept.rs:316`)
+  `src/base/accept.rs:39`, the similarity reason at `src/base/accept.rs:391`)
   plus two index inserts, which is why width has to reach the thousands before
   it registers. A named/unnamed A/B over the same walk — identical descent,
   cosine skipped — attributes **-0.009, -0.001 and +0.003us per child** to the
@@ -1832,10 +1603,10 @@ Recorded in `FEATURES.md` gap blocks, planned nowhere:
   spawn and every rename, buying back a comparison that measures as free.
 - `Entity` is a ~30-field flat struct (serialization cost on every store round
   trip) and `Kern` carries no per-kern stats — mean heat, fill ratio — that
-  clustering could reuse (`FEATURES.md:90-92`).
-- DiskANN is build-once; the lexical index is RAM-only (`FEATURES.md:251-252`).
+  clustering could reuse (`FEATURES.md:85-87`).
+- DiskANN is build-once; the lexical index is RAM-only (`FEATURES.md:245-246`).
 - LMDB compaction is manual and offline-only, and is the only way to shrink the
-  high-water mark (`FEATURES.md:322-324`).
+  high-water mark (`FEATURES.md:328-330`).
 
 ### 32. Tree depth was an eviction bias in the opposite direction — closed 2026-07-21 `[lifecycle]`
 
@@ -2040,7 +1811,7 @@ fallback and no way to distinguish discovery-failed from no-peers-present
 
 `TcpStream::connect` per call at `src/gossip/transport.rs:37` (`send_msg`) and
 `:45` (`send_and_receive`). No pooling. Separately, the `trnsprt` client has no
-pooling either (`FEATURES.md:976-977`) — that one is not gossip and is not gated
+pooling either (`FEATURES.md:971-972`) — that one is not gossip and is not gated
 on 33.
 
 ### 47. Hub phase 3: gossip moves hub-side `[hub]`
@@ -2056,7 +1827,7 @@ port-clash validation in `src/config/serve.rs` to collapse. (Corrected again
 item 84 owns.)
 
 Beside it: **hub↔node version skew is unmanaged** beyond same-binary spawning
-(`FEATURES.md:1082-1083`).
+(`FEATURES.md:1077-1078`).
 
 ### Decisions owed before the federation build
 
@@ -2093,7 +1864,7 @@ retired:** `CHANGELOG.md` 2026-07-20 shipped chunk external ids keyed on the ful
 source identity (`source_id()` + chunk index, not the bare section), and CLI
 `kern ingest` deriving its inline source hash from the text. What remains is the
 *dedup* key, not the external id. Beside it: the dedup threshold is global, not
-per-kind (`FEATURES.md:419`).
+per-kind (`FEATURES.md:413`).
 
 ### 49. The distill prompt is one-shot and global `[ingest]`
 
@@ -2129,7 +1900,7 @@ today.
 
 ### 51. Require reason text on supersede `[ingest]`
 
-`ReasonKind::Supersedes` edges are minted at `src/base/accept.rs:543` and `:638`
+`ReasonKind::Supersedes` edges are minted at `src/base/accept.rs:530` and `:625`
 with `fallback_label()` text (`src/base/types.rs:116`), never a caller-supplied
 rationale. The *why* is the thing the graph exists to hold.
 
@@ -2154,7 +1925,7 @@ newline one, and is still blocked on a real document long enough to truncate.
 
 ### 53. Clustering is vector-only `[lifecycle]`
 
-No semantic or structural features (`FEATURES.md:502`), and naming plus
+No semantic or structural features (`FEATURES.md:496`), and naming plus
 enrich are a cold LLM call per kern. The adopted-but-unbuilt upgrade is
 thought-level PageRank feeding the split heuristic — high-rank nodes become
 gravitons, bridge nodes become sub-kerns
@@ -2202,7 +1973,7 @@ incomplete — no item below produces a wrong answer today.
 
 There is no `Contradicts` reason kind (`src/base/types.rs:90-99`) and no `stance`
 parameter on the ingest schema (`src/mcp/tools_mutate.rs:19-33`);
-`observe_contradict` (`src/base/types.rs:434`) has exactly one caller, GNN
+`observe_contradict` (`src/base/types.rs:417`) has exactly one caller, GNN
 alignment (`src/tick/gnn_propagate.rs:233`). Observer-reputation weighting is
 also unbuilt.
 
@@ -2231,7 +2002,7 @@ permanently erasing a correct path, and nothing records that they happened.
 ### 60. No re-classification when a contradiction pair changes `[lifecycle]`
 
 Either side of a classified pair can move and nothing re-runs the call, and no
-tool exposes the supersede chain beyond `include_history` (`FEATURES.md:179-180`).
+tool exposes the supersede chain beyond `include_history` (`FEATURES.md:173-174`).
 Two open questions beside it, from `docs/kern/bayesian-belief.md:159-162`: should
 `Reason` edges carry belief symmetrically, and does superseding reset or inherit
 belief?
@@ -2321,9 +2092,9 @@ alternate. The gap was purely lexical: exact rare terms.
 Lifecycle, so the wording cannot outlive its survivor: `reindex_entity`
 (`src/base/lexical.rs:34`) re-derives the document from the graph and is called
 at every site that mints or drops a `Rephrase` — `merge_duplicate`
-(`src/base/accept.rs:199`), the supersede path that consumes one
-(`src/tick/tasks.rs:209`), and `degrade_entity_reasons`
-(`src/commands/graph_ops.rs:492`). GC needed nothing: `remove_entity` already
+(`src/base/accept.rs:187`), the supersede path that consumes one
+(`src/tick/tasks.rs:205`), and `degrade_entity_reasons`
+(`src/commands/graph_ops.rs:491`). GC needed nothing: `remove_entity` already
 calls `lex.remove(id)`, and the wording lives in the survivor's own document.
 `rebuild_from_graph` uses the same builder, or the posting would survive exactly
 until the next reload.
@@ -2384,13 +2155,13 @@ well-evidenced one at equal mean.
 
 Was two ceilings; the rerank half left with the rerank stage itself
 (2026-07-21). What remains: RRF weights plus mode blends are configurable but
-never auto-tuned (`FEATURES.md:216`).
+never auto-tuned (`FEATURES.md:210`).
 
 ### 67. Binary quantization stays non-user-selectable `[retrieval]`
 
 Its recall floor is too low without a rescoring pass; deliberately excluded from
 `parse` (`src/quant.rs:20-21`). Beside it: no int4 path and the quantization
-scale is fixed at encode time (`FEATURES.md:271`).
+scale is fixed at encode time (`FEATURES.md:265`).
 
 ### 69. Speculative decode for the distill leg `[ingest]`
 
@@ -2490,14 +2261,14 @@ set.** Precision 27/38 = **71.1% → 26/29 = 89.7%**. False-positive rate **28.9
 92.9%** — *it went down*. The three-character floor that acquits `acl`, `rrf` and
 `hub` also acquits `gpu`, and `gpu` plus `kern` is enough to reach the two-word
 prose bar and silence a genuinely under-covering anchor (this file citing
-`FEATURES.md:598` for three claims that span 589-590). That is the same trade the
+`FEATURES.md:598` for three claims that span 589-590). That is the same trade the <!-- docs-check: anchor-ok -->
 camelCase note above records, paid a second time, and it is recorded here for the
 same reason. A prose bar of 1 instead of 2 measures 96.3% precision at unchanged
 recall and was **declined**: the truth set holds only five prose-to-prose anchors,
 which is not evidence, it is a sample small enough to fit anything.
 
 **What remains.** Three false positives are structural, not tokenisation, and
-carry the marker rather than a fix: `FEATURES.md:206` cites `if scored.len() < k {`
+carry the marker rather than a fix: `FEATURES.md:206` cites `if scored.len() < k {` <!-- docs-check: anchor-ok -->
 for cold backfill and shares nothing with it because the line is a bound check
 whose meaning lives in the lines around it; this file's two retired notes cite a
 `README.md` table row and a `FEATURES.md` bullet for the single word each was
@@ -2924,11 +2695,11 @@ itself is pinned — `content_hash` (`src/base/util.rs:3`) is sha256-to-lowercas
 and `util.rs:155` asserts length, alphabet and determinism. What is unpinned is
 every *composition* feeding it, and each one is a different format string: entity
 ids are `content_hash(text)` bare (`src/ingest/place.rs`,
-`src/ingest/file_watcher.rs:182`, `src/ingest/direct.rs:44`,
-`src/ingest/worker.rs:148`), `Source::source_id` is
-`scheme \x00 object \x00 section` (`src/base/types.rs:270-282`), child and named
+`src/ingest/file_watcher.rs:181`, `src/ingest/direct.rs:39`,
+`src/ingest/worker.rs:122`), `Source::source_id` is
+`scheme \x00 object \x00 section` (`src/base/types.rs:254-266`), child and named
 ids are `parent_id + nonce` and `parent_id + name + nonce`
-(`types.rs:515-516`, `:520-521`), and the HNSW canon has its own
+(`types.rs:498-499`, `:503-504`), and the HNSW canon has its own
 (`src/base/hnsw.rs:525`).
 
 The bare-text composition is load-bearing beyond identity: the gossip import
@@ -2955,9 +2726,10 @@ unremarked.
 Called **once** (corrected 2026-07-21 — it was twice; the second site left with
 the ingest `kind` arg in `216730d`), with the literal `AGENT_SOURCE`
 (`src/mcp/tools_mutate.rs:161`), and it accepts `USER_SOURCE` / `AGENT_SOURCE`
-(`src/base/validate.rs:21`), so it can never fail. Decision:
-thread a real auth identity (item 18/24), or delete. Delete is correct for a
-single local daemon and needs only sign-off.
+(`src/base/validate.rs:21`), so it can never fail. Decision: delete. The
+"thread a real auth identity" alternative died with the item 18 removal
+decision (2026-07-22) — kern carries no caller identity, so this guard can
+never become real. Deletion is a small standalone slice, still owed.
 
 ### 81. `resources/list` and `prompts/list` return `-32601` on the proxy path `[surface]`
 
@@ -3002,7 +2774,7 @@ buys nothing there). The two copies were the same floats, not a normalised one
 and a raw one — recall is unmoved to four decimals across the change, which is
 the check that would have caught it had they differed. `Entity::vector`,
 `Entity::gnn_vector` and `Reason::vector` are now `Embedding`
-(`src/base/types.rs:609`) and every index holds the map's own allocation.
+(`src/base/types.rs:592`) and every index holds the map's own allocation.
 
 Measured with `tests/spill_memory.rs` in `resident` mode — 50k entities at dim
 384 each carrying `vector` AND `gnn_vector`, plus 25k reasons, one process per
@@ -3033,7 +2805,7 @@ Still open here, and the reason this item does not close: **nothing bounds the
 resident set.** Halving the O(N) term moves the ceiling; it does not install
 one. Also deliberately unclaimed, so that the number above measures one change:
 `do_reembed` seeds `vector` and `gnn_vector` from the same embed
-(`src/tick/tasks.rs:545-546`) and they could share a third allocation until GNN
+(`src/tick/tasks.rs:541-542`) and they could share a third allocation until GNN
 propagation overwrites one — another 76.8 MB at this corpus size.
 
 ### 84. Remaining operational odds and ends `[surface]`
@@ -3054,9 +2826,9 @@ propagation overwrites one — another 76.8 MB at this corpus size.
   requires either promoting them to real per-endpoint config or exposing that
   predicate. Was listed under item 11; it is a different job.
 - Hand-rolled tool schemas; no batch query
-  (`FEATURES.md:641-642`).
+  (`FEATURES.md:635-636`).
 - The LLM client is Ollama-centric with no retry/backoff policy object
-  (`FEATURES.md:919-920`).
+  (`FEATURES.md:914-915`).
 - ~~Watcher `.gitignore` parsing is approximate; no rename tracking~~ **(retired
   2026-07-21 — verified false on both counts).** `IgnoreRules` builds a real
   `Gitignore` through ripgrep's `ignore` crate
@@ -3068,17 +2840,17 @@ propagation overwrites one — another 76.8 MB at this corpus size.
   renamed file lands as a new `Document` and the old one is neither moved nor
   removed. It duplicates only when the rename *also* edits the file — ids are
   `content_hash(text)`, so an untouched move re-resolves to the same id, while
-  `external_id` is the path (`src/ingest/file_watcher.rs:186`), so a
+  `external_id` is the path (`src/ingest/file_watcher.rs:185`), so a
   move-plus-edit gets a new id under a new external id and supersede never
   fires. It sits in this tier and not in tier 1 because the watcher is **off by
   default** — `WatcherConfig::enabled` is `false` unless a `kern.toml` sets it
   (`src/config/watcher.rs:14-16`) — so it is not a default-path defect
   (`FEATURES.md:1085-1088`).
-- `unnamed` lists only; there is no `promote` (`FEATURES.md:818`).
+- `unnamed` lists only; there is no `promote` (`FEATURES.md:813`).
 - GNN has no GPU path, weights are per-kern rather than shared, and the objective
   is link-prediction only (`FEATURES.md:593-594`).
 - Under WSL2 NAT a loopback Ollama URL must be hand-pinned; kern neither rewrites
-  nor warns (`FEATURES.md:1130-1132`).
+  nor warns (`FEATURES.md:1125-1127`).
 - RPC socket bind→chmod race — sub-millisecond, umask default — recorded as an
   accepted risk where it happens (`harden_socket`,
   `src/trnsprt/src/typed/local.rs:348-358`); revisit only if the umask
@@ -3123,7 +2895,7 @@ target back. The list resolved into four classes, not the two the filing guessed
   keeping: **a page describing a broken citation must display it, not make it.**
   Writing this entry reproduced the fault twice before the checker caught it.
 - **False positives** — 2, and both are the same shape. The `gc` row cited
-  `tool_gc` correctly, and `README.md:399` pins the version correctly; in both
+  `tool_gc` correctly, and `README.md:399` pins the version correctly; in both <!-- docs-check: anchor-ok -->
   the only distinguishing token is under the three-character floor (`gc`) or is
   digits the tokeniser discards (`1.1.0`). Neither was acquitted with
   `anchor-ok`. The `gc` anchor was widened by two lines to reach the `reaped` /
@@ -3224,7 +2996,7 @@ and item 1's instrument staying the scorer.
   OR-Set for `statements` was *reversed, not deferred*;
   `diskann-disk-index.md:28-29` marks the PQ recall claim **withdrawn**.
 - (retired 2026-07-21 — withdrawn in place) the quality claims item 1's standard
-  forbids no longer survive. `FEATURES.md:201` keeps only the `+7% p50` latency
+  forbids no longer survive. `FEATURES.md:195` keeps only the `+7% p50` latency
   half and says the retrieval-quality half is withdrawn;
   `docs/kern/diskann-disk-index.md:26` says the note "previously published" the
   `recall@10 ≥ 0.90` figure; this file's own "recall@10 A/B" citation was struck
@@ -3232,8 +3004,8 @@ and item 1's instrument staying the scorer.
 - (retired 2026-07-21 — `README.md` and `VISION.md` were corrected) neither
   opens on "takes in durable facts from your sessions" or "learns on its own"
   any more; `VISION.md:52` now *states* there is no recorded baseline instead of
-  gating claims on one; `README.md:393-394` says the Question and Pulse senders and
-  the fetch RPC are live, and `:399` pins the version at `1.1.0` beside the
+  gating claims on one; `README.md:402-403` says the Question and Pulse senders and
+  the fetch RPC are live, and `:407` pins the version at `1.1.0` beside the
   anti-entropy pointer, matching `FEATURES.md`.
 - (retired 2026-07-21 — all three fixed) `FEATURES.md:54` now lists `Entity`'s
   `acl` <!-- docs-check: anchor-ok -->; the retired query-cache finding is gone from the file entirely; and
@@ -3245,7 +3017,7 @@ representation (bool vs `EntityStatus::Quarantined` vs `Source` trust band);
 contradiction-reconcile gating band; temporal-aware as-of retrieval scoring;
 episodic abstraction as a tick task; chunking strategy (contextual-prepend vs
 proposition self-containment). The threat model and staged hardening list
-(ed25519 signing, peer trust, Sybil binding, replay protection, ACL enforcement)
+(ed25519 signing, peer trust, Sybil binding, replay protection)
 lived in `docs/kern/safety-architecture.md`, deleted 2026-07-20 for stale paths —
 recover from git history when tier 5 opens. A private-disclosure policy still
 exists at `docs/FEDERATION-SECURITY.md:24-28` with nothing behind it.
@@ -3427,7 +3199,7 @@ an overall eval score that makes specialization worth funding.
   since a non-superseded `Fact` is immune (`is_cold_victim`,
   `src/tick/stigmergy.rs:35-46`) — is a false statement the caller has no way to
   falsify. So the id path **serves and flags**: `entity_detail`
-  (`src/mcp/tools_query.rs:382`) emits `expired` and `valid_until` whenever a
+  (`src/mcp/tools_query.rs:372`) emits `expired` and `valid_until` whenever a
   retention is set, and `kern get` prints an `Expired:` line
   (`src/commands/graph_ops.rs:67`). Filtering lost because the surface item 9
   deliberately widened — prefix plus cold-tier fallback — would have been
@@ -3441,10 +3213,8 @@ an overall eval score that makes specialization worth funding.
   `retrieve_drops_an_expired_claim_from_the_default_path`
   (`src/retrieval/query.rs:609`) runs the same corpus twice and asserts an
   `as_of` query still returns the since-expired claim; neutering the early
-  return in `drop_expired` fails that half alone. What this did **not** buy is
-  item 18's fourth bullet — that bullet wants ACL enforcement on the id path,
-  and an ACL denial cannot be expressed as a flag on the row it is denying, so
-  it still needs its own guard.
+  return in `drop_expired` fails that half alone. (Item 18's ACL half of this
+  history is moot since the 2026-07-22 removal decision.)
 - **A deduped ingest carries its retention** — was item 88, closed 2026-07-21.
   There were two dedup gates and both swallowed it; both now funnel through one
   site. `accept::merge_duplicate` takes the incoming `valid_until` and calls
@@ -3629,7 +3399,7 @@ number ("blocked on item 13") and renumbering would silently repoint them.
 - **Pulse and Question senders are live.** `broadcast_pulse` / `broadcast_q` built
   in `start_gossip` (`src/commands.rs:1063-1144`), pulse wired into the maintenance
   tick (`:761`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
-  `broadcast_q` invoked by `do_resolve` (`src/tick/tasks.rs:386`), `handle_question`
+  `broadcast_q` invoked by `do_resolve` (`src/tick/tasks.rs:382`), `handle_question`
   live-dispatched (`src/gossip/handler.rs:44`).
 - **`Fetch` is wired** — `wire_fetch` installs the handler at
   `src/commands.rs:1099`. Single-id, so it is not anti-entropy (item 36), but it
@@ -3653,7 +3423,7 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   `src/base/constants.rs:69`). Only the CLI reaches `Fact`, via
   `clamp_confidence(1.0, "user")` (`src/commands/ingest_cmd.rs:60`).
 - **`conf` is clamped to [0,1]** — `validate_conf` (`src/base/validate.rs:14`)
-  called at `src/mcp/tools_mutate.rs:159`.
+  called at `src/mcp/tools_mutate.rs:140`.
 - **A prose-answering reason model no longer archives deltas having stored
   nothing.** `parse_claims` returns `Option`; a reply with no parseable JSON array
   leaves the delta queued for retry, a well-formed empty array still archives

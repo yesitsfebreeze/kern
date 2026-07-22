@@ -42,7 +42,7 @@ everywhere, which is what makes conflict-free cross-node merge work.
 
 **How.**
 
-- `Entity` (`src/base/types.rs:293`) — typed (`Fact`/`Claim`/`Document`/
+- `Entity` (`src/base/types.rs:277`) — typed (`Fact`/`Claim`/`Document`/
   `Question`/`Conclusion`, `src/base/types.rs:19`), weighted by
   confidence (a beta distribution stored as `conf_alpha`/`conf_beta`, read via
   the `conf_mean`/`conf_variance` methods, updated via
@@ -51,21 +51,15 @@ everywhere, which is what makes conflict-free cross-node merge work.
   `created_at`), `status` (`Active`/`Superseded`), `superseded_by`, `statements`
   (OR-Set of text lines), two vectors (`vector` content, `gnn_vector` structure),
   and provenance (`Source` with `system`/`object_id`/`section`/`title`/`author`/
-  `url`). `kind`/`source` parsed off the source string. Also carries an `acl`
-  (`src/base/types.rs:310`; `Acl { scope, users, groups }` at `:133-137`) — as of
-  2026-07-21 it is **written and read**. The MCP `ingest` tool's `scope` /
-  `principals` build it (`acl_from_args`, `src/mcp/tools_mutate.rs`) and it rides
-  `ingest::Job::acl` into `new_statement_entity` (`src/ingest/place.rs:58`);
-  `query`'s `principals` enforce it in `matches_filter` via `acl_admits`
-  (`src/retrieval/score.rs:243`). Two rules: a scoped `Fact` is withheld from a
-  non-member (GC-immunity is not ACL-immunity), and an empty `principals` is *no
-  filter*, not public-only. A dedup keeps the survivor's ACL and drops the
-  `Rephrase` edge across a boundary — a `Reason` has no ACL. The file watcher
-  still writes `Acl::default()`; `ROADMAP.md` item 18 lists what is still ungated.
-- `Reason` (`src/base/types.rs:442`) — an edge `from`→`to` with a `kind`
+  `url`). `kind`/`source` parsed off the source string. There is **no per-row
+  ACL and no user identity**: kern is a single-trust-domain store, the process
+  boundary (socket `0600` + `mcp-token`) is the whole access model, and any
+  multi-caller scoping is the embedding host's job (decision 2026-07-22,
+  `CHANGELOG.md`).
+- `Reason` (`src/base/types.rs:425`) — an edge `from`→`to` with a `kind`
   (`Similarity`/`Provenance`/`Question`/`Spawn`/`Supersedes`/`Ratification`/
   `Rephrase`, `src/base/types.rs:90-99`), its own vector (mean of endpoints), a
-  `traversal_count` GCounter (`src/base/types.rs:454`), and a CRDT `score`.
+  `traversal_count` GCounter (`src/base/types.rs:437`), and a CRDT `score`.
   `is_enriched`/`is_remote` flags. There is no `Contradiction` edge kind —
   `Related` is a `ContradictionClass` verdict, not an edge, and a deferred
   contradiction candidate is carried by a `Rephrase` edge.
@@ -113,10 +107,10 @@ supersedes an existing one. The core write path every ingestion funnels through.
      `generic` catch-all child (empty graviton vec, never matches on similarity) —
      the root never commits entities itself.
    - At a **named** kern with a graviton: compute `acceptance_probability`
-     (`src/base/accept.rs:908`, softmax over cosine distance vs `inner`/`outer`
+     (`src/base/accept.rs:895`, softmax over cosine distance vs `inner`/`outer`
      radii); below `ACCEPT_FLOOR` (0.5) → spawn an unnamed child and descend.
    - `MAX_ACCEPT_DEPTH = 64` (`src/base/accept.rs:17`) bounds a runaway descent.
-3. **Commit** (`commit_entity`, `src/base/accept.rs:179`) — stamp `root_id`,
+3. **Commit** (`commit_entity`, `src/base/accept.rs:252`) — stamp `root_id`,
    insert into the `entity_idx`/`gnn_entity_idx`, attach a `Similarity` reason to
    the nearest existing neighbor and a `Provenance` reason to the source doc.
 
@@ -133,9 +127,9 @@ root fan-out is already O(gravitons). The remaining scaling question is the
 per-parent fan-out itself, not an index.
 
 Unnamed children are **not** unbounded on the routing path: `route_entity` goes
-through `get_or_spawn_unnamed_child` (`src/base/accept.rs:644`), which reuses the
+through `get_or_spawn_unnamed_child` (`src/base/accept.rs:631`), which reuses the
 single holding-pen child and auto-loads an evicted one rather than respawning it
-(three tests, both holding pens: `src/base/accept.rs:934`, `:953`, `:976`).
+(three tests, both holding pens: `src/base/accept.rs:921`, `:940`, `:963`).
 Growth comes only from tick clustering, which deliberately spawns one *distinct*
 child per spawnable cluster (`spawn_child_clusters`, `src/tick.rs:196`) —
 bounded per pass by the cluster count, not by anything per parent.
@@ -150,14 +144,14 @@ stays as history with a stamped `valid_to`; `query` can recover the past via
 
 **How.**
 
-- `supersede_by_contradiction` (`src/base/accept.rs:575`) — inserts the new
+- `supersede_by_contradiction` (`src/base/accept.rs:562`) — inserts the new
   thought, sets the old `status=Superseded`, `superseded_by=new_id`, and
   `stamp_invalidated(now, new_valid_from)` so the window closes exactly when
   the new claim became true. Removes the old id from both vector indexes (so it
   stops seeding) but keeps it in the kern for history. Adds a `Supersedes`
   reason edge with the averaged vector.
-- Classification is LLM-driven (`classify_prompt` `src/base/accept.rs:555` /
-  `parse_contradiction` `src/base/accept.rs:565`) and **fails open to `Related`**
+- Classification is LLM-driven (`classify_prompt` `src/base/accept.rs:542` /
+  `parse_contradiction` `src/base/accept.rs:552`) and **fails open to `Related`**
   (co-exist) — the conservative choice that never loses data. Driven from the
   tick's `do_classify_contradiction` task (`src/tick/tasks.rs:114`) so recall
   stays LLM-free at query time.
@@ -199,7 +193,7 @@ profiled via `src/profile.rs`):
 | 6 | **Merge** | `retrieval/merge.rs` | Combine seeds + expanded neighbors into `ScoredEntity` list. |
 | 7 | **Boosts** | `retrieval/score.rs` | `apply_boosts`: (confidence × score + **QBST** access/recency boost (`qbst`, capped at 0.1, 24h half-life) + `fact_score_boost` (0.3) for Facts) × `source_trust`. `source_trust` is a `RetrievalConfig` map keyed on `Source::scheme()` — `file`, `ticket`, `session`, `agent`, `inline` — empty by default, absent key exactly `1.0`, so an unconfigured kern scores bit-identically. It weights the CHANNEL, never the author: `kern ingest` and an MCP agent's default ingest both write `inline` (`ROADMAP.md` item 20). An unknown key is a `validate` error, not a silent no-op. |
 | 7b | **Gravity** | `retrieval/gravity.rs` | Query-time graviton pull: `score += gravity_weight (0.15) * max_over_gravitons(mass * max(0, cos(entity, graviton_vec)))`. Max, not sum — overlapping gravitons never double-count. `gravity_weight=0` disables (early return, zero cost); no gravitons → no-op. Latency only, from the bench deleted in `8d8b19e` and not reproducible: ~+7% p50 with 5 gravitons. No quality claim accompanies it — the retrieval-quality half of that bench is withdrawn under the claim standard (`ROADMAP.md` — "no quality claim of any kind"). |
-| 8 | **Filter** | `retrieval/score.rs` | `filter_delivery`: drop superseded; floor at `retrieval.min_deliver_score` (default `0.0` — off); cap at `delivery_cap` = `retrieval.max_deliver_results` (default `25`), or `mmr_pool_size=50` when MMR is on. Both are config fields (`src/config/retrieval.rs:48-49`), not constants. `delivery_cap` is a named function because the CLI reads it too — `cmd_query` sends it as `k` when it routes to a daemon, so the routed and local reads deliver the same number of hits. Query options (source/kind/scheme/time/min_conf/`principals`) go through `matches_filter` (`retrieval/score.rs`), the single predicate shared with pre-filtered ANN search. The ACL predicate runs first (`acl_admits`, same file): an entity whose `Acl` names no scope, user or group is public, otherwise the caller's `principals` must name one of them. An empty `principals` is **no filter, not public-only** — that is what keeps every principal-less read working — and a Fact is GC-immune, never ACL-immune, so a scoped Fact is withheld from a non-member like anything else. |
+| 8 | **Filter** | `retrieval/score.rs` | `filter_delivery`: drop superseded; floor at `retrieval.min_deliver_score` (default `0.0` — off); cap at `delivery_cap` = `retrieval.max_deliver_results` (default `25`), or `mmr_pool_size=50` when MMR is on. Both are config fields (`src/config/retrieval.rs:56-57`), not constants. `delivery_cap` is a named function because the CLI reads it too — `cmd_query` sends it as `k` when it routes to a daemon, so the routed and local reads deliver the same number of hits. Query options (source/kind/scheme/time/min_conf) go through `matches_filter` (`retrieval/score.rs`), the single predicate shared with pre-filtered ANN search. |
 | 9 | **Dedup by section** | `retrieval/diversify.rs:6` | Collapse near-duplicate sections. |
 | 10 | **MMR** | `retrieval/diversify.rs:46` | Maximal-marginal-relevance diversification so the `k` results actually differ. |
 | 11 | **Deliver** | `retrieval/query.rs` | Passages + enriched edges + `format_chains` chain text (`QUERY_MAX_CHAINS=5`), remote entities tagged UNTRUSTED for the synthesizing caller. Chains answer an active filter too (`retrieve`, same file): a chain renders the TEXT of every entity on it, so filtering only the results left it as a second delivery channel — one touching a withheld entity is dropped whole, since a chain with a hole still says the withheld thought exists and what it connects. The whole read path is LLM-free by design (2026-07-21): the calling agent synthesizes; an in-kern small-model answerer set the quality ceiling and made retrieval untunable. |
@@ -374,7 +368,7 @@ Nothing is lost on an LLM outage — the delta stays queued until it succeeds.
   the caller's duration to that absolute instant, so the four entrances cannot
   drift. `0`/absent = no TTL; an overflowing duration errors, never a silent
   no-TTL. `new_statement_entity` stamps it on both the document and the chunk
-  path (`place.rs:109`, `:249`), where the existing LWW lamport/producer
+  path (`place.rs:106`, `:242`), where the existing LWW lamport/producer
   stamping and pending delta finally have a writer; the reader half is
   `score::drop_expired`. `DirectJob` carries the resolved instant, which
   `drain_direct_once` overlays per job. The two entrances with no caller to pass
@@ -382,7 +376,7 @@ Nothing is lost on an LLM outage — the delta stays queued until it succeeds.
   via `Config::with_retention`, per drain pass and per record so no deadline
   dates to daemon boot, validated at load, never the preset-owned `[ingest]`.
 - **File watcher sink** (`src/ingest/file_watcher.rs`) — `KernFileWatcherSink`
-  adapts the watcher into ingest jobs, stamping `[watcher] retention_secs`. Since item 30 it parks each record as a durable `DirectJob` first (`:104`, gated on `intake.enabled` — the same flag that spawns the drain) and falls through to `Worker::submit` (`:129`) only when that write fails, so a record still in flight when the daemon dies is re-offered by the next drain instead of lost.
+  adapts the watcher into ingest jobs, stamping `[watcher] retention_secs`. Since item 30 it parks each record as a durable `DirectJob` first (`:104`, gated on `intake.enabled` — the same flag that spawns the drain) and falls through to `Worker::submit` (`:128`) only when that write fails, so a record still in flight when the daemon dies is re-offered by the next drain instead of lost.
 - **Outcome** (`src/ingest/outcome.rs`) — `OutcomeStatus` (`Committed`/`Partial`/`Deduped`/`Failed`, `src/ingest/outcome.rs:2`),
   `FailureReport::document_permanent` for non-retryable errors.
 - **Status & sidecars** (`src/ingest/intake_status.rs`) — every path that leaves
@@ -469,25 +463,25 @@ maintains itself.
   and not a core cluster spawns a distinct unnamed child and migrates its
   members. Unnamed kerns never spawn (bounds descent). Empty unnamed children
   are evicted back to the parent each pass.
-- **Name** (`do_name`, `src/tick/tasks.rs:239`) — LLM names an unnamed kern from
+- **Name** (`do_name`, `src/tick/tasks.rs:235`) — LLM names an unnamed kern from
   its centroid (`cluster::graviton_prompt`) once it crosses the naming
   thresholds (`KERN_NAMING_COHESION_THRESHOLD=0.50`,
   `KERN_NAMING_MIN_CLUSTER_SIZE=5`).
-- **Enrich** (`do_enrich`, `src/tick/tasks.rs:318`) — LLM writes the explanatory
+- **Enrich** (`do_enrich`, `src/tick/tasks.rs:314`) — LLM writes the explanatory
   text for an un-enriched reason edge.
-- **Resolve question** (`do_resolve`, `src/tick/tasks.rs:386`) — open `Question`
+- **Resolve question** (`do_resolve`, `src/tick/tasks.rs:382`) — open `Question`
   edges (`to` empty) get answered by retrieval; if a hit scores above
   `QUESTION_RESOLVE_THRESHOLD=0.80` the edge is closed.
 - **Seed questions** (`do_seed_questions`, `src/tick/tasks.rs:42`) — broadcasts
   open questions to peers (federation).
-- **Commit access** (`do_commit_access`, `src/tick/tasks.rs:458`) — flushes
+- **Commit access** (`do_commit_access`, `src/tick/tasks.rs:454`) — flushes
   queued access-count/heat updates.
 - **Idle sweep** (`src/tick/idle.rs`) — graph-global; unloads kerns idle past
   `tick.kern_idle_timeout_secs`. Residency, not forgetting: an unloaded kern is
   persisted first and reloads on next access.
 - **Persist / reembed / disk consolidate** — `do_persist`
-  (`src/tick/tasks.rs:470`), `do_reembed` (`src/tick/tasks.rs:501`),
-  `do_disk_consolidate` (`src/tick/tasks.rs:454`).
+  (`src/tick/tasks.rs:466`), `do_reembed` (`src/tick/tasks.rs:497`),
+  `do_disk_consolidate` (`src/tick/tasks.rs:450`).
 
 **Where.** `src/tick/*` (3589 LoC, 8 files) + `src/tick.rs` (1070 LoC) — remeasured 2026-07-22, the old 2912/893 had drifted ~660 and ~177 lines behind the tree. `trainer.rs` is the one that is not a queue task: GNN training runs on its own thread.
 
@@ -614,14 +608,14 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 
 | Tool | File | Purpose |
 | ------ | ------ | --------- |
-| `query` | `tools_query.rs` | Hybrid search, LLM-free; the caller synthesizes. Filters: `mode`/`kind`/`source`/`scheme`/time range/`min_conf`/`valid_at`/`as_of`; `include_history` for supersede chain; `exclude_pending` drops rows a `[ingest] review_policy` is still holding (opt-in, and the only predicate here with a CLI flag of its own, `kern query --exclude-pending` — which is what makes the review lifecycle e2e-measurable where `principals` is not). Returns edges **and path chains**, and `id` resolves a prefix and the cold tier (`entity_detail_by_id`) — both widenings exist so a CLI `query`/`get` routed through the daemon answers with what the local path answers. An `id` read runs the **same** filters: `src/mcp/tools_query.rs:137-157` builds `QueryOptions` first and puts the resolved row through `retrieval::score::matches_filter`, so `query {id, kind: "claim"}` on a `Fact` answers `thought not found`. A bare `query {id}` filters nothing — `QueryOptions::default()` leaves `valid_at`/`as_of` unset — which is what keeps an expired row served-and-flagged (`expired`/`valid_until`, `entity_detail` `src/mcp/tools_query.rs:390`, stamped `:435-437`) rather than hidden. `principals` (string array) is the caller's asserted identity and rides the same predicate, so `query {id, principals: ["bob"]}` on an alice-scoped row answers `thought not found` while a bare `query {id}` still serves it. A blank entry is a hard error (`parse_principals`, `src/mcp.rs`), never a silent skip — it would otherwise match the empty scope of every public entity. The row clearing the filter is not the end of it: an edge's text is written from **both** endpoint texts, so every edge the id read and the ranked read render is gated on its far endpoint through `acl::incident_edge` (`src/mcp/acl.rs`) — withheld drops the edge, unresolved renders it with `text` cleared. Naming no principal gates nothing here either, so `kern get` renders every edge exactly as before. **MCP-only: there is no CLI flag, so `tests/e2e/` cannot reach it** (`tests/e2e/conftest.py` drives the binary over subprocess and has no JSON-RPC client); the coverage is unit tests. |
-| `ingest` | `tools_mutate.rs` | Add text. `object_id` update semantics, free-text `hint` chunking context (`hint` is the only spelling — the `descriptor` alias retired in `7de23c0`), optional `retention_secs` TTL (integer seconds; `0`/absent = never) resolved to an absolute `valid_until` once, before the sync / durable-direct / RAM-queue branch, so all three carry the same deadline. Optional `scope` (string) + `principals` (string array) build the `Acl` stamped on every entity the job places (`acl_from_args` → `ingest::Job::acl` → `new_statement_entity`); naming neither leaves the thought public. Resolved on the same pre-branch line as `valid_until` and carried across the durable hop by `DirectJob::acl`, so the async path cannot silently republish a scoped ingest as public. |
+| `query` | `tools_query.rs` | Hybrid search, LLM-free; the caller synthesizes. Filters: `mode`/`kind`/`source`/`scheme`/time range/`min_conf`/`valid_at`/`as_of`; `include_history` for supersede chain; `exclude_pending` drops rows a `[ingest] review_policy` is still holding (opt-in, with a CLI flag of its own, `kern query --exclude-pending` — which is what makes the review lifecycle e2e-measurable). Returns edges **and path chains**, and `id` resolves a prefix and the cold tier (`entity_detail_by_id`) — both widenings exist so a CLI `query`/`get` routed through the daemon answers with what the local path answers. An `id` read runs the **same** filters: `src/mcp/tools_query.rs:137-157` builds `QueryOptions` first and puts the resolved row through `retrieval::score::matches_filter`, so `query {id, kind: "claim"}` on a `Fact` answers `thought not found`. A bare `query {id}` filters nothing — `QueryOptions::default()` leaves `valid_at`/`as_of` unset — which is what keeps an expired row served-and-flagged (`expired`/`valid_until`, `entity_detail` `src/mcp/tools_query.rs:372`, stamped `:410-412`) rather than hidden. |
+| `ingest` | `tools_mutate.rs` | Add text. `object_id` update semantics, free-text `hint` chunking context (`hint` is the only spelling — the `descriptor` alias retired in `7de23c0`), optional `retention_secs` TTL (integer seconds; `0`/absent = never) resolved to an absolute `valid_until` once, before the sync / durable-direct / RAM-queue branch, so all three carry the same deadline. |
 | `link` | `tools_mutate.rs` | Create a reason edge (LLM writes the reason if blank). Edge score is the asserted confidence (agent 0.95; CLI user 1.0), NOT `cosine(from,to)` — a deliberate link connects what similarity cannot, so similarity must not be its strength. |
 | `forget` | `tools_mutate.rs` | Remove a thought + cascade edges (Facts immune). |
 | `forget_by_source` | `tools_mutate.rs` | Remove every thought from one `(scheme, object_id)` — **all sections of it**, since `source_id` hashes the section and keying on one would forget a single chunk of a document. Cascades through the same `forget_entity`; refuses local Facts unless `force`, which is the ONLY bypass of the Fact guard and is never implicit. Returns `removed_entities`/`removed_edges`/`kept_facts` — the last so a refused Fact is reported rather than read as "nothing was there". Exists so `kern forget --source` has somewhere to route. |
 | `degrade` | `tools_mutate.rs` | Down-weight edges along a bad retrieval path (`DEGRADE_*` decay). Returns `decayed_edges` and `removed_edges` — the reap count exists so a CLI `degrade` routed through the daemon can print what the local path prints. |
-| `move` | `tools_mutate.rs:494` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
-| `promote` | `tools_mutate.rs` | Release a thought a review policy is holding: flips `ReviewState::Pending` to `Active`, so a `query {exclude_pending: true}` returns it again. The release half of the lifecycle `[ingest] review_policy` opens; idempotent, returning `promoted: false` on an already-active row rather than failing, and a hard `thought not found` on an id nothing resolves — a silent success would tell a curator a claim was released while it is still held. Shares `graph_ops::promote_entity` with the CLI's no-daemon fallback so the routed and local writes cannot disagree. **Authority: this is a curation decision made on a declared principal** — a wider claim than `intake drain`, which asserts none — and since 2026-07-22 the socket authenticates the *connection*, proving a uid rather than which of that uid's programs asked, so the gate it rides on is still whatever `ROADMAP.md` item 24 lands. |
+| `move` | `tools_mutate.rs:467` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
+| `promote` | `tools_mutate.rs` | Release a thought a review policy is holding: flips `ReviewState::Pending` to `Active`, so a `query {exclude_pending: true}` returns it again. The release half of the lifecycle `[ingest] review_policy` opens; idempotent, returning `promoted: false` on an already-active row rather than failing, and a hard `thought not found` on an id nothing resolves — a silent success would tell a curator a claim was released while it is still held. Shares `graph_ops::promote_entity` with the CLI's no-daemon fallback so the routed and local writes cannot disagree. Any caller holding the graph's `mcp-token` may promote — the process boundary is the access model. |
 | `health` | `tools_admin.rs:83` | Graph stats (gravitons/kerns/entities/reasons/unnamed/claim_kinds) **plus the degradation surface**: `queue_depth`, `tasks_done`, `task_avg_ms`, `task_panics`, `last_task_panic`, `task_failures`, `last_task_failure`, `cold_evicted`, `embed_model`, `embed_dim`, `embed_mismatch`, and the eight fail-open counters — `query_dim_rejected`, `below_floor_deliveries`, `clock_skew_skips`, `ingest_dropped_chunks`, `remote_cap_dropped`, `unspilled_drops`, `ingest_queue_refused`, `gnn_train_refused` — each a path that returns something rather than erroring, so the count is the only way to tell a degraded result from a good one (`Server::health_stats`, `src/mcp.rs:117`). The first seven come off `HealthStats` (`src/base/health.rs:40`), `gnn_train_refused` straight from the trainer's own global (`src/mcp.rs:147`) — but all eight are process-scoped counters read in the *serving* process, which is why only a daemon's answer carries real ones and any other reader reports its own zeros (`ROADMAP.md` item 100). |
 | `graviton` | `tools_admin.rs` | list/add/remove focus attractors (name + text — phrase or full document — + optional mass). Replaced the single per-kern "purpose". |
 | `claim_kind` | `tools_admin.rs` | register/remove claim kinds; registered kinds extend the built-in distill set. |
@@ -630,7 +624,7 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 | `intake_drain` | `tools_intake.rs` | One immediate pass of the daemon's own intake drain (`ingest::intake::drain_now`), returning `archived`. Exists so `kern intake drain` has somewhere to route: the CLI's in-process pass reads the same queue directory and archives the same entries as the daemon's poll loop, so both distill the file and both race the archive move. |
 | `setup` | `tools_setup.rs` | Agent-facing installer: returns idempotent wiring instructions (seed gravitons, install the capture rule/hook in the host, verify) plus this project's current [done]/[todo] state. kern never writes host config; the calling agent does the wiring. |
 
-Plus MCP **prompts** (`src/mcp/prompt.rs`) and **resources** (`src/mcp/resources.rs`) — four static URIs (`kern://local/health`, `kern://local/thoughts`, `kern://local/kerns`, `kern://local/claim-kinds`, `resource_definitions`) plus two dynamic prefixes resolved in `handle_resource_read`, `thought://{id}` (full text and every incident edge's text) and `reason://{id}` (an edge's text). Anything else is `unknown resource`. **This surface takes no `principals`, so it is default-deny**: it serves only rows whose `Acl` is empty (`Acl::is_public()`, the same emptiness test `acl_admits` runs), never a scoped one. A scoped `thought://{id}` reads back through the same `None` arm a missing one takes — byte-identical, and nothing in the file logs. An edge is gated on **both** ends, because `explain_relationship_prompt` writes its text from both endpoint texts, and the endpoint verdict has three outcomes (`Endpoint`) rather than two: `find_entity` walks only the *resident* kern map, so an id that does not resolve may be a cold-spilled or unloaded scoped row still alive in the store — Withheld drops the edge, Unresolved serves it with `text` withheld, Admitted serves it whole; `resource_reason`'s `from` fails closed on Unresolved too. Since 2026-07-22 that verdict lives in `src/mcp/acl.rs` and the `query` tool's edge renderings share it — the admission *rule* is the parameter, not the principals, because this surface's rule is `Acl::is_public` and `query`'s is the caller's `principals`. The two `kern://local` counting URIs still count scoped rows — a cardinality oracle, no ids and no text, tracked in item 18. Narrower than any principal scheme item 24 lands, which can only widen it (`ROADMAP.md` item 18). **MCP-only: `tests/e2e/` drives the binary over subprocess with no JSON-RPC client, so `resources/read` is unreachable from there**; the coverage is seven unit tests in `src/mcp/resources.rs`, one per guard.
+Plus MCP **prompts** (`src/mcp/prompt.rs`) and **resources** (`src/mcp/resources.rs`) — four static URIs (`kern://local/health`, `kern://local/thoughts`, `kern://local/kerns`, `kern://local/claim-kinds`, `resource_definitions`) plus two dynamic prefixes resolved in `handle_resource_read`, `thought://{id}` (full text and every incident edge's text) and `reason://{id}` (an edge's text). Anything else is `unknown resource`. **MCP-only: `tests/e2e/` drives the binary over subprocess with no JSON-RPC client, so `resources/read` is unreachable from there**; the coverage is the unit tests in `src/mcp/resources.rs`.
 
 **Server** (`src/mcp.rs`) — `Server` holds the shared `graph`/`worker`/`llm`/
 `task_q`/`cfg`; implements `trnsprt::McpServer`. `run`/`run_stdio` use the
@@ -681,8 +675,8 @@ the MCP JSON does — `task_panics`/`last_task_panic`,
 
 **Gaps.** The socket has auth now: one token frame carrying the graph's `mcp-token`,
 verified before any method dispatches and, since 2026-07-22, bounded by
-`AUTH_FRAME_MAX` = 1 KiB (`src/trnsprt/src/kern_rpc/auth.rs:40`) and `AUTH_DEADLINE`
-= 5 s (`:48`), both lifted once the token verifies. The named pipe carries an
+`AUTH_FRAME_MAX` = 1 KiB (`src/trnsprt/src/kern_rpc/auth.rs:24`) and `AUTH_DEADLINE`
+= 5 s (`:32`), both lifted once the token verifies. The named pipe carries an
 owner-only SDDL that typechecks for Windows and has never run on one. Both
 directions authenticate: `require_owned_by_caller` (`src/trnsprt/src/typed/local.rs:237`)
 and `require_peer_is_caller` (`:283`) run in `connect_kern` ahead of the token frame
@@ -810,9 +804,10 @@ because refusing them would make the CLI unusable whenever a daemon runs.
 because the RPC's only mutation surface is `call_tool`, the agent boundary:
 `tool_ingest` clamps to `AGENT_SOURCE` and `tool_link` writes
 `MAX_AI_CONFIDENCE`, while the CLI mints at user trust 1.0, so routing them
-unchanged would demote every CLI Fact to an agent Claim, and routing them with
-trust intact needs a principal the socket can *prove*, not the one it has
-declared since 2026-07-22 (item 24). `get` and `query` no longer read stale:
+unchanged would demote every CLI Fact to an agent Claim; kern carries no
+caller identity by decision (2026-07-22), so the remaining choice — route and
+accept the agent clamp, or stay local behind the flush guard — is owed in
+`ROADMAP.md` item 9. `get` and `query` no longer read stale:
 both route to a serving daemon over the `query` tool and fall back to the disk
 load only when nothing answers. `search` and `list` stay local by decision
 (`ROADMAP.md` item 9). `unnamed` lists only — no kern promotion.
@@ -910,7 +905,7 @@ Ollama by default; fail-open everywhere.
 **How.** `Client` (`src/llm.rs:117`) — `embed` (`:220`) / `embed_batch` (`:264`)
 against the embedding endpoint, `complete` (`:320`, reason / distillation),
 `complete_func` (`:388`, sync closure for the tick/ingest blocking bridges).
-`is_transient` (`:21`) classifies retryable errors — on both legs now: the completion leg counts and names what it throws away (`record_complete_failure`, `:74`, bounded to one line by `:65`), so `complete_func`'s `""` no longer hides which failure produced it. It reads back as `llm_complete_failed` / `last_llm_complete_failure` (`src/mcp.rs:150`, `src/commands/admin.rs:160`). **Every request is bounded** — `complete` posts under `[reason] timeout_secs` (`src/config/reason.rs:12`, default 600 at `:20`), applied by `with_timeout_secs` (`src/llm.rs:196`) and held as `reason_timeout` (`:137`, posted at `:344` / `:371`); `EMBED_TIMEOUT` = 120s on the embed calls (`:494`), applied per request by `post_checked` (`:243`) over a client-wide 120s default and a 3s `connect_timeout` (`:159`, `:162`) so a dead endpoint fails fast instead of hanging. `Endpoint` (`:100`) holds
+`is_transient` (`:21`) classifies retryable errors — on both legs now: the completion leg counts and names what it throws away (`record_complete_failure`, `:74`, bounded to one line by `:65`), so `complete_func`'s `""` no longer hides which failure produced it. It reads back as `llm_complete_failed` / `last_llm_complete_failure` (`src/mcp.rs:150`, `src/commands/admin.rs:201`). **Every request is bounded** — `complete` posts under `[reason] timeout_secs` (`src/config/reason.rs:12`, default 600 at `:20`), applied by `with_timeout_secs` (`src/llm.rs:196`) and held as `reason_timeout` (`:137`, posted at `:344` / `:371`); `EMBED_TIMEOUT` = 120s on the embed calls (`:494`), applied per request by `post_checked` (`:243`) over a client-wide 120s default and a 3s `connect_timeout` (`:159`, `:162`) so a dead endpoint fails fast instead of hanging. `Endpoint` (`:100`) holds
 url/model/key; `new_embed_only` (`:213`) builds a client for `reembed`.
 `for_eval(seed)` (`:184`) makes it deterministic.
 
@@ -1399,8 +1394,8 @@ Ranked by leverage:
    `kern link` no longer clobbers a racing commit — it flushes through
    `save_graph_guarded` (`src/commands/graph_ops.rs`) — but it still does not
    route, and neither does `ingest`: over `call_tool` they would land at agent
-   trust, so that half waits on a principal item 24 can *prove* — the socket got
-   auth 2026-07-22 and the block did not lift. `intake drain` got its tool
+   trust, and kern carries no caller identity by decision (2026-07-22), so the
+   route-or-stay-local choice is owed. `intake drain` got its tool
    2026-07-21 and routes. Open as `ROADMAP.md` item 9 on `ingest`/`link` alone.
 6. **GNN training has no GPU path** — linear in edges and off the tick since
    item 28 (11.6s at 4096, was 79.7s); `gnn_train_refused` now reaches `kern health`.

@@ -133,15 +133,6 @@ pub fn merge_valid_until(
 
 // INVARIANT: never overwrite statements/vector under the existing id
 // (= content_hash(text)); differing phrasing → Rephrase edge.
-//
-// SECURITY: `incoming_acl` is the ACL the deduped payload was ingested under. It
-// is NOT written to the survivor — an entity id is its content hash, so the same
-// text cannot exist twice under two audiences and the survivor keeps its own.
-// What it gates is the Rephrase edge, which stores the incoming text VERBATIM
-// and, being a Reason, carries no ACL of its own: it is served with whatever
-// entity it hangs on. Writing one across an ACL boundary republishes a scoped
-// ingest to the survivor's audience — for a public survivor, everybody.
-#[allow(clippy::too_many_arguments)]
 pub fn merge_duplicate(
 	g: &mut GraphGnn,
 	entity_id: &str,
@@ -149,7 +140,6 @@ pub fn merge_duplicate(
 	new_score: f64,
 	incoming_kind: EntityKind,
 	incoming_valid_until: Option<std::time::SystemTime>,
-	incoming_acl: &Acl,
 ) -> Option<MergeOutcome> {
 	let kern_id = g.kern_of_entity(entity_id)?.to_string();
 	// A deduped ingest still carries its retention: the survivor inherits the
@@ -157,17 +147,15 @@ pub fn merge_duplicate(
 	merge_valid_until(g, entity_id, incoming_valid_until);
 	let kern = g.get_mut(&kern_id)?;
 
-	let (differs, old_kind, acl_differs) = {
+	let (differs, old_kind) = {
 		let t = kern.entities.get_mut(entity_id)?;
 		t.observe_support(new_score);
 		t.updated_at = Some(std::time::SystemTime::now());
-		(t.text() != new_text, t.kind, t.acl != *incoming_acl)
+		(t.text() != new_text, t.kind)
 	};
 	let same_kind = incoming_kind == old_kind;
 
-	// Corroboration is metadata about a statement, not the statement — it merges
-	// across the boundary. The alternate WORDING does not.
-	if !differs || acl_differs {
+	if !differs {
 		return Some(MergeOutcome {
 			kern_id,
 			rephrase_id: None,
@@ -279,7 +267,6 @@ fn commit_entity(
 			thought.conf_mean(),
 			thought.kind,
 			thought.valid_until,
-			&thought.acl,
 		);
 		let (placed_in, reason_ids) = match outcome {
 			Some(o) => (o.kern_id, o.rephrase_id.into_iter().collect()),

@@ -125,7 +125,7 @@ pub fn do_classify_contradiction(
 		_ => return,
 	};
 
-	let (old_id, old_text, new_text, old_kind, old_source, confidence, old_acl) = {
+	let (old_id, old_text, new_text, old_kind, old_source, confidence) = {
 		let graph = g.read();
 		let kern = match graph.loaded(kern_id) {
 			Some(k) => k,
@@ -149,9 +149,6 @@ pub fn do_classify_contradiction(
 			old.kind,
 			old.source.clone(),
 			old.conf_mean(),
-			// A supersede must not launder a scoped thought into a public one: the
-			// revision inherits the ACL of the entity it replaces.
-			old.acl.clone(),
 		)
 	};
 	if new_text.trim().is_empty() || new_text == old_text {
@@ -180,7 +177,6 @@ pub fn do_classify_contradiction(
 		"",
 		confidence,
 		None,
-		old_acl,
 	);
 
 	// Re-validate under the write guard — another tick may have superseded or

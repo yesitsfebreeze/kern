@@ -7,7 +7,7 @@ this walks the whole loop: `[ingest] review_policy = { inline = "pending" }`
 holds every CLI ingest, `query --exclude-pending` must miss it, `kern promote`
 must release it, and the same query must then return it.
 
-Unlike item 18's `principals`, none of this needs a JSON-RPC client: the policy
+None of this needs a JSON-RPC client: the policy
 is ordinary config and both verbs are subprocess-visible, so the routed path and
 the NoDaemon fallback are each measurable. Both are measured, for the reason
 `test_graviton_routing` gives — a mutating CLI path that writes locally beside a

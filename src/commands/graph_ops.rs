@@ -160,10 +160,9 @@ fn print_promote(id: &str, promoted: bool) {
 // the live one, so a local promote would release the row in a stale copy that
 // the daemon's next persist overwrites — the row stays held and nothing says so.
 //
-// AUTHORITY: releasing a held claim is a curation decision, and unlike `intake
-// drain` it asserts authority over what the graph is willing to answer with. The
-// socket it routes over is still unauthenticated (ROADMAP item 24); whatever gate
-// 24 lands is the gate this verb rides on.
+// Releasing a held claim is a curation decision. The socket it routes over is
+// owner-only and token-authenticated; any caller holding the mcp-token may
+// release one — the process boundary is the access model.
 pub(super) async fn cmd_promote(cfg: &crate::config::Config, id: &str) {
 	match route("promote", serde_json::json!({"id": id})).await {
 		Routed::Done(v) => {

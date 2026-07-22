@@ -191,12 +191,11 @@ pub fn retrieve_profiled(
 	if let Some(o) = opts {
 		if o.is_active() {
 			results.retain(|r| score::matches_filter(r.entity, o));
-			// SECURITY: a chain is rendered by `format_chains` as the TEXT of every
-			// entity on it. Filtering only `results` leaves the chain rendering as a
-			// second delivery channel that answers no filter at all — for `kind` that
-			// is a cosmetic leak, for the ACL predicate it is the whole gate. A path
-			// through a withheld entity is dropped whole: a chain with a hole in it
-			// would still say the withheld thought exists and what it connects.
+			// A chain is rendered by `format_chains` as the TEXT of every entity on
+			// it. Filtering only `results` leaves the chain rendering as a second
+			// delivery channel that answers no filter at all. A path through a
+			// filtered entity is dropped whole: a chain with a hole in it would
+			// still say the filtered thought exists and what it connects.
 			chains.retain(|c| {
 				c.nodes.iter().step_by(2).all(|id| {
 					expand::find_entity_ref_in_graph(g, id).is_none_or(|e| score::matches_filter(e, o))
@@ -313,7 +312,6 @@ mod tests {
 	// invisible, which is why the probe has to make the survivor un-seedable by
 	// vector before it can prove anything about the lexical one.
 	fn deduped_corpus() -> GraphGnn {
-		use crate::base::types::Acl;
 		let mut g = GraphGnn::new();
 		let root = g.root.id.clone();
 		{
@@ -360,7 +358,6 @@ mod tests {
 			1.0,
 			EntityKind::Claim,
 			None,
-			&Acl::default(),
 		)
 		.expect("the near-duplicate merges onto the survivor");
 		g
@@ -681,12 +678,10 @@ mod tests {
 
 	// A chain is a SECOND delivery channel: `format_chains` renders the text of
 	// every entity on the path, and nothing about it is a result. Filtering only
-	// `results` left the ACL predicate stopping the row and the chain printing it
-	// anyway — the filter would read as protection while protecting nothing.
+	// `results` left the filter stopping the row and the chain printing it
+	// anyway — the filter would read as applied while filtering nothing.
 	#[test]
-	fn an_acl_filtered_entity_does_not_leak_through_a_path_chain() {
-		use crate::base::types::Acl;
-
+	fn a_filtered_entity_does_not_leak_through_a_path_chain() {
 		let mut g = GraphGnn::new();
 		let root = g.root.id.clone();
 		{
@@ -703,19 +698,15 @@ mod tests {
 
 			// Orthogonal to the query, so it is never a SEED — the only way it can
 			// enter the walk is by the edge, which is exactly the path that builds a
-			// chain and the path the ACL predicate has to cover.
+			// chain and the path the filter predicate has to cover.
 			let mut secret = mk_entity(
 				"secret",
 				"the vault code is 4815162342",
 				1.0,
-				EntityKind::Claim,
+				EntityKind::Document,
 			);
 			secret.vector = vec![0.0, 1.0].into();
 			secret.gnn_vector = vec![0.0, 1.0].into();
-			secret.acl = Acl {
-				scope: "acme".into(),
-				..Default::default()
-			};
 			k.entities.insert("secret".into(), secret);
 
 			add_reason(
@@ -759,8 +750,8 @@ mod tests {
 			open_read.chain_text
 		);
 
-		let bob = crate::retrieval::score::QueryOptions {
-			principals: vec!["bob".into()],
+		let claims_only = crate::retrieval::score::QueryOptions {
+			kind: Some(EntityKind::Claim),
 			..Default::default()
 		};
 		let out = retrieve(
@@ -769,13 +760,13 @@ mod tests {
 			&[1.0, 0.0],
 			"ada bicycle shed",
 			Mode::Hybrid,
-			Some(&bob),
+			Some(&claims_only),
 			w,
 		);
 		let ids: Vec<&str> = out.results.iter().map(|r| r.entity.id.as_str()).collect();
 		assert!(
 			!ids.contains(&"secret"),
-			"the scoped thought is withheld from the results: {ids:?}"
+			"the filtered thought is dropped from the results: {ids:?}"
 		);
 		assert!(
 			!out.chain_text.contains("vault code"),

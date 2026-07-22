@@ -3,7 +3,6 @@ use serde_json::value::RawValue;
 use crate::base::search::{find_entity, find_reason};
 use crate::base::util::truncate;
 
-use super::acl::{self, Endpoint};
 use super::{err_resp, ok, Response, Server, ERR_INVALID_REQ, ERR_NOT_FOUND};
 
 pub fn resource_definitions() -> Vec<serde_json::Value> {
@@ -98,11 +97,6 @@ fn resource_thoughts(server: &Server) -> String {
 	let mut all: Vec<(f64, serde_json::Value)> = Vec::new();
 	for kern in g.all() {
 		for t in kern.entities.values() {
-			// Default-deny: this surface consults no principal, so only an entity
-			// carrying no ACL at all is listed here.
-			if !t.acl.is_public() {
-				continue;
-			}
 			all.push((
 				t.score,
 				serde_json::json!({
@@ -146,38 +140,27 @@ fn resource_claim_kinds(server: &Server) -> String {
 	serde_json::to_string(&g.root.claim_kinds).unwrap_or_default()
 }
 
-/// This surface can name no principal (item 24), so admission here is simply
-/// "carries no ACL" — the same emptiness test `acl_admits` runs, so it and
-/// `matches_filter` cannot drift apart on what public means.
-fn public_only(t: &crate::base::types::Entity) -> bool {
-	t.acl.is_public()
-}
-
-fn edge_json(re: &crate::base::types::Reason, text_cleared: bool) -> serde_json::Value {
+fn edge_json(re: &crate::base::types::Reason) -> serde_json::Value {
 	serde_json::json!({
 		"id": re.id,
 		"from": re.from,
 		"to": re.to,
 		"kind": re.kind as i32,
-		"text": if text_cleared { re.text.clone() } else { String::new() },
+		"text": re.text.clone(),
 		"score": re.score,
 	})
 }
 
 fn resource_thought(server: &Server, id: &str) -> String {
 	let g = server.graph.read();
-	// A scoped entity reads back exactly like a missing one — telling the two apart
-	// would leak the id's existence on the very surface that withholds its text.
-	match find_entity(&g, id).filter(|(t, _)| t.acl.is_public()) {
+	match find_entity(&g, id) {
 		Some((thought, kern_id)) => {
 			let mut edges = Vec::new();
 			if let Some(kern) = g.kerns.get(&kern_id) {
 				let rids = crate::base::reason::collect_reason_ids(kern, &thought.id);
 				for rid in &rids {
 					if let Some(re) = kern.reasons.get(rid) {
-						if let Some(whole) = acl::incident_edge(&g, &thought.id, re, &public_only) {
-							edges.push(edge_json(re, whole));
-						}
+						edges.push(edge_json(re));
 					}
 				}
 			}
@@ -198,43 +181,17 @@ fn resource_thought(server: &Server, id: &str) -> String {
 
 fn resource_reason(server: &Server, id: &str) -> String {
 	let g = server.graph.read();
-	// The edge has no ACL of its own; the entities it hangs between do. Reading it
-	// unchecked would be a read of their quoted text through an id that is not
-	// theirs, and it is **both** ends that have to clear, not just `from`: the
-	// reply to `explain_relationship_prompt` is written from the two texts
-	// together, and the response names `to` outright, which is a scoped id on its
-	// own.
-	let found = find_reason(&g, id).filter(|(reason, _)| {
-		// `from` is the entity this edge hangs off. It fails closed on both
-		// non-public outcomes: one that did not resolve is not one that said the
-		// read was allowed, and it is exactly the endpoint a cold-spill hides.
-		matches!(
-			acl::endpoint(&g, &reason.from, &public_only),
-			Endpoint::Admitted
-		) && !matches!(
-			acl::endpoint(&g, &reason.to, &public_only),
-			Endpoint::Withheld
-		)
-	});
-	match found {
-		Some((reason, _)) => {
-			// A `to` that did not resolve leaves the text uncleared — same rule as
-			// the incident-edge list, and for the same reason.
-			let text_cleared = matches!(
-				acl::endpoint(&g, &reason.to, &public_only),
-				Endpoint::Admitted
-			);
-			serde_json::to_string(&serde_json::json!({
-				"id": reason.id,
-				"from": reason.from,
-				"to": reason.to,
-				"kind": reason.kind as i32,
-				"text": if text_cleared { reason.text.clone() } else { String::new() },
-				"score": reason.score,
-				"traversal_count": reason.traversal_count.value_i32(),
-			}))
-			.unwrap_or_default()
-		}
+	match find_reason(&g, id) {
+		Some((reason, _)) => serde_json::to_string(&serde_json::json!({
+			"id": reason.id,
+			"from": reason.from,
+			"to": reason.to,
+			"kind": reason.kind as i32,
+			"text": reason.text.clone(),
+			"score": reason.score,
+			"traversal_count": reason.traversal_count.value_i32(),
+		}))
+		.unwrap_or_default(),
 		None => format!(r#"{{"error":"reason not found: {id}"}}"#),
 	}
 }
@@ -254,7 +211,7 @@ mod tests {
 	use super::*;
 
 	use crate::base::reason::add_reason;
-	use crate::base::types::{Acl, Entity, Kern, Reason};
+	use crate::base::types::{Entity, Kern, Reason};
 	use crate::mcp::Server;
 
 	fn make_server() -> Server {
@@ -283,141 +240,26 @@ mod tests {
 		g.kerns.insert("kx".into(), k);
 	}
 
-	// Adds the scoped counterpart to `seed`'s public `e1`: `s1` carries an ACL, and
-	// is tied to `e1` once in each direction so both endpoint positions are covered.
-	fn seed_scoped(server: &Server) {
-		let mut g = server.graph.write();
-		let k = g.kerns.get_mut("kx").expect("seed() ran first");
-		k.entities.insert(
-			"s1".into(),
-			Entity {
-				id: "s1".into(),
-				acl: Acl {
-					scope: "secret".into(),
+	// A dangling endpoint is ordinary — `to` is optional in `add_reason` — and the
+	// edge renders whole, its own text included.
+	#[tokio::test]
+	async fn resource_thought_renders_an_edge_with_a_dangling_endpoint() {
+		let srv = make_server();
+		seed(&srv);
+		{
+			let mut g = srv.graph.write();
+			let k = g.kerns.get_mut("kx").expect("seed() ran first");
+			add_reason(
+				k,
+				Reason {
+					from: "e1".into(),
+					to: "ghost".into(),
+					id: "r4".into(),
+					text: "e1 and the ghost share a mechanism".into(),
 					..Default::default()
 				},
-				..Default::default()
-			},
-		);
-		add_reason(
-			k,
-			Reason {
-				from: "e1".into(),
-				to: "s1".into(),
-				id: "r2".into(),
-				..Default::default()
-			},
-		);
-		add_reason(
-			k,
-			Reason {
-				from: "s1".into(),
-				to: "e1".into(),
-				id: "r3".into(),
-				..Default::default()
-			},
-		);
-	}
-
-	#[tokio::test]
-	async fn resource_thoughts_omits_a_scoped_entity() {
-		let srv = make_server();
-		seed(&srv);
-		seed_scoped(&srv);
-		let v: serde_json::Value = serde_json::from_str(&resource_thoughts(&srv)).expect("valid json");
-		let ids: Vec<&str> = v
-			.as_array()
-			.expect("a list")
-			.iter()
-			.filter_map(|t| t["id"].as_str())
-			.collect();
-		assert!(ids.contains(&"e1"), "the public entity is still listed");
-		assert!(!ids.contains(&"s1"), "the scoped entity is withheld");
-	}
-
-	#[tokio::test]
-	async fn resource_thought_on_a_scoped_entity_reads_as_missing() {
-		let srv = make_server();
-		seed(&srv);
-		seed_scoped(&srv);
-		let v: serde_json::Value =
-			serde_json::from_str(&resource_thought(&srv, "s1")).expect("error is still valid json");
-		assert!(v["error"].as_str().unwrap_or("").contains("not found"));
-		assert!(v["text"].is_null(), "no entity text leaks alongside it");
-	}
-
-	#[tokio::test]
-	async fn resource_thought_drops_edges_touching_a_scoped_entity() {
-		let srv = make_server();
-		seed(&srv);
-		seed_scoped(&srv);
-		let v: serde_json::Value =
-			serde_json::from_str(&resource_thought(&srv, "e1")).expect("valid json");
-		assert_eq!(v["id"], "e1", "the public entity itself still reads");
-		let ids: Vec<&str> = v["edges"]
-			.as_array()
-			.expect("a list")
-			.iter()
-			.filter_map(|e| e["id"].as_str())
-			.collect();
-		assert_eq!(
-			ids,
-			vec!["r1"],
-			"r2 (into s1) and r3 (out of s1) are dropped; r1 survives"
-		);
-	}
-
-	#[tokio::test]
-	async fn resource_reason_from_a_scoped_entity_reads_as_missing() {
-		let srv = make_server();
-		seed(&srv);
-		seed_scoped(&srv);
-		let v: serde_json::Value =
-			serde_json::from_str(&resource_reason(&srv, "r3")).expect("error is still valid json");
-		assert!(v["error"].as_str().unwrap_or("").contains("not found"));
-		assert!(v["text"].is_null(), "no edge text leaks alongside it");
-	}
-
-	// The twin of the `from` test, and not a duplicate of it: gating only `from`
-	// left `reason://r2` serving `"to":"s1"` — the scoped id itself — beside text
-	// the LLM wrote from up to 500 chars of s1. Public `from`, scoped `to`.
-	#[tokio::test]
-	async fn resource_reason_to_a_scoped_entity_reads_as_missing() {
-		let srv = make_server();
-		seed(&srv);
-		seed_scoped(&srv);
-		let v: serde_json::Value =
-			serde_json::from_str(&resource_reason(&srv, "r2")).expect("error is still valid json");
-		assert!(v["error"].as_str().unwrap_or("").contains("not found"));
-		assert!(v["text"].is_null(), "no edge text leaks alongside it");
-		assert!(v["to"].is_null(), "nor the scoped id the edge points at");
-	}
-
-	// An id that never resolves is not an id that does not exist: `find_entity`
-	// walks only the resident kerns, so a cold-spilled or unloaded scoped row looks
-	// exactly like this. The edge stays — a dangling endpoint is ordinary, and
-	// dropping it would be deny-all — but the text the LLM wrote from both
-	// endpoints does not.
-	fn seed_dangling(server: &Server) {
-		let mut g = server.graph.write();
-		let k = g.kerns.get_mut("kx").expect("seed() ran first");
-		add_reason(
-			k,
-			Reason {
-				from: "e1".into(),
-				to: "ghost".into(),
-				id: "r4".into(),
-				text: "e1 and the ghost share a mechanism".into(),
-				..Default::default()
-			},
-		);
-	}
-
-	#[tokio::test]
-	async fn resource_thought_withholds_edge_text_when_an_endpoint_will_not_resolve() {
-		let srv = make_server();
-		seed(&srv);
-		seed_dangling(&srv);
+			);
+		}
 		let v: serde_json::Value =
 			serde_json::from_str(&resource_thought(&srv, "e1")).expect("valid json");
 		let r4 = v["edges"]
@@ -425,23 +267,9 @@ mod tests {
 			.expect("a list")
 			.iter()
 			.find(|e| e["id"] == "r4")
-			.expect("the edge itself survives — dropping it would be deny-all");
-		assert_eq!(
-			r4["text"], "",
-			"but the text quoting the unseen endpoint does not"
-		);
-		assert_eq!(r4["to"], "ghost", "the structure is still readable");
-	}
-
-	#[tokio::test]
-	async fn resource_reason_withholds_text_when_to_will_not_resolve() {
-		let srv = make_server();
-		seed(&srv);
-		seed_dangling(&srv);
-		let v: serde_json::Value =
-			serde_json::from_str(&resource_reason(&srv, "r4")).expect("valid json");
-		assert_eq!(v["id"], "r4", "the edge still reads");
-		assert_eq!(v["text"], "", "its text does not");
+			.expect("the edge renders");
+		assert_eq!(r4["text"], "e1 and the ghost share a mechanism");
+		assert_eq!(r4["to"], "ghost");
 	}
 
 	#[tokio::test]

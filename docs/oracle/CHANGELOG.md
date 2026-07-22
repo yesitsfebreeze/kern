@@ -2,6 +2,33 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — ACL and user identity removed wholesale, user-directed. kern is
+  a single-trust-domain store: the process boundary (socket `0600` +
+  `mcp-token` + anti-squat checks) is the whole access model, and multi-caller
+  scoping is the embedding consumer's job — one kern per trust domain, or a
+  gate in front. Deleted: `Acl {scope, users, groups}` off `Entity`,
+  `principals`/`scope` off the MCP `ingest`/`query` schemas, `acl_admits` out
+  of `matches_filter`, `src/mcp/acl.rs` (the edge-endpoint verdict), the
+  default-deny resources gating, the ACL-aware dedup/supersede/rephrase
+  carries, `Worker::{enqueue,run}_with_acl` (collapsed back into
+  `enqueue`/`run`), `DirectJob::acl`, and the declared-never-consulted
+  `AuthReq::principal` (with `PRINCIPAL_CLI`/`_MCP`/`_HUB`). No store or wire
+  compatibility kept, per the same direction. Grounds: the mechanism was
+  structurally unenforceable (caller-asserted principals, same-uid callers
+  indistinguishable, empty `principals` = read everything), so it was a
+  cooperative filter charging an access-control-sized tax — three read-surface
+  bypasses found after "done", a per-edge verdict that failed open on
+  non-resident endpoints, gossip shipping scoped rows ungated. 884 lib tests
+  green after removal. Recorded as ROADMAP item 18 (REMOVED); item 24 keeps
+  its transport half; item 9's "wait for a provable principal" exit is closed
+  and its route-or-stay-local decision is now owed; item 20's author-principal
+  blocker and item 79's "thread a real auth identity" alternative retired.
+  Decided by: fix-the-root (delete the unenforceable mechanism, not another
+  gate), name-the-tradeoff (re-adding costs a store bump, a wire change, and
+  re-litigating every read surface; multi-caller scoping is forever the
+  consumer's). Supersedes: the 2026-07-22 item 18 edge-ACL entries below —
+  the enforcement they record is gone with the feature.
+
 - 2026-07-22 — First real LoCoMo-10 numbers, and the claim standard is amended
   to permit exactly what they are. Run: `just eval-locomo --embed-url
   http://172.27.176.1:11434` (Ollama 0.32.1 on the Windows host across the

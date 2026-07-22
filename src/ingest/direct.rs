@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::base::constants::AGENT_SOURCE;
-use crate::base::types::{Acl, EntityKind, Source};
+use crate::base::types::{EntityKind, Source};
 use crate::base::util;
 use crate::ingest::outcome::OutcomeStatus;
 use crate::ingest::Worker;
@@ -20,11 +20,6 @@ pub struct DirectJob {
 	// and this payload may sit in the intake for a whole poll interval first.
 	#[serde(default)]
 	pub valid_until: Option<std::time::SystemTime>,
-	// Carried across the durable hop for the same reason as `valid_until`: the
-	// caller's principal is gone by the time the drain runs, so an ACL dropped
-	// here would silently republish a scoped ingest as public.
-	#[serde(default)]
-	pub acl: Acl,
 	// The channel this payload arrived on — what `clamp_confidence` reads and
 	// what `RetrievalConfig::source_trust` weights on. Carried rather than
 	// re-derived at the drain: every payload here used to be minted by the MCP
@@ -94,18 +89,17 @@ pub async fn drain_direct_once(
 			..cfg.clone()
 		};
 		let outcome = worker
-			.run_with_acl(
+			.run(
 				job.text,
 				job.source,
 				job.kind,
 				job.hint,
 				job.confidence,
 				// The producer's own tag, not this drain's: the durable hop is a
-				// carrier, and naming a principal here would relabel every channel
+				// carrier, and a drain that renamed it would relabel every channel
 				// that ever routes through the intake as an agent assertion.
 				&job.source_tag,
 				job_cfg,
-				job.acl,
 			)
 			.await;
 		if matches!(outcome.status, OutcomeStatus::Failed) {
@@ -143,7 +137,6 @@ mod tests {
 			hint: "audit-finding".into(),
 			confidence: 0.7,
 			valid_until: None,
-			acl: Acl::default(),
 			source_tag: AGENT_SOURCE.to_string(),
 		}
 	}
@@ -271,69 +264,6 @@ mod tests {
 				(got - 1.0).abs() < 1e-6,
 				"the payload's own tag reached the clamp: conf_beta want 1.0000, got {got:.4} \
 				 (1.0500 is the drain renaming it to agent)"
-			);
-		}
-	}
-
-	// The drain has no ACL of its own — that is what makes the watcher's public
-	// default (ROADMAP item 18) a decision made in one place rather than two that
-	// happen to match. The caller's principal is gone by the time this runs, so a
-	// drain that stamped anything here would republish a scoped ingest under its
-	// own answer; `run_with_acl(job.acl)` is the whole guard and this is the test
-	// that it stays. A public payload proves nothing — every default is public —
-	// so the payload is scoped and the check is that a non-member is refused.
-	#[tokio::test]
-	async fn drain_direct_once_carries_the_payloads_acl_rather_than_stamping_its_own() {
-		let (url, _server) =
-			crate::test_support::spawn_http(crate::test_support::fixed_vec_embed_app()).await;
-		let graph = Arc::new(RwLock::new(GraphGnn::new()));
-		let embedder = crate::llm::Client::new_embed_only(&url, "m", "");
-		let worker = Worker::new(graph.clone(), embedder, None, None, None);
-
-		let dir = tempdir().unwrap();
-		let direct = dir.path().join("direct");
-		let mut j = job("the quarterly numbers are not public");
-		j.acl = Acl {
-			scope: "acme".into(),
-			users: vec!["alice".into()],
-			groups: vec![],
-		};
-		intake_direct(&direct, &j).expect("accepted");
-
-		let cfg = crate::ingest::Config {
-			dedup_threshold: 0.95,
-			..Default::default()
-		};
-		assert_eq!(
-			drain_direct_once(&direct, &worker, &cfg).await,
-			1,
-			"the job committed"
-		);
-
-		let g = graph.read();
-		let placed: Vec<&crate::base::types::Entity> =
-			g.kerns.values().flat_map(|k| k.entities.values()).collect();
-		assert!(!placed.is_empty(), "the payload reached the graph");
-		let bob = crate::retrieval::score::QueryOptions {
-			principals: vec!["bob".into()],
-			..Default::default()
-		};
-		let alice = crate::retrieval::score::QueryOptions {
-			principals: vec!["alice".into()],
-			..Default::default()
-		};
-		for e in &placed {
-			assert_eq!(
-				e.acl, j.acl,
-				"the payload's own ACL survived the durable hop"
-			);
-			assert!(
-				!crate::retrieval::score::matches_filter(e, &bob),
-				"a non-member is refused after the hop; the drain did not republish it"
-			);
-			assert!(
-				crate::retrieval::score::matches_filter(e, &alice),
-				"the named member still reads it"
 			);
 		}
 	}

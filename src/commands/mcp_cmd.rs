@@ -2,7 +2,7 @@ use parking_lot::RwLock as StdRwLock;
 use std::sync::Arc;
 
 use tokio::sync::Mutex as TokioMutex;
-use trnsprt::kern_rpc::{AuthReq, CallToolReq, KernRpcClient, PRINCIPAL_MCP};
+use trnsprt::kern_rpc::{AuthReq, CallToolReq, KernRpcClient};
 use trnsprt::typed::{AdapterError, Endpoint, JsonEnvelopeCodec};
 use trnsprt::{McpError, McpServer, ToolResult, ToolSchema};
 
@@ -12,7 +12,7 @@ pub(super) async fn cmd_mcp(cfg: &crate::config::Config) {
 	// Hub-first: a running hub owns node lifecycle (spawn, adopt, unload) so the
 	// proxy never self-spawns a daemon the hub can't see. No hub -> direct path.
 	let log_dir = cfg.log_dir();
-	let caller = crate::rpc::caller_of(cfg, PRINCIPAL_MCP);
+	let caller = crate::rpc::caller_of(cfg);
 	if let Some(client) = attach_via_hub(cfg.hub.auto_start, &log_dir).await {
 		let client = replace_if_stale(client, cfg, &log_dir, true).await;
 		run_proxy(client, caller).await;
@@ -88,7 +88,7 @@ async fn replace_if_stale(
 	use super::mcp_restart::{verdict, Verdict};
 	use crate::base::identity;
 
-	let caller = crate::rpc::caller_of(cfg, PRINCIPAL_MCP);
+	let caller = crate::rpc::caller_of(cfg);
 
 	let health = match client.health().await {
 		Ok(h) => h,
@@ -226,7 +226,7 @@ async fn attach_via_hub(
 	);
 	KernRpcClient::<JsonEnvelopeCodec>::connect_endpoint(
 		&endpoint,
-		&crate::rpc::caller_at(&root, PRINCIPAL_MCP),
+		&crate::rpc::caller_at(&root),
 	)
 	.await
 	.ok()
@@ -399,7 +399,7 @@ async fn run_standalone(cfg: &crate::config::Config) {
 	let _writer_lock = match claim_standalone(
 		&cfg.data_dir,
 		&Endpoint::kern(),
-		&crate::rpc::caller_of(cfg, PRINCIPAL_MCP),
+		&crate::rpc::caller_of(cfg),
 		40,
 		std::time::Duration::from_millis(250),
 	)
@@ -407,7 +407,7 @@ async fn run_standalone(cfg: &crate::config::Config) {
 	{
 		StandaloneEntry::Own(l) => l,
 		StandaloneEntry::Attach(client) => {
-			return run_proxy(*client, crate::rpc::caller_of(cfg, PRINCIPAL_MCP)).await
+			return run_proxy(*client, crate::rpc::caller_of(cfg)).await
 		}
 		StandaloneEntry::Refuse(who) => {
 			eprintln!("kern mcp: {who}");

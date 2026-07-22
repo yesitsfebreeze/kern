@@ -1,4 +1,3 @@
-pub(crate) mod acl;
 pub mod prompt;
 pub mod resources;
 pub mod sse;
@@ -297,23 +296,6 @@ pub(crate) fn tool_error(msg: &str) -> serde_json::Value {
 		"isError": true,
 		"content": [{"type": "text", "text": msg}],
 	})
-}
-
-/// Principal ids, off the wire, for both the `ingest` and the `query` surface.
-///
-/// A blank principal is a hard error rather than a silent skip: it would match
-/// the empty `Acl::scope` of every public entity, so accepting it would turn a
-/// caller's typo into an access decision nobody asked for.
-pub(crate) fn parse_principals(field: &str, raw: &[String]) -> Result<Vec<String>, String> {
-	let mut out = Vec::with_capacity(raw.len());
-	for p in raw {
-		let t = p.trim();
-		if t.is_empty() {
-			return Err(format!("`{field}` must not contain a blank entry"));
-		}
-		out.push(t.to_string());
-	}
-	Ok(out)
 }
 
 #[cfg(test)]

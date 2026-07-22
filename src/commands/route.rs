@@ -1,4 +1,4 @@
-use trnsprt::kern_rpc::{AuthReq, CallToolReq, KernRpcClient, PRINCIPAL_CLI};
+use trnsprt::kern_rpc::{AuthReq, CallToolReq, KernRpcClient};
 use trnsprt::typed::{AdapterError, Endpoint, JsonEnvelopeCodec};
 
 pub(crate) enum Routed {
@@ -10,7 +10,7 @@ pub(crate) enum Routed {
 pub(crate) async fn route(name: &str, args: serde_json::Value) -> Routed {
 	route_to(
 		&Endpoint::kern(),
-		&crate::rpc::caller(PRINCIPAL_CLI),
+		&crate::rpc::caller(),
 		name,
 		args,
 	)
@@ -158,7 +158,7 @@ mod tests {
 		let graph = srv.graph.clone();
 		serving(srv, &ep).await;
 
-		let wrong = trnsprt::kern_rpc::AuthReq::new("scratch-tokex", trnsprt::kern_rpc::PRINCIPAL_CLI);
+		let wrong = trnsprt::kern_rpc::AuthReq::new("scratch-tokex");
 		assert_eq!(
 			wrong.token.len(),
 			crate::test_support::TEST_TOKEN.len(),

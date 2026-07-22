@@ -34,7 +34,6 @@ pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 				"scheme":    {"type": "string", "enum": ["file", "ticket", "session", "agent", "inline"], "description": "filter by source scheme"},
 				"include_history": {"type": "boolean", "description": "also return superseded (invalidated) revisions reachable from the active hits, flagged history:true"},
 				"exclude_pending": {"type": "boolean", "description": "drop thoughts a review policy is still holding for curation (`review: pending`, set by `[ingest] review_policy`) — the `promote` tool releases one. Opt-in: omitting it filters nothing, so an uncurated graph reads exactly as before"},
-				"principals": {"type": "array", "items": {"type": "string"}, "description": "the caller's principal ids (users and groups). A thought carrying an ACL is returned only when one of these names its scope, one of its users or one of its groups. Omitting this filters nothing — an unscoped caller still reads everything, it does not fall back to public-only"},
 			},
 		},
 	})]
@@ -64,7 +63,6 @@ fn build_query_options(p: &QueryArgs) -> Result<retrieval::score::QueryOptions, 
 		as_of: parse_time_filter("as_of", &p.as_of)?,
 		include_history: p.include_history,
 		exclude_pending: p.exclude_pending,
-		principals: super::parse_principals("principals", &p.principals)?,
 		..Default::default()
 	};
 	if let Some(ref s) = p.scheme {
@@ -110,8 +108,6 @@ struct QueryArgs {
 	include_history: bool,
 	#[serde(default)]
 	exclude_pending: bool,
-	#[serde(default)]
-	principals: Vec<String>,
 }
 
 // The filter takes the stable lowercase labels (`EntityKind::as_str`), not the
@@ -151,7 +147,7 @@ impl Server {
 			let hit = resolve_by_id(&g, &p.id)
 				.filter(|hit| retrieval::score::matches_filter(&hit.thought, &opts));
 			return match hit {
-				Some(hit) => tool_result_json(&hit.detail(&g, &opts)),
+				Some(hit) => tool_result_json(&hit.detail(&g)),
 				None => tool_error(&format!("thought not found: {}", p.id)),
 			};
 		}
@@ -219,11 +215,9 @@ impl Server {
 						if scored.len() >= k {
 							break;
 						}
-						// SECURITY: cold_search is a raw cosine scan of the spill tier — it
-						// answers no filter. Delivering its hits unfiltered made the cold
-						// tier a way around every predicate the hot path enforces, ACL
-						// included: the entity a scope withheld from the graph read arrived
-						// anyway the moment it had been spilled.
+						// cold_search is a raw cosine scan of the spill tier — it answers no
+						// filter. Delivering its hits unfiltered made the cold tier a way
+						// around every predicate the hot path enforces.
 						if !retrieval::score::matches_filter(&entity, &opts) {
 							continue;
 						}
@@ -242,8 +236,7 @@ impl Server {
 		if p.include_history {
 			// The same `opts` the ranked read and the cold fill used — rebuilding it
 			// here was a second chance for the three paths to disagree about what the
-			// caller asked for, which for the ACL predicate is a second chance to be
-			// the one that forgets.
+			// caller asked for.
 			let g = self.graph.read();
 			let heads: Vec<(String, f64)> = scored
 				.iter()
@@ -276,16 +269,12 @@ impl Server {
 		}
 
 		let take_n = k + history_ids.len();
-		let admits = |e: &crate::base::types::Entity| retrieval::score::acl_admits_entity(e, &opts);
 		let entities: Vec<serde_json::Value> = {
 			let g = self.graph.read();
 			scored
 				.iter()
 				.take(take_n)
 				.map(|st| {
-					// Same rule as the id read: the entity cleared `matches_filter`, but
-					// an edge's text is its NEIGHBOUR's, so each one is gated on its far
-					// endpoint before it is rendered.
 					let edges: Vec<serde_json::Value> = g
 						.kern_of_entity(&st.entity.id)
 						.and_then(|kid| g.kerns.get(kid))
@@ -294,15 +283,14 @@ impl Server {
 								.into_iter()
 								.filter_map(|rid| kern.reasons.get(&rid))
 								.filter(|r| r.is_enriched())
-								.filter_map(|r| {
-									let whole = super::acl::incident_edge(&g, &st.entity.id, r, &admits)?;
-									Some(serde_json::json!({
+								.map(|r| {
+									serde_json::json!({
 										"from": r.from,
 										"to": r.to,
 										"kind": r.kind as i32,
-										"text": if whole { truncate(&r.text, 120) } else { String::new() },
+										"text": truncate(&r.text, 120),
 										"score": r.score,
-									}))
+									})
 								})
 								.collect()
 						})
@@ -341,9 +329,7 @@ pub(crate) fn entity_detail_by_id(
 	id: &str,
 ) -> Option<serde_json::Value> {
 	let hit = resolve_by_id(g, id)?;
-	// Default options name no principal, which is no ACL filter at all — the local
-	// `kern get` fallback has no principal to name and must read exactly as before.
-	Some(hit.detail(g, &retrieval::score::QueryOptions::default()))
+	Some(hit.detail(g))
 }
 
 // A resolved id read, before it is rendered. Resolving and rendering are split
@@ -356,12 +342,8 @@ struct IdHit {
 }
 
 impl IdHit {
-	fn detail(
-		&self,
-		g: &crate::base::graph::GraphGnn,
-		opts: &retrieval::score::QueryOptions,
-	) -> serde_json::Value {
-		let mut v = entity_detail(&self.thought, &self.kern_id, g, opts);
+	fn detail(&self, g: &crate::base::graph::GraphGnn) -> serde_json::Value {
+		let mut v = entity_detail(&self.thought, &self.kern_id, g);
 		if self.cold {
 			// The label is for the printer; the flag is for anything reading the
 			// JSON, which should not have to match on a sentinel kern id.
@@ -391,25 +373,18 @@ fn entity_detail(
 	thought: &crate::base::types::Entity,
 	kern_id: &str,
 	g: &crate::base::graph::GraphGnn,
-	opts: &retrieval::score::QueryOptions,
 ) -> serde_json::Value {
-	let admits = |e: &crate::base::types::Entity| retrieval::score::acl_admits_entity(e, opts);
 	let mut edges = Vec::new();
 	if let Some(kern) = g.kerns.get(kern_id) {
 		let rids = crate::base::reason::collect_reason_ids(kern, &thought.id);
 		for rid in &rids {
 			if let Some(re) = kern.reasons.get(rid) {
-				// The row cleared `matches_filter`; its edges quote a NEIGHBOUR's text,
-				// which the row's own verdict says nothing about.
-				let Some(whole) = super::acl::incident_edge(g, &thought.id, re, &admits) else {
-					continue;
-				};
 				edges.push(serde_json::json!({
 					"id": re.id,
 					"from": re.from,
 					"to": re.to,
 					"kind": re.kind as i32,
-					"text": if whole { re.text.clone() } else { String::new() },
+					"text": re.text.clone(),
 					"score": re.score,
 				}));
 			}
@@ -640,44 +615,6 @@ mod id_filter_tests {
 		assert!(is_error(&out), "an explicit valid_at does filter: {out}");
 	}
 
-	fn alice_scoped(id: &str) -> Entity {
-		let mut e = fact(id);
-		e.acl = crate::base::types::Acl {
-			scope: "acme".into(),
-			users: vec!["alice".into()],
-			groups: Vec::new(),
-		};
-		e
-	}
-
-	#[tokio::test]
-	async fn id_read_withholds_a_scoped_row_from_a_non_member() {
-		let srv = server_with(alice_scoped("f1"));
-		let out = srv.tool_query(&serde_json::json!({"id": "f1", "principals": ["bob"]}));
-		assert!(
-			is_error(&out),
-			"an alice-scoped Fact must not be served to bob just because he named it by id: {out}"
-		);
-		assert!(text(&out).contains("thought not found"));
-
-		let out = srv.tool_query(&serde_json::json!({"id": "f1", "principals": ["alice"]}));
-		assert!(!is_error(&out), "a member reads it: {out}");
-		assert_eq!(body(&out)["id"], serde_json::json!("f1"));
-	}
-
-	// The load-bearing default: `principals` absent is NO ACL filter, not
-	// public-only. `kern get` and every unscoped read depend on this.
-	#[tokio::test]
-	async fn bare_id_read_still_serves_a_scoped_row() {
-		let srv = server_with(alice_scoped("f1"));
-		let out = srv.tool_query(&serde_json::json!({"id": "f1"}));
-		assert!(
-			!is_error(&out),
-			"naming no principal filters nothing — it must not degrade to public-only: {out}"
-		);
-		assert_eq!(body(&out)["id"], serde_json::json!("f1"));
-	}
-
 	// Item 21's hold half, through the surface rather than the engine. Both
 	// directions, for the reason `exclude_pending_drops_only_the_uncurated_and_
 	// only_when_asked` gives: a held row that is never in the set proves nothing.
@@ -701,213 +638,11 @@ mod id_filter_tests {
 		);
 		assert!(text(&out).contains("thought not found"));
 	}
-
-	#[tokio::test]
-	async fn a_blank_principal_is_a_loud_error_not_a_silent_skip() {
-		let srv = server_with(alice_scoped("f1"));
-		let out = srv.tool_query(&serde_json::json!({"id": "f1", "principals": ["  "]}));
-		assert!(is_error(&out), "a blank principal is refused: {out}");
-		assert!(
-			text(&out).contains("principals"),
-			"error names the field: {}",
-			text(&out)
-		);
-
-		// Wrong shape entirely is refused by deserialization, not coerced.
-		let out = srv.tool_query(&serde_json::json!({"id": "f1", "principals": "alice"}));
-		assert!(
-			is_error(&out),
-			"a bare string is not a principal list: {out}"
-		);
-	}
-}
-
-// ROADMAP item 18. `link` writes an edge by quoting up to 500 chars of BOTH
-// endpoint texts (`explain_relationship_prompt`, `src/base/util.rs`), so the
-// edge body is the endpoints' text under an id that is neither one's. Filtering
-// the ROW and rendering its edges unchecked publishes a scoped endpoint's text
-// to a non-member through any public neighbour. `src/mcp/resources.rs` already
-// gates its two edge renderings on the far endpoint; these are the other two the
-// item named — `entity_detail` (untruncated) and the ranked `edges` array.
-#[cfg(test)]
-mod edge_acl_tests {
-	use crate::base::reason::add_reason;
-	use crate::base::types::{Acl, Entity, EntityKind, Kern, Reason, ReasonKind, Source};
-	use crate::test_support::tool_text as text;
-
-	// Short enough to survive the ranked path's 120-char edge truncation.
-	const SECRET: &str = "acme ships on march 3";
-
-	fn is_error(out: &serde_json::Value) -> bool {
-		out
-			.get("isError")
-			.and_then(|x| x.as_bool())
-			.unwrap_or(false)
-	}
-
-	// A Fact on purpose: GC-immunity is not ACL-immunity, and an edge is where
-	// that is easiest to forget, because the Fact is never the row being served.
-	fn ent(id: &str, statement: &str, acl: Acl, vector: Vec<f32>) -> Entity {
-		let mut e = Entity {
-			id: id.into(),
-			kind: EntityKind::Fact,
-			source: Source::Inline {
-				hash: "h".into(),
-				section: String::new(),
-			},
-			statements: vec![statement.into()],
-			acl,
-			..Default::default()
-		};
-		e.vector = vector.into();
-		e
-	}
-
-	fn alice() -> Acl {
-		Acl {
-			scope: "acme".into(),
-			users: vec!["alice".into()],
-			groups: Vec::new(),
-		}
-	}
-
-	fn quoting_edge() -> Reason {
-		Reason {
-			id: "r1".into(),
-			from: "open".into(),
-			to: "secret".into(),
-			kind: ReasonKind::Similarity,
-			text: format!("B says {SECRET}"),
-			..Default::default()
-		}
-	}
-
-	fn server_with_edge() -> crate::mcp::Server {
-		let srv = crate::test_support::mcp_server();
-		let mut k = Kern::new("kx", "");
-		k.entities.insert(
-			"open".into(),
-			ent(
-				"open",
-				"a public neighbour",
-				Acl::default(),
-				vec![1.0, 0.0, 0.0],
-			),
-		);
-		k.entities.insert(
-			"secret".into(),
-			ent("secret", SECRET, alice(), vec![0.0, 1.0, 0.0]),
-		);
-		add_reason(&mut k, quoting_edge());
-		srv.graph.write().kerns.insert("kx".into(), k);
-		srv
-	}
-
-	#[tokio::test]
-	async fn id_read_withholds_edge_text_quoting_a_scoped_endpoint() {
-		let srv = server_with_edge();
-
-		let out = srv.tool_query(&serde_json::json!({"id": "open", "principals": ["bob"]}));
-		assert!(!is_error(&out), "the public row itself is admitted: {out}");
-		assert!(
-			!text(&out).contains(SECRET),
-			"a scoped Fact's text reached a non-member through a public neighbour's edge: {}",
-			text(&out)
-		);
-
-		let out = srv.tool_query(&serde_json::json!({"id": "open", "principals": ["alice"]}));
-		assert!(
-			text(&out).contains(SECRET),
-			"a member must still read the edge whole: {}",
-			text(&out)
-		);
-	}
-
-	// The load-bearing default, on the edge rendering too: naming no principal is
-	// no filter, not public-only. `kern get` routes here and names none.
-	#[tokio::test]
-	async fn a_bare_id_read_still_renders_the_whole_edge() {
-		let srv = server_with_edge();
-		let out = srv.tool_query(&serde_json::json!({"id": "open"}));
-		assert!(!is_error(&out), "{out}");
-		assert!(
-			text(&out).contains(SECRET),
-			"an unscoped caller reads every edge exactly as before: {}",
-			text(&out)
-		);
-	}
-
-	async fn ranked_server() -> (crate::mcp::Server, impl Sized) {
-		let app = axum::Router::new().route(
-			"/api/embed",
-			axum::routing::post(|| async {
-				axum::Json(serde_json::json!({ "embeddings": [[1.0, 0.0, 0.0]] }))
-			}),
-		);
-		let (url, server) = crate::test_support::spawn_http(app).await;
-		let mut srv = crate::test_support::mcp_server_with_embed_url(&url);
-		srv.llm = Some(crate::llm::Client::new_embed_only(&url, "test", ""));
-
-		{
-			let mut g = srv.graph.write();
-			let root = g.root.id.clone();
-			crate::base::accept::accept(
-				&mut g,
-				&root,
-				ent(
-					"open",
-					"a public neighbour",
-					Acl::default(),
-					vec![1.0, 0.0, 0.0],
-				),
-				"",
-			);
-			crate::base::accept::accept(
-				&mut g,
-				&root,
-				ent("secret", SECRET, alice(), vec![0.0, 1.0, 0.0]),
-				"",
-			);
-			let kid = g
-				.kern_of_entity("open")
-				.expect("open is resident")
-				.to_string();
-			add_reason(g.kerns.get_mut(&kid).expect("host kern"), quoting_edge());
-		}
-		(srv, server)
-	}
-
-	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-	async fn ranked_read_withholds_edge_text_quoting_a_scoped_endpoint() {
-		let (srv, _server) = ranked_server().await;
-
-		// Precondition: the edge is rendered at all, or the assertion below is vacuous.
-		let out = srv.tool_query(&serde_json::json!({"text": "anything"}));
-		assert!(!is_error(&out), "{out}");
-		assert!(
-			text(&out).contains(SECRET),
-			"precondition: an unscoped ranked read renders the quoting edge: {}",
-			text(&out)
-		);
-
-		let out = srv.tool_query(&serde_json::json!({"text": "anything", "principals": ["bob"]}));
-		assert!(!is_error(&out), "{out}");
-		assert!(
-			text(&out).contains("open"),
-			"the public row still arrives: {}",
-			text(&out)
-		);
-		assert!(
-			!text(&out).contains(SECRET),
-			"the ranked edges array served a scoped endpoint's text to a non-member: {}",
-			text(&out)
-		);
-	}
 }
 
 #[cfg(test)]
 mod cold_tier_filter_tests {
-	use crate::base::types::{Acl, Entity, EntityKind, Source};
+	use crate::base::types::{Entity, EntityKind, Source};
 
 	fn is_error(out: &serde_json::Value) -> bool {
 		out
@@ -916,16 +651,15 @@ mod cold_tier_filter_tests {
 			.unwrap_or(false)
 	}
 
-	fn spilled(id: &str, acl: Acl) -> Entity {
+	fn spilled(id: &str, kind: EntityKind) -> Entity {
 		let mut e = Entity {
 			id: id.into(),
-			kind: EntityKind::Claim,
+			kind,
 			source: Source::Inline {
 				hash: "h".into(),
 				section: String::new(),
 			},
 			statements: vec![format!("cold statement {id}")],
-			acl,
 			..Default::default()
 		};
 		e.vector = vec![1.0, 0.0, 0.0].into();
@@ -934,7 +668,7 @@ mod cold_tier_filter_tests {
 
 	// The cold tier is a raw cosine scan that answers no predicate of its own.
 	// Filling the ranked read from it unfiltered made spilling an entity the way
-	// around every filter the hot path enforces — for the ACL, the whole gate.
+	// around every filter the hot path enforces.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn a_cold_hit_answers_the_same_filter_the_hot_path_does() {
 		let app = axum::Router::new().route(
@@ -953,14 +687,8 @@ mod cold_tier_filter_tests {
 		let store = crate::base::store::Store::open(&dir.path().to_string_lossy()).expect("store");
 		store
 			.cold_put_all(&[
-				spilled("cold_open", Acl::default()),
-				spilled(
-					"cold_secret",
-					Acl {
-						scope: "acme".into(),
-						..Default::default()
-					},
-				),
+				spilled("cold_fact", EntityKind::Fact),
+				spilled("cold_claim", EntityKind::Claim),
 			])
 			.expect("spill");
 		srv.graph.write().set_store(std::sync::Arc::new(store));
@@ -977,25 +705,25 @@ mod cold_tier_filter_tests {
 				.collect()
 		};
 
-		// Precondition: naming no principal is no filter, so both cold rows arrive.
+		// Precondition: no filter, so both cold rows arrive.
 		let out = srv.tool_query(&serde_json::json!({"text": "anything"}));
 		assert!(!is_error(&out), "{out}");
 		let all = ids(&out);
 		assert!(
-			all.contains(&"cold_open".to_string()) && all.contains(&"cold_secret".to_string()),
+			all.contains(&"cold_fact".to_string()) && all.contains(&"cold_claim".to_string()),
 			"precondition: the cold fill reaches both rows: {all:?}"
 		);
 
-		let out = srv.tool_query(&serde_json::json!({"text": "anything", "principals": ["bob"]}));
+		let out = srv.tool_query(&serde_json::json!({"text": "anything", "kind": "fact"}));
 		assert!(!is_error(&out), "{out}");
 		let got = ids(&out);
 		assert!(
-			got.contains(&"cold_open".to_string()),
-			"the public cold row still arrives: {got:?}"
+			got.contains(&"cold_fact".to_string()),
+			"the matching cold row still arrives: {got:?}"
 		);
 		assert!(
-			!got.contains(&"cold_secret".to_string()),
-			"a scoped cold row must not reach a non-member just because it was spilled: {got:?}"
+			!got.contains(&"cold_claim".to_string()),
+			"a cold row must not dodge the kind filter just because it was spilled: {got:?}"
 		);
 	}
 }

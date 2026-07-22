@@ -13,10 +13,6 @@ pub struct KernRpcHandler {
 	pub kern: Arc<crate::mcp::Server>,
 	// Fires the daemon's graceful-exit path (save then exit) — the hub's unload.
 	pub shutdown: Arc<tokio::sync::Notify>,
-	// Who the connection declared itself to be, proven only as far as "it holds
-	// this graph's secret". Empty for the in-process handler that never crossed
-	// a socket. Nothing consults it yet; items 9 and 18 are what will.
-	pub principal: String,
 }
 
 impl KernRpcHandler {
@@ -24,13 +20,7 @@ impl KernRpcHandler {
 		Self {
 			kern,
 			shutdown,
-			principal: String::new(),
 		}
-	}
-
-	pub fn with_principal(mut self, principal: String) -> Self {
-		self.principal = principal;
-		self
 	}
 }
 
@@ -180,10 +170,10 @@ pub(crate) async fn serve_authenticated<H, F>(
 ) -> Result<(), AdapterError>
 where
 	H: KernRpc,
-	F: FnOnce(String) -> H,
+	F: FnOnce() -> H,
 {
-	let principal = verify_auth(&mut channel, token).await?;
-	serve_kern_rpc(channel, make_handler(principal)).await
+	verify_auth(&mut channel, token).await?;
+	serve_kern_rpc(channel, make_handler()).await
 }
 
 /// `token` is the graph's `mcp-token` (`ServeConfig::resolve_mcp_token`). It is
@@ -208,9 +198,9 @@ pub async fn serve_kern_rpc_loop(
 		let token = token.clone();
 		tokio::spawn(async move {
 			let channel = Channel::new(adapter, JsonEnvelopeCodec::new());
-			let served = serve_authenticated(channel, &token, |principal| {
-				tracing::debug!(target: "kern.kern_rpc", principal = %principal, "authenticated");
-				handler.with_principal(principal)
+			let served = serve_authenticated(channel, &token, || {
+				tracing::debug!(target: "kern.kern_rpc", "authenticated");
+				handler
 			})
 			.await;
 			if let Err(e) = served {
@@ -332,7 +322,7 @@ mod tests {
 mod auth_gate_tests {
 	use super::*;
 	use std::sync::atomic::{AtomicUsize, Ordering};
-	use trnsprt::kern_rpc::{AuthReq, PRINCIPAL_CLI};
+	use trnsprt::kern_rpc::AuthReq;
 	use trnsprt::typed::InprocAdapter;
 
 	const TOKEN: &str = "the-real-token";
@@ -343,7 +333,6 @@ mod auth_gate_tests {
 	#[derive(Clone, Default)]
 	struct Spy {
 		calls: Arc<AtomicUsize>,
-		principal: String,
 	}
 
 	impl KernRpc for Spy {
@@ -361,11 +350,10 @@ mod auth_gate_tests {
 			_req: CallToolReq,
 		) -> impl ::core::future::Future<Output = CallToolRes> + Send {
 			let calls = self.calls.clone();
-			let principal = self.principal.clone();
 			async move {
 				calls.fetch_add(1, Ordering::SeqCst);
 				CallToolRes {
-					envelope: serde_json::json!({ "principal": principal }),
+					envelope: serde_json::json!({ "ok": true }),
 				}
 			}
 		}
@@ -396,11 +384,7 @@ mod auth_gate_tests {
 		let spy_calls = calls.clone();
 		let server = tokio::spawn(async move {
 			let channel = Channel::new(server_side, JsonEnvelopeCodec::new());
-			let _ = serve_authenticated(channel, TOKEN, move |principal| Spy {
-				calls: spy_calls,
-				principal,
-			})
-			.await;
+			let _ = serve_authenticated(channel, TOKEN, move || Spy { calls: spy_calls }).await;
 		});
 
 		let mut client = Channel::new(client_side, JsonEnvelopeCodec::new());
@@ -447,7 +431,7 @@ mod auth_gate_tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn a_connection_with_the_wrong_token_never_reaches_call_tool() {
 		for offered in ["not-the-token", "the-real-tokex"] {
-			let (calls, result) = attempt(Some(AuthReq::new(offered, PRINCIPAL_CLI))).await;
+			let (calls, result) = attempt(Some(AuthReq::new(offered))).await;
 			assert_eq!(
 				calls, 0,
 				"a wrong token got a tool call through: {offered:?}"
@@ -457,14 +441,14 @@ mod auth_gate_tests {
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
-	async fn the_right_token_gets_through_and_carries_its_principal() {
-		let (calls, result) = attempt(Some(AuthReq::new(TOKEN, PRINCIPAL_CLI))).await;
+	async fn the_right_token_gets_through() {
+		let (calls, result) = attempt(Some(AuthReq::new(TOKEN))).await;
 		assert_eq!(calls, 1, "the daemon's own clients must still be served");
 		let res = result.expect("an authenticated call_tool answers");
 		assert_eq!(
-			res.pointer("/envelope/principal").and_then(Value::as_str),
-			Some(PRINCIPAL_CLI),
-			"the declared principal reaches the handler — the field items 9/18 ride"
+			res.pointer("/envelope/ok").and_then(Value::as_bool),
+			Some(true),
+			"the handler's answer travels back whole"
 		);
 	}
 
@@ -482,11 +466,7 @@ mod auth_gate_tests {
 
 		let served = tokio::time::timeout(std::time::Duration::from_secs(60), async move {
 			let channel = Channel::new(server_side, JsonEnvelopeCodec::new());
-			serve_authenticated(channel, TOKEN, move |principal| Spy {
-				calls: spy_calls,
-				principal,
-			})
-			.await
+			serve_authenticated(channel, TOKEN, move || Spy { calls: spy_calls }).await
 		})
 		.await
 		.expect("a silent connection kept the serve loop alive with no deadline to end it");
@@ -523,12 +503,12 @@ mod auth_gate_tests {
 		let gated = handler.clone();
 		let server = tokio::spawn(async move {
 			let channel = Channel::new(server_side, JsonEnvelopeCodec::new());
-			let _ = serve_authenticated(channel, TOKEN, |p| gated.with_principal(p)).await;
+			let _ = serve_authenticated(channel, TOKEN, || gated).await;
 		});
 
 		let mut client = Channel::new(client_side, JsonEnvelopeCodec::new());
 		client
-			.send(serde_json::json!({ "auth": AuthReq::new(TOKEN, PRINCIPAL_CLI) }))
+			.send(serde_json::json!({ "auth": AuthReq::new(TOKEN) }))
 			.await
 			.unwrap();
 		client.recv().await.unwrap().expect("a verdict frame");

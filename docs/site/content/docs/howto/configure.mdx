@@ -49,8 +49,8 @@ kern promote <id>                                 # release one, then it comes b
 
 A misspelled scheme refuses to load rather than holding nothing and reading as a working knob. `kern promote` is idempotent — releasing an already-active thought reports it and changes nothing.
 
-<Callout type="warn" title="`promote` is not authenticated yet">
-`kern promote` routes to a running daemon over its local socket, and that socket has no auth. Anything that can open it can release a held claim, which — unlike `kern intake drain` — is a curation-authority decision. The gate it will ride on is whatever the RPC-auth work lands.
+<Callout type="info" title="Who can `promote`">
+`kern promote` routes to a running daemon over its local socket. The socket is owner-only (`0600`) and authenticated with the graph's `mcp-token`; any caller holding that token can release a held claim. kern has no finer-grained caller identity — the process boundary is the access model.
 </Callout>
 
 ## The two model roles

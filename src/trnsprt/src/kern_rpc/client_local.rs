@@ -104,7 +104,7 @@ mod tests {
 	async fn connect_endpoint_gives_up_after_exhausting_retries() {
 		let res = KernRpcClient::connect_endpoint_with_retry(
 			&bogus_endpoint(),
-			&AuthReq::new("t", super::super::auth::PRINCIPAL_CLI),
+			&AuthReq::new("t"),
 			3,
 			Duration::from_millis(1),
 		)
@@ -131,7 +131,7 @@ mod tests {
 		}
 		let err = KernRpcClient::connect_endpoint_with_retry(
 			&Endpoint::Unix(std::path::PathBuf::from("/etc/hosts")),
-			&AuthReq::new("t", super::super::auth::PRINCIPAL_CLI),
+			&AuthReq::new("t"),
 			3,
 			Duration::from_millis(1),
 		)

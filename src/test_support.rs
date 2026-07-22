@@ -143,7 +143,7 @@ pub(crate) const TEST_TOKEN: &str = "scratch-token";
 
 #[cfg(unix)]
 pub(crate) fn test_caller() -> trnsprt::kern_rpc::AuthReq {
-	trnsprt::kern_rpc::AuthReq::new(TEST_TOKEN, trnsprt::kern_rpc::PRINCIPAL_CLI)
+	trnsprt::kern_rpc::AuthReq::new(TEST_TOKEN)
 }
 
 #[cfg(unix)]

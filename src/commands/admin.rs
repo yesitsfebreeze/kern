@@ -1,4 +1,4 @@
-use trnsprt::kern_rpc::{AuthReq, PRINCIPAL_CLI};
+use trnsprt::kern_rpc::AuthReq;
 use trnsprt::typed::Endpoint;
 
 use crate::base::util::short_id;
@@ -94,12 +94,12 @@ pub(super) async fn cmd_health(cfg: &crate::config::Config) {
 // The tick queue lives in the daemon; an offline CLI has no view of it. One
 // attempt, no retry: `kern health` must not stall when nothing is serving.
 async fn daemon_health(cfg: &crate::config::Config) -> Option<trnsprt::kern_rpc::HealthRes> {
-	use trnsprt::kern_rpc::{KernRpcClient, PRINCIPAL_CLI};
+	use trnsprt::kern_rpc::KernRpcClient;
 	use trnsprt::typed::{Endpoint, JsonEnvelopeCodec};
 
 	let client = KernRpcClient::<JsonEnvelopeCodec>::connect_endpoint_with_retry(
 		&Endpoint::kern(),
-		&crate::rpc::caller_of(cfg, PRINCIPAL_CLI),
+		&crate::rpc::caller_of(cfg),
 		1,
 		std::time::Duration::ZERO,
 	)
@@ -371,7 +371,7 @@ pub(super) async fn cmd_graviton(cfg: &crate::config::Config, action: GravitonAc
 	graviton_at(
 		cfg,
 		&Endpoint::kern(),
-		&crate::rpc::caller_of(cfg, PRINCIPAL_CLI),
+		&crate::rpc::caller_of(cfg),
 		action,
 	)
 	.await
@@ -496,7 +496,7 @@ pub(super) async fn cmd_claim_kind(cfg: &crate::config::Config, action: ClaimKin
 	claim_kind_at(
 		cfg,
 		&Endpoint::kern(),
-		&crate::rpc::caller_of(cfg, PRINCIPAL_CLI),
+		&crate::rpc::caller_of(cfg),
 		action,
 	)
 	.await

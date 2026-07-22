@@ -129,22 +129,6 @@ impl ReasonKind {
 	}
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Acl {
-	pub scope: String,
-	pub users: Vec<String>,
-	pub groups: Vec<String>,
-}
-
-impl Acl {
-	/// An ACL that names nothing is public: every caller reads it. The single
-	/// definition of "public" in the tree — `acl_admits` and the MCP resource
-	/// surface both ask here rather than each spelling out the emptiness test.
-	pub fn is_public(&self) -> bool {
-		self.scope.is_empty() && self.users.is_empty() && self.groups.is_empty()
-	}
-}
-
 // URI schemes: file://<path>, ticket://<system>/<id>[#section],
 // session://<id>[#slice], agent://<name>, inline://<hash>.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -307,7 +291,6 @@ pub struct Entity {
 	pub conf_beta: f32,
 	pub source: Source,
 	pub created_at: Option<SystemTime>,
-	pub acl: Acl,
 	pub access_count: GCounter,
 	pub accessed_at: Option<SystemTime>,
 	pub heat: f32,
@@ -634,7 +617,6 @@ pub(crate) fn mk_entity(id: &str, text: &str, heat: f64, kind: EntityKind) -> En
 			section: String::new(),
 		},
 		created_at: None,
-		acl: Acl::default(),
 		access_count: GCounter::new(),
 		accessed_at: None,
 		heat: heat as f32,

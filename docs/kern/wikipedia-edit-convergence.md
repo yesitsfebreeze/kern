@@ -59,7 +59,7 @@ assertions, and (4) asymmetrically weights trusted contributors.
 | Talk page                  | Existing `Reason`-graph around the thought        |
 | Reputation tier            | Per-`producer_id` score from `access_count`+merges|
 | NPOV article               | The *current* statement set (what `text()` emits) |
-| Page protection            | `acl.scope` already exists; extend with lock flag |
+| Page protection            | no per-row scoping in kern (removed 2026-07-22); a lock flag would be its own field |
 
 The talk-page analog is the single strongest fit: kern already has a typed
 edge graph (`ReasonKind::Provenance`, `Question`, `Supersedes`). A
@@ -94,7 +94,7 @@ Deferred (not building now):
   insufficient (long chains, need diff-by-byte, need blame-per-token).
 - Reputation scoring. Wait until we have a multi-agent deployment where
   adversarial or low-quality producers actually appear. Premature.
-- Locked/protected thoughts. `acl` already models scope; extend only when
+- Locked/protected thoughts. kern carries no per-row scoping; add only when
   a real threat model exists.
 
 Trigger conditions that would flip the decision toward full versioning:

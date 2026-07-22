@@ -35,29 +35,29 @@ fn cwd() -> PathBuf {
 	std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// What a client presents on connect: the graph's `mcp-token` plus the name it
-/// declares itself by. For the commands that run pinned to the project root,
-/// which is all of them — `main.rs` re-pins cwd before dispatch.
+/// What a client presents on connect: the graph's `mcp-token`. For the commands
+/// that run pinned to the project root, which is all of them — `main.rs` re-pins
+/// cwd before dispatch.
 ///
 /// No token found leaves it empty, and the daemon refuses an empty token like
 /// any other wrong one: a caller that cannot prove itself is turned away, not
 /// waved through.
-pub fn caller_of(cfg: &crate::config::Config, principal: &str) -> AuthReq {
-	AuthReq::new(token_for(&cwd(), cfg).unwrap_or_default(), principal)
+pub fn caller_of(cfg: &crate::config::Config) -> AuthReq {
+	AuthReq::new(token_for(&cwd(), cfg).unwrap_or_default())
 }
 
 /// The same, for a caller that knows only which directory the graph lives in —
 /// the hub, whose nodes are addressed by a root it never stands in.
-pub fn caller_at(root: &Path, principal: &str) -> AuthReq {
+pub fn caller_at(root: &Path) -> AuthReq {
 	let cfg =
 		crate::config::Config::load(root).unwrap_or_else(|_| crate::config::Config::default_in(root));
-	AuthReq::new(token_for(root, &cfg).unwrap_or_default(), principal)
+	AuthReq::new(token_for(root, &cfg).unwrap_or_default())
 }
 
 /// The caller identity for the graph rooted at this process's cwd — the root
 /// `Endpoint::kern()` resolves against.
-pub fn caller(principal: &str) -> AuthReq {
-	caller_at(&cwd(), principal)
+pub fn caller() -> AuthReq {
+	caller_at(&cwd())
 }
 
 #[cfg(test)]
@@ -106,7 +106,7 @@ mod caller_tests {
 		let cfg = crate::config::Config::default_in(root.path());
 		assert!(token_for(root.path(), &cfg).is_none());
 		assert!(
-			caller_at(root.path(), "cli").token.is_empty(),
+			caller_at(root.path()).token.is_empty(),
 			"an absent secret presents as empty, which verify_auth refuses"
 		);
 	}
@@ -126,7 +126,7 @@ mod caller_tests {
 				token_for(root.path(), &cfg).is_none(),
 				"a blank mcp-token must not present as a token ({body:?})"
 			);
-			assert!(caller_at(root.path(), "cli").token.is_empty());
+			assert!(caller_at(root.path()).token.is_empty());
 		}
 	}
 

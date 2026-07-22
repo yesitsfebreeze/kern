@@ -15,7 +15,7 @@ pub(super) async fn cmd_status(cfg: &crate::config::Config) {
 	println!("data dir     {}", cfg.data_dir);
 	println!("kern socket  {}", kern_ep.display());
 
-	let caller = crate::rpc::caller_of(cfg, trnsprt::kern_rpc::PRINCIPAL_CLI);
+	let caller = crate::rpc::caller_of(cfg);
 	let daemon = probe(&kern_ep, &caller).await;
 	match &daemon {
 		Some(h) => println!(

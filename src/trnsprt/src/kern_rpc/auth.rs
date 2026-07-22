@@ -7,25 +7,10 @@ use crate::typed::{AdapterError, Channel, JsonEnvelopeCodec};
 ///
 /// `token` is the per-graph secret the daemon minted (`resolve_mcp_token`) —
 /// the same `mcp-token` the HTTP surface demands, never a second one.
-///
-/// `principal` is *declared*, not proven. The socket is `0600` and the CLI, the
-/// `kern mcp` proxy and the hub all run as the same uid, so nothing on this
-/// connection can distinguish them: the secret proves "this uid", the principal
-/// says which of that uid's programs is talking. It is recorded, not enforced —
-/// items 9 and 18 are what will decide a principal's rights.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AuthReq {
 	pub token: String,
-	#[serde(default)]
-	pub principal: String,
 }
-
-/// A human at the terminal drove this.
-pub const PRINCIPAL_CLI: &str = "cli";
-/// An agent drove this, through `kern mcp`'s stdio proxy.
-pub const PRINCIPAL_MCP: &str = "mcp";
-/// The machine hub, on its own behalf (probe, idle poll, unload).
-pub const PRINCIPAL_HUB: &str = "hub";
 
 // One message for every refusal. A missing frame, a malformed frame and a wrong
 // token must read identically, or the reply becomes an oracle that tells a
@@ -33,8 +18,7 @@ pub const PRINCIPAL_HUB: &str = "hub";
 const REFUSED: &str = "kern.sock: unauthenticated";
 
 /// The cap on the one frame an unproven peer may send. A real `AuthReq` is
-/// `{"auth":{"token":"<64 hex>","principal":"cli"}}` — 110 bytes with the
-/// longest principal we mint. 1 KiB is nine times that and still an order of
+/// `{"auth":{"token":"<64 hex>"}}` — under 100 bytes. 1 KiB is an order of
 /// magnitude under `FramedRead`'s own 8 KiB starting buffer, so the refusal
 /// lands on the first decode, before that buffer has doubled even once.
 const AUTH_FRAME_MAX: usize = 1024;
@@ -48,10 +32,9 @@ const AUTH_FRAME_MAX: usize = 1024;
 const AUTH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl AuthReq {
-	pub fn new(token: impl Into<String>, principal: &str) -> Self {
+	pub fn new(token: impl Into<String>) -> Self {
 		Self {
 			token: token.into(),
-			principal: principal.to_string(),
 		}
 	}
 }
@@ -83,8 +66,7 @@ pub async fn present_auth(
 	}
 }
 
-/// Server half: read the caller's auth frame and verify it. Returns the
-/// declared principal.
+/// Server half: read the caller's auth frame and verify it.
 ///
 /// Every other outcome is a refusal — EOF, a codec error, a frame that is not
 /// an auth frame, a token that does not match, and an `expected` that is itself
@@ -98,7 +80,7 @@ pub async fn present_auth(
 pub async fn verify_auth(
 	channel: &mut Channel<JsonEnvelopeCodec>,
 	expected: &str,
-) -> Result<String, AdapterError> {
+) -> Result<(), AdapterError> {
 	channel
 		.decoder_mut()
 		.set_max_frame_len(Some(AUTH_FRAME_MAX));
@@ -123,7 +105,7 @@ pub async fn verify_auth(
 			channel
 				.send(serde_json::json!({ "auth": { "ok": true } }))
 				.await?;
-			Ok(req.principal)
+			Ok(())
 		}
 		_ => {
 			// Best-effort: say no out loud so a misconfigured client reports a
@@ -201,13 +183,13 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn the_right_token_verifies_and_hands_back_the_declared_principal() {
+	async fn the_right_token_verifies() {
 		let (mut server, mut client) = pair();
 		let task = tokio::spawn(async move { verify_auth(&mut server, "s3cret").await });
-		present_auth(&mut client, &AuthReq::new("s3cret", PRINCIPAL_CLI))
+		present_auth(&mut client, &AuthReq::new("s3cret"))
 			.await
 			.expect("the right token is accepted");
-		assert_eq!(task.await.unwrap().unwrap(), PRINCIPAL_CLI);
+		task.await.unwrap().expect("the server accepted it too");
 	}
 
 	// `s3crey` is the load-bearing case, not `guess`. A wrong token of a
@@ -221,7 +203,7 @@ mod tests {
 		for offered in ["guess", "s3crey"] {
 			let (mut server, mut client) = pair();
 			let task = tokio::spawn(async move { verify_auth(&mut server, "s3cret").await });
-			let out = present_auth(&mut client, &AuthReq::new(offered, PRINCIPAL_CLI)).await;
+			let out = present_auth(&mut client, &AuthReq::new(offered)).await;
 			assert!(
 				matches!(out, Err(AdapterError::Unauthenticated(_))),
 				"the client must learn it was refused, not that nothing was there (offered {offered:?})"
@@ -249,7 +231,7 @@ mod tests {
 		let (mut server, mut client) = pair();
 		let task = tokio::spawn(async move { verify_auth(&mut server, "s3cret").await });
 		client
-			.send(serde_json::json!({"auth": {"principal": "cli"}}))
+			.send(serde_json::json!({"auth": {}}))
 			.await
 			.unwrap();
 		assert!(task.await.unwrap().is_err(), "no token is not a token");
@@ -320,10 +302,10 @@ mod tests {
 		let (mut server, mut client) = pair();
 		let expected = token.clone();
 		let task = tokio::spawn(async move { verify_auth(&mut server, &expected).await });
-		present_auth(&mut client, &AuthReq::new(token, PRINCIPAL_CLI))
+		present_auth(&mut client, &AuthReq::new(token))
 			.await
 			.expect("the token the daemon mints must fit the frame it is sent in");
-		assert_eq!(task.await.unwrap().unwrap(), PRINCIPAL_CLI);
+		task.await.unwrap().expect("the server accepted it too");
 	}
 
 	// The daemon-side degenerate case. If the secret could not be read, the
@@ -334,7 +316,7 @@ mod tests {
 		for offered in ["", "anything"] {
 			let (mut server, mut client) = pair();
 			let task = tokio::spawn(async move { verify_auth(&mut server, "").await });
-			let _ = present_auth(&mut client, &AuthReq::new(offered, PRINCIPAL_CLI)).await;
+			let _ = present_auth(&mut client, &AuthReq::new(offered)).await;
 			assert!(
 				task.await.unwrap().is_err(),
 				"a daemon with no secret must serve nobody, not everybody (offered {offered:?})"

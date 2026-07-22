@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use trnsprt::kern_rpc::{KernRpcClient, PRINCIPAL_HUB};
+use trnsprt::kern_rpc::KernRpcClient;
 use trnsprt::typed::{Endpoint, JsonEnvelopeCodec};
 
 // Bootstrap loads the whole graph before binding kern.sock, so a big store
@@ -35,7 +35,7 @@ impl NodeHandle {
 // only the root can, via the config that names its data_dir. The endpoint is
 // derived here from the same root, so the two can never drift apart.
 fn node_caller(root: &Path) -> trnsprt::kern_rpc::AuthReq {
-	crate::rpc::caller_at(root, PRINCIPAL_HUB)
+	crate::rpc::caller_at(root)
 }
 
 // None = unreachable; Some(0) also means "treat as active" — daemons predating

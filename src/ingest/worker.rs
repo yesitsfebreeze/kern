@@ -22,10 +22,6 @@ pub(crate) struct Job {
 	pub(crate) hint: String,
 	pub(crate) confidence: f64,
 	pub(crate) config: Config,
-	// Stamped onto whatever this job places. `Acl::default()` is public — the
-	// documented default for every producer with no principal to name (the file
-	// watcher, the intake drain).
-	pub(crate) acl: Acl,
 	// Resolved from `config.review_policy` against `source`, once, at the gate.
 	pub(crate) review: ReviewState,
 	pub(crate) result_tx: Option<oneshot::Sender<Outcome>>,
@@ -45,7 +41,6 @@ fn job(
 	confidence: f64,
 	source_tag: &str,
 	config: Config,
-	acl: Acl,
 	result_tx: Option<oneshot::Sender<Outcome>>,
 ) -> Job {
 	// The confidence only. `kind` stays the producer's: a watched file is a
@@ -62,7 +57,6 @@ fn job(
 		hint,
 		confidence,
 		config,
-		acl,
 		review,
 		result_tx,
 	}
@@ -125,38 +119,11 @@ impl Worker {
 		source_tag: &str,
 		config: Config,
 	) -> Option<String> {
-		self.enqueue_with_acl(
-			text,
-			source,
-			kind,
-			hint,
-			confidence,
-			source_tag,
-			config,
-			Acl::default(),
-		)
-	}
-
-	// `enqueue` plus the requesting principal's ACL. The plain form is this with
-	// `Acl::default()` — public — which is what a producer that has no principal
-	// to name (the file watcher, the intake drain) still gets.
-	#[allow(clippy::too_many_arguments)]
-	pub fn enqueue_with_acl(
-		&self,
-		text: String,
-		source: Source,
-		kind: EntityKind,
-		hint: String,
-		confidence: f64,
-		source_tag: &str,
-		config: Config,
-		acl: Acl,
-	) -> Option<String> {
 		let doc_id = util::content_hash(&text);
 		if self
 			.tx
 			.try_send(job(
-				text, source, kind, hint, confidence, source_tag, config, acl, None,
+				text, source, kind, hint, confidence, source_tag, config, None,
 			))
 			.is_err()
 		{
@@ -198,7 +165,6 @@ impl Worker {
 			confidence,
 			source_tag,
 			config,
-			Acl::default(),
 			None,
 		);
 		self.tx.send(job).await.ok().map(|()| doc_id)
@@ -215,33 +181,6 @@ impl Worker {
 		source_tag: &str,
 		config: Config,
 	) -> Outcome {
-		self
-			.run_with_acl(
-				text,
-				source,
-				kind,
-				hint,
-				confidence,
-				source_tag,
-				config,
-				Acl::default(),
-			)
-			.await
-	}
-
-	// See `enqueue_with_acl`: the plain `run` is this with a public ACL.
-	#[allow(clippy::too_many_arguments)]
-	pub async fn run_with_acl(
-		&self,
-		text: String,
-		source: Source,
-		kind: EntityKind,
-		hint: String,
-		confidence: f64,
-		source_tag: &str,
-		config: Config,
-		acl: Acl,
-	) -> Outcome {
 		let (result_tx, result_rx) = oneshot::channel();
 		let job = job(
 			text,
@@ -251,7 +190,6 @@ impl Worker {
 			confidence,
 			source_tag,
 			config,
-			acl,
 			Some(result_tx),
 		);
 		if let Err(e) = self.tx.send(job).await {
@@ -607,7 +545,6 @@ mod tests {
 			hint: String::new(),
 			confidence: 1.0,
 			config: Config::default(),
-			acl: Acl::default(),
 			review: ReviewState::default(),
 			result_tx: None,
 		}
@@ -687,7 +624,6 @@ mod tests {
 				conf,
 				tag,
 				Config::default(),
-				Acl::default(),
 				None,
 			)
 		};
