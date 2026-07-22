@@ -82,6 +82,9 @@ pub const QUERY_MAX_CHAINS: usize = 5;
 pub const DEGRADE_DECAY_BASE: f64 = 0.15;
 pub const DEGRADE_DECAY_POW: f64 = 0.75;
 pub const DEGRADE_MIN_THRESHOLD: f64 = 0.05;
+/// Lower bound a `degrade`d edge score clamps at — a score is a non-negative
+/// relevance weight, so repeated degrades never push it negative (item 59 floor).
+pub const DEGRADE_FLOOR: f64 = 0.0;
 
 pub const QUESTION_RESOLVE_THRESHOLD: f64 = 0.80;
 
