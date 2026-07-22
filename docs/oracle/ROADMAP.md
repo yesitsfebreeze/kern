@@ -2965,16 +2965,8 @@ propagation overwrites one — another 76.8 MB at this corpus size.
 
 ### 84. Remaining operational odds and ends `[surface]`
 
-- **`serve.mcp_addr` is a config field with no reader.** Added when item 11
-  landed; `src/commands.rs` still resolves `cli.mcp_addr` alone, so setting it in
-  `kern.toml` starts no listener and warns about nothing — a silently-ignored
-  setting shipped by the tier that exists to delete them. Needs the CLI-over-config
-  resolve at the one call site.
-- **`kern merge` still defaults on a broken foreign config.**
-  `src/commands/admin.rs` does `Config::load(..).unwrap_or_else(..)` for both the
-  source and destination roots, the exact swallowing item 11 deleted at boot.
-  Not a mechanical port: a merge should probably refuse rather than default, which
-  is a decision to record.
+- **`serve.mcp_addr` is a config field with no reader.** ~~Added when item 11 landed~~ **Closed 2026-07-22.** `run_server` now resolves CLI flag first, falls back to `cfg.serve.mcp_addr`.
+- **`kern merge` still defaults on a broken foreign config.** ~~`src/commands/admin.rs` does `Config::load(..).unwrap_or_else(..)` for both the source and destination roots~~ **Closed 2026-07-22.** Both src and dst configs now fail loud on load error.
 - **`num_ctx` / `keep_alive` / `num_gpu` cannot warn when ignored on the `/v1`
   path**, because they are not config keys at all — they are constants in
   `src/llm.rs`, and the native-vs-compat decision is a private fn there. Warning

@@ -2,6 +2,9 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 84 sub-fix: `kern merge` refuses broken config instead of silently defaulting. Both src and dst configs fail loud on load error.
+  Decided by: fix-the-root.
+
 - 2026-07-22 — item 84 sub-fix: `serve.mcp_addr` config field now read as fallback when CLI `--mcp-addr` absent. CLI flag still wins; config field was silently ignored since item 11.
   Decided by: fix-the-root.
 
