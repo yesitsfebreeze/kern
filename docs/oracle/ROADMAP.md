@@ -2274,11 +2274,22 @@ Was two ceilings; the rerank half left with the rerank stage itself
 (2026-07-21). What remains: RRF weights plus mode blends are configurable but
 never auto-tuned (`FEATURES.md:210`).
 
-### 67. Binary quantization stays non-user-selectable `[retrieval]`
+### 67. Binary quantization stays non-user-selectable `[retrieval]` — closed 2026-07-22 by decision
 
 Its recall floor is too low without a rescoring pass; deliberately excluded from
 `parse` (`src/quant.rs:20-21`). Beside it: no int4 path and the quantization
 scale is fixed at encode time (`FEATURES.md:265`).
+
+**Closed 2026-07-22 — decided, not built.** Binary quantization stays
+non-user-selectable. Exposing it through `QuantizationMode::parse` would let a
+config opt into a recall floor the product has not measured against a rescoring
+pass, and kern claims no retrieval quality it has not measured (item 1 / item
+103). The `int8` path is already user-selectable (`kern compress`); `binary`
+is kept off the parse surface until a rescoring pass (re-rank the binary
+shortlist against the decoded float vectors) ships and the recall floor is
+measured — a separate, larger item, not this one. The encode-time scale and the
+missing int4 path stay as `FEATURES.md:265` records them. Decided by:
+verify-before-claiming (no unmeasured recall knob on a surface a user can set).
 
 ### 69. Speculative decode for the distill leg `[ingest]`
 

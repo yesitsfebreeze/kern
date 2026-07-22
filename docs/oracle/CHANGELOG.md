@@ -2,6 +2,15 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 67 closed by decision: binary quantization stays
+  non-user-selectable. Its recall floor is too low without a rescoring pass, and
+  kern claims no retrieval quality it has not measured — exposing `binary`
+  through `QuantizationMode::parse` would hand a config an unmeasured recall
+  knob. `int8` is already user-selectable (`kern compress`); `binary` returns to
+  the parse surface only when a rescoring pass ships and the floor is measured
+  (a separate, larger item). No code change. Decided by: verify-before-claiming.
+  Supersedes: nothing.
+
 - 2026-07-22 — item 82 closed by decision: standalone `kern mcp` is
   intentionally non-federated. It is the lightweight single-project local MCP
   server (fallback when no daemon serves); federation is the daemon's job —
