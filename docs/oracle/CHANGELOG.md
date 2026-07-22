@@ -2,6 +2,21 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 83 signal-on-approach half closed: the armed
+  `max_loaded_kerns` (128) is now surfaced. `GraphGnn::max_loaded_kerns()`
+  accessor + `HealthStats.max_kerns` + `kern health` prints `kerns: N (cap M)`
+  (or `cap off` for `KERN_CAP_DISABLED`) and warns `kerns near cap: N/M` at
+  `KERN_CAP_APPROACH_FRAC=0.9` — **daemon-sourced only** (item 100 rule). MCP
+  `health` JSON carries `max_kerns`; `trnsprt::HealthRes` gains
+  `#[serde(default)] max_kerns` (old daemon → `0` → `cap off`). Proved by
+  `graph_health_stats_reports_max_kerns`,
+  `kern_health_warns_when_resident_kerns_approach_cap` (116/128 → warn, 10/128
+  → none, `u64::MAX`/`0`/no-daemon → none), dto round-trip `max_kerns: 128`.
+  `cargo test -p kern --lib` 950 passed, 0 failed, 4 ignored; `cargo test -p
+  trnsprt --lib` 61 passed. Negative control (approach check `false` → no warn)
+  reds, green on revert. Decided by: fix-the-root, name-the-tradeoff,
+  verify-before-claiming.
+
 - 2026-07-22 — item 24 residue #2 closed: `connect_kern` peer-uid check now has
   a test seam mirroring the bind arm's `bind_unix(path, expected_peer)` — a
   `#[cfg(test)]` path injects the expected uid, and

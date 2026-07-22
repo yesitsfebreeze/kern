@@ -3341,6 +3341,27 @@ layer), name-the-tradeoff (the saving is per-reembed, not steady-state — GNN
 propagation breaks the share after the first tick), verify-before-claiming
 (negative control). See the 2026-07-22 CHANGELOG entry.
 
+**Signal-on-approach half closed 2026-07-22.** The armed `max_loaded_kerns` was
+unreported; now surfaced. `GraphGnn::max_loaded_kerns()` (new pub accessor) +
+`HealthStats.max_kerns` (new field, filled in `graph_health_stats`) +
+`kern health` prints `kerns: N (cap M)` (or `kerns: N (cap off)` when
+`M == KERN_CAP_DISABLED`) and warns `kerns near cap: N/M` at
+`KERN_CAP_APPROACH_FRAC` (new, `src/base/constants.rs`, default `0.9`),
+**daemon-sourced only** (item 100 rule — the CLI's fresh-open graph is
+structurally small). MCP `health` JSON carries `max_kerns`; `trnsprt::HealthRes`
+gains `#[serde(default)] max_kerns` (same shape as `gini_access`, item 62) so an
+old daemon reads `0` → `cap off`. Proved by
+`graph_health_stats_reports_max_kerns` (default → `KERN_CAP_DISABLED`; `set(8)`
+→ `8`), `kern_health_warns_when_resident_kerns_approach_cap` (116/128 → warn,
+10/128 → none, `u64::MAX`/`0`/no-daemon → none), dto round-trip `max_kerns:
+128`; existing kern-health + `HealthStats` tests green unedited. `cargo test -p
+kern --lib` 950 passed, 0 failed, 4 ignored; `cargo test -p trnsprt --lib` 61
+passed. Negative control (force the approach check `false` → 116/128 yields no
+warn → test reds, green on revert). Decided by fix-the-root (surface the armed
+cap, do not re-tune it), name-the-tradeoff (daemon-sourced only; `disk_threshold`
+stays silent — spill disarmed until item 75), verify-before-claiming (negative
+control). See the 2026-07-22 CHANGELOG entry.
+
 ### 84. Remaining operational odds and ends `[surface]`
 
 - **`serve.mcp_addr` is a config field with no reader.** ~~Added when item 11 landed~~ **Closed 2026-07-22.** `run_server` now resolves CLI flag first, falls back to `cfg.serve.mcp_addr`.
