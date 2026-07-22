@@ -86,7 +86,13 @@ pub(super) async fn cmd_health(cfg: &crate::config::Config) {
 			h.ingest_queue_refused
 		);
 	}
-	for line in tick_health_lines(daemon_health(cfg).await.as_ref()) {
+	// Asked once: the LLM lines below read the same answer, and a second call
+	// would be a second connect on a path that must not stall.
+	let d = daemon_health(cfg).await;
+	for line in tick_health_lines(d.as_ref()) {
+		println!("{line}");
+	}
+	for line in llm_health_lines(d.as_ref()) {
 		println!("{line}");
 	}
 
@@ -141,6 +147,29 @@ fn tick_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> {
 	}
 	if !h.last_task_failure.is_empty() {
 		lines.push(format!("  last failure: {}", h.last_task_failure));
+	}
+	lines
+}
+
+// The completion leg's failures (ROADMAP item 30). Daemon-sourced for the same
+// reason as the tick lines: the counter is a process static and nothing on the
+// `kern health` path completes anything, so a local read could only be zero.
+// Quiet at zero, loud otherwise — the count is what separates a dead endpoint
+// from a model too weak to answer, and the string is what separates a timeout
+// from a refusal from an empty body.
+fn llm_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> {
+	let Some(h) = h.filter(|h| h.llm_complete_failed > 0) else {
+		return Vec::new();
+	};
+	let mut lines = vec![format!(
+		"llm:         {} failed completions",
+		h.llm_complete_failed
+	)];
+	if !h.last_llm_complete_failure.is_empty() {
+		lines.push(format!(
+			"  last llm failure: {}",
+			h.last_llm_complete_failure
+		));
 	}
 	lines
 }
@@ -655,6 +684,41 @@ mod cmd_tests {
 		}));
 		assert_eq!(lines.len(), 2, "counts only, no fault lines: {lines:?}");
 		assert!(lines[1].contains("4 refused GNN trainings"), "{lines:?}");
+	}
+
+	// The three outcomes item 30 says were one empty string. Each drives the same
+	// counter, so the count alone cannot tell them apart — the named last failure
+	// is what does, and the test would pass on a count-only surface without it.
+	#[test]
+	fn the_llm_line_names_which_failure_it_counted() {
+		assert!(
+			llm_health_lines(None).is_empty(),
+			"no daemon -> no invented numbers"
+		);
+		assert!(
+			llm_health_lines(Some(&trnsprt::kern_rpc::HealthRes {
+				ok: true,
+				..Default::default()
+			}))
+			.is_empty(),
+			"a healthy completion leg stays quiet"
+		);
+
+		for reason in [
+			"transient: HTTP error: operation timed out",
+			"transient: HTTP error: tcp connect error",
+			"permanent: empty completion response",
+		] {
+			let lines = llm_health_lines(Some(&trnsprt::kern_rpc::HealthRes {
+				ok: true,
+				llm_complete_failed: 7,
+				last_llm_complete_failure: reason.into(),
+				..Default::default()
+			}));
+			assert_eq!(lines.len(), 2, "{lines:?}");
+			assert!(lines[0].contains("7 failed completions"), "{lines:?}");
+			assert!(lines[1].contains(reason), "{lines:?}");
+		}
 	}
 
 	#[test]

@@ -145,6 +145,10 @@ impl Server {
 			"unspilled_drops": h.unspilled_drops,
 			"ingest_queue_refused": h.ingest_queue_refused,
 			"gnn_train_refused": crate::tick::trainer::gnn_train_refused(),
+			// Read straight from the client, like `gnn_train_refused` above: it is a
+			// property of this process's LLM leg, not of the graph `h` describes.
+			"llm_complete_failed": crate::llm::complete_failed(),
+			"last_llm_complete_failure": crate::llm::last_complete_failure(),
 		})
 	}
 }
@@ -406,6 +410,8 @@ mod tests {
 			"unspilled_drops",
 			"ingest_queue_refused",
 			"gnn_train_refused",
+			"llm_complete_failed",
+			"last_llm_complete_failure",
 		] {
 			assert!(!h[key].is_null(), "{key} must reach the MCP surface");
 		}

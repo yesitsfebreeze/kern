@@ -24,7 +24,7 @@ pub use hub::HubConfig;
 pub use ingest::IngestConfig;
 pub use intake::IntakeConfig;
 pub use preset::Preset;
-pub use reason::ReasonConfig;
+pub use reason::{ReasonConfig, DEFAULT_REASON_TIMEOUT_SECS};
 pub use reload::ReloadConfig;
 pub use retrieval::RetrievalConfig;
 pub use serve::{mcp_token_path, open_private_append, ServeConfig};

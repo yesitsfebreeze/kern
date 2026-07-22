@@ -6,11 +6,18 @@ pub struct ReasonConfig {
 	pub url: String,
 	pub model: String,
 	pub key: String,
+	// Ceiling for one `complete` — the distill leg's slowest call. It was a
+	// `const` nobody chose for this leg; the default is the number it was, so an
+	// unconfigured kern posts under exactly the same bound. 0 keeps the default.
+	pub timeout_secs: u64,
 }
 
 const DEFAULT_REASON_URL: &str = "http://localhost:11434";
 
 pub const DEFAULT_REASON_MODEL: &str = "granite4:3b";
+
+// Slow CPU inference / large RAG prompts / long streams run past anything less.
+pub const DEFAULT_REASON_TIMEOUT_SECS: u64 = 600;
 
 impl Default for ReasonConfig {
 	fn default() -> Self {
@@ -18,6 +25,7 @@ impl Default for ReasonConfig {
 			url: DEFAULT_REASON_URL.into(),
 			model: DEFAULT_REASON_MODEL.into(),
 			key: String::new(),
+			timeout_secs: DEFAULT_REASON_TIMEOUT_SECS,
 		}
 	}
 }

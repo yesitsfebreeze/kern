@@ -47,7 +47,8 @@ pub(super) async fn cmd_profile(cfg: &crate::config::Config, text: &str, no_llm:
 	let llm_client = Client::new(
 		Endpoint::new(&reason_url, &cfg.reason.model, cfg.reason_key()),
 		Endpoint::new(&cfg.embed.url, &cfg.embed.model, &cfg.embed.key),
-	);
+	)
+	.with_timeout_secs(cfg.reason.timeout_secs);
 
 	let t = Instant::now();
 	let qvec = match llm_client.embed(text).await {
