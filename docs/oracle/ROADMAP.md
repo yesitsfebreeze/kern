@@ -43,6 +43,53 @@ These need no gossip, no flag and no unusual configuration. Every one produces a
 wrong or missing result with no error, which is why they outrank both the
 security work (armed only with federation on) and every feature.
 
+### 100. `kern health` reports the serving daemon's degradations — closed 2026-07-22 `[surface]`
+
+**Filed and closed 2026-07-22, found while reading item 28's close.** Eight of
+the numbers `kern health` prints are scoped to the process that reads them: the
+seven fail-open counters summed into `degraded:` are `AtomicU64` statics —
+`query_dim_rejected` (`src/base/search.rs:10`), `below_floor_deliveries`
+(`src/retrieval/score.rs:145`), `clock_skew_skips` and `unspilled_drops`
+(`src/tick/stigmergy.rs:16`), `ingest_queue_refused` (`src/ingest/worker.rs:81`),
+`ingest_dropped_chunks` (`src/ingest/worker.rs:311`), `remote_cap_dropped`
+(`src/base/merge.rs:140`) — and `evicted:` reads `Store::cold_evicted`
+(`src/base/store.rs:306`), an instance field every `Store::open` zeroes
+(`src/base/store.rs:351`). `cmd_health` built all eight from
+`graph_health_stats` over a graph *this CLI process* had just opened, and
+`load_graph` (`src/commands.rs:281`) runs no search, no scoring, no tick, no
+ingest and no merge, so the `if degraded > 0` branch was **unreachable from the
+CLI** and `evicted:` was **always 0** however degraded the daemon was. Not
+stale-and-sometimes-wrong: structurally zero.
+
+Closed by preferring the wire. `cmd_health` awaits `daemon_health` once, up
+front (`src/commands/admin.rs:43`), and hands the response to a new
+`degradation_lines` (`:116`) beside `tick_health_lines` (`:169`). `HealthRes`
+already carried all eight — `cold_evicted` (`src/trnsprt/src/kern_rpc/dto.rs:42`)
+and the seven at `:55`–`:67`, filled from the daemon's own `health_stats`
+(`src/rpc/kern_rpc_server.rs:104`) — and all eight are now taken **whole**
+(`src/commands/admin.rs:120`), not merged: a daemon is serving the store, so its
+counts are the true ones and this process's are noise about a graph nobody
+queried. The local read stands only when nothing answers (`:132`), where zero is
+honest. The no-daemon output is byte-identical to before, empty graph and
+populated.
+
+**The formatter is pure, so the tests are runner-independent.** These are
+process statics, so a test asserting on `ingest_queue_refused()` passes under
+`cargo nextest` (a fork per test) and fails under `cargo test --workspace
+--locked` (one process, which is what CI runs) the moment another test
+increments them — the trap item 92 hit. `degradation_lines` reads neither the
+statics nor the store, only its two arguments, and its tests
+(`src/commands/admin.rs:193`) construct both. The one that carries the decision
+is `a_local_count_is_not_printed_over_a_serving_daemons` (`:221`) — local
+counters nonzero, daemon healthy — which a `max()` or any additive merge fails.
+End to end, `e2e/test_health_surface.py` blinds the CLI's `data_dir` after the
+daemon has opened its own, drains three claims the fake LLM refuses to embed
+with a 400, and asserts `kern health` prints exactly 3: a count a blinded
+process cannot hold and a constant cannot match.
+
+Deciding behavior: verify-before-claiming — a health surface that cannot be
+wrong is worth more than another counter on one that can.
+
 ### 9. Live writers: `ingest`/`link` still write locally `[surface]`
 
 **Decided 2026-07-21, and implemented for every command the route fits.** The
@@ -181,7 +228,7 @@ underneath any of them gets a refused flush and a reload rather than a clobber.
 two unlocked callers".** The unguarded entry point is named
 `save_graph_unguarded` and carries its precondition, and walking its call sites
 turns up **three** classes, not two. The two this item already named stand and
-still do not belong to it: `cmd_hub_merge` (`src/commands/admin.rs:799`) writes
+still do not belong to it: `cmd_hub_merge` (`src/commands/admin.rs:915`) writes
 a destination graph it holds no lock on, and `maybe_self_heal_store`
 (`src/commands.rs:433`) rewrites the store during boot recovery — hub merge
 stops both daemons first, self-heal runs before the daemon serves, and neither
@@ -198,8 +245,8 @@ back over whatever the daemon had committed since — a full-graph clobber, not 
 lost write, and the exact race the writer lock and the route exist to close.
 **Corrected 2026-07-21 — this paragraph said "do not route at all" one commit
 after that stopped being true.** All four now route first
-(`graviton_at`, `src/commands/admin.rs:242`, route calls `:258` and `:304`;
-`claim_kind_at`, `:364`, route calls `:372` and `:390`), keeping `with_graph`
+(`graviton_at`, `src/commands/admin.rs:358`, route calls `:374` and `:420`;
+`claim_kind_at`, `:480`, route calls `:488` and `:506`), keeping `with_graph`
 as the `NoDaemon` fallback. Unlike `ingest` and `link` they assert no trust:
 `graviton` carries a name, seed text and a mass; `claim_kind` a name and a
 description. Neither mints a Fact, so routing them widened item 24's hole no
@@ -453,7 +500,7 @@ row to nobody; the ACL is still not a boundary a caller can be *held to*, only o
 they cannot get around here. Two residues are deliberate and named rather than
 closed. A **cardinality oracle**: `kern://local/health` and `kern://local/kerns`
 count every entity and reason, scoped included (`graph_health_stats`,
-`src/base/health.rs:44-50`; `k.entities.len()`, `resource_kerns`), so ingesting a
+`src/base/health.rs:48-54`; `k.entities.len()`, `resource_kerns`), so ingesting a
 scoped row moves a number. It discloses no id and no text, and it is the same
 count the operational `health` tool and CLI report — narrowing it is the separate
 question of what an unauthenticated *operational* surface may say, which belongs
@@ -1278,13 +1325,13 @@ old-daemon payload to prove a new client against an old daemon reads 0 rather
 than erroring. `KernRpcHandler::health` (`src/rpc/kern_rpc_server.rs:112`) fills
 it from `u64_at("gnn_train_refused")`, reading the *same* `tool_health` JSON the
 MCP surface emits so the two cannot drift. And `tick_health_lines`
-(`src/commands/admin.rs:135`) folds it into the existing `degraded:` line.
+(`src/commands/admin.rs:179`) folds it into the existing `degraded:` line.
 
 **Why it folds in rather than joining the fail-open line above it.** `cmd_health`
 already prints a `degraded:` line for the seven fail-open counters
-(`src/commands/admin.rs:79`), and that is where an eighth looks like it belongs.
+(`src/commands/admin.rs:156`), and that is where an eighth looks like it belongs.
 It cannot go there. That line is built from `graph_health_stats`
-(`src/base/health.rs:39`), which the CLI computes *in its own process*, while
+(`src/base/health.rs:43`), which the CLI computes *in its own process*, while
 `TRAIN_REFUSED` is a global only the daemon ever moves — a CLI reading it
 locally sees 0 forever. The only counters a CLI can see are the ones that
 crossed the RPC inside `HealthRes`, and the tick line is the only
@@ -1451,7 +1498,7 @@ that is the failure the new test reproduces when the bound is removed. Now
 `QUEUE_CAP` is the whole bound (`src/ingest/worker.rs:79`): `try_send` refuses
 the newest job rather than detaching (`:158`), the refusal is counted
 (`:163`) and reaches every health surface as `ingest_queue_refused`
-(`src/base/health.rs:81`, `src/mcp.rs:145`, `src/commands/admin.rs:86`). The
+(`src/base/health.rs:85`, `src/mcp.rs:145`, `src/commands/admin.rs:163`). The
 one producer that must not be refused waits instead — `submit` awaits capacity
 (`src/ingest/worker.rs:182`) and the file-watcher sink still calls it
 (`src/ingest/file_watcher.rs:129`) — now as the fail-open fallback behind item
@@ -1690,7 +1737,7 @@ the push-only choice was never revisited.
 The only per-origin budget is the `Question` one item 34 records
 (`src/gossip/handler.rs:318`, 30/min); the `Delta` path — the one that takes the
 write lock — has none. `HealthStats` has no divergence field
-(`src/base/health.rs:4-34`). Sharper than previously recorded: the four
+(`src/base/health.rs:8-38`). Sharper than previously recorded: the four
 full-corpus loops in `handle_crdt_delta` (`src/gossip/handler.rs:432`, `:448`,
 `:461`, `:482` — two `g.all_ids()`, two `remote_kern_ids(&g)`, which is
 `all_ids()` filtered at `:545`) run under the graph **write** lock, once per

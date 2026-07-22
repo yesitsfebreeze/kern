@@ -27,6 +27,12 @@ DIM = 384
 STALL_MARKER = "kern-e2e-stall-embed"
 STALL_SECS = 5
 
+# The one hard-failure path. Any embed input carrying this marker gets a 400 —
+# a permanent client error kern classifies as non-retryable — so the chunk is
+# dropped rather than stored. A test that has to drive a fail-open counter
+# *inside a live daemon* needs a write that fails there and nowhere else.
+FAIL_MARKER = "kern-e2e-fail-embed"
+
 
 def embed(text):
 	vec = [0.0] * DIM
@@ -80,6 +86,9 @@ class _Handler(BaseHTTPRequestHandler):
 			texts = inp if isinstance(inp, list) else [inp]
 			if any(STALL_MARKER in t for t in texts):
 				time.sleep(STALL_SECS)
+			if any(FAIL_MARKER in t for t in texts):
+				self.send_error(400, "embedding refused")
+				return
 			self._reply({"embeddings": [embed(t) for t in texts]})
 		elif self.path == "/api/chat":
 			last = ""
