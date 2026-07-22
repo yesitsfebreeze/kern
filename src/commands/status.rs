@@ -15,7 +15,8 @@ pub(super) async fn cmd_status(cfg: &crate::config::Config) {
 	println!("data dir     {}", cfg.data_dir);
 	println!("kern socket  {}", kern_ep.display());
 
-	let daemon = probe(&kern_ep).await;
+	let caller = crate::rpc::caller_of(cfg, trnsprt::kern_rpc::PRINCIPAL_CLI);
+	let daemon = probe(&kern_ep, &caller).await;
 	match &daemon {
 		Some(h) => println!(
 			"daemon       serving  ({} kerns, {} entities, idle {}s)",
@@ -26,7 +27,7 @@ pub(super) async fn cmd_status(cfg: &crate::config::Config) {
 		None => println!("daemon       not serving this directory"),
 	}
 
-	match probe(&hub_ep).await {
+	match probe(&hub_ep, &caller).await {
 		Some(_) => println!("hub          running   {}", hub_ep.display()),
 		None => println!("hub          not running"),
 	}
@@ -53,12 +54,23 @@ pub(super) async fn cmd_status(cfg: &crate::config::Config) {
 }
 
 // One attempt, no retry: status must answer instantly when nothing is there.
-async fn probe(ep: &Endpoint) -> Option<trnsprt::kern_rpc::HealthRes> {
-	KernRpcClient::<JsonEnvelopeCodec>::connect_endpoint_with_retry(ep, 1, std::time::Duration::ZERO)
-		.await
-		.ok()?
-		.health()
-		.await
-		.ok()
-		.filter(|h| h.ok)
+// A caller the daemon refuses reads as "not serving" here, the same as one that
+// found nothing — this line describes reachability, and an unreachable daemon is
+// unreachable either way. `route` is where the distinction has teeth.
+async fn probe(
+	ep: &Endpoint,
+	auth: &trnsprt::kern_rpc::AuthReq,
+) -> Option<trnsprt::kern_rpc::HealthRes> {
+	KernRpcClient::<JsonEnvelopeCodec>::connect_endpoint_with_retry(
+		ep,
+		auth,
+		1,
+		std::time::Duration::ZERO,
+	)
+	.await
+	.ok()?
+	.health()
+	.await
+	.ok()
+	.filter(|h| h.ok)
 }

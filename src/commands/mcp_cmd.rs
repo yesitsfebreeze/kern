@@ -2,7 +2,7 @@ use parking_lot::RwLock as StdRwLock;
 use std::sync::Arc;
 
 use tokio::sync::Mutex as TokioMutex;
-use trnsprt::kern_rpc::{CallToolReq, KernRpcClient};
+use trnsprt::kern_rpc::{AuthReq, CallToolReq, KernRpcClient, PRINCIPAL_MCP};
 use trnsprt::typed::{AdapterError, Endpoint, JsonEnvelopeCodec};
 use trnsprt::{McpError, McpServer, ToolResult, ToolSchema};
 
@@ -12,15 +12,16 @@ pub(super) async fn cmd_mcp(cfg: &crate::config::Config) {
 	// Hub-first: a running hub owns node lifecycle (spawn, adopt, unload) so the
 	// proxy never self-spawns a daemon the hub can't see. No hub -> direct path.
 	let log_dir = cfg.log_dir();
+	let caller = crate::rpc::caller_of(cfg, PRINCIPAL_MCP);
 	if let Some(client) = attach_via_hub(cfg.hub.auto_start, &log_dir).await {
 		let client = replace_if_stale(client, cfg, &log_dir, true).await;
-		run_proxy(client).await;
+		run_proxy(client, caller).await;
 		return;
 	}
-	match attach_with_retry(2, 150).await {
+	match attach_with_retry(&caller, 2, 150).await {
 		Ok(client) => {
 			let client = replace_if_stale(client, cfg, &log_dir, false).await;
-			run_proxy(client).await;
+			run_proxy(client, caller).await;
 		}
 		Err(e_first) => {
 			tracing::info!(
@@ -29,13 +30,13 @@ pub(super) async fn cmd_mcp(cfg: &crate::config::Config) {
 				"no daemon at kern.sock — auto-spawning detached daemon"
 			);
 			match spawn_daemon(&log_dir) {
-				Ok(()) => match attach_with_retry(6, 150).await {
+				Ok(()) => match attach_with_retry(&caller, 6, 150).await {
 					Ok(client) => {
 						tracing::info!(
 							target: "kern.mcp_proxy",
 							"attached to auto-spawned daemon — proxy mode"
 						);
-						run_proxy(client).await;
+						run_proxy(client, caller).await;
 					}
 					Err(e_retry) => {
 						tracing::warn!(
@@ -59,13 +60,14 @@ pub(super) async fn cmd_mcp(cfg: &crate::config::Config) {
 	}
 }
 
-async fn run_proxy(client: KernRpcClient<JsonEnvelopeCodec>) {
+async fn run_proxy(client: KernRpcClient<JsonEnvelopeCodec>, auth: AuthReq) {
 	tracing::info!(
 		target: "kern.mcp_proxy",
 		"attached to running daemon — proxy mode"
 	);
 	let proxy = ProxyServer {
 		client: Arc::new(TokioMutex::new(client)),
+		auth,
 	};
 	// serve_stdio is sync — on a blocking thread so it doesn't park a worker;
 	// call_tool crosses back via block_in_place (multi-thread rt only).
@@ -85,6 +87,8 @@ async fn replace_if_stale(
 ) -> KernRpcClient<JsonEnvelopeCodec> {
 	use super::mcp_restart::{verdict, Verdict};
 	use crate::base::identity;
+
+	let caller = crate::rpc::caller_of(cfg, PRINCIPAL_MCP);
 
 	let health = match client.health().await {
 		Ok(h) => h,
@@ -128,7 +132,7 @@ async fn replace_if_stale(
 	// respawn loses the race to the corpse and we reattach to what we just killed.
 	for _ in 0..40 {
 		tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-		if attach_with_retry(1, 0).await.is_err() {
+		if attach_with_retry(&caller, 1, 0).await.is_err() {
 			break;
 		}
 	}
@@ -137,7 +141,7 @@ async fn replace_if_stale(
 		attach_via_hub(cfg.hub.auto_start, log_dir).await
 	} else {
 		match spawn_daemon(log_dir) {
-			Ok(()) => attach_with_retry(40, 250).await.ok(),
+			Ok(()) => attach_with_retry(&caller, 40, 250).await.ok(),
 			Err(e) => {
 				tracing::warn!(target: "kern.mcp", error = %e, "respawn after restart failed");
 				None
@@ -155,7 +159,7 @@ async fn replace_if_stale(
 				target: "kern.mcp",
 				"could not reattach after restart — falling back to a fresh attach"
 			);
-			match attach_with_retry(40, 250).await {
+			match attach_with_retry(&caller, 40, 250).await {
 				Ok(c) => c,
 				Err(e) => {
 					tracing::error!(target: "kern.mcp", error = %e, "no daemon after restart");
@@ -220,18 +224,22 @@ async fn attach_via_hub(
 		spawned = res.spawned,
 		"attached via hub"
 	);
-	KernRpcClient::<JsonEnvelopeCodec>::connect_endpoint(&endpoint)
-		.await
-		.ok()
+	KernRpcClient::<JsonEnvelopeCodec>::connect_endpoint(
+		&endpoint,
+		&crate::rpc::caller_at(&root, PRINCIPAL_MCP),
+	)
+	.await
+	.ok()
 }
 
 async fn attach_with_retry(
+	auth: &AuthReq,
 	retries: u32,
 	delay_ms: u64,
 ) -> Result<KernRpcClient<JsonEnvelopeCodec>, AdapterError> {
 	let mut last_err: Option<AdapterError> = None;
 	for i in 0..retries {
-		match KernRpcClient::<JsonEnvelopeCodec>::connect_local().await {
+		match KernRpcClient::<JsonEnvelopeCodec>::connect_local(auth).await {
 			Ok(c) => return Ok(c),
 			Err(e) => {
 				last_err = Some(e);
@@ -277,6 +285,9 @@ fn spawn_detached(arg: &str, log_dir: &std::path::Path) -> std::io::Result<()> {
 
 struct ProxyServer {
 	client: Arc<TokioMutex<KernRpcClient<JsonEnvelopeCodec>>>,
+	// Re-presented on the reconnect below: a successor daemon has never seen
+	// this connection, so the proxy has to introduce itself again.
+	auth: AuthReq,
 }
 
 impl McpServer for ProxyServer {
@@ -305,6 +316,7 @@ impl McpServer for ProxyServer {
 
 	fn call_tool(&self, name: &str, args: &serde_json::Value) -> Result<ToolResult, McpError> {
 		let client = self.client.clone();
+		let auth = self.auth.clone();
 		let req = CallToolReq {
 			name: name.to_string(),
 			args: args.clone(),
@@ -321,7 +333,7 @@ impl McpServer for ProxyServer {
 				// the successor's graph load) and retry once. Safe to re-issue:
 				// ingest is content-addressed and deduped, queries are reads.
 				Err(_) => {
-					let fresh = attach_with_retry(40, 250).await?;
+					let fresh = attach_with_retry(&auth, 40, 250).await?;
 					let res = fresh.call_tool(req).await;
 					*client.lock().await = fresh;
 					res
@@ -362,6 +374,7 @@ enum StandaloneEntry {
 async fn claim_standalone(
 	data_dir: &str,
 	endpoint: &Endpoint,
+	auth: &AuthReq,
 	retries: u32,
 	delay: std::time::Duration,
 ) -> StandaloneEntry {
@@ -372,8 +385,10 @@ async fn claim_standalone(
 	// The likeliest holder is the daemon this process just spawned, up at last
 	// but after the attach window closed. Proxying to it is strictly better than
 	// dying, so spend one more window before refusing.
-	match KernRpcClient::<JsonEnvelopeCodec>::connect_endpoint_with_retry(endpoint, retries, delay)
-		.await
+	match KernRpcClient::<JsonEnvelopeCodec>::connect_endpoint_with_retry(
+		endpoint, auth, retries, delay,
+	)
+	.await
 	{
 		Ok(c) => StandaloneEntry::Attach(Box::new(c)),
 		Err(_) => StandaloneEntry::Refuse(held.to_string()),
@@ -384,13 +399,16 @@ async fn run_standalone(cfg: &crate::config::Config) {
 	let _writer_lock = match claim_standalone(
 		&cfg.data_dir,
 		&Endpoint::kern(),
+		&crate::rpc::caller_of(cfg, PRINCIPAL_MCP),
 		40,
 		std::time::Duration::from_millis(250),
 	)
 	.await
 	{
 		StandaloneEntry::Own(l) => l,
-		StandaloneEntry::Attach(client) => return run_proxy(*client).await,
+		StandaloneEntry::Attach(client) => {
+			return run_proxy(*client, crate::rpc::caller_of(cfg, PRINCIPAL_MCP)).await
+		}
 		StandaloneEntry::Refuse(who) => {
 			eprintln!("kern mcp: {who}");
 			eprintln!(
@@ -562,7 +580,9 @@ mod standalone_tests {
 			Arc::new(tokio::sync::Notify::new()),
 		);
 		tokio::spawn(crate::rpc::kern_rpc_server::serve_kern_rpc_loop(
-			listener, handler,
+			listener,
+			handler,
+			crate::test_support::TEST_TOKEN.to_string(),
 		));
 	}
 
@@ -572,6 +592,7 @@ mod standalone_tests {
 		let out = claim_standalone(
 			dir.path().to_str().unwrap(),
 			&scratch_endpoint("free"),
+			&crate::test_support::test_caller(),
 			1,
 			Duration::ZERO,
 		)
@@ -591,7 +612,14 @@ mod standalone_tests {
 		let d = dir.path().to_str().unwrap();
 		let _sibling = crate::base::lock::acquire(d, "mcp-standalone").expect("sibling claims it");
 
-		let out = claim_standalone(d, &scratch_endpoint("held"), 1, Duration::ZERO).await;
+		let out = claim_standalone(
+			d,
+			&scratch_endpoint("held"),
+			&crate::test_support::test_caller(),
+			1,
+			Duration::ZERO,
+		)
+		.await;
 		match out {
 			StandaloneEntry::Refuse(who) => assert!(
 				who.contains("mcp-standalone") && who.contains(&std::process::id().to_string()),
@@ -612,7 +640,14 @@ mod standalone_tests {
 		let ep = scratch_endpoint("late");
 		serving(&ep).await;
 
-		let out = claim_standalone(d, &ep, 5, Duration::from_millis(20)).await;
+		let out = claim_standalone(
+			d,
+			&ep,
+			&crate::test_support::test_caller(),
+			5,
+			Duration::from_millis(20),
+		)
+		.await;
 		assert!(
 			matches!(out, StandaloneEntry::Attach(_)),
 			"a holder that answers gets the traffic, not a refusal"

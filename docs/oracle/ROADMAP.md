@@ -71,14 +71,18 @@ cannot ride this route as it stands, because the RPC's only mutation surface is
 `MAX_AI_CONFIDENCE`, while `cmd_ingest` mints at `clamp_confidence(1.0, "user")`
 and `cmd_link` at `1.0`. Routing them unchanged would silently demote every
 CLI-minted Fact to an agent Claim. Routing them *with* their trust intact means
-putting a trust field on an unauthenticated socket, which is item 24's hole
-widened into an escalation path. So this half is **blocked on item 24**, not on
-effort.
+putting a trust field on the socket. **Restated 2026-07-22:** that used to read
+"an unauthenticated socket"; the socket now authenticates, and the block did not
+lift, because the part this half needs was never the missing auth. A shared
+secret proves a uid, and the CLI and the agent's proxy are the same uid — so a
+`principal` on that frame is still *declared*, and a trust field riding a
+declared principal is the same escalation path it always was. Blocked on item
+24's residue, not on effort.
 
 That block is a new sequencing edge pointing *down* the file — item 24 sits in
 tier 3 and this sits in tier 1 — and the list was not reordered for it. Item 24
-does not move up because the trust field is one caller of it, not its severity:
-an unauthenticated socket is armed the same either way.
+does not move up because the trust field is one caller of it, not its severity —
+and now that its gate is built, what remains of it is smaller than this half is.
 
 **Closed 2026-07-21: `graviton add`/`remove` and `claim-kind add`/`rm`.** These
 were the four shipped subcommands that reached `with_graph`
@@ -177,7 +181,7 @@ underneath any of them gets a refused flush and a reload rather than a clobber.
 two unlocked callers".** The unguarded entry point is named
 `save_graph_unguarded` and carries its precondition, and walking its call sites
 turns up **three** classes, not two. The two this item already named stand and
-still do not belong to it: `cmd_hub_merge` (`src/commands/admin.rs:748`) writes
+still do not belong to it: `cmd_hub_merge` (`src/commands/admin.rs:785`) writes
 a destination graph it holds no lock on, and `maybe_self_heal_store`
 (`src/commands.rs:424`) rewrites the store during boot recovery — hub merge
 stops both daemons first, self-heal runs before the daemon serves, and neither
@@ -194,14 +198,14 @@ back over whatever the daemon had committed since — a full-graph clobber, not 
 lost write, and the exact race the writer lock and the route exist to close.
 **Corrected 2026-07-21 — this paragraph said "do not route at all" one commit
 after that stopped being true.** All four now route first
-(`graviton_at`, `src/commands/admin.rs:234`, route calls `:245` and `:290`;
-`claim_kind_at`, `:343`, route calls `:346` and `:363`), keeping `with_graph`
+(`graviton_at`, `src/commands/admin.rs:242`, route calls `:258` and `:304`;
+`claim_kind_at`, `:364`, route calls `:372` and `:390`), keeping `with_graph`
 as the `NoDaemon` fallback. Unlike `ingest` and `link` they assert no trust:
 `graviton` carries a name, seed text and a mass; `claim_kind` a name and a
 description. Neither mints a Fact, so routing them widened item 24's hole no
 more than `intake drain` did, and the tools they route to already existed with
 matching semantics — `graviton` (`src/mcp/tools_admin.rs:87`, schema `:39`) and
-`claim_kind` (`:161`, schema `:52`), both dispatched at `src/mcp.rs:183-184`.
+`claim_kind` (`:161`, schema `:52`), both dispatched at `src/mcp.rs:184-185`.
 
 So the item's remainder is **one** half, not two: `ingest`/`link`, blocked on
 item 24. `graviton`/`claim_kind` were the unblocked half and are closed. The item
@@ -368,7 +372,10 @@ item 24 lands — default-deny can only be widened by it, never contradicted.
 
 **Still ungated — this is what keeps the item open.** What is *not* separable is
 how a principal arrives — resources get one per read or the server gets a session
-one — and that is the same missing-auth boundary as item 24. Until then the
+one — and that is item 24's residue. **Restated 2026-07-22:** a principal now
+does arrive on `kern.sock` (`AuthReq::principal`), but *declared*, not proven,
+and nothing reads it; a session principal a caller asserts about itself is not
+one an ACL can hold it to. Until then the
 surface serves public rows to any client that can open the transport, and a scoped
 row to nobody; the ACL is still not a boundary a caller can be *held to*, only one
 they cannot get around here. Two residues are deliberate and named rather than
@@ -461,11 +468,151 @@ auto-distilled claims out of retrieval until a human curates them. No
 `ReviewState`, `exclude_pending` or `promote` exists in `src/`. Requires 18's
 `QueryOptions` work first — review filters are more `matches_filter` predicates.
 
-### 24. RPC socket has no auth `[surface]`
+### 24. RPC socket authenticates the connection but not the caller — same-uid callers are indistinguishable `[surface]`
 
-`FEATURES.md:677-678`. The missing auth is the same boundary as 18's
-caller-asserted principals — decide them together or the principal stops at the
-MCP surface only. The item's second half is **retired 2026-07-21 — verified
+`FEATURES.md:677-685`. **Mostly closed 2026-07-22, and deliberately left open —
+read the residue at the bottom before citing this as a blocker.** The socket
+now authenticates; what it still cannot do is tell one same-uid caller from
+another, which is the half items 9 and 18 were waiting on.
+
+**Narrowed 2026-07-22 — "anything that can open the path" was already false on
+Unix when this was written.** `harden_socket`
+(`src/trnsprt/src/typed/local.rs:348`) sets the socket `0600` on both the fresh
+bind and the stale-rebind path, pinned by `a_bound_socket_is_owner_only` and
+`a_rebound_stale_socket_is_also_owner_only`, so a foreign uid never reaches it
+and the only residue is the sub-ms bind→chmod window item 84 already carries.
+No document said so — `FEATURES.md` §13 still read "anything that can open the
+path", which is why this is recorded here rather than assumed.
+
+**Built 2026-07-22 — the connection is authenticated.** One `AuthReq` frame
+(`src/trnsprt/src/kern_rpc/auth.rs:79`) carrying the graph's `mcp-token` — the
+same secret the HTTP surface already demands (`resolve_mcp_token`,
+`src/config/serve.rs:64`), never a second one — is compared in constant time
+before anything dispatches. The ordering is structural, not remembered:
+`serve_authenticated` (`src/rpc/kern_rpc_server.rs:173`) builds the handler
+*inside* a closure that only runs after the verdict, so on a refused connection
+no handler exists for a method to reach. Every non-match returns `Err`,
+including an empty `expected` — a daemon that cannot read its secret serves
+nobody rather than everybody — and `run_server` resolves the token before it
+binds, so that state is unreachable in practice as well as harmless. Windows
+gets the same posture the Unix `0600` states: an owner-only SDDL,
+`D:P(A;;GA;;;<user>)`, built from the process token's own SID
+(`src/trnsprt/src/typed/local.rs:385`) and passed to *every* pipe instance — <!-- docs-check: anchor-ok -->
+the `accept`-created ones too (`:598`), since an instance created without it
+would be a hole beside a locked door.
+
+**The tradeoff that was taken, named.** The secret proves *a uid*, not *a
+program*. The CLI, the `kern mcp` proxy an agent drives and the hub all run as
+the same user and can all read the same file, so no shared secret can separate
+them. `principal` is therefore **declared and recorded, never enforced** — the
+handler carries it, nothing consults it. This is honest but it is not what item
+9 needs to route `ingest`/`link` with their trust intact, nor what item 18 needs
+for a principal to survive past the MCP surface. Both must still cite something;
+they should now cite the *unproven principal*, not the missing socket auth.
+
+**Why it stays open — four residues, none of them "the gate might not hold".**
+The gate holds: making verification always succeed fails the no-token and the
+wrong-token tests, and gutting the byte compare fails them too (both mutations
+re-run 2026-07-22). What is left is everything the gate does not cover.
+1. **Windows is unexecuted.** The descriptor typechecks — `cargo check --target
+   x86_64-pc-windows-msvc -p trnsprt` is clean, and a deliberate type error
+   inside the `cfg(windows)` module does fail it, so that is not a vacuous
+   pass — but no line of it has ever run. The SDDL is unparsed, the token query
+   unmade, and there is no Windows test: `bind_tests_unix` is
+   `#[cfg(all(test, unix))]` and stays that way. Treat the pipe as *believed*
+   owner-only, not *known* to be.
+2. **`principal` is unproven**, above.
+3. **The socket secret is the HTTP secret, and the socket path is squattable.**
+   With no `XDG_RUNTIME_DIR` the endpoint falls back to `/tmp/kern-<tag>-<user>.sock`
+   (`Endpoint::scoped`, `src/trnsprt/src/typed/local.rs:44-55`), and `/tmp` is
+   sticky-but-writable: another local user can bind that name first. On the
+   socket the stolen token buys nothing (the real socket is `0600`), but it is
+   the *same* token `mcp_addr` demands, so a socket-side disclosure is an
+   HTTP-side compromise. That is the cost of reuse, and reuse was still the
+   right call — a second secret is a second thing to mint, rotate and get
+   wrong.
+
+   **The disclosure is closed 2026-07-22 — the client now authenticates the
+   server, twice.** `require_owned_by_caller`
+   (`src/trnsprt/src/typed/local.rs:237`) stats the endpoint and refuses unless
+   both the name and what it resolves to are owned by this euid.
+   `require_peer_is_caller` (`:283`) then reads `SO_PEERCRED` off the connected
+   socket and refuses unless the process serving it is this euid. Both sit in
+   `connect_kern` (`:314`), which returns before
+   `present_auth` (`src/trnsprt/src/kern_rpc/client_local.rs:44`) writes the
+   token — so both are ahead of every byte a client could send, and a check
+   after frame 1 would be decoration. It fails closed: any stat error, a
+   dangling symlink, and an unreadable peer credential all refuse.
+   `Endpoint::hub()` is the same `scoped()` name and reaches the wire through
+   the same `connect_kern`, so the hub socket is covered by construction rather
+   than by a second check.
+
+   **Why two checks and not one.** The stat is the cheap one and it is not
+   sufficient on its own: it describes a *name* at one instant, and the window
+   between it and the `connect` is opened by our own daemon rather than by an
+   attacker — `Drop for LocalListener` (`:611`) unlinks the socket on every
+   shutdown and the stale-rebind path unlinks it too, so a name that stats as
+   ours can be free a microsecond later and rebound by somebody else before the
+   `connect` lands. Waiting for a daemon restart is not a privilege an attacker
+   has to earn. `SO_PEERCRED` is the fact the kernel recorded when the peer
+   called `listen`, so no rename can move it; the stat is kept in front of it
+   only because refusing before opening a connection gives a message that names
+   the squatter's uid. **Do not describe the stat alone as sufficient** — an
+   earlier draft of this entry did, and it was wrong.
+
+   **Both checks are mutation-tested (re-run 2026-07-22).** Neutering
+   `require_owned_by_caller` to `Ok(())` fails 6 of 6 targeted tests, including
+   `a_foreign_owned_endpoint_is_refused_before_the_token_is_presented` — the
+   ordering assertion, which holds because connecting to a root-owned path
+   fails either way but as `UntrustedEndpoint` with the check and `Io` (EACCES)
+   without, so it cannot pass for the wrong reason. Neutering the peer uid
+   comparison fails `the_peer_check_reads_the_server_uid_and_decides_both_ways`.
+   That test injects the expected uid rather than reading `geteuid()`, because
+   a socket bound by a second uid is not something a test can create.
+
+   **What is still owed, in order of how much it matters.**
+   - **The daemon-side denial of service is untouched.** A squatter still
+     answers the `AlreadyRunning` probe (`src/trnsprt/src/typed/local.rs:500`),
+     so the real daemon still stands down. The client refuses to talk to the
+     squatter, so nothing leaks — the graph just has no daemon. Fixing it means
+     the bind path deciding what to do about a foreign socket it is forbidden
+     to unlink, which is a different change.
+   - **The wiring of the peer check is not test-covered, only its verdict is.**
+     Deleting the `require_peer_is_caller` call from `connect_kern` is a
+     mutation no test catches, because catching it needs a socket served by a
+     second uid. Code review is the only guard on that one line.
+   - **Windows gets no analogue and needs none** — a named pipe has no owning
+     uid, and the server side already pins every instance to this process's
+     SID, so both checks are `cfg(unix)`.
+   - **e2e measures only half of this, and cannot measure the other half.**
+     `e2e/conftest.py` sets `XDG_RUNTIME_DIR` per test, so e2e always takes the
+     XDG path and never the `/tmp` fallback that is the vulnerable one, and it
+     has no second uid with which to create a foreign-owned socket. So
+     `e2e/test_daemon_reads.py` and `e2e/test_graviton_routing.py` pin exactly
+     one thing — that the checks did not break connecting — and the refusal
+     itself is unit-test territory. Do not read a green e2e run as evidence
+     that the squat is covered.
+4. **The pre-auth frame is unbounded and untimed.** Filed 2026-07-22, unbuilt,
+   and added here 2026-07-22 because `FEATURES.md` §13 already cited this item
+   for it while the residue list did not carry it. `verify_auth`
+   (`src/trnsprt/src/kern_rpc/auth.rs:79`) awaits `channel.recv()` with no
+   deadline — `grep timeout` over `src/trnsprt/src/typed/`,
+   `src/trnsprt/src/kern_rpc/` and `src/rpc/` finds nothing — and
+   `JsonEnvelopeCodec::decode` (`src/trnsprt/src/typed/codec.rs:39`) returns
+   `Ok(None)` until a `\n` arrives, with no maximum frame length anywhere in the
+   crate. So a connection that opens and then sends bytes without a newline pins
+   a spawned task and grows a `BytesMut` for as long as it likes. This ranks
+   below the three above and is deliberately not called a boundary failure: the
+   socket is `0600`, so the caller is already same-uid and already owns the
+   account. It is a robustness bound, and the realistic trigger is an accident —
+   a wedged `kern mcp` proxy or hub connection — not an attacker. It is per
+   connection, not an accept-loop stall: `serve_kern_rpc_loop`
+   (`src/rpc/kern_rpc_server.rs`) spawns before it authenticates, so the daemon
+   keeps accepting. Closing it is a `tokio::time::timeout` around the handshake
+   plus a length cap in `decode`, and the cap needs a number nobody has chosen —
+   `call_tool` carries whole documents, so it cannot be small.
+
+The item's second half is **retired 2026-07-21 — verified
 false**: `KernRpc` does not mirror MCP 1:1 and never did. The contract is four
 methods (`health`/`shutdown`/`call_tool`/`list_tools`,
 `src/trnsprt/src/kern_rpc/svc.rs`) and every tool reaches the daemon through the
@@ -1020,7 +1167,7 @@ that is the failure the new test reproduces when the bound is removed. Now
 `QUEUE_CAP` is the whole bound (`src/ingest/worker.rs:79`): `try_send` refuses
 the newest job rather than detaching (`:158`), the refusal is counted
 (`:163`) and reaches every health surface as `ingest_queue_refused`
-(`src/base/health.rs:81`, `src/mcp.rs:145`, `src/commands/admin.rs:85`). The
+(`src/base/health.rs:81`, `src/mcp.rs:145`, `src/commands/admin.rs:86`). The
 one producer that must not be refused waits instead — `submit` awaits capacity
 (`src/ingest/worker.rs:182`) and the file-watcher sink still calls it
 (`src/ingest/file_watcher.rs:129`) — now as the fail-open fallback behind item
@@ -1080,7 +1227,7 @@ the resolved `intake.dir` and `data_dir` (`src/commands.rs:962`) — named by th
 host, because that crate must not know what kern is. `effective_roots` now pins a
 relative root to `cwd` (`src/config/watcher.rs:24`) so event paths and denied
 prefixes share one coordinate system. What is *not* closed is that the deny list
-is by name rather than by construction — item 98.
+is by name rather than by construction — item 99.
 
 The queue-depth half is
 **narrowed 2026-07-21** — closing item 8 gave `kern intake` a
@@ -1245,7 +1392,7 @@ sorts by heat and truncates to `ENTITY_SYNC_BATCH = 32` per heartbeat
 (`src/gossip/handler.rs:156`, sorted `:181`),
 so cold entities may never propagate and a partitioned node that rejoins never
 catches up. (`Fetch` is live — `wire_fetch` installs the handler at
-`src/commands.rs:1062` and the question path issues it — but it is single-id, not a
+`src/commands.rs:1077` and the question path issues it — but it is single-id, not a
 catch-up mechanism.) Two pieces adopted on paper and unscheduled: **back-off
 pacing** with exponential jitter keyed to a divergence estimate
 (`docs/kern/fl-vs-knids-federation.md:163-168`), and **batch-size / push-vs-pull
@@ -1359,7 +1506,7 @@ fallback and no way to distinguish discovery-failed from no-peers-present
 
 `TcpStream::connect` per call at `src/gossip/transport.rs:37` (`send_msg`) and
 `:45` (`send_and_receive`). No pooling. Separately, the `trnsprt` client has no
-pooling either (`FEATURES.md:964-965`) — that one is not gossip and is not gated
+pooling either (`FEATURES.md:971-972`) — that one is not gossip and is not gated
 on 33.
 
 ### 47. Hub phase 3: gossip moves hub-side `[hub]`
@@ -1375,7 +1522,7 @@ port-clash validation in `src/config/serve.rs` to collapse. (Corrected again
 item 84 owns.)
 
 Beside it: **hub↔node version skew is unmanaged** beyond same-binary spawning
-(`FEATURES.md:1070-1071`).
+(`FEATURES.md:1077-1078`).
 
 ### Decisions owed before the federation build
 
@@ -1796,6 +1943,31 @@ Neither is a defect in a running kern, which is why this sits in tier 9 — but 
 is the reason every reconcile pass so far has spent most of its effort
 re-pointing citations instead of checking claims.
 
+### 98. The pre-auth frame is unbounded and untimed `[surface]`
+
+`FEATURES.md` §13 states it plainly and no item carried it until now: the
+`AuthReq` frame is read from an **unauthenticated** peer with no size cap and no
+deadline. So the one thing reachable before the token is checked is also the one
+thing with no limit on it.
+
+Two shapes, both cheap for the attacker. A frame declaring a huge length makes
+the daemon allocate for a peer that has proven nothing. A connection that opens
+and then sends nothing occupies its accept slot indefinitely, and item 24 put
+the auth check *before* the handler exists, so a stalled pre-auth connection is
+holding resources for a session that will never be authorised.
+
+Neither is remote — `harden_socket` sets the socket `0600`, so the peer is
+already a same-uid process on this machine, which is why this is filed rather
+than escalated. But "same uid" is precisely the boundary item 24's residue says
+it cannot police, and a same-uid process is exactly the attacker item 24 left in
+scope. A limit that only holds against attackers who could already do worse is
+not a limit.
+
+Wanted: a maximum frame length and a read deadline, both applied before the
+first byte of `AuthReq` is trusted, and both smaller than anything the
+authenticated path uses. The numbers are a decision — a token frame is tens of
+bytes, so the cap can be brutal.
+
 ### 96. A shared `target-dir` can report green on stale code `[process]`
 
 The parallel-cycle worktrees all point `build.target-dir` at the main
@@ -2004,11 +2176,11 @@ non-goals.
 ### 76. The watchdog force-exit skips the final guarded flush `[store]`
 
 Confirmed against source 2026-07-21, and it is not a doc claim: `spawn_watchdog`
-(`src/commands.rs:870-909`) beats a counter once a second from the async runtime
+(`src/commands.rs:885-924`) beats a counter once a second from the async runtime
 and force-exits `std::process::exit(101)` (`:900`) after `STALL_LIMIT * CHECK_SECS`
 = 30s of no progress. `process::exit` runs no destructor and no `Drop`, so it
 skips the guarded shutdown flush the ordinary path takes — the `shutdown` notify
-at `src/commands.rs:832` unwinds into the guarded persist closure at `:592`,
+at `src/commands.rs:847` unwinds into the guarded persist closure at `:592`,
 which is the thing that "never overwrites a grown disk". Nothing on the watchdog
 path writes anything, and the exit line does not say so.
 
@@ -2065,16 +2237,16 @@ single local daemon and needs only sign-off.
 ### 81. `resources/list` and `prompts/list` return `-32601` on the proxy path `[surface]`
 
 `ProxyServer` implements `tools_list` / `call_tool` / `extra_capabilities` only
-(`src/commands/mcp_cmd.rs:290`, `:306`, `:343`) with no `handle_method` override,
+(`src/commands/mcp_cmd.rs:301`, `:317`, `:355`) with no `handle_method` override,
 so the trait default returns `None` (`src/trnsprt/src/server.rs:21`). Meanwhile
 `extra_capabilities` advertises `{"resources": {}, "prompts": {}}` (`:346`) to
-match standalone, which *does* serve them (`src/mcp.rs:212-221`, advertised `:158`). Advertised on
+match standalone, which *does* serve them (`src/mcp.rs:212-221`, advertised `:160`). Advertised on
 the normal path, non-functional there. Either forward them or stop advertising.
 
 ### 82. Standalone `kern mcp` runs no gossip `[surface]`
 
 **Corrected:** the previous version said "no maintenance tick and no gossip". The
-tick *is* started (`src/commands/mcp_cmd.rs:455-466`); only gossip is absent
+tick *is* started (`src/commands/mcp_cmd.rs:473-484`); only gossip is absent
 (`broadcast_q: None` at `:461`, `broadcast_pulse: None` at `:475`). A graph
 served that way decays, clusters and GCs normally, and simply does not federate.
 
@@ -2157,7 +2329,7 @@ propagation overwrites one — another 76.8 MB at this corpus size.
 - Hand-rolled tool schemas; no batch query
   (`FEATURES.md:636-637`).
 - The LLM client is Ollama-centric with no retry/backoff policy object
-  (`FEATURES.md:910-911`).
+  (`FEATURES.md:914-915`).
 - ~~Watcher `.gitignore` parsing is approximate; no rename tracking~~ **(retired
   2026-07-21 — verified false on both counts).** `IgnoreRules` builds a real
   `Gitignore` through ripgrep's `ignore` crate
@@ -2174,17 +2346,21 @@ propagation overwrites one — another 76.8 MB at this corpus size.
   fires. It sits in this tier and not in tier 1 because the watcher is **off by
   default** — `WatcherConfig::enabled` is `false` unless a `kern.toml` sets it
   (`src/config/watcher.rs:14-16`) — so it is not a default-path defect
-  (`FEATURES.md:1078-1081`).
-- `unnamed` lists only; there is no `promote` (`FEATURES.md:809`).
+  (`FEATURES.md:1085-1088`).
+- `unnamed` lists only; there is no `promote` (`FEATURES.md:813`).
 - GNN has no GPU path, weights are per-kern rather than shared, and the objective
   is link-prediction only (`FEATURES.md:593-594`).
 - Under WSL2 NAT a loopback Ollama URL must be hand-pinned; kern neither rewrites
-  nor warns (`FEATURES.md:1118-1120`).
+  nor warns (`FEATURES.md:1125-1127`).
 - RPC socket bind→chmod race — sub-millisecond, umask default — recorded as an
-  accepted risk (`concepts/security.mdx:40-43`); revisit only if the umask
-  alternative stops being worse.
+  accepted risk where it happens (`harden_socket`,
+  `src/trnsprt/src/typed/local.rs:341-351`); revisit only if the umask
+  alternative stops being worse. **Corrected 2026-07-22:** this cited
+  `concepts/security.mdx:40-43`, which is the API-key-vs-redirected-endpoint
+  rule and says nothing about the socket; that page states the `0600` mode at
+  `concepts/security.mdx:16` and does not record the race at all.
 
-### 98. The watcher's off-limits set is a list of names, not an invariant `[ingest]`
+### 99. The watcher's off-limits set is a list of names, not an invariant `[ingest]`
 
 Item 30's durable backstop put a kern-written file inside the default watched
 root and the watcher ate it — 283 payloads from one seed edit before the fix. The
@@ -2654,12 +2830,12 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   scheduled; the three it actually caught were live lies in `FEATURES.md` and
   `SPECIALISTS.md` (CHANGELOG 2026-07-21).
 - **Pulse and Question senders are live.** `broadcast_pulse` / `broadcast_q` built
-  in `start_gossip` (`src/commands.rs:987-1061`), pulse wired into the maintenance
+  in `start_gossip` (`src/commands.rs:1041-1122`), pulse wired into the maintenance
   tick (`:721`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
   `broadcast_q` invoked by `do_resolve` (`src/tick/tasks.rs:386`), `handle_question`
   live-dispatched (`src/gossip/handler.rs:44`).
 - **`Fetch` is wired** — `wire_fetch` installs the handler at
-  `src/commands.rs:1062`. Single-id, so it is not anti-entropy (item 36), but it
+  `src/commands.rs:1077`. Single-id, so it is not anti-entropy (item 36), but it
   is not dead.
 - **`union_statements` never existed**; remote heat is no longer pinnable
   (`src/base/merge.rs:20`, applied `:153`).

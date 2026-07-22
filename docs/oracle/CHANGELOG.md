@@ -36,7 +36,7 @@
   is. `effective_roots` now pins a relative root to `cwd`, because a relative
   root makes event paths relative while the denied prefixes are absolute, and
   two coordinate systems is how the check silently matches nothing. Filed as
-  item 98: the loop is closed by enumerating two directories, not by an
+  item 99: the loop is closed by enumerating two directories, not by an
   invariant.
 
   **The e2e's `STALL_MARKER` is load-bearing and that was measured, not
@@ -59,6 +59,160 @@
   unprovable by confidence, the stall is load-bearing, the fail-open path is
   live) are the ones that were re-measured rather than re-read.
 
+- 2026-07-22 — **The client authenticates the server, before it says anything.**
+  A `kern.sock` client used to present the graph's `mcp-token` to whatever was
+  bound at the path. With no `XDG_RUNTIME_DIR` that path is
+  `/tmp/kern-<tag>-<user>.sock`, which any local user can bind first, and the
+  socket token is the HTTP token — so the squat was an HTTP-side compromise.
+  `connect_kern` now refuses an endpoint this euid does not own, and refuses it
+  before `present_auth` writes frame 1. Item 24 residue 3 is closed on the
+  disclosure axis; the daemon-side denial of service is not, and stays filed.
+
+  **Two checks, because one is not enough.** `require_owned_by_caller` stats the
+  endpoint — both the name and what it resolves to must be ours. That is the
+  cheap half and it is racy on its own, and the race is not exotic: the window
+  is opened by *our own daemon*, since `Drop for LocalListener` unlinks the
+  socket on every shutdown and the stale-rebind path unlinks it too. A name that
+  stats as ours can be free a microsecond later and rebound by somebody else
+  before the `connect` lands, and an attacker only has to wait for a restart.
+  So `require_peer_is_caller` reads `SO_PEERCRED` off the connected socket
+  afterwards — the uid the kernel recorded when the peer called `listen`, which
+  no rename can move — still ahead of the token frame. The stat stays in front
+  because refusing without opening a connection yields a message naming the
+  squatter's uid.
+
+  **The `NotFound` carve-out, and why it is not a bypass.** A missing path
+  returns `Io`, not `UntrustedEndpoint`, so `route()` still reads it as
+  `NoDaemon` and every daemonless CLI invocation behaves as before. It cannot be
+  turned into a hole because the carve-out only changes the *variant* of an
+  error that is returned either way: `require_owned_by_caller(path)?` propagates
+  on `NotFound` exactly as it does on a refusal, so the connect never happens
+  and `present_auth` is never reached. Verified against a live binary — with no
+  socket, `kern claim-kind add` still writes locally; with the path pointing at
+  a root-owned file it prints `refusing endpoint`.
+
+  **Two defects found reviewing the first cut.** The refusal message printed the
+  *link's* uid on a target mismatch, so a symlink we own aimed at root's socket
+  read `owned by uid 1000, not 1000` — the two cases are reported separately
+  now. And the reported mutation score was wrong: neutering the stat check fails
+  **6** of 6 targeted tests, not 4 of 10; the earlier count was nextest's
+  fail-fast truncating the run, not four survivors.
+
+  Decided by: name-the-tradeoff — the `NotFound` carve-out trades a precise
+  error for the ordinary no-daemon path staying quiet, and it is safe only
+  because the connect is skipped either way; fix-the-root — the stat-vs-connect
+  TOCTOU was named and left in the first cut, and a check whose own daemon opens
+  the race window is false confidence, so `SO_PEERCRED` was built rather than
+  filed. What remains genuinely unclosed: the squatter still wins the
+  `AlreadyRunning` probe and the real daemon still stands down, and deleting the
+  peer-check *call* is a mutation no test catches, because catching it needs a
+  socket served by a second uid.
+- 2026-07-22 — swept every `**Gaps.**` block in `FEATURES.md` against
+  `ROADMAP.md` looking for more defects of item 98's kind — real, stated in a
+  description, carried by no item. **Found none.** Recording the negative result
+  with its method, so the next pass does not re-raise the same alarm.
+
+  The alarming-looking number is a false signal: **16 of 24 gap blocks cite no
+  ROADMAP item.** Spot-checking the two most concrete showed both are carried
+  anyway — "an entity dropped past the cap is gone" is closed item 5 (intended,
+  and counted by `unspilled_drops` on three health surfaces), and
+  `cmd_hub_merge`'s unguarded write is carried in item 9's section. Citation
+  style is not coverage, and counting citations measures the wrong thing.
+
+  So item 98 was a genuine one-off rather than the tip of a pattern, and it was
+  found by reading a neighbouring file rather than by any rule. Two heuristics
+  were tried and both came up empty: word-overlap between gap sentences and the
+  roadmap, and absence of an explicit item reference. The first is too loose to
+  discriminate, the second measures formatting.
+
+  Worth keeping the shape of the question even though the answer was "nothing
+  here": **a defect stated only in a present-tense description is not scheduled
+  work**, and that failure mode has produced three real items this run (95 out of
+  item 20's prose, 97 out of item 28's, 98 out of FEATURES §13). The sweep says
+  the backlog is currently clean of it, not that the failure mode is gone.
+
+  Decided by: verify-before-claiming — "16 of 24 uncited" looked like a finding
+  until two of them were opened, and neither was.
+
+- 2026-07-22 — item 24's title said "RPC socket has no auth" while its body said
+  "mostly closed 2026-07-22". Retitled to what is actually true: the connection
+  authenticates, the caller does not — same-uid callers remain
+  indistinguishable, which is the half items 9 and 18 were waiting on. Fourth
+  time a heading has outlived the defect it names, and slice selection reads
+  headings.
+
+  Also filed item 98, which `FEATURES.md` §13 stated and no item carried: **the
+  pre-auth frame is unbounded and untimed.** The one thing reachable before the
+  token is checked is the one thing with no cap on it. A frame declaring a huge
+  length makes the daemon allocate for a peer that has proven nothing; a
+  connection that opens and sends nothing holds its slot forever, and item 24
+  deliberately places the auth check before the handler exists, so that stall
+  costs a session that will never be authorised.
+
+  Not escalated, because `harden_socket` sets the socket `0600` and the peer is
+  therefore already a same-uid process. But that is exactly the attacker item
+  24's own residue says it cannot police — so "only a same-uid caller can do it"
+  is not mitigation here, it is a restatement of the open gap.
+
+  The pattern worth naming: **`FEATURES.md` described this correctly the whole
+  time.** The gap was not knowledge, it was that a limitation living only in a
+  present-tense description is not scheduled work. `ROADMAP.md` is the only file
+  that says what is left, so a real defect stated anywhere else is a defect
+  nobody will action. That is the third time this run — item 95 out of item 20's
+  prose, item 97 out of item 28's — and all three were found by reading the
+  neighbouring file rather than by anything automated.
+
+  Decided by: fix-the-root — the recurring failure is stating a defect somewhere
+  that is not the list of what is left.
+
+- 2026-07-22 — **`kern.sock` authenticates.** One `AuthReq` frame carrying the
+  graph's `mcp-token` is compared in constant time before any `KernRpc` method
+  dispatches, and the Windows named pipe is created with an owner-only SDDL
+  instead of the default descriptor. Item 24 is narrowed to a residue, not
+  closed.
+
+  **The defect the e2e corpus caught, and nothing else would have.** The socket
+  is keyed by the **root** (`Endpoint::kern_for` hashes the path) while the
+  token was keyed by the **data_dir**. Those are the same directory right up
+  until `kern.toml` is repointed under a live daemon — which is exactly the
+  blinding technique `e2e/` uses — and then the daemon keeps serving out of the
+  store it opened at boot while a later CLI, reading the new config, hunts for
+  the secret in a directory that daemon never wrote to. Every unit test passed:
+  they all built root and data_dir together, so the two keyings were
+  indistinguishable. `rpc::token_for` now searches the configured store first
+  and the root's conventional `.kern/data` second. The fallback is safe in the
+  only direction that matters: it changes what a *client presents*, never what
+  the *server accepts*, so a bad guess produces a refusal and can never produce
+  an admission.
+
+  **Why `principal` is recorded and not enforced.** The frame declares `cli`,
+  `mcp` or `hub`, and nothing consults it. A shared secret proves a **uid**; the
+  CLI, the `kern mcp` proxy an agent drives, and the hub all run as the same uid
+  and can all read the same file. There is no fact on that connection that can
+  separate them, so enforcing a self-asserted principal would be a permission
+  check a caller writes for itself. Recording it puts the field where items 9
+  and 18 need it without pretending it carries weight it does not.
+
+  **The gate was mutation-tested, and the first round of tests was decoration.**
+  Making verification always succeed did not fail the no-token test: an open
+  gate still *eats* the first frame, so one tool call cannot tell "consumed as a
+  handshake" from "consumed and refused". Offering the call twice distinguishes
+  them — past an open gate the second one lands — and re-running the mutation
+  confirms the two-attempt shape is what kills it. A second mutation found a
+  second decoration: every wrong token in the suite differed in *length* from
+  the right one, so `ct_eq`'s length short-circuit refused them all and gutting
+  the byte compare killed nothing at the gate. Both suites now offer a
+  same-length token differing in the final byte, and a negative case runs over a
+  real Unix socket rather than an in-process pipe.
+
+  Windows is typechecked (`cargo check --target x86_64-pc-windows-msvc -p
+  trnsprt`, with a deliberate type error proving the check is not vacuous) and
+  has never executed. Said plainly in `ROADMAP.md` item 24 rather than implied.
+
+  Decided by: fix-the-root — the root-vs-data_dir keying was the defect, and
+  repointing the test would have hidden it; name-the-tradeoff — reusing the HTTP
+  `mcp-token` means a socket-side disclosure is an HTTP-side compromise, which
+  is why item 24 stays open.
 - 2026-07-22 — merged item 21's review lifecycle. 203 + 1 + this one = 205. The
   merge broke **thirteen** citations, the worst single hit yet, and every one was
   a second-order effect: adding `ReviewState` to `Entity` shifted `types.rs`,

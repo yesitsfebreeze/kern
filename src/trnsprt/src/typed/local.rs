@@ -208,10 +208,118 @@ impl Adapter for LocalAdapter {
 	}
 }
 
+// Who is on the other end, decided before a single byte goes out. A client's
+// first frame is `present_auth`, which hands over the graph's `mcp-token` — the
+// same secret `mcp_addr` demands — and with no `XDG_RUNTIME_DIR` the endpoint
+// falls back to `/tmp/kern-<tag>-<user>.sock` (`Endpoint::scoped`), where the
+// sticky bit stops another local user from *deleting* the name but not from
+// *taking* it first. So the name gets checked before `connect`, which puts it
+// ahead of every byte a client could write.
+//
+// This is the cheap half and it is deliberately not the whole check: a stat
+// describes a path at one instant, and the path can move. `require_peer_is_caller`
+// below is the half that cannot be raced. Both run; this one first, because
+// failing on the stat gives a refusal that names the squatter's uid without
+// opening a connection to it at all.
+//
+// Fails closed. Any stat error refuses, including a symlink that resolves to
+// nothing; both the name and what it resolves to must be ours, because a
+// symlink is a substitution even when its target is innocent. The one case
+// that is *not* a refusal is a path with nothing at it at all: that is the
+// ordinary no-daemon case, nothing is bound, nothing can be told the token,
+// and callers that distinguish absence from a squat still need to.
+//
+// Windows has no analogue and gets none: a named pipe is not a filesystem
+// object with an owning uid, and the server side already restricts every
+// instance to this process's own SID (`owner_only::OwnerOnlySd`), so the name
+// cannot be taken by another user in the first place.
+#[cfg(unix)]
+fn require_owned_by_caller(path: &Path) -> Result<(), AdapterError> {
+	use std::os::unix::fs::MetadataExt;
+	let untrusted =
+		|what: &str| AdapterError::UntrustedEndpoint(format!("{}: {what}", path.display()));
+	// SAFETY: `geteuid` cannot fail and touches no memory the caller owns.
+	let euid = unsafe { libc::geteuid() };
+	let link = std::fs::symlink_metadata(path).map_err(|e| {
+		if e.kind() == std::io::ErrorKind::NotFound {
+			AdapterError::Io(e)
+		} else {
+			untrusted(&format!("cannot stat: {e}"))
+		}
+	})?;
+	let target = std::fs::metadata(path).map_err(|e| untrusted(&format!("cannot resolve: {e}")))?;
+	// Reported separately because they fail for different reasons and a refusal
+	// that cannot say which is a refusal nobody can act on: a symlink we own
+	// pointing at root's socket mismatches only on the target, and folding the
+	// two together printed the *link's* uid, i.e. "owned by uid 1000, not 1000".
+	if link.uid() != euid {
+		return Err(untrusted(&format!(
+			"owned by uid {}, not {euid}",
+			link.uid()
+		)));
+	}
+	if target.uid() != euid {
+		return Err(untrusted(&format!(
+			"resolves to a path owned by uid {}, not {euid}",
+			target.uid()
+		)));
+	}
+	Ok(())
+}
+
+// The second half, and the one that is not a guess. `require_owned_by_caller`
+// asks the filesystem about a *name*; this asks the kernel about *this
+// connection*. `SO_PEERCRED` is recorded when the peer called `listen`, so it
+// cannot be changed by anything that happens to the path afterwards — which
+// matters because the window between the stat and the connect is opened by our
+// own daemon, not by the attacker: `Drop for LocalListener` unlinks the socket
+// on every shutdown, and the stale-rebind path unlinks it too, so a name that
+// stats as ours can be free a microsecond later and bound by somebody else
+// before `connect` lands. A stat alone cannot see that; this does.
+//
+// Still ahead of frame 1: `connect_kern` returns the adapter and only then does
+// `present_auth` write the token.
+#[cfg(unix)]
+fn require_peer_is_caller(adapter: &UnixStreamAdapter, path: &Path) -> Result<(), AdapterError> {
+	// SAFETY: `geteuid` cannot fail and touches no memory the caller owns.
+	require_peer_uid(adapter, path, unsafe { libc::geteuid() })
+}
+
+// Split out with the expected uid as an argument for one reason: the refusal is
+// otherwise untestable. Asserting that a foreign server is turned away would
+// need a socket bound by a second uid, which no test can create; passing a uid
+// that is deliberately not ours exercises the same real `SO_PEERCRED` read
+// against a real connected socket and leaves only `geteuid()` uncovered.
+#[cfg(unix)]
+fn require_peer_uid(
+	adapter: &UnixStreamAdapter,
+	path: &Path,
+	expected: u32,
+) -> Result<(), AdapterError> {
+	let untrusted =
+		|what: &str| AdapterError::UntrustedEndpoint(format!("{}: {what}", path.display()));
+	let cred = adapter
+		.stream
+		.peer_cred()
+		.map_err(|e| untrusted(&format!("cannot read peer credentials: {e}")))?;
+	if cred.uid() != expected {
+		return Err(untrusted(&format!(
+			"served by uid {}, not {expected}",
+			cred.uid()
+		)));
+	}
+	Ok(())
+}
+
 pub async fn connect_kern(endpoint: &Endpoint) -> Result<LocalAdapter, AdapterError> {
 	match endpoint {
 		#[cfg(unix)]
-		Endpoint::Unix(path) => Ok(LocalAdapter::Unix(UnixStreamAdapter::connect(path).await?)),
+		Endpoint::Unix(path) => {
+			require_owned_by_caller(path)?;
+			let adapter = UnixStreamAdapter::connect(path).await?;
+			require_peer_is_caller(&adapter, path)?;
+			Ok(LocalAdapter::Unix(adapter))
+		}
 		#[cfg(windows)]
 		Endpoint::NamedPipe(name) => Ok(LocalAdapter::NamedPipe(
 			NamedPipeAdapter::connect(name).await?,
@@ -230,14 +338,153 @@ pub enum BindError {
 	Io(#[from] std::io::Error),
 }
 
-// The socket serves unauthenticated graph reads AND mutations, so it must be
-// owner-only. chmod-after-bind leaves a sub-ms window at the umask default
-// (0755); the alternative is flipping the process-global umask, which in a
-// multi-threaded daemon would race every unrelated file created concurrently.
+// The socket carries graph reads AND mutations behind one shared secret that
+// proves a uid and nothing finer, so it must be owner-only: a foreign uid that
+// could open it would be inside the only boundary there is. chmod-after-bind
+// leaves a sub-ms window at the umask default (0755); the alternative is
+// flipping the process-global umask, which in a multi-threaded daemon would
+// race every unrelated file created concurrently.
 #[cfg(unix)]
 fn harden_socket(path: &Path) -> std::io::Result<()> {
 	use std::os::unix::fs::PermissionsExt;
 	std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
+// The same posture on Windows, where there are no mode bits to set. A named
+// pipe created with the default security descriptor is reachable by anything on
+// the machine that can name it, so every instance is created with an explicit
+// one instead: SDDL `D:P(A;;GA;;;<user>)` — a protected DACL (no inheritance)
+// carrying exactly one ACE, full access for the SID this process runs as. No
+// SYSTEM ACE and no Administrators ACE, because `0600` grants neither.
+#[cfg(windows)]
+mod owner_only {
+	use std::io;
+
+	use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
+	use windows_sys::Win32::Security::Authorization::{
+		ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+	};
+	use windows_sys::Win32::Security::{
+		GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
+		TOKEN_USER,
+	};
+	use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+	/// An owner-only security descriptor, freed on drop. Held by the listener
+	/// for the whole of its life: `accept` creates a fresh pipe instance per
+	/// connection, and an instance created without this is an open door.
+	pub struct OwnerOnlySd(PSECURITY_DESCRIPTOR);
+
+	// SAFETY: the pointer is owned, never mutated after construction, and only
+	// read through `attributes()`.
+	unsafe impl Send for OwnerOnlySd {}
+	unsafe impl Sync for OwnerOnlySd {}
+
+	impl OwnerOnlySd {
+		pub fn new() -> io::Result<Self> {
+			let sid = current_user_sid()?;
+			let sddl: Vec<u16> = format!("D:P(A;;GA;;;{sid})")
+				.encode_utf16()
+				.chain(std::iter::once(0))
+				.collect();
+			let mut psd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+			// SAFETY: `sddl` is NUL-terminated and outlives the call; `psd` receives
+			// a LocalAlloc'd descriptor this value then owns.
+			let ok = unsafe {
+				ConvertStringSecurityDescriptorToSecurityDescriptorW(
+					sddl.as_ptr(),
+					SDDL_REVISION_1,
+					&mut psd,
+					std::ptr::null_mut(),
+				)
+			};
+			if ok == 0 || psd.is_null() {
+				return Err(io::Error::last_os_error());
+			}
+			Ok(Self(psd))
+		}
+
+		pub fn attributes(&self) -> SECURITY_ATTRIBUTES {
+			SECURITY_ATTRIBUTES {
+				nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+				lpSecurityDescriptor: self.0,
+				bInheritHandle: 0,
+			}
+		}
+	}
+
+	impl Drop for OwnerOnlySd {
+		fn drop(&mut self) {
+			// SAFETY: allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW
+			// (LocalAlloc) and freed nowhere else.
+			unsafe { LocalFree(self.0.cast()) };
+		}
+	}
+
+	fn current_user_sid() -> io::Result<String> {
+		let mut token: HANDLE = std::ptr::null_mut();
+		// SAFETY: the pseudo-handle from GetCurrentProcess needs no close; `token`
+		// receives a real handle closed below.
+		if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+			return Err(io::Error::last_os_error());
+		}
+		let out = token_user_sid(token);
+		// SAFETY: `token` was opened here and is not used after this.
+		unsafe { CloseHandle(token) };
+		out
+	}
+
+	fn token_user_sid(token: HANDLE) -> io::Result<String> {
+		let mut len: u32 = 0;
+		// SAFETY: the sizing call is *expected* to fail; it only writes `len`.
+		unsafe { GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut len) };
+		if len == 0 {
+			return Err(io::Error::last_os_error());
+		}
+		let mut buf = vec![0u8; len as usize];
+		// SAFETY: `buf` is exactly the length the sizing call asked for.
+		if unsafe { GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), len, &mut len) } == 0
+		{
+			return Err(io::Error::last_os_error());
+		}
+		// SAFETY: the buffer now holds a TOKEN_USER whose `Sid` points inside it.
+		let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+		let mut raw: *mut u16 = std::ptr::null_mut();
+		// SAFETY: `sid` is valid for the lifetime of `buf`; `raw` receives a
+		// LocalAlloc'd NUL-terminated string freed below.
+		if unsafe { ConvertSidToStringSidW(sid, &mut raw) } == 0 || raw.is_null() {
+			return Err(io::Error::last_os_error());
+		}
+		let mut n = 0usize;
+		// SAFETY: walking a NUL-terminated buffer the call above guaranteed.
+		while unsafe { *raw.add(n) } != 0 {
+			n += 1;
+		}
+		// SAFETY: `raw[..n]` is the string body, exclusive of the terminator.
+		let s = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(raw, n) });
+		// SAFETY: `raw` came from ConvertSidToStringSidW and is dead after this.
+		unsafe { LocalFree(raw.cast()) };
+		Ok(s)
+	}
+}
+
+#[cfg(windows)]
+fn create_pipe_instance(
+	name: &str,
+	sd: &owner_only::OwnerOnlySd,
+	first: bool,
+) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+	use tokio::net::windows::named_pipe::ServerOptions;
+	let mut attrs = sd.attributes();
+	// SAFETY: `attrs` lives across the call and points at a descriptor `sd` owns.
+	unsafe {
+		ServerOptions::new()
+			.first_pipe_instance(first)
+			.create_with_security_attributes_raw(
+				name,
+				std::ptr::addr_of_mut!(attrs).cast::<std::ffi::c_void>(),
+			)
+	}
 }
 
 pub async fn bind_kern_listener(endpoint: &Endpoint) -> Result<BindOutcome, BindError> {
@@ -265,13 +512,14 @@ pub async fn bind_kern_listener(endpoint: &Endpoint) -> Result<BindOutcome, Bind
 		}
 		#[cfg(windows)]
 		Endpoint::NamedPipe(name) => {
-			use tokio::net::windows::named_pipe::ServerOptions;
-			match ServerOptions::new()
-                .first_pipe_instance(true)
-                .create(name)
-            {
+			// Fail closed: no descriptor, no pipe. A pipe created with the default
+			// DACL is one any process on the machine can open, which is worse than
+			// not serving — it looks like a daemon and guards nothing.
+			let security = owner_only::OwnerOnlySd::new()?;
+			match create_pipe_instance(name, &security, true) {
                 Ok(server) => Ok(BindOutcome::Bound(LocalListener {
                     pipe_name: name.clone(),
+                    security,
                     current: Some(server),
                 })),
                 Err(e)
@@ -315,6 +563,10 @@ pub struct LocalListener {
 	socket_path: PathBuf,
 	#[cfg(windows)]
 	pipe_name: String,
+	// Kept for the life of the listener: `accept` creates the *next* instance,
+	// and an instance without this descriptor is a hole beside a locked door.
+	#[cfg(windows)]
+	security: owner_only::OwnerOnlySd,
 	#[cfg(windows)]
 	current: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
 }
@@ -342,9 +594,12 @@ impl LocalListener {
 			let server = self.current.take().expect("listener uninitialised");
 			server.connect().await?;
 			// Pre-create the next instance so subsequent accept doesn't race
-			// a fast reconnect.
-			self.current =
-				Some(tokio::net::windows::named_pipe::ServerOptions::new().create(&self.pipe_name)?);
+			// a fast reconnect — with the same descriptor as the first.
+			self.current = Some(create_pipe_instance(
+				&self.pipe_name,
+				&self.security,
+				false,
+			)?);
 			Ok(LocalAdapter::NamedPipe(NamedPipeAdapter::from_server(
 				server,
 			)))
@@ -448,6 +703,167 @@ mod bind_tests_unix {
 		assert!(
 			matches!(outcome, BindOutcome::Bound(_)),
 			"stale file removed, endpoint rebound"
+		);
+	}
+}
+
+#[cfg(all(test, unix))]
+mod owner_tests_unix {
+	use super::*;
+
+	// A path owned by somebody else, without needing a second uid to make one.
+	// `/etc/hosts` is root's on every Unix a developer runs this on; under an
+	// euid of 0 it is *ours*, and there is then nothing on the filesystem this
+	// process could fail to own, so the case is skipped rather than faked.
+	fn foreign_path() -> Option<PathBuf> {
+		// SAFETY: `geteuid` cannot fail and touches no memory the caller owns.
+		if unsafe { libc::geteuid() } == 0 {
+			return None;
+		}
+		let p = PathBuf::from("/etc/hosts");
+		p.exists().then_some(p)
+	}
+
+	#[test]
+	fn a_path_this_user_owns_is_accepted() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("kern.sock");
+		std::fs::write(&path, b"").unwrap();
+		assert!(
+			require_owned_by_caller(&path).is_ok(),
+			"our own path must pass, or nothing connects"
+		);
+	}
+
+	#[test]
+	fn a_path_owned_by_another_uid_is_refused() {
+		let Some(path) = foreign_path() else {
+			return; // running as root: nothing here is foreign
+		};
+		let err = require_owned_by_caller(&path).expect_err("a foreign owner must refuse");
+		assert!(
+			matches!(err, AdapterError::UntrustedEndpoint(_)),
+			"refusal must be untrust, not i/o: {err}"
+		);
+		assert!(
+			err.to_string().contains("owned by uid"),
+			"the refusal names the owner: {err}"
+		);
+	}
+
+	#[test]
+	fn a_missing_path_reads_as_absence_not_as_a_squat() {
+		let dir = tempfile::tempdir().unwrap();
+		let err = require_owned_by_caller(&dir.path().join("nothing.sock"))
+			.expect_err("nothing to connect to is still an error");
+		assert!(
+			matches!(err, AdapterError::Io(_)),
+			"an empty path is the no-daemon case, not a squat: {err}"
+		);
+	}
+
+	#[test]
+	fn a_dangling_symlink_is_refused() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("kern.sock");
+		std::os::unix::fs::symlink(dir.path().join("gone"), &path).unwrap();
+		let err = require_owned_by_caller(&path).expect_err("a link to nothing must refuse");
+		assert!(
+			matches!(err, AdapterError::UntrustedEndpoint(_)),
+			"a dangling link is a substitution, not an absence: {err}"
+		);
+	}
+
+	#[test]
+	fn a_symlink_to_a_foreign_target_is_refused() {
+		let Some(foreign) = foreign_path() else {
+			return; // running as root: nothing here is foreign
+		};
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("kern.sock");
+		std::os::unix::fs::symlink(&foreign, &path).unwrap();
+		let err = require_owned_by_caller(&path).expect_err("the target's owner is what counts");
+		assert!(
+			matches!(err, AdapterError::UntrustedEndpoint(_)),
+			"a link we own to a socket we do not is still a squat: {err}"
+		);
+		// The link is ours and the target is not, so a refusal that printed the
+		// link's uid would read "owned by uid 1000, not 1000" and tell an operator
+		// nothing. It must name the uid that actually mismatched.
+		assert!(
+			err
+				.to_string()
+				.contains("resolves to a path owned by uid 0"),
+			"the refusal names the target's owner, not the link's: {err}"
+		);
+	}
+
+	// The stat says who owns a *name*; this says who is serving *this
+	// connection*, which is the half a rename cannot move. Both directions are
+	// pinned against a real socket and a real `SO_PEERCRED` read — the refusal
+	// by handing the check a uid that is not the server's, since a socket bound
+	// by a second uid is not something a test can create.
+	#[tokio::test]
+	async fn the_peer_check_reads_the_server_uid_and_decides_both_ways() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("kern.sock");
+		let _listener = tokio::net::UnixListener::bind(&path).unwrap();
+		let adapter = UnixStreamAdapter::connect(&path)
+			.await
+			.expect("our own listener accepts");
+
+		// SAFETY: `geteuid` cannot fail and touches no memory the caller owns.
+		let euid = unsafe { libc::geteuid() };
+		assert!(
+			require_peer_uid(&adapter, &path, euid).is_ok(),
+			"our own daemon must pass, or nothing connects"
+		);
+
+		let err = require_peer_uid(&adapter, &path, euid.wrapping_add(1))
+			.expect_err("a server that is not who we expect must be refused");
+		assert!(
+			matches!(err, AdapterError::UntrustedEndpoint(_)),
+			"the peer verdict is untrust, not i/o: {err}"
+		);
+		assert!(
+			err.to_string().contains(&format!("served by uid {euid}")),
+			"the refusal names who is actually serving: {err}"
+		);
+	}
+
+	// The no-regression half in one test: a socket we bound, reached through the
+	// real entry point, with both checks in the way.
+	#[tokio::test]
+	async fn connect_kern_accepts_a_socket_this_user_bound() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("kern.sock");
+		let _listener = tokio::net::UnixListener::bind(&path).unwrap();
+		assert!(
+			connect_kern(&Endpoint::Unix(path)).await.is_ok(),
+			"the daemon, the hub and `kern mcp` all arrive here"
+		);
+	}
+
+	// The hub socket is not a second door: `Endpoint::hub()` and
+	// `Endpoint::kern()` are both `scoped()`, so both land in the same
+	// world-writable `/tmp` when `XDG_RUNTIME_DIR` is unset, and both reach the
+	// wire through this one `connect_kern`.
+	#[tokio::test]
+	async fn connect_kern_refuses_a_foreign_endpoint_before_it_connects() {
+		let Some(path) = foreign_path() else {
+			return; // running as root: nothing here is foreign
+		};
+		let err = connect_kern(&Endpoint::Unix(path))
+			.await
+			.err()
+			.expect("a foreign endpoint never becomes an adapter");
+		// The proof of ordering: connecting to `/etc/hosts` would fail too, but
+		// as `Io` (ENOTSOCK / ECONNREFUSED) from the syscall. `UntrustedEndpoint`
+		// can only come from the check, so the check ran first — and every
+		// caller's first frame is written after `connect_kern` returns.
+		assert!(
+			matches!(err, AdapterError::UntrustedEndpoint(_)),
+			"refused by the owner check, not by the connect: {err}"
 		);
 	}
 }

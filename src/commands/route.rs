@@ -1,5 +1,5 @@
-use trnsprt::kern_rpc::{CallToolReq, KernRpcClient};
-use trnsprt::typed::{Endpoint, JsonEnvelopeCodec};
+use trnsprt::kern_rpc::{AuthReq, CallToolReq, KernRpcClient, PRINCIPAL_CLI};
+use trnsprt::typed::{AdapterError, Endpoint, JsonEnvelopeCodec};
 
 pub(crate) enum Routed {
 	Done(serde_json::Value),
@@ -8,21 +8,49 @@ pub(crate) enum Routed {
 }
 
 pub(crate) async fn route(name: &str, args: serde_json::Value) -> Routed {
-	route_to(&Endpoint::kern(), name, args).await
+	route_to(
+		&Endpoint::kern(),
+		&crate::rpc::caller(PRINCIPAL_CLI),
+		name,
+		args,
+	)
+	.await
 }
 
 // One attempt and no spawn: a one-shot write must never conjure the daemon it
 // was looking for, and an absent socket is the ordinary no-daemon case rather
 // than a failure to report.
-pub(crate) async fn route_to(endpoint: &Endpoint, name: &str, args: serde_json::Value) -> Routed {
+pub(crate) async fn route_to(
+	endpoint: &Endpoint,
+	auth: &AuthReq,
+	name: &str,
+	args: serde_json::Value,
+) -> Routed {
 	let connected = KernRpcClient::<JsonEnvelopeCodec>::connect_endpoint_with_retry(
 		endpoint,
+		auth,
 		1,
 		std::time::Duration::ZERO,
 	)
 	.await;
-	let Ok(client) = connected else {
-		return Routed::NoDaemon;
+	let client = match connected {
+		Ok(c) => c,
+		// A refusal is not an absence. The daemon answered and turned this caller
+		// away, so falling through to NoDaemon would send the CLI off to write
+		// locally behind a daemon that owns the graph — the exact split item 9
+		// closed, reopened by an auth failure.
+		Err(AdapterError::Unauthenticated(e)) => {
+			return Routed::Refused(format!("daemon refused this caller: {e}"))
+		}
+		// Not an absence either, and not the daemon's verdict — this caller
+		// refused the endpoint. Something is bound at the socket path that this
+		// user does not own, which means no daemon of ours is reachable there;
+		// reporting NoDaemon would send the CLI off to write locally without
+		// ever mentioning that somebody else holds the name.
+		Err(AdapterError::UntrustedEndpoint(e)) => {
+			return Routed::Refused(format!("refusing endpoint: {e}"))
+		}
+		Err(_) => return Routed::NoDaemon,
 	};
 	let req = CallToolReq {
 		name: name.to_string(),
@@ -78,7 +106,7 @@ pub(crate) fn array_field<'a>(v: &'a serde_json::Value, key: &str) -> &'a [serde
 #[cfg(all(test, unix))]
 mod tests {
 	use super::*;
-	use crate::test_support::{scratch_endpoint, serving};
+	use crate::test_support::{scratch_endpoint, serving, test_caller};
 
 	fn kern_with_edge() -> crate::mcp::Server {
 		use crate::base::reason::add_reason;
@@ -100,10 +128,59 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn a_missing_socket_is_no_daemon_not_an_error() {
 		let ep = scratch_endpoint("absent");
-		let out = route_to(&ep, "forget", serde_json::json!({"id": "a"})).await;
+		let out = route_to(
+			&ep,
+			&test_caller(),
+			"forget",
+			serde_json::json!({"id": "a"}),
+		)
+		.await;
 		assert!(
 			matches!(out, Routed::NoDaemon),
 			"nothing serving -> the caller owns the write"
+		);
+	}
+
+	// The gate over a real socket. Every other refusal test in the tree runs on
+	// an in-process pipe, which proves the branch but not the transport: this one
+	// crosses `kern.sock` — real accept loop, real per-connection task, real
+	// framing — and asserts the two things that matter on the far side. The tool
+	// did not run (the daemon's graph still holds the entity), and the caller was
+	// told it was *refused* rather than that nothing was there, because a
+	// `NoDaemon` here is exactly how a CLI ends up writing behind a live daemon.
+	//
+	// The wrong token is `TEST_TOKEN` with its last byte changed, same length, so
+	// only the byte compare can refuse it.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_wrong_token_over_the_real_socket_is_refused_and_runs_nothing() {
+		let ep = scratch_endpoint("wrong-token");
+		let srv = kern_with_edge();
+		let graph = srv.graph.clone();
+		serving(srv, &ep).await;
+
+		let wrong = trnsprt::kern_rpc::AuthReq::new("scratch-tokex", trnsprt::kern_rpc::PRINCIPAL_CLI);
+		assert_eq!(
+			wrong.token.len(),
+			crate::test_support::TEST_TOKEN.len(),
+			"a wrong token of another length never reaches the byte compare"
+		);
+
+		let out = route_to(&ep, &wrong, "forget", serde_json::json!({"id": "a"})).await;
+		match out {
+			Routed::Refused(msg) => assert!(
+				msg.contains("unauthenticated"),
+				"a refusal must name itself as one: {msg}"
+			),
+			Routed::NoDaemon => {
+				panic!("a refusal reported as an absence sends the CLI off to write locally")
+			}
+			Routed::Done(v) => panic!("an unauthenticated caller ran the tool: {v}"),
+		}
+
+		let g = graph.read();
+		assert!(
+			g.kerns.get("kx").expect("kern").entities.contains_key("a"),
+			"the daemon's graph must be untouched by a caller it refused"
 		);
 	}
 
@@ -116,7 +193,13 @@ mod tests {
 		let graph = srv.graph.clone();
 		serving(srv, &ep).await;
 
-		let out = route_to(&ep, "forget", serde_json::json!({"id": "a"})).await;
+		let out = route_to(
+			&ep,
+			&test_caller(),
+			"forget",
+			serde_json::json!({"id": "a"}),
+		)
+		.await;
 		let Routed::Done(v) = out else {
 			panic!("a serving daemon must answer the forget");
 		};
@@ -165,7 +248,7 @@ mod tests {
 		serving(srv, &ep).await;
 
 		let args = serde_json::json!({"scheme": "file", "object_id": "notes.md"});
-		let Routed::Done(v) = route_to(&ep, "forget_by_source", args).await else {
+		let Routed::Done(v) = route_to(&ep, &test_caller(), "forget_by_source", args).await else {
 			panic!("a serving daemon must answer the per-source forget");
 		};
 		assert_eq!(
@@ -188,7 +271,13 @@ mod tests {
 		let ep = scratch_endpoint("degrade");
 		serving(kern_with_edge(), &ep).await;
 
-		let out = route_to(&ep, "degrade", serde_json::json!({"query_id": "a"})).await;
+		let out = route_to(
+			&ep,
+			&test_caller(),
+			"degrade",
+			serde_json::json!({"query_id": "a"}),
+		)
+		.await;
 		let Routed::Done(v) = out else {
 			panic!("a serving daemon must answer the degrade");
 		};
@@ -224,7 +313,7 @@ mod tests {
 			.expect("entity")
 			.set_text("only in the daemon".into());
 
-		let out = route_to(&ep, "query", serde_json::json!({"id": "a"})).await;
+		let out = route_to(&ep, &test_caller(), "query", serde_json::json!({"id": "a"})).await;
 		let Routed::Done(v) = out else {
 			panic!("a serving daemon must answer the get");
 		};
@@ -257,7 +346,13 @@ mod tests {
 			);
 		serving(srv, &ep).await;
 
-		let out = route_to(&ep, "query", serde_json::json!({"id": "only-in-ram"})).await;
+		let out = route_to(
+			&ep,
+			&test_caller(),
+			"query",
+			serde_json::json!({"id": "only-in-ram"}),
+		)
+		.await;
 		let Routed::Done(v) = out else {
 			panic!("a serving daemon must answer the get");
 		};
@@ -290,7 +385,13 @@ mod tests {
 			);
 		serving(srv, &ep).await;
 
-		let out = route_to(&ep, "query", serde_json::json!({"id": "9f3c"})).await;
+		let out = route_to(
+			&ep,
+			&test_caller(),
+			"query",
+			serde_json::json!({"id": "9f3c"}),
+		)
+		.await;
 		let Routed::Done(v) = out else {
 			panic!("a prefix must resolve through the daemon");
 		};
@@ -307,7 +408,13 @@ mod tests {
 		let ep = scratch_endpoint("refuse");
 		serving(kern_with_edge(), &ep).await;
 
-		let out = route_to(&ep, "forget", serde_json::json!({"id": "ghost"})).await;
+		let out = route_to(
+			&ep,
+			&test_caller(),
+			"forget",
+			serde_json::json!({"id": "ghost"}),
+		)
+		.await;
 		match out {
 			Routed::Refused(msg) => assert!(msg.contains("thought not found"), "{msg}"),
 			_ => panic!("an unknown id must come back as the daemon's refusal"),

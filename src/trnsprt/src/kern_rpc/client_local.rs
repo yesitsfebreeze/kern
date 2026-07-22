@@ -2,23 +2,32 @@ use std::time::Duration;
 
 use crate::typed::{connect_kern, AdapterError, Channel, Endpoint, JsonEnvelopeCodec};
 
+use super::auth::{present_auth, AuthReq};
 use super::svc::KernRpcClient;
 
 pub const RETRIES: u32 = 5;
 pub const RETRY_DELAY_MS: u64 = 100;
 
 impl KernRpcClient<JsonEnvelopeCodec> {
-	pub async fn connect_local() -> Result<Self, AdapterError> {
-		Self::connect_endpoint(&Endpoint::kern()).await
+	pub async fn connect_local(auth: &AuthReq) -> Result<Self, AdapterError> {
+		Self::connect_endpoint(&Endpoint::kern(), auth).await
 	}
 
-	pub async fn connect_endpoint(endpoint: &Endpoint) -> Result<Self, AdapterError> {
-		Self::connect_endpoint_with_retry(endpoint, RETRIES, Duration::from_millis(RETRY_DELAY_MS))
-			.await
+	pub async fn connect_endpoint(endpoint: &Endpoint, auth: &AuthReq) -> Result<Self, AdapterError> {
+		Self::connect_endpoint_with_retry(
+			endpoint,
+			auth,
+			RETRIES,
+			Duration::from_millis(RETRY_DELAY_MS),
+		)
+		.await
 	}
 
+	/// The handshake is part of connecting: a `KernRpcClient` only ever exists
+	/// on a channel the daemon has already admitted.
 	pub async fn connect_endpoint_with_retry(
 		endpoint: &Endpoint,
+		auth: &AuthReq,
 		retries: u32,
 		base_delay: Duration,
 	) -> Result<Self, AdapterError> {
@@ -26,9 +35,21 @@ impl KernRpcClient<JsonEnvelopeCodec> {
 		for _ in 0..retries {
 			match connect_kern(endpoint).await {
 				Ok(adapter) => {
-					let channel = Channel::new(adapter, JsonEnvelopeCodec::new());
+					let mut channel = Channel::new(adapter, JsonEnvelopeCodec::new());
+					// Propagated, never retried: a refusal is the daemon's verdict on
+					// this caller, and it will say the same thing five times. Retrying
+					// would only delay the report; swallowing it would tell the caller
+					// nothing is serving, which is how a CLI ends up writing behind a
+					// daemon that is very much there.
+					present_auth(&mut channel, auth).await?;
 					return Ok(KernRpcClient::new(channel));
 				}
+				// Also propagated, never retried, and for the same reason from the
+				// other side: the endpoint is bound by something this user does not
+				// own. Waiting cannot make it ours, and the retry loop exists for a
+				// daemon that has not finished starting, not for one that is not
+				// there at all.
+				Err(e @ AdapterError::UntrustedEndpoint(_)) => return Err(e),
 				Err(e) => last_err = Some(e),
 			}
 			tokio::time::sleep(jittered(base_delay)).await;
@@ -81,12 +102,45 @@ mod tests {
 
 	#[tokio::test]
 	async fn connect_endpoint_gives_up_after_exhausting_retries() {
-		let res =
-			KernRpcClient::connect_endpoint_with_retry(&bogus_endpoint(), 3, Duration::from_millis(1))
-				.await;
+		let res = KernRpcClient::connect_endpoint_with_retry(
+			&bogus_endpoint(),
+			&AuthReq::new("t", super::super::auth::PRINCIPAL_CLI),
+			3,
+			Duration::from_millis(1),
+		)
+		.await;
 		assert!(
 			res.is_err(),
 			"no server at the endpoint -> Err after retries"
+		);
+	}
+
+	// The token is frame 1. This pins that it is never frame 1 to a socket
+	// somebody else owns: `/etc/hosts` is root's, and a client that reached
+	// `connect` would fail with `Io` (ENOTSOCK) instead. `UntrustedEndpoint`
+	// can only come from the owner check, which sits ahead of `connect` and so
+	// ahead of `present_auth` — the whole point, since a check after the frame
+	// has gone out is decoration. Skipped under an euid of 0, where nothing on
+	// the filesystem is foreign and the case cannot fail.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn a_foreign_owned_endpoint_is_refused_before_the_token_is_presented() {
+		// SAFETY: `geteuid` cannot fail and touches no memory the caller owns.
+		if unsafe { libc::geteuid() } == 0 || !std::path::Path::new("/etc/hosts").exists() {
+			return;
+		}
+		let err = KernRpcClient::connect_endpoint_with_retry(
+			&Endpoint::Unix(std::path::PathBuf::from("/etc/hosts")),
+			&AuthReq::new("t", super::super::auth::PRINCIPAL_CLI),
+			3,
+			Duration::from_millis(1),
+		)
+		.await
+		.err()
+		.expect("a foreign endpoint never yields a client");
+		assert!(
+			matches!(err, AdapterError::UntrustedEndpoint(_)),
+			"refused by the owner check, before any frame: {err}"
 		);
 	}
 }
