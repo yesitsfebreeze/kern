@@ -2,6 +2,18 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 82 closed by decision: standalone `kern mcp` is
+  intentionally non-federated. It is the lightweight single-project local MCP
+  server (fallback when no daemon serves); federation is the daemon's job —
+  `kern --daemon` runs `start_gossip`, the tick wires `broadcast_pulse`,
+  `do_resolve` raises `broadcast_q`. Spawning gossip from standalone too would
+  make a second federating surface beside the daemon with no supervision, racing
+  the hub a `kern mcp` auto-spawns. Contract: one federator per host (the
+  daemon); standalone serves a graph, decays, clusters, GCs, and stops there. A
+  user wanting federation runs `kern --daemon`. No code change — the split
+  already shipped; this records the decision. Decided by: name-the-tradeoff,
+  one-dispatch-core. Supersedes: nothing.
+
 - 2026-07-22 — item 84 sub-fix closed: the `query` MCP tool now takes an
   `ids` array for batch direct lookup, returning `{results, missing}` — a
   caller can tell a filter-drop (in `results`, flagged) from a non-existent id

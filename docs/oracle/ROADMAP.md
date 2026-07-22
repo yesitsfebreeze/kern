@@ -2997,12 +2997,31 @@ Decided by: fix-the-root (one shared dispatcher, not a second copy that can
 drift), reuse (ride `call_tool` rather than a fifth `KernRpc` wire method).
 Supersedes: nothing — the item's own text described the defect, now removed.
 
-### 82. Standalone `kern mcp` runs no gossip `[surface]`
+### 82. Standalone `kern mcp` runs no gossip `[surface]` — closed 2026-07-22
 
 **Corrected:** the previous version said "no maintenance tick and no gossip". The
 tick *is* started (`src/commands/mcp_cmd.rs:498-509`); only gossip is absent
 (`broadcast_q: None` at `:504`, `broadcast_pulse: None` at `:518`). A graph
 served that way decays, clusters and GCs normally, and simply does not federate.
+
+**Closed 2026-07-22 — decided, not built.** Standalone `kern mcp` is
+intentionally non-federated. It is the lightweight single-project local MCP
+server (the fallback a client gets when no daemon is serving, and the path a
+developer reaches for to inspect one graph); federation is the daemon's job —
+`kern --daemon` runs `start_gossip` (`src/commands.rs`), the maintenance tick
+wires `broadcast_pulse` into it, and `do_resolve` raises `broadcast_q`. Spawning
+gossip from standalone too would make a process that binds no daemon socket,
+holds the writer lock as `mcp-standalone` (`claim_standalone`,
+`src/commands/mcp_cmd.rs`), and yet reached peers on its own — a second
+federating surface beside the daemon with no supervision, racing the hub a
+`kern mcp` auto-spawns. The split is the contract: one federator per host, the
+daemon; standalone serves a graph, decays, clusters and GCs, and stops there.
+A user who wants federation runs `kern --daemon` (or lets `kern mcp` auto-spawn
+one and proxy). Tradeoff taken: a standalone-only deployment does not federate,
+which is the point — federation is opt-in and coordinator-free, and standalone
+is the opt-out. Decided by: name-the-tradeoff, one-dispatch-core (the daemon is
+the one federator; standalone shares the dispatch core but not the federation
+leg).
 
 ### 83. Nothing bounds memory deterministically: eviction and spill are both disarmed `[lifecycle]`
 
