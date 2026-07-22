@@ -86,6 +86,13 @@ pub const DEGRADE_MIN_THRESHOLD: f64 = 0.05;
 /// relevance weight, so repeated degrades never push it negative (item 59 floor).
 pub const DEGRADE_FLOOR: f64 = 0.0;
 
+/// Max turns per distill prompt — a turn is a blank-line-delimited block. A
+/// conversation longer than this is chunked turn-batched so a long delta stops
+/// truncating past the model context window with no signal (item 49 chunking
+/// half). 48 turns keeps one distill call well under a 4–8k-token prompt; the
+/// batch is a knob, not a product choice.
+pub const DISTILL_CHUNK_TURNS: usize = 48;
+
 pub const QUESTION_RESOLVE_THRESHOLD: f64 = 0.80;
 
 pub const GOSSIP_FANOUT: usize = 3;

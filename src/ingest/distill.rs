@@ -1,3 +1,5 @@
+use crate::base::constants::DISTILL_CHUNK_TURNS;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Claim {
 	pub text: String,
@@ -61,15 +63,25 @@ pub fn distill(
 	// Inline 1-based turn markers so the model can cite which turns a claim is
 	// drawn from; the citation populates Source::Session.section at ingest.
 	let turns = split_turns(conversation);
-	let marked: String = turns
-		.iter()
-		.enumerate()
-		.map(|(i, t)| format!("[{i}] {t}"))
-		.collect::<Vec<_>>()
-		.join("\n\n");
 	let today = crate::base::time::date_string(now);
-	let prompt = format!(
-		"Extract durable, reusable knowledge from this conversation between a \
+	// Turn-batched chunking: a conversation longer than DISTILL_CHUNK_TURNS is
+	// split into batches of that many turns, each distilled through its own
+	// prompt, so a long delta stops truncating past the model context window
+	// with no signal (item 49 chunking half). Markers carry the global turn
+	// index so a citation in batch 2 maps to the right transcript turn. The
+	// common case (turns.len() <= DISTILL_CHUNK_TURNS) is one batch, bit-
+	// identical to the pre-chunking single call.
+	let mut all: Vec<Claim> = Vec::new();
+	for (batch_idx, chunk) in turns.chunks(DISTILL_CHUNK_TURNS).enumerate() {
+		let start = batch_idx * DISTILL_CHUNK_TURNS;
+		let marked: String = chunk
+			.iter()
+			.enumerate()
+			.map(|(i, t)| format!("[{}] {t}", start + i))
+			.collect::<Vec<_>>()
+			.join("\n\n");
+		let prompt = format!(
+			"Extract durable, reusable knowledge from this conversation between a \
 user and an AI coding assistant. The transcript below is marked with 1-based \
 turn numbers in [brackets]. Output ONLY a JSON array. Each element must be \
 {{\"text\": \"<one self-contained statement>\", \"kind\": \"<one of: {kinds}>\"}}. Optionally add \
@@ -94,12 +106,20 @@ partial ones. \
 Skip greetings, acknowledgements, one-off task mechanics, and anything \
 ephemeral. If nothing is worth keeping, output []. Do not wrap the array in \
 markdown.\n\nCONVERSATION:\n{marked}\n"
-	);
-	let raw = llm(&prompt);
-	if raw.trim().is_empty() {
-		return None;
+		);
+		let raw = llm(&prompt);
+		if raw.trim().is_empty() {
+			return None;
+		}
+		match parse_claims(&raw, extra_kinds) {
+			Some(claims) => all.extend(claims),
+			// A batch that returns no parseable array is a format failure for
+			// the whole delta — retry, never archive a partially-distilled
+			// conversation that silently dropped every later batch.
+			None => return None,
+		}
 	}
-	parse_claims(&raw, extra_kinds)
+	Some(all)
 }
 
 /// `None` = the reply held no parseable JSON array (prose or malformed span) — a
@@ -413,6 +433,105 @@ mod tests {
 		assert!(
 			prompt.contains("2026-07-22"),
 			"prompt must name today for relative-date resolution: {prompt}"
+		);
+	}
+
+	#[test]
+	fn distill_short_conversation_is_one_call() {
+		// turns.len() <= DISTILL_CHUNK_TURNS -> one llm call (common case,
+		// bit-identical to the pre-chunking path).
+		let calls = std::sync::atomic::AtomicUsize::new(0);
+		let llm = |_p: &str| {
+			calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+			r#"[{"text":"x","kind":"fact"}]"#.to_string()
+		};
+		let conv = (0..DISTILL_CHUNK_TURNS)
+			.map(|i| format!("turn {i}"))
+			.collect::<Vec<_>>()
+			.join("\n\n");
+		let claims = distill(&conv, &[], &llm, now()).expect("some");
+		assert_eq!(claims.len(), 1);
+		assert_eq!(
+			calls.load(std::sync::atomic::Ordering::SeqCst),
+			1,
+			"at exactly the batch boundary there is one call"
+		);
+	}
+
+	#[test]
+	fn distill_chunks_long_conversation_turn_batched() {
+		// N > DISTILL_CHUNK_TURNS -> ceil(N/batch) calls, one claim per batch,
+		// no batch silently dropped. The stub tags each claim with its batch.
+		let n = DISTILL_CHUNK_TURNS + 5;
+		let calls = std::sync::atomic::AtomicUsize::new(0);
+		let llm = |_p: &str| {
+			let b = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+			format!(r#"[{{"text":"batch {b}","kind":"fact"}}]"#)
+		};
+		let conv = (0..n)
+			.map(|i| format!("turn {i}"))
+			.collect::<Vec<_>>()
+			.join("\n\n");
+		let claims = distill(&conv, &[], &llm, now()).expect("some");
+		let expected = (n + DISTILL_CHUNK_TURNS - 1) / DISTILL_CHUNK_TURNS;
+		assert_eq!(
+			calls.load(std::sync::atomic::Ordering::SeqCst),
+			expected,
+			"ceil(N/batch) llm calls"
+		);
+		assert_eq!(claims.len(), expected, "one claim per batch, none dropped");
+		// every batch index present
+		for b in 0..expected {
+			assert!(
+				claims.iter().any(|c| c.text == format!("batch {b}")),
+				"batch {b} claim present"
+			);
+		}
+	}
+
+	#[test]
+	fn distill_chunk_markers_carry_global_turn_index() {
+		// a claim citing the first turn of batch 2 resolves to the global turn
+		// number, not a per-batch 0 — markers are offset by the batch start.
+		let n = DISTILL_CHUNK_TURNS + 1;
+		let captured = std::sync::Mutex::new(String::new());
+		let llm = |p: &str| {
+			if p.contains(&format!("[{}] ", DISTILL_CHUNK_TURNS)) {
+				*captured.lock().unwrap() = p.to_string();
+			}
+			r#"[{"text":"x","kind":"fact"}]"#.to_string()
+		};
+		let conv = (0..n)
+			.map(|i| format!("turn {i}"))
+			.collect::<Vec<_>>()
+			.join("\n\n");
+		let _ = distill(&conv, &[], &llm, now());
+		let prompt = captured.into_inner().unwrap();
+		assert!(
+			prompt.contains(&format!("[{}] turn {}", DISTILL_CHUNK_TURNS, DISTILL_CHUNK_TURNS)),
+			"batch 2's first marker is the global turn index, not 0: {prompt}"
+		);
+	}
+
+	#[test]
+	fn distill_batch_format_failure_retries_whole_delta() {
+		// one batch returns prose (no JSON array) -> None, even if an earlier
+		// batch parsed. A partially-distilled conversation must not archive.
+		let n = DISTILL_CHUNK_TURNS + 1;
+		let llm = |p: &str| {
+			if p.contains(&format!("[{}] ", DISTILL_CHUNK_TURNS)) {
+				"prose reply with no array".to_string()
+			} else {
+				r#"[{"text":"x","kind":"fact"}]"#.to_string()
+			}
+		};
+		let conv = (0..n)
+			.map(|i| format!("turn {i}"))
+			.collect::<Vec<_>>()
+			.join("\n\n");
+		assert!(
+			distill(&conv, &[], &llm, now()).is_none(),
+			"a batch format failure retries the whole delta, never archives partial"
 		);
 	}
 }
