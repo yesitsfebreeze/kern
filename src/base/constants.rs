@@ -47,6 +47,12 @@ pub const GENERIC_GRAVITON: &str = "generic";
 
 // Two gravitons above this cosine are the SAME concept. Re-tune if the embed model changes.
 pub const GRAVITON_DEDUP_THRESHOLD: f64 = 0.85;
+// A single-paragraph graviton seed above this many chars is char-chunked into
+// separate embeds the caller mean_pools — a long paragraph stops truncating past
+// the embed context window with no signal. Default 4000 ≈ 1000 tokens, well under
+// a 4–8k prompt budget and under any real seed today, so the path is a no-op until
+// an operator lowers it (same default-off shape as DISTILL_CHUNK_TURNS / item 57).
+pub const GRAVITON_SEED_CHAR_CHUNK: usize = 4000;
 pub const KERN_COHESION_THRESHOLD: f64 = 0.60;
 pub const KERN_MIN_CLUSTER_SIZE: usize = 10;
 pub const KERN_NAMING_COHESION_THRESHOLD: f64 = 0.50;

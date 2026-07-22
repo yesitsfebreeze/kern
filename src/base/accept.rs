@@ -830,7 +830,28 @@ pub(crate) fn seed_examples(text: &str) -> Vec<String> {
 		.map(str::to_string)
 		.collect();
 	if lines.len() < 2 {
-		vec![text.trim().to_string()]
+		let whole = text.trim();
+		if whole.chars().count() > crate::base::constants::GRAVITON_SEED_CHAR_CHUNK {
+			// ponytail: char-budget split on a code-point boundary; the caller
+			// embeds each chunk and mean_pools them, same as the multi-line path.
+			let mut out = Vec::new();
+			let mut buf = String::new();
+			let mut budget = crate::base::constants::GRAVITON_SEED_CHAR_CHUNK;
+			for ch in whole.chars() {
+				buf.push(ch);
+				budget -= 1;
+				if budget == 0 {
+					out.push(std::mem::take(&mut buf));
+					budget = crate::base::constants::GRAVITON_SEED_CHAR_CHUNK;
+				}
+			}
+			if !buf.is_empty() {
+				out.push(buf);
+			}
+			out
+		} else {
+			vec![whole.to_string()]
+		}
 	} else {
 		lines
 	}
@@ -1847,6 +1868,32 @@ mod tests {
 			vec!["padded single line"],
 			"one non-empty line embeds whole, not as a one-element pool"
 		);
+	}
+
+	#[test]
+	fn seed_examples_char_chunks_a_long_single_paragraph() {
+		let chunk = crate::base::constants::GRAVITON_SEED_CHAR_CHUNK;
+		let body = "x".repeat(chunk + 5);
+		let out = seed_examples(&body);
+		assert_eq!(out.len(), 2, "ceil((chunk+5)/chunk) -> 2 chunks");
+		assert!(out.iter().all(|c| c.chars().count() <= chunk));
+		assert_eq!(out.concat(), body, "chunks reassemble to the trimmed original");
+		// exactly-on-boundary: chunk chars -> one chunk (not two)
+		assert_eq!(seed_examples(&"x".repeat(chunk)).len(), 1);
+	}
+
+	#[test]
+	fn seed_examples_char_chunks_split_on_a_code_point_boundary() {
+		// a multibyte char straddling the boundary must not be split mid-char
+		let chunk = crate::base::constants::GRAVITON_SEED_CHAR_CHUNK;
+		let mut body = "a".repeat(chunk - 1);
+		body.push('ß');
+		body.push('z');
+		let out = seed_examples(&body);
+		// ß is one char, so chunk-1 'a' + 'ß' fills chunk 1; 'z' is chunk 2
+		assert_eq!(out.len(), 2);
+		assert_eq!(out.concat(), body);
+		assert!(out.iter().all(|c| c.chars().count() <= chunk));
 	}
 
 	#[test]
