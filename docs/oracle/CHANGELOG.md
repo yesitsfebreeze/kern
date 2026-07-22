@@ -50,6 +50,64 @@
   `AlreadyRunning` probe and the real daemon still stands down, and deleting the
   peer-check *call* is a mutation no test catches, because catching it needs a
   socket served by a second uid.
+- 2026-07-22 — swept every `**Gaps.**` block in `FEATURES.md` against
+  `ROADMAP.md` looking for more defects of item 98's kind — real, stated in a
+  description, carried by no item. **Found none.** Recording the negative result
+  with its method, so the next pass does not re-raise the same alarm.
+
+  The alarming-looking number is a false signal: **16 of 24 gap blocks cite no
+  ROADMAP item.** Spot-checking the two most concrete showed both are carried
+  anyway — "an entity dropped past the cap is gone" is closed item 5 (intended,
+  and counted by `unspilled_drops` on three health surfaces), and
+  `cmd_hub_merge`'s unguarded write is carried in item 9's section. Citation
+  style is not coverage, and counting citations measures the wrong thing.
+
+  So item 98 was a genuine one-off rather than the tip of a pattern, and it was
+  found by reading a neighbouring file rather than by any rule. Two heuristics
+  were tried and both came up empty: word-overlap between gap sentences and the
+  roadmap, and absence of an explicit item reference. The first is too loose to
+  discriminate, the second measures formatting.
+
+  Worth keeping the shape of the question even though the answer was "nothing
+  here": **a defect stated only in a present-tense description is not scheduled
+  work**, and that failure mode has produced three real items this run (95 out of
+  item 20's prose, 97 out of item 28's, 98 out of FEATURES §13). The sweep says
+  the backlog is currently clean of it, not that the failure mode is gone.
+
+  Decided by: verify-before-claiming — "16 of 24 uncited" looked like a finding
+  until two of them were opened, and neither was.
+
+- 2026-07-22 — item 24's title said "RPC socket has no auth" while its body said
+  "mostly closed 2026-07-22". Retitled to what is actually true: the connection
+  authenticates, the caller does not — same-uid callers remain
+  indistinguishable, which is the half items 9 and 18 were waiting on. Fourth
+  time a heading has outlived the defect it names, and slice selection reads
+  headings.
+
+  Also filed item 98, which `FEATURES.md` §13 stated and no item carried: **the
+  pre-auth frame is unbounded and untimed.** The one thing reachable before the
+  token is checked is the one thing with no cap on it. A frame declaring a huge
+  length makes the daemon allocate for a peer that has proven nothing; a
+  connection that opens and sends nothing holds its slot forever, and item 24
+  deliberately places the auth check before the handler exists, so that stall
+  costs a session that will never be authorised.
+
+  Not escalated, because `harden_socket` sets the socket `0600` and the peer is
+  therefore already a same-uid process. But that is exactly the attacker item
+  24's own residue says it cannot police — so "only a same-uid caller can do it"
+  is not mitigation here, it is a restatement of the open gap.
+
+  The pattern worth naming: **`FEATURES.md` described this correctly the whole
+  time.** The gap was not knowledge, it was that a limitation living only in a
+  present-tense description is not scheduled work. `ROADMAP.md` is the only file
+  that says what is left, so a real defect stated anywhere else is a defect
+  nobody will action. That is the third time this run — item 95 out of item 20's
+  prose, item 97 out of item 28's — and all three were found by reading the
+  neighbouring file rather than by anything automated.
+
+  Decided by: fix-the-root — the recurring failure is stating a defect somewhere
+  that is not the list of what is left.
+
 - 2026-07-22 — **`kern.sock` authenticates.** One `AuthReq` frame carrying the
   graph's `mcp-token` is compared in constant time before any `KernRpc` method
   dispatches, and the Windows named pipe is created with an owner-only SDDL
