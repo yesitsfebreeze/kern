@@ -2,6 +2,64 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 97: `e2e/` now runs the GNN, and the gate refuses to score
+  until it has. 38 → 39 e2e tests; `e2e` wall time **89.5s → 99.5s (+11%)**, all
+  of it the new test's daemon boot and its 72 routed probes. Existing recall
+  floors untouched and unmoved (0.9306 / 0.9722 / 0.9471).
+
+  **The item's premise was right and its favoured closure is dead.** It blamed
+  `DEFAULT_MIN_THOUGHTS=128` against a 36-fact corpus, which is true, and
+  proposed growing the corpus past 128. Measured through the real binary with
+  `do_gnn_propagate` temporarily instrumented: at 36 facts under a daemon the
+  propagation is entered and returns (`entities=36 min=128`); **at 150 facts it
+  still never runs**, because the boot cluster pass splits the root into 36 + 114
+  and neither part reaches 128. `do_cluster` enqueues `GnnPropagate` only when it
+  did structural work — and structural work is the same act that moves entities
+  *out* of the kern about to be propagated. Growing the corpus fights that, at
+  1.9s → 54.7s of CLI ingest for 36 → 150 facts, for a gate whose liveness would
+  still depend on clustering behaviour nobody has pinned.
+
+  There was a second reason nothing ran that the item did not have:
+  **`test_recall.py` drives the CLI, and the CLI has no tick loop at all.**
+  `do_gnn_propagate` is reachable only from `tick::start` — spawned by
+  `store::Registry::open`, i.e. a daemon or `kern mcp` — and from `tick_sync`,
+  whose one caller is a unit test. Lowering the threshold alone would have
+  changed nothing there either.
+
+  **So the shipped gate lowers `min_thoughts` in an e2e-only config *and* adds
+  the liveness assertion that is the whole point.** A recall floor alone would
+  have rebuilt the vacuous gate: green, about code that never executed. The
+  propagation now logs `learned propagation applied` with a `nodes` count on
+  success — failure was already loud, success was silent, and `gnn_vector` is
+  dropped on persist, so nothing on disk could ever have answered "did it run".
+  `e2e/test_gnn_recall.py` waits for that line, refuses a run covering under 30
+  nodes, and only then scores.
+
+  **Proved by breaking it.** With entity `i`'s propagated embedding written to
+  entity `i+1` — the ranking bug a bit-identity proof cannot see — `cargo nextest
+  run --workspace` was **972 passed** and `e2e/test_recall.py` passed printing
+  its usual 0.9306 / 0.9722 / 0.9471, while the new test **failed 3 of 3**
+  (recall@1 0.7917 / 0.7222 / 0.7361 against a 0.85 floor). Each new assertion
+  was also reverted individually: restoring the shipped 128 gives "no propagation
+  in 60s" with an empty daemon log, ingesting 6 facts gives "propagation covered
+  6 nodes, under 30", and deleting the log line gives the 60s timeout again.
+
+  **The floors are looser than the CLI corpus's, and that is a cost, not a
+  choice.** Propagation seeds weights and samples negative edges from an unseeded
+  RNG, so the number moves run to run: over **8 runs**, recall@1 **0.8889–0.9306**,
+  recall@5 **0.9583–0.9722**, MRR **0.9219–0.9508**. Floors 0.85 / 0.93 / 0.88
+  sit below the worst of that sample, roughly three probes of headroom — wide
+  enough that a subtle ranking regression could hide inside it, and the broken-GNN
+  runs above are the evidence that a real one does not.
+
+  What this still does not measure: **production scale.** The gate propagates 36
+  nodes, not 128+; `tests/gnn_scale.rs` is the only thing that runs at that size
+  and it is `#[ignore]`d and asserts nothing about ranking. Recorded in item 97
+  rather than left implied.
+
+  Decided by: verify-before-claiming — the closure the item preferred was
+  measured before it was built, and the measurement is what killed it.
+
 - 2026-07-22 — merged item 30's durable watcher path. The interesting conflict
   was in `e2e/conftest.py`, and it is the first this run that needed a **code**
   merge rather than a pick: item 21 added `review_policy` to `write_config`,

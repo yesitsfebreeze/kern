@@ -32,6 +32,17 @@ pub fn do_gnn_propagate(q: &Queue, g: &Arc<RwLock<GraphGnn>>, kern_id: &str, cfg
 	// produced them would be persisted and re-read on every following tick.
 	match propagate::run_learned_propagation(&snap, cfg) {
 		Ok(res) => {
+			// The only trace a propagation leaves outside the graph. Failures were
+			// already loud; success was silent, which is how e2e ran for months
+			// against a GNN that never executed (ROADMAP item 97). `nodes` is part
+			// of the record because "it ran" and "it ran on three thoughts" are
+			// different answers.
+			tracing::info!(
+				target: "kern.gnn",
+				kern = %kern_id,
+				nodes = res.updates.len(),
+				"learned propagation applied"
+			);
 			if !res.updates.is_empty() {
 				apply_gnn_updates(q, g, kern_id, res.updates, res.weights);
 			}

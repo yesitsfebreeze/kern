@@ -501,7 +501,7 @@ armed by default. A per-kern *entity* cap does not exist for local kerns at all;
 the only one in the tree is `GOSSIP_REMOTE_KERN_ENTITY_CAP` for `remote-*`.
 Clustering is vector-only; no semantic/structural features. Naming/enrich are
 LLM-cold per kern. Only `GnnPropagate` reports a *contained* failure today
-(`src/tick/gnn_propagate.rs:46`); every other task's early return is still
+(`src/tick/gnn_propagate.rs:57`); every other task's early return is still
 invisible except as work that did not happen.
 
 ---
@@ -574,10 +574,15 @@ Trained per-kern on the tick.
   backward, the inference forward, and the weight marshal are `?`-propagated, so
   **a failed propagation writes nothing** — no half-trained embeddings, no
   weights that produced them.
-- **Failure surfacing** (`src/tick/gnn_propagate.rs:31-47`) — on `Err` the tick
+- **Failure surfacing** (`src/tick/gnn_propagate.rs:50-57`) — on `Err` the tick
   logs `kern.gnn` with the kern id and calls `Queue::record_task_failure`, which
   `health` reports as `task_failures` / `last_task_failure`. Embeddings and
   weights are left untouched.
+- **Success surfacing** (`src/tick/gnn_propagate.rs:40-45`) — on `Ok` the tick
+  logs `kern.gnn` at INFO with the kern id and `nodes`, the number of embeddings
+  the run produced. It is the only trace a *completed* propagation leaves outside
+  the graph: `gnn_vector` is dropped on persist, so nothing on disk can say the
+  GNN ever ran. `e2e/test_gnn_recall.py` gates on this line.
 - **Optimizers** (`src/gnn/optim.rs`) — `Adam` (`:14`) behind an `Optimizer`
   trait. No SGD ships.
 - **Persist** (`src/gnn/persist.rs`) — `marshal_weights` (`:52`) /
@@ -596,7 +601,7 @@ node-classification objective. *Corrected 2026-07-21:* a repeatedly failing
 propagation does **not** re-enqueue every tick. `GnnPropagate` is enqueued only
 when `do_cluster` did structural work (`if did_structural_work`, `src/tick.rs:190`),
 so a quiescent kern retries nothing; the climbing `task_failures` count
-(`src/tick/gnn_propagate.rs:46`) is still the only visibility when it does.
+(`src/tick/gnn_propagate.rs:57`) is still the only visibility when it does.
 
 ---
 
@@ -1212,10 +1217,20 @@ bit-identical across runs because the fake embedder has no RNG and no clock. `e2
 each `VISION.md` criterion promises — self-recall, content addressing, supersede
 ordering, degrade, Fact durability.
 
+**Measured with the GNN running.** `e2e/test_gnn_recall.py` — the same 36 facts
+and 72 probes, but scored on a graph a real propagation has touched: it lowers
+`[gnn] min_thoughts` to 4 (e2e-only; the shipped floor is 128), pins `[tick]
+interval_secs = 0` so only the daemon's boot pass runs, and **refuses to score
+until the daemon's own `learned propagation applied` line arrives** naming at
+least 30 nodes. Floors **0.85 / 0.93 / 0.88**, set below the worst of 8 runs
+(0.8889–0.9306 / 0.9583–0.9722 / 0.9219–0.9508) because propagation is
+stochastic — not comparable to the CLI corpus's floors, since the seed index is
+fused 0.6/0.4 with the propagated one.
+
 **Where.** `e2e/conftest.py`, `e2e/fake_llm.py`, `e2e/ranking.py`,
 `e2e/test_retrieval.py`, `e2e/test_invariants.py`, `e2e/test_recall.py`,
-`e2e/test_hub.py`, `e2e/requirements.txt`; `justfile` recipes `e2e` and
-`e2e-install`; `.github/workflows/ci.yml` job `e2e`.
+`e2e/test_gnn_recall.py`, `e2e/test_hub.py`, `e2e/requirements.txt`; `justfile`
+recipes `e2e` and `e2e-install`; `.github/workflows/ci.yml` job `e2e`.
 
 **Gaps.** The floors make this a **regression detector, not a quality claim** —
 it can say kern got worse, never that kern is good, and no number here is
