@@ -604,6 +604,109 @@ mod tests {
 		}
 	}
 
+	// ROADMAP item 18's last owed decision, pinned: a watched file is **public**.
+	// Nobody names a principal on this path, so the `Document` carries the empty
+	// `Acl` and every caller reads it — one naming an unrelated principal
+	// (`matches_filter`) and the surface that can name none at all
+	// (`Acl::is_public`, `src/mcp/resources.rs`). Both legs are asserted because
+	// the ACL is written twice: at the sink for the durable one, inside
+	// `Worker::submit` for the RAM one. Two literals, one decision, and this is
+	// what stops them drifting apart.
+	// Pins the DURABLE leg only. The RAM leg reaches `Worker::submit`, whose job
+	// sits in the channel until a worker loop drains it, and this test spawns no
+	// loop — so a wrong ACL written in `submit` is invisible here. Both call sites
+	// pass `Acl::default()`, so they cannot drift without an edit to one of them,
+	// and that edit is exactly what this test would miss. Recorded in item 18.
+	#[tokio::test]
+	async fn a_watched_file_is_public_once_the_durable_leg_commits() {
+		async fn watched_docs(direct: Option<PathBuf>, content: &str) -> Vec<Entity> {
+			let (url, _server) =
+				crate::test_support::spawn_http(crate::test_support::fixed_vec_embed_app()).await;
+			let g = Arc::new(RwLock::new(GraphGnn::new()));
+			let embedder = crate::llm::Client::new_embed_only(&url, "m", "");
+			let worker = Arc::new(crate::ingest::Worker::new(
+				g.clone(),
+				embedder,
+				None,
+				None,
+				None,
+			));
+
+			KernFileWatcherSink::new(worker.clone(), 0, Default::default(), direct.clone())
+				.ingest(IngestRecord {
+					source_uri: "file:///tmp/public.rs".to_string(),
+					content: content.to_string(),
+					language_hint: Some("rust".to_string()),
+				})
+				.await;
+
+			if let Some(dir) = &direct {
+				let drained = crate::ingest::direct::drain_direct_once(
+					dir,
+					&worker,
+					&IngestRunConfig {
+						dedup_threshold: 0.95,
+						..Default::default()
+					},
+				)
+				.await;
+				assert_eq!(drained, 1, "the parked record committed");
+			}
+
+			let cap = std::time::Instant::now() + Duration::from_secs(5);
+			loop {
+				let docs: Vec<Entity> = g
+					.read()
+					.kerns
+					.values()
+					.flat_map(|k| k.entities.values())
+					.filter(|e| matches!(e.kind, EntityKind::Document))
+					.cloned()
+					.collect();
+				if !docs.is_empty() || std::time::Instant::now() > cap {
+					return docs;
+				}
+				sleep(Duration::from_millis(25)).await;
+			}
+		}
+
+		let dir = tempdir().expect("tempdir");
+		let legs = [
+			(
+				"durable",
+				watched_docs(Some(dir.path().join("direct")), "fn parked_public() {}").await,
+			),
+			("ram", watched_docs(None, "fn queued_public() {}").await),
+		];
+
+		// A principal the file does not name. If the default ever stamps a scope, a
+		// user or a group, this caller stops matching and the assertion below fires.
+		let stranger = crate::retrieval::score::QueryOptions {
+			principals: vec!["bob".into()],
+			..Default::default()
+		};
+		for (leg, docs) in &legs {
+			assert!(
+				!docs.is_empty(),
+				"{leg}: the watched file reached the graph"
+			);
+			for d in docs {
+				assert!(
+					crate::retrieval::score::matches_filter(d, &stranger),
+					"{leg}: bob names a principal this file does not and reads it anyway — \
+					 a watched file is public, not tenant-scoped; got {:?}",
+					d.acl
+				);
+				assert!(
+					d.acl.is_public(),
+					"{leg}: a watched file names nothing, so the unauthenticated resource \
+					 surface serves it too; got {:?}",
+					d.acl
+				);
+			}
+		}
+	}
+
 	// The other half of item 30's backstop, and the half with no coverage until
 	// now: the durable write is best-effort. A watcher that silently stops
 	// ingesting because a disk went read-only is worse than one with no backstop

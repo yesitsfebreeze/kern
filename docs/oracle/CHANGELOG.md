@@ -2,6 +2,40 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 18 closed by deciding: **a watched file is public.**
+  `Acl::default()` names nothing, `Acl::is_public` is exactly that emptiness, and
+  both watcher legs pass it while `drain_direct_once` carries the payload's own
+  ACL rather than stamping one.
+
+  Tenant-default lost on the same ground item 20's `source_trust_user` did. There
+  is no tenant identity on the wire — item 24's principal is declared, not
+  proven, and its residue says same-uid callers are indistinguishable. Stamping
+  `scope: "tenant"` names a boundary nothing can verify, which reads as
+  enforcement and is not. Configurable lost because it ships a knob plus a
+  default and asks the same question at the default.
+
+  **The slice's own test was a false green, and the sixth of this run.** Its
+  agent died mid-falsification — its last words were "now the drain-carrier
+  mutation" — leaving a mutation in `Worker::submit` still applied in the tree.
+  Committing that would have shipped the exact design the decision rejects: a
+  watcher stamping `scope: "tenant"`. Restored, then falsified properly, and the
+  test passed *with the mutation in place*: it drains only the durable leg, while
+  `submit`'s job waits in a channel for a worker loop the fixture never spawns.
+  Renamed to `a_watched_file_is_public_once_the_durable_leg_commits` and the gap
+  written into the item.
+
+  Two things worth keeping. **A stalled revert-check leaves the tree mutated**,
+  and a mutation that compiles and passes is indistinguishable from intent —
+  three agents have now died mid-verification, and this is the first where the
+  leftover would have inverted the decision being made. And the false green was
+  the trap this brief named in advance ("a test where no entity is scoped passes
+  whatever the default is"); naming it did not prevent it, catching it required
+  running the mutation.
+
+  Decided by: name-the-tradeoff — public is the honest default when the system
+  cannot verify the alternative, and the cost is that a watched file is readable
+  by every caller.
+
 - 2026-07-22 — merged item 26, which closes it, and with it the last of the
   retrieval performance items. 225 + 1 + this one = 227.
 

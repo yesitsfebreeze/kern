@@ -230,7 +230,33 @@ are GC-immune, not ACL-immune** — a Fact the requester cannot see must still n
 be returned. Default semantics: empty `principals` means *no filter*, not
 *public only*, or every single-agent caller goes blind.
 
-### 18. Every read surface enforces the ACL; the file watcher's default is the last decision owed `[surface]`
+### 18. Every read surface enforces the ACL, and a watched file is public by decision — closed 2026-07-22 `[surface]`
+
+**Closed 2026-07-22 by deciding, not by building.** A watched file stays public:
+`Acl::default()` names no scope, no user and no group, and `Acl::is_public` —
+the single definition of public in the tree — is exactly that emptiness. Both
+watcher legs pass it, and `drain_direct_once` carries the payload's own ACL
+rather than stamping one, so the decision is made in one place instead of two
+that happen to agree.
+
+**Tenant-default lost on the same ground item 20's `source_trust_user` did.**
+There is no tenant identity anywhere on the wire: item 24's principal is
+*declared*, not proven, and its own residue says same-uid callers are
+indistinguishable. Stamping `scope: "tenant"` would name a boundary nothing can
+verify — a label that reads as enforcement and is not. Configurable lost because
+it does not avoid the decision, it ships a knob plus a default and asks the
+question again at the default.
+
+So the deliverable is a pin and a statement rather than code: **a watched file is
+readable by every caller, including one naming no principal.** A host that wants
+otherwise sets an ACL at ingest, or holds the claim with `review_policy`.
+
+**One gap, recorded rather than papered over.** The test pins the durable leg
+only. The RAM leg reaches `Worker::submit`, whose job waits in the channel for a
+worker loop the test does not spawn, so a wrong ACL written there is invisible to
+it. Both call sites pass `Acl::default()` and cannot drift without someone
+editing one — which is precisely the edit this test would miss. Closing an
+end-to-end assertion on that leg wants a running worker loop in the fixture.
 
 **Title narrowed 2026-07-22.** It read "a bare `query {id}` still filters
 nothing" for a day after that stopped being a defect. The id path runs
