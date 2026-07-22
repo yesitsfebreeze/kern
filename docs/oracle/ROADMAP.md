@@ -641,25 +641,16 @@ re-run 2026-07-22). What is left is everything the gate does not cover.
      one thing — that the checks did not break connecting — and the refusal
      itself is unit-test territory. Do not read a green e2e run as evidence
      that the squat is covered.
-4. **The pre-auth frame is unbounded and untimed.** Filed 2026-07-22, unbuilt,
-   and added here 2026-07-22 because `FEATURES.md` §13 already cited this item
-   for it while the residue list did not carry it. `verify_auth`
-   (`src/trnsprt/src/kern_rpc/auth.rs:79`) awaits `channel.recv()` with no
-   deadline — `grep timeout` over `src/trnsprt/src/typed/`,
-   `src/trnsprt/src/kern_rpc/` and `src/rpc/` finds nothing — and
-   `JsonEnvelopeCodec::decode` (`src/trnsprt/src/typed/codec.rs:39`) returns
-   `Ok(None)` until a `\n` arrives, with no maximum frame length anywhere in the
-   crate. So a connection that opens and then sends bytes without a newline pins
-   a spawned task and grows a `BytesMut` for as long as it likes. This ranks
-   below the three above and is deliberately not called a boundary failure: the
-   socket is `0600`, so the caller is already same-uid and already owns the
-   account. It is a robustness bound, and the realistic trigger is an accident —
-   a wedged `kern mcp` proxy or hub connection — not an attacker. It is per
-   connection, not an accept-loop stall: `serve_kern_rpc_loop`
-   (`src/rpc/kern_rpc_server.rs`) spawns before it authenticates, so the daemon
-   keeps accepting. Closing it is a `tokio::time::timeout` around the handshake
-   plus a length cap in `decode`, and the cap needs a number nobody has chosen —
-   `call_tool` carries whole documents, so it cannot be small.
+4. ~~**The pre-auth frame is unbounded and untimed.**~~ **Closed 2026-07-22 by
+   item 98.** This entry read the defect correctly — per connection rather than
+   an accept-loop stall, and a cap belonging in `decode` — and named the one
+   thing it could not settle: the number. `verify_auth`
+   (`src/trnsprt/src/kern_rpc/auth.rs:98`) now bounds that read at 1 KiB and 5 s
+   and lifts both once the frame is in hand, so `call_tool`'s whole documents
+   still travel the framing they need
+   (`JsonEnvelopeCodec::decode`, `src/trnsprt/src/typed/codec.rs:53`). The
+   ranking stands as written: `0600` means the caller was already same-uid, so
+   this was a robustness bound, not a boundary failure.
 
 The item's second half is **retired 2026-07-21 — verified
 false**: `KernRpc` does not mirror MCP 1:1 and never did. The contract is four
@@ -1992,30 +1983,50 @@ Neither is a defect in a running kern, which is why this sits in tier 9 — but 
 is the reason every reconcile pass so far has spent most of its effort
 re-pointing citations instead of checking claims.
 
-### 98. The pre-auth frame is unbounded and untimed `[surface]`
+### 98. The pre-auth frame is capped and deadlined — closed 2026-07-22 `[surface]`
 
-`FEATURES.md` §13 states it plainly and no item carried it until now: the
-`AuthReq` frame is read from an **unauthenticated** peer with no size cap and no
-deadline. So the one thing reachable before the token is checked is also the one
-thing with no limit on it.
+Both halves were real and both are shut. 978 unit tests, e2e untouched.
 
-Two shapes, both cheap for the attacker. A frame declaring a huge length makes
-the daemon allocate for a peer that has proven nothing. A connection that opens
-and then sends nothing occupies its accept slot indefinitely, and item 24 put
-the auth check *before* the handler exists, so a stalled pre-auth connection is
-holding resources for a session that will never be authorised.
+**The size half was real by a different mechanism than this item named, and the
+difference decided where the fix had to go.** There is no length field on this
+wire to reject: `JsonEnvelopeCodec` is newline-delimited
+(`src/trnsprt/src/typed/codec.rs:53`), so nothing declares a size and
+`FramedRead` simply reserves, reads and doubles its `BytesMut` for as long as
+`decode` returns `Ok(None)` — which it does until a `\n` arrives
+(`tokio-util-0.7.18/src/codec/framed_impl.rs:218`, `state.buffer.reserve(1)`
+inside the read loop). So the allocation is not requested, it is accreted, and a
+cap enforced *after* `channel.recv()` returns would never run at all, because on
+this input `recv()` never returns. The cap therefore lives in the decoder, where
+the buffer is, and measures an **incomplete** line: the only shape an endless
+frame ever has.
 
-Neither is remote — `harden_socket` sets the socket `0600`, so the peer is
-already a same-uid process on this machine, which is why this is filed rather
-than escalated. But "same uid" is precisely the boundary item 24's residue says
-it cannot police, and a same-uid process is exactly the attacker item 24 left in
-scope. A limit that only holds against attackers who could already do worse is
-not a limit.
+Measured before it was fixed: a peer that writes 16 MiB with no newline had all
+16777216 bytes taken into the daemon's buffer, and was then refused at EOF. The
+refusal was already there. Only the memory was not bounded — which is why the
+test asserts on bytes taken and not on the verdict
+(`an_endless_pre_auth_frame_is_refused_without_being_buffered`).
 
-Wanted: a maximum frame length and a read deadline, both applied before the
-first byte of `AuthReq` is trusted, and both smaller than anything the
-authenticated path uses. The numbers are a decision — a token frame is tens of
-bytes, so the cap can be brutal.
+**The patience half was real as written**, though "occupies its accept slot" is
+not what happens: `serve_kern_rpc_loop` spawns per connection and keeps
+accepting. What a silent peer holds is a task, an fd and a growing buffer, for a
+session item 24 guarantees will never be authorised. Confirmed by removing the
+deadline and watching a 20 s outer timeout fire instead of the inner one.
+
+**The numbers.** `AUTH_FRAME_MAX = 1024` — a minted token is 64 hex characters
+(`mint_token`), so a real frame is 110 bytes; 1 KiB is nine times that and an
+order of magnitude under `FramedRead`'s own 8 KiB starting buffer, so the
+refusal lands on the first decode. `AUTH_DEADLINE = 5s` — every real client
+writes the token in the same breath as the connect, a microsecond conversation
+over a local socket. Both are lifted the instant the frame is in hand, so the
+authenticated path keeps the unbounded framing an ingest payload needs, and both
+are therefore strictly tighter than anything past the gate.
+
+**On timeout the connection is closed without a word**, which is the one place
+this path departs from "one message for every refusal". A peer that ran out the
+clock never spoke, so there is no misconfigured client to inform — and a reply
+would be a free liveness probe that also names the deadline. An oversized frame
+*does* get the standard refusal, deliberately: it did speak, and a distinct
+answer would tell a caller which limit it hit.
 
 ### 96. A shared `target-dir` can report green on stale code `[process]`
 

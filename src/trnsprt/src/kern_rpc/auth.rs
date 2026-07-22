@@ -32,6 +32,21 @@ pub const PRINCIPAL_HUB: &str = "hub";
 // caller how far it got.
 const REFUSED: &str = "kern.sock: unauthenticated";
 
+/// The cap on the one frame an unproven peer may send. A real `AuthReq` is
+/// `{"auth":{"token":"<64 hex>","principal":"cli"}}` — 110 bytes with the
+/// longest principal we mint. 1 KiB is nine times that and still an order of
+/// magnitude under `FramedRead`'s own 8 KiB starting buffer, so the refusal
+/// lands on the first decode, before that buffer has doubled even once.
+const AUTH_FRAME_MAX: usize = 1024;
+
+/// The deadline on that same frame. Every real client writes the token in the
+/// same breath as the connect (`KernRpcClient::connect_local`), so the handshake
+/// is a microsecond conversation over a local socket. Five seconds is four
+/// orders of magnitude of slack for a loaded machine and still finite, which is
+/// the whole difference: the authenticated path waits forever by design, and a
+/// peer that has proven nothing does not get that.
+const AUTH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl AuthReq {
 	pub fn new(token: impl Into<String>, principal: &str) -> Self {
 		Self {
@@ -76,11 +91,27 @@ pub async fn present_auth(
 /// empty. There is no branch here that returns `Ok` without having compared a
 /// non-empty secret, which is the whole point: a gate that fails open reads as
 /// protection while being none.
+///
+/// This read is the only one an unproven peer can reach, so it is also the only
+/// one that is bounded in both directions: `AUTH_FRAME_MAX` bytes and
+/// `AUTH_DEADLINE` of patience, both lifted the moment the frame is in hand.
 pub async fn verify_auth(
 	channel: &mut Channel<JsonEnvelopeCodec>,
 	expected: &str,
 ) -> Result<String, AdapterError> {
-	let req = match channel.recv().await {
+	channel
+		.decoder_mut()
+		.set_max_frame_len(Some(AUTH_FRAME_MAX));
+	let read = tokio::time::timeout(AUTH_DEADLINE, channel.recv()).await;
+	channel.decoder_mut().set_max_frame_len(None);
+	// A peer that ran out the clock is dropped without a word. Every other
+	// refusal answers so a misconfigured client reports "refused" instead of a
+	// bare EOF — but this one never spoke, so there is no client to inform, and
+	// the reply would be a free liveness probe that also names the deadline.
+	let Ok(read) = read else {
+		return Err(AdapterError::Unauthenticated(REFUSED.to_string()));
+	};
+	let req = match read {
 		Ok(Some(frame)) => frame
 			.get("auth")
 			.cloned()
@@ -107,7 +138,15 @@ pub async fn verify_auth(
 
 #[cfg(test)]
 mod tests {
+	use std::pin::Pin;
+	use std::sync::atomic::{AtomicUsize, Ordering};
+	use std::sync::Arc;
+	use std::task::{Context as TaskContext, Poll};
+
+	use tokio::io::{AsyncRead, ReadBuf};
+
 	use super::*;
+	use crate::typed::adapter::{Adapter, DynRead, DynWrite};
 	use crate::typed::InprocAdapter;
 
 	fn pair() -> (Channel<JsonEnvelopeCodec>, Channel<JsonEnvelopeCodec>) {
@@ -116,6 +155,40 @@ mod tests {
 			Channel::new(a, JsonEnvelopeCodec::new()),
 			Channel::new(b, JsonEnvelopeCodec::new()),
 		)
+	}
+
+	/// A peer that writes garbage and never a newline, counting what the server
+	/// actually takes from it. Nothing is ever consumed from `FramedRead`'s
+	/// buffer while `decode` returns `None`, so this count *is* the buffer's
+	/// size — which is what makes it evidence about allocation and not just
+	/// about the verdict.
+	///
+	/// Finite, so the unfixed case fails on a number rather than hanging.
+	struct Flood {
+		left: usize,
+		taken: Arc<AtomicUsize>,
+	}
+
+	impl AsyncRead for Flood {
+		fn poll_read(
+			mut self: Pin<&mut Self>,
+			_cx: &mut TaskContext<'_>,
+			buf: &mut ReadBuf<'_>,
+		) -> Poll<std::io::Result<()>> {
+			let n = self.left.min(buf.remaining());
+			if n > 0 {
+				buf.put_slice(&vec![b'x'; n]);
+				self.left -= n;
+				self.taken.fetch_add(n, Ordering::SeqCst);
+			}
+			Poll::Ready(Ok(()))
+		}
+	}
+
+	impl Adapter for Flood {
+		fn split(self: Box<Self>) -> (DynRead, DynWrite) {
+			(Box::new(*self), Box::new(tokio::io::sink()))
+		}
 	}
 
 	#[test]
@@ -190,6 +263,67 @@ mod tests {
 			verify_auth(&mut server, "s3cret").await.is_err(),
 			"EOF before the handshake must fail closed"
 		);
+	}
+
+	// The size half. There is no length prefix on this wire, so nothing declares
+	// how big the frame will be — `FramedRead` just keeps reading and doubling
+	// until a newline arrives, and the cap is the only thing that can stop it.
+	//
+	// The assertion is on *bytes the daemon took*, not on the verdict: an
+	// unfixed daemon refuses this too, at EOF, having buffered all 16 MiB first.
+	// A test that only checked the refusal would be green through the whole
+	// defect.
+	#[tokio::test]
+	async fn an_endless_pre_auth_frame_is_refused_without_being_buffered() {
+		let taken = Arc::new(AtomicUsize::new(0));
+		let mut server = Channel::new(
+			Flood {
+				left: 16 * 1024 * 1024,
+				taken: taken.clone(),
+			},
+			JsonEnvelopeCodec::new(),
+		);
+		assert!(
+			verify_auth(&mut server, "s3cret").await.is_err(),
+			"16 MiB of 'x' is not a token"
+		);
+		let took = taken.load(Ordering::SeqCst);
+		assert!(
+			took <= 64 * 1024,
+			"the daemon buffered {took} bytes from a peer that has proven nothing"
+		);
+	}
+
+	// The patience half, on a clock that costs no wall time. Two timers exist
+	// here: `AUTH_DEADLINE` inside `verify_auth` and this outer one. If the
+	// pre-auth read has no deadline of its own, the outer one is the only timer
+	// and it is what fires — which is the assertion.
+	#[tokio::test(start_paused = true)]
+	async fn a_peer_that_opens_and_says_nothing_is_dropped_by_the_deadline() {
+		let (mut server, _client) = pair();
+		let verdict = tokio::time::timeout(AUTH_DEADLINE * 4, verify_auth(&mut server, "s3cret"))
+			.await
+			.expect("a silent peer held the pre-auth read open past its deadline");
+		assert!(
+			matches!(verdict, Err(AdapterError::Unauthenticated(_))),
+			"a peer that never spoke is unauthenticated, not an i/o fault"
+		);
+	}
+
+	// The cap must not be so tight it refuses the real client. `s3cret` is six
+	// bytes and proves nothing about the number chosen — a token the daemon
+	// actually mints is 64 hex characters (`mint_token`), which is what the
+	// budget was sized against.
+	#[tokio::test]
+	async fn a_real_sized_token_frame_still_fits_under_the_cap() {
+		let token = "0".repeat(64);
+		let (mut server, mut client) = pair();
+		let expected = token.clone();
+		let task = tokio::spawn(async move { verify_auth(&mut server, &expected).await });
+		present_auth(&mut client, &AuthReq::new(token, PRINCIPAL_CLI))
+			.await
+			.expect("the token the daemon mints must fit the frame it is sent in");
+		assert_eq!(task.await.unwrap().unwrap(), PRINCIPAL_CLI);
 	}
 
 	// The daemon-side degenerate case. If the secret could not be read, the
