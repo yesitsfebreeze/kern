@@ -751,11 +751,12 @@ re-run 2026-07-22). What is left is everything the gate does not cover.
    - **The peer check's wiring is covered in the bind arm and not in
      `connect_kern`.** It was recorded here as untestable on one uid; it was
      untested. The arm is reached through `bind_unix(path, expected_peer)`
-     (`:507`), split out exactly as `require_peer_uid` is split out of
-     `require_peer_is_caller` and for the same reason, so a test drives the
-     whole arm against a real socket and a real `SO_PEERCRED` read with a uid
-     that is deliberately not the server's. The two alternatives considered do
-     not bite: a same-uid child with a different exe is *correctly* accepted,
+     (`src/trnsprt/src/typed/local.rs:507`), split out exactly as
+     `require_peer_uid` is split out of `require_peer_is_caller` and for the
+     same reason, so a test drives the whole arm against a real socket and a
+     real `SO_PEERCRED` read with a uid that is deliberately not the server's.
+     The two alternatives considered do not bite: a same-uid child with a
+     different exe is *correctly* accepted,
      because the check claims a uid and nothing finer (measured above), and an
      abstract-namespace socket or a `socketpair` has no filesystem name, so a
      path bind never returns `EADDRINUSE` for one and the arm is never
@@ -1341,7 +1342,7 @@ free-direction reading inside one process is a lie), RSS from
 `/proc/self/statm`, and **two readings: cold, and hot after 200 searches.** The
 hot one is the honest one, because mmap pages are only resident once touched.
 50k entities at dim 384, each with `vector` AND `gnn_vector`
-(`src/base/types.rs:303-304`), plus 25k reasons with vectors (`:427`):
+(`src/base/types.rs:303-304`), plus 25k reasons with vectors (`:450`):
 
 | configuration | cold MB | **hot MB** |
 | --- | --- | --- |
@@ -1477,9 +1478,10 @@ question rather than a liveness defect.
 **The durability half is closed 2026-07-22.** `KernFileWatcherSink::ingest` now
 writes a `DirectJob` through `intake_direct` first
 (`src/ingest/file_watcher.rs:104`, tmp + rename at `src/ingest/direct.rs:42`) and
-falls through to `Worker::submit` (`:129`) only when that write fails — the shape
-`tool_ingest` already had (`src/mcp/tools_mutate.rs:300`). It is gated on
-`intake.enabled` alone (`src/commands.rs:974`), which is exactly the flag
+falls through to `Worker::submit` (`src/ingest/file_watcher.rs:129`) only when
+that write fails — the shape `tool_ingest` already had
+(`src/mcp/tools_mutate.rs:300`). It is gated on `intake.enabled` alone
+(`src/commands.rs:974`), which is exactly the flag
 `spawn_intake` gates on, so the directory is never written unless something
 drains it; `drain_direct_once` needs no reason LLM, so the stricter gate
 `tool_ingest` uses would have parked nothing on a reason-less host that drains
@@ -1517,8 +1519,9 @@ The queue-depth half is
 `pending=/stuck=/failed=/done=` readout (`src/commands/intake_cmd.rs:43-45`),
 so the file-backed queue reports its depth; the in-process `Worker` channel
 still does not. "The only LLM call on the path"
-(`concepts/acceptance.mdx:7` — the old citation `:189-192` was past the end of
-an 86-line page and quoted a sentence that is nowhere in the tree), and with the
+(`concepts/acceptance.mdx:7` — the old citation `` `:189-192` `` was past the
+end of an 86-line page and quoted a sentence that is nowhere in the tree), and
+with the
 answer leg removed (2026-07-21) the distill leg is still the only LLM on any
 path — no latency work has landed on it.
 
@@ -1765,9 +1768,9 @@ an invariant.
 
 Two leads from `docs/kern/crdts-federation.md`, adopted and never scheduled:
 
-- **Tombstone and LWW-history growth is unbounded** (`:259-261`); the note's own
+- **Tombstone and LWW-history growth is unbounded** (`:278-281`); the note's own
   follow-up was "time-bounded compaction".
-- **Vector LWW is coarse across heterogeneous embedding models** (`:264-266`),
+- **Vector LWW is coarse across heterogeneous embedding models** (`:284-286`),
   and `docs/kern/fl-vs-knids-federation.md:200-204` explicitly *allows*
   per-node model choice. Item 3 covers the local swap; the federated case — no
   model-identity stamp on the wire — is separate and unfunded.
@@ -2601,10 +2604,10 @@ is silent staleness, not a crash. Wanted: one rename that publishes all three
 to), and an fsync before it.
 
 Beside it, both unverified against source and still doc-only: mmap file-locking
-and flush semantics differ on Windows (`:136-137`), and PQ codebook
-training/drift has no retrain trigger — "a bad codebook silently degrades recall"
-(`:132-134`) — which lands in item 1's lap the moment PQ is promoted out of the
-non-goals.
+and flush semantics differ on Windows
+(`docs/kern/diskann-disk-index.md:149-150`), and PQ codebook training/drift has
+no retrain trigger — "a bad codebook silently degrades recall" (`:145-148`) —
+which lands in item 1's lap the moment PQ is promoted out of the non-goals.
 
 ### 76. The watchdog force-exit skips the final guarded flush `[store]`
 
@@ -2638,7 +2641,8 @@ ids are `content_hash(text)` bare (`src/ingest/place.rs`,
 `src/ingest/worker.rs:148`), `Source::source_id` is
 `scheme \x00 object \x00 section` (`src/base/types.rs:270-282`), child and named
 ids are `parent_id + nonce` and `parent_id + name + nonce`
-(`types.rs:502`, `:507`), and the HNSW canon has its own (`src/base/hnsw.rs:525`).
+(`types.rs:515-516`, `:520-521`), and the HNSW canon has its own
+(`src/base/hnsw.rs:525`).
 
 The bare-text composition is load-bearing beyond identity: the gossip import
 guard re-derives `content_hash(&e.text()) == e.id` to refuse a forged remote
@@ -2683,7 +2687,7 @@ the normal path, non-functional there. Either forward them or stop advertising.
 
 **Corrected:** the previous version said "no maintenance tick and no gossip". The
 tick *is* started (`src/commands/mcp_cmd.rs:473-484`); only gossip is absent
-(`broadcast_q: None` at `:461`, `broadcast_pulse: None` at `:475`). A graph
+(`broadcast_q: None` at `:479`, `broadcast_pulse: None` at `:493`). A graph
 served that way decays, clusters and GCs normally, and simply does not federate.
 
 ### 83. Nothing bounds memory deterministically: eviction and spill are both disarmed `[lifecycle]`
@@ -2796,29 +2800,61 @@ propagation overwrites one — another 76.8 MB at this corpus size.
   rule and says nothing about the socket; that page states the `0600` mode at
   `concepts/security.mdx:16` and does not record the race at all.
 
-### 101. Eighteen anchors the widened checker can now see are wrong `[process]`
+### 101. Every anchor the widened checker exposed now points where its sentence says — closed 2026-07-22 `[process]`
 
 `docs-check` learned to resolve bare continuation refs — `` `:239` `` following a
-`` `place.rs:112` `` — and immediately nominated 18 anchors that were always
-wrong and always invisible. The count is a measurement of the old blind spot,
-not of new damage: nothing broke, the checker started looking.
+`` `place.rs:112` `` — and immediately nominated a list that was always wrong and
+always invisible. The count is a measurement of the old blind spot, not of new
+damage: nothing broke, the checker started looking. The merge that filed this
+counted 18; the list read off this branch is **20**. The discrepancy was not
+chased — the list is what the checker prints, not what the filing remembered.
 
-Two distinct faults are mixed in the list and they want different fixes:
+Each of the 20 was adjudicated by reading the citing sentence, opening the cited
+line, finding where the described thing actually lives, and reading the new
+target back. The list resolved into four classes, not the two the filing guessed:
 
-- **Stale line numbers**, the ordinary rot: `tools_mutate.rs:491` for the `move`
-  row, `tools_admin.rs:190` for `gc`, `types.rs:120` for the `Acl` struct.
-  Repointing is mechanical, one target read at a time.
-- **A bare ref continuing the wrong file.** Item 52 already documented this
-  exact hazard — a `` `:NNN` `` binds to the nearest preceding path, so a
-  paragraph that names `tools_admin.rs` and then writes `` `:189-192` ``
-  meaning `intake_cmd.rs` silently points into a 455-line unrelated file. These
-  cannot be fixed by adjusting a number; the citation has to be spelled in full.
+- **Stale line numbers**, the ordinary rot — 11 of them. The `move` row's
+  `` `tools_mutate.rs:491` `` was three lines short of `tool_move`; the `Acl`
+  struct had moved 13 lines; `mcp_cmd.rs`'s two `None`s had drifted 18.
+  Mechanical, one target read at a time.
+- **A bare ref continuing the wrong file** — 4, plus a fifth wearing a
+  quotation's clothes. Item 52 documented the hazard and it is exactly as
+  predicted: `bind_unix`'s `` `:507` `` bound to `src/commands.rs` and meant
+  `src/trnsprt/src/typed/local.rs`; `Worker::submit`'s `` `:129` `` bound to
+  `src/ingest/direct.rs` and meant `src/ingest/file_watcher.rs` — the *number*
+  was right, only the file was wrong, which is the quietest failure of the set;
+  and item 75's two doc-only leads bound to `src/base/graph.rs` while meaning
+  `docs/kern/diskann-disk-index.md`. None of these can be fixed by adjusting a
+  number. Each citation is now spelled in full at the point the file changes,
+  and only the continuations that follow it are left bare.
+- **A quotation the checker read as a citation** — 2, both in this item's own
+  first draft, which named the broken anchors in single backticks and so made
+  fresh copies of them. The fifth counted above — item 30's note on the dead
+  `concepts/acceptance.mdx` citation — is the same defect wearing a wrong-file
+  binding as well. The repo already has the fix: a doubly-backticked span is an
+  illustration and is blanked before scanning. The lesson is narrow and worth
+  keeping: **a page describing a broken citation must display it, not make it.**
+  Writing this entry reproduced the fault twice before the checker caught it.
+- **False positives** — 2, and both are the same shape. The `gc` row cited
+  `tool_gc` correctly, and `README.md:399` pins the version correctly; in both
+  the only distinguishing token is under the three-character floor (`gc`) or is
+  digits the tokeniser discards (`1.1.0`). Neither was acquitted with
+  `anchor-ok`. The `gc` anchor was widened by two lines to reach the `reaped` /
+  `before` / `after` binding the row actually describes, and the `README` line
+  now names the anti-entropy pointer that shares it — both true of the target,
+  and both leave the anchor checked rather than silenced.
 
-Deliberately not fixed in the merge that surfaced them. Eighteen anchors across
-six files, several needing a judgement about *which* file a bare ref was meant
-to continue, is not work to do at the tail of a merge — that is how a repoint
-lands on a plausible wrong line and becomes invisible again. It wants its own
-pass, with each target read.
+**Two out-of-band repoints came with them**, found by reading targets rather than
+by nomination: `Entity::acl` was cited into `src/base/types.rs` at `` `:296` ``
+(an unrelated field) and `start_gossip`'s builders into `src/commands.rs` at
+`` `:1046-1127` `` (an unrelated span). Both are wrong the same way and neither
+was nominated, because a long enough citing block shares words with almost
+anything. That is the residual: the content check bites where the sentence is
+short.
+
+11 + 5 + 2 + 2 = 20. So the false-positive rate on the widened checker's first
+real list is 2 in 20, and both are floor artefacts rather than judgement errors
+— which is the number `--strict-anchors` has to be adopted against.
 
 Note the shape of the win: the checker's own improvement is what made its
 previous coverage claim false. Every "no anchors nominated" before this widening
@@ -2910,8 +2946,8 @@ and item 1's instrument staying the scorer.
   opens on "takes in durable facts from your sessions" or "learns on its own"
   any more; `VISION.md:52` now *states* there is no recorded baseline instead of
   gating claims on one; `README.md:393-394` says the Question and Pulse senders and
-  the fetch RPC are live, and `:399` pins the version at `1.1.0`, matching
-  `FEATURES.md`.
+  the fetch RPC are live, and `:399` pins the version at `1.1.0` beside the
+  anti-entropy pointer, matching `FEATURES.md`.
 - (retired 2026-07-21 — all three fixed) `FEATURES.md:54` now lists `Entity`'s
   `acl` <!-- docs-check: anchor-ok -->; the retired query-cache finding is gone from the file entirely; and
   `:634-635` marks prompts and resources "served on the standalone path only",
@@ -3294,8 +3330,8 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   scheduled; the three it actually caught were live lies in `FEATURES.md` and
   `SPECIALISTS.md` (CHANGELOG 2026-07-21).
 - **Pulse and Question senders are live.** `broadcast_pulse` / `broadcast_q` built
-  in `start_gossip` (`src/commands.rs:1046-1127`), pulse wired into the maintenance
-  tick (`:721`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
+  in `start_gossip` (`src/commands.rs:1105-1136`), pulse wired into the maintenance
+  tick (`:760`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
   `broadcast_q` invoked by `do_resolve` (`src/tick/tasks.rs:386`), `handle_question`
   live-dispatched (`src/gossip/handler.rs:44`).
 - **`Fetch` is wired** — `wire_fetch` installs the handler at

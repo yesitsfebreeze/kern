@@ -52,7 +52,7 @@ everywhere, which is what makes conflict-free cross-node merge work.
   (OR-Set of text lines), two vectors (`vector` content, `gnn_vector` structure),
   and provenance (`Source` with `system`/`object_id`/`section`/`title`/`author`/
   `url`). `kind`/`source` parsed off the source string. Also carries an `acl`
-  (`src/base/types.rs:296`; `Acl { scope, users, groups }` at `:120-124`) — as of
+  (`src/base/types.rs:310`; `Acl { scope, users, groups }` at `:133-137`) — as of
   2026-07-21 it is **written and read**. The MCP `ingest` tool's `scope` /
   `principals` build it (`acl_from_args`, `src/mcp/tools_mutate.rs`) and it rides
   `ingest::Job::acl` into `new_statement_entity` (`src/ingest/place.rs:57`);
@@ -135,10 +135,10 @@ per-parent fan-out itself, not an index.
 Unnamed children are **not** unbounded on the routing path: `route_entity` goes
 through `get_or_spawn_unnamed_child` (`src/base/accept.rs:644`), which reuses the
 single holding-pen child and auto-loads an evicted one rather than respawning it
-(three tests hold the line, `src/base/accept.rs:934`, `:909`). Growth comes only
-from tick clustering, which deliberately spawns one *distinct* child per
-spawnable cluster (`spawn_child_clusters`, `src/tick.rs:196`) — bounded per pass
-by the cluster count, not by anything per parent.
+(three tests, both holding pens: `src/base/accept.rs:934`, `:953`, `:976`).
+Growth comes only from tick clustering, which deliberately spawns one *distinct*
+child per spawnable cluster (`spawn_child_clusters`, `src/tick.rs:196`) —
+bounded per pass by the cluster count, not by anything per parent.
 
 ---
 
@@ -374,7 +374,7 @@ Nothing is lost on an LLM outage — the delta stays queued until it succeeds.
   the caller's duration to that absolute instant, so the four entrances cannot
   drift. `0`/absent = no TTL; an overflowing duration errors, never a silent
   no-TTL. `new_statement_entity` stamps it on both the document and the chunk
-  path (`place.rs:112`, `:239`), where the existing LWW lamport/producer
+  path (`place.rs:117`, `:239`), where the existing LWW lamport/producer
   stamping and pending delta finally have a writer; the reader half is
   `score::drop_expired`. `DirectJob` carries the resolved instant, which
   `drain_direct_once` overlays per job. The two entrances with no caller to pass
@@ -620,13 +620,13 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 | `forget` | `tools_mutate.rs` | Remove a thought + cascade edges (Facts immune). |
 | `forget_by_source` | `tools_mutate.rs` | Remove every thought from one `(scheme, object_id)` — **all sections of it**, since `source_id` hashes the section and keying on one would forget a single chunk of a document. Cascades through the same `forget_entity`; refuses local Facts unless `force`, which is the ONLY bypass of the Fact guard and is never implicit. Returns `removed_entities`/`removed_edges`/`kept_facts` — the last so a refused Fact is reported rather than read as "nothing was there". Exists so `kern forget --source` has somewhere to route. |
 | `degrade` | `tools_mutate.rs` | Down-weight edges along a bad retrieval path (`DEGRADE_*` decay). Returns `decayed_edges` and `removed_edges` — the reap count exists so a CLI `degrade` routed through the daemon can print what the local path prints. |
-| `move` | `tools_mutate.rs:491` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
+| `move` | `tools_mutate.rs:494` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
 | `promote` | `tools_mutate.rs` | Release a thought a review policy is holding: flips `ReviewState::Pending` to `Active`, so a `query {exclude_pending: true}` returns it again. The release half of the lifecycle `[ingest] review_policy` opens; idempotent, returning `promoted: false` on an already-active row rather than failing, and a hard `thought not found` on an id nothing resolves — a silent success would tell a curator a claim was released while it is still held. Shares `graph_ops::promote_entity` with the CLI's no-daemon fallback so the routed and local writes cannot disagree. **Authority: this is a curation decision made on a declared principal** — a wider claim than `intake drain`, which asserts none — and since 2026-07-22 the socket authenticates the *connection*, proving a uid rather than which of that uid's programs asked, so the gate it rides on is still whatever `ROADMAP.md` item 24 lands. |
 | `health` | `tools_admin.rs:83` | Graph stats (gravitons/kerns/entities/reasons/unnamed/claim_kinds) **plus the degradation surface**: `queue_depth`, `tasks_done`, `task_avg_ms`, `task_panics`, `last_task_panic`, `task_failures`, `last_task_failure`, `cold_evicted`, `embed_model`, `embed_dim`, `embed_mismatch`, and the eight fail-open counters — `query_dim_rejected`, `below_floor_deliveries`, `clock_skew_skips`, `ingest_dropped_chunks`, `remote_cap_dropped`, `unspilled_drops`, `ingest_queue_refused`, `gnn_train_refused` — each a path that returns something rather than erroring, so the count is the only way to tell a degraded result from a good one (`Server::health_stats`, `src/mcp.rs:117`). The first seven come off `HealthStats` (`src/base/health.rs:36`); `gnn_train_refused` is read straight from the trainer's own global (`src/mcp.rs:147`), which is why only a daemon's answer carries it. |
 | `graviton` | `tools_admin.rs` | list/add/remove focus attractors (name + text — phrase or full document — + optional mass). Replaced the single per-kern "purpose". |
 | `claim_kind` | `tools_admin.rs` | register/remove claim kinds; registered kinds extend the built-in distill set. |
 | `pulse` | `tools_admin.rs` | Trigger a clustering pass across the tree. |
-| `gc` | `tools_admin.rs:190` | Live reap of empty/orphan kerns (`GraphGnn::gc_empty_kerns_counted`); reports `reaped`/`before`/`after` and the live `data.mdb` size, since LMDB keeps freed pages until a restart or `kern compact`. |
+| `gc` | `tools_admin.rs:190-192` | Live reap of empty/orphan kerns (`GraphGnn::gc_empty_kerns_counted`); reports `reaped`/`before`/`after` and the live `data.mdb` size, since LMDB keeps freed pages until a restart or `kern compact`. |
 | `intake_drain` | `tools_intake.rs` | One immediate pass of the daemon's own intake drain (`ingest::intake::drain_now`), returning `archived`. Exists so `kern intake drain` has somewhere to route: the CLI's in-process pass reads the same queue directory and archives the same entries as the daemon's poll loop, so both distill the file and both race the archive move. |
 | `setup` | `tools_setup.rs` | Agent-facing installer: returns idempotent wiring instructions (seed gravitons, install the capture rule/hook in the host, verify) plus this project's current [done]/[todo] state. kern never writes host config; the calling agent does the wiring. |
 
