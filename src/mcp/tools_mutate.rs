@@ -280,6 +280,7 @@ impl Server {
 				hint: p.hint.clone(),
 				confidence: conf,
 				valid_until,
+				valid_from: None,
 				// Same principal the sync leg above clamps against: an MCP caller is
 				// an agent whatever `p.source` claims.
 				source_tag: AGENT_SOURCE.to_string(),

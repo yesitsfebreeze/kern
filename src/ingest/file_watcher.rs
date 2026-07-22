@@ -110,6 +110,7 @@ impl IngestSink for KernFileWatcherSink {
 				hint: hint.clone(),
 				confidence: 1.0,
 				valid_until: cfg.valid_until,
+				valid_from: None,
 				source_tag: tag.to_string(),
 			};
 			match crate::ingest::direct::intake_direct(dir, &job) {

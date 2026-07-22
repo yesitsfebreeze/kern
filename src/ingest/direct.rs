@@ -20,6 +20,10 @@ pub struct DirectJob {
 	// and this payload may sit in the intake for a whole poll interval first.
 	#[serde(default)]
 	pub valid_until: Option<std::time::SystemTime>,
+	// Lower bi-temporal bound: when the claim became true. Carried through the
+	// durable intake so the drain preserves the distiller's per-claim valid_from.
+	#[serde(default)]
+	pub valid_from: Option<std::time::SystemTime>,
 	// The channel this payload arrived on — what `clamp_confidence` reads and
 	// what `RetrievalConfig::source_trust` weights on. Carried rather than
 	// re-derived at the drain: every payload here used to be minted by the MCP
@@ -86,6 +90,7 @@ pub async fn drain_direct_once(
 		};
 		let job_cfg = crate::ingest::Config {
 			valid_until: job.valid_until,
+			valid_from: job.valid_from,
 			..cfg.clone()
 		};
 		let outcome = worker
@@ -137,6 +142,7 @@ mod tests {
 			hint: "audit-finding".into(),
 			confidence: 0.7,
 			valid_until: None,
+			valid_from: None,
 			source_tag: AGENT_SOURCE.to_string(),
 		}
 	}
@@ -166,6 +172,36 @@ mod tests {
 		let back: DirectJob = serde_json::from_str(&raw).expect("valid json payload");
 		assert_eq!(back.text, "a durable fact");
 		assert_eq!(back.confidence, 0.7);
+	}
+
+	#[test]
+	fn valid_from_round_trips_through_json() {
+		let now = std::time::SystemTime::now();
+		let j = DirectJob {
+			text: "round-trip".into(),
+			source: Source::Inline {
+				hash: "h".into(),
+				section: String::new(),
+			},
+			kind: EntityKind::Claim,
+			hint: String::new(),
+			confidence: 0.5,
+			valid_until: Some(now),
+			valid_from: Some(now),
+			source_tag: AGENT_SOURCE.to_string(),
+		};
+		let json = serde_json::to_string(&j).unwrap();
+		let back: DirectJob = serde_json::from_str(&json).unwrap();
+		assert_eq!(back.valid_from, Some(now));
+		assert_eq!(back.valid_until, Some(now));
+	}
+
+	#[test]
+	fn old_payload_without_valid_from_deserializes_as_none() {
+		// Simulate a payload written before valid_from existed.
+		let json = r#"{"text":"old","source":{"Inline":{"hash":"h","section":""}},"kind":"Claim","hint":"","confidence":0.7,"valid_until":null,"source_tag":"agent"}"#;
+		let j: DirectJob = serde_json::from_str(json).unwrap();
+		assert_eq!(j.valid_from, None, "missing field defaults to None");
 	}
 
 	#[tokio::test]
