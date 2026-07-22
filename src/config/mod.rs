@@ -282,6 +282,36 @@ impl Config {
 		}
 		out
 	}
+
+	/// In WSL2 a Linux loopback URL (`127.0.0.1` / `localhost`) does not reach a
+	/// Windows-host Ollama — the guest needs the RFC1918 gateway IP. Warn once
+	/// per loopback endpoint when running under WSL, so the hand-pinning the
+	/// LoCoMo run needed is no longer a silent failure. Non-WSL hosts are silent
+	/// (loopback is correct there), and a non-loopback local URL (e.g. the WSL2
+	/// gateway `172.27.x.x`) is already correct, so it is silent too.
+	pub fn wsl_loopback_warnings(&self) -> Vec<String> {
+		self.wsl_loopback_warnings_for(crate::llm::is_wsl())
+	}
+
+	/// Same as `wsl_loopback_warnings` with the WSL flag injected, so a test does
+	/// not depend on `/proc/sys/kernel/osrelease` matching the runner.
+	fn wsl_loopback_warnings_for(&self, in_wsl: bool) -> Vec<String> {
+		if !in_wsl {
+			return Vec::new();
+		}
+		let mut out = Vec::new();
+		for (label, url) in [
+			("embed.url", &self.embed.url),
+			("reason.url", &self.reason.url),
+		] {
+			if !url.is_empty() && crate::llm::is_loopback_url(url) {
+				out.push(format!(
+					"{label} ({url}) is loopback, but kern is running under WSL — a Linux 127.0.0.1 does not reach a Windows-host Ollama. Pin the WSL2 gateway IP instead (e.g. the host side of /etc/resolv.conf, or `ip route show default`)"
+				));
+			}
+		}
+		out
+	}
 }
 
 #[cfg(test)]
@@ -631,5 +661,44 @@ mod tests {
 		let c = crate::config::embed::EmbedConfig::default();
 		assert_eq!(c.num_ctx, crate::llm::EMBED_NUM_CTX);
 		assert_eq!(c.keep_alive, crate::llm::EMBED_KEEP_ALIVE);
+	}
+
+	#[test]
+	fn wsl_loopback_warnings_silent_off_wsl() {
+		let mut cfg = Config::default_in(Path::new("x"));
+		cfg.embed.url = "http://127.0.0.1:11434".into();
+		// not WSL -> loopback is correct, silent
+		assert!(cfg.wsl_loopback_warnings_for(false).is_empty());
+	}
+
+	#[test]
+	fn wsl_loopback_warnings_names_a_loopback_endpoint_under_wsl() {
+		let mut cfg = Config::default_in(Path::new("x"));
+		cfg.embed.url = "http://127.0.0.1:11434".into();
+		cfg.reason.url = "http://localhost:11434".into();
+		let w = cfg.wsl_loopback_warnings_for(true);
+		assert_eq!(w.len(), 2, "one per loopback endpoint: {w:?}");
+		assert!(w[0].contains("embed.url"), "names the field: {w:?}");
+		assert!(w[0].contains("127.0.0.1"), "names the host: {w:?}");
+		assert!(w[0].contains("WSL"), "names the cause: {w:?}");
+		// a non-loopback local URL (the WSL2 gateway) is already correct — silent
+		cfg.embed.url = "http://172.27.176.1:11434".into();
+		assert_eq!(
+			cfg.wsl_loopback_warnings_for(true).len(),
+			1,
+			"gateway IP is not loopback"
+		);
+	}
+
+	#[test]
+	fn is_loopback_url_pins_loopback_only() {
+		assert!(crate::llm::is_loopback_url("http://127.0.0.1:11434"));
+		assert!(crate::llm::is_loopback_url("http://127.1.2.3:11434"));
+		assert!(crate::llm::is_loopback_url("http://localhost:11434"));
+		assert!(crate::llm::is_loopback_url("http://[::1]:8080"));
+		// RFC1918 is local but NOT loopback — the WSL2 gateway falls here
+		assert!(!crate::llm::is_loopback_url("http://172.27.176.1:11434"));
+		assert!(!crate::llm::is_loopback_url("http://10.0.0.1:11434"));
+		assert!(!crate::llm::is_loopback_url("https://api.openai.com"));
 	}
 }

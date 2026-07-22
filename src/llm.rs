@@ -561,6 +561,38 @@ pub fn is_local_url(url: &str) -> bool {
 	false
 }
 
+/// True when the URL's host is loopback only — `127.0.0.0/8`, `::1` or
+/// `localhost`. Narrower than `is_local_url`: a WSL2 guest reaching a Windows
+/// host service must use the RFC1918 gateway IP, not loopback, so a boot
+/// warning keys on this.
+pub fn is_loopback_url(url: &str) -> bool {
+	let host = match host_of(url) {
+		Some(h) => h,
+		None => return false,
+	};
+	if host == "localhost" {
+		return true;
+	}
+	if let Some(rest) = host.strip_prefix('[') {
+		if let Some(v6) = rest.strip_suffix(']') {
+			return v6 == "::1";
+		}
+		return false;
+	}
+	if let Some(o) = parse_ipv4(host) {
+		return o[0] == 127;
+	}
+	false
+}
+
+/// True when this process is running inside WSL (1 or 2). `/proc/sys/kernel/osrelease`
+/// carries a Microsoft marker on both; absent or unreadable means not-WSL.
+pub fn is_wsl() -> bool {
+	std::fs::read_to_string("/proc/sys/kernel/osrelease")
+		.map(|k| k.to_ascii_lowercase().contains("microsoft"))
+		.unwrap_or(false)
+}
+
 fn host_of(url: &str) -> Option<&str> {
 	let after = url.split("//").nth(1)?;
 	// Bracketed IPv6: host is `[... ]`, the port `:port` follows the `]`.

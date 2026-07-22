@@ -3102,8 +3102,19 @@ propagation overwrites one — another 76.8 MB at this corpus size.
 - `unnamed` lists only; there is no `promote` (`FEATURES.md:813`).
 - GNN has no GPU path, weights are per-kern rather than shared, and the objective
   is link-prediction only (`FEATURES.md:595-596`).
-- Under WSL2 NAT a loopback Ollama URL must be hand-pinned; kern neither rewrites
-  nor warns (`FEATURES.md:1125-1127`).
+- ~~Under WSL2 NAT a loopback Ollama URL must be hand-pinned; kern neither
+  rewrites nor warns~~ — **Closed 2026-07-22.** kern still does not rewrite
+  config (a URL is the user's to set), but it now warns at boot when it is
+  running under WSL and a configured `embed.url` / `reason.url` is loopback
+  (`127.0.0.0/8`, `::1`, `localhost`) — a Linux loopback does not reach a
+  Windows-host Ollama, and the guest needs the RFC1918 gateway IP.
+  `crate::llm::is_wsl` reads the Microsoft marker in
+  `/proc/sys/kernel/osrelease`; `crate::llm::is_loopback_url` is the
+  loopback-only subset of `is_local_url` (a WSL2 gateway `172.27.x.x` is local
+  but not loopback, so it stays silent); `Config::wsl_loopback_warnings`
+  emits one non-fatal `tracing::warn!` per loopback endpoint, alongside the
+  `egress_warnings` (item 78) and `native_knob_warnings`. Non-WSL hosts are
+  silent — loopback is correct there (`FEATURES.md:1125-1127`).
 - RPC socket bind→chmod race — sub-millisecond, umask default — recorded as an
   accepted risk where it happens (`harden_socket`,
   `src/trnsprt/src/typed/local.rs:348-358`); revisit only if the umask

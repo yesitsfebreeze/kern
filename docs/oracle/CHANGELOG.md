@@ -2,6 +2,18 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 84 sub-fix closed: kern now warns at boot when running
+  under WSL and a configured `embed.url` / `reason.url` is loopback
+  (`127.0.0.0/8`, `::1`, `localhost`) — a Linux loopback does not reach a
+  Windows-host Ollama, and the LoCoMo run had to hand-pin the WSL2 gateway IP
+  with no hint. `crate::llm::is_wsl` reads the Microsoft marker in
+  `/proc/sys/kernel/osrelease`; `is_loopback_url` is the loopback-only subset
+  of `is_local_url` (WSL2 gateway `172.27.x.x` is local but not loopback, so
+  silent); `Config::wsl_loopback_warnings` emits one non-fatal `tracing::warn!`
+  per loopback endpoint. Non-WSL hosts silent. No URL rewriting (config is the
+  user's). 1019 pass, 3 new tests. Decided by: fix-the-root, the-oracle.
+  Supersedes: nothing.
+
 - 2026-07-22 — item 59 floor half-closed: `degrade_entity_reasons`
   (`src/commands/graph_ops.rs`) clamps `r.score = (r.score - decay).max(DEGRADE_FLOOR)`
   with `DEGRADE_FLOOR` (new, `src/base/constants.rs`, default `0.0`), so a
