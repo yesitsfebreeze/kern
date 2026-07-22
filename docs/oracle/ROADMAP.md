@@ -3318,8 +3318,13 @@ propagation overwrites one — another 76.8 MB at this corpus size.
   filter-drop (in `results`, flagged) from a non-existent id (in `missing`).
   Each id resolves a prefix and the cold tier and honours the same filters the
   single-`id` path honours — the per-row predicate, not a silent skip. The
-  hand-rolled-schemas half stays: the tool schemas are still hand-written JSON
-  (not derived from types), which is a style debt, not a correctness gap.
+  ~~hand-rolled-schemas half stays~~ — **retired 2026-07-22 as accepted
+  style debt.** The tool schemas are hand-written JSON (`tools.rs`), correct,
+  unit-tested (`definitions_are_well_formed_and_complete`), and stable. Deriving
+  them from types would need a proc-macro for a refactor with no correctness,
+  ergonomics, or wire gain — the schemas ARE the contract an MCP client reads.
+  Kept hand-written by decision; a future derive lands only if the schema surface
+  grows enough that hand-maintenance costs more than the macro.
 - ~~The LLM client is Ollama-centric with no retry/backoff policy object~~
   — **retry/backoff half closed 2026-07-22.** `complete` now retries a transient
   (5xx/429/timeout/connect) with the embed leg's `[150, 300, 600]ms` cadence via

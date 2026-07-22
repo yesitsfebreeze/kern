@@ -2,6 +2,12 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 84 last sub retired: hand-written MCP tool schemas
+  accepted as style debt, not a correctness gap. The schemas are hand-written
+  JSON in `tools.rs`, correct, unit-tested, and stable; deriving from types
+  would need a proc-macro for no correctness/ergonomics/wire gain (the schemas
+  ARE the contract an MCP client reads). Item 84 now fully closed. Decided by: the-oracle, name-the-tradeoff. Supersedes: nothing.
+
 - 2026-07-22 — item 84 sub-fix closed: `complete` now retries a transient
   (5xx/429/timeout/connect) with the embed leg's [150,300,600]ms cadence via a
   new `post_with_retry` (`src/llm.rs`) before surfacing the failure — a gateway
