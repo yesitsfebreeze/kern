@@ -6,7 +6,7 @@ use crate::base::reason::move_entity;
 use crate::base::search::find_entity;
 use crate::base::types::Source;
 use crate::base::util::explain_relationship_prompt;
-use crate::base::validate::{validate_conf, validate_fact_source};
+use crate::base::validate::validate_conf;
 use crate::ingest;
 
 pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
@@ -138,9 +138,6 @@ struct IngestArgs {
 // entities. Kind is derived from clamped confidence, never caller-supplied.
 fn validate_ingest(p: &IngestArgs) -> Result<(), String> {
 	validate_conf(p.conf).map_err(|e| e.to_string())?;
-	if p.conf >= crate::base::constants::FACT_CONFIDENCE {
-		validate_fact_source(AGENT_SOURCE).map_err(|e| e.to_string())?;
-	}
 	Ok(())
 }
 
