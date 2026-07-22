@@ -181,7 +181,7 @@ underneath any of them gets a refused flush and a reload rather than a clobber.
 two unlocked callers".** The unguarded entry point is named
 `save_graph_unguarded` and carries its precondition, and walking its call sites
 turns up **three** classes, not two. The two this item already named stand and
-still do not belong to it: `cmd_hub_merge` (`src/commands/admin.rs:785`) writes
+still do not belong to it: `cmd_hub_merge` (`src/commands/admin.rs:799`) writes
 a destination graph it holds no lock on, and `maybe_self_heal_store`
 (`src/commands.rs:433`) rewrites the store during boot recovery — hub merge
 stops both daemons first, self-heal runs before the daemon serves, and neither
@@ -538,7 +538,7 @@ path", which is why this is recorded here rather than assumed.
 same secret the HTTP surface already demands (`resolve_mcp_token`,
 `src/config/serve.rs:64`), never a second one — is compared in constant time
 before anything dispatches. The ordering is structural, not remembered:
-`serve_authenticated` (`src/rpc/kern_rpc_server.rs:173`) builds the handler
+`serve_authenticated` (`src/rpc/kern_rpc_server.rs:174`) builds the handler
 *inside* a closure that only runs after the verdict, so on a refused connection
 no handler exists for a method to reach. Every non-match returns `Err`,
 including an empty `expected` — a daemon that cannot read its secret serves
@@ -1044,7 +1044,7 @@ for reuse (`src/base/hnsw.rs:136-149`, scrub `:153`, alloc reuse `:109-125`),
 guarded by the test "deleted slots were recycled, arena did not grow" (`:755`). The cost is the
 scan, not the accumulation.
 
-### 28. GNN training is off the tick and linear in edges; only the `gnn_train_refused` surface gap is left `[lifecycle]`
+### 28. GNN training is off the tick, linear in edges, and `gnn_train_refused` reaches `kern health` `[lifecycle]` — CLOSED 2026-07-22
 
 ~~`TaskKind::GnnPropagate => do_gnn_propagate(...)` runs inline in `process_task`
 on the single tick loop, stalling large kerns.~~ **(closed 2026-07-21.)** The
@@ -1069,16 +1069,16 @@ arm only hands it the kern id (`src/tick.rs:116-121`). Same measurement after:
   `num_entities^2` adjacency — 134MB at N=4096 alone.
 - **Overlap.** The waiting set is keyed by kern id, so a second request for a
   kern already waiting is *coalesced*, not queued (`Submit::Coalesced`,
-  `src/tick/trainer.rs:82`) — the waiting job snapshots the graph when it runs,
+  `src/tick/trainer.rs:99`) — the waiting job snapshots the graph when it runs,
   so it already covers what the newer request would have seen. Past
   `TRAIN_QUEUE_CAP` distinct kerns (`:16`) the newest is refused and counted
-  (`:87`, `:97`), the shape item 30 settled on, and the count reaches MCP health
+  (`:104`, `:114`), the shape item 30 settled on, and the count reaches MCP health
   as `gnn_train_refused` (`src/mcp.rs:146`).
 - **Panic.** Item 2 is closed, so the inline arm was already contained by
   `run_guarded` — moving the work does not improve that, it *relocates* it, and
   a bare thread would have been strictly worse: the first panicking propagation
   would kill the trainer and every later one would silently never run. The
-  trainer therefore catches per job (`src/tick/trainer.rs:61`) and records
+  trainer therefore catches per job (`src/tick/trainer.rs:78`) and records
   through the same `Queue::record_task_panic` the health surfaces already read,
   so `GnnPropagate` keeps being the one task that reports a contained failure.
 
@@ -1086,7 +1086,7 @@ Moving training off the loop also opened a write-back race the inline version
 could not have: an entity superseded *during* training would have been
 re-inserted into `gnn_entity_idx` by the apply step, undoing the supersede
 removal. `apply_gnn_updates` now re-checks status at write time
-(`src/tick/gnn_propagate.rs:155`).
+(`src/tick/gnn_propagate.rs:166`).
 
 ~~Remaining: **the cost itself is untouched.** A propagation still takes 79.7s at
 N=4096.~~ **(closed 2026-07-22.)** The adjacency is now stored as its nonzeros
@@ -1129,12 +1129,70 @@ downstream code give identical outputs, so `gnn_vector` is unchanged to the last
 bit and ranking cannot move.
 
 The e2e recall harness is green and unchanged (0.9306 / 0.9722 / 0.9471 before
-and after) but is **not** evidence here: its corpus is 36 facts and
-`min_thoughts` is 128, so no propagation runs in it at all. Worth knowing that
-the recall gate the previous author asked for does not exist at that corpus size.
+and after) but is **not** evidence here: `test_recall.py` drives the CLI, its
+corpus is 36 facts and `min_thoughts` is 128, so no propagation runs in it at
+all. *Restated 2026-07-22:* the sentence here used to end "the recall gate the
+previous author asked for does not exist at that corpus size", and item 97 built
+it — `e2e/test_gnn_recall.py` lowers `min_thoughts` to 4, waits for the daemon's
+own `learned propagation applied` line, and scores recall only after one
+arrives. So a GNN recall gate now exists and would have covered this change; it
+still measures a 36-node graph, so it is a wiring gate, not a scale gate.
 
-Also unaddressed, and now the whole of this item: `gnn_train_refused` reaches
-MCP health only — `kern status` and the RPC `HealthRes` do not carry it.
+~~Also unaddressed, and now the whole of this item: `gnn_train_refused` reaches
+MCP health only (`src/mcp.rs:146`) — the RPC `HealthRes` does not carry the
+field, so no CLI can see it.~~ **(closed 2026-07-22.)** Corrected before it was
+fixed: this said `kern status`, and that is the wrong command.
+`src/commands/status.rs:1-6` says what it is for in its own first line — it
+describes the *processes* around the graph, `kern health` describes the graph —
+so the counter belonged to `cmd_health` (`src/commands/admin.rs:38`). Both
+lacked it, so the defect was real either way; only the target moved.
+
+Three edits and no new plumbing. `HealthRes` took a `#[serde(default)]
+gnn_train_refused: u64` (`src/trnsprt/src/kern_rpc/dto.rs:71`) — append-only,
+the shape every other counter took, and `dto_serde_tests` feeds it a literal
+old-daemon payload to prove a new client against an old daemon reads 0 rather
+than erroring. `KernRpcHandler::health` (`src/rpc/kern_rpc_server.rs:112`) fills
+it from `u64_at("gnn_train_refused")`, reading the *same* `tool_health` JSON the
+MCP surface emits so the two cannot drift. And `tick_health_lines`
+(`src/commands/admin.rs:135`) folds it into the existing `degraded:` line.
+
+**Why it folds in rather than joining the fail-open line above it.** `cmd_health`
+already prints a `degraded:` line for the seven fail-open counters
+(`src/commands/admin.rs:79`), and that is where an eighth looks like it belongs.
+It cannot go there. That line is built from `graph_health_stats`
+(`src/base/health.rs:39`), which the CLI computes *in its own process*, while
+`TRAIN_REFUSED` is a global only the daemon ever moves — a CLI reading it
+locally sees 0 forever. The only counters a CLI can see are the ones that
+crossed the RPC inside `HealthRes`, and the tick line is the only
+`HealthRes`-derived degradation line there is. Folding into it also keeps
+`a_clean_daemon_prints_no_last_fault_lines` true unedited: a healthy tick still
+prints exactly two lines, so a quiet kern does not grow a third that always
+reads zero.
+
+Two mutations were run rather than argued. Hardcoding the handler field to `0`
+fails exactly `a_refused_gnn_training_reaches_the_rpc_health_surface` and
+nothing else — that test spawns a real `Trainer` whose runner blocks on a
+channel, submits distinct kern ids until `Submit::Refused`, and asserts the RPC
+surface reports the count the trainer actually holds. Gating the new segment on
+`task_panics > 0` fails exactly
+`a_refused_gnn_training_shows_with_no_other_counter_moving` and — this is the
+point — leaves `a_clean_daemon_prints_no_last_fault_lines` green, because an
+all-zero `HealthRes` cannot tell a printed zero from a suppressed one.
+
+**The real `Trainer` cost something, recorded because it nearly shipped red.**
+`TRAIN_REFUSED` is one global per process, and CI runs `cargo test --workspace`
+(`.github/workflows/ci.yml:95`) — one process for the whole suite — where `just
+test` runs `cargo nextest`, one process per test. The new test refuses a full
+cap's worth of submissions, and the trainer's own
+`a_backlog_past_the_cap_is_refused_and_counted_not_grown` asserts its delta is
+exactly 1, so the two raced. Measured: **5 red runs in 30 under `cargo test`, 0
+in 40 under nextest** — which is precisely why `just test` never saw it, and why
+a green `just test` is not evidence about a global. Both tests now hold
+`REFUSAL_COUNTER` (`src/tick/trainer.rs:43`) across the window in which they
+measure; 40 of 40 green after. The rule this leaves: a test that *moves* a
+process-global must serialise against every test that *measures* one, because a
+measurement is two reads and the gap between them belongs to whoever else is
+running.
 
 Two consequences left deliberately unbuilt. The dense `normalized_adjacency`
 (`src/gnn/graph.rs:134`) is no longer on any production path; it is kept as the

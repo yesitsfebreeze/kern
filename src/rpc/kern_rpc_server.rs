@@ -109,6 +109,7 @@ impl KernRpc for KernRpcHandler {
 				remote_cap_dropped: u64_at("remote_cap_dropped"),
 				unspilled_drops: u64_at("unspilled_drops"),
 				ingest_queue_refused: u64_at("ingest_queue_refused"),
+				gnn_train_refused: u64_at("gnn_train_refused"),
 				embed_model: str_at("embed_model"),
 				embed_dim: u64_at("embed_dim"),
 				embed_mismatch: payload
@@ -280,6 +281,46 @@ mod tests {
 			handler.health().await.ingest_queue_refused >= 1,
 			"a refused ingest that no health surface reports is a lost write nobody can see"
 		);
+	}
+
+	// Same shape, for the trainer's cap: a real refusal walked from the trainer's
+	// counter through the MCP payload to the RPC DTO. Nonzero on purpose — a
+	// handler that hardcodes the field to `0` still names it, still compiles, and
+	// still reports a healthy daemon.
+	#[tokio::test]
+	async fn a_refused_gnn_training_reaches_the_rpc_health_surface() {
+		use crate::tick::trainer::{gnn_train_refused, Submit, Trainer, REFUSAL_COUNTER};
+
+		// Held first, so it outlives the trainer: this test fills a queue and so
+		// refuses a whole cap's worth, and `TRAIN_REFUSED` is one global for the
+		// process `cargo test` runs the suite in. Without this the trainer's own
+		// cap test — which asserts its delta is exactly 1 — reds on 1 run in 6.
+		let _serial = REFUSAL_COUNTER.lock().await;
+
+		// A runner that blocks until its sender drops, so the queue fills and stays
+		// full instead of draining out from under the test.
+		let (release, gate) = std::sync::mpsc::sync_channel::<()>(0);
+		let trainer = Trainer::spawn(Arc::new(Queue::new(8)), move |_| {
+			let _ = gate.recv();
+		});
+		let mut offered = 0;
+		while trainer.submit(&format!("k{offered}")) != Submit::Refused {
+			offered += 1;
+			assert!(offered < 10_000, "the trainer queue never filled");
+		}
+
+		let handler = KernRpcHandler::new(
+			Arc::new(crate::test_support::mcp_server()),
+			Arc::new(tokio::sync::Notify::new()),
+		);
+		let refused = gnn_train_refused();
+		assert!(refused >= 1, "the refusal itself was never counted");
+		assert_eq!(
+			handler.health().await.gnn_train_refused,
+			refused,
+			"a refused propagation no health surface reports is a kern left on stale embeddings nobody can see"
+		);
+		drop(release);
 	}
 }
 

@@ -25,6 +25,23 @@ pub fn gnn_train_refused() -> u64 {
 	TRAIN_REFUSED.load(Ordering::Relaxed)
 }
 
+// `TRAIN_REFUSED` is process-global and `cargo test` — what CI runs, rather than
+// the `cargo nextest` of `just test` — puts the whole suite in one process on
+// many threads. Every test that *moves* the counter must therefore hold this
+// while any test is *measuring* it, because a measurement is two reads and the
+// gap between them is where somebody else's refusals land. Measured before it
+// was added: the cap test below failed 5 runs in 30 once a second refusing test
+// existed. Test-only, since nothing in production reads the counter twice and
+// expects the two reads to agree.
+//
+// `tokio::sync::Mutex` rather than the `parking_lot` one this file already uses,
+// because one of the holders measures across an `.await` on the RPC handler and
+// a sync guard held over that is `clippy::await_holding_lock`. Sync callers take
+// `blocking_lock()`, which is sound here only because every one of them is a
+// plain `#[test]` with no runtime under it.
+#[cfg(test)]
+pub(crate) static REFUSAL_COUNTER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Submit {
 	Accepted,
@@ -171,6 +188,9 @@ mod tests {
 
 	#[test]
 	fn a_backlog_past_the_cap_is_refused_and_counted_not_grown() {
+		// Declared first so it outlives `h`: the trainer must be dropped, and its
+		// thread with it, while this still holds.
+		let _serial = REFUSAL_COUNTER.blocking_lock();
 		let h = held_trainer(Arc::new(Queue::new(8)));
 		let before = gnn_train_refused();
 
