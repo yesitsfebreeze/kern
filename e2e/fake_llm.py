@@ -33,6 +33,16 @@ STALL_SECS = 5
 # *inside a live daemon* needs a write that fails there and nowhere else.
 FAIL_MARKER = "kern-e2e-fail-embed"
 
+# The three ways the *chat* leg fails, which ROADMAP item 30 says used to be one
+# empty string. Any chat prompt carrying one of these markers gets that outcome:
+# a hang the client's `[reason] timeout_secs` has to cut, a 5xx, and a
+# well-formed reply with nothing in it — the weak model. Same idiom as
+# STALL_MARKER above, on the other endpoint.
+CHAT_HANG_MARKER = "kern-e2e-hang-chat"
+CHAT_HANG_SECS = 30
+CHAT_ERROR_MARKER = "kern-e2e-error-chat"
+CHAT_EMPTY_MARKER = "kern-e2e-empty-chat"
+
 
 def embed(text):
 	vec = [0.0] * DIM
@@ -78,6 +88,25 @@ class _Handler(BaseHTTPRequestHandler):
 		self.end_headers()
 		self.wfile.write(body)
 
+	def _chat_failure(self, prompt):
+		"""Answer a marked chat prompt with the failure it asks for.
+
+		Returns True when it answered (or hung), so the caller stops. Kept apart
+		from the normal reply path so the unmarked case is byte-for-byte what it
+		was before these modes existed.
+		"""
+		if CHAT_HANG_MARKER in prompt:
+			# Outlives the test's `[reason] timeout_secs`; the client cuts it.
+			time.sleep(CHAT_HANG_SECS)
+			return True
+		if CHAT_ERROR_MARKER in prompt:
+			self.send_error(500)
+			return True
+		if CHAT_EMPTY_MARKER in prompt:
+			self._reply({"message": {"role": "assistant", "content": ""}, "done": True})
+			return True
+		return False
+
 	def do_POST(self):
 		length = int(self.headers.get("Content-Length", 0))
 		req = json.loads(self.rfile.read(length) or b"{}")
@@ -95,6 +124,8 @@ class _Handler(BaseHTTPRequestHandler):
 			for msg in req.get("messages", []):
 				if msg.get("role") == "user":
 					last = msg.get("content", "")
+			if self._chat_failure(last):
+				return
 			reply = distilled(last) if _DISTILL in last else last
 			self._reply({"message": {"role": "assistant", "content": reply}, "done": True})
 		else:

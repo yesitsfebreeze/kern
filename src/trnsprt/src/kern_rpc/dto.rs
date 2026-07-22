@@ -69,6 +69,14 @@ pub struct HealthRes {
 	// `gnn_vector` they already had, so the count is the only trace.
 	#[serde(default)]
 	pub gnn_train_refused: u64,
+	// Completions that failed on the reason endpoint, and the last one in words.
+	// The blocking bridge hands its caller `""` for every failure, so the count
+	// is what separates a dead endpoint from a model with nothing to say, and the
+	// string is what separates a timeout from a refusal from an empty body.
+	#[serde(default)]
+	pub llm_complete_failed: u64,
+	#[serde(default)]
+	pub last_llm_complete_failure: String,
 	// Staleness identity. `build_id` fingerprints the running executable,
 	// `config_id` the resolved config, so an edited kern.toml reads as stale
 	// even when the binary did not move. Empty from daemons predating the
@@ -136,6 +144,8 @@ mod dto_serde_tests {
 		assert_eq!(h.unspilled_drops, 0);
 		assert_eq!(h.ingest_queue_refused, 0);
 		assert_eq!(h.gnn_train_refused, 0);
+		assert_eq!(h.llm_complete_failed, 0);
+		assert!(h.last_llm_complete_failure.is_empty());
 		assert!(h.build_id.is_empty(), "unknown build, not a stale one");
 		assert!(h.config_id.is_empty());
 		assert_eq!(h.uptime_ms, 0);
@@ -173,6 +183,8 @@ mod dto_serde_tests {
 			unspilled_drops: 16,
 			ingest_queue_refused: 17,
 			gnn_train_refused: 18,
+			llm_complete_failed: 19,
+			last_llm_complete_failure: "transient: HTTP error: operation timed out".into(),
 			build_id: "a1b2c3d4e5f60718".into(),
 			config_id: "0f1e2d3c4b5a6978".into(),
 			uptime_ms: 90_000,
@@ -194,6 +206,11 @@ mod dto_serde_tests {
 		assert_eq!(back.unspilled_drops, 16);
 		assert_eq!(back.ingest_queue_refused, 17);
 		assert_eq!(back.gnn_train_refused, 18);
+		assert_eq!(back.llm_complete_failed, 19);
+		assert_eq!(
+			back.last_llm_complete_failure,
+			src.last_llm_complete_failure
+		);
 		assert_eq!(back.build_id, src.build_id);
 		assert_eq!(back.config_id, src.config_id);
 		assert_eq!(back.uptime_ms, 90_000);

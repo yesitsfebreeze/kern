@@ -67,9 +67,9 @@ front (`src/commands/admin.rs:43`), and hands the response to a new
 already carried all eight — `cold_evicted` (`src/trnsprt/src/kern_rpc/dto.rs:42`)
 and the seven at `:55`–`:67`, filled from the daemon's own `health_stats`
 (`src/rpc/kern_rpc_server.rs:104`) — and all eight are now taken **whole**
-(`src/commands/admin.rs:120`), not merged: a daemon is serving the store, so its
+(`src/commands/admin.rs:125`), not merged: a daemon is serving the store, so its
 counts are the true ones and this process's are noise about a graph nobody
-queried. The local read stands only when nothing answers (`:132`), where zero is
+queried. The local read stands only when nothing answers (`:135`), where zero is
 honest. The no-daemon output is byte-identical to before, empty graph and
 populated.
 
@@ -79,8 +79,8 @@ process statics, so a test asserting on `ingest_queue_refused()` passes under
 --locked` (one process, which is what CI runs) the moment another test
 increments them — the trap item 92 hit. `degradation_lines` reads neither the
 statics nor the store, only its two arguments, and its tests
-(`src/commands/admin.rs:193`) construct both. The one that carries the decision
-is `a_local_count_is_not_printed_over_a_serving_daemons` (`:221`) — local
+(`src/commands/admin.rs:218`) construct both. The one that carries the decision
+is `a_local_count_is_not_printed_over_a_serving_daemons` (`:246`) — local
 counters nonzero, daemon healthy — which a `max()` or any additive merge fails.
 End to end, `e2e/test_health_surface.py` blinds the CLI's `data_dir` after the
 daemon has opened its own, drains three claims the fake LLM refuses to embed
@@ -228,7 +228,7 @@ underneath any of them gets a refused flush and a reload rather than a clobber.
 two unlocked callers".** The unguarded entry point is named
 `save_graph_unguarded` and carries its precondition, and walking its call sites
 turns up **three** classes, not two. The two this item already named stand and
-still do not belong to it: `cmd_hub_merge` (`src/commands/admin.rs:915`) writes
+still do not belong to it: `cmd_hub_merge` (`src/commands/admin.rs:975`) writes
 a destination graph it holds no lock on, and `maybe_self_heal_store`
 (`src/commands.rs:433`) rewrites the store during boot recovery — hub merge
 stops both daemons first, self-heal runs before the daemon serves, and neither
@@ -238,21 +238,20 @@ The third class *was* this item's unblocked half, and it is the one the closure
 above discharged. `with_graph` (`src/commands.rs:462`) loads the graph, mutates
 it and calls `save_graph_unguarded` (`:465`) holding no lock at all. `cmd_forget`
 and `cmd_degrade` reach it safely, because they `route` first and only fall into
-it on `NoDaemon` (`src/commands/graph_ops.rs:120`, `:443`). `kern graviton
+it on `NoDaemon` (`src/commands/graph_ops.rs:120`, `:444`). `kern graviton
 add`/`remove` and `kern claim-kind add`/`rm` did not route at all, so beside a
 running daemon they loaded a snapshot, mutated it, and wrote the *whole graph*
 back over whatever the daemon had committed since — a full-graph clobber, not a
 lost write, and the exact race the writer lock and the route exist to close.
 **Corrected 2026-07-21 — this paragraph said "do not route at all" one commit
 after that stopped being true.** All four now route first
-(`graviton_at`, `src/commands/admin.rs:358`, route calls `:374` and `:420`;
-`claim_kind_at`, `:480`, route calls `:488` and `:506`), keeping `with_graph`
-as the `NoDaemon` fallback. Unlike `ingest` and `link` they assert no trust:
+(`graviton_at`, `src/commands/admin.rs:383`, route calls `:399` and `:445`;
+`claim_kind_at`, `:505`, route calls `:513` and `:531`), keeping `with_graph`
 `graviton` carries a name, seed text and a mass; `claim_kind` a name and a
 description. Neither mints a Fact, so routing them widened item 24's hole no
 more than `intake drain` did, and the tools they route to already existed with
 matching semantics — `graviton` (`src/mcp/tools_admin.rs:87`, schema `:39`) and
-`claim_kind` (`:161`, schema `:52`), both dispatched at `src/mcp.rs:184-185`.
+`claim_kind` (`:161`, schema `:52`), both dispatched at `src/mcp.rs:188-189`.
 
 So the item's remainder is **one** half, not two: `ingest`/`link`, blocked on
 item 24. `graviton`/`claim_kind` were the unblocked half and are closed. The item
@@ -532,7 +531,7 @@ item.
 **What remains is the part the item assumed and the data does not carry: an
 `Entity` knows the CHANNEL it arrived on, never its AUTHOR.** `Source` is
 `{File, Ticket, Session, Agent, Inline}` — a URI scheme. `kern ingest`, the
-human path, writes `Source::Inline` (`src/commands/ingest_cmd.rs:62`), and the
+human path, writes `Source::Inline` (`src/commands/ingest_cmd.rs:63`), and the
 MCP `ingest` tool's default writes `Source::Inline` too
 (`src/mcp/tools_mutate.rs:231`). One tag, two trust principals: no weighting
 keyed on scheme can separate a person from an agent, so `source_trust_user` and
@@ -544,7 +543,7 @@ Nor does confidence stand in for it. `clamp_confidence`
 which after `beta_params_from_confidence` (`src/ingest/place.rs:16`) is a 0.667
 against 0.650 posterior — a 2.6% edge over an MCP agent, and since item 95 the
 same 2.6% over the file watcher, whose `tag` is now its `source` `scheme`
-(`src/ingest/file_watcher.rs:85`) instead of a raw `1.0`. So the item's
+(`src/ingest/file_watcher.rs:95`) instead of a raw `1.0`. So the item's
 own headline — a user-authored claim outranking an auto-ingested one at equal
 heat — is true by default at last, but only by 2.6%, which is a rounding error
 rather than a trust model. `source_trust = { file = 0.8 }` is how to make it
@@ -660,7 +659,7 @@ path", which is why this is recorded here rather than assumed.
 same secret the HTTP surface already demands (`resolve_mcp_token`,
 `src/config/serve.rs:64`), never a second one — is compared in constant time
 before anything dispatches. The ordering is structural, not remembered:
-`serve_authenticated` (`src/rpc/kern_rpc_server.rs:174`) builds the handler
+`serve_authenticated` (`src/rpc/kern_rpc_server.rs:176`) builds the handler
 *inside* a closure that only runs after the verdict, so on a refused connection
 no handler exists for a method to reach. Every non-match returns `Err`,
 including an empty `expected` — a daemon that cannot read its secret serves
@@ -781,7 +780,7 @@ re-run 2026-07-22). What is left is everything the gate does not cover.
 
      **The refusal is visible at both call sites**, which is the point of it:
      `run_hub` (`src/hub/serve.rs:305`) already `eprintln!`ed its `Err` arm;
-     the daemon's (`src/commands.rs:853`) only `tracing::error!`ed, so a
+     the daemon's (`src/commands.rs:854`) only `tracing::error!`ed, so a
      refusal there would have printed nothing at the default level while the
      `AlreadyRunning` arm beside it printed to the terminal. It now does both.
 
@@ -804,6 +803,11 @@ re-run 2026-07-22). What is left is everything the gate does not cover.
      real `SO_PEERCRED` read with a uid that is deliberately not the server's.
      The two alternatives considered do not bite: a same-uid child with a
      different exe is *correctly* accepted,
+     (`:508`), split out exactly as `require_peer_uid` is split out of
+     `require_peer_is_caller` and for the same reason, so a test drives the
+     whole arm against a real socket and a real `SO_PEERCRED` read with a uid
+     that is deliberately not the server's. The two alternatives considered do
+     not bite: a same-uid child with a different exe is *correctly* accepted,
      because the check claims a uid and nothing finer (measured above), and an
      abstract-namespace socket or a `socketpair` has no filesystem name, so a
      path bind never returns `EADDRINUSE` for one and the arm is never
@@ -1325,7 +1329,7 @@ old-daemon payload to prove a new client against an old daemon reads 0 rather
 than erroring. `KernRpcHandler::health` (`src/rpc/kern_rpc_server.rs:112`) fills
 it from `u64_at("gnn_train_refused")`, reading the *same* `tool_health` JSON the
 MCP surface emits so the two cannot drift. And `tick_health_lines`
-(`src/commands/admin.rs:179`) folds it into the existing `degraded:` line.
+(`src/commands/admin.rs:172`) folds it into the existing `degraded:` line.
 
 **Why it folds in rather than joining the fail-open line above it.** `cmd_health`
 already prints a `degraded:` line for the seven fail-open counters
@@ -1486,7 +1490,7 @@ that corpus is ingested through `kern ingest` — the one path that still mints
 
 Deciding behavior: fix-the-root.
 
-### 30. The durable backstop landed; what is left is a distill ceiling nobody chose and a queue that does not report its depth `[ingest]`
+### 30. The durable backstop landed; what is left is a distill ceiling nobody chose, an LLM failure with no channel, and a queue that does not report its depth `[ingest]`
 
 ~~`Worker::enqueue` fires `tokio::spawn(async move { tx.send(job).await })` and
 returns immediately. The channel bound is 64; the spawn set is unbounded.~~
@@ -1512,15 +1516,43 @@ grep that established it looked in the wrong files.** The claim was "no
 none in either — because the bound lives at the client, not at the caller.
 `distill` takes an opaque `llm: &dyn Fn(&str) -> String`
 (`src/ingest/distill.rs:37`) which is always `Client::complete_func`
-(`src/llm.rs:300`), and `complete` posts under `LLM_TIMEOUT` = 600s
-(`src/llm.rs:396`, applied at `:267` and `:289` — both the native and the
-OpenAI-compat branch), over a client-wide 120s default and a 3s
-`connect_timeout` (`:96`, `:99`). So a hung LLM does **not** hold the one
+(`src/llm.rs:388`), and `complete` posted under `LLM_TIMEOUT` = 600s
+(now the default behind `[reason] timeout_secs`, `src/llm.rs:492`, applied at
+`:344` and `:371` — both the native and the OpenAI-compat branch), over a
+client-wide 120s default and a 3s
+`connect_timeout` (`:159`, `:162`). So a hung LLM does **not** hold the one
 in-flight slot forever; it holds it for at most ten minutes. What is actually
-open is that 600s is a ceiling nobody chose for *this* leg and nothing exposes
-it: it is a `const`, not config, and a stall that long is indistinguishable at
-every health surface from a slow model. Narrower than stated, and a tuning
-question rather than a liveness defect.
+open is that 600s is a ceiling nobody chose for *this* leg: it is a `const`, not
+config. On the *bound* the item was narrower than stated, and a tuning question.
+
+**Widened 2026-07-22 — "indistinguishable at every health surface" understated
+it. The erasure is one frame below any surface, so no surface could have shown
+it.** `complete_func` (`src/llm.rs:388`) ended
+`.and_then(Result::ok).unwrap_or_default()`, so every outcome of `complete`
+collapsed to `""`: the 600s timeout, a refused connection, an HTTP 500, an auth
+rejection and `EmptyCompletion` were one value, with no log line and no counter
+anywhere. `is_transient` (`src/llm.rs:21`) exists and classifies
+exactly those cases, but it is consulted only on the *embed* leg
+(`src/llm.rs:228`) — the completion leg never sees the error it would sort.
+Six call sites take that closure and none can tell the cases apart:
+`spawn_intake`'s two (`src/commands.rs:681`, `src/commands.rs:693`), the intake
+tool's kinds closure (`src/mcp/tools_intake.rs:22`), the standalone tick
+(`src/commands/mcp_cmd.rs:458`) and `kern profile`
+(`src/commands/profile_cmd.rs:93`).
+
+The downstream handling is correct, and that is precisely what hides it:
+`distill` reads `""` as `None` (`src/ingest/distill.rs:34`, contract at
+`src/ingest/distill.rs:29-33`), so the delta is retried and never archived —
+nothing is lost. But a hung endpoint, a dead endpoint and a model too weak to
+emit a JSON array all produce the same unbounded retry loop. **The stuck sidecar
+concedes it in so many words:** `record_stuck` (`src/ingest/intake.rs:167`)
+writes "the reason model returned no parseable claims (prose reply, or endpoint
+unreachable)" — the product's own error text names two causes and admits it
+cannot say which, because by then there is nothing left to say it with. So the
+residue is two things, not one:
+**choose the ceiling** (config, not `const`) and **give the failure a channel** —
+a counted, logged error on the completion leg, the way `ingest_queue_refused`
+counts the queue's. The second is the liveness half the item denied it had.
 
 **The durability half is closed 2026-07-22.** `KernFileWatcherSink::ingest` now
 writes a `DirectJob` through `intake_direct` first
@@ -1529,6 +1561,9 @@ falls through to `Worker::submit` (`src/ingest/file_watcher.rs:129`) only when
 that write fails — the shape `tool_ingest` already had
 (`src/mcp/tools_mutate.rs:300`). It is gated on `intake.enabled` alone
 (`src/commands.rs:974`), which is exactly the flag
+that write fails — the shape
+`tool_ingest` already had (`src/mcp/tools_mutate.rs:300`). It is gated on
+`intake.enabled` alone (`src/commands.rs:975`), which is exactly the flag
 `spawn_intake` gates on, so the directory is never written unless something
 drains it; `drain_direct_once` needs no reason LLM, so the stricter gate
 `tool_ingest` uses would have parked nothing on a reason-less host that drains
@@ -1555,7 +1590,7 @@ in 60 seconds, largest 1.77 MB, versus 0 on the pre-change build** — each one 
 embed call and a graph write. `IgnoreRules` only ever hardcoded `.git`
 (`src/watcher/src/ignore_rules.rs:60`), so nothing stopped it. Closed by giving
 `IgnoreRules` host-supplied denied prefixes (`:45`, matched `:63`) and passing
-the resolved `intake.dir` and `data_dir` (`src/commands.rs:967`) — named by the
+the resolved `intake.dir` and `data_dir` (`src/commands.rs:968`) — named by the
 host, because that crate must not know what kern is. `effective_roots` now pins a
 relative root to `cwd` (`src/config/watcher.rs:25`) so event paths and denied
 prefixes share one coordinate system. What is *not* closed is that the deny list
@@ -1569,8 +1604,52 @@ still does not. "The only LLM call on the path"
 (`concepts/acceptance.mdx:7` — the old citation `` `:189-192` `` was past the
 end of an 86-line page and quoted a sentence that is nowhere in the tree), and
 with the
+(`concepts/acceptance.mdx:7` — the old citation, to lines 189-192, was past the
+end of an 86-line page and quoted a sentence that is nowhere in the tree; it is
+spelled without backticks here because a backticked span *is* an anchor to
+`docs_check`, and a mention of a dead citation is not one), and with the
 answer leg removed (2026-07-21) the distill leg is still the only LLM on any
 path — no latency work has landed on it.
+
+**Both halves of the LLM residue are closed 2026-07-22.** *The ceiling is
+chosen:* `LLM_TIMEOUT` is now the default behind `[reason] timeout_secs`
+(`src/config/reason.rs:12`, `DEFAULT_REASON_TIMEOUT_SECS` = 600 at `:20`),
+threaded through `Client::with_timeout_secs` (`src/llm.rs:196`) at every site
+that builds a client from config (`src/commands.rs:498`,
+`src/commands/ingest_cmd.rs:57`, `src/commands/intake_cmd.rs:143`,
+`src/commands/graph_ops.rs:340`, `src/commands/profile_cmd.rs:51`). *The failure
+has a channel:* `complete_func` (`src/llm.rs:388`) still hands its caller `""` —
+that contract is what six call sites rely on — but the error is counted and
+named on the way past (`record_complete_failure`, `:74`), reusing `is_transient`
+(`:21`) rather than adding a second classifier, and reaching the surface as
+`llm_complete_failed` / `last_llm_complete_failure` (`src/mcp.rs:150`,
+`trnsprt::HealthRes` at `src/trnsprt/src/kern_rpc/dto.rs:77`, printed by
+`llm_health_lines`, `src/commands/admin.rs:201`). Daemon-sourced, because the
+counter is a process static and nothing on the `kern health` path completes
+anything — a local read could only ever be zero.
+
+**What the count buys is exactly `record_stuck`'s missing sentence.** The four
+outcomes it could not separate now read apart on one health line: a hang as
+`transient: HTTP error: error sending request for url (...)`, a refusal as the
+same class with a different message, a 5xx as `transient: API error (500): ...`
+(first line only, capped at 160 chars — a gateway's error page is HTML and would
+otherwise take the screen), an empty body as `permanent: empty completion
+response`. And prose from a weak model raises **nothing**: the endpoint is fine,
+so the counter that means "the endpoint is at fault" stays at zero, which is the
+one bit `record_stuck` needed and did not have. Proved four ways rather than
+asserted: `llm.rs`'s four-mode test compares the recorded strings pairwise for
+distinctness and takes a *delta* off the process-global counter
+(`src/llm.rs:764`) — the shape `src/ingest/worker.rs:521` established, which
+reads `before = ingest_queue_refused()` and asserts the difference, because
+`cargo test` runs the whole crate in one process and an absolute count is green
+under `nextest` and red under it; a control test proves a working model moves
+nothing; and
+`e2e/test_llm_failure_channel.py` drives hang / 500 / empty-body through a live
+daemon's intake poll and reads the line back over the socket. **Unchanged when
+unconfigured, measured not claimed:** the default `timeout_secs` is asserted
+equal to the `const` it replaced and applying it is asserted a no-op
+(`src/llm.rs:726`), and `0` reads as unset rather than as a zero deadline
+(`src/llm.rs:196`).
 
 ### 31. Structural debt in the hot types `[retrieval]`
 
@@ -1725,7 +1804,7 @@ sorts by heat and truncates to `ENTITY_SYNC_BATCH = 32` per heartbeat
 (`src/gossip/handler.rs:156`, sorted `:181`),
 so cold entities may never propagate and a partitioned node that rejoins never
 catches up. (`Fetch` is live — `wire_fetch` installs the handler at
-`src/commands.rs:1098` and the question path issues it — but it is single-id, not a
+`src/commands.rs:1099` and the question path issues it — but it is single-id, not a
 catch-up mechanism.) Two pieces adopted on paper and unscheduled: **back-off
 pacing** with exponential jitter keyed to a divergence estimate
 (`docs/kern/fl-vs-knids-federation.md:163-168`), and **batch-size / push-vs-pull
@@ -2084,7 +2163,7 @@ Lifecycle, so the wording cannot outlive its survivor: `reindex_entity`
 at every site that mints or drops a `Rephrase` — `merge_duplicate`
 (`src/base/accept.rs:199`), the supersede path that consumes one
 (`src/tick/tasks.rs:209`), and `degrade_entity_reasons`
-(`src/commands/graph_ops.rs:491`). GC needed nothing: `remove_entity` already
+(`src/commands/graph_ops.rs:492`). GC needed nothing: `remove_entity` already
 calls `lex.remove(id)`, and the wording lives in the survivor's own document.
 `rebuild_from_graph` uses the same builder, or the posting would survive exactly
 until the next reload.
@@ -2659,12 +2738,12 @@ which lands in item 1's lap the moment PQ is promoted out of the non-goals.
 ### 76. The watchdog force-exit skips the final guarded flush `[store]`
 
 Confirmed against source 2026-07-21, and it is not a doc claim: `spawn_watchdog`
-(`src/commands.rs:929-968`) beats a counter once a second from the async runtime
-and force-exits `std::process::exit(101)` (`:959`) after `STALL_LIMIT * CHECK_SECS`
+(`src/commands.rs:930-969`) beats a counter once a second from the async runtime
+and force-exits `std::process::exit(101)` (`:960`) after `STALL_LIMIT * CHECK_SECS`
 = 30s of no progress. `process::exit` runs no destructor and no `Drop`, so it
 skips the guarded shutdown flush the ordinary path takes — the `shutdown` notify
-at `src/commands.rs:891` unwinds into the guarded persist closure `save_fn`
-(`:632`, called at `:897`),
+at `src/commands.rs:892` unwinds into the guarded persist closure `save_fn`
+(`:633`, called at `:898`),
 which is the thing that "never overwrites a grown disk". Nothing on the watchdog
 path writes anything, and the exit line does not say so.
 
@@ -2727,7 +2806,7 @@ so the trait default returns `None` (`src/trnsprt/src/server.rs:21`). Meanwhile
 `extra_capabilities` advertises `{"resources": {}, "prompts": {}}`
 (`src/commands/mcp_cmd.rs:358` — spelled in full because the nearest preceding
 path is `server.rs`, and a bare `:NNN` continues the wrong file) to
-match standalone, which *does* serve them (`src/mcp.rs:213-222`, advertised `:160`). Advertised on
+match standalone, which *does* serve them (`src/mcp.rs:217-226`, advertised `:164`). Advertised on
 the normal path, non-functional there. Either forward them or stop advertising.
 
 ### 82. Standalone `kern mcp` runs no gossip `[surface]`
@@ -2913,7 +2992,7 @@ Item 30's durable backstop put a kern-written file inside the default watched
 root and the watcher ate it — 283 payloads from one seed edit before the fix. The
 fix works and is measured: `IgnoreRules::with_denied`
 (`src/watcher/src/ignore_rules.rs:45`) takes the resolved `intake.dir` and
-`data_dir` from `spawn_file_watcher` (`src/commands.rs:967`). But it closes that
+`data_dir` from `spawn_file_watcher` (`src/commands.rs:968`). But it closes that
 loop by *enumerating* the two directories that were writing, not by making the
 class impossible. Anything kern writes under a watched root in future is
 ingestible again unless someone remembers to add it, and there is no test that
@@ -3377,12 +3456,12 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   scheduled; the three it actually caught were live lies in `FEATURES.md` and
   `SPECIALISTS.md` (CHANGELOG 2026-07-21).
 - **Pulse and Question senders are live.** `broadcast_pulse` / `broadcast_q` built
-  in `start_gossip` (`src/commands.rs:1105-1136`), pulse wired into the maintenance
-  tick (`:760`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
+  in `start_gossip` (`src/commands.rs:1063-1144`), pulse wired into the maintenance
+  tick (`:761`) and the `pulse` MCP tool (`src/mcp/tools_admin.rs:218`),
   `broadcast_q` invoked by `do_resolve` (`src/tick/tasks.rs:386`), `handle_question`
   live-dispatched (`src/gossip/handler.rs:44`).
 - **`Fetch` is wired** — `wire_fetch` installs the handler at
-  `src/commands.rs:1098`. Single-id, so it is not anti-entropy (item 36), but it
+  `src/commands.rs:1099`. Single-id, so it is not anti-entropy (item 36), but it
   is not dead.
 - **`union_statements` never existed**; remote heat is no longer pinnable
   (`src/base/merge.rs:20`, applied `:153`).
@@ -3401,7 +3480,7 @@ number ("blocked on item 13") and renumbering would silently repoint them.
   AGENT_SOURCE)` capping at `MAX_AI_CONFIDENCE` 0.95 and `kind` is *derived* from
   confidence, which needs 1.0 for `Fact` (`src/base/math.rs:205-210`,
   `src/base/constants.rs:69`). Only the CLI reaches `Fact`, via
-  `clamp_confidence(1.0, "user")` (`src/commands/ingest_cmd.rs:59`).
+  `clamp_confidence(1.0, "user")` (`src/commands/ingest_cmd.rs:60`).
 - **`conf` is clamped to [0,1]** — `validate_conf` (`src/base/validate.rs:14`)
   called at `src/mcp/tools_mutate.rs:159`.
 - **A prose-answering reason model no longer archives deltas having stored

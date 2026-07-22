@@ -55,7 +55,7 @@ everywhere, which is what makes conflict-free cross-node merge work.
   (`src/base/types.rs:310`; `Acl { scope, users, groups }` at `:133-137`) — as of
   2026-07-21 it is **written and read**. The MCP `ingest` tool's `scope` /
   `principals` build it (`acl_from_args`, `src/mcp/tools_mutate.rs`) and it rides
-  `ingest::Job::acl` into `new_statement_entity` (`src/ingest/place.rs:57`);
+  `ingest::Job::acl` into `new_statement_entity` (`src/ingest/place.rs:58`);
   `query`'s `principals` enforce it in `matches_filter` via `acl_admits`
   (`src/retrieval/score.rs:243`). Two rules: a scoped `Fact` is withheld from a
   non-member (GC-immunity is not ACL-immunity), and an empty `principals` is *no
@@ -332,7 +332,7 @@ and cold tier live together. Readers never block, writers serialize.
 
 **Gaps.** Single-writer is enforced, not assumed — `src/base/lock.rs` is an advisory
 lock `reembed`, `gc` and `compact` claim or refuse — but `cmd_hub_merge`
-(`src/commands/admin.rs:915`) and `maybe_self_heal_store` (`src/commands.rs:446`)
+(`src/commands/admin.rs:975`) and `maybe_self_heal_store` (`src/commands.rs:446`)
 still `save_graph_unguarded` holding none. No WAL but LMDB's; compaction is offline.
 
 ---
@@ -374,7 +374,7 @@ Nothing is lost on an LLM outage — the delta stays queued until it succeeds.
   the caller's duration to that absolute instant, so the four entrances cannot
   drift. `0`/absent = no TTL; an overflowing duration errors, never a silent
   no-TTL. `new_statement_entity` stamps it on both the document and the chunk
-  path (`place.rs:117`, `:239`), where the existing LWW lamport/producer
+  path (`place.rs:109`, `:249`), where the existing LWW lamport/producer
   stamping and pending delta finally have a writer; the reader half is
   `score::drop_expired`. `DirectJob` carries the resolved instant, which
   `drain_direct_once` overlays per job. The two entrances with no caller to pass
@@ -907,14 +907,14 @@ receipt (`id_matches_body`, `src/gossip/handler.rs`).
 **What.** One client wrapping two endpoints (reason / embed) against
 Ollama by default; fail-open everywhere.
 
-**How.** `Client` (`src/llm.rs:57`) — `embed` (`:147`) / `embed_batch` (`:191`)
-against the embedding endpoint, `complete` (`:247`, reason / distillation),
-`complete_func` (`:300`, sync closure for the tick/ingest blocking bridges).
-`is_transient` (`:19`) classifies retryable errors. **Every request is bounded** — `LLM_TIMEOUT` = 600s on `complete`, `EMBED_TIMEOUT` = 120s on the embed calls (`:396`, `:398`), applied per request by `post_checked` (`:170`) over a client-wide 120s default and a 3s `connect_timeout` (`:96`, `:99`) so a dead endpoint fails fast instead of hanging. `Endpoint` (`:40`) holds
-url/model/key; `new_embed_only` (`:140`) builds a client for `reembed`.
-`for_eval(seed)` (`:120`) makes it deterministic.
+**How.** `Client` (`src/llm.rs:117`) — `embed` (`:220`) / `embed_batch` (`:264`)
+against the embedding endpoint, `complete` (`:320`, reason / distillation),
+`complete_func` (`:388`, sync closure for the tick/ingest blocking bridges).
+`is_transient` (`:21`) classifies retryable errors — on both legs now: the completion leg counts and names what it throws away (`record_complete_failure`, `:74`, bounded to one line by `:65`), so `complete_func`'s `""` no longer hides which failure produced it. It reads back as `llm_complete_failed` / `last_llm_complete_failure` (`src/mcp.rs:150`, `src/commands/admin.rs:160`). **Every request is bounded** — `complete` posts under `[reason] timeout_secs` (`src/config/reason.rs:12`, default 600 at `:20`), applied by `with_timeout_secs` (`src/llm.rs:196`) and held as `reason_timeout` (`:137`, posted at `:344` / `:371`); `EMBED_TIMEOUT` = 120s on the embed calls (`:494`), applied per request by `post_checked` (`:243`) over a client-wide 120s default and a 3s `connect_timeout` (`:159`, `:162`) so a dead endpoint fails fast instead of hanging. `Endpoint` (`:100`) holds
+url/model/key; `new_embed_only` (`:213`) builds a client for `reembed`.
+`for_eval(seed)` (`:184`) makes it deterministic.
 
-**Where.** `src/llm.rs` (585 LoC).
+**Where.** `src/llm.rs` (852 LoC).
 
 **Gaps.** Ollama-centric; OpenAI-compatible only via manual url/key. No
 retry/backoff policy object. The embedding dimension still locks the graph and
