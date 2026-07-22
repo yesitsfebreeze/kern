@@ -103,6 +103,16 @@ pub(crate) async fn place_document(
 
 	let external_id = job.source.source_id().unwrap_or_default();
 
+	// A rename carries the old path's external_id so the stale `Document` it
+	// names can be superseded. The new entity's vector is needed for the
+	// Supersedes reason midpoint, so clone it only when there is something to
+	// supersede — never on the common path.
+	let rename_vec = if job.replaces.is_some() {
+		Some(vec.clone())
+	} else {
+		None
+	};
+
 	let mut thought = new_statement_entity(
 		doc_id.to_string(),
 		&job.text,
@@ -122,7 +132,7 @@ pub(crate) async fn place_document(
 	let tid = thought.id.clone();
 	let joined = thought.statements.join(" ");
 
-	let (result, lex) = {
+	let (result, lex, renamed_old_id) = {
 		let mut g = graph.write();
 		// Stamp AFTER accept, against the id that actually entered the graph: the
 		// second dedup gate drops `thought` whole, so a delta minted beforehand
@@ -132,8 +142,23 @@ pub(crate) async fn place_document(
 		if !r.deduped {
 			accept::merge_valid_until(&mut g, &r.entity_id, job.config.valid_until);
 		}
+		// A renamed-and-edited file supersedes the entity at its old path — a
+		// move-plus-edit gets a new id under a new external id and otherwise the
+		// old `Document` would dangle forever (ROADMAP item 84). Only on the
+		// non-dedup path: a rename whose new content paraphrases an existing
+		// entity is a rarer edge left to the dedup survivor. `job.replaces` is the
+		// old path's `source_id()` (external id), resolved by the sink.
+		let renamed_old_id = if !r.deduped {
+			job.replaces.as_deref().and_then(|old_external| {
+				rename_vec.as_deref().and_then(|nv| {
+					accept::supersede_renamed(&mut g, &root_id, &r.entity_id, nv, old_external, "renamed")
+				})
+			})
+		} else {
+			None
+		};
 		let l = g.lexical();
-		(r, l)
+		(r, l, renamed_old_id)
 	};
 	// Only the id that entered the graph gets indexed or acked. On a gate-2 dedup
 	// `tid` was discarded whole, so lexically indexing it would hand retrieval a
@@ -141,6 +166,10 @@ pub(crate) async fn place_document(
 	if !result.deduped {
 		if let Some(lex) = lex {
 			lex.insert(&tid, &joined);
+			// The superseded old path is no longer a live lexical seed.
+			if let Some(old_id) = renamed_old_id {
+				lex.remove(&old_id);
+			}
 		}
 	}
 
@@ -284,6 +313,7 @@ mod tests {
 			confidence,
 			config: Config::default(),
 			review: ReviewState::default(),
+			replaces: None,
 			result_tx: None,
 		}
 	}

@@ -68,6 +68,7 @@ impl IngestSink for KernFileWatcherSink {
 			source_uri,
 			content,
 			language_hint,
+			replaces,
 		} = record;
 
 		let path = strip_file_uri(&source_uri);
@@ -124,6 +125,20 @@ impl IngestSink for KernFileWatcherSink {
 			}
 		}
 
+		// `replaces` arrives as the old file URI; the graph keys on
+		// `source_id()` (a content hash of scheme+object+section), so resolve it
+		// here, once, rather than re-parsing inside the place path.
+		let replaces_external = replaces.as_deref().map(|old_uri| {
+			Source::File {
+				path: strip_file_uri(old_uri),
+				section: String::new(),
+				title: String::new(),
+				author: String::new(),
+				url: old_uri.to_string(),
+			}
+			.source_id()
+			.unwrap_or_default()
+		});
 		self
 			.worker
 			.submit(
@@ -134,6 +149,7 @@ impl IngestSink for KernFileWatcherSink {
 				1.0,
 				tag,
 				self.ingest_config(),
+				replaces_external,
 			)
 			.await;
 	}
@@ -237,9 +253,31 @@ mod tests {
 				author: String::new(),
 				url: record.source_uri,
 			};
-			let entity = self.build_entity(source, record.content);
+			let entity = self.build_entity(source.clone(), record.content);
+			let new_vec = entity.vector.to_vec();
 			let root_id = self.graph.read().root.id.clone();
-			accept::accept(&mut self.graph.write(), &root_id, entity, "");
+			let placed = accept::accept(&mut self.graph.write(), &root_id, entity, "");
+			if let Some(old_uri) = record.replaces {
+				let old_external = Source::File {
+					path: strip_file_uri(&old_uri),
+					section: String::new(),
+					title: String::new(),
+					author: String::new(),
+					url: old_uri,
+				}
+				.object_id()
+				.to_string();
+				if !old_external.is_empty() {
+					accept::supersede_renamed(
+						&mut self.graph.write(),
+						&root_id,
+						&placed.entity_id,
+						&new_vec,
+						&old_external,
+						"renamed",
+					);
+				}
+			}
 		}
 	}
 
@@ -281,6 +319,7 @@ mod tests {
 			source_uri: "file:///tmp/hello.rs".to_string(),
 			content: "fn hello() {}".to_string(),
 			language_hint: Some("rust".to_string()),
+			replaces: None,
 		};
 		sink.ingest(rec).await;
 
@@ -366,6 +405,7 @@ mod tests {
 				source_uri: "file:///tmp/ttl.rs".to_string(),
 				content: "fn expires() {}".to_string(),
 				language_hint: Some("rust".to_string()),
+				replaces: None,
 			})
 			.await;
 
@@ -450,6 +490,7 @@ mod tests {
 				source_uri: "file:///tmp/backpressure.rs".to_string(),
 				content: "fn waits() {}".to_string(),
 				language_hint: Some("rust".to_string()),
+				replaces: None,
 			}),
 		)
 		.await;
@@ -487,6 +528,7 @@ mod tests {
 				source_uri: "file:///tmp/trusted.rs".to_string(),
 				content: "fn appears_on_disk() {}".to_string(),
 				language_hint: Some("rust".to_string()),
+				replaces: None,
 			})
 			.await;
 
@@ -553,6 +595,7 @@ mod tests {
 				source_uri: "file:///tmp/durable.rs".to_string(),
 				content: content.to_string(),
 				language_hint: Some("rust".to_string()),
+				replaces: None,
 			})
 			.await;
 
@@ -635,6 +678,7 @@ mod tests {
 				source_uri: "file:///tmp/failopen.rs".to_string(),
 				content: "fn still_ingested() {}".to_string(),
 				language_hint: Some("rust".to_string()),
+				replaces: None,
 			})
 			.await;
 
@@ -673,11 +717,103 @@ mod tests {
 			source_uri: "file:///tmp/dup.rs".to_string(),
 			content: "fn dup() {}".to_string(),
 			language_hint: Some("rust".to_string()),
+			replaces: None,
 		};
 		sink.ingest(rec.clone()).await;
 		sink.ingest(rec).await;
 
 		let g = g.read();
 		assert_eq!(count_file_documents(&g), 1);
+	}
+
+	// ROADMAP item 84: a renamed-and-edited file used to leave the old `Document`
+	// dangling beside the new one. The sink now supersedes the old-path entity.
+	#[tokio::test]
+	async fn a_rename_plus_edit_supersedes_the_old_path_document() {
+		let g = Arc::new(RwLock::new(GraphGnn::new()));
+		let sink = DirectFileSink::new(g.clone());
+
+		// original file at /tmp/old.rs
+		sink
+			.ingest(IngestRecord {
+				source_uri: "file:///tmp/old.rs".to_string(),
+				content: "fn original() {}".to_string(),
+				language_hint: Some("rust".to_string()),
+				replaces: None,
+			})
+			.await;
+
+		let old_id = {
+			let g = g.read();
+			g.kerns
+				.values()
+				.flat_map(|k| k.entities.values())
+				.find(|e| matches!(e.kind, EntityKind::Document) && e.source.object_id() == "tmp/old.rs")
+				.map(|e| e.id.clone())
+				.expect("old doc placed")
+		};
+
+		// renamed to /tmp/new.rs and edited — `replaces` carries the old file URI
+		sink
+			.ingest(IngestRecord {
+				source_uri: "file:///tmp/new.rs".to_string(),
+				content: "fn renamed_and_edited() {}".to_string(),
+				language_hint: Some("rust".to_string()),
+				replaces: Some("file:///tmp/old.rs".to_string()),
+			})
+			.await;
+
+		let g = g.read();
+		let old = g
+			.kerns
+			.values()
+			.flat_map(|k| k.entities.values())
+			.find(|e| e.id == old_id)
+			.expect("old entity kept for the supersede chain");
+		assert!(
+			matches!(old.status, EntityStatus::Superseded),
+			"old-path document is superseded, not left dangling"
+		);
+		assert_eq!(old.superseded_by.len() > 0, true, "superseded_by is set");
+		let new = g
+			.kerns
+			.values()
+			.flat_map(|k| k.entities.values())
+			.find(|e| matches!(e.kind, EntityKind::Document) && e.source.object_id() == "tmp/new.rs")
+			.expect("new doc placed");
+		assert!(
+			matches!(new.status, EntityStatus::Active),
+			"new-path document is active"
+		);
+	}
+
+	// A pure rename (same content) re-resolves to the same id, so there is nothing
+	// to supersede — `replaces` is a noop when the old external id names the same
+	// entity the new placement would.
+	#[tokio::test]
+	async fn a_rename_with_no_old_entity_is_a_noop() {
+		let g = Arc::new(RwLock::new(GraphGnn::new()));
+		let sink = DirectFileSink::new(g.clone());
+		sink
+			.ingest(IngestRecord {
+				source_uri: "file:///tmp/new.rs".to_string(),
+				content: "fn fresh() {}".to_string(),
+				language_hint: Some("rust".to_string()),
+				replaces: Some("file:///tmp/ghost.rs".to_string()),
+			})
+			.await;
+		let g = g.read();
+		assert_eq!(
+			count_file_documents(&g),
+			1,
+			"one doc, no supersede happened"
+		);
+		let active = g
+			.kerns
+			.values()
+			.flat_map(|k| k.entities.values())
+			.filter(|e| matches!(e.kind, EntityKind::Document))
+			.all(|e| matches!(e.status, EntityStatus::Active));
+		assert!(active, "nothing was superseded");
 	}
 }

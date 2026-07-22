@@ -12,6 +12,10 @@ pub struct IngestRecord {
 	pub source_uri: String,
 	pub content: String,
 	pub language_hint: Option<String>,
+	/// The source_uri the new file replaces, on a `Renamed` event. The sink
+	/// supersedes the old-path entity so a move-plus-edit does not leave a
+	/// dangling stale `Document` beside the new one. `None` for ordinary events.
+	pub replaces: Option<String>,
 }
 
 // This crate must NOT depend on kern; the sink is implemented by the kern wiring.
@@ -46,9 +50,11 @@ impl<S: IngestSink> IngestPipeline<S> {
 }
 
 async fn build_record(ev: &WatchEvent) -> Option<IngestRecord> {
-	let path: &Path = match &ev.kind {
-		WatchKind::Created | WatchKind::Modified => &ev.path,
-		WatchKind::Renamed { to, .. } => to,
+	let (path, replaces): (&Path, Option<String>) = match &ev.kind {
+		WatchKind::Created | WatchKind::Modified => (&ev.path, None),
+		// `WatchEvent::new` forces `ev.path` to `to`, so the old path comes from
+		// the `from` half of the kind — `ev.path` would be the new location.
+		WatchKind::Renamed { from, to } => (to, Some(file_uri(from))),
 		WatchKind::Deleted => return None,
 	};
 
@@ -73,6 +79,7 @@ async fn build_record(ev: &WatchEvent) -> Option<IngestRecord> {
 		source_uri: file_uri(path),
 		content,
 		language_hint: language_hint(path),
+		replaces,
 	})
 }
 

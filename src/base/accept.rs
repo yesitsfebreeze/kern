@@ -508,14 +508,39 @@ fn supersede(
 		}
 	};
 
+	stamp_superseded(
+		g,
+		placed_kern_id,
+		entity_id,
+		thought_vec,
+		&old_id,
+		&old_kern_id,
+		&old_vec,
+		reason_text,
+	)
+}
+
+/// Stamp `old_id` Superseded-by `new_id`, evict it from the ANN indices, and add
+/// a `Supersedes` reason edge new→old. Shared by same-external-id `supersede`
+/// and cross-external-id `supersede_renamed`.
+fn stamp_superseded(
+	g: &mut GraphGnn,
+	placed_kern_id: &str,
+	entity_id: &str,
+	thought_vec: &[f32],
+	old_id: &str,
+	old_kern_id: &str,
+	old_vec: &[f32],
+	reason_text: &str,
+) -> Vec<String> {
 	let now = std::time::SystemTime::now();
 	let new_valid_from = g
 		.loaded(placed_kern_id)
 		.and_then(|k| k.entities.get(entity_id))
 		.and_then(|e| e.valid_from_or_created())
 		.unwrap_or(now);
-	if let Some(kern) = g.get_mut(&old_kern_id) {
-		if let Some(old) = kern.entities.get_mut(&old_id) {
+	if let Some(kern) = g.get_mut(old_kern_id) {
+		if let Some(old) = kern.entities.get_mut(old_id) {
 			old.status = EntityStatus::Superseded;
 			old.superseded_by = entity_id.to_string();
 			old.stamp_invalidated(now, new_valid_from);
@@ -524,11 +549,11 @@ fn supersede(
 
 	// A superseded entity is never a valid retrieval result — evict from the ANN
 	// indices; it stays in `kern.entities` so the supersede chain holds.
-	g.entity_idx.delete(&old_id);
-	g.gnn_entity_idx.delete(&old_id);
+	g.entity_idx.delete(old_id);
+	g.gnn_entity_idx.delete(old_id);
 
 	let vec = if !thought_vec.is_empty() && !old_vec.is_empty() {
-		Embedding::from(average_vec(thought_vec, &old_vec))
+		Embedding::from(average_vec(thought_vec, old_vec))
 	} else {
 		Embedding::default()
 	};
@@ -537,12 +562,64 @@ fn supersede(
 		g,
 		placed_kern_id,
 		entity_id,
-		&old_id,
+		old_id,
 		ReasonKind::Supersedes,
 		1.0,
 		vec,
 		reason_text,
 	)]
+}
+
+/// Supersede the entity that owns `old_external_id` with `new_id`, for a
+/// renamed-and-edited file. Unlike `supersede`, this is cross-external-id: the
+/// old path is gone, so it is dropped rather than reassigned to the new entity.
+/// `source_index` is not populated at plain ingest, so the owner is found by a
+/// resident walk — fine for a rare rename event on the (off-by-default) watcher.
+pub fn supersede_renamed(
+	g: &mut GraphGnn,
+	placed_kern_id: &str,
+	new_id: &str,
+	new_vec: &[f32],
+	old_external_id: &str,
+	reason_text: &str,
+) -> Option<String> {
+	let mut hit = None;
+	for (kid, kern) in g.kerns.iter() {
+		for (eid, t) in kern.entities.iter() {
+			if t.external_id == old_external_id {
+				hit = Some((eid.clone(), kid.clone(), t.vector.to_vec()));
+				break;
+			}
+		}
+		if hit.is_some() {
+			break;
+		}
+	}
+	let (old_id, old_kern_id, old_vec) = match hit {
+		Some(t) => t,
+		None => return None,
+	};
+	if old_id == new_id {
+		return None;
+	}
+	// The old path no longer exists; drop its source-keyed entries if any.
+	if let Some(kern) = g.get_mut(&old_kern_id) {
+		kern.source_index.remove(old_external_id);
+	}
+	if g.kern_of_source(old_external_id).is_some() {
+		g.clear_source_entry(old_external_id);
+	}
+	stamp_superseded(
+		g,
+		placed_kern_id,
+		new_id,
+		new_vec,
+		&old_id,
+		&old_kern_id,
+		&old_vec,
+		reason_text,
+	);
+	Some(old_id)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

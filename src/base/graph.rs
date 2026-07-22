@@ -542,6 +542,12 @@ impl GraphGnn {
 		self.src_index.insert(external_id, kern_id);
 	}
 
+	/// Drop a source-keyed entry — for a renamed file whose old path no longer
+	/// exists. `set_source_entry` reassigns; this clears.
+	pub fn clear_source_entry(&mut self, external_id: &str) {
+		self.src_index.remove(external_id);
+	}
+
 	pub fn loaded(&self, id: &str) -> Option<&Kern> {
 		self.kerns.get(id)
 	}

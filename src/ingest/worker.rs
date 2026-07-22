@@ -24,6 +24,10 @@ pub(crate) struct Job {
 	pub(crate) config: Config,
 	// Resolved from `config.review_policy` against `source`, once, at the gate.
 	pub(crate) review: ReviewState,
+	// The old-path external_id a `Renamed` file-event replaces; `None` for
+	// ordinary ingests. `place_document` supersedes the entity that owns it so a
+	// move-plus-edit does not leave a dangling stale `Document` (ROADMAP item 84).
+	pub(crate) replaces: Option<String>,
 	pub(crate) result_tx: Option<oneshot::Sender<Outcome>>,
 }
 
@@ -41,6 +45,7 @@ fn job(
 	confidence: f64,
 	source_tag: &str,
 	config: Config,
+	replaces: Option<String>,
 	result_tx: Option<oneshot::Sender<Outcome>>,
 ) -> Job {
 	// The confidence only. `kind` stays the producer's: a watched file is a
@@ -58,6 +63,7 @@ fn job(
 		confidence,
 		config,
 		review,
+		replaces,
 		result_tx,
 	}
 }
@@ -123,7 +129,7 @@ impl Worker {
 		if self
 			.tx
 			.try_send(job(
-				text, source, kind, hint, confidence, source_tag, config, None,
+				text, source, kind, hint, confidence, source_tag, config, None, None,
 			))
 			.is_err()
 		{
@@ -163,10 +169,11 @@ impl Worker {
 		confidence: f64,
 		source_tag: &str,
 		config: Config,
+		replaces: Option<String>,
 	) -> Option<String> {
 		let doc_id = util::content_hash(&text);
 		let job = job(
-			text, source, kind, hint, confidence, source_tag, config, None,
+			text, source, kind, hint, confidence, source_tag, config, replaces, None,
 		);
 		self.tx.send(job).await.ok().map(|()| doc_id)
 	}
@@ -191,6 +198,7 @@ impl Worker {
 			confidence,
 			source_tag,
 			config,
+			None,
 			Some(result_tx),
 		);
 		if let Err(e) = self.tx.send(job).await {
@@ -634,6 +642,7 @@ mod tests {
 			confidence: 1.0,
 			config: Config::default(),
 			review: ReviewState::default(),
+			replaces: None,
 			result_tx: None,
 		}
 	}
@@ -712,6 +721,7 @@ mod tests {
 				conf,
 				tag,
 				Config::default(),
+				None,
 				None,
 			)
 		};
@@ -794,6 +804,7 @@ mod tests {
 				1.0,
 				"file",
 				no_dedup.clone(),
+				None,
 			)
 			.await;
 		worker.enqueue(
