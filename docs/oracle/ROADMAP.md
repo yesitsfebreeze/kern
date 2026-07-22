@@ -2182,11 +2182,29 @@ the hand-rolled stemmer (`src/base/lexical.rs:244`, no stopword list, no
 needs a BM25 rebuild; and validate-or-remove GNN reranking, whose only expression
 is the 0.6 blend in item 61.
 
-### 65. Rank on the lower confidence bound `[retrieval]`
+### 65. Rank on the lower confidence bound — closed 2026-07-22 `[retrieval]`
 
-`p − k·√var` instead of the mean (`docs/kern/bayesian-belief.md:149`) — a
+**Closed 2026-07-22.** `apply_boosts` (`src/retrieval/score.rs:131`) now ranks
+by the lower confidence bound `conf_mean() − K·√conf_variance()` (clamped
+`>= 0.0`), not the mean, so a single-observation claim stops outranking a
+well-evidenced one at equal mean. `CONFIDENCE_BOUND_K` (new,
+`src/base/constants.rs:76`, default `1.0` = one standard deviation, the
+natural Wilson-style bound) is a tunable constant like the other knobs, not a
+product choice. `e.score` stays the mean everywhere else (routing, merge,
+storage) — only the ranking confidence factor moved to the lower bound, the
+one-line change the item names. Proved by
+`lower_confidence_bound_ranks_well_evidenced_above_single_observation`: two
+entities at equal `conf_mean` (Beta(2,1) vs Beta(20,10), both 0.67), the
+lower-variance (well-evidenced) one ranks higher; negative control at `K=0`
+(or `+` for `−`) ties them. `cargo test -p kern --lib` 913 passed, 0 failed, 4
+ignored. Decided by fix-the-root (move the ranking factor only, leave
+`e.score`/routing/merge on the mean), name-the-tradeoff (`K` is a knob, default
+1.0; auto-tuning is item 66), verify-before-claiming (negative control). See
+the 2026-07-22 CHANGELOG entry.
+
+~~`p − k·√var` instead of the mean (`docs/kern/bayesian-belief.md:149`) — a
 one-line ranking change that makes a single-observation claim stop outranking a
-well-evidenced one at equal mean.
+well-evidenced one at equal mean.~~
 
 ### 66. RRF weights and mode blends are configurable but never auto-tuned `[retrieval]`
 

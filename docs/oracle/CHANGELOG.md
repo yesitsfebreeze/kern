@@ -2,6 +2,20 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 65 closed: `apply_boosts` (`src/retrieval/score.rs:131`)
+  ranks by the lower confidence bound `conf_mean() − K·√conf_variance()`
+  (clamped `>= 0.0`), not the mean, so a single-observation claim stops
+  outranking a well-evidenced one at equal mean. `CONFIDENCE_BOUND_K` (new,
+  `src/base/constants.rs:76`, default `1.0` = one standard deviation) is a
+  tunable knob, not a product choice. `e.score` stays the mean everywhere else
+  (routing, merge, storage) — only the ranking confidence factor moved to the
+  lower bound. Proved by
+  `lower_confidence_bound_ranks_well_evidenced_above_single_observation`
+  (Beta(2,1) vs Beta(20,10) at equal mean 0.67, lower-variance ranks higher;
+  negative control at `K=0` ties them). `cargo test -p kern --lib` 913 passed,
+  0 failed, 4 ignored.
+  Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming.
+
 - 2026-07-22 — item 96 closed: the shared-`target-dir` defect it names is absent
   in this checkout, and that is now recorded rather than left as a live open item.
   No `.cargo/config.toml` exists; `git worktree list` shows only the main checkout;
