@@ -17,6 +17,27 @@
   pass over the delivered list, bounded by `max_deliver_results`). Supersedes:
   the 2026-07-22 `lexical_top_boost` entry's placement claim, narrowed.
 
+- 2026-07-22 — item 81 closed: the `kern mcp` `ProxyServer` answers every
+  method its handshake advertises. `ProxyServer::handle_method`
+  (`src/commands/mcp_cmd.rs:368`) dispatches the four graphless methods —
+  `resources/list`, `prompts/list`, `prompts/get`, `ping` — through
+  `handle_graphless_method` (`src/mcp.rs:249`), the one function the standalone
+  `Server::handle_method` (`:219`) also uses, so the proxy and standalone
+  surfaces are one implementation, not two that agree. `resources/read` rides
+  the existing `call_tool` passthrough as `RESOURCE_READ_TOOL` (`:243`) —
+  encoded/decoded by `encode_resource_read` (`:277`) / `decode_resource_read`
+  (`:288`) with the verdict's exact code carried in the text block, because
+  `CallToolRes` carries only `content` and `isError` and a code that does not
+  survive the hop would turn `unknown resource` into a generic `-32000`. It is
+  transport, not a tool schema entry, so `tools/list` is unchanged. `ping` is
+  the one that mattered most: clients use it for liveness, so `-32601` there read
+  as a dead server on the path an agent actually gets (`cmd_mcp` reaches
+  `run_proxy` whenever a daemon exists). Five Rust tests drive the production
+  `serve_rw` loop over a real proxy bound to a real daemon on a scratch socket.
+  Decided by: fix-the-root (one shared dispatcher, not a second copy that can
+  drift), reuse (ride `call_tool` rather than a fifth `KernRpc` wire method).
+  Supersedes: nothing — the item described the defect, now removed.
+
 - 2026-07-22 — eval data dir moved from repo-root `/eval/` to `/tests/eval/`, so
   all benchmark artifacts (datasets, reports, cache) live under `tests/` beside
   the harness scripts in `tests/e2e/eval/`. `.gitignore` `/eval/` →

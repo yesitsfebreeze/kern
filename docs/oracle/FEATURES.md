@@ -635,16 +635,15 @@ trnsprt framing; `run_sse` (`src/mcp/sse.rs`) is bearer-gated Streamable HTTP.
 **Where.** `src/mcp/*` (2346 LoC, 9 files).
 
 **Gaps.** Tool schemas are hand-
-rolled JSON, not derived. No batch query. **Prompts and resources are served on
-the standalone path only.** `ProxyServer` — the path taken whenever a daemon is
-running, i.e. the normal one — implements `tools_list`/`call_tool`/
-`extra_capabilities` and no `handle_method` (`src/commands/mcp_cmd.rs`), so the
-trait default returns `None` (`src/trnsprt/src/server.rs:21-23`) and
-`resources/list` / `prompts/list` come back `-32601` — while
-`extra_capabilities` still advertises `{"resources": {}, "prompts": {}}` to match
-standalone, which does serve them (`Server::handle_method`, `src/mcp.rs`).
-Advertised on the normal path, non-functional there (`ROADMAP.md` —
-"`resources/list` and `prompts/list` return `-32601` on the proxy path").
+rolled JSON, not derived. No batch query. **Prompts and resources are served
+on both the standalone and the proxy path.** `ProxyServer` (`src/commands/mcp_cmd.rs`)
+implements `handle_method` (`:368`): the four graphless methods — `resources/list`,
+`prompts/list`, `prompts/get`, `ping` — dispatch through `handle_graphless_method`
+(`src/mcp.rs:249`), the same function the standalone `Server::handle_method`
+(`:219`) uses, so the two surfaces are one implementation. `resources/read` rides
+the `call_tool` passthrough as `RESOURCE_READ_TOOL` (`src/mcp.rs:243`) — transport,
+not a tool schema, so `tools/list` is unchanged. `ping` answers `{}` for client
+liveness (item 81, closed 2026-07-22).
 
 ---
 
