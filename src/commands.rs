@@ -793,6 +793,21 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	#[cfg(unix)]
 	let mut handover_fd: Option<std::os::fd::OwnedFd>;
 	{
+		// The secret every caller on this socket must present. Resolved before the
+		// bind and fatal if it fails: a daemon that cannot state what it demands
+		// must not listen, because `verify_auth` on an empty token refuses
+		// everyone — a socket nobody can use, silently.
+		let token = match cfg
+			.serve
+			.resolve_mcp_token(std::path::Path::new(&cfg.data_dir))
+		{
+			Ok(t) => t,
+			Err(e) => {
+				tracing::error!(target: "kern.kern_rpc", error = %e, "mcp-token unavailable — not serving");
+				eprintln!("kern: cannot read or mint {}/mcp-token: {e}", cfg.data_dir);
+				return;
+			}
+		};
 		let handler = crate::rpc::KernRpcHandler::new(mcp_server.clone(), shutdown.clone());
 		let endpoint = trnsprt::typed::Endpoint::kern();
 		#[cfg(unix)]
@@ -845,7 +860,7 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 		{
 			handover_fd = listener.dup_fd().ok();
 		}
-		tokio::spawn(crate::rpc::serve_kern_rpc_loop(listener, handler));
+		tokio::spawn(crate::rpc::serve_kern_rpc_loop(listener, handler, token));
 	}
 
 	if cli.mcp_stdio {

@@ -183,7 +183,7 @@ for a node, `.kern/data/logs/` by default — so a spawn that dies leaves a trac
 `kern status` reports which of the two happened, and whether anything holds the
 writer lock; the offline admin commands refuse while it is held.
 One caveat is still real: if the attach fails, `kern mcp` falls back to serving
-the store itself (`src/commands/mcp_cmd.rs:46`), a second writer against the
+the store itself (`src/commands/mcp_cmd.rs:47`), a second writer against the
 same LMDB environment. A stale flush is refused rather than clobbering newer
 state, but the two writers still exist. Add it as a stdio MCP server in your
 client's config:

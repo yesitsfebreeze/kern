@@ -8,6 +8,11 @@ pub enum AdapterError {
 	Eof,
 	#[error("adapter codec: {0}")]
 	Codec(#[from] CodecError),
+	// The peer answered and refused this caller. Distinct from `Io` on purpose:
+	// a refusal proves the server is *there*, so a client must never downgrade
+	// it to "nothing is serving" and go act on the resource itself.
+	#[error("adapter unauthenticated: {0}")]
+	Unauthenticated(String),
 	#[error("adapter: {0}")]
 	Other(String),
 }

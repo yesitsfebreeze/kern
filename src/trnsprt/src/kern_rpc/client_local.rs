@@ -2,23 +2,32 @@ use std::time::Duration;
 
 use crate::typed::{connect_kern, AdapterError, Channel, Endpoint, JsonEnvelopeCodec};
 
+use super::auth::{present_auth, AuthReq};
 use super::svc::KernRpcClient;
 
 pub const RETRIES: u32 = 5;
 pub const RETRY_DELAY_MS: u64 = 100;
 
 impl KernRpcClient<JsonEnvelopeCodec> {
-	pub async fn connect_local() -> Result<Self, AdapterError> {
-		Self::connect_endpoint(&Endpoint::kern()).await
+	pub async fn connect_local(auth: &AuthReq) -> Result<Self, AdapterError> {
+		Self::connect_endpoint(&Endpoint::kern(), auth).await
 	}
 
-	pub async fn connect_endpoint(endpoint: &Endpoint) -> Result<Self, AdapterError> {
-		Self::connect_endpoint_with_retry(endpoint, RETRIES, Duration::from_millis(RETRY_DELAY_MS))
-			.await
+	pub async fn connect_endpoint(endpoint: &Endpoint, auth: &AuthReq) -> Result<Self, AdapterError> {
+		Self::connect_endpoint_with_retry(
+			endpoint,
+			auth,
+			RETRIES,
+			Duration::from_millis(RETRY_DELAY_MS),
+		)
+		.await
 	}
 
+	/// The handshake is part of connecting: a `KernRpcClient` only ever exists
+	/// on a channel the daemon has already admitted.
 	pub async fn connect_endpoint_with_retry(
 		endpoint: &Endpoint,
+		auth: &AuthReq,
 		retries: u32,
 		base_delay: Duration,
 	) -> Result<Self, AdapterError> {
@@ -26,7 +35,13 @@ impl KernRpcClient<JsonEnvelopeCodec> {
 		for _ in 0..retries {
 			match connect_kern(endpoint).await {
 				Ok(adapter) => {
-					let channel = Channel::new(adapter, JsonEnvelopeCodec::new());
+					let mut channel = Channel::new(adapter, JsonEnvelopeCodec::new());
+					// Propagated, never retried: a refusal is the daemon's verdict on
+					// this caller, and it will say the same thing five times. Retrying
+					// would only delay the report; swallowing it would tell the caller
+					// nothing is serving, which is how a CLI ends up writing behind a
+					// daemon that is very much there.
+					present_auth(&mut channel, auth).await?;
 					return Ok(KernRpcClient::new(channel));
 				}
 				Err(e) => last_err = Some(e),
@@ -81,9 +96,13 @@ mod tests {
 
 	#[tokio::test]
 	async fn connect_endpoint_gives_up_after_exhausting_retries() {
-		let res =
-			KernRpcClient::connect_endpoint_with_retry(&bogus_endpoint(), 3, Duration::from_millis(1))
-				.await;
+		let res = KernRpcClient::connect_endpoint_with_retry(
+			&bogus_endpoint(),
+			&AuthReq::new("t", super::super::auth::PRINCIPAL_CLI),
+			3,
+			Duration::from_millis(1),
+		)
+		.await;
 		assert!(
 			res.is_err(),
 			"no server at the endpoint -> Err after retries"
