@@ -457,6 +457,25 @@ the consumer that wants author-weighted trust holds that mapping outside kern.
 `source_trust` keyed on channel scheme is the whole trust surface. Do not add
 `_user` / `_agent` knobs; they would read as working and weight nothing.
 
+**Measurement half-closed 2026-07-23.** The active `source_trust` map was
+invisible at runtime — an operator could not tell from `kern health` whether
+it is configured. Now surfaced: `Server::health_stats` (`src/mcp.rs`) JSON
+carries `source_trust` from `self.cfg.retrieval.source_trust`; `trnsprt::HealthRes`
+gains `#[serde(default)] source_trust: BTreeMap<String, f64>` (old daemon →
+empty, same shape as `gini_access`/`max_kerns`/`preset`); `kern health` prints
+`source-trust:` daemon-sourced only (item 100 rule), empty map → `(none)`,
+no daemon → no line; `kern://local/health` by construction. Proved by
+`kern_health_prints_source_trust` (`file=0.8,ticket=0.9`; empty → `(none)`;
+no daemon → empty) + dto round-trip `source_trust {file:0.8, ticket:0.9}` +
+old-payload absence → empty (standing negative-control guard). Existing
+`kern_health_*` + dto tests green unedited. `cargo test -p kern --lib` 964
+passed, 0 failed, 4 ignored; `cargo test -p trnsprt --lib` 61 passed. Decided
+by fix-the-root (surface the configured map, do not tune it — author-level
+trust is retired under item 18), name-the-tradeoff (one map — the channel
+scheme; the `_user`/`_agent` labels the item retired stay retired), verify-
+before-claiming (old-payload-absence guard). See the 2026-07-23 CHANGELOG
+entry.
+
 ### 21. The review lifecycle has a caller-facing surface: `promote` and `exclude_pending` — closed 2026-07-22 `[surface]`
 
 **Corrected 2026-07-22 — "three of four parts landed" counted a part no caller

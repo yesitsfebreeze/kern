@@ -2,6 +2,18 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-23 — item 20 measurement half-closed: the active `source_trust` map
+  (`RetrievalConfig.source_trust`, `BTreeMap` keyed on `Source::scheme()`,
+  empty by default = bit-identical scoring) is now surfaced. `Server::health_stats`
+  (`src/mcp.rs`) JSON carries `source_trust`; `trnsprt::HealthRes` gains
+  `#[serde(default)] source_trust: BTreeMap<String, f64>` (old daemon → empty);
+  `kern health` prints `source-trust:` daemon-sourced only (item 100 rule),
+  empty → `(none)`, no daemon → no line; `kern://local/health` by construction.
+  Proved by `kern_health_prints_source_trust` + dto round-trip + old-payload
+  absence → empty (standing guard). `cargo test -p kern --lib` 964 passed, 0
+  failed, 4 ignored; `cargo test -p trnsprt --lib` 61 passed.
+  Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming.
+
 - 2026-07-23 — item 87 measurement half-closed: the active preset name
   (`relaxed`/`medium`/`tight`) is now surfaced. `Server::health_stats`
   (`src/mcp.rs`) JSON carries `preset` from `self.cfg.preset`; `trnsprt::HealthRes`
