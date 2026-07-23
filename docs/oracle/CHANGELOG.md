@@ -2,6 +2,19 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-23 — item 55 measurement half-closed: the QBST recency half-life
+  (`qbst_recency_half_life_secs`, `src/config/retrieval.rs`, 24h default) is now
+  surfaced — companion to the item 62 heat line. `HealthRes.qbst_recency_half_life_secs`
+  `#[serde(default)]` (old daemon → `0`); `Server::health_stats` JSON line;
+  `kern health` `recency: half-life {N}s` daemon-sourced only (item 100 rule);
+  `kern://local/health` by construction. Proved by `kern_health_prints_heat_half_life`
+  (extended: both `recency: half-life 0s` + `86400s`), dto round-trip `86400` +
+  old-payload → `0`. `cargo test -p kern --lib` 957 passed (1 pre-existing
+  `the_sink_waits` flake, green isolated); `cargo test -p trnsprt --lib` 61
+  passed. Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming.
+  Still open: the tuning sweep (item 55/87) — neither half-life measured vs
+  recall.
+
 - 2026-07-23 — item 48 beside half-closed (per-kind dedup threshold, default-off):
   `IngestConfig.dedup_threshold_by_kind: [Option<f64>; 5]` (new, indexed by
   `EntityKind as u8`, default `[None; 5]` = bit-identical) + `dedup_threshold_for(kind)`

@@ -2118,6 +2118,27 @@ item 87's surface, and the two should be swept together. Now measurable:
 `tests/e2e/test_recall.py` scores a half-life change directly
 (`recall@1`/`recall@5`/`MRR`), which is the sweep that was never run.
 
+**Measurement half-closed 2026-07-23 — both half-lives now surfaced.** The
+retention half-life shipped in the item 62 surfacing half (`heat_half_life_secs`
+in `Server::health_stats` JSON + `kern health` `heat: half-life` + `HealthRes`
+serde default + `kern://local/health`). The **QBST recency half-life**
+(`qbst_recency_half_life_secs`, `src/config/retrieval.rs`, 24h default) now
+surfaces the same way: `HealthRes.qbst_recency_half_life_secs` `#[serde(default)]`
+(old daemon → `0`), `Server::health_stats` JSON line, `kern health` `recency:
+half-life {N}s` **daemon-sourced only** (item 100 rule — the daemon's running
+preset is what the operator asked about), `kern://local/health` by construction.
+Proved by `kern_health_prints_heat_half_life` (extended: asserts both
+`recency: half-life 0s` + `86400s`), dto round-trip `86400` + old-payload
+absence → `0`. `cargo test -p kern --lib` 957 passed (1 pre-existing
+`the_sink_waits` flake, green isolated); `cargo test -p trnsprt --lib` 61 passed.
+Decided by fix-the-root (surface both preset-owned signals, do not tune),
+name-the-tradeoff (the recency companion to the heat line; tuning is the
+bench/sweep, item 55/87, avoided), verify-before-claiming (negative control).
+See the 2026-07-23 CHANGELOG entry.
+
+**Still open:** the tuning sweep (item 55/87) — neither half-life has been
+measured against recall.
+
 ---
 
 # Tier 7 — belief model
