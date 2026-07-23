@@ -457,6 +457,7 @@ mod tests {
 	// So this leg must wait for capacity, never be handed a refusal.
 	#[tokio::test]
 	async fn the_sink_waits_for_queue_capacity_rather_than_losing_the_file() {
+		let _serial = crate::ingest::worker::queue_refused_test_lock().lock().await;
 		let (url, _server) =
 			crate::test_support::spawn_http(crate::test_support::hanging_embed_app()).await;
 		let embedder = crate::llm::Client::new_embed_only(&url, "m", "");

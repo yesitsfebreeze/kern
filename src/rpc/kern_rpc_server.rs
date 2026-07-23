@@ -330,6 +330,7 @@ mod tests {
 	// through the health stats and the MCP payload to the RPC DTO an operator polls.
 	#[tokio::test]
 	async fn a_refused_ingest_reaches_the_rpc_health_surface() {
+		let _serial = crate::ingest::worker::queue_refused_test_lock().lock().await;
 		let (url, _server) =
 			crate::test_support::spawn_http(crate::test_support::hanging_embed_app()).await;
 		let srv = crate::test_support::mcp_server_with_embed_url(&url);

@@ -39,7 +39,6 @@ pub(crate) struct Job {
 // watcher minted `1.0`, a posterior of 0.6667 — a human's, and above the 0.6500
 // a deliberate agent assertion gets.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn job(
 	text: String,
 	source: Source,
@@ -90,6 +89,15 @@ static REFUSED_WARN: LogThrottle = LogThrottle::new(REFUSED_WARN_SECS);
 // the caller, but only the count says how often a producer outran the LLM leg.
 pub fn ingest_queue_refused() -> u64 {
 	QUEUE_REFUSED.load(Ordering::Relaxed)
+}
+
+// `QUEUE_REFUSED` is process-global, so every test that fills a queue and
+// asserts on the counter must hold this lock, or a parallel sibling's refusals
+// land in its delta.
+#[cfg(test)]
+pub(crate) fn queue_refused_test_lock() -> &'static tokio::sync::Mutex<()> {
+	static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+	LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 pub struct Worker {
@@ -464,6 +472,7 @@ mod tests {
 	async fn enqueue_refuses_past_the_queue_bound_and_counts_the_refusal() {
 		const OFFERED: usize = 500;
 
+		let _serial = queue_refused_test_lock().lock().await;
 		let (url, _server) =
 			crate::test_support::spawn_http(crate::test_support::hanging_embed_app()).await;
 		let embedder = LlmClient::new_embed_only(&url, "m", "");
