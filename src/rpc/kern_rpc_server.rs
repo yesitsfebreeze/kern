@@ -104,10 +104,11 @@ impl KernRpc for KernRpcHandler {
 				max_kerns: u64_at("max_kerns"),
 				gnn_train_refused: u64_at("gnn_train_refused"),
 				supersede_chain_depth_exceeded: u64_at("supersede_chain_depth_exceeded"),
-			largest_kern_entities: payload
-				.get("largest_kern_entities")
-				.and_then(|v| v.as_u64())
-				.unwrap_or(0) as usize,
+				largest_kern_entities: payload
+					.get("largest_kern_entities")
+					.and_then(|v| v.as_u64())
+					.unwrap_or(0) as usize,
+				heat_half_life_secs: u64_at("heat_half_life_secs"),
 				llm_complete_failed: u64_at("llm_complete_failed"),
 				last_llm_complete_failure: str_at("last_llm_complete_failure"),
 				embed_model: str_at("embed_model"),
