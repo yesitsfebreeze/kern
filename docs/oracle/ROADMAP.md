@@ -2386,7 +2386,7 @@ What the instrument still cannot judge, and what that costs: the fake embedder i
 bag-of-words, so a change that only a real embedding model would reward looks
 neutral here. Item 64's stemmer swap is the clearest case.
 
-### 103. Run the public retrieval benchmarks and record the first numbers `[bench]`
+### 103. Run the public retrieval benchmarks and record the first numbers — closed 2026-07-23 `[bench]`
 
 The harness exists (`tests/e2e/eval/`, CHANGELOG 2026-07-22): LoCoMo-10 and
 LongMemEval-S scored retrieval-only — recall@k / MRR / NDCG against the
@@ -2407,9 +2407,29 @@ kern's any@5 0.5983 sits at parity with that claim, and no stronger sentence
 than "parity with the one vendor-run peer number" is licensed. Zep's 75.14 and
 Mem0's 92.5 are LLM-judged end-to-end scores and are not comparable.
 
-Still wanted before this closes: the LongMemEval-S run (dataset fetch needs
-`huggingface-hub`, `just e2e-install`), recorded the same way. Weakest
-category is open-domain (0.3696 any@5) — a finding for Tier 8, not a claim.
+**LongMemEval-S half done, measured 2026-07-23** (`qwen3-embedding:0.6b` on
+Ollama, direct path, k=10, seeded 100-question sample of 500 — seed 13, the
+runner's default — 4792 sessions ingested, 196 label collisions resolved
+through `kern get`; report `tests/eval/reports/longmemeval-20260723-193342.json`,
+CHANGELOG entry same day): session granularity recall_any@1 **0.83**,
+recall_any@5 **0.97**, recall_any@10 **0.99**, recall_all@10 0.91, MRR 0.8896,
+NDCG@10 0.8589 over 100 questions; turn granularity (93 questions carrying
+`has_answer` labels) recall_any@1 0.5054, recall_any@5 **0.8065**,
+recall_any@10 **0.9032**, recall_all@10 0.6989, MRR 0.6271, NDCG@10 0.6224.
+Per type (session any@1): single-session-assistant 1.00, knowledge-update
+0.944, multi-session 0.80, temporal-reasoning 0.792, single-session-user 0.75,
+single-session-preference 0.429 (n=7 — the weakest, same finding shape as
+LoCoMo's open-domain). Query latency p50 0.53s / p95 0.63s, cold-process CLI
+wall clock. Honesty notes: a 100-of-500 seeded sample, not the full set —
+`--full` remains for anyone wanting the whole-set number; the release binary
+was rebuilt mid-run with a `kern get`-only provenance addition (`cc37be8`),
+which the query path never executes. LongMemEval's published numbers are
+LLM-judged QA accuracy and are not comparable to these retrieval-only ranks.
+
+Both halves are now recorded; closed. Follow-ups live elsewhere: the weakest
+categories (LoCoMo open-domain 0.3696 any@5, LME single-session-preference
+0.429 any@1) are findings for Tier 8, and the daemon-mode LoCoMo bench is item
+104's still-open half.
 
 ### 104. Benchmark the full pipeline, which needs turn-level claim provenance — ground half-closed 2026-07-23 `[ingest]`
 

@@ -2,6 +2,21 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-23 — item 103 closed: the LongMemEval-S run is recorded, completing
+  the public-benchmark pair. Seeded 100-question sample (seed 13, runner
+  default) of LongMemEval-S, `qwen3-embedding:0.6b`, direct path, k=10, 4792
+  sessions ingested; report `tests/eval/reports/longmemeval-20260723-193342.json`.
+  Session granularity: any@1 0.83 / any@5 0.97 / any@10 0.99 / MRR 0.8896.
+  Turn granularity (93 labeled): any@5 0.8065 / any@10 0.9032 / MRR 0.6271.
+  Weakest type: single-session-preference (any@1 0.429, n=7). Latency p50
+  0.53s / p95 0.63s cold-process CLI. Honesty: sample not full set (`--full`
+  exists); binary rebuilt mid-run with a `kern get`-only change the query path
+  never executes; LongMemEval's published LLM-judged accuracies are not
+  comparable to retrieval-only ranks. Decided by: verify-before-claiming (the
+  number is recorded with its protocol and caveats, no stronger sentence
+  licensed), name-the-tradeoff (100-sample now over full-set hours — the seed
+  is pinned so the sample is reproducible and extendable).
+
 - 2026-07-23 — item 104 ground half: kern gets its own committed ground-truth
   corpus and the first distill-path benchmark numbers. `tests/e2e/eval/ground.json`
   (self-authored CC0, 8 sessions / 82 turns / 34 questions, evidence cited as
