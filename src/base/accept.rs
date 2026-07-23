@@ -223,11 +223,16 @@ fn route_entity(g: &mut GraphGnn, kern_id: &str, thought: &Entity, is_dup: bool)
 	}
 
 	for _depth in 0..MAX_ACCEPT_DEPTH {
-		let children = g
-			.loaded(&current_id)
-			.map(|k| k.children.clone())
-			.unwrap_or_default();
-		if let Some(child_id) = route_to_child_id(&children, g, &thought.vector) {
+		// ponytail: hold &kern.children alongside the &GraphGnn reborrow — both
+		// immutable, so the clone that existed only to end a borrow is gone.
+		let child_id = {
+			let kern = match g.loaded(&current_id) {
+				Some(k) => k,
+				None => break,
+			};
+			route_to_child_id(&kern.children, g, &thought.vector)
+		};
+		if let Some(child_id) = child_id {
 			current_id = child_id;
 			continue;
 		}
@@ -1838,6 +1843,45 @@ mod tests {
 		assert_eq!(
 			r.placed_in, graviton_id,
 			"matching entity enters its graviton"
+		);
+	}
+
+	// ponytail: the per-descent children clone is gone — routing through a root
+	// with 4 named children allocates no more than through a root with 1, since
+	// `&kern.children` is held alongside the `&GraphGnn` reborrow (item 31).
+	#[test]
+	fn route_entity_does_not_clone_children_per_descent() {
+		use crate::test_support::alloc_probe;
+
+		let build = |n: usize| -> (GraphGnn, String) {
+			let mut g = GraphGnn::new();
+			let root = g.root.id.clone();
+			let root_net = g.root.root_id.clone();
+			for i in 0..n {
+				let name = format!("work{i}");
+				let mut v = vec![0.0, 0.0, 0.0];
+				v[i % 3] = 1.0;
+				let k = Kern::new_named_child(&root, &root_net, &name, v);
+				g.get_mut(&root).unwrap().children.push(k.id.clone());
+				g.register(k);
+			}
+			(g, root)
+		};
+
+		let thought = ent("e", vec![1.0, 0.0, 0.0]);
+		let (mut g4, root4) = build(4);
+		let (mut g1, root1) = build(1);
+
+		let (_, a4) = alloc_probe::measure(|| route_entity(&mut g4, &root4, &thought, false));
+		let (_, a1) = alloc_probe::measure(|| route_entity(&mut g1, &root1, &thought, false));
+		// The matched-id String clone is the only alloc left and it is the same
+		// length in both; the children Vec<String> clone is gone, so the two agree
+		// within a tight tolerance. A re-added `.clone()` of 4 vs 1 children would
+		// push a4 roughly 3 String-headers (~72 B) past a1 and red this.
+		let diff = a4.total as i64 - a1.total as i64;
+		assert!(
+			diff.abs() <= 8,
+			"children clone leaked: a4={a4:?} a1={a1:?} diff={diff}"
 		);
 	}
 
