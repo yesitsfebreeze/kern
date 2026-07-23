@@ -1,13 +1,19 @@
 use serde::{Deserialize, Serialize};
 
 use crate::base::constants::INGEST_DEDUP_THRESHOLD;
-use crate::base::types::Source;
+use crate::base::types::{EntityKind, Source};
 use crate::ingest::ReviewPolicy;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IngestConfig {
 	pub dedup_threshold: f64,
+	/// Per-kind overrides indexed by `EntityKind as u8` (Fact=0 .. Conclusion=4).
+	/// `None` falls back to `dedup_threshold`; default `[None; 5]` is
+	/// bit-identical today. An operator can ask Facts to dedup tighter than
+	/// Claims without tightening both (ROADMAP item 48 beside).
+	#[serde(default = "default_dedup_threshold_by_kind")]
+	pub dedup_threshold_by_kind: [Option<f64>; EntityKind::Conclusion as usize + 1],
 	// Per-source-scheme curation policy, keyed on `Source::scheme()` — file,
 	// ticket, session, agent, inline. An absent key is `active`, so the empty
 	// default leaves every ingest retrievable exactly as before; `file =
@@ -17,10 +23,15 @@ pub struct IngestConfig {
 	pub review_policy: ReviewPolicy,
 }
 
+fn default_dedup_threshold_by_kind() -> [Option<f64>; EntityKind::Conclusion as usize + 1] {
+	[None; EntityKind::Conclusion as usize + 1]
+}
+
 impl Default for IngestConfig {
 	fn default() -> Self {
 		Self {
 			dedup_threshold: INGEST_DEDUP_THRESHOLD,
+			dedup_threshold_by_kind: default_dedup_threshold_by_kind(),
 			review_policy: ReviewPolicy::new(),
 		}
 	}
@@ -39,6 +50,7 @@ impl IngestConfig {
 		}
 		crate::ingest::Config {
 			dedup_threshold: self.dedup_threshold,
+			dedup_threshold_by_kind: self.dedup_threshold_by_kind,
 			..Default::default()
 		}
 		.validate()

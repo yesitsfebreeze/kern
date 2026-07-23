@@ -457,6 +457,97 @@ mod tests {
 		);
 	}
 
+	#[test]
+	fn per_kind_dedup_threshold_tightens_facts_loosens_claims() {
+		// cosine 0.97 between the two chunks.
+		let chunks = vec!["alpha".to_string(), "alpha nearly verbatim".to_string()];
+		let vecs = vec![vec![1.0, 0.0, 0.0], vec![0.97, 0.243_1, 0.0]];
+
+		// A Fact job whose per-kind slot is Some(0.99): the 0.97 near-dup is
+		// below 0.99, so it is kept as a new entity (tighter than the global).
+		let mut fact_cfg = Config::default();
+		fact_cfg.dedup_threshold_by_kind[EntityKind::Fact as usize] = Some(0.99);
+		let mut fact_job = job("doc", 1.0);
+		fact_job.kind = EntityKind::Fact;
+		fact_job.config = fact_cfg;
+		let g = empty_graph();
+		let placed = place_chunks(
+			&g,
+			None,
+			None,
+			&fact_job,
+			&chunks,
+			&vecs,
+			"doc1",
+			fact_job
+				.config
+				.dedup_threshold_for(EntityKind::Fact),
+		);
+		assert_eq!(placed, 2, "place_chunks counts deduped-or-new, not new");
+		assert_eq!(
+			total_entity_count(&g),
+			2,
+			"0.97 < 0.99 Fact threshold -> not deduped, two entities"
+		);
+
+		// The same Fact near-dup under the global 0.95 (no per-kind override) is
+		// deduped: 0.97 >= 0.95.
+		let g2 = empty_graph();
+		let global_job = job("doc", 1.0);
+		assert!(
+			global_job
+				.config
+				.dedup_threshold_by_kind
+				.iter()
+				.all(Option::is_none),
+			"default is all-None = the global threshold applies"
+		);
+		let _placed2 = place_chunks(
+			&g2,
+			None,
+			None,
+			&global_job,
+			&chunks,
+			&vecs,
+			"doc1",
+			global_job.config.dedup_threshold_for(EntityKind::Fact),
+		);
+		assert_eq!(
+			total_entity_count(&g2),
+			1,
+			"0.97 >= 0.95 global threshold -> deduped, one entity"
+		);
+
+		// A Claim with Some(0.80) dedups a 0.81-sim the global 0.95 would also
+		// catch — proves the kind-keyed path fires the other direction too.
+		let mut claim_cfg = Config::default();
+		claim_cfg.dedup_threshold_by_kind[EntityKind::Claim as usize] = Some(0.80);
+		let mut claim_job = job("doc", 1.0);
+		claim_job.kind = EntityKind::Claim;
+		claim_job.config = claim_cfg;
+		let claim_chunks = vec!["beta".to_string(), "beta nearly verbatim".to_string()];
+		// cosine 0.81.
+		let claim_vecs = vec![vec![1.0, 0.0, 0.0], vec![0.81, 0.586_4, 0.0]];
+		let g3 = empty_graph();
+		let _placed3 = place_chunks(
+			&g3,
+			None,
+			None,
+			&claim_job,
+			&claim_chunks,
+			&claim_vecs,
+			"doc2",
+			claim_job
+				.config
+				.dedup_threshold_for(EntityKind::Claim),
+		);
+		assert_eq!(
+			total_entity_count(&g3),
+			1,
+			"0.81 >= 0.80 Claim threshold -> deduped, one entity"
+		);
+	}
+
 	fn placed_deadlines(g: &Arc<RwLock<GraphGnn>>) -> Vec<Option<SystemTime>> {
 		let gg = g.read();
 		gg.all()

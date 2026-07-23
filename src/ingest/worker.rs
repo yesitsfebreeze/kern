@@ -6,7 +6,7 @@ use crate::base::util;
 use crate::ingest::config::Config;
 use crate::ingest::embed::embed_chunks;
 use crate::ingest::outcome::{FailureReport, Outcome, OutcomeStatus};
-use crate::ingest::place::{place_chunks, place_document};
+use crate::ingest::place::{document_kind, place_chunks, place_document};
 use crate::ingest::split;
 use crate::llm::Client as LlmClient;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -334,7 +334,7 @@ async fn process(
 		embedder,
 		job,
 		&doc_id,
-		job.config.dedup_threshold,
+		job.config.dedup_threshold_for(document_kind(job).0),
 		defer_contradiction.as_ref(),
 	)
 	.await;
@@ -363,7 +363,7 @@ async fn process(
 		&chunks,
 		&chunk_vecs,
 		&doc_id,
-		job.config.dedup_threshold,
+		job.config.dedup_threshold_for(job.kind),
 	);
 
 	let embedded_chunks = chunk_vecs.iter().filter(|v| !v.is_empty()).count();
