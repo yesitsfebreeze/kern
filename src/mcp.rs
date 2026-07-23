@@ -151,6 +151,9 @@ impl Server {
 			// Supersede chains past `SUPERSEDE_CHAIN_HOP_THRESHOLD` on one
 			// `external_id` (ROADMAP item 58 trigger #1).
 			"supersede_chain_depth_exceeded": h.supersede_chain_depth_exceeded,
+			// Largest resident kern's entity count (ROADMAP item 83): a gauge of
+			// the unbounded resident set at per-kern granularity.
+			"largest_kern_entities": h.largest_kern_entities,
 			// This server's own worker, read directly: a gauge on the live channel,
 			// not a process static like the counters `h` carries.
 			"ingest_queue_depth": self.worker.queue_depth(),

@@ -53,7 +53,10 @@ pub(super) async fn cmd_health(cfg: &crate::config::Config) {
 	} else {
 		h.max_kerns.to_string()
 	};
-	println!("kerns:       {} (cap {})", h.kerns, kerns_cap);
+	println!(
+		"kerns:       {} (cap {}, largest {} entities)",
+		h.kerns, kerns_cap, h.largest_kern_entities
+	);
 	println!("thoughts:    {} (unnamed: {})", h.entities, h.unnamed);
 	println!("reasons:     {}", h.reasons);
 	println!("claim kinds: {}", g.root.claim_kinds.len());
