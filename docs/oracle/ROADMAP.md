@@ -2607,6 +2607,19 @@ claiming (old-payload-absence guard). See the 2026-07-23 CHANGELOG entry.
 **Still open:** the tuning sweep — RRF weights + mode blends never measured
 against recall.
 
+**Completion 2026-07-23 — remaining `RetrievalConfig` knobs surfaced.** The RRF
+block shipped above carried the weights + blends; the four other active knobs
+(`seed_k`, `mmr_enabled`, `lexical_enabled`, `pagerank_enabled`) were still
+invisible. Now in the same `retrieval:` JSON block + `HealthRes` + `kern health`
+(one line `seed_k N, mmr {bool}, lexical {bool}, pagerank {bool}`,
+daemon-sourced) + RPC map. `kern_health_prints_retrieval_config` extended (5
+lines); dto round-trip `seed_k 30/mmr false/lexical true/pagerank true`;
+old-payload-absence decodes to `0/false` (standing guard). `cargo test -p kern
+--lib` 964 passed, 0 failed, 4 ignored; `cargo test -p trnsprt --lib` 61
+passed. Decided by fix-the-root (complete the block, one shape), name-the-
+tradeoff (one line — the four knobs; tuning is the sweep), verify-before-
+claiming (old-payload-absence guard). See the 2026-07-23 CHANGELOG entry.
+
 ~~Was two ceilings; the rerank half left with the rerank stage itself
 (2026-07-21). What remains: RRF weights plus mode blends are configurable but
 never auto-tuned (`FEATURES.md:210`).~~

@@ -2,6 +2,16 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-23 — item 66 measurement completion: the four remaining
+  `RetrievalConfig` knobs (`seed_k`, `mmr_enabled`, `lexical_enabled`,
+  `pagerank_enabled`) now surface in the existing `retrieval:` JSON block +
+  `HealthRes` + `kern health` (one line `seed_k N, mmr {bool}, lexical {bool},
+  pagerank {bool}`, daemon-sourced) + RPC map. `kern_health_prints_retrieval_config`
+  extended (5 lines); dto round-trip `seed_k 30/mmr false/lexical true/pagerank
+  true`; old-payload-absence → `0/false` (standing guard). `cargo test -p kern
+  --lib` 964 passed, 0 failed, 4 ignored; `cargo test -p trnsprt --lib` 61
+  passed. Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming.
+
 - 2026-07-23 — item 20 measurement half-closed: the active `source_trust` map
   (`RetrievalConfig.source_trust`, `BTreeMap` keyed on `Source::scheme()`,
   empty by default = bit-identical scoring) is now surfaced. `Server::health_stats`
