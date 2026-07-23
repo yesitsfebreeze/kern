@@ -2,6 +2,16 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-23 — item 31 `route_entity` clone lever closed: `route_entity`
+  (`src/base/accept.rs`) now holds `&kern.children` alongside the `&GraphGnn`
+  reborrow in a scoped block (both immutable, borrow ends before
+  `current_id = child_id`), dropping the `Vec<String>` alloc per descent —
+  bit-identical routing. Proved by `route_entity_does_not_clone_children_per_descent`
+  (children vs no-children delta equal within 8 B; re-add `.clone()` of 4 vs 1
+  pushes ~72 B past → reds, green on revert). Routing tests green unedited.
+  `cargo test -p kern --lib` 953 passed, 0 failed, 4 ignored.
+  Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming.
+
 - 2026-07-22 — item 58 trigger #1 instrumented: `supersede` /
   `supersede_by_contradiction` (`src/base/accept.rs`) increment a
   process-global `SUPERSEDE_CHAIN_DEPTH_EXCEEDED` `AtomicU64` when the chain

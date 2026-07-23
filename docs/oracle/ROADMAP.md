@@ -1619,10 +1619,22 @@ Recorded in `FEATURES.md` gap blocks, planned nowhere:
   children, and it needs some thousands of distinct cohesive topics before it is
   a fifth. That is a slope, not a cliff, and no optimisation is shipped for it.
   Recording the lever in case the slope ever matters: it is the `Vec<String>`
-  clone, not an index over children. The clone in `route_entity` exists only to
+  clone, not an index over children. ~~The clone in `route_entity` exists only to
   end a borrow and can be replaced by holding `&kern.children` alongside the
   `&GraphGnn` the scan already takes; an index would be write-path work on every
-  spawn and every rename, buying back a comparison that measures as free.
+  spawn and every rename, buying back a comparison that measures as free.~~
+  **The `route_entity` clone lever closed 2026-07-23.** `route_entity`
+  (`src/base/accept.rs`) now holds `&kern.children` alongside the `&GraphGnn`
+  reborrow in a scoped block — both immutable, the borrow ends at `}` before
+  `current_id = child_id` — so the `Vec<String>` alloc per descent is gone
+  (bit-identical routing). Proved by `route_entity_does_not_clone_children_per_descent`
+  (children vs no-children delta equal within 8 B; re-add `.clone()` of 4 vs 1
+  pushes ~72 B past → reds, green on revert). Routing tests green unedited.
+  `cargo test -p kern --lib` 953 passed, 0 failed, 4 ignored. Decided by
+  fix-the-root (drop the alloc the borrow needed, not an index), name-the-
+  tradeoff (the linear scan stays — item names + rejects an index: write-path
+  work on every spawn/rename for a comparison that measures free), verify-
+  before-claiming (negative control). See the 2026-07-23 CHANGELOG entry.
 - `Entity` is a ~30-field flat struct (serialization cost on every store round
   trip) and `Kern` carries no per-kern stats — mean heat, fill ratio — that
   clustering could reuse (`FEATURES.md:85-87`).
@@ -2164,7 +2176,8 @@ request, not instrumentable), verify-before-claiming (negative control +
 process-global serialisation). See the 2026-07-22 CHANGELOG entry.
 
 **Still open:** rate-limit / `ReasonKind::Edit` + schema (the decision); trigger
-# 2 (producer ping-pong) + #3 (byte-level blame request) instrumentation.
+
+# 2 (producer ping-pong) + #3 (byte-level blame request) instrumentation
 
 ~~No `ReasonKind::Edit` rationale edge (`src/base/types.rs:90-99`) and no producer
 rate-limit, so an A/B ping-pong on one `external_id` grows without bound
