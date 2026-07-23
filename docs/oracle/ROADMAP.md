@@ -3762,9 +3762,29 @@ Deciding behavior: fix-the-root — the enumeration is the symptom-level fix, ke
 because the root fix is a registry and the loop was live; this half closes the
 state-root invariant the registry was the full answer to.
 
-### 87. Do the preset tiers earn their numbers, now that `relaxed` is the default? `[eval]`
+### 87. Do the preset tiers earn their numbers, now that `relaxed` is the default? — measurement half-closed 2026-07-23 `[eval]`
 
-**Deciding behavior: verify-before-claiming.**
+**Measurement half-closed 2026-07-23; tuning sweep still open.** The active
+preset name (`relaxed`/`medium`/`tight`) is now surfaced: `Server::health_stats`
+(`src/mcp.rs`) JSON carries `preset` from `self.cfg.preset`; `trnsprt::HealthRes`
+gains `preset: String` `#[serde(default)]` (old daemon → `""`); `kern health`
+prints `preset: {name}` **daemon-sourced only** (item 100 rule), placed first
+so it frames the heat/recency/retrieval lines; `kern://local/health` by
+construction. Proved by `kern_health_prints_preset` (tight/relaxed/empty/no-
+daemon) + dto round-trip `preset: "tight"`; standing negative-control guard:
+old-payload absence decodes `""` (the `tight` print reds if the field is
+omitted). `cargo test -p kern --lib` 963 passed, 0 failed, 4 ignored; `cargo
+test -p trnsprt --lib` 61 passed. Decided by fix-the-root (surface the name
+that frames the values, do not tune — tuning is the sweep below), name-the-
+tradeoff (one name — the values already surface via heat/recency/retrieval),
+verify-before-claiming (old-payload-absence guard). See the 2026-07-23
+CHANGELOG entry.
+
+**Still open:** the tuning sweep — run the retrieval suite once per preset,
+re-pin the baseline to `medium` or re-record on `relaxed`, adjust any knob
+whose tier value scores worse than medium on the posture it claims to serve.
+
+~~**Deciding behavior: verify-before-claiming.**
 
 The preset tiers shipped 2026-07-21 with hand-picked values, and the default
 flipped from the medium-era values to `relaxed` the same day
@@ -3776,7 +3796,7 @@ first decide whether the standing baseline is re-pinned to `preset =
 scores worse than medium on the posture it claims to serve (relaxed →
 recall, tight → precision). Preset values live in code now, so adjustments
 are commits, not config edits. Blocked on nothing; gated only on an idle GPU
-and item 1's instrument staying the scorer.
+and item 1's instrument staying the scorer.~~
 
 ### 85. Documentation owed, tracked here so it is not lost `[docs]`
 

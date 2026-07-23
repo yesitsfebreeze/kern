@@ -2,6 +2,19 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-23 — item 87 measurement half-closed: the active preset name
+  (`relaxed`/`medium`/`tight`) is now surfaced. `Server::health_stats`
+  (`src/mcp.rs`) JSON carries `preset` from `self.cfg.preset`; `trnsprt::HealthRes`
+  gains `preset: String` `#[serde(default)]` (old daemon → `""`); `kern health`
+  prints `preset: {name}` daemon-sourced only (item 100 rule), first line framing
+  the heat/recency/retrieval lines; `kern://local/health` by construction.
+  Proved by `kern_health_prints_preset` (tight/relaxed/empty/no-daemon) + dto
+  round-trip `preset: "tight"`. Standing guard: old-payload absence → `""`
+  (the `tight` print reds if omitted). `cargo test -p kern --lib` 963 passed, 0
+  failed, 4 ignored; `cargo test -p trnsprt --lib` 61 passed.
+  Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming.
+  Still open: the tuning sweep — run the suite per preset, re-pin the baseline.
+
 - 2026-07-23 — item 66 measurement half-closed: the active RRF config
   (`rrf_k`, `rrf_global_weight`, the three `ModeWeights`
   `weights_content`/`weights_reason`/`weights_hybrid`) is now surfaced.
