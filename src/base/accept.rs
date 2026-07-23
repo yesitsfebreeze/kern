@@ -2044,7 +2044,11 @@ mod tests {
 		let out = seed_examples(&body);
 		assert_eq!(out.len(), 2, "ceil((chunk+5)/chunk) -> 2 chunks");
 		assert!(out.iter().all(|c| c.chars().count() <= chunk));
-		assert_eq!(out.concat(), body, "chunks reassemble to the trimmed original");
+		assert_eq!(
+			out.concat(),
+			body,
+			"chunks reassemble to the trimmed original"
+		);
 		// exactly-on-boundary: chunk chars -> one chunk (not two)
 		assert_eq!(seed_examples(&"x".repeat(chunk)).len(), 1);
 	}

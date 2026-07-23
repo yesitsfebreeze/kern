@@ -14,7 +14,7 @@ use crate::base::heat::HeatConfig;
 use crate::base::math::reason_id;
 use crate::base::reason::{add_reason, remove_reason};
 use crate::base::search::search_all_unlocked;
-use crate::base::types::{Embedding, Reason, ReasonKind};
+use crate::base::types::{Embedding, Reason, ReasonKind, Scoping};
 use crate::base::util;
 use crate::config::TickConfig;
 use crate::ingest::place::build_chunk_entity;
@@ -169,8 +169,16 @@ pub fn do_classify_contradiction(
 	if new_id == old_id {
 		return;
 	}
-	let new_thought =
-		build_chunk_entity(&new_text, &vec, old_kind, &old_source, "", confidence, None);
+	let new_thought = build_chunk_entity(
+		&new_text,
+		&vec,
+		old_kind,
+		&old_source,
+		"",
+		confidence,
+		None,
+		&Scoping::default(),
+	);
 
 	// Re-validate under the write guard — another tick may have superseded or
 	// removed this pair while we were unlocked.

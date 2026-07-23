@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use watcher::{FileWatcher, IgnoreRules, IngestPipeline, IngestRecord, IngestSink, WatcherError};
 
-use crate::base::types::{EntityKind, Source};
+use crate::base::types::{EntityKind, Scoping, Source};
 use crate::ingest::{Config as IngestRunConfig, Worker};
 
 fn strip_file_uri(uri: &str) -> String {
@@ -113,6 +113,7 @@ impl IngestSink for KernFileWatcherSink {
 				valid_until: cfg.valid_until,
 				valid_from: None,
 				source_tag: tag.to_string(),
+				scoping: Scoping::default(),
 			};
 			match crate::ingest::direct::intake_direct(dir, &job) {
 				Ok(_) => return,
@@ -150,6 +151,7 @@ impl IngestSink for KernFileWatcherSink {
 				tag,
 				self.ingest_config(),
 				replaces_external,
+				Scoping::default(),
 			)
 			.await;
 	}
@@ -228,16 +230,19 @@ mod tests {
 				producer_id: String::new(),
 				unlinked_count: 0,
 				dirty: false,
+				user_id: None,
+				agent_id: None,
+				session_id: None,
 				valid_from: None,
 				valid_to: None,
-				invalidated_at: None,
+						invalidated_at: None,
 			};
 			t.refresh_score();
 			t
 		}
-	}
+}
 
-	#[async_trait]
+		#[async_trait]
 	impl IngestSink for DirectFileSink {
 		async fn ingest(&self, record: IngestRecord) {
 			let path = strip_file_uri(&record.source_uri);
@@ -476,6 +481,7 @@ mod tests {
 				1.0,
 				"inline",
 				IngestRunConfig::default(),
+				Scoping::default(),
 			)
 			.is_some()
 		{
@@ -865,12 +871,18 @@ mod tests {
 			.flat_map(|k| k.entities.values())
 			.find(|e| e.id == old_id)
 			.expect("survivor kept");
-		assert_eq!(survivor.external_id, "tmp/new.rs", "external_id re-keyed to new path");
+		assert_eq!(
+			survivor.external_id, "tmp/new.rs",
+			"external_id re-keyed to new path"
+		);
 		assert!(
 			matches!(survivor.status, EntityStatus::Active),
 			"survivor active, not superseded"
 		);
-		assert!(g.kern_of_source("tmp/old.rs").is_none(), "old source-index cleared");
+		assert!(
+			g.kern_of_source("tmp/old.rs").is_none(),
+			"old source-index cleared"
+		);
 		let holder = g
 			.kern_of_source("tmp/new.rs")
 			.expect("new source-index set");

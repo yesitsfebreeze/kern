@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::base::constants::AGENT_SOURCE;
-use crate::base::types::{EntityKind, Source};
+use crate::base::types::{EntityKind, Scoping, Source};
 use crate::base::util;
 use crate::ingest::outcome::OutcomeStatus;
 use crate::ingest::Worker;
@@ -32,6 +32,8 @@ pub struct DirectJob {
 	// exactly that MCP mint, so the serde default is the agent it named inline.
 	#[serde(default = "default_source_tag")]
 	pub source_tag: String,
+	#[serde(default)]
+	pub scoping: Scoping,
 }
 
 fn default_source_tag() -> String {
@@ -105,6 +107,7 @@ pub async fn drain_direct_once(
 				// that ever routes through the intake as an agent assertion.
 				&job.source_tag,
 				job_cfg,
+				job.scoping,
 			)
 			.await;
 		if matches!(outcome.status, OutcomeStatus::Failed) {
@@ -144,8 +147,9 @@ mod tests {
 			valid_until: None,
 			valid_from: None,
 			source_tag: AGENT_SOURCE.to_string(),
+			scoping: Scoping::default(),
 		}
-	}
+}
 
 	#[test]
 	fn intake_direct_writes_idempotent_json_named_by_content_hash() {
@@ -189,6 +193,7 @@ mod tests {
 			valid_until: Some(now),
 			valid_from: Some(now),
 			source_tag: AGENT_SOURCE.to_string(),
+			scoping: Scoping::default(),
 		};
 		let json = serde_json::to_string(&j).unwrap();
 		let back: DirectJob = serde_json::from_str(&json).unwrap();

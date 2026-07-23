@@ -50,6 +50,10 @@ pub struct QueryOptions {
 	// Drop entities still awaiting curation. OPT-IN: false is every caller that
 	// names no review policy, so an uncurated graph reads exactly as before.
 	pub exclude_pending: bool,
+	// Multi-tenancy scoping. None = no filter on this dimension.
+	pub user_id: Option<String>,
+	pub agent_id: Option<String>,
+	pub session_id: Option<String>,
 	// Appended to the synthesis prompt only — never a retrieval filter, so is_active() ignores it.
 }
 
@@ -64,6 +68,9 @@ impl QueryOptions {
 			|| self.valid_at.is_some()
 			|| self.as_of.is_some()
 			|| self.exclude_pending
+			|| self.user_id.is_some()
+			|| self.agent_id.is_some()
+			|| self.session_id.is_some()
 	}
 }
 
@@ -288,6 +295,21 @@ pub fn matches_filter(entity: &Entity, opts: &QueryOptions) -> bool {
 	}
 	if let Some(as_of) = opts.as_of {
 		if !entity.is_valid_at(as_of) {
+			return false;
+		}
+	}
+	if let Some(ref want) = opts.user_id {
+		if entity.user_id.as_deref() != Some(want.as_str()) {
+			return false;
+		}
+	}
+	if let Some(ref want) = opts.agent_id {
+		if entity.agent_id.as_deref() != Some(want.as_str()) {
+			return false;
+		}
+	}
+	if let Some(ref want) = opts.session_id {
+		if entity.session_id.as_deref() != Some(want.as_str()) {
 			return false;
 		}
 	}

@@ -273,6 +273,16 @@ pub struct ChunkPart {
 	pub index: usize,
 }
 
+/// Multi-tenancy scoping dimensions. None on each field = global (unscoped).
+/// Carried on Entity for query filtering; threaded through ingest via this
+/// helper to avoid bloating every function signature.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Scoping {
+	pub user_id: Option<String>,
+	pub agent_id: Option<String>,
+	pub session_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Entity {
 	pub id: String,
@@ -302,6 +312,12 @@ pub struct Entity {
 	pub producer_id: String,
 	pub unlinked_count: i32,
 	pub dirty: bool,
+	// Multi-tenancy scoping. None = global (unscoped). Optional on ingest,
+	// filterable on query. Backward-compatible: absent in stored data deser
+	// as None.
+	pub user_id: Option<String>,
+	pub agent_id: Option<String>,
+	pub session_id: Option<String>,
 	// serde(skip) is load-bearing: StoredKern's side-map persists these, never the
 	// embedded entity bytes. valid_from/valid_to = world time, invalidated_at =
 	// transaction time.
@@ -630,6 +646,9 @@ pub(crate) fn mk_entity(id: &str, text: &str, heat: f64, kind: EntityKind) -> En
 		producer_id: String::new(),
 		unlinked_count: 0,
 		dirty: false,
+		user_id: None,
+		agent_id: None,
+		session_id: None,
 		valid_from: None,
 		valid_to: None,
 		invalidated_at: None,

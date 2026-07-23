@@ -141,6 +141,7 @@ async fn run_once(
 			// cannot record that (ROADMAP item 20), so it names the principal here.
 			crate::base::constants::USER_SOURCE,
 			ingest_config(cfg, valid_until),
+			crate::base::types::Scoping::default(),
 		)
 		.await
 }

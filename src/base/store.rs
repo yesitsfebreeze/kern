@@ -34,7 +34,7 @@ const EMBED_KEY: &str = "embed";
 // Version byte prepended ahead of the zstd frame so a reader rejects any other
 // format instead of mis-decoding it. Alpha: exactly one version is ever
 // decodable — a mismatch is a clean BadVersion, never a migration.
-const FORMAT_VERSION: u8 = 7;
+const FORMAT_VERSION: u8 = 8; // v8: added user_id/agent_id/session_id scoping on Entity
 const ZSTD_LEVEL: i32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

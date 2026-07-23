@@ -109,11 +109,7 @@ pub fn graph_health_stats(g: &GraphGnn) -> HealthStats {
 	// Largest resident kern's entity count — the per-kern size the kern cap
 	// does not bound. Reuses the `kerns` walk already done above; computed here
 	// for one pass over the resident map.
-	let largest_kern_entities = kerns
-		.iter()
-		.map(|k| k.entities.len())
-		.max()
-		.unwrap_or(0);
+	let largest_kern_entities = kerns.iter().map(|k| k.entities.len()).max().unwrap_or(0);
 	let store = g.store();
 	let stamp = store
 		.as_ref()
@@ -307,12 +303,7 @@ mod tests {
 			}
 		}
 		for i in 0..4 {
-			let child = Kern::new_named_child(
-				&g.root.id,
-				&g.root.id,
-				&format!("c{i}"),
-				vec![0.0; 4],
-			);
+			let child = Kern::new_named_child(&g.root.id, &g.root.id, &format!("c{i}"), vec![0.0; 4]);
 			g.kerns.insert(child.id.clone(), child);
 		}
 		let h = graph_health_stats(&g);

@@ -4,7 +4,7 @@ use crate::base::constants::AGENT_SOURCE;
 use crate::base::math::clamp_confidence;
 use crate::base::reason::move_entity;
 use crate::base::search::find_entity;
-use crate::base::types::Source;
+use crate::base::types::{Scoping, Source};
 use crate::base::util::explain_relationship_prompt;
 use crate::base::validate::validate_conf;
 use crate::ingest;
@@ -28,6 +28,9 @@ pub(crate) fn tool_schemas() -> Vec<serde_json::Value> {
 					"conf":       {"type": "number", "description": "confidence weight 0.0-1.0 (default 0.5)"},
 					"hint": {"type": "string", "description": "free-text hint describing the content, folded into the chunking prompt"},
 					"retention_secs": {"type": "integer", "description": "expire this ingest after N seconds — sets valid_until, after which retrieval drops it (0 or absent = never). On a near-duplicate the shorter of the two deadlines wins, so this can shorten an existing TTL but never extend one"},
+					"user_id":    {"type": "string", "description": "multi-tenancy scope: filterable user dimension (optional, absent = global)"},
+					"agent_id":   {"type": "string", "description": "multi-tenancy scope: filterable agent dimension (optional, absent = global)"},
+					"session_id": {"type": "string", "description": "multi-tenancy scope: filterable session dimension (optional, absent = global)"},
 					"sync":       {"type": "boolean", "description": "block until ingest completes (default false)"},
 				},
 			},
@@ -132,6 +135,12 @@ struct IngestArgs {
 	retention_secs: u64,
 	#[serde(default)]
 	sync: bool,
+	#[serde(default)]
+	user_id: Option<String>,
+	#[serde(default)]
+	agent_id: Option<String>,
+	#[serde(default)]
+	session_id: Option<String>,
 }
 
 // Caller boundary: an agent caller can mint neither Fact-kind nor Fact-confidence
@@ -232,6 +241,12 @@ impl Server {
 			},
 		};
 
+		let scoping = Scoping {
+			user_id: p.user_id,
+			agent_id: p.agent_id,
+			session_id: p.session_id,
+		};
+
 		if p.sync {
 			let fut = self.worker.run(
 				p.text,
@@ -247,6 +262,7 @@ impl Server {
 					review_policy: self.cfg.ingest.review_policy.clone(),
 					..Default::default()
 				},
+				scoping.clone(),
 			);
 			let Some(outcome) = crate::llm::block_on_in_place(fut) else {
 				return tool_error("no tokio runtime");
@@ -285,6 +301,7 @@ impl Server {
 				// Same principal the sync leg above clamps against: an MCP caller is
 				// an agent whatever `p.source` claims.
 				source_tag: AGENT_SOURCE.to_string(),
+				scoping: scoping.clone(),
 			};
 			match crate::ingest::direct::intake_direct(&direct_dir, &job) {
 				Ok(doc_id) => {
@@ -321,6 +338,7 @@ impl Server {
 				review_policy: self.cfg.ingest.review_policy.clone(),
 				..Default::default()
 			},
+			scoping,
 		) else {
 			// Loud, not a `status` field in a success envelope: the caller has to
 			// re-offer this text, and a caller that must act cannot be told quietly.

@@ -30,6 +30,7 @@ fn new_statement_entity(
 	confidence: f64,
 	valid_until: Option<SystemTime>,
 	unlinked_count: i32,
+	scoping: &Scoping,
 ) -> Entity {
 	let conf = confidence.clamp(0.0, 1.0) as f32;
 	let (conf_alpha, conf_beta) = beta_params_from_confidence(conf);
@@ -65,6 +66,9 @@ fn new_statement_entity(
 		producer_id: String::new(),
 		unlinked_count,
 		dirty: false,
+		user_id: scoping.user_id.clone(),
+		agent_id: scoping.agent_id.clone(),
+		session_id: scoping.session_id.clone(),
 		valid_from: None,
 		valid_to: None,
 		invalidated_at: None,
@@ -124,6 +128,7 @@ pub(crate) async fn place_document(
 		job.confidence,
 		job.config.valid_until,
 		unlinked,
+		&job.scoping,
 	);
 	thought.valid_from = job.config.valid_from;
 	thought.review = job.review;
@@ -152,7 +157,15 @@ pub(crate) async fn place_document(
 		let renamed_old_id = if !r.deduped {
 			job.replaces.as_deref().and_then(|old_external| {
 				rename_vec.as_deref().and_then(|nv| {
-					accept::supersede_renamed(&mut g, &root_id, &r.entity_id, nv, old_external, &new_external_id, "renamed")
+					accept::supersede_renamed(
+						&mut g,
+						&root_id,
+						&r.entity_id,
+						nv,
+						old_external,
+						&new_external_id,
+						"renamed",
+					)
 				})
 			})
 		} else {
@@ -226,6 +239,7 @@ pub(crate) fn place_chunks(
 			&external_id,
 			job.confidence,
 			job.config.valid_until,
+			&job.scoping,
 		);
 		thought.valid_from = job.config.valid_from;
 		thought.review = job.review;
@@ -268,6 +282,7 @@ pub fn build_chunk_entity(
 	external_id: &str,
 	confidence: f64,
 	valid_until: Option<SystemTime>,
+	scoping: &Scoping,
 ) -> Entity {
 	new_statement_entity(
 		util::content_hash(text),
@@ -279,6 +294,7 @@ pub fn build_chunk_entity(
 		confidence,
 		valid_until,
 		0,
+		scoping,
 	)
 }
 
@@ -316,6 +332,7 @@ mod tests {
 			review: ReviewState::default(),
 			replaces: None,
 			result_tx: None,
+			scoping: Scoping::default(),
 		}
 	}
 
@@ -370,6 +387,7 @@ mod tests {
 			"sec#chunk0",
 			1.0,
 			None,
+			&Scoping::default(),
 		);
 		assert_eq!(
 			e.id,
@@ -396,6 +414,7 @@ mod tests {
 			"e",
 			5.0,
 			None,
+			&Scoping::default(),
 		);
 		assert_eq!((hi.conf_alpha, hi.conf_beta), (2.0, 1.0));
 		let lo = build_chunk_entity(
@@ -406,6 +425,7 @@ mod tests {
 			"e",
 			-3.0,
 			None,
+			&Scoping::default(),
 		);
 		assert_eq!((lo.conf_alpha, lo.conf_beta), (1.0, 2.0));
 	}

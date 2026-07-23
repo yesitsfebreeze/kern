@@ -29,6 +29,8 @@ pub(crate) struct Job {
 	// move-plus-edit does not leave a dangling stale `Document` (ROADMAP item 84).
 	pub(crate) replaces: Option<String>,
 	pub(crate) result_tx: Option<oneshot::Sender<Outcome>>,
+	// Multi-tenancy scoping. None = global.
+	pub(crate) scoping: Scoping,
 }
 
 // The ONLY place a Job is built, so `source_tag` is the one gate every producer
@@ -36,6 +38,7 @@ pub(crate) struct Job {
 // that forgot it is exactly the defect this closes (ROADMAP item 95): the file
 // watcher minted `1.0`, a posterior of 0.6667 — a human's, and above the 0.6500
 // a deliberate agent assertion gets.
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn job(
 	text: String,
@@ -47,6 +50,7 @@ fn job(
 	config: Config,
 	replaces: Option<String>,
 	result_tx: Option<oneshot::Sender<Outcome>>,
+	scoping: Scoping,
 ) -> Job {
 	// The confidence only. `kind` stays the producer's: a watched file is a
 	// Document at 0.95, not the Claim the clamp's own classification would name.
@@ -65,6 +69,7 @@ fn job(
 		review,
 		replaces,
 		result_tx,
+		scoping,
 	}
 }
 
@@ -124,12 +129,13 @@ impl Worker {
 		confidence: f64,
 		source_tag: &str,
 		config: Config,
+		scoping: Scoping,
 	) -> Option<String> {
 		let doc_id = util::content_hash(&text);
 		if self
 			.tx
 			.try_send(job(
-				text, source, kind, hint, confidence, source_tag, config, None, None,
+				text, source, kind, hint, confidence, source_tag, config, None, None, scoping,
 			))
 			.is_err()
 		{
@@ -170,10 +176,11 @@ impl Worker {
 		source_tag: &str,
 		config: Config,
 		replaces: Option<String>,
+		scoping: Scoping,
 	) -> Option<String> {
 		let doc_id = util::content_hash(&text);
 		let job = job(
-			text, source, kind, hint, confidence, source_tag, config, replaces, None,
+			text, source, kind, hint, confidence, source_tag, config, replaces, None, scoping,
 		);
 		self.tx.send(job).await.ok().map(|()| doc_id)
 	}
@@ -188,6 +195,7 @@ impl Worker {
 		confidence: f64,
 		source_tag: &str,
 		config: Config,
+		scoping: Scoping,
 	) -> Outcome {
 		let (result_tx, result_rx) = oneshot::channel();
 		let job = job(
@@ -200,6 +208,7 @@ impl Worker {
 			config,
 			None,
 			Some(result_tx),
+			scoping,
 		);
 		if let Err(e) = self.tx.send(job).await {
 			return Outcome::failed(
@@ -443,6 +452,7 @@ mod tests {
 			1.0,
 			"session",
 			Config::default(),
+			Scoping::default(),
 		);
 		assert_eq!(doc_id, Some(util::content_hash(&text)));
 	}
@@ -476,6 +486,7 @@ mod tests {
 				1.0,
 				"session",
 				Config::default(),
+				Scoping::default(),
 			);
 			if got.is_some() {
 				accepted += 1;
@@ -552,6 +563,7 @@ mod tests {
 			1.0,
 			"session",
 			Config::default(),
+			Scoping::default(),
 		);
 		assert!(
 			depth_settles_to_zero(&worker).await,
@@ -567,6 +579,7 @@ mod tests {
 				1.0,
 				"session",
 				Config::default(),
+				Scoping::default(),
 			);
 		}
 		assert_eq!(
@@ -644,6 +657,7 @@ mod tests {
 			review: ReviewState::default(),
 			replaces: None,
 			result_tx: None,
+			scoping: Scoping::default(),
 		}
 	}
 
@@ -723,6 +737,7 @@ mod tests {
 				Config::default(),
 				None,
 				None,
+				Scoping::default(),
 			)
 		};
 
@@ -793,6 +808,7 @@ mod tests {
 				1.0,
 				"file",
 				no_dedup.clone(),
+				Scoping::default(),
 			)
 			.await;
 		worker
@@ -805,6 +821,7 @@ mod tests {
 				"file",
 				no_dedup.clone(),
 				None,
+				Scoping::default(),
 			)
 			.await;
 		worker.enqueue(
@@ -815,6 +832,7 @@ mod tests {
 			1.0,
 			"file",
 			no_dedup,
+			Scoping::default(),
 		);
 
 		let want = crate::base::constants::MAX_AI_CONFIDENCE;
@@ -869,6 +887,7 @@ mod tests {
 				1.0,
 				"session",
 				Config::default(),
+				Scoping::default(),
 			)
 			.await;
 

@@ -270,6 +270,7 @@ mod tests {
 				1.0,
 				"inline",
 				crate::ingest::Config::default(),
+				crate::base::types::Scoping::default(),
 			)
 			.is_some()
 		{

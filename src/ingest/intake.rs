@@ -205,7 +205,7 @@ async fn drain_entry(
 		claim_cfg.valid_from = c.valid_from;
 		let tag = src.scheme();
 		let outcome = worker
-			.run(c.text, src, EntityKind::Claim, c.kind, 0.6, tag, claim_cfg)
+			.run(c.text, src, EntityKind::Claim, c.kind, 0.6, tag, claim_cfg, crate::base::types::Scoping::default())
 			.await;
 		let ok = !matches!(outcome.status, OutcomeStatus::Failed);
 		if !ok {
@@ -248,6 +248,7 @@ async fn drain_document(
 			1.0,
 			tag,
 			cfg.clone(),
+			crate::base::types::Scoping::default(),
 		)
 		.await;
 	let ok = !matches!(outcome.status, OutcomeStatus::Failed);
