@@ -2563,11 +2563,34 @@ the 2026-07-22 CHANGELOG entry.
 one-line ranking change that makes a single-observation claim stop outranking a
 well-evidenced one at equal mean.~~
 
-### 66. RRF weights and mode blends are configurable but never auto-tuned `[retrieval]`
+### 66. RRF weights and mode blends are configurable but never auto-tuned — measurement half-closed 2026-07-23 `[retrieval]`
 
-Was two ceilings; the rerank half left with the rerank stage itself
+**Measurement half-closed 2026-07-23; tuning sweep still open.** The active RRF
+config (`rrf_k`, `rrf_global_weight`, the three `ModeWeights`
+`weights_content`/`weights_reason`/`weights_hybrid`, each `{content, reason,
+edge}`) is now surfaced: `Server::health_stats` (`src/mcp.rs`) JSON carries a
+`retrieval:` block from `self.cfg.retrieval`; `trnsprt::HealthRes` gains a nested
+`RetrievalHealth` `#[serde(default)]` (old daemon → zeroed); `kern health` prints
+4 lines (`retrieval: rrf_k {}, global {}` + content/reason/hybrid weights)
+**daemon-sourced only** (item 100 rule); `kern://local/health` by construction.
+Proved by `kern_health_prints_retrieval_config` (4 lines, non-default values;
+old daemon → 4 zero lines; no daemon → empty) and
+`every_health_field_round_trips_through_json` (retrieval round-trip). `cargo
+test -p kern --lib` 961 passed (1 pre-existing `the_sink_waits` flake, green
+isolated); `cargo test -p trnsprt --lib` 61 passed. Standing negative-control
+guard: old-payload-absence decode → `HealthRes.retrieval` zeroed (the print
+block reds if the block is omitted). Decided by fix-the-root (surface the
+configured RRF, do not tune it — tuning is the bench/sweep, item 55/87),
+name-the-tradeoff (one block — the three `ModeWeights` carry the blends; the
+recency/heat half-lives are separate signals, items 55/62), verify-before-
+claiming (old-payload-absence guard). See the 2026-07-23 CHANGELOG entry.
+
+**Still open:** the tuning sweep — RRF weights + mode blends never measured
+against recall.
+
+~~Was two ceilings; the rerank half left with the rerank stage itself
 (2026-07-21). What remains: RRF weights plus mode blends are configurable but
-never auto-tuned (`FEATURES.md:210`).
+never auto-tuned (`FEATURES.md:210`).~~
 
 ### 67. Binary quantization stays non-user-selectable `[retrieval]` — closed 2026-07-22 by decision
 

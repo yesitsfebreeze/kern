@@ -2,6 +2,20 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-23 — item 66 measurement half-closed: the active RRF config
+  (`rrf_k`, `rrf_global_weight`, the three `ModeWeights`
+  `weights_content`/`weights_reason`/`weights_hybrid`) is now surfaced.
+  `Server::health_stats` (`src/mcp.rs`) JSON carries a `retrieval:` block from
+  `self.cfg.retrieval`; `trnsprt::HealthRes` gains a nested `RetrievalHealth`
+  `#[serde(default)]` (old daemon → zeroed); `kern health` prints 4 lines
+  (header + content/reason/hybrid weights) daemon-sourced only; `kern://local/health`
+  by construction. Proved by `kern_health_prints_retrieval_config` +
+  `every_health_field_round_trips_through_json` (retrieval round-trip).
+  `cargo test -p kern --lib` 961 passed (1 pre-existing flake); `cargo test -p
+  trnsprt --lib` 61 passed. Standing guard: old-payload-absence → zeroed.
+  Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming.
+  Still open: the tuning sweep — RRF weights/blends never measured vs recall.
+
 - 2026-07-23 — item 83 Gini-over-kern-sizes gauge: `gini_over_kern_sizes(counts:
   &[usize]) -> f64` (new, `src/base/health.rs`, finite-n max `(n−1)/n`) +
   `HealthStats.gini_kern_sizes` (filled from the resident-kern walk) — the
