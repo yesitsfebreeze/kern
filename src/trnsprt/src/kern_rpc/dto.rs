@@ -93,6 +93,10 @@ pub struct HealthRes {
 	// edit). 0 from older daemons (ROADMAP item 62 `kern://health` surfacing).
 	#[serde(default)]
 	pub heat_half_life_secs: u64,
+	// QBST recency half-life (`RetrievalConfig.qbst_recency_half_life_secs`,
+	// the 24h ranking-freshness signal). 0 from older daemons (ROADMAP item 55).
+	#[serde(default)]
+	pub qbst_recency_half_life_secs: u64,
 	// Completions that failed on the reason endpoint, and the last one in words.
 	// The blocking bridge hands its caller `""` for every failure, so the count
 	// is what separates a dead endpoint from a model with nothing to say, and the
@@ -214,6 +218,7 @@ mod dto_serde_tests {
 			supersede_chain_depth_exceeded: 22,
 			largest_kern_entities: 99,
 			heat_half_life_secs: 2592000,
+			qbst_recency_half_life_secs: 86400,
 			llm_complete_failed: 19,
 			last_llm_complete_failure: "transient: HTTP error: operation timed out".into(),
 			build_id: "a1b2c3d4e5f60718".into(),
@@ -243,6 +248,7 @@ mod dto_serde_tests {
 		assert_eq!(back.supersede_chain_depth_exceeded, 22);
 		assert_eq!(back.largest_kern_entities, 99);
 		assert_eq!(back.heat_half_life_secs, 2592000);
+		assert_eq!(back.qbst_recency_half_life_secs, 86400);
 		assert_eq!(back.llm_complete_failed, 19);
 		assert_eq!(
 			back.last_llm_complete_failure,
