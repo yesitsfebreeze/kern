@@ -192,6 +192,12 @@ impl Server {
 			// Active preset name (ROADMAP item 87 measurement half). Preset::apply
 			// is its only writer; the name frames the heat/recency/retrieval lines.
 			"preset": self.cfg.preset.as_str(),
+			// Active source-trust map (ROADMAP item 20 measurement half), keyed
+			// on `Source::scheme()`. Empty by default (bit-identical scoring),
+			// so an unconfigured kern surfaces an empty map; an operator who sets
+			// `source_trust = { file = 0.8 }` sees it. Daemon-sourced: the CLI's
+			// own config is irrelevant.
+			"source_trust": self.cfg.retrieval.source_trust,
 			// This server's own worker, read directly: a gauge on the live channel,
 			// not a process static like the counters `h` carries.
 			"ingest_queue_depth": self.worker.queue_depth(),
