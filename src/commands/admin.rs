@@ -92,6 +92,9 @@ pub(super) async fn cmd_health(cfg: &crate::config::Config) {
 	for line in retrieval_health_lines(d.as_ref()) {
 		println!("{line}");
 	}
+	for line in source_trust_health_lines(d.as_ref()) {
+		println!("{line}");
+	}
 	for line in kern_cap_health_lines(d.as_ref()) {
 		println!("{line}");
 	}
@@ -292,6 +295,27 @@ fn retrieval_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<Strin
 		],
 		None => Vec::new(),
 	}
+}
+
+// Active source-trust map (ROADMAP item 20 measurement half). Daemon-sourced
+// like the heat/recency/retrieval lines: the CLI's own config is irrelevant —
+// the daemon's running `source_trust` is what the operator asked about. No
+// daemon, no line. An empty map (unconfigured kern) prints `source_trust:
+// (none)`, matching the preset/heat lines that print a zeroed value when a
+// daemon answers.
+fn source_trust_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> {
+	let Some(h) = h else {
+		return Vec::new();
+	};
+	if h.source_trust.is_empty() {
+		return vec!["source_trust: (none)".to_string()];
+	}
+	let pairs: Vec<String> = h
+		.source_trust
+		.iter()
+		.map(|(scheme, w)| format!("{scheme}={w}"))
+		.collect();
+	vec![format!("source_trust: {}", pairs.join(", "))]
 }
 
 // The resident-kern cap approach warn (ROADMAP item 83). Daemon-sourced like
@@ -517,6 +541,43 @@ mod degradation_lines_tests {
 				"recency:     half-life 86400s",
 			],
 			"recency half-life surfaced daemon-sourced"
+		);
+	}
+
+	#[test]
+	fn kern_health_prints_source_trust() {
+		// A configured source-trust map prints one line naming each scheme.
+		let cfg = HealthRes {
+			ok: true,
+			source_trust: std::collections::BTreeMap::from([
+				("file".to_string(), 0.8),
+				("ticket".to_string(), 0.9),
+			]),
+			..Default::default()
+		};
+		assert_eq!(
+			source_trust_health_lines(Some(&cfg)),
+			vec!["source_trust: file=0.8, ticket=0.9"],
+		);
+
+		// An unconfigured kern (empty map) prints a (none) line — the
+		// bit-identical default, not absent.
+		let uncfg = HealthRes {
+			ok: true,
+			..Default::default()
+		};
+		assert_eq!(
+			source_trust_health_lines(Some(&uncfg)),
+			vec!["source_trust: (none)"],
+			"empty map surfaces a (none) line, matching the zeroed-value rule"
+		);
+
+		// No daemon -> no line (item 100 rule: the CLI's own config is
+		// irrelevant, the daemon's running map is what the operator asked
+		// about).
+		assert!(
+			source_trust_health_lines(None).is_empty(),
+			"no daemon -> no source_trust line"
 		);
 	}
 

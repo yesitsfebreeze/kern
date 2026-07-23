@@ -148,6 +148,15 @@ impl KernRpc for KernRpcHandler {
 					}
 				},
 				preset: str_at("preset").to_string(),
+				source_trust: payload
+					.get("source_trust")
+					.and_then(|v| v.as_object())
+					.map(|obj| {
+						obj.iter()
+							.filter_map(|(k, v)| v.as_f64().map(|w| (k.clone(), w)))
+							.collect()
+					})
+					.unwrap_or_default(),
 				llm_complete_failed: u64_at("llm_complete_failed"),
 				last_llm_complete_failure: str_at("last_llm_complete_failure"),
 				embed_model: str_at("embed_model"),

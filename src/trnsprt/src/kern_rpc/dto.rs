@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct ModeWeightsHealth {
@@ -135,6 +136,12 @@ pub struct HealthRes {
 	// Empty from older daemons (ROADMAP item 87 measurement half).
 	#[serde(default)]
 	pub preset: String,
+	// Active source-trust map (`RetrievalConfig.source_trust`, keyed on
+	// `Source::scheme()` — file/ticket/session/agent/inline). Empty from
+	// older daemons and from a configless kern (ROADMAP item 20 measurement
+	// half).
+	#[serde(default)]
+	pub source_trust: BTreeMap<String, f64>,
 	// Completions that failed on the reason endpoint, and the last one in words.
 	// The blocking bridge hands its caller `""` for every failure, so the count
 	// is what separates a dead endpoint from a model with nothing to say, and the
@@ -222,6 +229,10 @@ mod dto_serde_tests {
 		assert!((h.retrieval.rrf_global_weight - 0.0).abs() < 1e-12);
 		assert!((h.retrieval.weights_content.content - 0.0).abs() < 1e-12);
 		assert!(h.preset.is_empty(), "an old daemon reports no preset name");
+		assert!(
+			h.source_trust.is_empty(),
+			"an old daemon reports no source-trust map"
+		);
 
 		let ancient = r#"{"ok":true}"#;
 		let h2: HealthRes = serde_json::from_str(ancient).expect("only `ok` is required");
@@ -284,6 +295,10 @@ mod dto_serde_tests {
 				},
 			},
 			preset: "tight".into(),
+			source_trust: BTreeMap::from([
+				("file".to_string(), 0.8),
+				("ticket".to_string(), 0.9),
+			]),
 			llm_complete_failed: 19,
 			last_llm_complete_failure: "transient: HTTP error: operation timed out".into(),
 			build_id: "a1b2c3d4e5f60718".into(),
@@ -321,6 +336,14 @@ mod dto_serde_tests {
 		assert!((back.retrieval.weights_reason.reason - 0.8).abs() < 1e-12);
 		assert!((back.retrieval.weights_hybrid.edge - 0.2).abs() < 1e-12);
 		assert_eq!(back.preset, "tight");
+		assert_eq!(
+			back.source_trust.get("file").copied().unwrap_or(0.0),
+			0.8
+		);
+		assert_eq!(
+			back.source_trust.get("ticket").copied().unwrap_or(0.0),
+			0.9
+		);
 		assert_eq!(back.llm_complete_failed, 19);
 		assert_eq!(
 			back.last_llm_complete_failure,
