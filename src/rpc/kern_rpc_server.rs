@@ -145,6 +145,22 @@ impl KernRpc for KernRpcHandler {
 						weights_content: mw("weights_content"),
 						weights_reason: mw("weights_reason"),
 						weights_hybrid: mw("weights_hybrid"),
+						seed_k: r
+							.and_then(|r| r.get("seed_k"))
+							.and_then(|v| v.as_u64())
+							.unwrap_or(0) as usize,
+						mmr_enabled: r
+							.and_then(|r| r.get("mmr_enabled"))
+							.and_then(|v| v.as_bool())
+							.unwrap_or(false),
+						lexical_enabled: r
+							.and_then(|r| r.get("lexical_enabled"))
+							.and_then(|v| v.as_bool())
+							.unwrap_or(false),
+						pagerank_enabled: r
+							.and_then(|r| r.get("pagerank_enabled"))
+							.and_then(|v| v.as_bool())
+							.unwrap_or(false),
 					}
 				},
 				preset: str_at("preset").to_string(),
