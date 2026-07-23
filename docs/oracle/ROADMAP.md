@@ -3507,6 +3507,25 @@ name-the-tradeoff (one max, not a distribution; the smallest signal naming the
 gap), verify-before-claiming (negative control). See the 2026-07-23 CHANGELOG
 entry.
 
+**Gini-over-kern-sizes gauge added 2026-07-23.** `gini_over_kern_sizes(counts:
+&[usize]) -> f64` (new pure fn, `src/base/health.rs` beside `gini_over_access`)
+— the distribution the `largest_kern_entities` max only summarises: `0.0` =
+balanced (all kerns equal), → `1.0` asymptotically (**finite-n max `(n−1)/n`**,
+stated not hidden, same as item 62). `HealthStats.gini_kern_sizes` (new field,
+filled from the same resident-kern walk). `kern health` `kerns:` line gains
+`gini N.NN`; MCP `health` JSON carries `gini_kern_sizes`; `HealthRes` gains
+`#[serde(default)]` (old daemon → `0.0`), **daemon-sourced only** (item 100).
+Proved by `gini_over_kern_sizes_pins_known_distributions` (`[10,0,0]` → `2/3`,
+`[100,0]` → `1/2`), `graph_health_stats_reports_gini_kern_sizes` (10 + four
+empty → `4/5` > `0.5`; empty → `0.0`), dto round-trip `0.42` + old-payload →
+`0.0`. `cargo test -p kern --lib` 961 passed (1 pre-existing `the_sink_waits`
+flake, green isolated); `cargo test -p trnsprt --lib` 61 passed. Negative
+control (`gini_over_kern_sizes → 0.0` always reds, green on revert). Decided by
+fix-the-root (measure the distribution, do not enforce — per-kern cap blocked
+on item 75), name-the-tradeoff (a distribution, not a second max; finite-n Gini
+maxes at `(n−1)/n`, stated), verify-before-claiming (negative control). See the
+2026-07-23 CHANGELOG entry.
+
 ### 84. Remaining operational odds and ends `[surface]`
 
 - **`serve.mcp_addr` is a config field with no reader.** ~~Added when item 11 landed~~ **Closed 2026-07-22.** `run_server` now resolves CLI flag first, falls back to `cfg.serve.mcp_addr`.

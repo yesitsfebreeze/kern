@@ -2,6 +2,19 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-23 — item 83 Gini-over-kern-sizes gauge: `gini_over_kern_sizes(counts:
+  &[usize]) -> f64` (new, `src/base/health.rs`, finite-n max `(n−1)/n`) +
+  `HealthStats.gini_kern_sizes` (filled from the resident-kern walk) — the
+  distribution the `largest_kern_entities` max summarises. `kern health` `kerns:`
+  line gains `gini N.NN`; MCP `health` JSON + `HealthRes` `#[serde(default)]`
+  (old daemon → `0.0`), daemon-sourced only. Proved by
+  `gini_over_kern_sizes_pins_known_distributions` (`[10,0,0]` → `2/3`, `[100,0]`
+  → `1/2`), `graph_health_stats_reports_gini_kern_sizes` (10 + four empty →
+  `4/5`), dto round-trip `0.42`. `cargo test -p kern --lib` 961 passed (1
+  pre-existing flake); `cargo test -p trnsprt --lib` 61 passed. Negative control
+  (`→ 0.0` reds) green on revert.
+  Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming.
+
 - 2026-07-23 — item 25 guard added: `non_access_mutations_leave_mutation_epoch_unchanged`
   (`src/retrieval/seed.rs`) pins `g.mutation_epoch()` unchanged across the four
   named non-access sites (`merge_remote_entity`, reembed `values_mut`, gossip
