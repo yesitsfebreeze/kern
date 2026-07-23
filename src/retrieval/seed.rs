@@ -668,4 +668,80 @@ mod tests {
 			"a Fact demoted to an unaccessed Claim stops being important immediately"
 		);
 	}
+
+	// ponytail: item-25 guard — pins the four non-access mutation sites item 25
+	// names (merge_remote_entity, reembed values_mut, gossip phantom-kern insert,
+	// do_cluster move_entity) as epoch-silent. A future chokepoint fix that
+	// bump_mutation_epoch()s at one of them fails loudly here instead of shipping
+	// a half-bumped eligible-set index. Companion to
+	// an_eligibility_change_is_reflected_with_no_epoch_bump (the access site).
+	#[test]
+	fn non_access_mutations_leave_mutation_epoch_unchanged() {
+		use crate::base::merge::merge_remote_entity;
+		use crate::base::reason::move_entity;
+
+		// (1) merge_remote_entity — insert a remote Fact into a phantom kern.
+		{
+			let mut g = graph_with(vec![ent("local", vec![1.0, 0.0], 0, true)]);
+			g.kerns
+				.insert("remote-net-k1".into(), Kern::new("remote-net-k1", ""));
+			let before = g.mutation_epoch();
+			let remote = ent("remote-fact", vec![1.0, 0.0], 0, true);
+			assert!(
+				merge_remote_entity(&mut g, "remote-net-k1", remote),
+				"merge_remote_entity inserted the remote Fact"
+			);
+			assert_eq!(
+				g.mutation_epoch(),
+				before,
+				"merge_remote_entity does not bump the mutation_epoch"
+			);
+		}
+
+		// (2) reembed values_mut shape — replace an entity's vector in place,
+		// the mutation do_reembed drives through `kerns.values_mut()`.
+		{
+			let mut g = graph_with(vec![ent("e", vec![1.0, 0.0], 0, true)]);
+			let before = g.mutation_epoch();
+			let kern = g.kerns.get_mut("kx").unwrap();
+			let e = kern.entities.get_mut("e").unwrap();
+			e.vector = vec![0.0f32, 1.0].into();
+			assert_eq!(
+				g.mutation_epoch(),
+				before,
+				"reembed's values_mut vector replace does not bump the mutation_epoch"
+			);
+		}
+
+		// (3) inject_remote_scope / new_phantom_kern shape — gossip writes a
+		// phantom-kern entity directly via kerns.insert + entities.insert.
+		{
+			let mut g = graph_with(vec![ent("local", vec![1.0, 0.0], 0, true)]);
+			let before = g.mutation_epoch();
+			let mut phantom = Kern::new("remote-net-k2", "");
+			phantom
+				.entities
+				.insert("gossip-fact".into(), ent("gossip-fact", vec![1.0, 0.0], 0, true));
+			g.kerns.insert("remote-net-k2".into(), phantom);
+			assert_eq!(
+				g.mutation_epoch(),
+				before,
+				"gossip phantom-kern insert does not bump the mutation_epoch"
+			);
+		}
+
+		// (4) do_cluster move shape — clustering moves entities between kerns via
+		// reason::move_entity.
+		{
+			let mut g = graph_with(vec![ent("mover", vec![1.0, 0.0], 0, true)]);
+			g.kerns.insert("dest".into(), Kern::new("dest", ""));
+			let before = g.mutation_epoch();
+			move_entity(&mut g, "kx", "dest", "mover").expect("move_entity relocates");
+			assert_eq!(
+				g.mutation_epoch(),
+				before,
+				"do_cluster's move_entity does not bump the mutation_epoch"
+			);
+		}
+	}
 }
