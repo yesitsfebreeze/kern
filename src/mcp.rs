@@ -188,6 +188,10 @@ impl Server {
 					"reason": self.cfg.retrieval.weights_hybrid.reason,
 					"edge": self.cfg.retrieval.weights_hybrid.edge,
 				},
+				"seed_k": self.cfg.retrieval.seed_k,
+				"mmr_enabled": self.cfg.retrieval.mmr_enabled,
+				"lexical_enabled": self.cfg.retrieval.lexical_enabled,
+				"pagerank_enabled": self.cfg.retrieval.pagerank_enabled,
 			},
 			// Active preset name (ROADMAP item 87 measurement half). Preset::apply
 			// is its only writer; the name frames the heat/recency/retrieval lines.

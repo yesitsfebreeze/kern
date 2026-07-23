@@ -292,9 +292,16 @@ fn retrieval_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<Strin
 				h.retrieval.weights_hybrid.reason,
 				h.retrieval.weights_hybrid.edge,
 			),
+			format!(
+				"  seed_k {}, mmr {}, lexical {}, pagerank {}",
+				h.retrieval.seed_k,
+				h.retrieval.mmr_enabled,
+				h.retrieval.lexical_enabled,
+				h.retrieval.pagerank_enabled,
+			),
 		],
 		None => Vec::new(),
-	}
+		}
 }
 
 // Active source-trust map (ROADMAP item 20 measurement half). Daemon-sourced
@@ -653,11 +660,15 @@ mod degradation_lines_tests {
 					reason: 0.3,
 					edge: 0.2,
 				},
+				seed_k: 30,
+				mmr_enabled: false,
+				lexical_enabled: true,
+				pagerank_enabled: true,
 			},
 			..Default::default()
 		};
 		let lines = retrieval_health_lines(Some(&cfg));
-		assert_eq!(lines.len(), 4, "one header + three mode-weight lines");
+		assert_eq!(lines.len(), 5, "header + three mode-weight + one knob line");
 		assert!(
 			lines[0].contains("retrieval:") && lines[0].contains("60") && lines[0].contains("0.5"),
 			"header carries rrf_k + global: {lines:?}"
@@ -674,8 +685,13 @@ mod degradation_lines_tests {
 			lines[3].contains("hybrid") && lines[3].contains("0.2"),
 			"hybrid weights line: {lines:?}"
 		);
+		assert!(
+			lines[4].contains("seed_k 30") && lines[4].contains("mmr false")
+						&& lines[4].contains("lexical true") && lines[4].contains("pagerank true"),
+			"knob line carries the four: {lines:?}"
+		);
 
-		// Zeroed (old daemon / unset) -> four lines of zeroes, matching the
+		// Zeroed (old daemon / unset) -> five lines of zeroes, matching the
 		// heat/recency lines that print `0s` when a daemon answers.
 		let old = HealthRes {
 			ok: true,
@@ -683,7 +699,7 @@ mod degradation_lines_tests {
 		};
 		assert_eq!(
 			retrieval_health_lines(Some(&old)).len(),
-			4,
+			5,
 			"old daemon still prints the block at zero"
 		);
 

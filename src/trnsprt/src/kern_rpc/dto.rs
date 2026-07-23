@@ -12,8 +12,9 @@ pub struct ModeWeightsHealth {
 }
 
 // Active RRF config (`RetrievalConfig.rrf_k` / `rrf_global_weight` / the three
-// `ModeWeights`), preset-owned. Zeroed from older daemons (ROADMAP item 66
-// measurement half).
+// `ModeWeights`) plus the remaining active retrieval knobs (`seed_k`,
+// `mmr_enabled`, `lexical_enabled`, `pagerank_enabled`), preset-owned. Zeroed
+// from older daemons (ROADMAP item 66 measurement half).
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct RetrievalHealth {
 	#[serde(default)]
@@ -26,6 +27,14 @@ pub struct RetrievalHealth {
 	pub weights_reason: ModeWeightsHealth,
 	#[serde(default)]
 	pub weights_hybrid: ModeWeightsHealth,
+	#[serde(default)]
+	pub seed_k: usize,
+	#[serde(default)]
+	pub mmr_enabled: bool,
+	#[serde(default)]
+	pub lexical_enabled: bool,
+	#[serde(default)]
+	pub pagerank_enabled: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -228,6 +237,10 @@ mod dto_serde_tests {
 		assert!((h.retrieval.rrf_k - 0.0).abs() < 1e-12);
 		assert!((h.retrieval.rrf_global_weight - 0.0).abs() < 1e-12);
 		assert!((h.retrieval.weights_content.content - 0.0).abs() < 1e-12);
+		assert_eq!(h.retrieval.seed_k, 0);
+		assert!(!h.retrieval.mmr_enabled);
+		assert!(!h.retrieval.lexical_enabled);
+		assert!(!h.retrieval.pagerank_enabled);
 		assert!(h.preset.is_empty(), "an old daemon reports no preset name");
 		assert!(
 			h.source_trust.is_empty(),
@@ -293,6 +306,10 @@ mod dto_serde_tests {
 					reason: 0.3,
 					edge: 0.2,
 				},
+				seed_k: 30,
+				mmr_enabled: false,
+				lexical_enabled: true,
+				pagerank_enabled: true,
 			},
 			preset: "tight".into(),
 			source_trust: BTreeMap::from([
@@ -335,6 +352,10 @@ mod dto_serde_tests {
 		assert!((back.retrieval.weights_content.content - 0.7).abs() < 1e-12);
 		assert!((back.retrieval.weights_reason.reason - 0.8).abs() < 1e-12);
 		assert!((back.retrieval.weights_hybrid.edge - 0.2).abs() < 1e-12);
+	assert_eq!(back.retrieval.seed_k, 30);
+	assert!(!back.retrieval.mmr_enabled);
+	assert!(back.retrieval.lexical_enabled);
+	assert!(back.retrieval.pagerank_enabled);
 		assert_eq!(back.preset, "tight");
 		assert_eq!(
 			back.source_trust.get("file").copied().unwrap_or(0.0),
