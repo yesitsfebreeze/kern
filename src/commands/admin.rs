@@ -241,7 +241,13 @@ fn convergence_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<Str
 // that prints `gini 0.00` when a daemon answers.
 fn heat_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> {
 	match h {
-		Some(h) => vec![format!("heat:        half-life {}s", h.heat_half_life_secs)],
+		Some(h) => vec![
+			format!("heat:        half-life {}s", h.heat_half_life_secs),
+			// QBST recency half-life — the 24h ranking-freshness signal, the
+			// second of item 55's two freshness signals. Same daemon-sourced
+			// rule as the heat line above.
+			format!("recency:     half-life {}s", h.qbst_recency_half_life_secs),
+		],
 		None => Vec::new(),
 	}
 }
@@ -421,7 +427,13 @@ mod degradation_lines_tests {
 			..Default::default()
 		};
 		let lines = heat_health_lines(Some(&relaxed));
-		assert_eq!(lines, vec!["heat:        half-life 2592000s"]);
+		assert_eq!(
+			lines,
+			vec![
+				"heat:        half-life 2592000s",
+				"recency:     half-life 0s",
+			]
+		);
 
 		// 0 (old daemon / unset) -> prints 0s unconditionally, matching the
 		// convergence: line that prints `gini 0.00` when a daemon answers.
@@ -432,7 +444,10 @@ mod degradation_lines_tests {
 		};
 		assert_eq!(
 			heat_health_lines(Some(&old)),
-			vec!["heat:        half-life 0s"],
+			vec![
+				"heat:        half-life 0s",
+				"recency:     half-life 0s",
+			],
 			"a daemon that answers carries the line even at 0"
 		);
 
@@ -440,6 +455,23 @@ mod degradation_lines_tests {
 		assert!(
 			heat_health_lines(None).is_empty(),
 			"no daemon -> no heat line"
+		);
+
+		// 24h QBST recency half-life -> the recency line carries it (ROADMAP
+		// item 55 measurement half). The heat line stays at its own value.
+		let recency = HealthRes {
+			ok: true,
+			heat_half_life_secs: 2592000,
+			qbst_recency_half_life_secs: 86400,
+			..Default::default()
+		};
+		assert_eq!(
+			heat_health_lines(Some(&recency)),
+			vec![
+				"heat:        half-life 2592000s",
+				"recency:     half-life 86400s",
+			],
+			"recency half-life surfaced daemon-sourced"
 		);
 	}
 }
