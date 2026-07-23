@@ -3,6 +3,7 @@
 <!-- docs-check: historical -->
 
 - 2026-07-23 — item 55 measurement half-closed: the QBST recency half-life
+- 2026-07-23 — multi-tenancy scoping: user_id/agent_id/session_id on Entity, threaded through ingest + query filter (FORMAT_VERSION 7→8)
   (`qbst_recency_half_life_secs`, `src/config/retrieval.rs`, 24h default) is now
   surfaced — companion to the item 62 heat line. `HealthRes.qbst_recency_half_life_secs`
   `#[serde(default)]` (old daemon → `0`); `Server::health_stats` JSON line;
