@@ -2433,8 +2433,28 @@ not hidden), verify-before-claiming (negative control). See the 2026-07-22
 CHANGELOG entry.
 
 **Still open:** top-10 stability (needs two temporal query-ranking snapshots —
-stateful, separate slice); `kern://health` resource surfacing; item 54 GC
-convergence gate (depends on this + stability).
+stateful, separate slice); ~~`kern://health` resource surfacing~~ **— surfaced
+2026-07-23** (see below); item 54 GC convergence gate (depends on this +
+stability).
+
+**`kern://health` HeatStats surfacing closed 2026-07-23.** The active heat
+retention half-life (`HeatConfig.half_life_secs`, the one `Preset::apply` sets —
+relaxed=30d / medium=7d / tight=3d) is now surfaced: `Server::health_stats`
+(`src/mcp.rs`) JSON carries `heat_half_life_secs` from `self.cfg.heat`;
+`trnsprt::HealthRes` gains `#[serde(default)] heat_half_life_secs` (old daemon →
+`0`); `kern health` prints `heat: half-life {N}s` **daemon-sourced only** (item
+100 rule — the CLI's own config is irrelevant, the daemon's running preset is
+what the operator asked about); the `kern://local/health` resource carries it by
+construction (`resource_health` → `server.health_stats()`). Proved by dto
+round-trip `2592000` + old-payload absence decodes `0`, and
+`kern_health_prints_heat_half_life` (30d → `2592000s`, `0` → `0s`, no daemon →
+no line); negative control (omit the field → `HealthRes.heat_half_life_secs == 0`
+→ print line reds, green on revert). `cargo test -p kern --lib` 955 passed, 0
+failed, 4 ignored; `cargo test -p trnsprt --lib` 61 passed. Decided by
+fix-the-root (surface the preset's retention, do not tune it — tuning is item
+55/87), name-the-tradeoff (one knob — the retention half-life; the QBST recency
+half-life is a separate ranking signal, item 55), verify-before-claiming
+(negative control). See the 2026-07-23 CHANGELOG entry.
 
 ~~The convergence metrics — Gini over access, top-10 stability — were never built
 (no `gini` anywhere in `src/`), so "the corpus converges on efficient paths", a

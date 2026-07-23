@@ -2,6 +2,20 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-23 — item 62 `kern://health` surfacing closed: the active heat
+  retention half-life (`HeatConfig.half_life_secs`, the one `Preset::apply`
+  sets — relaxed=30d / medium=7d / tight=3d) is now surfaced. `Server::health_stats`
+  (`src/mcp.rs`) JSON carries `heat_half_life_secs` from `self.cfg.heat`;
+  `trnsprt::HealthRes` gains `#[serde(default)] heat_half_life_secs` (old daemon
+  → `0`); `kern health` prints `heat: half-life {N}s` daemon-sourced only (item
+  100 rule); `kern://local/health` carries it by construction. Proved by dto
+  round-trip `2592000` + old-payload absence → `0`, and
+  `kern_health_prints_heat_half_life` (30d → `2592000s`, `0` → `0s`, no daemon →
+  no line); negative control (omit field → `0` → print reds, green on revert).
+  `cargo test -p kern --lib` 955 passed, 0 failed, 4 ignored; `cargo test -p
+  trnsprt --lib` 61 passed. Decided by: fix-the-root, name-the-tradeoff,
+  verify-before-claiming. Still open: top-10 stability; item 54 GC gate.
+
 - 2026-07-23 — item 83 per-kern entity-count signal: `HealthStats.largest_kern_entities`
   (new field, max `Kern::entities.len()` across resident kerns) — gauge of the
   unbounded resident set at the granularity the kern-cap (bounds count of kerns,
