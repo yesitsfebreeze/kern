@@ -173,6 +173,21 @@ impl KernRpc for KernRpcHandler {
 							.collect()
 					})
 					.unwrap_or_default(),
+				ingest_dedup_threshold: payload
+					.get("ingest_dedup_threshold")
+					.and_then(|v| v.as_f64())
+					.unwrap_or(0.0),
+				ingest_dedup_threshold_by_kind: payload
+					.get("ingest_dedup_threshold_by_kind")
+					.and_then(|v| v.as_array())
+					.map(|arr| {
+						let mut out = [None; 5];
+						for (i, v) in arr.iter().take(5).enumerate() {
+							out[i] = v.as_f64();
+						}
+						out
+					})
+					.unwrap_or([None; 5]),
 				llm_complete_failed: u64_at("llm_complete_failed"),
 				last_llm_complete_failure: str_at("last_llm_complete_failure"),
 				embed_model: str_at("embed_model"),
