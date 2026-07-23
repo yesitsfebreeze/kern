@@ -2136,14 +2136,42 @@ per-day / access-tied).
 observations to unseat. Tick-based γ damping is an open design
 (`decisions/bayesian-confidence.mdx:137`).~~
 
-### 58. Supersede chains are unbounded while contested `[lifecycle]`
+### 58. Supersede chains are unbounded while contested — trigger #1 instrumented 2026-07-22 `[lifecycle]`
 
-No `ReasonKind::Edit` rationale edge (`src/base/types.rs:90-99`) and no producer
+**Trigger #1 instrumented 2026-07-22; rate-limit / `ReasonKind::Edit` decision +
+triggers #2/#3 still open.** Trigger #1 ("supersede chains routinely exceed ~5
+hops on the same `external_id`") is now detectable: `supersede` /
+`supersede_by_contradiction` (`src/base/accept.rs`) increment a process-global
+`SUPERSEDE_CHAIN_DEPTH_EXCEEDED` `AtomicU64` when the chain depth (via the
+existing `superseded_ancestors` walk) exceeds `SUPERSEDE_CHAIN_HOP_THRESHOLD`
+(new, `src/base/constants.rs`, default `5` — the doc's own number). The counter
+reads into `HealthStats.supersede_chain_depth_exceeded`, folds into the `kern
+health` `degraded:` line (daemon-sourced only, item 100 rule, item 28
+`gnn_train_refused` precedent), and rides MCP `health` JSON +
+`trnsprt::HealthRes` `#[serde(default)]` (old daemon → `0`, same shape as
+`gini_access`/`max_kerns`). Proved by
+`supersede_chain_depth_counter_increments_past_threshold` (6-deep chain →
+delta 1; 3-deep → 0; serialised on `SUPERSEDE_CHAIN_TEST_MUX` per the item 28
+lesson — a process-global moved by one test races another that measures it),
+`graph_health_stats_carries_supersede_chain_depth_exceeded`, dto round-trip
+`supersede_chain_depth_exceeded: 22`. `cargo test -p kern --lib` 952 passed, 0
+failed, 4 ignored; `cargo test -p trnsprt --lib` 61 passed. Negative control
+(`SUPERSEDE_CHAIN_HOP_THRESHOLD = usize::MAX` → no increment) reds, green on
+revert. Decided by fix-the-root (measure, do not act — the rate-limit/`Edit`
+kind is the decision, out of scope), name-the-tradeoff (trigger #1 only; #2
+needs per-`external_id` producer tracking — stateful, bigger; #3 is a user
+request, not instrumentable), verify-before-claiming (negative control +
+process-global serialisation). See the 2026-07-22 CHANGELOG entry.
+
+**Still open:** rate-limit / `ReasonKind::Edit` + schema (the decision); trigger
+# 2 (producer ping-pong) + #3 (byte-level blame request) instrumentation.
+
+~~No `ReasonKind::Edit` rationale edge (`src/base/types.rs:90-99`) and no producer
 rate-limit, so an A/B ping-pong on one `external_id` grows without bound
 (`decisions/edit-convergence.mdx:107`). Compounding it: the three trigger
 conditions that would flip kern to full versioning have **no instrumentation**
 (`docs/kern/wikipedia-edit-convergence.md:100-105`), so the flip is undetectable
-even in principle.
+even in principle.~~
 
 ### 59. `degrade` has no floor, no audit trail and no undo — floor half-closed 2026-07-22 `[retrieval]`
 

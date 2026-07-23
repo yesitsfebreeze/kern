@@ -2,6 +2,24 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-22 — item 58 trigger #1 instrumented: `supersede` /
+  `supersede_by_contradiction` (`src/base/accept.rs`) increment a
+  process-global `SUPERSEDE_CHAIN_DEPTH_EXCEEDED` `AtomicU64` when the chain
+  depth (via the existing `superseded_ancestors` walk) exceeds
+  `SUPERSEDE_CHAIN_HOP_THRESHOLD` (new, `src/base/constants.rs`, default `5` —
+  the doc's own number). The counter reads into
+  `HealthStats.supersede_chain_depth_exceeded`, folds into `kern health`
+  `degraded:` (daemon-sourced only, item 100/28 precedent), and rides MCP
+  `health` JSON + `trnsprt::HealthRes` `#[serde(default)]` (old daemon → `0`).
+  Proved by `supersede_chain_depth_counter_increments_past_threshold` (6-deep
+  → delta 1; 3-deep → 0; serialised on `SUPERSEDE_CHAIN_TEST_MUX` per item 28
+  process-global lesson), `graph_health_stats_carries_supersede_chain_depth_exceeded`,
+  dto round-trip `: 22`. `cargo test -p kern --lib` 952 passed, 0 failed, 4
+  ignored; `cargo test -p trnsprt --lib` 61 passed. Negative control
+  (`SUPERSEDE_CHAIN_HOP_THRESHOLD = usize::MAX` → no increment) reds, green on
+  revert. Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming.
+  Still open: rate-limit / `ReasonKind::Edit` decision + triggers #2/#3.
+
 - 2026-07-22 — item 83 signal-on-approach half closed: the armed
   `max_loaded_kerns` (128) is now surfaced. `GraphGnn::max_loaded_kerns()`
   accessor + `HealthStats.max_kerns` + `kern health` prints `kerns: N (cap M)`
