@@ -52,6 +52,11 @@ pub struct HealthStats {
 	// `external_id` (ROADMAP item 58 trigger #1). Process-global; the count is
 	// the only trace a contested chain ran past the hop budget.
 	pub supersede_chain_depth_exceeded: u64,
+	// The largest resident kern's entity count — a gauge of the unbounded
+	// resident set at the per-kern granularity the kern cap cannot see (a cap
+	// on kerns bounds the count of kerns, not the size of any one). Empty graph
+	// → 0. Measures, does not enforce (ROADMAP item 83).
+	pub largest_kern_entities: usize,
 }
 
 /// Gini coefficient over the access-count distribution. 0.0 when all counts are
@@ -101,6 +106,14 @@ pub fn graph_health_stats(g: &GraphGnn) -> HealthStats {
 		.flat_map(|k| k.entities.values().map(|e| e.access_count.value()))
 		.collect();
 	let gini_access = gini_over_access(&access_counts);
+	// Largest resident kern's entity count — the per-kern size the kern cap
+	// does not bound. Reuses the `kerns` walk already done above; computed here
+	// for one pass over the resident map.
+	let largest_kern_entities = kerns
+		.iter()
+		.map(|k| k.entities.len())
+		.max()
+		.unwrap_or(0);
 	let store = g.store();
 	let stamp = store
 		.as_ref()
@@ -130,6 +143,7 @@ pub fn graph_health_stats(g: &GraphGnn) -> HealthStats {
 		gini_access,
 		max_kerns: g.max_loaded_kerns(),
 		supersede_chain_depth_exceeded: crate::base::accept::supersede_chain_depth_exceeded(),
+		largest_kern_entities,
 	}
 }
 
@@ -270,6 +284,42 @@ mod tests {
 		g.set_max_loaded_kerns(8);
 		let h = graph_health_stats(&g);
 		assert_eq!(h.max_kerns, 8, "armed cap reaches HealthStats");
+	}
+
+	#[test]
+	fn graph_health_stats_reports_largest_kern_entities() {
+		use crate::base::types::{mk_entity, EntityKind, Kern};
+
+		// Empty graph -> 0.
+		assert_eq!(
+			graph_health_stats(&GraphGnn::new()).largest_kern_entities,
+			0,
+			"empty graph -> no resident entities"
+		);
+
+		// One kern holding 10 entities + four empty named children: the max is 10.
+		let mut g = GraphGnn::new();
+		{
+			let root = g.root_kern_mut().expect("root kern present");
+			for i in 0..10 {
+				let e = mk_entity(&format!("e{i}"), "x", 0.0, EntityKind::Claim);
+				root.entities.insert(format!("e{i}"), e);
+			}
+		}
+		for i in 0..4 {
+			let child = Kern::new_named_child(
+				&g.root.id,
+				&g.root.id,
+				&format!("c{i}"),
+				vec![0.0; 4],
+			);
+			g.kerns.insert(child.id.clone(), child);
+		}
+		let h = graph_health_stats(&g);
+		assert_eq!(
+			h.largest_kern_entities, 10,
+			"largest resident kern holds 10 entities; the four empty children do not move the max"
+		);
 	}
 
 	#[test]

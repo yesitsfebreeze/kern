@@ -84,6 +84,10 @@ pub struct HealthRes {
 	// `external_id` (ROADMAP item 58 trigger #1). 0 from older daemons.
 	#[serde(default)]
 	pub supersede_chain_depth_exceeded: u64,
+	// The largest resident kern's entity count (ROADMAP item 83). 0 from older
+	// daemons.
+	#[serde(default)]
+	pub largest_kern_entities: usize,
 	// Completions that failed on the reason endpoint, and the last one in words.
 	// The blocking bridge hands its caller `""` for every failure, so the count
 	// is what separates a dead endpoint from a model with nothing to say, and the
@@ -203,6 +207,7 @@ mod dto_serde_tests {
 			max_kerns: 128,
 			gnn_train_refused: 18,
 			supersede_chain_depth_exceeded: 22,
+			largest_kern_entities: 99,
 			llm_complete_failed: 19,
 			last_llm_complete_failure: "transient: HTTP error: operation timed out".into(),
 			build_id: "a1b2c3d4e5f60718".into(),
@@ -230,6 +235,7 @@ mod dto_serde_tests {
 		assert_eq!(back.max_kerns, 128);
 		assert_eq!(back.gnn_train_refused, 18);
 		assert_eq!(back.supersede_chain_depth_exceeded, 22);
+		assert_eq!(back.largest_kern_entities, 99);
 		assert_eq!(back.llm_complete_failed, 19);
 		assert_eq!(
 			back.last_llm_complete_failure,
