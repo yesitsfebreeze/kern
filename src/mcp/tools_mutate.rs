@@ -242,6 +242,7 @@ impl Server {
 				AGENT_SOURCE,
 				ingest::Config {
 					dedup_threshold: self.cfg.ingest.dedup_threshold,
+					dedup_threshold_by_kind: self.cfg.ingest.dedup_threshold_by_kind,
 					valid_until,
 					review_policy: self.cfg.ingest.review_policy.clone(),
 					..Default::default()
@@ -315,6 +316,7 @@ impl Server {
 			AGENT_SOURCE,
 			ingest::Config {
 				dedup_threshold: self.cfg.ingest.dedup_threshold,
+				dedup_threshold_by_kind: self.cfg.ingest.dedup_threshold_by_kind,
 				valid_until,
 				review_policy: self.cfg.ingest.review_policy.clone(),
 				..Default::default()
