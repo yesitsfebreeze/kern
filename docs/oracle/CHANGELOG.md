@@ -2,6 +2,16 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-23 — item 25 guard added: `non_access_mutations_leave_mutation_epoch_unchanged`
+  (`src/retrieval/seed.rs`) pins `g.mutation_epoch()` unchanged across the four
+  named non-access sites (`merge_remote_entity`, reembed `values_mut`, gossip
+  `inject_remote_scope`/`new_phantom_kern`, `do_cluster` `move_entity`) —
+  companion to `an_eligibility_change_is_reflected_with_no_epoch_bump` (access
+  site). Same item-77 shape. Negative control (add a bump at one site → sub-
+  assert reds, `right: 0` epoch 0→1, green on revert). `cargo test -p kern --lib`
+  959 passed, 0 failed, 4 ignored. Decided by: fix-the-root, name-the-tradeoff,
+  verify-before-claiming.
+
 - 2026-07-23 — item 55 measurement half-closed: the QBST recency half-life
 - 2026-07-23 — multi-tenancy scoping: user_id/agent_id/session_id on Entity, threaded through ingest + query filter (FORMAT_VERSION 7→8)
   (`qbst_recency_half_life_secs`, `src/config/retrieval.rs`, 24h default) is now

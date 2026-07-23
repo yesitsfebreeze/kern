@@ -856,6 +856,24 @@ freshness signal is lost. An index that slows ingest to speed up query is the
 trade, and it only pays where eligibility is low — a corpus where everything is
 eligible cannot be helped by an index at all.
 
+**Guard added 2026-07-23 — the four named non-access mutation sites now pin
+epoch-silence.** `non_access_mutations_leave_mutation_epoch_unchanged`
+(`src/retrieval/seed.rs`) snapshots `g.mutation_epoch()` before and asserts it
+unchanged after each of the four sites named above:
+`merge_remote_entity` (fresh Fact into phantom kern), reembed `values_mut`
+(vector in place), gossip `inject_remote_scope`/`new_phantom_kern` (phantom-kern
+insert), and `do_cluster` `move_entity` (entities between kerns). Same
+item-77 shape as the existing `an_eligibility_change_is_reflected_with_no_epoch_bump`
+guard for the access site. Negative control (add `g.bump_mutation_epoch()` at
+one site → the corresponding sub-assert reds, `right: 0` epoch 0→1, green on
+revert) — the guard bites on a real bump, so a future chokepoint fix that bumps
+the epoch at one of these ships loudly instead of a half-bumped index.
+`cargo test -p kern --lib` 959 passed, 0 failed, 4 ignored. Decided by fix-the-
+root (pin the invariant, do not build the index — the chokepoint decision is
+owed separately), name-the-tradeoff (four representative sites, not the full
+~20 — the rest are the same class), verify-before-claiming (negative control).
+See the 2026-07-23 CHANGELOG entry.
+
 ### 26. PageRank allocates four N-sized buffers on every query — closed 2026-07-22 `[retrieval]`
 
 **Narrowed 2026-07-21, narrowed again 2026-07-22, closed 2026-07-22.** The flat
