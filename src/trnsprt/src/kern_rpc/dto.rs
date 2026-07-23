@@ -1,5 +1,32 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ModeWeightsHealth {
+	#[serde(default)]
+	pub content: f64,
+	#[serde(default)]
+	pub reason: f64,
+	#[serde(default)]
+	pub edge: f64,
+}
+
+// Active RRF config (`RetrievalConfig.rrf_k` / `rrf_global_weight` / the three
+// `ModeWeights`), preset-owned. Zeroed from older daemons (ROADMAP item 66
+// measurement half).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct RetrievalHealth {
+	#[serde(default)]
+	pub rrf_k: f64,
+	#[serde(default)]
+	pub rrf_global_weight: f64,
+	#[serde(default)]
+	pub weights_content: ModeWeightsHealth,
+	#[serde(default)]
+	pub weights_reason: ModeWeightsHealth,
+	#[serde(default)]
+	pub weights_hybrid: ModeWeightsHealth,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ShutdownRes {
 	pub ok: bool,
@@ -100,6 +127,10 @@ pub struct HealthRes {
 	// the 24h ranking-freshness signal). 0 from older daemons (ROADMAP item 55).
 	#[serde(default)]
 	pub qbst_recency_half_life_secs: u64,
+	// Active RRF config + mode blends (ROADMAP item 66 measurement half).
+	// Zeroed from older daemons.
+	#[serde(default)]
+	pub retrieval: RetrievalHealth,
 	// Completions that failed on the reason endpoint, and the last one in words.
 	// The blocking bridge hands its caller `""` for every failure, so the count
 	// is what separates a dead endpoint from a model with nothing to say, and the
@@ -183,6 +214,9 @@ mod dto_serde_tests {
 		assert_eq!(h.uptime_ms, 0);
 		assert_eq!(h.largest_kern_entities, 0);
 		assert!((h.gini_kern_sizes - 0.0).abs() < 1e-12);
+		assert!((h.retrieval.rrf_k - 0.0).abs() < 1e-12);
+		assert!((h.retrieval.rrf_global_weight - 0.0).abs() < 1e-12);
+		assert!((h.retrieval.weights_content.content - 0.0).abs() < 1e-12);
 
 		let ancient = r#"{"ok":true}"#;
 		let h2: HealthRes = serde_json::from_str(ancient).expect("only `ok` is required");
@@ -225,6 +259,25 @@ mod dto_serde_tests {
 			gini_kern_sizes: 0.42,
 			heat_half_life_secs: 2592000,
 			qbst_recency_half_life_secs: 86400,
+			retrieval: RetrievalHealth {
+				rrf_k: 60.0,
+				rrf_global_weight: 0.5,
+				weights_content: ModeWeightsHealth {
+					content: 0.7,
+					reason: 0.2,
+					edge: 0.1,
+				},
+				weights_reason: ModeWeightsHealth {
+					content: 0.1,
+					reason: 0.8,
+					edge: 0.1,
+				},
+				weights_hybrid: ModeWeightsHealth {
+					content: 0.5,
+					reason: 0.3,
+					edge: 0.2,
+				},
+			},
 			llm_complete_failed: 19,
 			last_llm_complete_failure: "transient: HTTP error: operation timed out".into(),
 			build_id: "a1b2c3d4e5f60718".into(),
@@ -256,6 +309,11 @@ mod dto_serde_tests {
 		assert!((back.gini_kern_sizes - 0.42).abs() < 1e-12);
 		assert_eq!(back.heat_half_life_secs, 2592000);
 		assert_eq!(back.qbst_recency_half_life_secs, 86400);
+		assert_eq!(back.retrieval.rrf_k, 60.0);
+		assert!((back.retrieval.rrf_global_weight - 0.5).abs() < 1e-12);
+		assert!((back.retrieval.weights_content.content - 0.7).abs() < 1e-12);
+		assert!((back.retrieval.weights_reason.reason - 0.8).abs() < 1e-12);
+		assert!((back.retrieval.weights_hybrid.edge - 0.2).abs() < 1e-12);
 		assert_eq!(back.llm_complete_failed, 19);
 		assert_eq!(
 			back.last_llm_complete_failure,

@@ -89,6 +89,9 @@ pub(super) async fn cmd_health(cfg: &crate::config::Config) {
 	for line in heat_health_lines(d.as_ref()) {
 		println!("{line}");
 	}
+	for line in retrieval_health_lines(d.as_ref()) {
+		println!("{line}");
+	}
 	for line in kern_cap_health_lines(d.as_ref()) {
 		println!("{line}");
 	}
@@ -247,6 +250,42 @@ fn heat_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> {
 			// second of item 55's two freshness signals. Same daemon-sourced
 			// rule as the heat line above.
 			format!("recency:     half-life {}s", h.qbst_recency_half_life_secs),
+		],
+		None => Vec::new(),
+	}
+}
+
+// Active RRF config + mode blends (ROADMAP item 66 measurement half).
+// Daemon-sourced like the heat/recency lines: the CLI's own config is
+// irrelevant — the daemon's running preset is what the operator asked about.
+// No daemon, no block. A zeroed block (old daemon) prints zeroes, matching
+// the `convergence:`/`heat:` lines that print `0.00`/`0s` when a daemon
+// answers.
+fn retrieval_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> {
+	match h {
+		Some(h) => vec![
+			format!(
+				"retrieval:   rrf_k {}, global {}",
+				h.retrieval.rrf_k, h.retrieval.rrf_global_weight
+			),
+			format!(
+				"  content {{ content {}, reason {}, edge {} }}",
+				h.retrieval.weights_content.content,
+				h.retrieval.weights_content.reason,
+				h.retrieval.weights_content.edge,
+			),
+			format!(
+				"  reason  {{ content {}, reason {}, edge {} }}",
+				h.retrieval.weights_reason.content,
+				h.retrieval.weights_reason.reason,
+				h.retrieval.weights_reason.edge,
+			),
+			format!(
+				"  hybrid  {{ content {}, reason {}, edge {} }}",
+				h.retrieval.weights_hybrid.content,
+				h.retrieval.weights_hybrid.reason,
+				h.retrieval.weights_hybrid.edge,
+			),
 		],
 		None => Vec::new(),
 	}
@@ -472,6 +511,70 @@ mod degradation_lines_tests {
 				"recency:     half-life 86400s",
 			],
 			"recency half-life surfaced daemon-sourced"
+		);
+	}
+
+	#[test]
+	fn kern_health_prints_retrieval_config() {
+		// Non-default retrieval block -> the four lines carry it daemon-sourced.
+		let cfg = HealthRes {
+			ok: true,
+			retrieval: trnsprt::kern_rpc::dto::RetrievalHealth {
+				rrf_k: 60.0,
+				rrf_global_weight: 0.5,
+				weights_content: trnsprt::kern_rpc::dto::ModeWeightsHealth {
+					content: 0.7,
+					reason: 0.2,
+					edge: 0.1,
+				},
+				weights_reason: trnsprt::kern_rpc::dto::ModeWeightsHealth {
+					content: 0.1,
+					reason: 0.8,
+					edge: 0.1,
+				},
+				weights_hybrid: trnsprt::kern_rpc::dto::ModeWeightsHealth {
+					content: 0.5,
+					reason: 0.3,
+					edge: 0.2,
+				},
+			},
+			..Default::default()
+		};
+		let lines = retrieval_health_lines(Some(&cfg));
+		assert_eq!(lines.len(), 4, "one header + three mode-weight lines");
+		assert!(
+			lines[0].contains("retrieval:") && lines[0].contains("60") && lines[0].contains("0.5"),
+			"header carries rrf_k + global: {lines:?}"
+		);
+		assert!(
+			lines[1].contains("content") && lines[1].contains("0.7"),
+			"content weights line: {lines:?}"
+		);
+		assert!(
+			lines[2].contains("reason") && lines[2].contains("0.8"),
+			"reason weights line: {lines:?}"
+		);
+		assert!(
+			lines[3].contains("hybrid") && lines[3].contains("0.2"),
+			"hybrid weights line: {lines:?}"
+		);
+
+		// Zeroed (old daemon / unset) -> four lines of zeroes, matching the
+		// heat/recency lines that print `0s` when a daemon answers.
+		let old = HealthRes {
+			ok: true,
+			..Default::default()
+		};
+		assert_eq!(
+			retrieval_health_lines(Some(&old)).len(),
+			4,
+			"old daemon still prints the block at zero"
+		);
+
+		// No daemon -> no block: the CLI's own config is irrelevant.
+		assert!(
+			retrieval_health_lines(None).is_empty(),
+			"no daemon -> no retrieval block"
 		);
 	}
 }

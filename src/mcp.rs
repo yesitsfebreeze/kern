@@ -167,6 +167,28 @@ impl Server {
 			// above is the first). Daemon-sourced: the CLI's own config is
 			// irrelevant (ROADMAP item 55 measurement half).
 			"qbst_recency_half_life_secs": self.cfg.retrieval.qbst_recency_half_life_secs,
+			// Active RRF config + mode blends (ROADMAP item 66 measurement half).
+			// Preset-owned; surfaced daemon-sourced so an operator sees which
+			// preset's retrieval is running.
+			"retrieval": {
+				"rrf_k": self.cfg.retrieval.rrf_k,
+				"rrf_global_weight": self.cfg.retrieval.rrf_global_weight,
+				"weights_content": {
+					"content": self.cfg.retrieval.weights_content.content,
+					"reason": self.cfg.retrieval.weights_content.reason,
+					"edge": self.cfg.retrieval.weights_content.edge,
+				},
+				"weights_reason": {
+					"content": self.cfg.retrieval.weights_reason.content,
+					"reason": self.cfg.retrieval.weights_reason.reason,
+					"edge": self.cfg.retrieval.weights_reason.edge,
+				},
+				"weights_hybrid": {
+					"content": self.cfg.retrieval.weights_hybrid.content,
+					"reason": self.cfg.retrieval.weights_hybrid.reason,
+					"edge": self.cfg.retrieval.weights_hybrid.edge,
+				},
+			},
 			// This server's own worker, read directly: a gauge on the live channel,
 			// not a process static like the counters `h` carries.
 			"ingest_queue_depth": self.worker.queue_depth(),
