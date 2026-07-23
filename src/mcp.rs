@@ -154,6 +154,11 @@ impl Server {
 			// Largest resident kern's entity count (ROADMAP item 83): a gauge of
 			// the unbounded resident set at per-kern granularity.
 			"largest_kern_entities": h.largest_kern_entities,
+			// Active heat retention half-life (HeatConfig.half_life_secs; the one
+			// Preset::apply sets, never a config edit). Daemon-sourced like the
+			// config-derived fields — the CLI's own config is irrelevant (ROADMAP
+			// item 62 `kern://health` surfacing).
+			"heat_half_life_secs": self.cfg.heat.half_life_secs,
 			// This server's own worker, read directly: a gauge on the live channel,
 			// not a process static like the counters `h` carries.
 			"ingest_queue_depth": self.worker.queue_depth(),

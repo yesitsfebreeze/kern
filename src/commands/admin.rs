@@ -86,6 +86,9 @@ pub(super) async fn cmd_health(cfg: &crate::config::Config) {
 	for line in convergence_health_lines(d.as_ref()) {
 		println!("{line}");
 	}
+	for line in heat_health_lines(d.as_ref()) {
+		println!("{line}");
+	}
 	for line in kern_cap_health_lines(d.as_ref()) {
 		println!("{line}");
 	}
@@ -226,6 +229,19 @@ fn ingest_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> 
 fn convergence_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> {
 	match h {
 		Some(h) => vec![format!("convergence: gini {:.2}", h.gini_access)],
+		None => Vec::new(),
+	}
+}
+
+// Active heat retention half-life (ROADMAP item 62 `kern://health` surfacing).
+// Daemon-sourced like the convergence line: the CLI's own config is irrelevant
+// — the daemon's running preset is what the operator asked about, and a fresh
+// CLI opens on defaults that carry no signal. No daemon, no line. 0 (old
+// daemon / unset) prints `0s` unconditionally, matching the `convergence:` line
+// that prints `gini 0.00` when a daemon answers.
+fn heat_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> {
+	match h {
+		Some(h) => vec![format!("heat:        half-life {}s", h.heat_half_life_secs)],
 		None => Vec::new(),
 	}
 }
@@ -394,6 +410,37 @@ mod degradation_lines_tests {
 
 		// No daemon -> no warn.
 		assert!(kern_cap_health_lines(None).is_empty());
+	}
+
+	#[test]
+	fn kern_health_prints_heat_half_life() {
+		// 30d (relaxed preset) -> half-life 2592000s, line present.
+		let relaxed = HealthRes {
+			ok: true,
+			heat_half_life_secs: 2592000,
+			..Default::default()
+		};
+		let lines = heat_health_lines(Some(&relaxed));
+		assert_eq!(lines, vec!["heat:        half-life 2592000s"]);
+
+		// 0 (old daemon / unset) -> prints 0s unconditionally, matching the
+		// convergence: line that prints `gini 0.00` when a daemon answers.
+		let old = HealthRes {
+			ok: true,
+			heat_half_life_secs: 0,
+			..Default::default()
+		};
+		assert_eq!(
+			heat_health_lines(Some(&old)),
+			vec!["heat:        half-life 0s"],
+			"a daemon that answers carries the line even at 0"
+		);
+
+		// No daemon -> no line: the CLI's own config is irrelevant.
+		assert!(
+			heat_health_lines(None).is_empty(),
+			"no daemon -> no heat line"
+		);
 	}
 }
 
