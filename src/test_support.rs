@@ -44,6 +44,7 @@ pub(crate) mod alloc_probe {
 		}
 	}
 
+	#[derive(Debug)]
 	pub(crate) struct Allocated {
 		pub total: usize,
 		// The largest single block. An N-wide buffer shows up here and nowhere
