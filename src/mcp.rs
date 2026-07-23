@@ -154,6 +154,9 @@ impl Server {
 			// Largest resident kern's entity count (ROADMAP item 83): a gauge of
 			// the unbounded resident set at per-kern granularity.
 			"largest_kern_entities": h.largest_kern_entities,
+			// Gini over resident kern sizes (ROADMAP item 83): the distribution
+			// the `largest_kern_entities` max summarises — kern-size balance.
+			"gini_kern_sizes": h.gini_kern_sizes,
 			// Active heat retention half-life (HeatConfig.half_life_secs; the one
 			// Preset::apply sets, never a config edit). Daemon-sourced like the
 			// config-derived fields — the CLI's own config is irrelevant (ROADMAP
