@@ -426,6 +426,11 @@ fn entity_detail(
 		"conf_uncertainty": thought.conf_variance(),
 		"access_count": thought.access_count.value_i32(),
 		"kern": kern_id,
+		"source": {
+			"scheme": thought.source.scheme(),
+			"object_id": thought.source.object_id(),
+			"section": thought.source.section(),
+		},
 		"edges": edges,
 	});
 	// Retention on the id surface. The ranked path DROPS an expired thought

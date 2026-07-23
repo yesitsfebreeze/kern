@@ -103,6 +103,12 @@ eval-locomo *args:
 eval-longmemeval *args:
     python3 tests/e2e/eval/run_longmemeval.py {{args}}
 
+# kern's own committed ground-truth corpus (tests/e2e/eval/ground.json);
+# `--path direct` is the verbatim floor, `--path distill` runs the real
+# intake pipeline and scores claims by their cited-turn provenance.
+eval-ground *args:
+    python3 tests/e2e/eval/run_ground.py {{args}}
+
 # install e2e harness dependencies. Plain install first: --break-system-packages
 # is unknown to pip < 23 and would turn a working environment into a hard error,
 # so it is the fallback for a PEP 668 distro python, not the default.

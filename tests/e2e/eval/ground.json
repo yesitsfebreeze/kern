@@ -1,0 +1,176 @@
+{
+	"version": 1,
+	"license": "CC0-1.0 — authored for kern, no external corpus text",
+	"about": "kern's own ground-truth retrieval corpus: 8 sessions, 1-based turn indices (blank-line unit, matching split.rs::paragraph_split and distill.rs::split_turns). Evidence triples are [session_id, turn_1based, anchor-substring]; the anchor must appear in the cited turn — test_eval_ground.py enforces it.",
+	"sessions": [
+		{
+			"id": "s1",
+			"date": "2026-03-02",
+			"turns": [
+				"user: Hey, first time using this. I'm Mara, I work as a backend engineer at a logistics startup called Freightwise.",
+				"assistant: Nice to meet you, Mara. A backend engineer at Freightwise — noted. What are you working with day to day?",
+				"user: Mostly Go services and a big Postgres cluster. I live in Rotterdam, moved here two years ago from Leipzig.",
+				"assistant: Rotterdam via Leipzig, Go and Postgres at work. Got it.",
+				"user: I have a dog, a whippet named Biscuit. She's three and terrified of thunderstorms.",
+				"assistant: Biscuit the whippet, three years old, hates thunderstorms. Anything else about your setup at home?",
+				"user: I share a flat near Blaak station with one roommate, Jonas. He's a nurse and works night shifts.",
+				"assistant: A flat near Blaak with Jonas, who nurses on night shifts — so quiet mornings matter.",
+				"user: Exactly. Also for the record: I'm vegetarian, and I can't stand cilantro.",
+				"assistant: Vegetarian, no cilantro. I'll remember both."
+			]
+		},
+		{
+			"id": "s2",
+			"date": "2026-03-09",
+			"turns": [
+				"user: Work update. I got assigned tech lead on a new project called Kestrel.",
+				"assistant: Congratulations — tech lead on Kestrel. What does the project do?",
+				"user: It's a route-optimization engine for truck fleets. We promised the pilot customer a demo on April 15th.",
+				"assistant: Route optimization for truck fleets, pilot demo April 15th. Tight?",
+				"user: Very. We picked Rust for the solver core and kept Go for the API layer.",
+				"assistant: Rust solver core, Go API layer — a pragmatic split.",
+				"user: The pilot customer is a Dutch carrier called Vos Transport. Their ops lead is named Hanneke.",
+				"assistant: Vos Transport, ops lead Hanneke. I'll keep the names straight.",
+				"user: My biggest worry is the solver's memory use on the 5000-stop benchmark. It peaks around 11 GB right now.",
+				"assistant: 11 GB peak on the 5000-stop benchmark is the number to beat. What's the target?",
+				"user: We need it under 4 GB to fit the customer's edge boxes.",
+				"assistant: Under 4 GB on edge hardware — that's a real constraint. Worth profiling allocations first."
+			]
+		},
+		{
+			"id": "s3",
+			"date": "2026-03-16",
+			"turns": [
+				"user: Booking some travel. My sister Elin is getting married in Oslo on June 20th.",
+				"assistant: Elin's wedding, Oslo, June 20th — exciting. Flying or taking the train?",
+				"user: Flying, but I want to be back by June 23rd because Biscuit's dog-sitter can only cover three days.",
+				"assistant: Back by June 23rd for Biscuit's sitter. Who's watching her?",
+				"user: Jonas offered but he has shifts, so we hired a sitter named Petra from a neighborhood app.",
+				"assistant: Petra the sitter, three days max. Noted.",
+				"user: Also planning a hiking trip in the Ardennes with two friends from Leipzig, probably late May.",
+				"assistant: Ardennes hike, late May, with the Leipzig friends. Do they have names I should know?",
+				"user: Tomas and Ricarda. Tomas is the one who got me into climbing years ago.",
+				"assistant: Tomas — climbing origin story — and Ricarda. Got it."
+			]
+		},
+		{
+			"id": "s4",
+			"date": "2026-03-23",
+			"turns": [
+				"user: Annoying discovery: turns out I'm allergic to hazelnuts. Mild, but my lips swell.",
+				"assistant: Hazelnut allergy with lip swelling — mild but worth taking seriously. Diagnosed by a doctor?",
+				"user: Yes, allergist confirmed it last Thursday. She also said to carry antihistamines when eating out.",
+				"assistant: Allergist-confirmed, antihistamines when eating out. I'll flag hazelnuts alongside your no-cilantro rule.",
+				"user: On a better note, I signed up at a bouldering gym called Grip near the harbor. Tuesdays and Fridays.",
+				"assistant: Grip bouldering gym, Tuesdays and Fridays. Back into climbing like the Leipzig days?",
+				"user: Exactly, Tomas would be proud. My goal is to climb a 6B by the end of summer.",
+				"assistant: A 6B by end of summer — solid goal for a returning climber.",
+				"user: Also Biscuit needs her booster vaccination in April, the vet sent a reminder for April 8th.",
+				"assistant: Biscuit's booster on April 8th. I'll keep that with her file."
+			]
+		},
+		{
+			"id": "s5",
+			"date": "2026-04-01",
+			"turns": [
+				"user: Big week. We got the Kestrel solver memory down to 3.4 GB on the 5000-stop benchmark.",
+				"assistant: 3.4 GB — under the 4 GB edge-box target with room to spare. What did it?",
+				"user: Switching the distance matrix to int16 quantization and streaming the stop graph from disk.",
+				"assistant: int16 distance matrix plus streaming the stop graph — nice. Demo still on for April 15th?",
+				"user: Yes, and Hanneke is bringing Vos Transport's fleet director, so the stakes went up.",
+				"assistant: Fleet director in the room on April 15th. High stakes, good position.",
+				"user: HR also opened a staff-engineer req. My manager Priya told me to apply.",
+				"assistant: Priya's nudging you toward staff engineer — that's a strong signal. Applying?",
+				"user: I submitted the internal application yesterday. Panel interview is set for April 22nd.",
+				"assistant: Applied, panel on April 22nd. A week after the demo — busy month."
+			]
+		},
+		{
+			"id": "s6",
+			"date": "2026-04-10",
+			"turns": [
+				"user: Housing news: Jonas is moving in with his partner in June, so I need to decide about the flat.",
+				"assistant: Jonas moving out in June — keep the flat solo, find a roommate, or move?",
+				"user: I can't afford it alone. I'm leaning toward a one-bedroom in Katendrecht I saw listed.",
+				"assistant: Katendrecht one-bedroom over a new roommate. What's the rent situation?",
+				"user: 1250 a month, which is 200 more than my half now, but no roommate roulette.",
+				"assistant: 1250 versus 1050 — paying 200 for certainty. When would you move?",
+				"user: Viewing is Saturday. If it works out, lease would start July 1st.",
+				"assistant: Viewing Saturday, lease July 1st. That sequences fine after Elin's wedding.",
+				"user: Vet update: Biscuit got her booster on the 8th as planned, all fine, she weighs 12.1 kg.",
+				"assistant: Booster done April 8th, 12.1 kg, healthy whippet. Good."
+			]
+		},
+		{
+			"id": "s7",
+			"date": "2026-04-18",
+			"turns": [
+				"user: The Kestrel demo happened on the 15th. It went well — Vos signed a six-month pilot contract.",
+				"assistant: Demo delivered and a six-month pilot signed with Vos. Huge. How did the solver behave?",
+				"user: Flawless, 3.2 GB peak and route quality 8 percent better than their current tool.",
+				"assistant: 3.2 GB and 8 percent better routes — numbers that close deals. Celebrating?",
+				"user: Team dinner Friday. Separately, I joined a book club that meets first Monday of each month.",
+				"assistant: Book club, first Monday monthly. What's the first book?",
+				"user: The Overstory by Richard Powers. I'm halfway and it's wrecking me in a good way.",
+				"assistant: The Overstory will do that. Enjoy the wreckage.",
+				"user: I also bought a used acoustic guitar, a Yamaha FG800, to pick playing back up.",
+				"assistant: Yamaha FG800 acoustic — welcome back to guitar. Fingers will complain for two weeks."
+			]
+		},
+		{
+			"id": "s8",
+			"date": "2026-04-26",
+			"turns": [
+				"user: Two updates. First: I got the staff engineer role, effective May 1st.",
+				"assistant: Staff engineer, effective May 1st — congratulations, Mara. The panel on the 22nd clearly went well.",
+				"user: Second: the Katendrecht viewing worked out, I signed the lease. Moving July 1st, so update my address situation.",
+				"assistant: Lease signed — from the Blaak flat to Katendrecht on July 1st. I'll treat Katendrecht as your address from then.",
+				"user: Correction on an old thing: Biscuit is actually four now, her birthday was April 20th.",
+				"assistant: Biscuit is four as of April 20th — updating from three.",
+				"user: The Ardennes hike is locked for May 24th to 26th. Ricarda booked a gite near La Roche-en-Ardenne.",
+				"assistant: May 24th to 26th, gite near La Roche-en-Ardenne, booked by Ricarda. Boots ready?",
+				"user: Getting there. Also hit my first 6A at Grip yesterday, so the 6B goal feels reachable.",
+				"assistant: First 6A down, 6B by summer within reach. Tomas would indeed be proud."
+			]
+		}
+	],
+	"questions": [
+		{ "q": "What does Mara do for a living and where does she work?", "category": "single-hop", "evidence": [["s1", 1, "backend engineer at a logistics startup called Freightwise"]] },
+		{ "q": "What city does Mara live in and where did she move from?", "category": "single-hop", "evidence": [["s1", 3, "Rotterdam, moved here two years ago from Leipzig"]] },
+		{ "q": "What breed is Mara's dog and what is she afraid of?", "category": "single-hop", "evidence": [["s1", 5, "whippet named Biscuit"]] },
+		{ "q": "Who is Mara's roommate and what does he do?", "category": "single-hop", "evidence": [["s1", 7, "Jonas. He's a nurse"]] },
+		{ "q": "What food does Mara refuse to eat besides meat?", "category": "single-hop", "evidence": [["s1", 9, "can't stand cilantro"]] },
+		{ "q": "What is the Kestrel project?", "category": "single-hop", "evidence": [["s2", 3, "route-optimization engine for truck fleets"]] },
+		{ "q": "Which programming languages does the Kestrel project use?", "category": "single-hop", "evidence": [["s2", 5, "Rust for the solver core and kept Go for the API layer"]] },
+		{ "q": "Who is the pilot customer for Kestrel and who is their ops lead?", "category": "single-hop", "evidence": [["s2", 7, "Vos Transport. Their ops lead is named Hanneke"]] },
+		{ "q": "Where is Elin's wedding and when?", "category": "single-hop", "evidence": [["s3", 1, "married in Oslo on June 20th"]] },
+		{ "q": "Who is dog-sitting Biscuit during the wedding trip?", "category": "single-hop", "evidence": [["s3", 5, "sitter named Petra"]] },
+		{ "q": "What allergy did Mara discover?", "category": "single-hop", "evidence": [["s4", 1, "allergic to hazelnuts"]] },
+		{ "q": "What gym did Mara join and which days does she go?", "category": "single-hop", "evidence": [["s4", 5, "bouldering gym called Grip near the harbor. Tuesdays and Fridays"]] },
+		{ "q": "What guitar did Mara buy?", "category": "single-hop", "evidence": [["s7", 9, "Yamaha FG800"]] },
+		{ "q": "What book is Mara reading for her book club?", "category": "single-hop", "evidence": [["s7", 7, "The Overstory by Richard Powers"]] },
+		{ "q": "How much will Mara's new apartment cost per month?", "category": "single-hop", "evidence": [["s6", 5, "1250 a month"]] },
+
+		{ "q": "How did the Kestrel team get the solver under its memory target?", "category": "multi-hop", "evidence": [["s2", 11, "under 4 GB"], ["s5", 3, "int16 quantization and streaming the stop graph"]] },
+		{ "q": "Who got Mara into climbing, and what climbing grade has she reached so far?", "category": "multi-hop", "evidence": [["s3", 9, "Tomas is the one who got me into climbing"], ["s8", 9, "first 6A at Grip"]] },
+		{ "q": "Why is Mara moving out of the flat near Blaak?", "category": "multi-hop", "evidence": [["s6", 1, "Jonas is moving in with his partner"], ["s6", 3, "can't afford it alone"]] },
+		{ "q": "How did the memory use at the Kestrel demo compare to the original benchmark number?", "category": "multi-hop", "evidence": [["s2", 9, "peaks around 11 GB"], ["s7", 3, "3.2 GB peak"]] },
+		{ "q": "Which of Mara's friends booked the Ardennes accommodation, and where did they first know each other from?", "category": "multi-hop", "evidence": [["s3", 7, "friends from Leipzig"], ["s8", 7, "Ricarda booked a gite"]] },
+		{ "q": "What outcome did the demo that Hanneke attended with her fleet director produce?", "category": "multi-hop", "evidence": [["s5", 5, "Hanneke is bringing Vos Transport's fleet director"], ["s7", 1, "signed a six-month pilot contract"]] },
+		{ "q": "What dietary restrictions should a restaurant know about for Mara?", "category": "multi-hop", "evidence": [["s1", 9, "vegetarian"], ["s4", 1, "allergic to hazelnuts"]] },
+
+		{ "q": "When did Biscuit get her booster vaccination?", "category": "temporal", "evidence": [["s6", 9, "booster on the 8th"]] },
+		{ "q": "When is Mara's staff engineer panel interview?", "category": "temporal", "evidence": [["s5", 9, "Panel interview is set for April 22nd"]] },
+		{ "q": "When does Mara's new lease start?", "category": "temporal", "evidence": [["s6", 7, "lease would start July 1st"]] },
+		{ "q": "What are the exact dates of the Ardennes hiking trip?", "category": "temporal", "evidence": [["s8", 7, "May 24th to 26th"]] },
+		{ "q": "When did the Kestrel demo take place?", "category": "temporal", "evidence": [["s7", 1, "demo happened on the 15th"]] },
+		{ "q": "By when does Mara need to be back from the Oslo trip, and why?", "category": "temporal", "evidence": [["s3", 3, "back by June 23rd"]] },
+		{ "q": "When does Mara's promotion take effect?", "category": "temporal", "evidence": [["s8", 1, "staff engineer role, effective May 1st"]] },
+
+		{ "q": "How old is Biscuit now?", "category": "update", "evidence": [["s8", 5, "Biscuit is actually four now"]] },
+		{ "q": "What is Mara's current job title after the panel?", "category": "update", "evidence": [["s8", 1, "got the staff engineer role"]] },
+		{ "q": "Where will Mara live from July onwards?", "category": "update", "evidence": [["s8", 3, "Katendrecht viewing worked out, I signed the lease"]] },
+		{ "q": "What is the latest measured memory peak of the Kestrel solver?", "category": "update", "evidence": [["s7", 3, "3.2 GB peak"]] },
+		{ "q": "How much does Biscuit weigh?", "category": "update", "evidence": [["s6", 9, "she weighs 12.1 kg"]] }
+	]
+}

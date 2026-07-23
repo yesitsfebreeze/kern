@@ -2411,7 +2411,7 @@ Still wanted before this closes: the LongMemEval-S run (dataset fetch needs
 `huggingface-hub`, `just e2e-install`), recorded the same way. Weakest
 category is open-domain (0.3696 any@5) — a finding for Tier 8, not a claim.
 
-### 104. Benchmark the full pipeline, which needs turn-level claim provenance `[ingest]`
+### 104. Benchmark the full pipeline, which needs turn-level claim provenance — ground half-closed 2026-07-23 `[ingest]`
 
 **Provenance landed 2026-07-22 (`fd914a9`).** The blocker this item named is
 gone: `distill` (`src/ingest/distill.rs`) splits the transcript into 1-based
@@ -2428,14 +2428,30 @@ empty `section` carrier, no new field — schema stays append-only),
 name-the-tradeoff (1-based cite-by-position; a re-edited transcript shifts them
 — accepted, distill runs once per archived transcript).
 
-**Still open — the bench.** The provenance field is populated but nothing scores
-it yet. To close: an eval mode that ingests via the daemon (so the tick pipeline
-runs — distill claims, reasons/edges, GNN) and scores recall@k against LoCoMo's
-per-turn evidence labels, then compares to the 0.7129 direct-path baseline
-(item 103). This is the number that measures the real graph (kern's job, decoupled
-from the synthesis LLM) and the path to a Zep/Mem0-comparable result: kern
-retrieves top-k, an external LLM synthesizes, recall@k is what the synthesis can
-reach. The harness today measures only the verbatim floor.
+**Ground half-closed 2026-07-23 (see the CHANGELOG entry).** The distill path
+is now scored, on kern's own committed corpus: `tests/e2e/eval/ground.json`
+(self-authored CC0, 8 sessions / 82 turns / 34 questions, anchors CI-enforced
+by `test_eval_ground.py`) + `run_ground.py` (`just eval-ground`), which runs
+the same turn-level labels over the direct path (documents, verbatim floor)
+and the intake pipeline (`kern intake drain`, real distill; claims map back to
+cited turns via `kern get`'s new `Source:` provenance line). First numbers
+(qwen3-embedding:0.6b, distill qwen3.5:4b, k=10, report
+`ground-20260723-192745.json`): direct recall_any@10 **0.824** / MRR 0.407;
+distill recall_any@10 **0.324** / MRR 0.259. The finding: the gap is ingest
+coverage, not retrieval — 24 distinct claims retrieved for 82 turns, 17% of
+hits cite no turns, single-hop worst (0.20 any@10) while temporal/update hold
+0.43–0.60 because dated facts survive distillation. That makes the distill
+prompt's claim yield the next lever (item 49's chunking half is adjacent), and
+any future 'distill quality' change has a number to move.
+
+**Still open — the LoCoMo daemon-mode bench.** An eval mode that ingests via
+the daemon (so the tick pipeline runs — distill claims, reasons/edges, GNN) and
+scores recall@k against LoCoMo's per-turn evidence labels, compared to the
+0.7129 direct-path baseline (item 103). This is the number that measures the
+real graph at LoCoMo scale and the path to a Zep/Mem0-comparable result: kern
+retrieves top-k, an external LLM synthesizes, recall@k is what the synthesis
+can reach. The ground corpus above is the same shape at 1/40 the size — the
+protocol is proven, the scale run remains.
 
 ### 94. A near-duplicate's alternate wording is indexed and findable — closed 2026-07-22 `[retrieval]`
 

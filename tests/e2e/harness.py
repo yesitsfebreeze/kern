@@ -45,6 +45,7 @@ class KernProject:
 		tick_interval_secs=None,
 		reason_timeout_secs=None,
 		embed=None,
+		reason=None,
 		max_deliver_results=None,
 	):
 		"""(Re)write the project kern.toml. `data_dir` is cwd-relative.
@@ -82,10 +83,11 @@ class KernProject:
 		`const` used to hardcode.
 
 		`embed` is an `(url, model)` pair pointing at a real embedding endpoint —
-		the eval harness's knob; None keeps the fake. `max_deliver_results`
-		widens the delivered list past the preset for recall@k with k above the
-		cap. Both omitted when None, same byte-identity reason as everything
-		above.
+		the eval harness's knob; None keeps the fake. `reason` is the same pair
+		for the completion endpoint — the distill-path eval's knob; None keeps
+		the fake. `max_deliver_results` widens the delivered list past the
+		preset for recall@k with k above the cap. All omitted when None, same
+		byte-identity reason as everything above.
 		"""
 		head = f'data_dir = "{data_dir}"\n\n' if data_dir else ""
 		ttl = (
@@ -111,6 +113,7 @@ class KernProject:
 			f"timeout_secs = {reason_timeout_secs}\n" if reason_timeout_secs else ""
 		)
 		embed_url, embed_model = embed if embed else (self.llm_url, "fake-embed")
+		reason_url, reason_model = reason if reason else (self.llm_url, "fake-reason")
 		# KERN_EVAL_RETRIEVAL_TOML injects extra `[retrieval]` keys (e.g.
 		# `lexical_top_boost = 1.0`) for ablation runs. Unset => empty, so every
 		# other test's config text stays byte-identical.
@@ -126,7 +129,7 @@ class KernProject:
 		(self.cwd / ".kern" / "kern.toml").write_text(
 			f"{head}"
 			f'[embed]\nurl = "{embed_url}"\nmodel = "{embed_model}"\n\n'
-			f'[reason]\nurl = "{self.llm_url}"\nmodel = "fake-reason"\n'
+			f'[reason]\nurl = "{reason_url}"\nmodel = "{reason_model}"\n'
 			f"{reason_timeout}\n"
 			f"{review}"
 			f"[intake]\nenabled = {str(intake_enabled).lower()}\n{ttl}"

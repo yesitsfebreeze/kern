@@ -71,6 +71,19 @@ fn print_detail(v: &serde_json::Value) {
 		);
 	}
 	println!("Text:   {}", str_field(v, "text"));
+	if let Some(src) = v.get("source") {
+		let scheme = str_field(src, "scheme");
+		let object_id = str_field(src, "object_id");
+		let section = str_field(src, "section");
+		if !object_id.is_empty() || !section.is_empty() {
+			let sect = if section.is_empty() {
+				String::new()
+			} else {
+				format!(" \u{a7}{section}")
+			};
+			println!("Source: {scheme}://{object_id}{sect}");
+		}
+	}
 
 	let edges = array_field(v, "edges");
 	if edges.is_empty() {
@@ -962,18 +975,24 @@ mod tests {
 			&[("a", EntityKind::Question), ("b", EntityKind::Claim)],
 			&[("a", "b")],
 		);
-		g.kerns
-			.get_mut("kx")
-			.unwrap()
-			.entities
-			.get_mut("a")
-			.unwrap()
-			.set_text("the question".into());
+		{
+			let a = g.kerns.get_mut("kx").unwrap().entities.get_mut("a").unwrap();
+			a.set_text("the question".into());
+			a.source = crate::base::types::Source::Session {
+				session_id: "session:sess-1".into(),
+				section: "2,5".into(),
+				title: String::new(),
+			};
+		}
 		let v = entity_detail_by_id(&g, "a").expect("a resolves");
 
 		assert_eq!(entity_kind_label(u64_field(&v, "kind")), "Question");
 		assert_eq!(str_field(&v, "text"), "the question");
 		assert_eq!(str_field(&v, "kern"), "kx");
+		let src = v.get("source").expect("detail carries provenance");
+		assert_eq!(str_field(src, "scheme"), "session");
+		assert_eq!(str_field(src, "object_id"), "session:sess-1");
+		assert_eq!(str_field(src, "section"), "2,5");
 		let edges = array_field(&v, "edges");
 		assert_eq!(edges.len(), 1);
 		assert_eq!(str_field(&edges[0], "from"), "a", "edge points outward");

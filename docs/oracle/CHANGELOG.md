@@ -2,6 +2,36 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-23 — item 104 ground half: kern gets its own committed ground-truth
+  corpus and the first distill-path benchmark numbers. `tests/e2e/eval/ground.json`
+  (self-authored CC0, 8 sessions / 82 turns / 34 questions, evidence cited as
+  `[session, 1-based turn, anchor substring]`, anchors enforced by
+  `tests/e2e/test_eval_ground.py` in CI); `run_ground.py` (+ `just eval-ground`)
+  scores the same turn-level labels over two paths: `direct` (documents, the
+  verbatim floor — the LoCoMo protocol) and `distill` (`.kern/intake/` + `kern
+  intake drain`, the real pipeline; retrieved claims map back to cited turns via
+  `kern get`'s new `Source:` line — `entity_detail` now carries
+  `source.{scheme,object_id,section}`, pinned in
+  `detail_json_carries_everything_the_get_printer_needs`). First numbers
+  (qwen3-embedding:0.6b, distill qwen3.5:4b, k=10, report
+  `ground-20260723-192745.json` + direct in `ground-20260723-190855`-series):
+  direct recall_any@10 **0.824** / MRR 0.407; distill recall_any@10 **0.324** /
+  MRR 0.259. The gap is ingest coverage, not retrieval: only 24 distinct claims
+  were ever retrieved for 82 turns, and 17% of delivered hits cite no turns —
+  the distiller compresses away what single-hop questions need (0.20 any@10,
+  worst category; temporal/update ≈ 0.43–0.60 because dated facts survive
+  distillation). Fixed en route: `fake_llm.distilled` never matched the `[i]`
+  turn markers the provenance prompt added 2026-07-22, so every fake-LLM
+  distill quietly produced zero claims; it now strips the marker and cites the
+  turn. Harness `write_config` gains a `reason=(url, model)` knob (byte-identity
+  default). Decided by: verify-before-claiming (the pipeline's number measured
+  before any tuning; the finding is distill coverage, recorded not guessed),
+  name-the-tradeoff (a small self-authored corpus is self-graded and easy —
+  accepted as the committed, license-free, CI-validatable baseline the NC-licensed
+  datasets cannot be; cross-model claims still belong to LoCoMo/LongMemEval),
+  avoided-question-first (the LoCoMo daemon-mode bench stays open — this is the
+  same shape on the corpus we may redistribute).
+
 - 2026-07-23 — item 48 measurement half-closed: the active ingest dedup config
   (global `dedup_threshold` + per-kind `dedup_threshold_by_kind`) is now
   surfaced. `Server::health_stats` (`src/mcp.rs`) JSON `ingest:` block;

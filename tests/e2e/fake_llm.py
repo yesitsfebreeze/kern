@@ -57,22 +57,35 @@ def embed(text):
 _DISTILL = "Output ONLY a JSON array"
 
 
+_TURN_MARKER = re.compile(r"^\[(\d+)\]\s+(.*)$")
+
+
 def distilled(prompt):
 	"""Answer the intake distill prompt in the shape it asks for.
 
 	The echo cannot: src/ingest/distill.rs::parse_claims spans the first '[' to
 	the last ']', and the prompt's own "If nothing is worth keeping, output []"
 	puts prose inside that span, so an echoed prompt always parses as garbage.
-	Every `assistant:` line of the conversation becomes one claim.
+	Every `assistant:` line of the conversation becomes one claim, citing the
+	`[i]` turn marker the prompt put in front of it (distill.rs inlines one per
+	turn) — without stripping the marker first, no line ever starts with
+	`assistant:` and the fake distills every transcript to nothing.
 	"""
 	body = prompt.split("CONVERSATION:", 1)[-1]
 	claims = []
+	turn = None
 	for line in body.splitlines():
+		m = _TURN_MARKER.match(line)
+		if m:
+			turn, line = int(m.group(1)), m.group(2)
 		if not line.startswith("assistant:"):
 			continue
 		text = line.split(":", 1)[1].strip()
 		if text:
-			claims.append({"text": text, "kind": "fact"})
+			claim = {"text": text, "kind": "fact"}
+			if turn is not None:
+				claim["turns"] = [turn]
+			claims.append(claim)
 	return json.dumps(claims)
 
 
