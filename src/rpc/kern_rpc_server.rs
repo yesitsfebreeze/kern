@@ -114,6 +114,39 @@ impl KernRpc for KernRpcHandler {
 					.unwrap_or(0.0),
 				heat_half_life_secs: u64_at("heat_half_life_secs"),
 				qbst_recency_half_life_secs: u64_at("qbst_recency_half_life_secs"),
+				retrieval: {
+					let r = payload.get("retrieval");
+					let mw = |key: &str| trnsprt::kern_rpc::dto::ModeWeightsHealth {
+						content: r
+							.and_then(|r| r.get(key))
+							.and_then(|w| w.get("content"))
+							.and_then(|v| v.as_f64())
+							.unwrap_or(0.0),
+						reason: r
+							.and_then(|r| r.get(key))
+							.and_then(|w| w.get("reason"))
+							.and_then(|v| v.as_f64())
+							.unwrap_or(0.0),
+						edge: r
+							.and_then(|r| r.get(key))
+							.and_then(|w| w.get("edge"))
+							.and_then(|v| v.as_f64())
+							.unwrap_or(0.0),
+					};
+					trnsprt::kern_rpc::dto::RetrievalHealth {
+						rrf_k: r
+							.and_then(|r| r.get("rrf_k"))
+							.and_then(|v| v.as_f64())
+							.unwrap_or(0.0),
+						rrf_global_weight: r
+							.and_then(|r| r.get("rrf_global_weight"))
+							.and_then(|v| v.as_f64())
+							.unwrap_or(0.0),
+						weights_content: mw("weights_content"),
+						weights_reason: mw("weights_reason"),
+						weights_hybrid: mw("weights_hybrid"),
+					}
+				},
 				llm_complete_failed: u64_at("llm_complete_failed"),
 				last_llm_complete_failure: str_at("last_llm_complete_failure"),
 				embed_model: str_at("embed_model"),
