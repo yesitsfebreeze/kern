@@ -108,6 +108,10 @@ impl KernRpc for KernRpcHandler {
 					.get("largest_kern_entities")
 					.and_then(|v| v.as_u64())
 					.unwrap_or(0) as usize,
+				gini_kern_sizes: payload
+					.get("gini_kern_sizes")
+					.and_then(|v| v.as_f64())
+					.unwrap_or(0.0),
 				heat_half_life_secs: u64_at("heat_half_life_secs"),
 				qbst_recency_half_life_secs: u64_at("qbst_recency_half_life_secs"),
 				llm_complete_failed: u64_at("llm_complete_failed"),

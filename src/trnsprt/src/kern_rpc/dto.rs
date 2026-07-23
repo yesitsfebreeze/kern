@@ -88,6 +88,9 @@ pub struct HealthRes {
 	// daemons.
 	#[serde(default)]
 	pub largest_kern_entities: usize,
+	// Gini over resident kern sizes (ROADMAP item 83). 0.0 from older daemons.
+	#[serde(default)]
+	pub gini_kern_sizes: f64,
 	// Active heat retention half-life (`HeatConfig.half_life_secs`, the one
 	// `Preset::apply` sets — relaxed=30d / medium=7d / tight=3d, never a config
 	// edit). 0 from older daemons (ROADMAP item 62 `kern://health` surfacing).
@@ -178,6 +181,8 @@ mod dto_serde_tests {
 		assert!(h.build_id.is_empty(), "unknown build, not a stale one");
 		assert!(h.config_id.is_empty());
 		assert_eq!(h.uptime_ms, 0);
+		assert_eq!(h.largest_kern_entities, 0);
+		assert!((h.gini_kern_sizes - 0.0).abs() < 1e-12);
 
 		let ancient = r#"{"ok":true}"#;
 		let h2: HealthRes = serde_json::from_str(ancient).expect("only `ok` is required");
@@ -217,6 +222,7 @@ mod dto_serde_tests {
 			gnn_train_refused: 18,
 			supersede_chain_depth_exceeded: 22,
 			largest_kern_entities: 99,
+			gini_kern_sizes: 0.42,
 			heat_half_life_secs: 2592000,
 			qbst_recency_half_life_secs: 86400,
 			llm_complete_failed: 19,
@@ -247,6 +253,7 @@ mod dto_serde_tests {
 		assert_eq!(back.gnn_train_refused, 18);
 		assert_eq!(back.supersede_chain_depth_exceeded, 22);
 		assert_eq!(back.largest_kern_entities, 99);
+		assert!((back.gini_kern_sizes - 0.42).abs() < 1e-12);
 		assert_eq!(back.heat_half_life_secs, 2592000);
 		assert_eq!(back.qbst_recency_half_life_secs, 86400);
 		assert_eq!(back.llm_complete_failed, 19);

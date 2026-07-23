@@ -57,6 +57,12 @@ pub struct HealthStats {
 	// on kerns bounds the count of kerns, not the size of any one). Empty graph
 	// → 0. Measures, does not enforce (ROADMAP item 83).
 	pub largest_kern_entities: usize,
+	// Gini coefficient over resident kern sizes (`entities.len()`) — the
+	// distribution the `largest_kern_entities` max only summarises. 0.0 when all
+	// kerns hold the same count (balanced), →1.0 asymptotically as one kern
+	// holds all entities (finite-n max (n−1)/n). Empty graph → 0.0. Measures,
+	// does not enforce (ROADMAP item 83).
+	pub gini_kern_sizes: f64,
 }
 
 /// Gini coefficient over the access-count distribution. 0.0 when all counts are
@@ -68,6 +74,30 @@ pub fn gini_over_access(counts: &[u64]) -> f64 {
 		return 0.0;
 	}
 	let sum: u64 = counts.iter().sum();
+	if sum == 0 {
+		return 0.0;
+	}
+	let mut abs_diff_sum: u128 = 0;
+	for i in 0..n {
+		for j in 0..n {
+			abs_diff_sum += (counts[i].max(counts[j]) - counts[i].min(counts[j])) as u128;
+		}
+	}
+	let denom = 2u128 * (n as u128) * (sum as u128);
+	(abs_diff_sum as f64) / (denom as f64)
+}
+
+/// Gini coefficient over the kern-size distribution (`entities.len()` per
+/// resident kern). Same formula as `gini_over_access`, cast to `u64`; 0.0 when
+/// all kerns hold the same count (or empty), →1.0 asymptotically (finite-n max
+/// `(n−1)/n`). Measures the balance the `largest_kern_entities` max summarises
+/// (ROADMAP item 83).
+pub fn gini_over_kern_sizes(counts: &[usize]) -> f64 {
+	let n = counts.len();
+	if n == 0 {
+		return 0.0;
+	}
+	let sum: u64 = counts.iter().map(|c| *c as u64).sum();
 	if sum == 0 {
 		return 0.0;
 	}
@@ -110,6 +140,9 @@ pub fn graph_health_stats(g: &GraphGnn) -> HealthStats {
 	// does not bound. Reuses the `kerns` walk already done above; computed here
 	// for one pass over the resident map.
 	let largest_kern_entities = kerns.iter().map(|k| k.entities.len()).max().unwrap_or(0);
+	// Gini over kern sizes — the distribution the max summarises. Same walk.
+	let kern_sizes: Vec<usize> = kerns.iter().map(|k| k.entities.len()).collect();
+	let gini_kern_sizes = gini_over_kern_sizes(&kern_sizes);
 	let store = g.store();
 	let stamp = store
 		.as_ref()
@@ -140,6 +173,7 @@ pub fn graph_health_stats(g: &GraphGnn) -> HealthStats {
 		max_kerns: g.max_loaded_kerns(),
 		supersede_chain_depth_exceeded: crate::base::accept::supersede_chain_depth_exceeded(),
 		largest_kern_entities,
+		gini_kern_sizes,
 	}
 }
 
@@ -310,6 +344,57 @@ mod tests {
 		assert_eq!(
 			h.largest_kern_entities, 10,
 			"largest resident kern holds 10 entities; the four empty children do not move the max"
+		);
+	}
+
+	#[test]
+	fn gini_over_kern_sizes_pins_known_distributions() {
+		assert_eq!(gini_over_kern_sizes(&[]), 0.0, "empty -> 0.0");
+		assert_eq!(gini_over_kern_sizes(&[5, 5, 5]), 0.0, "uniform -> 0.0");
+		assert_eq!(gini_over_kern_sizes(&[1, 1, 1, 1]), 0.0, "uniform -> 0.0");
+		assert_eq!(gini_over_kern_sizes(&[0, 0, 0]), 0.0, "zero-sum -> 0.0");
+		// [10,0,0]: one kern holds all entities over n=3 -> (n-1)/n = 2/3.
+		assert!(
+			(gini_over_kern_sizes(&[10, 0, 0]) - 2.0 / 3.0).abs() < 1e-12,
+			"one of three holds all -> 2/3"
+		);
+		// [100,0]: n=2 -> (n-1)/n = 1/2.
+		assert!(
+			(gini_over_kern_sizes(&[100, 0]) - 0.5).abs() < 1e-12,
+			"two kerns, one holds all -> 0.5"
+		);
+	}
+
+	#[test]
+	fn graph_health_stats_reports_gini_kern_sizes() {
+		use crate::base::types::{mk_entity, EntityKind, Kern};
+
+		// Empty graph -> 0.0 (one root kern, no entities -> uniform zero-sum).
+		assert!(
+			graph_health_stats(&GraphGnn::new()).gini_kern_sizes.abs() < 1e-12,
+			"empty graph -> gini 0.0"
+		);
+
+		// One kern holding 10 entities + four empty named children: the
+		// distribution is [10,0,0,0,0] (root + 4 children), n=5, sum=10 ->
+		// Gini = (n-1)/n = 4/5 = 0.8 (> 0.5).
+		let mut g = GraphGnn::new();
+		{
+			let root = g.root_kern_mut().expect("root kern present");
+			for i in 0..10 {
+				let e = mk_entity(&format!("e{i}"), "x", 0.0, EntityKind::Claim);
+				root.entities.insert(format!("e{i}"), e);
+			}
+		}
+		for i in 0..4 {
+			let child = Kern::new_named_child(&g.root.id, &g.root.id, &format!("c{i}"), vec![0.0; 4]);
+			g.kerns.insert(child.id.clone(), child);
+		}
+		let h = graph_health_stats(&g);
+		assert!(
+			h.gini_kern_sizes > 0.5,
+			"one kern holds all entities -> gini > 0.5, got {}",
+			h.gini_kern_sizes
 		);
 	}
 
