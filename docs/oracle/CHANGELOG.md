@@ -2,6 +2,23 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-23 — item 48 beside half-closed (per-kind dedup threshold, default-off):
+  `IngestConfig.dedup_threshold_by_kind: [Option<f64>; 5]` (new, indexed by
+  `EntityKind as u8`, default `[None; 5]` = bit-identical) + `dedup_threshold_for(kind)`
+  resolver (`None` → global). `validate` rejects out-of-range `Some` naming the
+  kind. Three production call sites (`place.rs` `place_document`/`place_chunks`,
+  `worker.rs`) resolve per-kind; `ingest_cmd` + `mcp tools_mutate` bridge into
+  the runtime `Config`. Array indexed by `as u8` avoids adding `Hash` to
+  `EntityKind`. Proved by `dedup_threshold_for_kind_resolves`,
+  `validate_rejects_out_of_range_per_kind`,
+  `per_kind_dedup_threshold_tightens_facts_loosens_claims` (Fact `Some(0.99)`
+  keeps `0.97`; Claim `Some(0.80)` dedups `0.81`). Existing dedup/place green
+  unedited at default. `cargo test -p kern --lib` 958 passed, 0 failed, 4
+  ignored; `cargo test -p trnsprt --lib` 61 passed. Negative control (Fact slot
+  → `None` → `0.97` dedups → reds) green on revert.
+  Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming.
+  Still open: hard paraphrase-evadable dedup key (main body).
+
 - 2026-07-23 — item 62 `kern://health` surfacing closed: the active heat
   retention half-life (`HeatConfig.half_life_secs`, the one `Preset::apply`
   sets — relaxed=30d / medium=7d / tight=3d) is now surfaced. `Server::health_stats`

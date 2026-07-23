@@ -1928,15 +1928,41 @@ Deciding behavior: **all 7 decided 2026-07-22 (a–g). TOFU + config-owned netwo
 Below the cliffs because none of it is a defect, above the belief model because
 every claim in the graph is shaped here first.
 
-### 48. Source-keyed idempotency at ingest `[ingest]`
+### 48. Source-keyed idempotency at ingest — beside half-closed 2026-07-23 `[ingest]`
 
-`find_duplicate` is pure cosine-over-HNSW (`src/ingest/dedup.rs:8-21`), which is
+**Beside half-closed 2026-07-23 (per-kind dedup threshold, default-off); hard
+paraphrase-evadable dedup-key main body still open.** The dedup threshold is no
+longer global: `IngestConfig.dedup_threshold_by_kind: [Option<f64>; 5]` (new,
+`src/config/ingest.rs`, indexed by `EntityKind as u8`, default `[None; 5]` =
+bit-identical today) + `dedup_threshold_for(kind)` resolver (`None` → global
+`dedup_threshold`). `validate` rejects out-of-range per-kind `Some` naming the
+kind. The three production call sites (`place.rs` `place_document` /
+`place_chunks`, `worker.rs`) resolve per-kind; `ingest_cmd` + `mcp tools_mutate`
+bridge the array into the runtime `Config`. Array indexed by `EntityKind as u8`
+avoids adding `Hash` to `EntityKind` (the `HashMap` alternative would need it).
+Proved by `dedup_threshold_for_kind_resolves` (None→global, Some→override,
+neighbour isolation), `validate_rejects_out_of_range_per_kind` (1.5 rejected
+naming `fact`, `0.0`/`1.0` accepted, NaN rejected),
+`per_kind_dedup_threshold_tightens_facts_loosens_claims` (Fact `Some(0.99)`
+keeps a `0.97` near-dup the global `0.95` dedups; Claim `Some(0.80)` dedups a
+`0.81` the global also catches). Existing dedup + place tests green unedited at
+default. `cargo test -p kern --lib` 958 passed, 0 failed, 4 ignored; `cargo test
+-p trnsprt --lib` 61 passed. Negative control (Fact slot → `None` → global
+`0.95` → `0.97` dedups → Fact "not deduped" assertion reds) green on revert.
+Decided by fix-the-root (resolve per-kind at the call sites, not a `HashMap`),
+name-the-tradeoff (default-off — no operator asked, no preset sets it; auto-
+tuning is YAGNI), verify-before-claiming (negative control). See the
+2026-07-23 CHANGELOG entry.
+
+**Still open:** the hard paraphrase-evadable semantic dedup key (main body).
+
+~~`find_duplicate` is pure cosine-over-HNSW (`src/ingest/dedup.rs:8-21`), which is
 paraphrase-evadable. **The shape of this item changed and the old wording is
 retired:** `CHANGELOG.md` 2026-07-20 shipped chunk external ids keyed on the full
 source identity (`source_id()` + chunk index, not the bare section), and CLI
 `kern ingest` deriving its inline source hash from the text. What remains is the
 *dedup* key, not the external id. Beside it: the dedup threshold is global, not
-per-kind (`FEATURES.md:413`).
+per-kind (`FEATURES.md:413`).~~
 
 ### 49. The distill prompt is one-shot and global — chunking half-closed 2026-07-22 `[ingest]`
 
