@@ -2,6 +2,17 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-23 — item 48 measurement half-closed: the active ingest dedup config
+  (global `dedup_threshold` + per-kind `dedup_threshold_by_kind`) is now
+  surfaced. `Server::health_stats` (`src/mcp.rs`) JSON `ingest:` block;
+  `trnsprt::HealthRes` gains `#[serde(default)] ingest_dedup_threshold` +
+  `ingest_dedup_threshold_by_kind` (old daemon → `0.0`/`[None;5]`); `kern health`
+  prints `dedup:` daemon-sourced only; `kern://local/health` by construction.
+  Proved by `kern_health_prints_dedup_config` + dto round-trip + old-payload
+  absence guard. `cargo test -p kern --lib` 965 passed, 0 failed, 4 ignored;
+  `cargo test -p trnsprt --lib` 61 passed.
+  Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming.
+
 - 2026-07-23 — item 66 measurement completion: the four remaining
   `RetrievalConfig` knobs (`seed_k`, `mmr_enabled`, `lexical_enabled`,
   `pagerank_enabled`) now surface in the existing `retrieval:` JSON block +

@@ -1993,6 +1993,23 @@ tuning is YAGNI), verify-before-claiming (negative control). See the
 
 **Still open:** the hard paraphrase-evadable semantic dedup key (main body).
 
+**Measurement half-closed 2026-07-23.** The active ingest dedup config (global
+`dedup_threshold` + per-kind `dedup_threshold_by_kind`, shipped above but
+invisible at runtime) is now surfaced: `Server::health_stats` (`src/mcp.rs`) JSON
+carries an `ingest:` block; `trnsprt::HealthRes` gains
+`#[serde(default)] ingest_dedup_threshold: f64` +
+`ingest_dedup_threshold_by_kind: [Option<f64>; 5]` (old daemon → `0.0` /
+`[None;5]`); `kern health` prints a `dedup:` line daemon-sourced only (item 100
+rule), override + all-`None`/global-only + no-daemon shapes; `kern://local/health`
+by construction. Proved by `kern_health_prints_dedup_config` + dto round-trip
+(`0.95` + `[Some(0.99), None, …]`) + old-payload absence → `0.0`/`[None;5]`
+(standing guard). `cargo test -p kern --lib` 965 passed, 0 failed, 4 ignored;
+`cargo test -p trnsprt --lib` 61 passed. Decided by fix-the-root (surface the
+beside's already-shipped config, do not build the hard key), name-the-tradeoff
+(one block — global + per-kind array; tuning is the hard key, avoided),
+verify-before-claiming (old-payload-absence guard). See the 2026-07-23 CHANGELOG
+entry.
+
 ~~`find_duplicate` is pure cosine-over-HNSW (`src/ingest/dedup.rs:8-21`), which is
 paraphrase-evadable. **The shape of this item changed and the old wording is
 retired:** `CHANGELOG.md` 2026-07-20 shipped chunk external ids keyed on the full
