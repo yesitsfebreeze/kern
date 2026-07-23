@@ -202,6 +202,12 @@ impl Server {
 			// `source_trust = { file = 0.8 }` sees it. Daemon-sourced: the CLI's
 			// own config is irrelevant.
 			"source_trust": self.cfg.retrieval.source_trust,
+		// Active ingest dedup config (ROADMAP item 48 measurement half): the
+		// global `dedup_threshold` plus the per-kind `dedup_threshold_by_kind`
+		// array (item 48 beside, shipped 2026-07-23). `None` falls back to the
+		// global. Daemon-sourced: the CLI's own config is irrelevant.
+		"ingest_dedup_threshold": self.cfg.ingest.dedup_threshold,
+		"ingest_dedup_threshold_by_kind": self.cfg.ingest.dedup_threshold_by_kind,
 			// This server's own worker, read directly: a gauge on the live channel,
 			// not a process static like the counters `h` carries.
 			"ingest_queue_depth": self.worker.queue_depth(),

@@ -95,6 +95,9 @@ pub(super) async fn cmd_health(cfg: &crate::config::Config) {
 	for line in source_trust_health_lines(d.as_ref()) {
 		println!("{line}");
 	}
+	for line in dedup_health_lines(d.as_ref()) {
+		println!("{line}");
+	}
 	for line in kern_cap_health_lines(d.as_ref()) {
 		println!("{line}");
 	}
@@ -323,6 +326,34 @@ fn source_trust_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<St
 		.map(|(scheme, w)| format!("{scheme}={w}"))
 		.collect();
 	vec![format!("source_trust: {}", pairs.join(", "))]
+}
+
+// Active ingest dedup config (ROADMAP item 48 measurement half): the global
+// `dedup_threshold` plus the per-kind `dedup_threshold_by_kind` array (item 48
+// beside, shipped 2026-07-23). `None` falls back to the global. Daemon-sourced
+// like the heat/recency/retrieval/source_trust lines: the CLI's own config is
+// irrelevant (item 100). No daemon, no line.
+fn dedup_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> {
+	let Some(h) = h else {
+		return Vec::new();
+	};
+	// The 5 EntityKind labels in `as u8` order (Fact .. Conclusion).
+	let kinds = ["fact", "claim", "document", "question", "conclusion"];
+	let overrides: Vec<String> = h
+		.ingest_dedup_threshold_by_kind
+		.iter()
+		.enumerate()
+		.filter_map(|(i, v)| v.map(|w| format!("{}={}", kinds[i], w)))
+		.collect();
+	if overrides.is_empty() {
+		vec![format!("dedup: {}", h.ingest_dedup_threshold)]
+	} else {
+		vec![format!(
+			"dedup: {}, kind {}",
+			h.ingest_dedup_threshold,
+			overrides.join(", ")
+		)]
+	}
 }
 
 // The resident-kern cap approach warn (ROADMAP item 83). Daemon-sourced like
@@ -585,6 +616,40 @@ mod degradation_lines_tests {
 		assert!(
 			source_trust_health_lines(None).is_empty(),
 			"no daemon -> no source_trust line"
+		);
+	}
+
+	#[test]
+	fn kern_health_prints_dedup_config() {
+		// A configured per-kind override prints one line with the global + the
+		// override (ROADMAP item 48 measurement half).
+		let cfg = HealthRes {
+			ok: true,
+			ingest_dedup_threshold: 0.95,
+			ingest_dedup_threshold_by_kind: [Some(0.99), None, None, None, None],
+			..Default::default()
+		};
+		assert_eq!(
+			dedup_health_lines(Some(&cfg)),
+			vec!["dedup: 0.95, kind fact=0.99"],
+		);
+
+		// All-None -> global only, no kind suffix.
+		let uncfg = HealthRes {
+			ok: true,
+			ingest_dedup_threshold: 0.95,
+			..Default::default()
+		};
+		assert_eq!(
+			dedup_health_lines(Some(&uncfg)),
+			vec!["dedup: 0.95"],
+			"all-None per-kind surfaces the global only"
+		);
+
+		// No daemon -> no line (item 100 rule).
+		assert!(
+			dedup_health_lines(None).is_empty(),
+			"no daemon -> no dedup line"
 		);
 	}
 

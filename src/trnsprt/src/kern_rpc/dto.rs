@@ -151,6 +151,16 @@ pub struct HealthRes {
 	// half).
 	#[serde(default)]
 	pub source_trust: BTreeMap<String, f64>,
+	// Active ingest dedup config (`IngestConfig.dedup_threshold` + the
+	// per-kind `dedup_threshold_by_kind` array, shipped 2026-07-23 by item 48
+	// beside). `0.0` / `[None; 5]` from older daemons and from a configless
+	// kern (ROADMAP item 48 measurement half). The array is indexed by
+	// `EntityKind as u8` (Fact=0 .. Conclusion=4); `None` falls back to the
+	// global threshold.
+	#[serde(default)]
+	pub ingest_dedup_threshold: f64,
+	#[serde(default)]
+	pub ingest_dedup_threshold_by_kind: [Option<f64>; 5],
 	// Completions that failed on the reason endpoint, and the last one in words.
 	// The blocking bridge hands its caller `""` for every failure, so the count
 	// is what separates a dead endpoint from a model with nothing to say, and the
@@ -246,6 +256,14 @@ mod dto_serde_tests {
 			h.source_trust.is_empty(),
 			"an old daemon reports no source-trust map"
 		);
+		assert!(
+			(h.ingest_dedup_threshold - 0.0).abs() < 1e-12,
+			"an old daemon reports no ingest dedup threshold"
+		);
+		assert!(
+			h.ingest_dedup_threshold_by_kind.iter().all(Option::is_none),
+			"an old daemon reports no per-kind dedup overrides"
+		);
 
 		let ancient = r#"{"ok":true}"#;
 		let h2: HealthRes = serde_json::from_str(ancient).expect("only `ok` is required");
@@ -316,6 +334,8 @@ mod dto_serde_tests {
 				("file".to_string(), 0.8),
 				("ticket".to_string(), 0.9),
 			]),
+			ingest_dedup_threshold: 0.95,
+			ingest_dedup_threshold_by_kind: [Some(0.99), None, None, None, None],
 			llm_complete_failed: 19,
 			last_llm_complete_failure: "transient: HTTP error: operation timed out".into(),
 			build_id: "a1b2c3d4e5f60718".into(),
@@ -364,6 +384,11 @@ mod dto_serde_tests {
 		assert_eq!(
 			back.source_trust.get("ticket").copied().unwrap_or(0.0),
 			0.9
+		);
+		assert!((back.ingest_dedup_threshold - 0.95).abs() < 1e-12);
+		assert_eq!(
+			back.ingest_dedup_threshold_by_kind,
+			[Some(0.99), None, None, None, None]
 		);
 		assert_eq!(back.llm_complete_failed, 19);
 		assert_eq!(
