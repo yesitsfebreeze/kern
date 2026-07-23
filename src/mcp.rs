@@ -189,6 +189,9 @@ impl Server {
 					"edge": self.cfg.retrieval.weights_hybrid.edge,
 				},
 			},
+			// Active preset name (ROADMAP item 87 measurement half). Preset::apply
+			// is its only writer; the name frames the heat/recency/retrieval lines.
+			"preset": self.cfg.preset.as_str(),
 			// This server's own worker, read directly: a gauge on the live channel,
 			// not a process static like the counters `h` carries.
 			"ingest_queue_depth": self.worker.queue_depth(),
