@@ -2,6 +2,19 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-23 — item 83 per-kern entity-count signal: `HealthStats.largest_kern_entities`
+  (new field, max `Kern::entities.len()` across resident kerns) — gauge of the
+  unbounded resident set at the granularity the kern-cap (bounds count of kerns,
+  not size of any one) cannot reach. `kern health` prints `kerns: N (cap M,
+  largest L entities)` (or `cap off, largest L entities`), daemon-sourced only.
+  MCP `health` JSON carries `largest_kern_entities`; `HealthRes`
+  `#[serde(default)]` (old daemon → `0`). Proved by
+  `graph_health_stats_reports_largest_kern_entities` (empty → `0`; 10 + four
+  empty → `10`), dto round-trip `99`. `cargo test -p kern --lib` 954 passed, 0
+  failed, 4 ignored; `cargo test -p trnsprt --lib` 61 passed. Negative control
+  (skip the max → `0`) reds, green on revert.
+  Decided by: fix-the-root, name-the-tradeoff, verify-before-claiming.
+
 - 2026-07-23 — item 31 `route_entity` clone lever closed: `route_entity`
   (`src/base/accept.rs`) now holds `&kern.children` alongside the `&GraphGnn`
   reborrow in a scoped block (both immutable, borrow ends before

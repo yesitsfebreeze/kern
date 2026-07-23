@@ -3403,6 +3403,25 @@ cap, do not re-tune it), name-the-tradeoff (daemon-sourced only; `disk_threshold
 stays silent — spill disarmed until item 75), verify-before-claiming (negative
 control). See the 2026-07-22 CHANGELOG entry.
 
+**Per-kern entity-count signal added 2026-07-23.** `HealthStats.largest_kern_entities`
+(new field, max `Kern::entities.len()` across resident kerns, filled in
+`graph_health_stats`'s existing walk) — a gauge of the unbounded resident set at
+the granularity the kern-cap (bounds *count* of kerns, not *size* of any one)
+cannot reach. A 128-kern graph with one kern holding 100k entities is "within
+cap" and was invisible; now `kern health` prints `kerns: N (cap M, largest L
+entities)` (or `cap off, largest L entities`), **daemon-sourced only** (item
+100 rule). MCP `health` JSON carries `largest_kern_entities`; `HealthRes` gains
+`#[serde(default)]` (old daemon → `0`, same shape as `gini_access`/`max_kerns`).
+Proved by `graph_health_stats_reports_largest_kern_entities` (empty → `0`; one
+kern holding 10 + four empty → `10`), dto round-trip `99`. `cargo test -p kern
+--lib` 954 passed, 0 failed, 4 ignored; `cargo test -p trnsprt --lib` 61 passed.
+Negative control (`largest_kern_entities = 0` skip the max → 10-entity fixture
+yields `0`) reds, green on revert. Decided by fix-the-root (measure, do not
+enforce — the per-kern cap is blocked on the absent cold-spill, item 75),
+name-the-tradeoff (one max, not a distribution; the smallest signal naming the
+gap), verify-before-claiming (negative control). See the 2026-07-23 CHANGELOG
+entry.
+
 ### 84. Remaining operational odds and ends `[surface]`
 
 - **`serve.mcp_addr` is a config field with no reader.** ~~Added when item 11 landed~~ **Closed 2026-07-22.** `run_server` now resolves CLI flag first, falls back to `cfg.serve.mcp_addr`.
