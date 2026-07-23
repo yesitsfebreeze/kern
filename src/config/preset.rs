@@ -25,6 +25,15 @@ struct Tuning {
 }
 
 impl Preset {
+	/// Lowercase name matching the serde rendering, for health surfacing.
+	pub fn as_str(&self) -> &'static str {
+		match self {
+			Self::Relaxed => "relaxed",
+			Self::Medium => "medium",
+			Self::Tight => "tight",
+		}
+	}
+
 	fn tuning(&self) -> Tuning {
 		match self {
 			Self::Relaxed => Tuning {

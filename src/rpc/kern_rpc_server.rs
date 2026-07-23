@@ -147,6 +147,7 @@ impl KernRpc for KernRpcHandler {
 						weights_hybrid: mw("weights_hybrid"),
 					}
 				},
+				preset: str_at("preset").to_string(),
 				llm_complete_failed: u64_at("llm_complete_failed"),
 				last_llm_complete_failure: str_at("last_llm_complete_failure"),
 				embed_model: str_at("embed_model"),

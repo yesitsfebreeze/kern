@@ -245,6 +245,9 @@ fn convergence_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<Str
 fn heat_health_lines(h: Option<&trnsprt::kern_rpc::HealthRes>) -> Vec<String> {
 	match h {
 		Some(h) => vec![
+			// Active preset name (ROADMAP item 87 measurement half). The frame
+			// the heat/recency/retrieval lines interpret. Empty = old daemon.
+			format!("preset:      {}", h.preset),
 			format!("heat:        half-life {}s", h.heat_half_life_secs),
 			// QBST recency half-life — the 24h ranking-freshness signal, the
 			// second of item 55's two freshness signals. Same daemon-sourced
@@ -469,6 +472,7 @@ mod degradation_lines_tests {
 		assert_eq!(
 			lines,
 			vec![
+				"preset:      ",
 				"heat:        half-life 2592000s",
 				"recency:     half-life 0s",
 			]
@@ -484,6 +488,7 @@ mod degradation_lines_tests {
 		assert_eq!(
 			heat_health_lines(Some(&old)),
 			vec![
+				"preset:      ",
 				"heat:        half-life 0s",
 				"recency:     half-life 0s",
 			],
@@ -507,10 +512,60 @@ mod degradation_lines_tests {
 		assert_eq!(
 			heat_health_lines(Some(&recency)),
 			vec![
+				"preset:      ",
 				"heat:        half-life 2592000s",
 				"recency:     half-life 86400s",
 			],
 			"recency half-life surfaced daemon-sourced"
+		);
+	}
+
+	#[test]
+	fn kern_health_prints_preset() {
+		// A named preset -> the line carries it (ROADMAP item 87 measurement half).
+		let tight = HealthRes {
+			ok: true,
+			preset: "tight".into(),
+			..Default::default()
+		};
+		let lines = heat_health_lines(Some(&tight));
+		assert!(
+			lines.iter().any(|l| l == "preset:      tight"),
+			"preset name surfaced: {lines:?}"
+		);
+
+		// Relaxed (the default) -> relaxed.
+		let relaxed = HealthRes {
+			ok: true,
+			preset: "relaxed".into(),
+			..Default::default()
+		};
+		assert!(
+			heat_health_lines(Some(&relaxed))
+				.iter()
+				.any(|l| l == "preset:      relaxed"),
+			"relaxed preset named"
+		);
+
+		// Empty (old daemon) -> empty name, line still present.
+		let old = HealthRes {
+			ok: true,
+			preset: String::new(),
+			..Default::default()
+		};
+		assert!(
+			heat_health_lines(Some(&old))
+				.iter()
+				.any(|l| l == "preset:      "),
+			"old daemon -> empty preset name"
+		);
+
+		// No daemon -> no line.
+		assert!(
+			!heat_health_lines(None)
+				.iter()
+				.any(|l| l.starts_with("preset:")),
+			"no daemon -> no preset line"
 		);
 	}
 

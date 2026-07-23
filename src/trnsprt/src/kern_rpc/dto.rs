@@ -131,6 +131,10 @@ pub struct HealthRes {
 	// Zeroed from older daemons.
 	#[serde(default)]
 	pub retrieval: RetrievalHealth,
+	// Active preset name (`Config.preset`, `Preset::apply` is its only writer).
+	// Empty from older daemons (ROADMAP item 87 measurement half).
+	#[serde(default)]
+	pub preset: String,
 	// Completions that failed on the reason endpoint, and the last one in words.
 	// The blocking bridge hands its caller `""` for every failure, so the count
 	// is what separates a dead endpoint from a model with nothing to say, and the
@@ -217,6 +221,7 @@ mod dto_serde_tests {
 		assert!((h.retrieval.rrf_k - 0.0).abs() < 1e-12);
 		assert!((h.retrieval.rrf_global_weight - 0.0).abs() < 1e-12);
 		assert!((h.retrieval.weights_content.content - 0.0).abs() < 1e-12);
+		assert!(h.preset.is_empty(), "an old daemon reports no preset name");
 
 		let ancient = r#"{"ok":true}"#;
 		let h2: HealthRes = serde_json::from_str(ancient).expect("only `ok` is required");
@@ -278,6 +283,7 @@ mod dto_serde_tests {
 					edge: 0.2,
 				},
 			},
+			preset: "tight".into(),
 			llm_complete_failed: 19,
 			last_llm_complete_failure: "transient: HTTP error: operation timed out".into(),
 			build_id: "a1b2c3d4e5f60718".into(),
@@ -314,6 +320,7 @@ mod dto_serde_tests {
 		assert!((back.retrieval.weights_content.content - 0.7).abs() < 1e-12);
 		assert!((back.retrieval.weights_reason.reason - 0.8).abs() < 1e-12);
 		assert!((back.retrieval.weights_hybrid.edge - 0.2).abs() < 1e-12);
+		assert_eq!(back.preset, "tight");
 		assert_eq!(back.llm_complete_failed, 19);
 		assert_eq!(
 			back.last_llm_complete_failure,
