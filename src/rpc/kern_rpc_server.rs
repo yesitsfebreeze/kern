@@ -103,6 +103,7 @@ impl KernRpc for KernRpcHandler {
 					.unwrap_or(0.0),
 				max_kerns: u64_at("max_kerns"),
 				gnn_train_refused: u64_at("gnn_train_refused"),
+				supersede_chain_depth_exceeded: u64_at("supersede_chain_depth_exceeded"),
 				llm_complete_failed: u64_at("llm_complete_failed"),
 				last_llm_complete_failure: str_at("last_llm_complete_failure"),
 				embed_model: str_at("embed_model"),

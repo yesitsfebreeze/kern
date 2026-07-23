@@ -48,6 +48,10 @@ pub struct HealthStats {
 	// `apply_graph_config`; surfaced so an operator sees the bound and a warn
 	// when resident kerns approach it (ROADMAP item 83).
 	pub max_kerns: usize,
+	// Supersede chains that exceeded `SUPERSEDE_CHAIN_HOP_THRESHOLD` on one
+	// `external_id` (ROADMAP item 58 trigger #1). Process-global; the count is
+	// the only trace a contested chain ran past the hop budget.
+	pub supersede_chain_depth_exceeded: u64,
 }
 
 /// Gini coefficient over the access-count distribution. 0.0 when all counts are
@@ -125,6 +129,7 @@ pub fn graph_health_stats(g: &GraphGnn) -> HealthStats {
 		ingest_queue_refused: crate::ingest::worker::ingest_queue_refused(),
 		gini_access,
 		max_kerns: g.max_loaded_kerns(),
+		supersede_chain_depth_exceeded: crate::base::accept::supersede_chain_depth_exceeded(),
 	}
 }
 
@@ -265,5 +270,19 @@ mod tests {
 		g.set_max_loaded_kerns(8);
 		let h = graph_health_stats(&g);
 		assert_eq!(h.max_kerns, 8, "armed cap reaches HealthStats");
+	}
+
+	#[test]
+	fn graph_health_stats_carries_supersede_chain_depth_exceeded() {
+		// The field is wired from the process-global read fn; on a fresh graph
+		// (no supersede happened in this process before this point is reached)
+		// it equals the read fn's current value. The increment itself is pinned
+		// in `accept::tests::supersede_chain_depth_counter_increments_past_threshold`.
+		let h = graph_health_stats(&GraphGnn::new());
+		assert_eq!(
+			h.supersede_chain_depth_exceeded,
+			crate::base::accept::supersede_chain_depth_exceeded(),
+			"HealthStats mirrors the process-global counter"
+		);
 	}
 }

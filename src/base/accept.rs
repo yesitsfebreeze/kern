@@ -1,10 +1,11 @@
 use super::constants::*;
 use super::graph::GraphGnn;
 use super::math::{average_vec, cosine_distance, reason_id};
-use super::reason::add_reason;
+use super::reason::{add_reason, superseded_ancestors};
 use super::search::search_all_unlocked;
 use super::types::*;
 use crate::crdt::GCounter;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug)]
 pub struct AcceptResult {
@@ -16,6 +17,28 @@ pub struct AcceptResult {
 
 const MAX_ACCEPT_DEPTH: usize = 64;
 const MASS_EPSILON: f64 = 1e-6;
+
+// Supersede chains that exceeded `SUPERSEDE_CHAIN_HOP_THRESHOLD` on one
+// `external_id` — item 58 trigger #1. Process-global like `TRAIN_REFUSED`:
+// the count is the only trace that a contested chain ran past the hop budget,
+// since the chain itself is bounded by `MAX_ACCEPT_DEPTH` and never errors.
+static SUPERSEDE_CHAIN_DEPTH_EXCEEDED: AtomicU64 = AtomicU64::new(0);
+
+pub fn supersede_chain_depth_exceeded() -> u64 {
+	SUPERSEDE_CHAIN_DEPTH_EXCEEDED.load(Ordering::Relaxed)
+}
+
+// Count the hops behind `old_id` (the existing supersede chain) and bump the
+// counter when a new supersede would push the chain past the threshold. Called
+// before the new Supersedes edge is added, so `superseded_ancestors(old_id)`
+// is the chain as it stood before this hop. `+ 1` is the hop `old_id` itself
+// contributes — depth 1 is a first supersede, depth 6 is the sixth.
+fn bump_supersede_chain_depth(g: &GraphGnn, old_id: &str) {
+	let depth = superseded_ancestors(g, old_id).len() + 1;
+	if depth > SUPERSEDE_CHAIN_HOP_THRESHOLD {
+		SUPERSEDE_CHAIN_DEPTH_EXCEEDED.fetch_add(1, Ordering::Relaxed);
+	}
+}
 
 fn effective_distance(dist: f64, mass: f64) -> f64 {
 	dist / mass.max(MASS_EPSILON)
@@ -507,6 +530,10 @@ fn supersede(
 		}
 	};
 
+	// Item 58 trigger #1: count the existing chain behind `old_id` before this
+	// hop lands, so a contested chain on one `external_id` is detectable.
+	bump_supersede_chain_depth(g, &old_id);
+
 	stamp_superseded(
 		g,
 		placed_kern_id,
@@ -737,6 +764,9 @@ pub fn supersede_by_contradiction(
 	} else {
 		Embedding::default()
 	};
+	// Item 58 trigger #1: same chain-depth measure as the same-external-id
+	// `supersede` path — a contradiction supersede is another hop on the chain.
+	bump_supersede_chain_depth(g, old_id);
 	vec![commit_reason(
 		g,
 		kern_id,
@@ -1072,6 +1102,13 @@ pub fn acceptance_probability(dist: f64, inner: f64, outer: f64) -> f64 {
 	}
 }
 
+// `SUPERSEDE_CHAIN_DEPTH_EXCEEDED` is process-global; a test that moves it
+// must hold this while any test measures it, same lesson as `TRAIN_REFUSED`
+// (`src/tick/trainer.rs`). `std::sync::Mutex` rather than tokio because every
+// holder is a plain `#[test]`.
+#[cfg(test)]
+pub(crate) static SUPERSEDE_CHAIN_TEST_MUX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -1347,6 +1384,92 @@ mod tests {
 			empties.is_empty(),
 			"accept left empty unnamed kern(s) behind: {empties:?}"
 		);
+	}
+
+	#[test]
+	fn supersede_chain_depth_counter_increments_past_threshold() {
+		let _serial = SUPERSEDE_CHAIN_TEST_MUX.lock().unwrap();
+		let mut g = GraphGnn::new();
+		let kid = g.root.id.clone();
+		// Seed `ext1` with e0, then supersede six times: e1←e0, e2←e1, … e6←e5.
+		// The sixth hop makes superseded_ancestors(e5) = [e4,e3,e2,e1,e0] (len 5),
+		// depth 6 > SUPERSEDE_CHAIN_HOP_THRESHOLD (5) → one increment.
+		let old = Entity {
+			id: "e0".into(),
+			external_id: "ext1".into(),
+			vector: vec![1.0, 0.0].into(),
+			status: EntityStatus::Active,
+			..Default::default()
+		};
+		if let Some(k) = g.get_mut(&kid) {
+			k.entities.insert("e0".into(), old);
+			k.source_index.insert("ext1".into(), "e0".into());
+		}
+		g.set_source_entry("ext1".into(), kid.clone());
+		g.index_entity("e0", &kid);
+
+		let before = supersede_chain_depth_exceeded();
+		// Insert e_i then supersede(e_i): `supersede` does not insert the new
+		// entity, so the next hop's `old` lookup needs it present in the kern.
+		for i in 1..=6 {
+			let new_id = format!("e{i}");
+			if let Some(k) = g.get_mut(&kid) {
+				k.entities.insert(
+					new_id.clone(),
+					Entity {
+						id: new_id.clone(),
+						external_id: "ext1".into(),
+						vector: vec![1.0, 0.0].into(),
+						status: EntityStatus::Active,
+						..Default::default()
+					},
+				);
+			}
+			g.index_entity(&new_id, &kid);
+			supersede(&mut g, &kid, &new_id, &[1.0, 0.0], "ext1", "hop");
+		}
+		let delta = supersede_chain_depth_exceeded() - before;
+		assert_eq!(
+			delta, 1,
+			"a 6-deep chain on one external_id increments the counter once"
+		);
+
+		// A fresh 3-deep chain on a different external_id stays under threshold.
+		let before2 = supersede_chain_depth_exceeded();
+		if let Some(k) = g.get_mut(&kid) {
+			k.entities.insert(
+				"s0".into(),
+				Entity {
+					id: "s0".into(),
+					external_id: "ext2".into(),
+					vector: vec![0.0, 1.0].into(),
+					status: EntityStatus::Active,
+					..Default::default()
+				},
+			);
+			k.source_index.insert("ext2".into(), "s0".into());
+		}
+		g.set_source_entry("ext2".into(), kid.clone());
+		g.index_entity("s0", &kid);
+		for i in 1..=3 {
+			let new_id = format!("s{i}");
+			if let Some(k) = g.get_mut(&kid) {
+				k.entities.insert(
+					new_id.clone(),
+					Entity {
+						id: new_id.clone(),
+						external_id: "ext2".into(),
+						vector: vec![0.0, 1.0].into(),
+						status: EntityStatus::Active,
+						..Default::default()
+					},
+				);
+			}
+			g.index_entity(&new_id, &kid);
+			supersede(&mut g, &kid, &new_id, &[0.0, 1.0], "ext2", "hop");
+		}
+		let delta2 = supersede_chain_depth_exceeded() - before2;
+		assert_eq!(delta2, 0, "a 3-deep chain does not cross the threshold");
 	}
 
 	#[test]

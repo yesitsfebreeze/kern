@@ -109,6 +109,12 @@ pub const EVIDENCE_HALF_LIFE_SECS: u64 = 0;
 /// batch is a knob, not a product choice.
 pub const DISTILL_CHUNK_TURNS: usize = 48;
 
+/// Supersede-chain depth at which the `SUPERSEDE_CHAIN_DEPTH_EXCEEDED` counter
+/// increments — the doc's "~5 hops on the same `external_id`" that would flip
+/// kern to full versioning (item 58 trigger #1). A tunable const, not a
+/// product choice; the counter measures, it does not act.
+pub const SUPERSEDE_CHAIN_HOP_THRESHOLD: usize = 5;
+
 pub const QUESTION_RESOLVE_THRESHOLD: f64 = 0.80;
 
 pub const GOSSIP_FANOUT: usize = 3;
