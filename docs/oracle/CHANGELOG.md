@@ -2,6 +2,24 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-24 — published docs reconciled to the live tool set. `tools/list`
+  serves fifteen (`query`, `ingest`, `link`, `forget`, `forget_by_source`,
+  `degrade`, `move`, `promote`, `health`, `graviton`, `claim_kind`, `pulse`,
+  `gc`, `intake_drain`, `setup` — pinned by `definitions_are_well_formed_and_complete`
+  in `src/mcp/tools.rs`), but the site still said thirteen and enumerated only
+  thirteen: `forget_by_source` (host-deletion cascade, item 19) and `promote`
+  (review-lifecycle release, item 21) landed after the last site pass and were
+  invisible to any agent reading the docs. Fixed `howto/mcp.mdx` (count at the
+  top and the verify step, plus a bullet for each missing tool) and
+  `content/llms.md` (count and list). `next build` green (30 static routes),
+  `docs_check` still exit 0. The published page is the one an agent wires
+  against, so a missing tool there is a capability the user never learns exists.
+
+  **Decided by:** verify-before-claiming (tool set taken from the source test's
+  expected array, not the doc's own count; site rebuilt to confirm), fix-the-root
+  (the drift is new tools outrunning the last site pass — added them, not just
+  bumped the number).
+
 - 2026-07-24 — item 93 tax paid again: `FEATURES.md` drifted line anchors
   re-pointed to current source. The live inventory had accumulated 56 anchor
   nominations — citations naming a symbol (`traversal_count`, `observe_lamport`,

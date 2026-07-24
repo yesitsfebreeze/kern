@@ -2,7 +2,7 @@
 title: "Wire up MCP"
 ---
 
-Get your agent listing kern's thirteen tools against the project's graph. Start from a project with `.kern/` — see [Install & run](./install-run.mdx).
+Get your agent listing kern's fifteen tools against the project's graph. Start from a project with `.kern/` — see [Install & run](./install-run.mdx).
 
 ## 1. Register the server
 
@@ -55,8 +55,10 @@ Standalone fallback is a second writer against the same LMDB environment — a s
 - **`ingest`** — put text in. `object_id` = update semantics for revisions; `hint` folded into the chunking prompt; `conf` weights the claim; `sync: true` blocks until complete.
 - **`link`** — reason edge between two thoughts. Empty `reason`: the LLM writes the justification.
 - **`forget`** — remove a thought, cascade-delete its edges. Facts immune; rewrite history via superseding `ingest` with the same `object_id`.
+- **`forget_by_source`** — the host-deletion cascade: remove every thought ingested from one source, all its sections, edges cascaded. Keys on `scheme` + `object_id`. Local Facts are spared unless `force: true`; a remote Fact goes either way.
 - **`degrade`** — feedback. Bad result's id as `query_id`: edges along that path lose score.
 - **`move`** — relocate a thought to another kern (`id`, `to_kern`), edges carried.
+- **`promote`** — the release half of the review lifecycle: mark a thought reviewed, moving it from `pending` back to `active` so a `query` asking `exclude_pending` returns it again. Idempotent.
 
 ### Shaping and maintenance
 
@@ -73,7 +75,7 @@ Default loop: `query` to recall, `ingest` durable conclusions, `degrade` on a mi
 
 ## 4. Verify
 
-List tools in your client — expect all thirteen. Or drive stdio:
+List tools in your client — expect all fifteen. Or drive stdio:
 
 ```bash
 printf '%s\n' \
