@@ -344,13 +344,19 @@ def check_page(page: Path, failures: list[str], nominations: list[str] | None = 
         if in_fence:
             continue
         # Offsets survive the blanking, so the sort below still reads left to right.
+        # Every citation form runs over `quoted`, not raw `text`: the double-backtick
+        # illustration escape (`` `src/llm.rs:11434` ``) must cover a spelled-out
+        # `src/` path exactly as it covers a bare `:NNN` continuation, or an inline
+        # illustrated full path reds as a phantom citation (the item 93 residual that
+        # kept docs-check red from 2026-07-22 to 2026-07-24). LINK/SELF_URL below stay
+        # on raw text — a page link is a real target, never illustration.
         quoted = ILLUSTRATION.sub(lambda m: " " * len(m.group(0)), text)
         found: list[tuple[int, str, re.Match[str]]] = []
-        for m in REF.finditer(text):
+        for m in REF.finditer(quoted):
             found.append((m.start(), "src", m))
-        for m in REPO_PATH.finditer(text):
+        for m in REPO_PATH.finditer(quoted):
             found.append((m.start(), "repo", m))
-        for m in SIBLING_REF.finditer(text):
+        for m in SIBLING_REF.finditer(quoted):
             found.append((m.start(), "sibling", m))
         for m in BARE_RS.finditer(quoted):
             found.append((m.start(), "bare", m))
@@ -723,6 +729,43 @@ def anchor_selftest() -> None:
         total = check_page(fence, failures, nominations)
         assert failures == [], f"fenced anchors must be skipped: {failures}"
         assert total == 1, f"only the pre-fence citation counts: {total}"
+
+        # An inline double-backtick illustration must cover a spelled-out `src/`
+        # path exactly as it covers a bare `:NNN` continuation. REF/REPO_PATH/
+        # SIBLING_REF once ran on raw text while only the continuation forms ran on
+        # the blanked `quoted`, so an illustrated `` `src/llm.rs:11434` `` reddened
+        # as a phantom past-EOF citation — the residual that held docs-check red from
+        # 2026-07-22 to 2026-07-24. All forms now run on `quoted`; the escape is
+        # uniform.
+        illus = d / "ILLUS.md"
+        illus.write_text(
+            "# Section\n"
+            "\n"
+            "An illustrated full path (`` `src/llm.rs:11434` ``) is prose, not a cite.\n",
+            encoding="utf-8",
+        )
+        failures = []
+        nominations = []
+        total = check_page(illus, failures, nominations)
+        assert failures == [], f"an illustrated full path is silent: {failures}"
+        assert total == 0, f"and counts as no citation at all: {total}"
+
+        # Negative control: strip the double backticks and the same token is a real
+        # citation past EOF — proving the silence is the escape, not a tokeniser
+        # blind spot. `src/llm.rs` is 1095 lines, so :11434 is beyond EOF.
+        illus.write_text(
+            "# Section\n"
+            "\n"
+            "A bare full path (`src/llm.rs:11434`) is a citation past EOF.\n",
+            encoding="utf-8",
+        )
+        failures = []
+        nominations = []
+        check_page(illus, failures, nominations)
+        assert len(failures) == 1 and "11434 beyond EOF" in failures[0], (
+            f"the un-escaped token reds where the escaped one is silent: {failures}"
+        )
+        assert "src/llm.rs" in failures[0], failures[0]
 
         line_counts.clear()
         file_lines.clear()

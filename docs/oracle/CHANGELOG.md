@@ -2,6 +2,29 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-24 — item 93 residual: `docs_check.py` is green again, and the
+  illustration escape now covers every citation form. `docs_check.py` had been
+  red since 2026-07-22 with five `beyond EOF` dead references, all false
+  positives. Root cause: in `check_page`, the `ILLUSTRATION` regex blanks
+  double-backtick spans into `quoted`, but only `BARE_RS` and `CONTINUATION` ran
+  over `quoted` — `REF`, `REPO_PATH` and `SIBLING_REF` still ran over raw `text`.
+  So the escape was form-dependent: a bare `:NNN` inside `` `` `` was silent, but
+  an illustrated spelled-out path `` `src/llm.rs:11434` `` was matched as a
+  phantom past-EOF citation. The item 93 fenced-block pass had claimed "After: 0
+  dead references", which was false on the real tree — those three tokens are
+  inline illustrations, not fenced blocks, so the fence skip never reached them.
+  Fixed by running every citation form over `quoted`, so the double-backtick
+  escape is uniform; the four surviving single-backtick port tokens
+  (`:11434`/`:8080` in `FEATURES.md` and `ROADMAP.md`) were converted to the
+  documented `` `:11434` `` illustration idiom. A new selftest fixture pins both
+  directions: an illustrated full path past EOF inside double backticks is
+  silent, and the same token without the double backticks reds as `beyond EOF`.
+  `python3 tests/docs_check.py` now exits 0 and `--selftest` prints `selftest
+  OK`. Decided by: fix-the-root (the escape is made uniform across all matchers,
+  not the five citations edited one by one), verify-before-claiming (the
+  negative control reds, and the false "0 dead references" claim was measured
+  wrong before it was corrected).
+
 - 2026-07-23 — item 103 closed: the LongMemEval-S run is recorded, completing
   the public-benchmark pair. Seeded 100-question sample (seed 13, runner
   default) of LongMemEval-S, `qwen3-embedding:0.6b`, direct path, k=10, 4792
