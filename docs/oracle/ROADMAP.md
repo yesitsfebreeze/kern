@@ -2956,6 +2956,20 @@ Neither is a defect in a running kern, which is why this sits in tier 9 — but 
 is the reason every reconcile pass so far has spent most of its effort
 re-pointing citations instead of checking claims.
 
+**2026-07-24 re-anchor pass.** `FEATURES.md` had grown to 56 anchor nominations
+(39 → 56 since this item was written 2026-07-21 — the debt compounding on
+schedule); 22 were re-pointed to their verified definition line and the count
+fell to 34. This changes nothing here: symbolic anchors remain the fix and this
+item stays open. The pass is logged so the tax is visible, not so it reads as
+progress toward closure.
+
+**2026-07-24 re-anchor pass.** `FEATURES.md` had grown to 56 anchor nominations
+(39 → 56 since this item was written 2026-07-21 — the debt compounding on
+schedule); 22 were re-pointed to their verified definition line and the count
+fell to 34. This changes nothing here: symbolic anchors remain the fix and this
+item stays open. The pass is logged so the tax is visible, not so it reads as
+progress toward closure.
+
 ### 98. The pre-auth frame is capped and deadlined — closed 2026-07-22 `[surface]`
 
 Both halves were real and both are shut. 978 unit tests, e2e untouched.

@@ -2,6 +2,35 @@
 
 <!-- docs-check: historical -->
 
+- 2026-07-24 — item 93 tax paid again: `FEATURES.md` drifted line anchors
+  re-pointed to current source. The live inventory had accumulated 56 anchor
+  nominations — citations naming a symbol (`traversal_count`, `observe_lamport`,
+  `spawn_child_clusters`, the `do_*` tick tasks, `struct Reason`/`Kern`,
+  `HealthStats`, `with_timeout_secs`) but pointing at a bare `}`, a blank line or
+  unrelated code, because both the doc and the source grew and the line numbers
+  never followed. Twenty-two were re-anchored to the verified definition line
+  (resolved by pairing each citation with the symbol its sentence names, then
+  locating that symbol's unique `fn`/`struct`/field definition in the cited
+  file); the lamport pair `` `:443` ``/`` `:450` `` was hand-corrected to
+  bump=467 / observe=474 rather than trusting nearest-left pairing, and two
+  auto-resolutions were dropped as unsafe — a generic `from` that resolved into a
+  test body, and one mispaired lamport anchor. `FEATURES.md` nominations fell
+  56 → 34; `python3 tests/docs_check.py` still exits 0 (nominations never gated).
+  The 34 residual are the dense §16 LLM-client continuations and precise
+  struct-offset pointers, where hand-chasing is error-prone and low-value.
+
+  **This is the tax, not the fix.** Item 93's symbolic anchors
+  (`` `FEATURES.md#16-llm-client` ``, immune to insertion) remain the real
+  answer and stay open; every reconcile pass that re-points line numbers is
+  paying interest on that debt. The nomination count grew 39 → 56 in
+  `FEATURES.md` alone since item 93 was written 2026-07-21, which is the debt
+  compounding on schedule.
+
+  **Decided by:** fix-the-root (name the residual as the symbolic-anchor debt it
+  is, don't pretend line-chasing closes item 93), verify-before-claiming (each
+  re-anchor confirmed against the target file's actual definition line, unsafe
+  auto-resolutions dropped, nomination drop measured 56 → 34 not asserted).
+
 - 2026-07-24 — item 93 residual: `docs_check.py` is green again, and the
   illustration escape now covers every citation form. `docs_check.py` had been
   red since 2026-07-22 with five `beyond EOF` dead references, all false

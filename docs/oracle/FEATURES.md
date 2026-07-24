@@ -56,14 +56,14 @@ everywhere, which is what makes conflict-free cross-node merge work.
   boundary (socket `0600` + `mcp-token`) is the whole access model, and any
   multi-caller scoping is the embedding host's job (decision 2026-07-22,
   `CHANGELOG.md`).
-- `Reason` (`src/base/types.rs:425`) — an edge `from`→`to` with a `kind`
+- `Reason` (`src/base/types.rs:443`) — an edge `from`→`to` with a `kind`
   (`Similarity`/`Provenance`/`Question`/`Spawn`/`Supersedes`/`Ratification`/
   `Rephrase`, `src/base/types.rs:90-99`), its own vector (mean of endpoints), a
-  `traversal_count` GCounter (`src/base/types.rs:437`), and a CRDT `score`.
+  `traversal_count` GCounter (`src/base/types.rs:455`), and a CRDT `score`.
   `is_enriched`/`is_remote` flags. There is no `Contradiction` edge kind —
   `Related` is a `ContradictionClass` verdict, not an edge, and a deferred
   contradiction candidate is carried by a `Rephrase` edge.
-- `Kern` (`src/base/types.rs:485`) — a container node in the kern tree:
+- `Kern` (`src/base/types.rs:486`) — a container node in the kern tree:
   `entities` + `reasons` maps, `children` ids, a `graviton_vec`/`graviton_text` + `mass` (default 1.0),
   radii (`inner_radius`/`outer_radius`) for acceptance gating, and an
   `access_count`. Root, named children, and unnamed (spill) children are all
@@ -72,7 +72,7 @@ everywhere, which is what makes conflict-free cross-node merge work.
   map, `root`, `entity_idx` (HNSW over content vectors), `gnn_entity_idx`
   (HNSW over GNN vectors), `entity_adjacency` (reason-edge incidence),
   source routing, a Lamport clock (a plain `AtomicU64` field driven by
-  `bump_lamport`/`observe_lamport`, `src/base/graph.rs:443`/`:450` — there is no
+  `bump_lamport`/`observe_lamport`, `src/base/graph.rs:467`/`:474` — there is no
   `Lamport` type), a `mutation_epoch`, pending CRDT deltas, the bound embedding
   model name (`set_embed_model`/`embed_model`, `src/base/graph.rs:204`), and an
   optional bound `Store` (LMDB) for hot/cold tiers + disk fallback.
@@ -98,7 +98,7 @@ supersedes an existing one. The core write path every ingestion funnels through.
    threshold (0.98 on the default `relaxed`; 0.95 medium, 0.90 tight,
    `src/config/preset.rs`; `DEDUP_EF=64`), the thought is a duplicate and merges
    into the existing entity (no new node).
-2. **Route** (`route_entity`, `src/base/accept.rs:111`) — descend from the
+2. **Route** (`route_entity`, `src/base/accept.rs:218`) — descend from the
    target kern toward a leaf:
    - For each loaded child, route into the one whose graviton is nearest by
      effective distance `cosine_distance / mass` (`mass` default `1.0`,
@@ -110,7 +110,7 @@ supersedes an existing one. The core write path every ingestion funnels through.
      (`src/base/accept.rs:895`, softmax over cosine distance vs `inner`/`outer`
      radii); below `ACCEPT_FLOOR` (0.5) → spawn an unnamed child and descend.
    - `MAX_ACCEPT_DEPTH = 64` (`src/base/accept.rs:17`) bounds a runaway descent.
-3. **Commit** (`commit_entity`, `src/base/accept.rs:252`) — stamp `root_id`,
+3. **Commit** (`commit_entity`, `src/base/accept.rs:279`) — stamp `root_id`,
    insert into the `entity_idx`/`gnn_entity_idx`, attach a `Similarity` reason to
    the nearest existing neighbor and a `Provenance` reason to the source doc.
 
@@ -127,11 +127,11 @@ root fan-out is already O(gravitons). The remaining scaling question is the
 per-parent fan-out itself, not an index.
 
 Unnamed children are **not** unbounded on the routing path: `route_entity` goes
-through `get_or_spawn_unnamed_child` (`src/base/accept.rs:631`), which reuses the
+through `get_or_spawn_unnamed_child` (`src/base/accept.rs:787`), which reuses the
 single holding-pen child and auto-loads an evicted one rather than respawning it
 (three tests, both holding pens: `src/base/accept.rs:921`, `:940`, `:963`).
 Growth comes only from tick clustering, which deliberately spawns one *distinct*
-child per spawnable cluster (`spawn_child_clusters`, `src/tick.rs:196`) —
+child per spawnable cluster (`spawn_child_clusters`, `src/tick.rs:225`) —
 bounded per pass by the cluster count, not by anything per parent.
 
 ---
@@ -150,8 +150,8 @@ stays as history with a stamped `valid_to`; `query` can recover the past via
   the new claim became true. Removes the old id from both vector indexes (so it
   stops seeding) but keeps it in the kern for history. Adds a `Supersedes`
   reason edge with the averaged vector.
-- Classification is LLM-driven (`classify_prompt` `src/base/accept.rs:542` /
-  `parse_contradiction` `src/base/accept.rs:552`) and **fails open to `Related`**
+- Classification is LLM-driven (`classify_prompt` `src/base/accept.rs:693` /
+  `parse_contradiction` `src/base/accept.rs:703`) and **fails open to `Related`**
   (co-exist) — the conservative choice that never loses data. Driven from the
   tick's `do_classify_contradiction` task (`src/tick/tasks.rs:114`) so recall
   stays LLM-free at query time.
@@ -326,7 +326,7 @@ and cold tier live together. Readers never block, writers serialize.
 
 **Gaps.** Single-writer is enforced, not assumed — `src/base/lock.rs` is an advisory
 lock `reembed`, `gc` and `compact` claim or refuse — but `cmd_hub_merge`
-(`src/commands/admin.rs:1002`) and `maybe_self_heal_store` (`src/commands.rs:446`)
+(`src/commands/admin.rs:1002`) and `maybe_self_heal_store` (`src/commands.rs:444`)
 still `save_graph_unguarded` holding none. No WAL but LMDB's; compaction is offline.
 
 ---
@@ -469,31 +469,31 @@ maintains itself.
   and not a core cluster spawns a distinct unnamed child and migrates its
   members. Unnamed kerns never spawn (bounds descent). Empty unnamed children
   are evicted back to the parent each pass.
-- **Name** (`do_name`, `src/tick/tasks.rs:235`) — LLM names an unnamed kern from
+- **Name** (`do_name`, `src/tick/tasks.rs:236`) — LLM names an unnamed kern from
   its centroid (`cluster::graviton_prompt`) once it crosses the naming
   thresholds (`KERN_NAMING_COHESION_THRESHOLD=0.50`,
   `KERN_NAMING_MIN_CLUSTER_SIZE=5`).
-- **Enrich** (`do_enrich`, `src/tick/tasks.rs:314`) — LLM writes the explanatory
+- **Enrich** (`do_enrich`, `src/tick/tasks.rs:315`) — LLM writes the explanatory
   text for an un-enriched reason edge.
-- **Resolve question** (`do_resolve`, `src/tick/tasks.rs:382`) — open `Question`
+- **Resolve question** (`do_resolve`, `src/tick/tasks.rs:383`) — open `Question`
   edges (`to` empty) get answered by retrieval; if a hit scores above
   `QUESTION_RESOLVE_THRESHOLD=0.80` the edge is closed.
 - **Seed questions** (`do_seed_questions`, `src/tick/tasks.rs:42`) — broadcasts
   open questions to peers (federation).
-- **Commit access** (`do_commit_access`, `src/tick/tasks.rs:454`) — flushes
+- **Commit access** (`do_commit_access`, `src/tick/tasks.rs:455`) — flushes
   queued access-count/heat updates.
 - **Idle sweep** (`src/tick/idle.rs`) — graph-global; unloads kerns idle past
   `tick.kern_idle_timeout_secs`. Residency, not forgetting: an unloaded kern is
   persisted first and reloads on next access.
 - **Persist / reembed / disk consolidate** — `do_persist`
-  (`src/tick/tasks.rs:466`), `do_reembed` (`src/tick/tasks.rs:497`),
-  `do_disk_consolidate` (`src/tick/tasks.rs:450`).
+  (`src/tick/tasks.rs:466`), `do_reembed` (`src/tick/tasks.rs:498`),
+  `do_disk_consolidate` (`src/tick/tasks.rs:451`).
 
 **Where.** `src/tick/*` (3589 LoC, 8 files) + `src/tick.rs` (1070 LoC) — remeasured 2026-07-22, the old 2912/893 had drifted ~660 and ~177 lines behind the tree. `trainer.rs` is the one that is not a queue task: GNN training runs on its own thread.
 
 **Gaps.** `KERN_CAP_DISABLED` (`src/base/constants.rs:30`) is a **kern-eviction**
 sentinel, not an entity cap. Its two readers are `max_loaded_kerns` (how many
-kerns stay resident, `enforce_kern_cap`, `src/base/graph.rs:216`) and
+kerns stay resident, `enforce_kern_cap`, `src/base/graph.rs:227`) and
 `disk_threshold` (the per-kern entity count that triggers a DiskANN spill,
 `src/base/graph.rs:296`). `max_kerns` now defaults to **128** (2026-07-22, item
 83): a conservative resident bound — eviction is proven safe (`get_mut`
@@ -626,7 +626,7 @@ to external clients (Claude, Cursor, etc.). Protocol version `2024-11-05`.
 | `degrade` | `tools_mutate.rs` | Down-weight edges along a bad retrieval path (`DEGRADE_*` decay). Returns `decayed_edges` and `removed_edges` — the reap count exists so a CLI `degrade` routed through the daemon can print what the local path prints. |
 | `move` | `tools_mutate.rs:467` | Relocate a thought to another kern, carrying outgoing edges and restamping cross-kern references. |
 | `promote` | `tools_mutate.rs` | Release a thought a review policy is holding: flips `ReviewState::Pending` to `Active`, so a `query {exclude_pending: true}` returns it again. The release half of the lifecycle `[ingest] review_policy` opens; idempotent, returning `promoted: false` on an already-active row rather than failing, and a hard `thought not found` on an id nothing resolves — a silent success would tell a curator a claim was released while it is still held. Shares `graph_ops::promote_entity` with the CLI's no-daemon fallback so the routed and local writes cannot disagree. Any caller holding the graph's `mcp-token` may promote — the process boundary is the access model. |
-| `health` | `tools_admin.rs:83` | Graph stats (gravitons/kerns/entities/reasons/unnamed/claim_kinds) **plus the degradation surface**: `queue_depth`, `tasks_done`, `task_avg_ms`, `task_panics`, `last_task_panic`, `task_failures`, `last_task_failure`, `cold_evicted`, `embed_model`, `embed_dim`, `embed_mismatch`, and the eight fail-open counters — `query_dim_rejected`, `below_floor_deliveries`, `clock_skew_skips`, `ingest_dropped_chunks`, `remote_cap_dropped`, `unspilled_drops`, `ingest_queue_refused`, `gnn_train_refused` — each a path that returns something rather than erroring, so the count is the only way to tell a degraded result from a good one (`Server::health_stats`, `src/mcp.rs:116`). The first seven come off `HealthStats` (`src/base/health.rs:40`), `gnn_train_refused` straight from the trainer's own global (`src/mcp.rs:149`) — but all eight are process-scoped counters read in the *serving* process, which is why only a daemon's answer carries real ones and any other reader reports its own zeros (`ROADMAP.md` item 100). Beside the counters, one gauge: `ingest_queue_depth` reads the serving worker's mpsc channel occupancy live (`src/mcp.rs:148`, `Worker::queue_depth` at `src/ingest/worker.rs:148`) — how full the RAM queue is right now, where `ingest_queue_refused` only says its bound was ever hit (item 30). |
+| `health` | `tools_admin.rs:83` | Graph stats (gravitons/kerns/entities/reasons/unnamed/claim_kinds) **plus the degradation surface**: `queue_depth`, `tasks_done`, `task_avg_ms`, `task_panics`, `last_task_panic`, `task_failures`, `last_task_failure`, `cold_evicted`, `embed_model`, `embed_dim`, `embed_mismatch`, and the eight fail-open counters — `query_dim_rejected`, `below_floor_deliveries`, `clock_skew_skips`, `ingest_dropped_chunks`, `remote_cap_dropped`, `unspilled_drops`, `ingest_queue_refused`, `gnn_train_refused` — each a path that returns something rather than erroring, so the count is the only way to tell a degraded result from a good one (`Server::health_stats`, `src/mcp.rs:116`). The first seven come off `HealthStats` (`src/base/health.rs:9`), `gnn_train_refused` straight from the trainer's own global (`src/mcp.rs:149`) — but all eight are process-scoped counters read in the *serving* process, which is why only a daemon's answer carries real ones and any other reader reports its own zeros (`ROADMAP.md` item 100). Beside the counters, one gauge: `ingest_queue_depth` reads the serving worker's mpsc channel occupancy live (`src/mcp.rs:148`, `Worker::queue_depth` at `src/ingest/worker.rs:148`) — how full the RAM queue is right now, where `ingest_queue_refused` only says its bound was ever hit (item 30). |
 | `graviton` | `tools_admin.rs` | list/add/remove focus attractors (name + text — phrase or full document — + optional mass). Replaced the single per-kern "purpose". |
 | `claim_kind` | `tools_admin.rs` | register/remove claim kinds; registered kinds extend the built-in distill set. |
 | `pulse` | `tools_admin.rs` | Trigger a clustering pass across the tree. |
@@ -847,7 +847,7 @@ thought ingested on node A becomes searchable on node B under the same id.
   RPC (`GOSSIP_FETCH_TIMEOUT=5s`), `start_heartbeat`
   (`GOSSIP_HEARTBEAT_INTERVAL=30s`), `GOSSIP_MAX_FRAME_BYTES=4MB` bounds. The
   Lamport counter it stamps messages with lives on the graph, not the node
-  (`GraphGnn::bump_lamport`/`observe_lamport`, `src/base/graph.rs:443`/`:450`).
+  (`GraphGnn::bump_lamport`/`observe_lamport`, `src/base/graph.rs:467`/`:474`).
 - **Discovery** (`src/gossip/discovery.rs`) — multicast announce/parse on
   `GOSSIP_DISCOVERY_MULTICAST=239.77.75.68` at `gossip.discovery_port`
   (default `7475`, `src/config/gossip.rs:66`) every
@@ -907,7 +907,7 @@ said so:* a per-origin budget ships and runs, but only on the `Question` path
 (`RateLimiter`, `src/gossip/rate.rs`, 30/min, checked at
 `src/gossip/handler.rs:318`). The `Delta` path — the one that takes the write
 lock — has none, and `origin` is self-declared so the budget is evadable by
-rotating it. No divergence signal at all (`HealthStats`, `src/base/health.rs:8`,
+rotating it. No divergence signal at all (`HealthStats`, `src/base/health.rs:9`,
 has no such field) (`ROADMAP.md` — "Backpressure,
 divergence metric, and delta write-lock starvation"). The unauthenticated
 local-row reach is closed: LWW deltas only touch `remote-*` kerns
@@ -928,7 +928,7 @@ per non-local URL, and `boot_config` emits each via `tracing::warn!` (non-fatal)
 **How.** `Client` (`src/llm.rs:117`) — `embed` (`:220`) / `embed_batch` (`:264`)
 against the embedding endpoint, `complete` (`:320`, reason / distillation),
 `complete_func` (`:388`, sync closure for the tick/ingest blocking bridges).
-`is_transient` (`:21`) classifies retryable errors — on both legs now: the completion leg counts and names what it throws away (`record_complete_failure`, `:74`, bounded to one line by `:65`), so `complete_func`'s `""` no longer hides which failure produced it. It reads back as `llm_complete_failed` / `last_llm_complete_failure` (`src/mcp.rs:150`, `src/commands/admin.rs:201`). **Every request is bounded** — `complete` posts under `[reason] timeout_secs` (`src/config/reason.rs:12`, default 600 at `:20`), applied by `with_timeout_secs` (`src/llm.rs:196`) and held as `reason_timeout` (`:137`, posted at `:344` / `:371`); `EMBED_TIMEOUT` = 120s on the embed calls (`:494`), applied per request by `post_checked` (`:243`) over a client-wide 120s default and a 3s `connect_timeout` (`:159`, `:162`) so a dead endpoint fails fast instead of hanging. `Endpoint` (`:100`) holds
+`is_transient` (`:21`) classifies retryable errors — on both legs now: the completion leg counts and names what it throws away (`record_complete_failure`, `:74`, bounded to one line by `:65`), so `complete_func`'s `""` no longer hides which failure produced it. It reads back as `llm_complete_failed` / `last_llm_complete_failure` (`src/mcp.rs:150`, `src/commands/admin.rs:201`). **Every request is bounded** — `complete` posts under `[reason] timeout_secs` (`src/config/reason.rs:12`, default 600 at `:20`), applied by `with_timeout_secs` (`src/llm.rs:202`) and held as `reason_timeout` (`:137`, posted at `:344` / `:371`); `EMBED_TIMEOUT` = 120s on the embed calls (`:494`), applied per request by `post_checked` (`:243`) over a client-wide 120s default and a 3s `connect_timeout` (`:159`, `:162`) so a dead endpoint fails fast instead of hanging. `Endpoint` (`:100`) holds
 url/model/key; `new_embed_only` (`:213`) builds a client for `reembed`.
 `for_eval(seed)` (`:184`) makes it deterministic.
 
@@ -1404,7 +1404,7 @@ Ranked by leverage:
 4. **Nothing bounds memory deterministically** — corrected 2026-07-21, this
    entry named the wrong knob. `KERN_CAP_DISABLED` (`src/base/constants.rs:30`)
    is a *kern-eviction* sentinel, not a per-kern entity cap: it defaults both
-   `max_loaded_kerns` (`enforce_kern_cap`, `src/base/graph.rs:216`) and
+   `max_loaded_kerns` (`enforce_kern_cap`, `src/base/graph.rs:227`) and
    `disk_threshold` (spill trigger, `:296`) to `usize::MAX`, so neither eviction
    nor DiskANN spill is armed. A per-kern entity cap for local kerns does not
    exist at all. A safe cap + escalation policy is still the wanted fix.
