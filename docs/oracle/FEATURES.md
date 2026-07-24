@@ -922,7 +922,7 @@ receipt (`id_matches_body`, `src/gossip/handler.rs`).
 **What.** One client wrapping two endpoints (reason / embed) against Ollama by
 default; fail-open everywhere. A non-local configured URL warns at config load
 (item 78, 2026-07-22) — `is_local_url` (`src/llm.rs`) detects loopback/RFC1918/
-link-local/`ollama`/`:11434`, `Config::egress_warnings` returns one warning
+link-local/`ollama`/`` `:11434` ``, `Config::egress_warnings` returns one warning
 per non-local URL, and `boot_config` emits each via `tracing::warn!` (non-fatal).
 
 **How.** `Client` (`src/llm.rs:117`) — `embed` (`:220`) / `embed_batch` (`:264`)

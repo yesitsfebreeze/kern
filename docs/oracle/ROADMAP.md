@@ -2933,11 +2933,24 @@ silent. Before: 3 dead references, 129 nominations. After: 0 dead references,
 `python3 tests/docs_check.py --selftest` prints `selftest OK`. Decided by
 fix-the-root (a fence is prose-as-code, not a citation — same reasoning as the
 doubly-backticked escape), name-the-tradeoff (the skip is structural, not
-tokenisation — it does not help a single-backtick `:8080` port outside a fence),
+tokenisation — it does not help a single-backtick `` `:8080` `` port outside a fence),
 verify-before-claiming (the negative control reds, and the three real false
 positives were found, not assumed). **Symbolic anchors remain open and the
 better larger answer; this closes the fenced-block residual only.** See the
 2026-07-22 CHANGELOG entry.
+
+**The "After: 0 dead references" claim above was false on the real tree (2026-07-24).**
+The three `` `src/llm.rs:11434` `` tokens are inline double-backtick illustrations,
+not fenced blocks, so the fence skip never reached them — and the double-backtick
+escape only covered `BARE_RS`/`CONTINUATION`, which ran on the blanked `quoted`,
+while `REF`/`REPO_PATH`/`SIBLING_REF` still ran on raw `text`. So an illustrated
+spelled-out path reddened as a phantom past-EOF citation and docs-check stayed red
+from 2026-07-22 to 2026-07-24. Fixed 2026-07-24 by running every citation form over
+`quoted`, so the illustration escape is uniform; the four surviving single-backtick
+port tokens (`docs/oracle/FEATURES.md:925`, `docs/oracle/ROADMAP.md:2936`/`:3373`/`:3382`)
+were escaped with the documented `` `:11434` `` idiom. `python3 tests/docs_check.py`
+now exits 0; the selftest pins the escape and its negative control. See the
+2026-07-24 CHANGELOG entry.
 
 Neither is a defect in a running kern, which is why this sits in tier 9 — but it
 is the reason every reconcile pass so far has spent most of its effort
@@ -3370,7 +3383,7 @@ points at a non-local host, so the one setting that voids "local-first, zero
 egress" is legible the moment it is loaded. `is_local_url` (new, `src/llm.rs`,
 pub) is the detector: loopback (`127/8`, `::1`, `localhost`), RFC1918
 (`10/8`, `172.16-31/12`, `192.168/16`), link-local (`169.254/16`), the `ollama`
-host, or the existing `is_local_ollama` heuristic (`:11434` / `//localhost` /
+host, or the existing `is_local_ollama` heuristic (`` `:11434` `` / `//localhost` /
 `//127.0.0.1`) — reused, not duplicated. No URL-parser dep: `host_of` extracts
 the span between `//` and the first `:`/`/`/`?` (with a bracketed-IPv6 branch).
 The WSL2-gateway the LoCoMo run used (`172.27.176.1:11434`) is RFC1918
@@ -3379,7 +3392,7 @@ returns one warning string per rejected URL — checks `reason.url` raw, not via
 `reason_url()` fallback, so a silently-inherited `embed.url` does not
 double-count. `boot_config` emits each via `tracing::warn!` after `validate`,
 non-fatal. Tests pin both directions (loopback/RFC1918 incl. `172.27.176.1`/
-link-local/ollama/`:11434` local; rejects `api.openai.com`, `example.com`,
+link-local/ollama/`` `:11434` `` local; rejects `api.openai.com`, `example.com`,
 `203.0.113.5`, `8.8.8.8`, `172.32.0.1` outside `/12`) and `egress_warnings`
 (loopback → none, public `embed.url` → one naming field+host, both public →
 two, empty `reason.url` inherits without double-count). 909 passed (+4), 1
